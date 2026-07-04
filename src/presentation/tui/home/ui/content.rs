@@ -78,7 +78,7 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
     let mut lines = vec![
         LogLine::output("Keybindings, by mode. ↑↓ scroll · Esc / q close.".to_string()),
         LogLine::output(String::new()),
-        cheatsheet_header("General (any mode)"),
+        cheatsheet_header("General — usagi surfaces (没入 has its own keys, below)"),
         key_row(":", "Open the command palette (run \"man\" for commands)"),
         key_row("?", "Show this cheat sheet"),
         key_row("Ctrl-B", "Toggle the session sidebar"),
@@ -98,11 +98,12 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
         key_row("Enter", "Focus the session (attach when live)"),
         key_row("t", "Open the action surface (add a pane)"),
         key_row("x", "Close the highlighted tab"),
-        key_row("c / Ctrl-A", "Create a new session (Ctrl-A is IME-safe)"),
+        key_row("a / Ctrl-A", "Launch an agent in the highlighted session"),
+        key_row("c", "Create a new session"),
         key_row("r", "Rename the session"),
         key_row("n / Ctrl-E", "Edit the session note (Ctrl-E is IME-safe)"),
         key_row("Ctrl-^", "Jump to the previous session"),
-        key_row("Esc", "Close the note / back out"),
+        key_row("Esc", "Back out to where Switch was opened from"),
         LogLine::output(String::new()),
     ];
     lines.extend(focus_keys(scheme));
@@ -221,6 +222,7 @@ mod tests {
             name: name.to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),

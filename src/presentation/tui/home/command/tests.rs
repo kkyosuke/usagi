@@ -185,12 +185,30 @@ fn history_is_empty_when_nothing_was_entered() {
 
 #[test]
 fn history_numbers_previous_entries() {
-    let entries = vec!["man".to_string(), "doctor".to_string()];
+    let entries = vec![
+        crate::domain::history::HistoryEntry::from("man"),
+        crate::domain::history::HistoryEntry::now("doctor", Some("feature-x".to_string()), false),
+    ];
     let result = registry().dispatch("history", &entries, &[]);
     assert_eq!(result.lines.len(), 2);
-    assert!(result.lines[0].text.contains("1"));
+    assert!(result.lines[0].text.contains("✓"));
     assert!(result.lines[0].text.contains("man"));
     assert!(result.lines[1].text.contains("doctor"));
+    assert!(result.lines[1].text.contains("✗"));
+    assert!(result.lines[1].text.contains("[feature-x]"));
+}
+
+#[test]
+fn history_can_filter_by_session() {
+    let entries = vec![
+        crate::domain::history::HistoryEntry::now("terminal", Some("feature-x".to_string()), true),
+        crate::domain::history::HistoryEntry::now("agent", Some("other".to_string()), true),
+    ];
+    let result = registry().dispatch("history feature-x", &entries, &[]);
+    assert_eq!(result.lines.len(), 1);
+    assert!(result.lines[0].text.contains("terminal"));
+    assert!(!result.lines[0].text.contains("other"));
+    assert!(!result.lines[0].text.contains("[feature-x]"));
 }
 
 #[test]
@@ -448,6 +466,32 @@ fn terminal_requests_opening_a_shell() {
     let result = registry().dispatch("terminal", &[], &[]);
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::OpenTerminal);
+    assert_eq!(
+        registry().dispatch("terminal open", &[], &[]).effect,
+        Effect::OpenTerminal
+    );
+    assert_eq!(
+        registry().dispatch("terminal new", &[], &[]).effect,
+        Effect::OpenExternalTerminal
+    );
+    let unknown = registry().dispatch("terminal split", &[], &[]);
+    assert_eq!(unknown.effect, Effect::None);
+    assert!(unknown.lines[0]
+        .text
+        .contains("unknown terminal action \"split\""));
+}
+
+#[test]
+fn terminal_completes_open_and_new_actions() {
+    let completion = registry().complete("terminal n", CommandScope::Session);
+    assert_eq!(completion.input, "terminal new");
+    assert!(completion.candidates.is_empty());
+    let all = registry().complete("terminal ", CommandScope::Session);
+    assert_eq!(all.input, "terminal ");
+    assert_eq!(all.candidates, vec!["open", "new"]);
+    let after_action = registry().complete("terminal open ", CommandScope::Session);
+    assert_eq!(after_action.input, "terminal open ");
+    assert!(after_action.candidates.is_empty());
 }
 
 #[test]
@@ -510,6 +554,13 @@ fn config_requests_opening_the_settings_screen() {
     let result = registry().dispatch("config", &[], &[]);
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::OpenConfig);
+}
+
+#[test]
+fn env_requests_opening_the_workspace_env_editor() {
+    let result = registry().dispatch("env", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenEnvEditor);
 }
 
 #[test]
@@ -686,6 +737,36 @@ fn complete_offers_session_names_for_switch_and_remove() {
 }
 
 #[test]
+fn complete_offers_session_names_for_history() {
+    // `history [session]` completes its single argument against the workspace's
+    // session names; once the session token is settled, nothing more is offered.
+    let names = ["feature-x", "feature-y", "main-fix"];
+
+    // While the first token is being typed, the session names are offered.
+    let first = registry().complete_with("history fea", CommandScope::Workspace, &names, &names);
+    assert!(first
+        .candidates
+        .iter()
+        .all(|c| c == "feature-x" || c == "feature-y"));
+    assert_eq!(first.input, "history feature-"); // longest common prefix
+
+    // A unique prefix fills straight in.
+    let unique = registry().complete_with("history main", CommandScope::Workspace, &names, &names);
+    assert_eq!(unique.input, "history main-fix");
+    assert!(unique.candidates.is_empty());
+
+    // Once the session token is settled, a second token offers nothing.
+    let after = registry().complete_with(
+        "history feature-x ",
+        CommandScope::Workspace,
+        &names,
+        &names,
+    );
+    assert_eq!(after.input, "history feature-x ");
+    assert!(after.candidates.is_empty());
+}
+
+#[test]
 fn complete_offers_qualified_names_for_remove_in_unite_mode() {
     // In 統合(unite) mode `session remove` completes against the qualified
     // `workspace:session` names (its own `removable_sessions` list), while
@@ -829,6 +910,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(!has(&workspace, "terminal"));
     assert!(!has(&workspace, "agent"));
     assert!(!has(&workspace, "ai"));
+    assert!(!has(&workspace, "diff"));
 
     // The 在席 (Focus) prompt offers the session-specific commands and the
     // shared utilities, but never the workspace ones — the two surfaces are
@@ -838,6 +920,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(has(&session, "agent"));
     assert!(has(&session, "ai"));
     assert!(has(&session, "close"));
+    assert!(has(&session, "diff"));
     assert!(has(&session, "man")); // a shared utility
     assert!(!has(&session, "session"));
     assert!(!has(&session, "config"));
@@ -908,14 +991,17 @@ fn command_scope_visibility_is_same_scope_or_both() {
 #[test]
 fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
     // `commands_in_scope` returns exactly the Session-scope commands, in
-    // registry order, excluding the shared utilities. (The 在席 menu sorts these
-    // alphabetically itself before displaying them.)
+    // registry order, excluding the shared utilities. (The 在席 menu reorders
+    // these into its own fixed display order before displaying them.)
     let session: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Session)
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(session, vec!["terminal", "agent", "ai", "chat", "close"]);
+    assert_eq!(
+        session,
+        vec!["agent", "ai", "chat", "close", "diff", "terminal"]
+    );
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)
@@ -924,6 +1010,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .collect();
     assert!(workspace.contains(&"session"));
     assert!(workspace.contains(&"config"));
+    assert!(workspace.contains(&"env"));
     assert!(!workspace.contains(&"terminal"));
 }
 
@@ -1114,12 +1201,36 @@ fn preview_without_an_argument_reports_its_usage() {
 }
 
 #[test]
-fn preview_diff_reports_that_it_is_not_built_yet() {
+fn diff_requests_opening_the_diff_view() {
+    let result = registry().dispatch("diff", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenDiff);
+}
+
+#[test]
+fn diff_is_a_session_command() {
+    // `diff` operates the focused session (the 在席 surface), so it is offered in
+    // the session scope and refused from the workspace `:` palette.
+    let session = suggested_names(CommandScope::Session);
+    assert!(session.iter().any(|n| n == "diff"));
+    let workspace = suggested_names(CommandScope::Workspace);
+    assert!(!workspace.iter().any(|n| n == "diff"));
+}
+
+#[test]
+fn preview_does_not_treat_diff_as_a_special_argument() {
+    // `diff` is its own 在席 command now, so `preview diff` just previews a file
+    // named `diff` (resolved to `diff.md`) rather than opening the diff view.
     let result = registry().dispatch("preview diff", &[], &[]);
-    // `diff` is recognised so the surface reads coherently, but opens nothing.
-    assert_eq!(result.effect, Effect::None);
-    assert_eq!(result.lines[0].kind, LineKind::Output);
-    assert!(joined(&result).contains("Diff preview"));
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::OpenPreview("diff".to_string()));
+}
+
+#[test]
+fn open_diff_takes_over_the_pane_so_it_closes_the_palette() {
+    // Like `OpenPreview`, the diff view takes over the right pane, so dispatching
+    // it from the `:` palette closes the palette first.
+    assert!(Effect::OpenDiff.closes_palette());
 }
 
 #[test]

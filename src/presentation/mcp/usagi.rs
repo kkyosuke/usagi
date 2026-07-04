@@ -17,11 +17,16 @@
 
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{json, Value};
 
 use super::issue::McpServer as IssueServer;
-use super::session::{AgentBackend, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS};
+use super::session::{AgentBackend, PromptMode, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS};
 use super::McpService;
+
+/// The composite-only orchestration tool this server adds on top of the merged
+/// issue/memory and session surfaces (see [`UsagiMcpServer::tool_delegate_issue`]).
+const DELEGATE_ISSUE_TOOL: &str = "session_delegate_issue";
 
 /// A JSON-RPC server exposing the full `usagi` tool surface (issue + memory +
 /// session) for one workspace.
@@ -53,6 +58,77 @@ impl UsagiMcpServer {
     pub fn handle_line(&self, line: &str) -> Option<String> {
         super::dispatch_line(self, line)
     }
+
+    /// Delegate an issue to a fresh session in one call: render the issue as an
+    /// agent prompt, create a new session, and queue that prompt for the
+    /// session's first launch. This is the composite's own orchestration tool —
+    /// it does not add new business logic, it drives the existing sub-tools
+    /// (`issue_to_prompt`, `session_create`, `session_prompt`) so their behaviour
+    /// stays single-sourced. The primitives remain available for callers that
+    /// need to tweak the prompt or target an existing session.
+    fn tool_delegate_issue(&self, arguments: Value) -> Result<String, String> {
+        let args: DelegateIssueArgs = super::parse_args(arguments)?;
+        // Drive the sub-servers through their typed helpers (not their serialized
+        // tool output), so the orchestration reuses their logic without parsing
+        // JSON text back out. Each step surfaces the sub-server's own error.
+        //
+        // 1. Render the issue as a ready-to-run prompt (errors if it is missing).
+        let rendered = self.issue.render_prompt(args.number)?;
+        // 2. Create a fresh session for the issue (default name: issue-<number>).
+        //    A duplicate name surfaces the session server's own error.
+        let name = args
+            .name
+            .unwrap_or_else(|| format!("issue-{}", args.number));
+        let created = self.session.create_session(&name)?;
+        // 3. Deliver the prompt. A freshly created session has no live pane, so the
+        //    launch queue is always the right channel here.
+        let (channel, _detail) =
+            self.session
+                .deliver_prompt(&name, &rendered.prompt, PromptMode::Queue)?;
+
+        Ok(super::to_pretty(&json!({
+            "issue": rendered.number,
+            "title": rendered.title,
+            "session": created.name,
+            "root": created.root,
+            "worktrees": created.worktrees,
+            "delivered_to": channel.as_str(),
+        })))
+    }
+}
+
+/// Arguments for [`UsagiMcpServer::tool_delegate_issue`].
+#[derive(Deserialize)]
+struct DelegateIssueArgs {
+    /// The issue to delegate.
+    number: u32,
+    /// Session name to create; defaults to `issue-<number>`.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// The JSON Schema for the composite's `session_delegate_issue` tool.
+fn delegate_issue_schema() -> Value {
+    json!({
+        "name": DELEGATE_ISSUE_TOOL,
+        "description": "Delegate an issue to a fresh parallel session in one step: \
+            render the issue as a ready-to-run agent prompt, create a new session \
+            (worktree + branch usagi/<name>), and queue that prompt for the \
+            session's first agent launch. A convenience over calling \
+            issue_to_prompt + session_create + session_prompt yourself; use those \
+            primitives instead when you need to tweak the prompt or target an \
+            existing session. `name` defaults to issue-<number>. Errors if the \
+            issue does not exist or the session name is already taken. Returns \
+            { issue, title, session, root, worktrees, delivered_to }.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "number": { "type": "integer", "description": "Issue number to delegate" },
+                "name": { "type": "string", "description": "Session name to create (default: issue-<number>)" }
+            },
+            "required": ["number"]
+        }
+    })
 }
 
 impl McpService for UsagiMcpServer {
@@ -61,18 +137,23 @@ impl McpService for UsagiMcpServer {
     }
 
     fn tool_schemas(&self) -> Value {
-        // Advertise the issue/memory tools followed by the session tools, so a
-        // single `usagi` server exposes all of them. `into_schema_array` keeps a
-        // malformed sub-schema from panicking `tools/list` (see its docs).
+        // Advertise the issue/memory tools followed by the session tools, then the
+        // composite's own orchestration tool, so a single `usagi` server exposes
+        // all of them. `into_schema_array` keeps a malformed sub-schema from
+        // panicking `tools/list` (see its docs).
         let mut tools = super::into_schema_array(self.issue.tool_schemas());
         tools.extend(super::into_schema_array(self.session.tool_schemas()));
+        tools.push(delegate_issue_schema());
         Value::Array(tools)
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        // Session tools go to the session server; everything else (issue,
-        // memory, and unknown-tool errors) is handled by the issue server.
-        if SESSION_TOOLS.contains(&name) {
+        // The composite owns `session_delegate_issue` (it spans both sub-servers);
+        // session tools go to the session server; everything else (issue, memory,
+        // and unknown-tool errors) is handled by the issue server.
+        if name == DELEGATE_ISSUE_TOOL {
+            self.tool_delegate_issue(arguments)
+        } else if SESSION_TOOLS.contains(&name) {
             self.session.call_tool(name, arguments)
         } else {
             self.issue.call_tool(name, arguments)
@@ -91,12 +172,20 @@ mod tests {
     use std::path::Path;
 
     /// A backend that returns a fixed reply, so the unified server's routing of
-    /// `session_prompt` to the session server can be exercised without a real
+    /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
     struct StubBackend;
     impl AgentBackend for StubBackend {
         fn prompt(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
             Ok("delegated".to_string())
+        }
+
+        fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+            Ok("sent".to_string())
+        }
+
+        fn agent_is_live(&self, _worktree: &Path) -> bool {
+            false
         }
 
         fn remove(
@@ -169,10 +258,11 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 7 issue + 6 memory + 7 session.
-        assert_eq!(names.len(), 20);
+        // 6 issue + 4 memory + 7 session + 1 composite orchestration tool.
+        assert_eq!(names.len(), 18);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
+        assert!(names.contains(&"issue_search"));
         assert!(names.contains(&"memory_save"));
         assert!(names.contains(&"session_create"));
         assert!(names.contains(&"session_list"));
@@ -181,12 +271,19 @@ mod tests {
         assert!(names.contains(&"session_remove"));
         assert!(names.contains(&"session_note_get"));
         assert!(names.contains(&"session_note_update"));
+        assert!(names.contains(&"session_delegate_issue"));
+        // The list / send / update tools were folded into search / session_prompt
+        // / memory_save.
+        assert!(!names.contains(&"issue_list"));
+        assert!(!names.contains(&"memory_list"));
+        assert!(!names.contains(&"memory_update"));
+        assert!(!names.contains(&"session_send"));
     }
 
     #[test]
     fn issue_tools_route_to_the_issue_server() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = call(&server_at(tmp.path()), "issue_list", json!({}));
+        let result = call(&server_at(tmp.path()), "issue_search", json!({}));
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "[]");
     }
@@ -194,7 +291,7 @@ mod tests {
     #[test]
     fn memory_tools_route_to_the_issue_server() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = call(&server_at(tmp.path()), "memory_list", json!({}));
+        let result = call(&server_at(tmp.path()), "memory_search", json!({}));
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "[]");
     }
@@ -248,13 +345,39 @@ mod tests {
         let server = server_at(root.path());
         call(&server, "session_create", json!({"name":"work"}));
 
+        // The stub reports no live pane, so `auto` queues for launch (the `prompt`
+        // delegate), and the result reports the channel it took.
         let result = call(
             &server,
             "session_prompt",
             json!({"name":"work","prompt":"do it"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "delegated");
+        let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("delivery report");
+        assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(body["detail"], "delegated");
+    }
+
+    #[test]
+    fn session_prompt_live_mode_routes_through_to_the_backend_send() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        call(&server, "session_create", json!({"name":"work"}));
+
+        // `live` mode forces the live channel (the `send` delegate) regardless of
+        // whether a pane is detected.
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"do it now","mode":"live"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("delivery report");
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(body["detail"], "sent");
     }
 
     #[test]
@@ -282,5 +405,75 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("unknown tool"));
+    }
+
+    #[test]
+    fn delegate_issue_renders_creates_and_queues_in_one_call() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        // An issue to delegate.
+        call(
+            &server,
+            "issue_create",
+            json!({"title":"Add doctor","body":"Diagnose the env."}),
+        );
+
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], false);
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["issue"], 1);
+        assert_eq!(body["title"], "Add doctor");
+        // Default session name is issue-<number>, freshly created (queue channel).
+        assert_eq!(body["session"], "issue-1");
+        assert_eq!(body["delivered_to"], "queue");
+
+        // The session really exists now (create ran through to the workspace).
+        let listed = call(&server, "session_list", json!({}));
+        let listed: Value =
+            serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+        let names: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"issue-1"));
+    }
+
+    #[test]
+    fn delegate_issue_accepts_an_explicit_session_name() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        call(&server, "issue_create", json!({"title":"task"}));
+
+        let result = call(
+            &server,
+            "session_delegate_issue",
+            json!({"number":1,"name":"my-work"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["session"], "my-work");
+    }
+
+    #[test]
+    fn delegate_issue_errors_when_the_issue_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        // No issue #1 exists, so rendering the prompt fails and nothing is created.
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no issue #1"));
+        // No stray session was created.
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
     }
 }

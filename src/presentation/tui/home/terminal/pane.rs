@@ -110,9 +110,9 @@ pub enum PaneStep {
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
     PrevSession,
-    /// A double click on a sidebar session row: leave 没入 to jump to that focus
-    /// row, attaching it when live — the confirm a double click does in 切替. The
-    /// caller re-roots the pane on it, like [`PrevSession`](Self::PrevSession).
+    /// A double click on a selectable sidebar row: leave 没入 to act on that row —
+    /// attaching a session when live, or opening inline creation when the row is
+    /// `+ new session`. The caller handles it like [`PrevSession`](Self::PrevSession).
     ToSession(usize),
     /// `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in the pool; the
     /// caller raises the quit-confirmation modal on the home screen rather than
@@ -147,7 +147,7 @@ const QUIET_POLL_SLICE: Duration = Duration::from_millis(32);
 const IDLE_REEVAL: Duration = Duration::from_millis(200);
 
 /// The shortest gap between two repaints driven purely by fresh shell output.
-/// The reader thread bumps the generation once per 8 KiB chunk — roughly every
+/// The reader thread bumps the generation once per 64 KiB read — roughly every
 /// 4 ms while an agent streams — and each repaint locks the parser and
 /// re-stringifies the whole grid. Coalescing output-only frames to at most one
 /// per ~60 fps keeps a flood of output from pinning the CPU on redraws the eye
@@ -374,6 +374,20 @@ fn drive(
             scrollback = pty.set_scrollback(scrollback);
             applied_scrollback = Some(scrollback);
             interactive = true;
+        } else if scrollback > 0 {
+            // No user scroll this pass, but output streaming in while scrolled
+            // back advances the parser's offset on its own to keep the viewed
+            // region pinned (the `scroll_up` patch in `third_party/vt100` bumps
+            // the offset as lines enter the scrollback). Adopt that advance so
+            // the next wheel / `Shift`+`PageUp` notch scrolls relative to where
+            // the view actually sits. Without it the tracked offset goes stale
+            // and a single notch snaps the view across every line that streamed
+            // in — the scroll jumps and older/newer content briefly overlap.
+            let actual = pty.scrollback();
+            if actual != scrollback {
+                scrollback = actual;
+                applied_scrollback = Some(actual);
+            }
         }
         // Fresh shell output (or the shell exiting) bumps the generation.
         let gen = pty.generation();
@@ -387,9 +401,23 @@ fn drive(
             interactive = true;
         }
         // The pointer moved onto / off a different cell: repaint so the hovered
-        // link's highlight follows it.
+        // link's highlight follows it — but only when a link cell is actually
+        // involved. A hover change over a screen with no link under either the old
+        // or new pointer cell leaves the underline/highlight identical, so skipping
+        // the full-grid re-stringify there keeps sweeping the pointer across plain
+        // output (DECSET 1003 reports every crossed cell) from pinning the CPU.
+        // `links_cache` holds the current screen's link cells, refreshed each paint.
         if last_hover != hover {
-            interactive = true;
+            let hovered_link = |c: &Option<Cell>| {
+                c.as_ref().is_some_and(|cell| {
+                    links_cache
+                        .as_ref()
+                        .is_some_and(|(_, set)| set.contains(cell))
+                })
+            };
+            if hovered_link(&last_hover) || hovered_link(&hover) {
+                interactive = true;
+            }
         }
         // The pinned PR popup opened, closed, or moved to another session: repaint
         // so the floating box appears / clears / relocates over the live pane.
@@ -425,42 +453,51 @@ fn drive(
             drawn_gen = gen;
             // Hold the parser lock just long enough to detect links (only when the
             // content changed) and snapshot the grid into an owned view.
-            let view = {
+            // Snapshot the grid (and, on a fresh-output frame, rescan its links)
+            // under the parser lock, then release it. Any pull-request URLs to
+            // persist are lifted out as owned data and written *after* the lock is
+            // dropped: `pr_link_store::add`/`get` do synchronous disk IO (atomic
+            // write + read-back), and doing that while holding the parser Mutex
+            // would stall the reader thread — and, once the PTY buffer fills, the
+            // shell itself — for the duration of the write.
+            let (view, fresh_prs) = {
                 let parser = pty.parser();
                 let screen = parser.screen();
-                if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
+                let fresh_prs = if links_cache.as_ref().map(|(g, _)| *g) != Some(gen) {
                     // One whole-screen scan yields both the link cells (to
                     // underline) and the URL text — computing them together avoids
                     // a second full-grid walk under the parser lock.
                     let scan = link::scan_links(screen);
                     // Fresh output: harvest the pull-request URLs the agent may have
-                    // printed, recording them for the attached session so the sidebar
-                    // shows the `#<number>` badges and a click reopens them. Keyed by
-                    // the session root (the dir the agent runs in), matching what
-                    // `sync` reads; the store accumulates distinct URLs over time.
+                    // printed so the attached session records them (sidebar
+                    // `#<number>` badges, click-to-reopen). Return them to persist
+                    // off the lock; only when the visible set actually changed.
                     let prs = link::pr_links_from(&scan.urls);
                     links_cache = Some((gen, scan.cells));
-                    if !prs.is_empty() && prs != last_prs {
-                        // Clone the active root so the immutable borrow ends before
-                        // the mutable `set_pr_links` below.
-                        if let Some(root) = state.list().active().map(|wt| wt.path.clone()) {
-                            let _ = crate::infrastructure::pr_link_store::add(&root, &prs);
-                            // Reflect the badge in the sidebar *now* instead of
-                            // waiting for the next (slow) workspace re-sync to fold
-                            // `pr-links/` into `state.json`: read back the store's
-                            // accumulated, deduped set (the same value the re-sync
-                            // computes) and set it on the in-memory row. We are
-                            // already inside a repaint pass, so the `#N` badge shows
-                            // on this frame.
-                            let merged = crate::infrastructure::pr_link_store::get(&root);
-                            state.set_pr_links(&root, merged);
-                        }
-                        last_prs = prs;
-                    }
-                }
+                    (!prs.is_empty() && prs != last_prs).then_some(prs)
+                } else {
+                    None
+                };
                 let links = &links_cache.as_ref().expect("links cache set above").1;
-                TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links)
+                let view =
+                    TerminalView::from_screen_with_links(screen, selection.as_ref(), hover, links);
+                (view, fresh_prs)
             };
+            // Parser lock released. Persist any newly-seen PR URLs now, keyed by the
+            // session root (the dir the agent runs in), matching what `sync` reads;
+            // the store accumulates distinct URLs over time. Reflect the badge in the
+            // sidebar *now* instead of waiting for the next (slow) workspace re-sync
+            // to fold `pr-links/` into `state.json`: read back the store's
+            // accumulated, deduped set (the same value the re-sync computes) and set
+            // it on the in-memory row so the `#N` badge shows on this frame.
+            if let Some(prs) = fresh_prs {
+                if let Some(root) = state.list().active().map(|wt| wt.path.clone()) {
+                    let _ = crate::infrastructure::pr_link_store::add(&root, &prs);
+                    let merged = crate::infrastructure::pr_link_store::get(&root);
+                    state.set_pr_links(&root, merged);
+                }
+                last_prs = prs;
+            }
             // The cursor belongs to the live screen, so don't park it while the
             // user is viewing scrolled-back history. When live, park it on the
             // program's cursor cell even if the program hid it (so the IME's
@@ -530,6 +567,7 @@ fn drive(
                     &mut selection,
                     &mut drag_tab,
                     &mut hover,
+                    links_cache.as_ref().map(|(_, set)| set),
                     &mut pending_prefix,
                     &mut last_click,
                     &mut last_pointer,
@@ -599,8 +637,9 @@ fn wait(
 /// no drag opens the `#<number>` PR badge or terminal link under the pointer in the
 /// default browser (see [`ui::sidebar_pr_links_at`] / [`open_clicked_url`]), or —
 /// double-clicked on a sidebar session row — switches to that session
-/// ([`PaneStep::ToSession`], tracked across calls via `last_click`); a left click
-/// on a tab chip switches to that tab ([`PaneStep::ToTab`]; see
+/// ([`PaneStep::ToSession`], tracked across calls via `last_click`), or opens
+/// inline session creation when that row is `+ new session`; a left click on a
+/// tab chip switches to that tab ([`PaneStep::ToTab`]; see
 /// [`ui::attached_tab_at`]). Button-less motion updates
 /// `hover` so the link under the pointer lights up. The navigation keys are
 /// classified by the active `KeyScheme` (see
@@ -611,8 +650,9 @@ fn wait(
 /// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 在席
 /// ([`PaneStep::ToFocus`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
 /// note editor ([`PaneStep::OpenNote`]), jump to the previous session
-/// ([`PaneStep::PrevSession`]), or switch to a sidebar-clicked session
-/// ([`PaneStep::ToSession`]); toggling the sidebar stays in 没入. `Esc` and
+/// ([`PaneStep::PrevSession`]), switch to a sidebar-clicked session, or open
+/// creation from the sidebar create row ([`PaneStep::ToSession`]); toggling the
+/// sidebar stays in 没入. `Esc` and
 /// `Ctrl-W` always reach the shell; tabs are closed from 切替 (`x`). Other events
 /// are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
@@ -626,6 +666,7 @@ fn pump_input(
     selection: &mut Option<Selection>,
     drag_tab: &mut Option<usize>,
     hover: &mut Option<Cell>,
+    links: Option<&std::collections::HashSet<Cell>>,
     pending_prefix: &mut Option<Instant>,
     last_click: &mut Option<(usize, Instant)>,
     last_pointer: &mut Option<PointerShape>,
@@ -668,9 +709,13 @@ fn pump_input(
                     KeyAction::BeginPrefix => *pending_prefix = Some(now),
                     // An unrecognised key right after the leader: drop it.
                     KeyAction::Swallow => *pending_prefix = None,
-                    // `Ctrl-B` / `Ctrl-O s` collapses or expands the sidebar in
-                    // place, without leaving 没入: the next loop pass re-lays out
-                    // the frame and resizes the PTY to the new pane width.
+                    // `Ctrl-O s` (prefix scheme) / `Alt-s` (alt scheme) collapses
+                    // or expands the sidebar in place, without leaving 没入: the
+                    // next loop pass re-lays out the frame and resizes the PTY to
+                    // the new pane width. Bare `Ctrl-B` never reaches here —
+                    // `classify` only maps the leader / `Alt` chords, so it is
+                    // forwarded to the shell; `Ctrl-B` toggles the sidebar on
+                    // usagi's own surfaces (切替 / 在席), not in 没入.
                     KeyAction::Reserved(Reserved::ToggleSidebar) => {
                         *pending_prefix = None;
                         state.toggle_sidebar();
@@ -743,7 +788,7 @@ fn pump_input(
                 update_pointer(
                     term,
                     state,
-                    pty,
+                    links,
                     geo,
                     size,
                     mouse.column,
@@ -844,11 +889,13 @@ fn pump_input(
                                 )
                             })
                             .flatten();
-                        // Otherwise a plain click on a sidebar session row arms a
-                        // double click; a second click on the same row within
+                        // Otherwise a plain click on a sidebar row arms a double
+                        // click; a second click on the same row within
                         // `DOUBLE_CLICK` switches to that session (attaching when
-                        // live) — the confirm 切替 does, so the list is navigable
-                        // without first zooming out. A single click only arms.
+                        // live), or opens inline creation when the row is the
+                        // persistent `+ new session` affordance — the same
+                        // confirm 切替 / 在席 expose without first zooming out. A
+                        // single click only arms.
                         let session = (badge.is_none() && !dragged)
                             .then(|| {
                                 ui::left_pane_session_at(
@@ -976,7 +1023,7 @@ fn flush_pending_input(pty: &mut PtySession, pending: &mut Vec<u8>) -> Result<()
 fn update_pointer(
     term: &Term,
     state: &HomeState,
-    pty: &PtySession,
+    links: Option<&std::collections::HashSet<Cell>>,
     geo: ui::TerminalGeometry,
     size: (u16, u16),
     col: u16,
@@ -985,9 +1032,14 @@ fn update_pointer(
 ) -> Result<()> {
     let cell = pane_cell(col, row, geo);
     let clickable = match cell {
-        // Inside the grid only a URL cell is clickable; the parser lock is held
-        // just long enough to test the cell under the pointer.
-        Some(cell) => link::url_at(pty.parser().screen(), cell).is_some(),
+        // Inside the grid only a URL cell is clickable. This runs on *every* mouse
+        // report (motion, drag, wheel), so it consults the link cells already
+        // scanned for the current frame rather than re-taking the parser lock and
+        // re-flattening the logical line under the pointer each event. The set is
+        // exactly the cells [`link::url_at`] would lift a URL from (both derive from
+        // [`link::scan_links`]'s `url_spans`), so the click handler still resolves
+        // the URL with `url_at`.
+        Some(cell) => links.is_some_and(|set| set.contains(&cell)),
         // Off the grid, a tab chip, a sidebar PR badge, or a `#<number>` in the
         // pinned PR popup is the clickable target.
         None => {

@@ -183,30 +183,73 @@ pub fn worktree_status(path: &Path) -> Option<WorktreeStatus> {
 /// through git (`rev-parse --git-path`) so it lands in the right place for a
 /// linked worktree, whose `info/exclude` lives in the shared common dir.
 pub fn ensure_excluded(worktree: &Path, pattern: &str) -> Result<()> {
+    ensure_all_excluded(worktree, std::slice::from_ref(&pattern))
+}
+
+/// Append every pattern in `patterns` (absent ones only) to the worktree's
+/// `info/exclude`, in one pass. See [`ensure_excluded`] for what this hides and
+/// why; this batches several patterns so the exclude path is resolved through git
+/// once and the file is read and rewritten once, instead of paying a
+/// `rev-parse --git-path` plus a read/write per pattern (a session excludes one
+/// pattern per shipped skill in every worktree it builds). Idempotent: a pattern
+/// already present is left as-is, and the file is only rewritten when something
+/// was actually added.
+pub fn ensure_all_excluded(worktree: &Path, patterns: &[&str]) -> Result<()> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let path = exclude_path(worktree)?;
+
+    // Preserve any existing content (git seeds `info/exclude` with comments) and
+    // append each missing pattern on its own line. `content` grows as we go, so a
+    // duplicate later in `patterns` sees the copy appended earlier in this loop.
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut changed = false;
+    for pattern in patterns {
+        if content.lines().any(|line| line.trim() == *pattern) {
+            continue;
+        }
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(pattern);
+        content.push('\n');
+        changed = true;
+    }
+    if changed {
+        std::fs::write(&path, &content).context(format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Resolve the worktree's `info/exclude` path through git (`rev-parse
+/// --git-path`) so it lands in the right place for a linked worktree, whose
+/// `info/exclude` lives in the shared common dir.
+fn exclude_path(worktree: &Path) -> Result<PathBuf> {
     let args = [
         "rev-parse",
         "--path-format=absolute",
         "--git-path",
         "info/exclude",
     ];
-    let path = match git_capture(worktree, &args)? {
-        Some(raw) => PathBuf::from(raw),
+    match git_capture(worktree, &args)? {
+        Some(raw) => Ok(PathBuf::from(raw)),
         None => bail!("{} is not a git worktree", worktree.display()),
-    };
+    }
+}
 
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| line.trim() == pattern) {
-        return Ok(());
-    }
-    // Preserve any existing content (git seeds `info/exclude` with comments);
-    // append the pattern on its own line.
-    let mut content = existing;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(pattern);
-    content.push('\n');
-    std::fs::write(&path, content).context(format!("failed to write {}", path.display()))
+/// The absolute path of the repository's git **common directory** — the `.git`
+/// store shared by every worktree of the repository — or `None` when `path` is
+/// not inside a git repository.
+///
+/// A single cheap `rev-parse`, unlike [`primary_worktree`], which shells out to
+/// `git worktree list` and parses every worktree of the repository. Callers that
+/// only need to know *which repository* a path belongs to (e.g. to resolve a
+/// per-repository property once across many worktrees) use this to avoid an
+/// O(worktrees) scan per path.
+pub fn git_common_dir(path: &Path) -> Option<PathBuf> {
+    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    git_capture(path, &args).ok().flatten().map(PathBuf::from)
 }
 
 /// Remove the worktree at `worktree` from `repo`. With `force`, discard

@@ -51,14 +51,20 @@ fn tools_list_returns_issue_and_memory_tools() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     );
     let tools = res["result"]["tools"].as_array().unwrap();
-    // Seven issue tools followed by six memory tools.
-    assert_eq!(tools.len(), 13);
+    // Six issue tools followed by four memory tools.
+    assert_eq!(tools.len(), 10);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"issue_create"));
     assert!(names.contains(&"issue_to_prompt"));
+    assert!(names.contains(&"issue_search"));
     assert!(names.contains(&"issue_delete"));
     assert!(names.contains(&"memory_save"));
     assert!(names.contains(&"memory_delete"));
+    // The separate list tools were folded into search (query optional), and the
+    // memory update tool into memory_save (upsert).
+    assert!(!names.contains(&"issue_list"));
+    assert!(!names.contains(&"memory_list"));
+    assert!(!names.contains(&"memory_update"));
 }
 
 #[test]
@@ -178,16 +184,16 @@ fn create_get_list_update_delete_round_trip() {
     let missing = call(&server, "issue_get", json!({"number":99}));
     assert_eq!(tool_json(&missing), Value::Null);
 
-    // list: #1 ready, #2 blocked by #1
-    let listed = tool_json(&call(&server, "issue_list", json!({})));
+    // search with no query lists all: #1 ready, #2 blocked by #1
+    let listed = tool_json(&call(&server, "issue_search", json!({})));
     let arr = listed.as_array().unwrap();
     assert_eq!(arr.len(), 2);
     assert_eq!(arr[0]["ready"], true);
     assert_eq!(arr[1]["ready"], false);
     assert_eq!(arr[1]["unmet_deps"], json!([1]));
 
-    // ready-only filter keeps just #1
-    let ready = tool_json(&call(&server, "issue_list", json!({"ready":true})));
+    // ready-only filter (no query) keeps just #1
+    let ready = tool_json(&call(&server, "issue_search", json!({"ready":true})));
     assert_eq!(ready.as_array().unwrap().len(), 1);
 
     // search by title
@@ -197,7 +203,7 @@ fn create_get_list_update_delete_round_trip() {
     // update #1 -> done, then #2 becomes ready
     let updated = call(&server, "issue_update", json!({"number":1,"status":"done"}));
     assert_eq!(tool_json(&updated)["status"], "done");
-    let listed = tool_json(&call(&server, "issue_list", json!({})));
+    let listed = tool_json(&call(&server, "issue_search", json!({})));
     assert_eq!(listed.as_array().unwrap()[1]["ready"], true);
 
     // update missing -> tool error
@@ -266,10 +272,10 @@ fn list_and_search_filter_by_parent_and_milestone() {
         json!({"title":"child b","parent":1,"milestone":"v2","body":"shared"}),
     );
 
-    let by_parent = tool_json(&call(&server, "issue_list", json!({"parent":1})));
+    let by_parent = tool_json(&call(&server, "issue_search", json!({"parent":1})));
     assert_eq!(by_parent.as_array().unwrap().len(), 2);
 
-    let by_milestone = tool_json(&call(&server, "issue_list", json!({"milestone":"v1"})));
+    let by_milestone = tool_json(&call(&server, "issue_search", json!({"milestone":"v1"})));
     let arr = by_milestone.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["number"], 2);
@@ -287,10 +293,10 @@ fn list_and_search_filter_by_parent_and_milestone() {
 #[test]
 fn tool_call_without_arguments_defaults_to_empty() {
     let server = McpServer::new(tempfile::tempdir().unwrap().path());
-    // No `arguments` field: issue_list takes none, so it should succeed.
+    // No `arguments` field: issue_search takes none required, so it lists all.
     let res = reply(
         &server,
-        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"issue_list"}}),
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"issue_search"}}),
     );
     assert_eq!(res["result"]["isError"], false);
     assert_eq!(tool_json(&res["result"]), json!([]));
@@ -321,7 +327,7 @@ fn usecase_errors_surface_for_every_tool() {
         ("issue_create", json!({"title":"x"})),
         ("issue_get", json!({"number":1})),
         ("issue_to_prompt", json!({"number":1})),
-        ("issue_list", json!({})),
+        ("issue_search", json!({})),
         ("issue_search", json!({"query":"x"})),
         ("issue_update", json!({"number":1,"status":"done"})),
         ("issue_delete", json!({"number":1})),

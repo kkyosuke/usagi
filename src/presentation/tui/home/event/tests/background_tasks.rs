@@ -91,6 +91,26 @@ fn a_live_session_wakes_the_loop_without_a_key() {
 }
 
 #[test]
+fn an_idle_watched_screen_wakes_on_the_watch_tick_without_a_key() {
+    // A create / remove made outside this screen (an agent's MCP call, another
+    // usagi window, or the CLI) only writes state.json; the background watcher
+    // republishes it, so an otherwise-idle loop must wake on the watch tick to
+    // apply it rather than blocking until the next keypress. The first tick yields
+    // no key (Ok(None)) and the loop re-iterates (draining any pending refresh);
+    // the next Ctrl-C quits (no session is live). The blocking queue holds an
+    // error: were the loop to block on `read_key` (no watch tick), it would
+    // surface here instead of quitting cleanly through the timeout path.
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC))]),
+        blocking: VecDeque::from(vec![Err(io::Error::other("loop blocked on a key"))]),
+    };
+    assert!(matches!(
+        run_idle_watching(&mut reader).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
 fn a_finished_removal_evicts_the_pooled_shell() {
     // A completed removal carrying an evict path makes the loop evict that pool
     // path on the next drain (on this thread, since the pool is not `Send`).

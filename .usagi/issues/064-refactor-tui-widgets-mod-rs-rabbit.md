@@ -1,13 +1,13 @@
 ---
 number: 64
 title: refactor(tui): widgets/mod.rs から rabbit アセットを分離する
-status: todo
+status: done
 priority: low
 labels: [refactor, tui, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:17:23.832740+00:00
-updated_at: 2026-06-19T22:17:23.832740+00:00
+updated_at: 2026-07-04T00:05:39.047152+00:00
 ---
 
 ## 背景

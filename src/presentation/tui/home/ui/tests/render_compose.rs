@@ -422,6 +422,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         name: "alpha".to_string(),
         display_name: None,
         note: Some("first line\nsecond".to_string()),
+        label_id: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
         created_at: Utc::now(),
@@ -436,6 +437,10 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     // The right-pane editor: a `note` box (the session is named in the sidebar) +
     // the multi-line note.
     assert!(frame.contains("─ note"), "the box is titled `note`");
+    assert!(
+        frame.contains("編集中"),
+        "the open editor is marked as editing, distinct from the read-only note"
+    );
     assert!(
         frame.contains("alpha"),
         "the session is still named on screen"
@@ -501,6 +506,10 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
     // The selected session's note shows in the right pane (overlaid on top).
     let pane = stripped(&right_pane_contents(&state, 40, 12));
     assert!(pane.contains("─ note"), "the overlay is titled");
+    assert!(
+        !pane.contains("編集中"),
+        "the read-only note carries no editing marker"
+    );
     assert!(pane.contains("do X"));
     assert!(pane.contains("do Y"));
 
@@ -508,35 +517,6 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
     state.switch_move_up();
     let root = stripped(&right_pane_contents(&state, 40, 12));
     assert!(!root.contains("do X"));
-}
-
-#[test]
-fn read_only_note_overlay_hides_on_dismiss_and_returns_on_move() {
-    let mut state = switch_state_with_note("do X\ndo Y");
-    assert!(
-        state.switch_note_visible(),
-        "the note auto-shows on selection"
-    );
-
-    // Dismissing it (the first `Esc`) hides the overlay without leaving 切替.
-    state.hide_switch_note();
-    assert!(!state.switch_note_visible(), "the dismissed note is hidden");
-    let hidden = stripped(&right_pane_contents(&state, 40, 12));
-    assert!(
-        !hidden.contains("do X"),
-        "the dismissed note does not render"
-    );
-
-    // Moving the cursor (here back onto the same session via a wrap) re-shows it:
-    // the dismissal belonged to the row just left.
-    state.switch_move_up(); // -> root
-    state.switch_move_down(); // -> alpha
-    assert!(state.switch_note_visible(), "moving re-shows the note");
-    let shown = stripped(&right_pane_contents(&state, 40, 12));
-    assert!(
-        shown.contains("do X"),
-        "the note renders again after moving"
-    );
 }
 
 #[test]

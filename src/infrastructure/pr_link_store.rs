@@ -1,12 +1,13 @@
 //! Per-worktree storage of the pull requests discovered for a session.
 //!
-//! usagi does not query GitHub for a session's PRs. Instead the TUI scans the
-//! embedded agent's terminal output for pull-request URLs (see
+//! usagi does not query GitHub for a session's PRs. Instead the TUI scans live
+//! embedded terminal output for pull-request URLs (see
 //! [`crate::presentation::tui::home::terminal::link::pr_links`]) and records them
 //! here, keyed by the session's worktree. The next workspace sync reads them back
 //! and folds them into the worktree's [`PrLink`] list so the sidebar shows the
 //! `#<number>` badges and a click reopens them — and, because they are persisted,
-//! the badges survive a restart even though the agent only prints each URL once.
+//! the badges survive a restart even though a command may print each URL only
+//! once.
 //!
 //! A session may open several PRs (one per repository it touches, or several over
 //! its life), so the store **accumulates** distinct URLs across calls rather than

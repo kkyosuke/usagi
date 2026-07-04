@@ -1,20 +1,18 @@
-//! Real 1Password `op` CLI subprocess and OS-keyring IO that backs
+//! Real 1Password `op` CLI subprocess that backs
 //! [`resolve_workspace_env`](super::resolve_workspace_env).
 //!
 //! Everything here is genuine external IO — spawning the `op` binary, streaming
-//! its stdout/stderr on worker threads, waiting with a timeout, and reading the
-//! service-account token from the OS keychain. The testable resolution logic is
-//! injected via [`SecretResolver`] and lives (with its unit tests) in the parent
-//! module; this file is the thin real-IO layer left after that extraction, so it
-//! is excluded from coverage (see `scripts/coverage.sh`).
+//! its stdout/stderr on worker threads, and waiting with a timeout. The testable
+//! resolution logic is injected via [`SecretResolver`] and lives (with its unit
+//! tests) in the parent module; this file is the thin real-IO layer left after
+//! that extraction, so it is excluded from coverage (see `scripts/coverage.sh`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::{resolve_env, SecretResolver};
-use crate::infrastructure::secret_store::OP_SERVICE_ACCOUNT_TOKEN_KEY;
+use super::collect_resolved;
 use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -25,23 +23,65 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// Resolve the secret environment configured for `workspace_root`.
 ///
 /// The returned map contains only variables whose name/reference pass
-/// [`LocalSettings::env`](crate::domain::settings::LocalSettings::env) and whose
+/// [`Settings::env`](crate::domain::settings::Settings::env) and whose
 /// `op read --no-newline` call succeeds. Errors are logged with the variable name
 /// and reference but never the resolved secret.
+///
+/// Each binding is resolved on its own thread: `op read` calls are independent
+/// subprocesses, so fanning them out turns the total wait from the *sum* of the
+/// per-binding latencies (each up to [`OP_TIMEOUT`]) into roughly the *slowest
+/// single* one. A workspace with several 1Password references — the common case
+/// that made launching a pane feel frozen — now resolves in one round-trip's
+/// time. Completion order does not matter: the results are keyed into a
+/// `BTreeMap` by name via [`collect_resolved`].
 pub fn resolve_workspace_env(workspace_root: &Path) -> BTreeMap<String, String> {
-    let settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
-    resolve_env(&settings, &OpCliResolver)
+    let settings = crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
+    // The service account token stored by `usagi op login` (if any) is shared by
+    // every binding's `op read`.
+    let token = service_account_token();
+    let bindings: Vec<(String, String)> = settings
+        .env()
+        .map(|(name, reference)| (name.to_string(), reference.to_string()))
+        .collect();
+
+    let results = std::thread::scope(|scope| {
+        let token = token.as_deref();
+        let handles: Vec<(String, String, _)> = bindings
+            .into_iter()
+            .map(|(name, reference)| {
+                let for_thread = reference.clone();
+                let handle = scope.spawn(move || op_read(&for_thread, token));
+                (name, reference, handle)
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(name, reference, handle)| {
+                // A panicked reader thread is reported as a failed resolution
+                // (logged, dropped) rather than propagated, so one bad binding
+                // never takes down the pane launch.
+                let outcome = handle
+                    .join()
+                    .unwrap_or_else(|_| Err("op read thread panicked".to_string()));
+                (name, reference, outcome)
+            })
+            .collect::<Vec<_>>()
+    });
+
+    collect_resolved(results)
 }
 
-struct OpCliResolver;
-
-impl SecretResolver for OpCliResolver {
-    fn read(&self, reference: &str) -> Result<String, String> {
-        op_read(reference)
-    }
+/// The 1Password service account token stored by `usagi op login`, if any.
+///
+/// Best-effort: when it is absent (or the keychain cannot be read) `op read`
+/// falls back to whatever ambient authentication `op` already has (an `op signin`
+/// session or an externally provided `OP_SERVICE_ACCOUNT_TOKEN`).
+fn service_account_token() -> Option<String> {
+    use crate::infrastructure::secret_store::{SystemSecretStore, OP_SERVICE_ACCOUNT_TOKEN_KEY};
+    SystemSecretStore.get(OP_SERVICE_ACCOUNT_TOKEN_KEY)
 }
 
-fn op_read(reference: &str) -> Result<String, String> {
+fn op_read(reference: &str, service_account_token: Option<&str>) -> Result<String, String> {
     let mut command = Command::new("op");
     command
         .arg("read")
@@ -50,7 +90,9 @@ fn op_read(reference: &str) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(token) = op_service_account_token() {
+    // Supplied through the environment, not a CLI argument, so the token never
+    // appears in process listings.
+    if let Some(token) = service_account_token {
         command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
     }
     let mut child = command
@@ -100,18 +142,6 @@ fn op_read(reference: &str) -> Result<String, String> {
         text.push_str(" …(truncated)");
     }
     Ok(text.trim_end_matches(['\n', '\r']).to_string())
-}
-
-/// The same OS-keychain entry `usagi op login` writes for op-mcp. Supplying it
-/// to `op read` preserves non-interactive service-account auth for env injection
-/// instead of requiring a separate ambient `op signin` session.
-fn op_service_account_token() -> Option<String> {
-    const KEYRING_SERVICE: &str = "usagi";
-    let entry = keyring::Entry::new(KEYRING_SERVICE, OP_SERVICE_ACCOUNT_TOKEN_KEY).ok()?;
-    match entry.get_password() {
-        Ok(password) if !password.trim().is_empty() => Some(password),
-        _ => None,
-    }
 }
 
 struct RealChild(std::process::Child);

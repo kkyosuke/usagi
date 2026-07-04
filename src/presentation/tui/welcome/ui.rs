@@ -25,6 +25,11 @@ const MENU_WIDTH: usize = 18;
 const RECENT_WIDTH: usize = 32;
 const COLUMN_GAP: usize = 4;
 const RECENT_INNER_WIDTH: usize = RECENT_WIDTH - 4;
+/// The full display width of the two-column menu block: the left menu column, the
+/// central divider with a [`COLUMN_GAP`] either side, and the right recent
+/// column. Centring this as one unit keeps the block balanced under the centred
+/// mascot and title instead of drifting toward the wider recent column.
+const MENU_BLOCK_WIDTH: usize = MENU_WIDTH + COLUMN_GAP + 1 + COLUMN_GAP + RECENT_WIDTH;
 
 /// Builds the centred mascot and title block.
 ///
@@ -119,11 +124,11 @@ fn menu_lines(
     let left = menu_column_lines(items, selected_index);
     let right = recent_lines(recent_items, now);
     let row_count = left.len().max(right.len());
-    // The divider sits on the same horizontal centre line as the centred mascot
-    // and title; the two columns hang off either side of it.
-    let divider_col = width / 2;
-    let left_col = divider_col.saturating_sub(COLUMN_GAP + MENU_WIDTH);
-    let right_col = divider_col + 1 + COLUMN_GAP;
+    // Centre the whole two-column block (menu │ recent) in the terminal so it
+    // hangs under the centred mascot and title as one balanced unit, rather than
+    // pinning the divider to the centre column — which drifted the block right
+    // because the recent column is wider than the menu column.
+    let left_pad = widgets::centered_padding(width, MENU_BLOCK_WIDTH);
     let gap = " ".repeat(COLUMN_GAP);
 
     (0..row_count)
@@ -131,14 +136,11 @@ fn menu_lines(
             let left = pad_segment(left.get(i).map(String::as_str).unwrap_or(""), MENU_WIDTH);
             let right = pad_segment(right.get(i).map(String::as_str).unwrap_or(""), RECENT_WIDTH);
             let mut line = String::new();
-            line.push_str(&" ".repeat(left_col));
+            line.push_str(&" ".repeat(left_pad));
             line.push_str(&left);
-            let left_visible = left_col + MENU_WIDTH;
-            line.push_str(&" ".repeat(divider_col.saturating_sub(left_visible)));
+            line.push_str(&gap);
             line.push_str(&style("│").dim().to_string());
             line.push_str(&gap);
-            let right_visible = divider_col + 1 + COLUMN_GAP;
-            line.push_str(&" ".repeat(right_col.saturating_sub(right_visible)));
             line.push_str(&right);
             widgets::clip_to_width(&line, width)
         })
@@ -191,8 +193,16 @@ pub fn body_top_padding(
         + 1
         + menu_lines(0, items, 0, recent_items, Utc::now()).len()
         + notice_lines(0, notice).len();
-    let footer = footer_lines(0).len();
-    height.saturating_sub(body + footer) / 2
+    centered_top_padding(height, body, footer_lines(0).len())
+}
+
+/// The blank rows that vertically centre a `body_lines`-tall body above a
+/// `footer_lines`-tall pinned footer in `height` rows. The shared centering math,
+/// so [`render_frame`] (which has already built the body) and [`body_top_padding`]
+/// (which only knows the section line counts) agree without one rebuilding the
+/// other's sections.
+fn centered_top_padding(height: usize, body_lines: usize, footer_lines: usize) -> usize {
+    height.saturating_sub(body_lines + footer_lines) / 2
 }
 
 /// Builds the full welcome-screen frame for a raw terminal size.
@@ -225,8 +235,9 @@ pub fn render_frame(
     let mut lines = Vec::with_capacity(height);
 
     // Centre the body in the space above the footer (shared with the splash so
-    // the mascot and title line up across the two screens).
-    let top_padding = body_top_padding(height, items, recent_items, notice);
+    // the mascot and title line up across the two screens). The body is already
+    // built, so measure it directly rather than rebuilding it in `body_top_padding`.
+    let top_padding = centered_top_padding(height, body.len(), footer.len());
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -324,6 +335,29 @@ mod tests {
     }
 
     #[test]
+    fn menu_lines_center_the_two_column_block_as_a_whole() {
+        let items = sample_items();
+        let lines = menu_lines(80, &items, 0, &sample_recents(), now());
+        let heading = console::strip_ansi_codes(
+            lines
+                .iter()
+                .find(|line| line.contains("Menu") && line.contains("Recent"))
+                .unwrap(),
+        )
+        .into_owned();
+
+        let left_blank = heading.chars().take_while(|ch| *ch == ' ').count();
+        let row_width = console::measure_text_width(&heading);
+        let right_blank = 80 - row_width;
+
+        assert_eq!(left_blank, widgets::centered_padding(80, MENU_BLOCK_WIDTH));
+        assert!(
+            left_blank.abs_diff(right_blank) <= 1,
+            "menu block should be centred: left={left_blank}, right={right_blank}, row={heading:?}"
+        );
+    }
+
+    #[test]
     fn recent_lines_always_reserve_three_numbered_slots() {
         let recents = sample_recents();
         let lines = recent_lines(&recents, now());
@@ -350,7 +384,7 @@ mod tests {
     fn notice_slot_keeps_layout_stable_across_toggling() {
         let items = sample_items();
         let without = render_frame(24, 80, &items, 0, &[], None);
-        let with = render_frame(24, 80, &items, 0, &[], Some("Config is coming soon 🐰"));
+        let with = render_frame(24, 80, &items, 0, &[], Some("Config is coming soon 󰤇"));
         // The frame height is identical whether or not a notice is shown, so
         // the menu and footer never move.
         assert_eq!(without.len(), with.len());
@@ -418,7 +452,7 @@ mod tests {
         let items = sample_items();
         assert_eq!(
             body_top_padding(40, &items, &[], None),
-            body_top_padding(40, &items, &[], Some("Saved 🐰")),
+            body_top_padding(40, &items, &[], Some("Saved 󰤇")),
         );
     }
 

@@ -13,7 +13,7 @@
 - [同期と参照](#同期と参照)
 - [git 検査の方針](#git-検査の方針infrastructuregitrs)
 - [`settings.json`: プロジェクト固有の設定上書き（ローカル設定）](#settingsjson-プロジェクト固有の設定上書きローカル設定)
-- [`history.jsonl`](#historyjsonl)
+- [`history.json`](#historyjson)
 - [`issues/`: タスク issue](#issues-タスク-issue)
 
 ## 保存場所
@@ -26,7 +26,7 @@
 ├── .lock           # state.json 更新を直列化するプロセス間ロック（git 管理外）
 ├── state.json      # worktree / ブランチの状態スナップショット
 ├── settings.json   # プロジェクト固有の設定上書き（ローカル設定）
-├── history.jsonl    # ワークスペース画面で実行したコマンドの履歴
+├── history.json    # ワークスペース画面で実行したコマンドの履歴
 ├── issues/         # タスク issue（git で共有する。後述）
 │   ├── 001-*.md    # 1 issue = 1 ファイル（frontmatter 付き markdown）
 │   └── index.json  # 一覧・検索を速くする派生キャッシュ（git 管理外）
@@ -37,7 +37,7 @@
 ```
 
 - どの worktree からコマンドを実行しても、`git worktree list` の先頭（＝プライマリ worktree）を基準に保存先を解決します（`infrastructure/git.rs` の `primary_worktree`）。これによりリポジトリ内で 1 つの `.usagi/` に集約されます。
-- `.usagi/` の大半（`state.json` / `settings.json` / `history.jsonl` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。`state.json` 更新を直列化するプロセス間ロック `.usagi/.lock` も同様で、トップレベルの `/*` で除外されます（`issues/` / `memory/` は git 管理対象に戻すため、それぞれの `.lock` を個別に再除外する点が異なります）。
+- `.usagi/` の大半（`state.json` / `settings.json` / `history.json` / `sessions/`）は **マシンローカルな状態・設定** で、後述の `.gitignore` により **コミットされません**。`state.json` 更新を直列化するプロセス間ロック `.usagi/.lock` も同様で、トップレベルの `/*` で除外されます（`issues/` / `memory/` は git 管理対象に戻すため、それぞれの `.lock` を個別に再除外する点が異なります）。
 - 例外は **`.usagi/issues/`** と **`.usagi/memory/`**。タスク issue とエージェントのメモリはチームで共有したいので git 管理対象とします。それぞれの派生キャッシュ `index.json` と、プロセス間書き込みロック用の `.lock` ファイルは再生成可能・ローカル専用なので除外したままにします（メモリの目次 `MEMORY.md` は共有対象）。
 - git 管理の制御は **リポジトリルートの `.gitignore` には書かず、`.usagi/.gitignore` に自己完結させます**（`usagi::usecase::project::ignore_usagi_dir`）。リポジトリルートを汚さず、`.usagi/` 配下だけで完結するのが利点です。`usagi init` 時に次の内容（`.usagi/` 配下からの相対パターン）を書き込み、リポジトリルートの `.gitignore` に `.usagi/` 系エントリがあれば除去します。
 
@@ -81,6 +81,7 @@
       "name": "login",
       "display_name": "ログイン機能",
       "note": "バリデーションを実装中\n・API は未着手",
+      "label_id": "review",
       "root": "/Users/me/git/usagi/.usagi/sessions/login",
       "worktrees": [
         {
@@ -127,6 +128,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `name` | string | セッション名。セッションの識別子で、作成後は変わらない。各リポジトリで作成するブランチは `usagi/<name>`（`usagi/` 名前空間に収め、手で切ったブランチと衝突させない） |
 | `display_name` | string? | サイドメニューでの表示名（任意）。設定時は一覧の `name` の代わりに表示する**見た目だけ**の上書きで、ブランチ名・識別子は変えない。未設定（既定）なら省略され、`name` を表示する |
 | `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
+| `label_id` | string? | ユーザーが切替（Switch）で手で付けた**ステータスラベルの ID**（任意）。[`session_labels` マスタ](../05-settings.md#ステータスラベルsession_labels)の要素 `id` を指し、表示時にマスタへ解決される（マスタから消えた ID は未設定扱い）。`status` と違い git からは導出されない純粋なユーザー付与タグで、ワークスペース同期では書き換えない。未設定（既定）なら省略される |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
@@ -243,7 +245,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
   "local_llm_enabled": true,         // 任意。未設定ならグローバル値（local_llm.enabled）
-  "env": {                           // 任意。agent / terminal 起動時に解決して注入
+  "env": {                           // 任意。グローバル env へ追加・同名上書きして注入
     "GH_TOKEN": "op://Private/GitHub/token"
   },
   "setup_commands": [                // 任意。新規セッション作成後に session root で実行
@@ -263,7 +265,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
 | `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |
-| `env` | map<string, string> | 空 map。agent / terminal 起動時に secret 環境変数を注入しない |
+| `env` | map<string, string> | 空 map。グローバル `env` だけを使い、workspace から追加・上書きしない |
 | `setup_commands` | string[] | 空配列。セッション作成後に実行するコマンドなし |
 | `skill_features` | map<string, bool> | 機能 ID 単位で上書き。未記載の機能はグローバル `skill_features` にフォールバック |
 
@@ -272,10 +274,12 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   新ブランチの基点解決は [4. オーケストレーション#新ブランチの基点local--remote](../04-orchestration.md#新ブランチの基点local--remote)、編集画面は
   [design/04-config.md](../design/04-config.md) が正本です。
 - **実効設定 = グローバル設定にローカルの上書きを適用した結果**。解決は `domain/settings.rs` の `Settings::with_local`、ユースケースは `usecase/settings.rs` の `effective(storage, repo_root)` が担います。
-- `env` はローカル設定専用です。キーは環境変数名（英字または `_` で始まり、英数字と `_` のみ）、値は
+- `env` はグローバル設定の `env` へ workspace 固有の binding を追加し、同じ環境変数名の binding がある場合は
+  workspace 側で上書きします。キーは環境変数名（英字または `_` で始まり、英数字と `_` のみ）、値は
   `op://vault/item/field` 形式など `op read` が解決できる 1Password reference です。embedded `agent` / `terminal` pane の
-  新規起動時に `op read --no-newline` で解決し、成功した値だけを子プロセス環境へ注入します。secret 本体は
-  `settings.json` に保存しません。
+  新規起動時に、マージ後の binding を `op read --no-newline` で解決し、成功した値だけを子プロセス環境へ注入します。
+  secret 本体は `settings.json` に保存しません。起動時のペイン復旧では workspace root 単位で解決結果を共有し、同じ root に
+  属する root / session worktree の復旧ペインが同じ `op read` を繰り返さないようにします。
 - `setup_commands` はローカル設定専用です。各要素は 1 つの shell コマンド行で、`session create` 後に
   `<workspace>/.usagi/sessions/<name>` をカレントディレクトリとして保存順に実行されます。空白だけの要素は無視されます。
 - 全項目を未上書きに戻しても `settings.json` は残し（中身は実質空）、「グローバルに従う／既定に従う」を意味します。
@@ -283,26 +287,30 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 対応するユースケース（`usecase/settings.rs`）: `load_local` / `save_local` / `effective` /
 `set_local_agent_cli` / `set_local_notifications_enabled`。
 
-## `history.jsonl`
+## `history.json`
 
 ワークスペース画面（`usagi hop` 後の操作画面）のコマンドモードで実行したコマンドの履歴です。実行のたびに 1 件ずつ追記され、次回以降の画面起動時に読み込まれて `history` コマンドや `↑`/`↓` での履歴遡りに使われます。
 
 **追記専用の JSONL**（1 行 = 1 件の `HistoryEntry`）です。古い順に並びます。
 
 ```jsonl
-{"command":"man","executed_at":"2026-06-14T01:02:03.456789Z"}
-{"command":"doctor","executed_at":"2026-06-14T01:02:30.123456Z"}
+{"command":"man","executed_at":"2026-06-14T01:02:03.456789Z","session":null,"success":true}
+{"command":"terminal","executed_at":"2026-06-14T01:02:30.123456Z","session":"feature-x","success":true}
+{"command":"nope","executed_at":"2026-06-14T01:02:40.123456Z","session":null,"success":false}
 ```
 
 | フィールド | 型 | 意味 |
 |---|---|---|
 | `command` | string | 入力されたコマンド行（トリム済み） |
 | `executed_at` | RFC3339(UTC) | コマンドを実行した日時 |
+| `session` | string? | コマンドが対象にしたセッション（worktree）の表示名。ワークスペース全体を対象にしたコマンドは `null` |
+| `success` | boolean | コマンドの構文・即時実行結果。エラー行を出したコマンドは `false` |
 
-- 保存先は `state.json` と同じ `.usagi/` ディレクトリ（`<repo>/.usagi/history.jsonl`）。
+- 保存先は `state.json` と同じ `.usagi/` ディレクトリ（`<repo>/.usagi/history.json`）。
 - `HistoryStore::append` は **1 行を `O_APPEND` で追記する**。全件を読み直して書き戻す read-modify-write をしないため、2 つの書き手（複数の TUI ペインや TUI とコマンド実行）が同時に追記しても互いのエントリを取りこぼさない。読み込み時にファイルが無ければ空の履歴として扱う。
-- 読み込みは 1 行ずつパースする。空行は読み飛ばし、改行で終端されていない末尾行は「追記中の書きかけ」とみなして捨てる（破損として失敗させない）。改行で終端された不正な行は本物の破損としてエラーになる。
-- 追記専用ゆえファイルは際限なく伸びるため、読み込みは**末尾の最新 1,000 件のみ**を取り込む（起動時のパース量と画面のメモリを一定に保つ。それより前の行は再検証しない）。画面側の履歴バッファも同数で頭打ちし、直前と同一のコマンドは記録しない。
+- 読み込みは 1 行ずつパースする。空行は読み飛ばし、改行で終端されていない末尾行は「追記中の書きかけ」とみなして捨てる（破損として失敗させない）。改行で終端された不正な行は本物の破損としてエラーになる。旧バージョンが書いた `<repo>/.usagi/history.jsonl` は、`history.json` がまだ無い場合だけ読み込み元として扱う。
+- 追記専用ゆえファイルは際限なく伸びるため、読み込みは**末尾の最新 1,000 件のみ**を取り込む（起動時のパース量と画面のメモリを一定に保つ。それより前の行は再検証しない）。画面側の表示用履歴も同数で頭打ちする。`↑` / `↓` の入力補助用バッファは、同じ最新 1,000 件のコマンド文字列を使い、直前と同一のコマンドだけ遡り候補から除く。
+- さらに、ファイルが一定サイズ（末尾 1 MiB）を超える場合は**その末尾だけを seek して読む**。全体を読み込むと起動時の読み取りコストが履歴全体に比例して伸びるため、末尾ウィンドウの先頭の書きかけ行を捨ててから上記の 1,000 件制限を適用する。1 件は数百バイト程度なので、通常はこのウィンドウに 1,000 件が十分収まる（極端に長いコマンドばかりの場合のみ取り込み件数が 1,000 未満になりうる）。
 - ワークスペース画面での永続化は **ベストエフォート**。書き込みに失敗しても画面の操作は止めない（履歴が残らないだけ）。
 - 対応するドメイン型は `domain/history.rs` の `HistoryEntry`。表示側の挙動は [../design/home/05-overlays.md](../design/home/05-overlays.md#履歴の永続化) を参照。
 

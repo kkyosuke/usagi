@@ -60,13 +60,14 @@
 │          Mascot Animation   < On >                    │  │  サイドバーうさぎの動き（On / Off）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
 │          Local LLM Model      qwen2.5-coder:7b        │  │  導入後はアクション。Space/Enter でモデル選択モーダル
+│          Env Vars             Edit (none)             │  │  全 workspace に注入する secret 環境変数（アクション）
 │          PR Skills          < On >                    │  ┘  同梱スキル機能の ON/OFF（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン（変更時のみ緑で有効）
 │                                                       │
-│        Saved 🐰                                       │  ← 通知行（任意・黄色）
+│        Saved 󰤇                                       │  ← 通知行（任意・黄色）
 │                                                       │
-│    ↑↓: move · ←→: change · Enter: save · Esc: back    │  ← フッター（淡色）
+│ ↑↓ move · ←→ change · Space select · Enter confirm · Esc back │  ← フッター（淡色）
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -81,10 +82,11 @@
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
+| Env Vars | 全 workspace の pane 起動時に 1Password から解決して注入する環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。workspace スコープの Env Vars はここへ追加・同名上書きする |
 | PR Skills | 同梱スキル機能 `pull-request`（PR 作成・更新・修正）の配布 ON/OFF | `On` ⇄ `Off` をトグル。固定項目の下に、トグル可能な[同梱スキル機能](../04-orchestration.md#スキルの配布)ごとに 1 行並ぶ（`usagi-session` は常時 ON で出ない） |
 
 > ほとんどの項目は共通の chooser widget で描画し、現在値を常に `< 値 >` の形で表示します。例外は `Local LLM` の
-> **インストールアクション**と `Local LLM Model` の**モデル選択アクション**で、これらは選択肢を循環するのではなく動作（モーダル）を
+> **インストールアクション**、`Local LLM Model` の**モデル選択アクション**、`Env Vars` の**複数行編集アクション**で、これらは選択肢を循環するのではなく動作（モーダル）を
 > 起動するため、山かっこなしの緑のラベルで表示します。ランタイム未導入のあいだ `Local LLM Model` は淡色の `—` で操作不可です。
 
 > **ローカル LLM の導入**: ローカル LLM の有効化は **2 段階**で、どちらの導入も**バックグラウンドで進みます**。
@@ -115,7 +117,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の固定 6 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
+ここには表示されず、対象は次の固定 7 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
 
 ```text
 ┌───────────────────────────────────────────────────────┐
@@ -125,17 +127,19 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 6 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 8 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
 │          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  │
-│          Setup Commands  Edit (2 commands)            │  ┘
+│          Setup Commands  Edit (2 commands)            │  │
+│          Env Vars        Edit (1 var)                 │  │
+│          Session Labels  Edit (global: 5 labels)      │  ┘
 │          PR Skills       < Global (On) >              │  ← 同梱スキル機能の上書き（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
 │                                                       │
-│    ↑↓: move · ←→: change · Enter: save · Esc: back    │  ← フッター
+│ ↑↓ move · ←→ change · Space select · Enter confirm · Esc back │  ← フッター
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -147,6 +151,8 @@
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
+| Env Vars | pane 起動時に 1Password から解決して注入する workspace 固有の環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。グローバル Env Vars へ追加し、同名は workspace 側が優先される |
+| Session Labels | 切替のステータスラベルマスタ（`session_labels`）のこのワークスペースでの上書き | 未上書きは `Edit (global: N labels)`（グローバルの実効値に追従）、上書き時は `Edit (N labels)`、空上書き時は `Edit (off)`。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -161,6 +167,19 @@
 - Setup Commands は action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 つの shell コマンドを
   入力します。`Ctrl-S` でエディタ内容をメモリ上のローカル設定に反映し、空行は保存時に除外します。実際の
   `<workspace>/.usagi/settings.json` への書き込みは通常どおり Save ボタンで行います。
+- Env Vars も action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 件の `NAME=op://vault/item/field`
+  を入力します。`Ctrl-S` で反映するとき、`=` を含まない行・環境変数名として不正な名前・reference が空の行は破棄し、
+  同名は後勝ちで解決します（[`env`](../05-settings.md#設定項目) の読み取り時と同じフィルタ）。保存する値は 1Password
+  reference だけで、解決した secret 本体は保存しません。同じ binding は、コマンドパレットの
+  [`env`](../03-commands/02-tui.md#env) を実行して開く[オーバーレイエディタ](home/05-overlays.md#workspace-env-エディタ)からも
+  編集できます（そちらは Config 画面へ遷移せず Overview 上で完結します）。
+- Session Labels も action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 件の
+  `id | name | color | icon` を入力します（`color` 省略で `gray`、`icon` 省略で既定ビュレット。`name` に区切りの
+  `|` は使えません）。`Ctrl-S` で反映するとき、`id` か `name` が空の行は破棄し、重複 `id` は最初の 1 件だけ残します
+  （[`session_labels`](../05-settings.md#ステータスラベルsession_labels) の読み取り時と同じ整形）。エディタはグローバルの
+  マスタ（または既存の上書き）で初期化され、内容がグローバルと同一のまま保存すると**上書きを作らずグローバルに追従**、
+  全行を空にして保存すると**このプロジェクトで機能休止**（空の上書き）になります。切替での付け方は
+  [../05-settings.md#ステータスラベルsession_labels](../05-settings.md#ステータスラベルsession_labels) を参照。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します
   （削除はしません）。
@@ -187,8 +206,8 @@
 | サブタイトル | グローバル: `Adjust your global preferences` ／ ワークスペース: `Adjust this workspace's settings` | 淡色（dim） |
 | 設定一覧 | 各設定を「カーソル列 + 変更マーク列 + ラベル(幅揃え) + 値」で 1 行ずつ表示 | 選択行：左端 `>` 赤太字／ラベル シアン太字。値は chooser（常に `< 値 >`）、ただしアクション行（`Install` / モデル名）は山かっこなしの緑ラベル、操作不可行（未導入時のモデル）は淡色の `—`。変更済みはラベル左に `●`（黄色）＋値も黄色 |
 | Save ボタン | 設定一覧の下に 1 行空けて配置する `[ Save ]`。値の列に揃える | 変更ありで緑・太字（有効）、変更なしで淡色（無効）。選択行は `>` 赤太字 |
-| 通知行 | 保存結果などのメッセージ（例: `Saved 🐰`）。未表示時も 1 行ぶんの枠を確保しレイアウトを安定させる | 黄色 |
-| フッター | 操作ヘルプ `↑↓: move · ←→: change · Enter: save · Esc: back` | 淡色（dim） |
+| 通知行 | 保存結果などのメッセージ（例: `Saved 󰤇`）。未表示時も 1 行ぶんの枠を確保しレイアウトを安定させる | 黄色 |
+| フッター | 操作ヘルプ `↑↓ move · ←→ change · Space select · Enter confirm · Esc back` | 淡色（dim） |
 
 ## キー操作
 
@@ -196,10 +215,10 @@
 |---|---|
 | `↑` / `k` | 選択を 1 つ上へ移動（設定一覧と Save ボタンの間をラップ）。通知をクリア |
 | `↓` / `j` | 選択を 1 つ下へ移動（末尾の Save ボタンの次は先頭へラップ）。通知をクリア |
-| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上・`Setup Commands` 上では無効 |
-| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上・`Setup Commands` 上では無効 |
-| `Space` | `Local LLM` の `Install` 行でインストールモーダル、`Local LLM Model`（導入後）行でモデル選択モーダル、`Setup Commands` 行で複数行エディタを開く（他の行では無効） |
-| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを、`Setup Commands` 上では複数行エディタを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
+| `→` / `l` | 選択中の項目の値を次の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model`（モーダルで選ぶ）上・`Setup Commands`・`Env Vars` 上では無効 |
+| `←` / `h` | 選択中の項目の値を前の選択肢へ切り替え（メモリ上のみ。保存はしない）。Save ボタン上・`Local LLM` の `Install` 上・`Local LLM Model` 上・`Setup Commands`・`Env Vars` 上では無効 |
+| `Space` | `Local LLM` の `Install` 行でインストールモーダル、`Local LLM Model`（導入後）行でモデル選択モーダル、`Setup Commands` 行・`Env Vars` 行で複数行エディタを開く（他の行では無効） |
+| `Enter` | Save ボタン上では編集内容を `settings.json` へ保存。`Local LLM`（未導入時）上ではインストールモーダルを、`Local LLM Model`（導入後）上ではモデル選択モーダルを、`Setup Commands`・`Env Vars` 上では複数行エディタを開く。その他の設定項目上では `→` と同じく値を次へ切り替え |
 | `q` / `Esc` | 前の画面へ戻る（起動画面から開いた場合は起動画面、ホーム画面の `config` から開いた場合はホーム画面。未保存の編集は破棄） |
 | `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
@@ -208,6 +227,16 @@
 `Local LLM` の `Install` を起動するとモーダルが開き、開いている間はすべてのキーを受け取ります。
 
 パスワードは共通の入力ウィジェットで編集され、キャレット位置での挿入・削除と左右移動に対応します（伏せ字でもブロックカーソルが正しい伏せ字 `•` の上に表示されます）。
+
+| キー | 動作 |
+|---|---|
+| 文字キー | sudo パスワードのキャレット位置に 1 文字挿入（伏せ字 `•` で表示） |
+| `Backspace` / `Del` | キャレットの前／後の 1 文字を削除 |
+| `←` / `→` | キャレットを 1 文字左／右へ移動 |
+| `Home` / `End` | キャレットを行頭／行末へ移動 |
+| `Enter` | 入力した sudo パスワードでランタイム導入を**バックグラウンドで開始**し、モーダルを閉じて操作に戻る |
+| `Esc` | モーダルを閉じてキャンセル（導入しない） |
+| `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
 
 ### Setup Commands エディタのキー操作
 
@@ -224,15 +253,22 @@
 | `Esc` | 変更を破棄してエディタを閉じる |
 | `Ctrl+C` | アプリを終了 |
 
+### Env Vars エディタのキー操作
+
+`Env Vars` を起動すると複数行エディタが開き、開いている間はすべてのキーを受け取ります。各行は
+`NAME=op://vault/item/field` の 1 件で、pane 起動時に 1Password から解決して子プロセス環境へ注入されます。
+グローバルスコープでは全 workspace 向けの binding、ワークスペーススコープではその workspace 固有の追加・上書き
+binding を編集します。コマンドパレットの [`env`](../03-commands/02-tui.md#env) は workspace スコープのエディタへ直接入ります。
+
 | キー | 動作 |
 |---|---|
-| 文字キー | sudo パスワードのキャレット位置に 1 文字挿入（伏せ字 `•` で表示） |
-| `Backspace` / `Del` | キャレットの前／後の 1 文字を削除 |
-| `←` / `→` | キャレットを 1 文字左／右へ移動 |
-| `Home` / `End` | キャレットを行頭／行末へ移動 |
-| `Enter` | 入力した sudo パスワードでランタイム導入を**バックグラウンドで開始**し、モーダルを閉じて操作に戻る |
-| `Esc` | モーダルを閉じてキャンセル（導入しない） |
-| `Ctrl+C` / `Ctrl+Q` | アプリを終了 |
+| 文字入力 | キャレット位置に文字を挿入 |
+| `Enter` | 行を分割して新しい binding 行を作成 |
+| `Backspace` / `Del` | キャレット前後の文字を削除（行頭では前行と結合） |
+| `←` / `→` / `↑` / `↓` / `Home` / `End` | キャレット移動 |
+| `Ctrl-S` | 有効な binding だけをメモリ上の現在スコープの設定へ反映し、エディタを閉じる（`=` の無い行・不正名・空 reference は破棄、同名は後勝ち） |
+| `Esc` | 変更を破棄してエディタを閉じる |
+| `Ctrl+C` | アプリを終了 |
 
 ### モデル選択モーダルのキー操作
 
@@ -269,16 +305,22 @@
 
 ## 読み込みと保存の挙動
 
+- 画面を開くとき、外部プロセスを伴うプローブ（インストール済み agent CLI の検出 `<cmd> --version`、
+  Default Branch 候補のブランチ一覧 `git`、ローカル LLM の導入状況 `ollama`）を**別スレッドで並列**に実行します。
+  これらは直列に待つと画面表示までの体感が遅くなるため、待ち時間は最も遅い 1 件ぶんで済ませ、時間がかかる
+  あいだは**ローディングうさぎ**（画面中央）を表示して処理中であることを示します（すぐ終わるときは何も出さず、
+  そのまま設定画面を描画します）。ローカル LLM のプローブはグローバルスコープでのみ実行します（ワークスペース
+  スコープは `Local LLM` 行を持たないため）。
 - 設定の読み込みに失敗した場合は、既定値の状態でエラー内容を通知行に表示します。
 - 値の切り替え（`←→` / 設定項目上の `Enter`）はメモリ上の編集のみで、ディスクには書き込みません。
   保存済みの値から変わった項目は黄色＋ `●` で示し、変更がある間は Save ボタンが緑（有効）になります。
 - Save ボタンで `Enter` を押すとそのスコープの `settings.json`（グローバルスコープなら
   `~/.usagi/settings.json`、ワークスペーススコープなら `<workspace>/.usagi/settings.json`）へ保存し、
-  `Saved 🐰` を通知して変更マークを消します。変更が無い状態で押した場合は `No changes to save 🐰` を表示し、
+  `Saved 󰤇` を通知して変更マークを消します。変更が無い状態で押した場合は `No changes to save 󰤇` を表示し、
   書き込みは行いません。保存に失敗した場合は `Failed to save: <理由>` を表示し、画面はそのまま継続します
   （再操作・離脱が可能）。
 - 既定ワークスペースの選択肢が無い（ワークスペース未登録）状態で値を切り替えようとすると、
-  `No workspaces to choose from 🐰` を表示します（グローバルスコープのみ）。
+  `No workspaces to choose from 󰤇` を表示します（グローバルスコープのみ）。
 
 > 描画ロジックは `src/presentation/tui/config/`（設定状態 `state.rs`・描画 `ui.rs`・
 > イベントループ `event.rs` に分離）、設定の永続化は `src/usecase/settings.rs` と

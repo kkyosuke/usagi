@@ -15,6 +15,57 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
+fn focus_menu_overlay_holds_only_for_the_menu_surface_on_the_action_tab() {
+    let mut state = state(); // root, main, feature
+                             // Not in 在席: nothing floats.
+    assert!(!state.focus_menu_overlay());
+
+    // Idle 在席 on the menu UI (the default): the menu floats as an overlay.
+    state.enter_focus(1);
+    assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
+    assert!(state.focus_menu_overlay());
+
+    // The prompt surface stays inline, so nothing floats for it.
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
+    assert!(!state.focus_menu_overlay());
+
+    // Back on the menu UI with live panes: it floats on the "+ new" tab (the
+    // action surface) but not once the selector steps onto a pane tab.
+    state.set_session_action_ui(SessionActionUi::Menu);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert!(state.focus_on_new_tab());
+    assert!(state.focus_menu_overlay());
+    state.focus_tab_next(); // "+ new" -> the sole pane tab
+    assert!(!state.focus_on_new_tab());
+    assert!(!state.focus_menu_overlay());
+}
+
+#[test]
+fn focus_menu_overlay_yields_to_the_loading_indicator_open_overlays_and_palette() {
+    // The idle menu floats by default; each screen-owning surface suppresses it so
+    // two boxes never fight for the pane.
+    let mut loading = state();
+    loading.enter_focus(1);
+    assert!(loading.focus_menu_overlay());
+    loading.step_loading("起動中…"); // a momentary launch owns the pane
+    assert!(!loading.focus_menu_overlay());
+
+    // An open overlay (here a text modal a menu command dumped) captures the screen.
+    let mut modal = state();
+    modal.enter_focus(1);
+    modal.open_text_modal("Help", vec![LogLine::output("x")], ModalSize::Normal);
+    assert!(!modal.focus_menu_overlay());
+
+    // The `:` command palette likewise.
+    let mut palette = state();
+    palette.enter_focus(1);
+    palette.open_command_palette();
+    assert!(!palette.focus_menu_overlay());
+}
+
+#[test]
 fn previous_session_row_tracks_the_last_focused_session() {
     let mut state = state(); // root, main, feature
                              // Nothing to jump back to before a second session is focused.
@@ -97,6 +148,22 @@ fn entering_focus_selects_the_new_tab() {
 }
 
 #[test]
+fn entering_focus_existing_selects_a_live_pane_instead_of_new_tab() {
+    // Close auto-focus lands on the neighbouring session's current live pane when
+    // one exists, rather than opening the "+ new" action surface.
+    let mut live = state();
+    assert!(live.enter_focus_named_existing("feature"));
+    live.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert!(!live.focus_on_new_tab());
+
+    // An idle session still falls back to "+ new" because there is no existing
+    // pane to show.
+    let mut idle = state();
+    assert!(idle.enter_focus_named_existing("feature"));
+    assert!(idle.focus_on_new_tab());
+}
+
+#[test]
 fn an_idle_session_is_always_on_the_new_tab() {
     // With no live panes published the "+ new" tab is the only one — navigation is
     // inert (no pane index to make active) and the selector never leaves it.
@@ -111,8 +178,10 @@ fn an_idle_session_is_always_on_the_new_tab() {
 
 #[test]
 fn leaving_attached_lands_on_the_new_tab() {
-    // `Ctrl-T` (leave_attached) drops back to 在席 on the trailing "+ new" launch
-    // surface — the action menu over the (still-live) panes — not a pane preview.
+    // A bare `leave_attached` (the shell exited, or a quit was raised) drops back
+    // to 在席 on the trailing "+ new" launch surface — not a pane preview. The
+    // deliberate zoom-out layers `focus_menu_over_active_pane` on top (see the
+    // dedicated tests below).
     let mut state = state();
     state.enter_focus(1);
     // `leave_attached` clears the surface; the event loop republishes the strip on
@@ -121,6 +190,87 @@ fn leaving_attached_lands_on_the_new_tab() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     assert_eq!(state.mode(), Mode::Focus);
     assert!(state.focus_on_new_tab());
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn zooming_out_floats_the_menu_over_the_pane_tab() {
+    // `Ctrl-T` / `Ctrl-O a` (leave_attached + focus_menu_over_active_pane) keeps
+    // the selector on the pane the zoom left: the strip grows no "+ new" chip for
+    // a tab that was never created, the pane's live preview keeps showing, and
+    // the action menu floats over it.
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert_eq!(state.mode(), Mode::Focus);
+    assert!(!state.focus_on_new_tab());
+    assert!(state.focus_menu_over_pane());
+    assert!(state.focus_menu_overlay());
+    // Dismissing the menu (`Esc` once the re-attach arming is spent) leaves the
+    // pane previewing — one step short of leaving 在席 — and reports it was up
+    // exactly once.
+    assert!(state.close_focus_menu_over_pane());
+    assert!(!state.focus_menu_overlay());
+    assert!(!state.close_focus_menu_over_pane());
+}
+
+#[test]
+fn focus_menu_over_active_pane_is_a_no_op_for_the_prompt_ui() {
+    // Only the menu surface floats; the prompt draws inline on the "+ new" tab,
+    // so with the prompt UI configured the zoom-out keeps its "+ new" landing.
+    let mut state = state();
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert!(state.focus_on_new_tab());
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn walking_or_clicking_tabs_dismisses_the_menu_over_a_pane() {
+    // Moving the tab selector is browsing previews: the floating menu steps aside
+    // whichever way the move happens (Ctrl-N / Ctrl-P / a tab click).
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert!(state.focus_menu_over_pane());
+    state.focus_tab_next();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.focus_tab_prev();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.focus_select_pane_tab(1);
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn attaching_or_reentering_focus_drops_the_menu_over_a_pane() {
+    // Attaching consumes the floating menu, and every fresh 在席 entry (or a bare
+    // leave_attached) resets it, so no stale menu survives a surface change.
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    assert!(state.focus_menu_over_pane());
+    state.show_attached();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.enter_focus(1);
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.leave_attached();
+    assert!(!state.focus_menu_over_pane());
 }
 
 #[test]
@@ -192,46 +342,61 @@ fn focus_menu_hides_prompt_taking_ai_command() {
     // Focus a session row (not the root) so `close` is offered.
     let mut state = state();
     state.enter_focus(1);
-    // `ai <prompt>` needs typed arguments, so the pickable menu hides it and
-    // lists the zero-argument session actions alphabetically (`chat` is offered —
-    // it takes no arguments — but `ai` is not).
+    // `ai <prompt>` needs typed arguments, so it is always kept out of the menu.
+    // `chat` (local LLM) is gated on availability, so by default (LLM unavailable)
+    // the menu lists the pane actions and `close` in the fixed display order.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert!(!names.contains(&"ai"));
-    assert_eq!(names, vec!["agent", "chat", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
+    // Once the local LLM is usable (enabled + model pulled), `chat` appears — but
+    // `ai` (prompt-taking) never does.
+    state.set_ai_available(true);
+    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert!(!names.contains(&"ai"));
+    assert_eq!(names, vec!["agent", "terminal", "diff", "chat", "close"]);
 }
 
 #[test]
-fn focus_menu_hides_close_on_the_root_row() {
-    // The root row is the workspace itself, not a session, so it cannot be
-    // closed and `close` is not offered there.
+fn session_menu_rank_orders_the_known_commands_and_ranks_others_last() {
+    use super::super::session_menu_rank;
+    // The fixed 在席 display order: agent, terminal, diff, ai, close.
+    assert!(session_menu_rank("agent") < session_menu_rank("terminal"));
+    assert!(session_menu_rank("terminal") < session_menu_rank("diff"));
+    assert!(session_menu_rank("diff") < session_menu_rank("ai"));
+    assert!(session_menu_rank("ai") < session_menu_rank("close"));
+    // Any command outside the five sorts after all of them.
+    assert!(session_menu_rank("close") < session_menu_rank("session"));
+}
+
+#[test]
+fn focus_menu_hides_close_and_diff_on_the_root_row() {
+    // The root row is the workspace itself, not a session, so it cannot be closed
+    // or diffed — neither `close` nor `diff` is offered there.
     let mut state = state();
     state.enter_focus(0);
     assert!(state.list().root_active());
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "chat", "terminal"]);
-    // A session row still offers `close`.
+    assert_eq!(names, vec!["agent", "terminal"]);
+    // A session row offers both `diff` and `close`.
     state.enter_focus(1);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "chat", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
 }
 
 #[test]
-fn focus_menu_hides_agent_when_an_agent_pane_is_already_open() {
+fn focus_menu_keeps_agent_when_an_agent_pane_is_already_open() {
     // Focus a session row so `close` is offered too.
     let mut state = state();
     state.enter_focus(1);
     // No live panes yet: `agent` is offered.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "chat", "close", "terminal"]);
-    // Once the session publishes a live `agent` pane, the launch command is hidden
-    // (its agent is already running); the rest still list alphabetically.
-    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
+    // A session holds one agent per CLI, so `agent` stays offered even once a live
+    // agent pane is published — launching it adds a different CLI's agent (and
+    // re-selecting the running CLI just re-focuses its tab).
+    state.set_terminal_tabs(vec!["Claude".to_string(), "terminal".to_string()], 0);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["chat", "close", "terminal"]);
-    // A session whose only live panes are plain terminals keeps offering `agent`.
-    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
-    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "chat", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
 }
 
 #[test]
@@ -252,7 +417,7 @@ fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(names, vec!["agent", "chat", "close", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
 
     // Active row is a session, cursor moved back onto the root row: the preview is
     // the root's, so `close` is hidden even though the active session could close.
@@ -265,26 +430,70 @@ fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(names, vec!["agent", "chat", "terminal"]);
+    assert_eq!(names, vec!["agent", "terminal"]);
 }
 
 #[test]
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);
-    // With `ai` hidden, alphabetical order: agent (0, highlighted by default),
-    // chat (1), close (2), terminal (3).
+    // With `ai` hidden, fixed order: agent (0, highlighted by default),
+    // terminal (1), diff (2), close (3).
     assert_eq!(state.focus_selected_command().unwrap().name, "agent");
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().unwrap().name, "chat");
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+    assert_eq!(state.focus_selected_command().unwrap().name, "diff");
     state.focus_menu_move_down();
     state.focus_menu_move_down(); // wraps to the top
     assert_eq!(state.focus_menu_cursor(), 0);
-    // Up from the top wraps to the bottom (`terminal`).
+    // Up from the top wraps to the bottom (`close`).
     state.focus_menu_move_up();
+    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+}
+
+#[test]
+fn focus_menu_terminal_picker_expands_only_on_terminal_row() {
+    let mut state = state();
+    state.enter_focus(1);
+    // Starts on agent, so the terminal picker cannot open yet.
+    assert!(!state.focus_menu_terminal_can_expand());
+    state.focus_menu_expand_terminal();
+    assert!(!state.focus_menu_expanded());
+
+    // Move down from agent to terminal and open the terminal picker.
+    state.focus_menu_move_down();
     assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
+    assert!(state.focus_menu_terminal_can_expand());
+    state.focus_menu_expand_terminal();
+    assert!(state.focus_menu_expanded());
+    assert_eq!(state.focus_menu_terminal_cursor(), Some(0));
+    assert_eq!(state.focus_menu_selected_terminal_action(), Some("open"));
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_menu_selected_terminal_action(), Some("new"));
+}
+
+#[test]
+fn focus_menu_close_picker_expands_only_on_close_row() {
+    let mut state = state();
+    state.enter_focus(1);
+    // Starts on agent, so the close picker cannot open yet.
+    assert!(!state.focus_close_can_expand());
+    state.focus_menu_expand_close();
+    assert!(!state.focus_menu_expanded());
+
+    state.focus_menu_move_down(); // agent -> terminal
+    state.focus_menu_move_down(); // terminal -> diff
+    state.focus_menu_move_down(); // diff -> close
+    assert_eq!(state.focus_selected_command().unwrap().name, "close");
+    assert!(state.focus_close_can_expand());
+    state.focus_menu_expand_close();
+    assert!(state.focus_menu_expanded());
+    assert_eq!(state.focus_close_cursor(), Some(0));
+    assert!(!state.focus_menu_selected_close_force());
+    state.focus_menu_move_down();
+    assert_eq!(state.focus_close_cursor(), Some(1));
+    assert!(state.focus_menu_selected_close_force());
 }
 
 #[test]
@@ -337,7 +546,7 @@ fn focus_menu_agent_picker_expands_only_with_a_choice_and_navigates_agents() {
     use crate::domain::settings::AgentCli;
     let mut state = state();
     state.enter_focus(1);
-    // Alphabetical order (agent, chat, close, terminal) highlights `agent` on entry.
+    // Fixed order (agent, terminal, diff, close) highlights the `agent` row on entry.
     assert_eq!(state.focus_selected_command().unwrap().name, "agent");
     // With fewer than two agents installed there is nothing to pick: no expand.
     state.set_installed_agents(vec![AgentCli::Claude]);
@@ -368,9 +577,9 @@ fn focus_menu_agent_picker_does_not_expand_off_the_agent_row() {
     let mut state = state();
     state.enter_focus(1);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
-    // Move off the `agent` row (down to `chat`): the picker cannot open there.
+    // Move off the `agent` row (down to `terminal`): the picker cannot open there.
     state.focus_menu_move_down();
-    assert_eq!(state.focus_selected_command().unwrap().name, "chat");
+    assert_eq!(state.focus_selected_command().unwrap().name, "terminal");
     assert!(!state.focus_menu_agent_can_expand());
     state.focus_menu_expand_agent();
     assert!(!state.focus_menu_expanded());
@@ -450,7 +659,18 @@ fn focus_prompt_submit_runs_a_session_command() {
     }
     let submission = state.focus_prompt_submit();
     assert_eq!(submission.effect, Effect::OpenTerminal);
-    assert_eq!(submission.recorded.as_deref(), Some("terminal"));
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("terminal")
+    );
+    assert_eq!(
+        submission
+            .recorded
+            .as_ref()
+            .and_then(|e| e.session.as_deref()),
+        Some("main")
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| e.success));
     // The prompt is cleared and the command recorded in history.
     assert_eq!(state.focus_prompt(), "");
     assert_eq!(state.cmdline.history, vec!["terminal"]);

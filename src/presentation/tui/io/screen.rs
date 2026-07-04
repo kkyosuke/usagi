@@ -288,12 +288,22 @@ impl FramePainter {
         Self::default()
     }
 
-    /// Forget the last frame so the next [`paint`](Self::paint) clears the
-    /// screen and repaints every row. Call this after another screen (a modal,
-    /// the embedded terminal, the settings screen) has drawn over ours and left
-    /// the remembered frame stale.
+    /// Force the next [`paint`](Self::paint) to repaint every row **without a
+    /// whole-screen clear**. Call this after another screen (a modal, the embedded
+    /// terminal, the settings screen) has drawn over ours and left the remembered
+    /// frame stale.
+    ///
+    /// Rather than forgetting the frame (which would make [`diff_frame`] emit a
+    /// `\x1b[2J` whole-screen clear on the next paint — a visible flash), this
+    /// blanks every remembered row while keeping the row count: each blanked row
+    /// then differs from the new content and is rewritten with its own per-row
+    /// clear (`\x1b[2K`), and a shorter new frame still clears the rows it no
+    /// longer fills. The result is a flicker-free full repaint that overwrites
+    /// whatever was on screen row by row.
     pub fn reset(&mut self) {
-        self.prev.clear();
+        for line in &mut self.prev {
+            line.clear();
+        }
     }
 
     /// Draw `frame` (overlaying any in-flight install), rewriting only the rows
@@ -604,9 +614,16 @@ mod tests {
         painter.paint(&term, lines(&["a", "b"])).unwrap();
         // An identical frame now diffs to nothing but the cursor-hide prefix.
         assert_eq!(diff_frame(&painter.prev, &lines(&["a", "b"])), "\x1b[?25l");
-        // After a reset the remembered frame is forgotten, forcing a full repaint.
+        // After a reset the remembered rows are blanked (not forgotten): the row
+        // count is kept so the repaint clears row by row rather than whole-screen.
         painter.reset();
-        assert!(painter.prev.is_empty());
+        assert_eq!(painter.prev, lines(&["", ""]));
+        // The forced repaint rewrites every row (each differs from the blank) and
+        // emits NO whole-screen clear — the flicker-free path.
+        let out = diff_frame(&painter.prev, &lines(&["a", "b"]));
+        assert!(!out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[1;1H\x1b[2Ka"));
+        assert!(out.contains("\x1b[2;1H\x1b[2Kb"));
         painter.paint(&term, lines(&["a", "b"])).unwrap();
         assert_eq!(painter.prev, lines(&["a", "b"]));
     }

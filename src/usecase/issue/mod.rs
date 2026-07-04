@@ -264,7 +264,15 @@ pub fn list(repo_root: &Path, filter: &IssueFilter) -> Result<Vec<ListedIssue>> 
 /// Full-text search issue titles and bodies (case-insensitive), then apply
 /// `filter`. Results are annotated with dependency readiness.
 pub fn search(repo_root: &Path, query: &str, filter: &IssueFilter) -> Result<Vec<ListedIssue>> {
-    let issues = IssueStore::new(repo_root).scan()?;
+    // An empty query matches every issue, which is exactly what `list` returns —
+    // so take its index path instead of reading and parsing every issue's full
+    // Markdown body just to match-all and discard the bodies.
+    if query.is_empty() {
+        return list(repo_root, filter);
+    }
+    // Tolerant scan: one unparseable file is skipped (and logged) rather than
+    // failing the whole query, matching how `list` reads through the index.
+    let issues = IssueStore::new(repo_root).scan_lenient()?;
     let done = done_numbers(issues.iter().map(|i| (i.number, i.status)));
     let needle = search::fold_query(query);
     let matched: Vec<IssueSummary> = issues

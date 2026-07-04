@@ -86,6 +86,7 @@ fn returning_from_config_reapplies_the_default_agent_cli() {
             session_action_ui: SessionActionUi::Prompt,
             key_scheme: crate::domain::settings::KeyScheme::default(),
             agent_cli: AgentCli::Gemini,
+            ai_available: false,
         }))
     };
     let seen = RefCell::new(None);

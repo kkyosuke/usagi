@@ -6,7 +6,7 @@
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use console::Key;
@@ -22,8 +22,19 @@ use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME}
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
-    paint_now, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O, CTRL_P, CTRL_S,
+    paint_now, selected_diff, selected_dir, Flow, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O,
+    CTRL_P, CTRL_S,
 };
+
+/// Minimum time the launch loader stays visible before a fresh pane spawn begins.
+///
+/// The home loop is about to hand control to the embedded PTY driver, so a fast
+/// spawn can otherwise replace the frame before the user perceives it. Four
+/// frames at 60ms cover this minimum and reach frame `3`, where the `run 2`
+/// loader grows from three to four rabbits (`RUN2_LOADING_GROW = 3` in `ui`).
+const LAUNCH_LOADING_MIN_VISIBLE: Duration = Duration::from_millis(180);
+/// Frame cadence for the pre-spawn launch loader.
+const LAUNCH_LOADING_FRAME_INTERVAL: Duration = Duration::from_millis(60);
 
 /// Handle one key in the workspace command palette overlay (`:`): edit /
 /// complete / recall the workspace command line and run it on `Enter`,
@@ -41,8 +52,8 @@ pub(super) fn palette_key(
     match key {
         Key::Enter => {
             let submission = state.submit();
-            if let Some(command) = submission.recorded.as_deref() {
-                (wiring.persist)(command);
+            if let Some(entry) = submission.recorded.as_ref() {
+                (wiring.persist)(entry);
             }
             // A transitioning effect closes the palette so it can take over the
             // screen; a non-transitioning one keeps it open so its response
@@ -123,6 +134,7 @@ pub(super) fn palette_key(
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_key_scheme(reload.key_scheme);
                         state.set_default_agent(reload.agent_cli);
+                        state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
                 },
@@ -159,21 +171,35 @@ pub(super) fn palette_key(
                         state.log_error(format!("\"{name}\" is not in the unite view"));
                     }
                 }
+                // `env`: open the workspace-env editor as an overlay *over* the
+                // palette (the palette stayed open — `OpenEnvEditor` does not
+                // close it), so saving / cancelling returns to the Overview. Seed
+                // it from the workspace's current bindings.
+                Effect::OpenEnvEditor => {
+                    let env = crate::usecase::settings::load_local(wiring.workspace_root)
+                        .unwrap_or_default()
+                        .env;
+                    state.open_env_editor(env);
+                }
                 // `ShowText` already opened its modal inside `submit`; the palette
                 // stays open behind it. `None` / `Clear` likewise keep it open.
                 //
-                // `OpenTerminal` / `OpenAgent` / `CloseSession` are session-scoped
-                // (`terminal` / `agent` / `close`): the palette is a workspace
-                // surface, so `dispatch_in_scope` refuses them before they reach
-                // here — they only fire from the 在席 prompt (see `focus_prompt_key`).
-                // Listed so the match stays exhaustive; they are unreachable here.
+                // `OpenTerminal` / `OpenExternalTerminal` / `OpenAgent` /
+                // `OpenDiff` / `CloseSession` are session-scoped (`terminal` /
+                // `agent` / `diff` / `close`): the palette is a workspace surface,
+                // so `dispatch_in_scope` refuses them before they reach here — they
+                // only fire from the 在席 menu / prompt (see `focus_prompt_key` and
+                // `run_focus_command`). Listed so the match stays exhaustive; they
+                // are unreachable here.
                 Effect::None
                 | Effect::Clear
                 | Effect::ShowText { .. }
                 | Effect::OpenTerminal
+                | Effect::OpenExternalTerminal
                 | Effect::OpenAgent(_)
                 | Effect::OpenAgentPrompt(_)
                 | Effect::OpenChat
+                | Effect::OpenDiff
                 | Effect::CloseSession { .. } => {}
             }
         }
@@ -305,7 +331,7 @@ pub(super) fn switch_key(
             // clicking it or pressing Enter starts the inline create editor, while
             // typing a printable character starts the editor and inserts that
             // character as the first byte of the session name.
-            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
+            Key::Enter => begin_switch_create(state, wiring, None),
             Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
             // Keep keyboard escape hatches on the row: arrows still navigate away
             // (the create row carries no session, so it needs no note / tab keys),
@@ -363,14 +389,19 @@ pub(super) fn switch_key(
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
         }
-        // `c` begins inline session creation. `Ctrl-A` (which `console` decodes
-        // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
-        // bare letter `c` composes into kana and never reaches usagi, but a
-        // control chord still does — mirroring the note editor's `Ctrl-E` below.
-        // It is unambiguous here, as 切替 list navigation has no caret to move
-        // (the inline create / rename inputs consume `Home` earlier and return
-        // before this match).
-        Key::Char('c') | Key::Home => {
+        // `a` launches an agent for the highlighted session (the 切替 analogue of
+        // 在席 menu's `agent` action). `Ctrl-A` is decoded by `console` as
+        // `Key::Home`, so accept that as an IME-safe alias: with a Japanese IME
+        // left on, bare `a` may compose into kana and never reach usagi, but the
+        // control chord still does. Inline create / rename inputs consume `Home`
+        // earlier and keep its caret meaning there.
+        Key::Char('a') | Key::Home => {
+            let row = state.list().selected_index();
+            state.enter_focus(row);
+            launch_agent(term, state, painter, wiring, None);
+        }
+        // `c` begins inline session creation.
+        Key::Char('c') => {
             begin_switch_create(state, wiring, None);
         }
         // `r` begins inline rename of the selected session's sidebar label
@@ -402,21 +433,46 @@ pub(super) fn switch_key(
             ui::content::cheatsheet(state.key_scheme()),
             ModalSize::Large,
         ),
-        // Esc first dismisses the highlighted session's read-only note overlay
-        // (it auto-shows on selection); with no note showing it backs out to
-        // where Switch was opened from (inert at the base Switch).
-        Key::Escape => {
-            if state.switch_note_visible() {
-                state.hide_switch_note();
-            } else {
-                leave_switch(term, state, painter, wiring);
-            }
+        // Esc backs out to where Switch was opened from (inert at the base
+        // Switch). The highlighted session's read-only note overlay stays put —
+        // it follows the cursor, not a dismissal.
+        Key::Escape => leave_switch(term, state, painter, wiring),
+        // `Tab` / `Shift-Tab` cycle the selected session's manual status label
+        // forward / back through the effective master, ringing through the "unset"
+        // slot. A no-op on the root row or when no labels are defined.
+        Key::Tab => apply_label_change(state, wiring, state.cycle_selected_label(true)),
+        Key::BackTab => apply_label_change(state, wiring, state.cycle_selected_label(false)),
+        // `1`–`9` assign the master's Nth label directly (out of range is a no-op),
+        // and `0` clears the label. Terminals cannot reliably distinguish `Ctrl`+digit
+        // chords, so the bare digits — free while navigating the list — carry this.
+        Key::Char(d @ '1'..='9') => {
+            let index = d as usize - '1' as usize;
+            apply_label_change(state, wiring, state.select_label_index(index));
         }
+        Key::Char('0') => apply_label_change(state, wiring, state.clear_selected_label()),
         // Ctrl-^ jumps straight back to the previously focused session.
         Key::Char(CTRL_CARET) => jump_to_previous(term, state, painter, wiring),
         _ => {}
     }
     Flow::Continue
+}
+
+/// Persist a manual-status label change computed by [`HomeState`] and apply the
+/// result inline: `change` is the `(session name, new label id)` to store — or
+/// `None` when the keypress was a no-op (root row, no labels, or unchanged), in
+/// which case nothing is written. Mirrors the rename / note persistence path.
+fn apply_label_change(
+    state: &mut HomeState,
+    wiring: &mut Wiring,
+    change: Option<(String, Option<String>)>,
+) {
+    let Some((name, id)) = change else {
+        return;
+    };
+    let root = state.selected_workspace_root();
+    state.set_op_target(root.clone());
+    let outcome = (wiring.set_label)(&root, &name, id.as_deref());
+    state.apply_session_outcome(outcome);
 }
 
 /// Open 切替's inline create input, seeded with `first` when the visible
@@ -539,6 +595,55 @@ pub(super) fn note_editor_key(
                 Key::Backspace => area.backspace(),
                 Key::Del => area.delete_forward(),
                 // A plain (unshifted) motion collapses any selection and moves.
+                Key::ArrowLeft => area.move_left(),
+                Key::ArrowRight => area.move_right(),
+                Key::ArrowUp => area.move_up(),
+                Key::ArrowDown => area.move_down(),
+                Key::Home => area.move_home(),
+                Key::End => area.move_end(),
+                Key::Char(c) if !c.is_control() => area.insert(c),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Handle one key in the workspace-env editor overlay (the `env` command), which
+/// sits over the command palette. `Ctrl-S` parses the buffer's valid bindings,
+/// writes them into this workspace's local settings (preserving the other
+/// overrides), and closes back to the Overview; `Esc` cancels; every other key
+/// edits the multi-line `NAME=op://…` buffer in place. Saving touches the
+/// settings file, so this is a handler rather than inline in the loop.
+pub(super) fn env_editor_key(state: &mut HomeState, key: Key, wiring: &mut Wiring) {
+    // Only entered while the env editor is open (the loop guards on
+    // `env_editor().is_some()`), so the accessors below always resolve.
+    match key {
+        // `Ctrl-S` saves the bindings and returns to the palette.
+        Key::Char(CTRL_S) => {
+            let env = state
+                .confirm_env_editor()
+                .expect("env editor open while editing");
+            let root = wiring.workspace_root;
+            // Read-modify-write so the workspace's other local overrides survive.
+            let mut settings = crate::usecase::settings::load_local(root).unwrap_or_default();
+            settings.env = env;
+            match crate::usecase::settings::save_local(root, &settings) {
+                Ok(()) => state.log_output("Saved workspace env 󰤇".to_string()),
+                Err(e) => state.log_error(format!("Failed to save env: {e}")),
+            }
+        }
+        // `Esc` closes without saving, returning to the palette.
+        Key::Escape => state.env_editor_cancel(),
+        // Every other key edits the multi-line buffer in place.
+        key => {
+            let area = state
+                .env_editor_mut()
+                .expect("env editor open while editing")
+                .area_mut();
+            match key {
+                Key::Enter => area.newline(),
+                Key::Backspace => area.backspace(),
+                Key::Del => area.delete_forward(),
                 Key::ArrowLeft => area.move_left(),
                 Key::ArrowRight => area.move_right(),
                 Key::ArrowUp => area.move_up(),
@@ -784,6 +889,12 @@ pub(super) fn focus_key(
                 open_pane(term, state, painter, wiring, false, false, true);
                 return Flow::Continue;
             }
+            // A menu floating over a pane tab (the zoomed-out state once another
+            // key cancelled the re-attach): `Esc` dismisses the menu, leaving the
+            // pane's preview showing — one step short of leaving 在席.
+            if state.close_focus_menu_over_pane() {
+                return Flow::Continue;
+            }
             if !state.focus_discard_new_tab() {
                 state.leave_focus();
             }
@@ -871,9 +982,10 @@ pub(super) fn focus_key(
     }
 
     // The "+ new" tab drives the action surface (a menu / prompt that launches a
-    // pane); a pane tab is a preview, so its only action is `Enter` to re-attach
-    // the selected (now-active) pane — every other key is inert there.
-    if state.focus_on_new_tab() {
+    // pane), and so does the menu floating over a pane tab after a zoom-out; a
+    // bare pane tab is a preview, so its only action is `Enter` to re-attach the
+    // selected (now-active) pane — every other key is inert there.
+    if state.focus_on_new_tab() || state.focus_menu_over_pane() {
         match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
             SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
@@ -995,24 +1107,16 @@ fn focus_menu_key(
                 if let Some(cli) = state.focus_menu_selected_agent() {
                     state.focus_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
+                } else if let Some(action) = state.focus_menu_selected_terminal_action() {
+                    state.focus_menu_collapse_agent();
+                    if action == "new" {
+                        open_external_terminal(state, wiring);
+                    } else {
+                        launch_pane(term, state, painter, wiring, false);
+                    }
+                } else {
+                    run_focus_close_picker(term, state, painter, wiring);
                 }
-            }
-            _ => {}
-        }
-        return;
-    }
-    if state.focus_close_expanded() {
-        match key {
-            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
-            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
-            Key::ArrowLeft => {
-                state.focus_menu_collapse_close();
-            }
-            Key::Enter => {
-                let force = state.focus_menu_selected_close_force();
-                state.focus_menu_collapse_close();
-                let cmd = if force { "close --force" } else { "close" };
-                run_focus_command(term, state, painter, cmd, wiring);
             }
             _ => {}
         }
@@ -1021,11 +1125,15 @@ fn focus_menu_key(
     match key {
         Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
         Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
-        // On the `agent` row, open the picker to choose a non-default CLI.
-        // On the `close` row, open the picker to choose plain or --force.
+        // On the `agent` / `terminal` rows, open their inline pickers.
         Key::ArrowRight | Key::Tab => {
-            state.focus_menu_expand_agent();
-            state.focus_menu_expand_close();
+            if state.focus_menu_agent_can_expand() {
+                state.focus_menu_expand_agent();
+            } else if state.focus_menu_terminal_can_expand() {
+                state.focus_menu_expand_terminal();
+            } else if state.focus_close_can_expand() {
+                state.focus_menu_expand_close();
+            }
         }
         Key::Enter => {
             if let Some(command) = state.focus_selected_command() {
@@ -1042,6 +1150,18 @@ fn focus_menu_key(
     }
 }
 
+fn run_focus_close_picker(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    let force = state.focus_menu_selected_close_force();
+    state.focus_menu_collapse_close();
+    let cmd = if force { "close --force" } else { "close" };
+    run_focus_command(term, state, painter, cmd, wiring);
+}
+
 /// 在席 prompt surface: edit / complete the session-scoped command line and run
 /// it on `Enter`, attaching the pane on `terminal` / `agent`, and launching the
 /// configured agent with an opening prompt on `ai <prompt>`.
@@ -1055,16 +1175,25 @@ fn focus_prompt_key(
     match key {
         Key::Enter => {
             // `terminal` / `agent` attach the pane; `ai <prompt>` attaches the
-            // configured agent and hands it that prompt; `close` removes the
-            // session and leaves 在席; anything else only logs, staying in Focus.
-            let effect = state.focus_prompt_submit().effect;
+            // configured agent and hands it that prompt; `chat` opens the local-LLM
+            // overlay; `diff` opens the right-pane diff view; `close` removes the
+            // session and leaves 在席; anything else only logs, staying in Focus. The
+            // command is persisted (with its session) so per-session history
+            // survives across launches, like the palette line.
+            let submission = state.focus_prompt_submit();
+            if let Some(entry) = submission.recorded.as_ref() {
+                (wiring.persist)(entry);
+            }
+            let effect = submission.effect;
             match effect {
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
+                Effect::OpenExternalTerminal => open_external_terminal(state, wiring),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
                 Effect::OpenAgentPrompt(prompt) => {
                     launch_agent_with_prompt(term, state, painter, wiring, prompt)
                 }
                 Effect::OpenChat => state.open_chat(),
+                Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
@@ -1090,11 +1219,12 @@ fn focus_prompt_key(
     }
 }
 
-/// Run a named session command from the 在席 menu. The menu is action-oriented, so
-/// only the zero-argument launch commands are runnable from it: `terminal` /
-/// `agent` attach a pane, and `close` / `close --force` remove the focused
-/// session. Prompt-taking commands such as `ai <prompt>` are intentionally kept
-/// out of the menu and are typed in the Prompt UI.
+/// Run a named session command (`terminal` / `agent` / `diff` / `chat` /
+/// `close` / `close --force`) from the 在席 menu: the launch commands attach
+/// the pane (没入), `diff` opens the right-pane diff view over 在席, `chat` opens
+/// the local-LLM chat overlay, `close` variants remove the session and leave 在席.
+/// The prompt-taking `ai <prompt>` is kept out of the menu (typed in the Prompt
+/// UI); a command with no arm here logs its coming-soon line.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1104,19 +1234,32 @@ fn run_focus_command(
 ) {
     match name {
         "terminal" => launch_pane(term, state, painter, wiring, false),
+        // The menu's `agent` row / `a` shortcut launch the configured default.
+        "agent" => launch_agent(term, state, painter, wiring, None),
+        // `diff` opens the right-pane diff view of the focused session (the same
+        // effect the 在席 prompt / palette `diff` produced): resolve its worktree
+        // and shell out to git, then render / store the patch (or log a failure).
+        "diff" => state.open_diff_result(selected_diff(state)),
+        // `chat` opens the local-LLM chat overlay in the right pane.
+        "chat" => state.open_chat(),
         // `close` removes the focused session safely and leaves 在席.
         "close" => close_focused_session(state, wiring, false),
         // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
         // explicit discard path.
         "close --force" => close_focused_session(state, wiring, true),
-        // The menu's `agent` row / `a` shortcut launch the configured default.
-        "agent" => launch_agent(term, state, painter, wiring, None),
-        // `chat` opens the local-LLM chat overlay in the right pane.
-        "chat" => state.open_chat(),
-        // Fail loudly for anything else: a Session-scope command registered
-        // without an arm here must not silently launch an agent (or anything
-        // side-effectful) when picked from the menu.
-        _ => state.log_error(format!("\"{name}\" cannot be run from the menu")),
+        // Any future coming-soon command just logs its line.
+        _ => state.log_output(format!("\"{name}\" is coming soon 󰤇")),
+    }
+}
+
+/// Open a native terminal application at the focused row's directory. Unlike
+/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal, and
+/// usagi stays in 在席 so the user can continue navigating.
+fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
+    let dir = selected_dir(state, wiring.workspace_root);
+    match (wiring.open_external_terminal)(&dir) {
+        Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
+        Err(e) => state.log_error(e),
     }
 }
 
@@ -1192,6 +1335,49 @@ fn launch_pane(
     open_pane(term, state, painter, wiring, agent, true, false);
 }
 
+/// Number of paint calls required to keep a transient loader visible for at
+/// least `min_visible`. The first frame is immediate; each additional frame is
+/// separated by `interval`, so `180ms / 60ms` needs four paints at
+/// 0/60/120/180ms.
+fn launch_loading_frame_count(min_visible: Duration, interval: Duration) -> usize {
+    if interval.is_zero() {
+        return 1;
+    }
+    let intervals = min_visible
+        .as_nanos()
+        .saturating_add(interval.as_nanos().saturating_sub(1))
+        / interval.as_nanos();
+    usize::try_from(intervals)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1)
+        .max(1)
+}
+
+fn wait_launch_loading_frame() {
+    std::thread::sleep(LAUNCH_LOADING_FRAME_INTERVAL);
+}
+
+/// Paint the launch loader for a short minimum window before entering a fresh
+/// pane. This guarantees the indicator is perceptible even when the PTY starts
+/// quickly, while the already-painted final frame remains on screen during any
+/// subsequent blocking spawn work.
+fn paint_launch_loading(
+    term: &Term,
+    painter: &mut FramePainter,
+    state: &mut HomeState,
+    label: &str,
+) {
+    let frames =
+        launch_loading_frame_count(LAUNCH_LOADING_MIN_VISIBLE, LAUNCH_LOADING_FRAME_INTERVAL);
+    for frame in 0..frames {
+        state.step_loading(label);
+        let _ = paint_now(term, painter, state);
+        if frame + 1 < frames {
+            wait_launch_loading_frame();
+        }
+    }
+}
+
 /// Open the embedded terminal pane (没入) for the focused session and run it
 /// until the user leaves it, then act on the [`PaneExit`].
 ///
@@ -1209,8 +1395,9 @@ fn launch_pane(
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 在席 when none was recorded).
-/// - [`PaneExit::ToSession`] — a double click on a sidebar session row: switch to
-///   that focus row, re-attaching it when live.
+/// - [`PaneExit::ToSession`] — a double click on a selectable sidebar row: switch
+///   to that focus row (re-attaching it when live) or open inline creation for
+///   the create row.
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
 ///
@@ -1236,21 +1423,22 @@ fn open_pane(
     // is already buffered, so the pane paints over the screen in the same beat.
     // Only a *fresh spawn* (a brand-new pane, or the session's first pane when
     // none is live yet) blocks while the PTY and agent CLI start up. Flashing the
-    // loading rabbit means painting the whole home frame for one tick; doing that
-    // on a re-attach is the visible flicker when switching sessions (the home
-    // screen blinks between the old pane and the new one), so restrict it to the
-    // spawning case where the wait is real.
+    // loading indicator means painting the whole home frame for one tick; doing
+    // that on a re-attach is the visible flicker when switching sessions (the
+    // home screen blinks between the old pane and the new one), so restrict it
+    // to the spawning case where the wait is real.
     let will_spawn = new_pane || (!known_live && (wiring.preview)(&dir, state.sidebar()).is_none());
     if will_spawn {
         // Spawning the PTY (and launching the agent CLI inside it) blocks for a
-        // beat; flash the loading rabbit in the top-right so the wait reads as
-        // deliberate, until the pane itself paints over the screen.
-        state.step_loading(if agent {
+        // beat; keep the right-pane-centred loading indicator visible for a
+        // short minimum window so the wait reads as deliberate, until the pane
+        // itself paints over the screen.
+        let label = if agent {
             "エージェント起動中…"
         } else {
             "ターミナル起動中…"
-        });
-        let _ = paint_now(term, painter, state);
+        };
+        paint_launch_loading(term, painter, state, label);
         state.finish_loading();
     }
     state.show_attached();
@@ -1287,10 +1475,14 @@ fn open_pane(
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
-            // pane stays alive in the pool, so re-launching re-attaches them. Arm
-            // the one-shot return-to-pane bit so an immediate `Esc` bounces back to
-            // the pane this zoom started from (没入) rather than peeling back to 切替.
+            // pane stays alive in the pool, so re-launching re-attaches them. The
+            // selector stays on the tab the zoom left — its live preview keeps
+            // showing behind the floating action menu — instead of jumping to a
+            // "+ new" chip for a tab that was never created. Arm the one-shot
+            // return-to-pane bit so an immediate `Esc` bounces back to the pane
+            // this zoom started from (没入) rather than peeling back to 切替.
             state.leave_attached();
+            state.focus_menu_over_active_pane();
             state.arm_focus_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
@@ -1301,15 +1493,29 @@ fn open_pane(
             // one (like `Ctrl-T`), so the pane never lingers in 没入 with no driver.
             match state.previous_session_row() {
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
-                None => state.leave_attached(),
+                None => {
+                    state.leave_attached();
+                    state.focus_menu_over_active_pane();
+                }
             }
         }
         Ok(PaneExit::ToSession(row)) => {
-            // A double click on a sidebar session row in 没入: switch to that focus
-            // row, re-attaching it when live (like `Enter` in 切替, via
-            // `focus_and_attach`) — focusing records the session being left, so
-            // `Ctrl-^` can toggle back.
-            focus_and_attach(term, state, painter, wiring, row);
+            if row == state.list().create_row() {
+                // A double click on the sidebar create row in 没入: leave the pane
+                // to the picker and open the same inline create editor that 切替 /
+                // 在席 expose. ReturnMode::Attached preserves the usual `Esc`
+                // path: if the user cancels creation and backs out of 切替, the
+                // live pane re-attaches.
+                state.enter_switch(ReturnMode::Attached);
+                state.switch_select(row);
+                begin_switch_create(state, wiring, None);
+            } else {
+                // A double click on a sidebar session row in 没入: switch to that
+                // focus row, re-attaching it when live (like `Enter` in 切替, via
+                // `focus_and_attach`) — focusing records the session being left,
+                // so `Ctrl-^` can toggle back.
+                focus_and_attach(term, state, painter, wiring, row);
+            }
         }
         Ok(PaneExit::Quit) => {
             // `Ctrl-Q` in 没入: leave the pane (every shell / agent stays alive in
@@ -1336,7 +1542,9 @@ fn open_pane(
 
 #[cfg(test)]
 mod tests {
-    use super::{shift_select, Select};
+    use std::time::Duration;
+
+    use super::{launch_loading_frame_count, shift_select, Select};
     use console::Key;
 
     /// Build the reassembled key for `CSI 1 ; <modifier> <letter>`.
@@ -1380,5 +1588,32 @@ mod tests {
         assert_eq!(shift_select(&seq("x", 'D')), None);
         // Shift held but the final byte is not a cursor key.
         assert_eq!(shift_select(&seq("2", 'Z')), None);
+    }
+
+    #[test]
+    fn launch_loading_frame_count_covers_the_minimum_visible_window() {
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(180), Duration::from_millis(60)),
+            4,
+            "frames paint at 0/60/120/180ms"
+        );
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(181), Duration::from_millis(60)),
+            5,
+            "round up so the elapsed window is never shorter than requested"
+        );
+        assert_eq!(
+            launch_loading_frame_count(Duration::ZERO, Duration::from_millis(60)),
+            1,
+            "even a zero-duration flash still paints once"
+        );
+    }
+
+    #[test]
+    fn launch_loading_frame_count_is_safe_with_a_zero_interval() {
+        assert_eq!(
+            launch_loading_frame_count(Duration::from_millis(180), Duration::ZERO),
+            1
+        );
     }
 }

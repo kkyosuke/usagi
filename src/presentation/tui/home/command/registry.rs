@@ -4,13 +4,14 @@
 
 use super::builtins::{
     AgentCommand, AiCommand, ChatCommand, ClearCommand, CloseCommand, ComingSoonCommand,
-    ConfigCommand, HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand,
-    SessionCommand, TerminalCommand, UniteCommand,
+    ConfigCommand, DiffCommand, EnvCommand, HistoryCommand, IssueCommand, ManCommand,
+    PreviewCommand, QuitCommand, SessionCommand, TerminalCommand, UniteCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
     CompletionContext, Hint, LogLine, WorktreeRef,
 };
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 
 /// The set of commands available in command mode, dispatched and completed by
@@ -21,24 +22,21 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
-    /// A registry with every built-in command, in display order. The not-yet
-    /// implemented `doctor` command is present as a discoverable "coming soon"
-    /// placeholder; every other command (`session`, `terminal`, `agent`, `ai`, …)
-    /// is fully implemented.
+    /// A registry with every built-in command, in display order (alphabetical by
+    /// command name), so the `:` palette hints and `man`'s listing read in a
+    /// predictable order. The not-yet implemented `doctor` command is present as a
+    /// discoverable "coming soon" placeholder; every other command (`session`,
+    /// `terminal`, `agent`, `ai`, `chat`, …) is fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
-                Box::new(SessionCommand),
-                Box::new(UniteCommand),
-                Box::new(TerminalCommand),
                 Box::new(AgentCommand),
                 Box::new(AiCommand),
                 Box::new(ChatCommand),
+                Box::new(ClearCommand),
                 Box::new(CloseCommand),
                 Box::new(ConfigCommand),
-                Box::new(IssueCommand),
-                Box::new(PreviewCommand),
-                Box::new(HistoryCommand),
+                Box::new(DiffCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
                     description: "Check that required tools are installed",
@@ -46,9 +44,15 @@ impl CommandRegistry {
                     examples: &[],
                     scope: CommandScope::Workspace,
                 }),
+                Box::new(EnvCommand),
+                Box::new(HistoryCommand),
+                Box::new(IssueCommand),
                 Box::new(ManCommand),
-                Box::new(ClearCommand),
+                Box::new(PreviewCommand),
                 Box::new(QuitCommand),
+                Box::new(SessionCommand),
+                Box::new(TerminalCommand),
+                Box::new(UniteCommand),
             ],
         }
     }
@@ -74,7 +78,8 @@ impl CommandRegistry {
 
     /// The commands belonging exactly to `scope`, in registry order — used by the
     /// 在席 (Focus) menu to list a session's runnable commands (`agent`, `ai`,
-    /// `terminal`, `close`); the menu sorts them alphabetically itself. Unlike
+    /// `terminal`, `close`); the menu reorders them into its own fixed display
+    /// order itself. Unlike
     /// completion this is an exact-scope filter, so it excludes the shared
     /// [`CommandScope::Both`] utilities.
     pub fn commands_in_scope(&self, scope: CommandScope) -> Vec<CommandInfo> {
@@ -99,7 +104,7 @@ impl CommandRegistry {
     pub fn dispatch(
         &self,
         input: &str,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
     ) -> CommandResult {
         self.dispatch_with(input, history, worktrees, &[])
@@ -111,7 +116,7 @@ impl CommandRegistry {
     pub fn dispatch_with(
         &self,
         input: &str,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
         issues: &[Issue],
     ) -> CommandResult {
@@ -153,7 +158,7 @@ impl CommandRegistry {
         &self,
         input: &str,
         scope: CommandScope,
-        history: &[String],
+        history: &[HistoryEntry],
         worktrees: &[WorktreeRef],
         issues: &[Issue],
     ) -> CommandResult {

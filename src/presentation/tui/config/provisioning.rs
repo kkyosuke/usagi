@@ -33,7 +33,7 @@ pub(super) fn start_install_runtime(password: &str) -> Result<()> {
             true,
         );
         let (ok, message) = match result {
-            Ok(_) => (true, "ollama を導入しました 🐰".to_string()),
+            Ok(_) => (true, "ollama を導入しました 󰤇".to_string()),
             Err(e) => (false, e.user_message()),
         };
         handle.finish(ok, message);
@@ -55,7 +55,7 @@ pub(super) fn start_pull_model(model: &str) -> Result<()> {
     std::thread::spawn(move || {
         let result = local_llm::ensure_model(&SystemRunner, &model_owned, true);
         let (ok, message) = match result {
-            Ok(_) => (true, format!("{model_owned} を導入しました 🐰")),
+            Ok(_) => (true, format!("{model_owned} を導入しました 󰤇")),
             Err(e) => (false, e.user_message()),
         };
         handle.finish(ok, message);

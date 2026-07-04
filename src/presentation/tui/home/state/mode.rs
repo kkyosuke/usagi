@@ -71,7 +71,8 @@ pub enum PaneExit {
     /// pane, so the user drops straight back into the live terminal.
     OpenNote,
     /// The user pressed `Ctrl-T`: zoom out to 在席 (Focus) — the session's action
-    /// menu — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
+    /// menu, floating over the tab the zoom left so its live preview keeps
+    /// showing — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
     /// pane is closed; the panes stay live just as [`Self::ToSwitch`] keeps them.
     ToFocus,
     /// The user pressed `Ctrl-^`: leave the pane to jump straight to the
@@ -79,10 +80,11 @@ pub enum PaneExit {
     /// attaching it when live. With no previous session recorded the pane returns
     /// to 在席 (Focus) on the current session instead.
     ToPreviousSession,
-    /// The user double-clicked a session row in the sidebar: leave the pane to
-    /// jump to that focus row (0 is the root), attaching it when live — the same
-    /// confirm a double click does in 切替 (Switch). The payload is the focus row
-    /// `left_pane_session_at` reports (0 the root, `i` the worktree `i - 1`).
+    /// The user double-clicked a selectable sidebar row: leave the pane to act on
+    /// that focus row — attaching a session when live, or opening inline creation
+    /// when the row is `+ new session`. The payload is the focus row
+    /// `left_pane_session_at` reports (0 the root, `i` the worktree `i - 1`, or
+    /// `create_row` for the create affordance).
     ToSession(usize),
     /// The user pressed `Ctrl-Q`: leave the pane to quit usagi. Every pane stays
     /// alive in the pool; the caller raises the quit-confirmation modal rather

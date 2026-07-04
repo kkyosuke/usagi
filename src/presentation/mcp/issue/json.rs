@@ -62,12 +62,15 @@ pub(super) fn issue_tool_schemas() -> Value {
             }
         },
         {
-            "name": "issue_list",
+            "name": "issue_search",
             "description": "List issues, each annotated with dependency readiness \
-                (ready = every dependency is done). Optional filters.",
+                (ready = every dependency is done). Give `query` to full-text search \
+                titles and bodies (case-insensitive); omit it to list every issue. \
+                All filters are optional and combine with the query.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "query": { "type": "string", "description": "Full-text query; omit to list all issues" },
                     "status": status,
                     "priority": priority,
                     "label": { "type": "string" },
@@ -75,23 +78,6 @@ pub(super) fn issue_tool_schemas() -> Value {
                     "milestone": { "type": "string", "description": "Keep only issues in this milestone" },
                     "ready": { "type": "boolean", "description": "Only issues ready to start" }
                 }
-            }
-        },
-        {
-            "name": "issue_search",
-            "description": "Full-text search issue titles and bodies (case-insensitive).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "status": status,
-                    "priority": priority,
-                    "label": { "type": "string" },
-                    "parent": { "type": "integer", "description": "Keep only children of this issue" },
-                    "milestone": { "type": "string", "description": "Keep only issues in this milestone" },
-                    "ready": { "type": "boolean", "description": "Only issues ready to start" }
-                },
-                "required": ["query"]
             }
         },
         {

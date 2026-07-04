@@ -11,8 +11,8 @@ fn save(repo: &Path, name: &str, title: &str) -> String {
 }
 
 #[test]
-fn tool_names_and_schemas_cover_the_six_tools() {
-    assert_eq!(tool_names().len(), 6);
+fn tool_names_and_schemas_cover_the_four_tools() {
+    assert_eq!(tool_names().len(), 4);
     let schemas = tool_schemas();
     let names: Vec<&str> = schemas
         .as_array()
@@ -44,35 +44,71 @@ fn get_returns_null_when_absent() {
 }
 
 #[test]
-fn list_and_search_return_summaries() {
+fn search_lists_all_without_a_query_and_filters_with_one() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     save(repo, "deploy", "Deploy steps");
 
-    let listed = call_tool(repo, "memory_list", json!({ "type": "project" })).unwrap();
+    // Omitting `query` lists every memory (optionally filtered by type) — the
+    // behaviour a separate `memory_list` tool used to provide.
+    let listed = call_tool(repo, "memory_search", json!({ "type": "project" })).unwrap();
     assert!(listed.contains("\"file\": \"deploy.md\""));
 
+    // A `query` narrows to a full-text match.
     let found = call_tool(repo, "memory_search", json!({ "query": "deploy" })).unwrap();
     assert!(found.contains("\"name\": \"deploy\""));
+
+    // A query that matches nothing yields an empty list.
+    let none = call_tool(repo, "memory_search", json!({ "query": "zzz" })).unwrap();
+    assert_eq!(none, "[]");
 }
 
 #[test]
-fn update_changes_fields_and_reports_missing() {
+fn save_upserts_patching_only_provided_fields_on_an_existing_memory() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
-    save(repo, "fact", "Old");
+    // Create with a body and the default type (project via the `save` helper).
+    call_tool(
+        repo,
+        "memory_save",
+        json!({ "name": "fact", "title": "Old", "type": "project", "body": "keep me" }),
+    )
+    .unwrap();
 
+    // Saving again with the same name patches only the fields passed: the title
+    // and type change, while the untouched body is preserved (not reset).
     let updated = call_tool(
         repo,
-        "memory_update",
+        "memory_save",
         json!({ "name": "fact", "title": "New", "type": "feedback" }),
     )
     .unwrap();
     assert!(updated.contains("\"title\": \"New\""));
     assert!(updated.contains("\"type\": \"feedback\""));
+    assert!(
+        updated.contains("keep me"),
+        "body should be preserved: {updated}"
+    );
+}
 
-    let err = call_tool(repo, "memory_update", json!({ "name": "nope" })).unwrap_err();
-    assert!(err.contains("no memory 'nope'"));
+#[test]
+fn save_requires_a_title_only_when_creating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    // Creating a brand-new memory without a title is rejected.
+    let err = call_tool(repo, "memory_save", json!({ "name": "fresh" })).unwrap_err();
+    assert!(err.contains("`title` is required"), "{err}");
+
+    // Once it exists, a title-less save is a valid no-field patch.
+    call_tool(
+        repo,
+        "memory_save",
+        json!({ "name": "fresh", "title": "T" }),
+    )
+    .unwrap();
+    let touched = call_tool(repo, "memory_save", json!({ "name": "fresh" })).unwrap();
+    assert!(touched.contains("\"title\": \"T\""));
 }
 
 #[test]
@@ -115,9 +151,8 @@ fn store_errors_surface_as_tool_errors() {
     for (name, args) in [
         ("memory_save", json!({ "name": "n", "title": "t" })),
         ("memory_get", json!({ "name": "n" })),
-        ("memory_list", json!({})),
+        ("memory_search", json!({})),
         ("memory_search", json!({ "query": "q" })),
-        ("memory_update", json!({ "name": "n", "title": "t" })),
         ("memory_delete", json!({ "name": "n" })),
     ] {
         assert!(

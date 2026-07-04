@@ -20,6 +20,7 @@ mod registry;
 pub use registry::CommandRegistry;
 
 use super::state::{LogLine, ModalSize};
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::settings::AgentCli;
 
@@ -61,8 +62,13 @@ pub enum Effect {
     /// for a live session, attaches the pane.
     Activate(String),
     /// Open an interactive terminal in the selected worktree (the user ran
-    /// `terminal`). The directory is resolved by the event loop.
+    /// `terminal` or `terminal open`). The directory is resolved by the event
+    /// loop, and the terminal is embedded as a usagi pane/tab.
     OpenTerminal,
+    /// Open a new native terminal application rooted at the selected worktree
+    /// (the user ran `terminal new`). The directory is resolved by the event
+    /// loop, then handed to the platform launcher.
+    OpenExternalTerminal,
     /// Open an AI agent in the selected worktree (the user ran `agent`). This is
     /// `terminal` with the agent CLI launched inside it; the directory and agent
     /// command are resolved by the event loop / wiring. The payload selects which
@@ -91,10 +97,15 @@ pub enum Effect {
     /// is left for the base 切替 (Switch). The focused session's name is resolved by
     /// the event loop, which owns the worktree list and the removal callback.
     CloseSession { force: bool },
-    /// Open the configuration screen (the user ran `config`) to edit the global
-    /// settings and this workspace's local overrides. The screen is run by the
-    /// event loop, which returns to the workspace screen when it is dismissed.
+    /// Open the configuration screen to edit this workspace's local overrides.
+    /// The screen is run by the event loop, which returns to the workspace screen
+    /// when it is dismissed.
     OpenConfig,
+    /// Open the workspace-env editor (the `env` command) as an overlay over the
+    /// command palette, so editing the 1Password-backed environment bindings
+    /// stays in the Overview and returns to it on save / cancel. The event loop
+    /// seeds it from — and saves it to — this workspace's local settings.
+    OpenEnvEditor,
     /// Show the result lines in a scrollable text modal (rather than the results
     /// band), for commands whose output is text to read — `man` / `history` /
     /// `issue`. `title` is the modal title; `size` selects the compact box or the
@@ -108,6 +119,13 @@ pub enum Effect {
     /// `preview <path|name>`). The string is the requested target; the event loop
     /// resolves and reads it (under the workspace root) and renders it.
     OpenPreview(String),
+    /// Open the right-pane diff view of the focused session (the user ran the
+    /// 在席 `diff` command): the session worktree's cumulative diff against the
+    /// base branch. The event loop resolves the highlighted worktree, shells out
+    /// to git, and renders the patch — like [`OpenPreview`], it takes over the
+    /// right pane. Session-scoped, so it fires from the 在席 menu / prompt, not
+    /// the workspace palette.
+    OpenDiff,
     /// Stack another registered workspace into the 統合(unite) view (the user ran
     /// `unite add <workspace>`). The event loop resolves the name to a workspace,
     /// loads its sessions, and appends it as an extra group.
@@ -136,12 +154,14 @@ impl Effect {
             | Effect::OpenSessionModal
             | Effect::RemoveSession { .. }
             | Effect::OpenTerminal
+            | Effect::OpenExternalTerminal
             | Effect::OpenAgent(_)
             | Effect::OpenAgentPrompt(_)
             | Effect::OpenChat
             | Effect::OpenConfig
             | Effect::CloseSession { .. }
             | Effect::OpenPreview(_)
+            | Effect::OpenDiff
             | Effect::UniteAdd(_)
             | Effect::UniteRemove(_) => true,
             Effect::None
@@ -150,6 +170,7 @@ impl Effect {
             | Effect::Activate(_)
             | Effect::ListSessions
             | Effect::OpenRemoveModal { .. }
+            | Effect::OpenEnvEditor
             | Effect::ShowText { .. } => false,
         }
     }
@@ -281,8 +302,9 @@ pub struct CompletionContext<'a> {
 
 /// Everything a command may read while running, beyond its own argument string.
 pub struct CommandContext<'a> {
-    /// Commands entered so far this session (oldest first), for `history`.
-    pub history: &'a [String],
+    /// Commands entered so far (oldest first), with persisted metadata, for
+    /// `history`.
+    pub history: &'a [HistoryEntry],
     /// Every registered command, in display order, for `man`.
     pub commands: &'a [CommandInfo],
     /// The workspace's worktrees, in display order, for `space`.

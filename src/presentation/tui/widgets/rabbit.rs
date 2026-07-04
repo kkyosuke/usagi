@@ -583,6 +583,43 @@ pub fn loading_rabbit_timed(hop_frame: usize, face_index: usize, label: &str) ->
         .collect()
 }
 
+/// A full-screen "loading" frame: the time-based [`loading_rabbit_timed`]
+/// hopping in the centre of a `width`×`height` screen with its `label`.
+///
+/// Painted as the stand-in a screen shows while a slow, blocking step runs on a
+/// worker thread — resolving 1Password-backed env before a pane launches, or
+/// probing installed agent CLIs / the local LLM before the config screen opens —
+/// so the user sees usagi is working rather than a frozen screen. `hop_frame` and
+/// `face_index` are derived from elapsed time (exactly as the background-install
+/// overlay derives them), so the rabbit animates purely on the clock. A zero
+/// terminal size falls back to 80×24 via [`normalize_size`](super::normalize_size).
+pub fn loading_screen(
+    width: usize,
+    height: usize,
+    hop_frame: usize,
+    face_index: usize,
+    label: &str,
+) -> Vec<String> {
+    let (height, width) = super::normalize_size(height, width);
+    let block = loading_rabbit_timed(hop_frame, face_index, label);
+    let block_w = block
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    let pad = " ".repeat(super::centered_padding(width, block_w));
+    // Vertically centre the two-row block, then pad the frame out to the full
+    // height so the painter clears every row it draws over.
+    let top = height.saturating_sub(block.len()) / 2;
+    let mut lines = Vec::with_capacity(height);
+    lines.resize(top, String::new());
+    for row in block {
+        lines.push(format!("{pad}{row}"));
+    }
+    lines.resize(height, String::new());
+    lines
+}
+
 /// A two-line "finished" rabbit for the background-install overlay: a resting
 /// usagi with a happy (`^ㅅ^`) or dejected (`>ㅅ<`) face and the outcome
 /// `message`. No spinner — the work is done. Padded and styled like
@@ -1334,6 +1371,34 @@ mod tests {
                 "ears must sit over the head on hop frame {hop}",
             );
         }
+    }
+
+    #[test]
+    fn loading_screen_centres_the_rabbit_and_fills_the_height() {
+        let frame = loading_screen(80, 24, 0, 0, "環境変数を解決中…");
+        // The frame is exactly the terminal height, one string per row.
+        assert_eq!(frame.len(), 24);
+        // The rabbit and its label sit somewhere in the frame...
+        let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+        assert!(joined.contains("環境変数を解決中…"));
+        assert!(joined.contains('∩'));
+        // ...vertically centred, so there are blank rows above it.
+        let top_padding = frame.iter().take_while(|l| l.is_empty()).count();
+        assert!(top_padding > 0);
+        // The body row is horizontally centred: it is indented from the left edge.
+        let body = frame
+            .iter()
+            .find(|l| console::strip_ansi_codes(l).contains("環境変数を解決中…"))
+            .unwrap();
+        assert!(body.starts_with(' '));
+    }
+
+    #[test]
+    fn loading_screen_falls_back_to_eighty_by_twenty_four_for_a_zero_size() {
+        // A non-interactive zero size renders at the 80x24 fallback rather than
+        // an empty frame.
+        let frame = loading_screen(0, 0, 3, 2, "読み込み中…");
+        assert_eq!(frame.len(), 24);
     }
 
     #[test]

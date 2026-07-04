@@ -1,16 +1,18 @@
-//! The config screen's two modal overlays and the [`Config`] methods that drive
-//! them.
+//! The config screen's modal overlays and the [`Config`] methods that drive them.
 //!
 //! The Local LLM rows open one of two modals: [`InstallModal`] collects the sudo
 //! password before the `ollama` runtime is provisioned, and [`ModelModal`] lists
-//! the offered models so one can be picked (and pulled if needed). Both are kept
-//! terminal-independent so their entry / navigation flows are unit-testable. The
-//! `Config` methods here are the event loop's seam onto those modals — opening,
-//! closing, routing keys, and reading the result — split out of the parent
-//! [`super`] module to keep the core editor state focused.
+//! the offered models so one can be picked (and pulled if needed). The
+//! workspace-local action rows open a text editor each: [`SetupCommandsModal`]
+//! for the per-session setup commands and [`EnvModal`] for the 1Password-backed
+//! environment bindings. All are kept terminal-independent so their entry /
+//! navigation flows are unit-testable. The `Config` methods here are the event
+//! loop's seam onto those modals — opening, closing, routing keys, and reading
+//! the result — split out of the parent [`super`] module to keep the core editor
+//! state focused.
 
 use super::{Config, LocalField};
-use crate::domain::settings::LOCAL_LLM_MODELS;
+use crate::domain::settings::{SecretEnv, SessionLabelMaster, LOCAL_LLM_MODELS};
 use crate::presentation::tui::widgets::{self, text_area::TextArea, text_input::TextInput};
 use console::Style;
 
@@ -92,6 +94,75 @@ impl SetupCommandsModal {
             .filter(|line| !line.is_empty())
             .map(str::to_string)
             .collect()
+    }
+}
+
+/// The open workspace-env editor. Each line is one `NAME=op://vault/item/field`
+/// binding: the environment variable name, then the 1Password reference to
+/// resolve into it at pane launch. Malformed lines (no `=`, an invalid name, or a
+/// blank reference) are accepted while editing and dropped when applied, mirroring
+/// the filtering [`crate::domain::settings::LocalSettings::env`] applies at read
+/// time. Only the reference is stored — never a resolved secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvModal {
+    area: TextArea,
+}
+
+impl EnvModal {
+    fn new(env: &SecretEnv) -> Self {
+        Self {
+            area: TextArea::from_text(&crate::domain::settings::format_env_bindings(env)),
+        }
+    }
+
+    /// The binding lines currently in the editor.
+    pub fn lines(&self) -> &[String] {
+        self.area.lines()
+    }
+
+    /// The caret position as `(row, byte_col)` for rendering.
+    pub fn cursor(&self) -> (usize, usize) {
+        self.area.cursor()
+    }
+
+    /// The valid `NAME → reference` bindings currently in the editor (see
+    /// [`crate::domain::settings::parse_env_bindings`] for the filtering rule).
+    fn bindings(&self) -> SecretEnv {
+        crate::domain::settings::parse_env_bindings(&self.area.text())
+    }
+}
+
+/// The open session-label editor. Each line is one `id | name | color | icon`
+/// label definition — the master 切替's `Tab` / digit keys assign from. Malformed
+/// lines (a blank id or name) are accepted while editing and dropped when applied,
+/// and a duplicate id keeps only its first definition, mirroring the coercion
+/// [`crate::domain::settings::parse_session_labels`] applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLabelsModal {
+    area: TextArea,
+}
+
+impl SessionLabelsModal {
+    fn new(master: &SessionLabelMaster) -> Self {
+        Self {
+            area: TextArea::from_text(&crate::domain::settings::format_session_labels(master)),
+        }
+    }
+
+    /// The label lines currently in the editor.
+    pub fn lines(&self) -> &[String] {
+        self.area.lines()
+    }
+
+    /// The caret position as `(row, byte_col)` for rendering.
+    pub fn cursor(&self) -> (usize, usize) {
+        self.area.cursor()
+    }
+
+    /// The valid label master currently in the editor (see
+    /// [`crate::domain::settings::parse_session_labels`] for the filtering rule).
+    fn master(&self) -> SessionLabelMaster {
+        crate::domain::settings::parse_session_labels(&self.area.text())
     }
 }
 
@@ -369,6 +440,210 @@ impl Config {
 
     pub fn setup_modal_cursor_end(&mut self) {
         if let Some(modal) = &mut self.setup_modal {
+            modal.area.move_end();
+        }
+    }
+
+    /// Open the workspace-env editor on the Env Vars row. A no-op outside the
+    /// global/local Env Vars rows. In the global scope it edits
+    /// [`Settings::env`](crate::domain::settings::Settings::env); in the local
+    /// scope it edits [`LocalSettings::env`](crate::domain::settings::LocalSettings::env).
+    pub fn open_env_modal(&mut self) {
+        if !self.env_row_active() {
+            return;
+        }
+        let env = self
+            .local
+            .as_ref()
+            .map(|local| &local.settings.env)
+            .unwrap_or(&self.settings.env);
+        self.env_modal = Some(EnvModal::new(env));
+    }
+
+    /// The open workspace-env editor, if any. While present the event loop routes
+    /// every key into it.
+    pub fn env_modal(&self) -> Option<&EnvModal> {
+        self.env_modal.as_ref()
+    }
+
+    /// Close the workspace-env editor without applying its current buffer.
+    pub fn close_env_modal(&mut self) {
+        self.env_modal = None;
+    }
+
+    /// Apply the env editor's valid bindings into the current scope's settings,
+    /// then close it. A no-op when no editor is open.
+    pub fn apply_env_modal(&mut self) {
+        let Some(modal) = self.env_modal.take() else {
+            return;
+        };
+        if let Some(local) = &mut self.local {
+            local.settings.env = modal.bindings();
+        } else {
+            self.settings.env = modal.bindings();
+        }
+    }
+
+    pub fn env_modal_insert(&mut self, c: char) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.insert(c);
+        }
+    }
+
+    pub fn env_modal_newline(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.newline();
+        }
+    }
+
+    pub fn env_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.backspace();
+        }
+    }
+
+    pub fn env_modal_delete_forward(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.delete_forward();
+        }
+    }
+
+    pub fn env_modal_cursor_left(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_left();
+        }
+    }
+
+    pub fn env_modal_cursor_right(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_right();
+        }
+    }
+
+    pub fn env_modal_cursor_up(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_up();
+        }
+    }
+
+    pub fn env_modal_cursor_down(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_down();
+        }
+    }
+
+    pub fn env_modal_cursor_home(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_home();
+        }
+    }
+
+    pub fn env_modal_cursor_end(&mut self) {
+        if let Some(modal) = &mut self.env_modal {
+            modal.area.move_end();
+        }
+    }
+
+    /// Open the session-label editor on the workspace-local Session Labels row,
+    /// seeded from the project's override when set, otherwise from the effective
+    /// global master (so editing starts from the labels currently in effect). A
+    /// no-op outside the local scope or on any other row.
+    pub fn open_session_labels_modal(&mut self) {
+        if !self.session_labels_row_active() {
+            return;
+        }
+        let master = self
+            .local
+            .as_ref()
+            .and_then(|local| local.settings.session_labels.as_ref())
+            .unwrap_or(&self.settings.session_labels);
+        self.session_labels_modal = Some(SessionLabelsModal::new(master));
+    }
+
+    /// The open session-label editor, if any. While present the event loop routes
+    /// every key into it.
+    pub fn session_labels_modal(&self) -> Option<&SessionLabelsModal> {
+        self.session_labels_modal.as_ref()
+    }
+
+    /// Close the session-label editor without applying its current buffer.
+    pub fn close_session_labels_modal(&mut self) {
+        self.session_labels_modal = None;
+    }
+
+    /// Apply the session-label editor's valid labels into the local override,
+    /// then close it. A buffer identical to the effective global master stores
+    /// `None` (defer to global) so leaving the seeded labels untouched keeps the
+    /// project following the global set; any other buffer — including an empty one
+    /// (the feature off for this project) — stores the override. A no-op when no
+    /// editor is open or outside the local scope.
+    pub fn apply_session_labels_modal(&mut self) {
+        let Some(modal) = self.session_labels_modal.take() else {
+            return;
+        };
+        let master = modal.master();
+        let override_value = (master != self.settings.session_labels).then_some(master);
+        if let Some(local) = &mut self.local {
+            local.settings.session_labels = override_value;
+        }
+    }
+
+    pub fn session_labels_modal_insert(&mut self, c: char) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.insert(c);
+        }
+    }
+
+    pub fn session_labels_modal_newline(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.newline();
+        }
+    }
+
+    pub fn session_labels_modal_backspace(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.backspace();
+        }
+    }
+
+    pub fn session_labels_modal_delete_forward(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.delete_forward();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_left(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.move_left();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_right(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.move_right();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_up(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.move_up();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_down(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.move_down();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_home(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
+            modal.area.move_home();
+        }
+    }
+
+    pub fn session_labels_modal_cursor_end(&mut self) {
+        if let Some(modal) = &mut self.session_labels_modal {
             modal.area.move_end();
         }
     }

@@ -21,6 +21,7 @@
 //! here is pure and unit-tested against a parser driven with bytes.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use super::selection::Cell;
 use crate::domain::workspace_state::PrLink;
@@ -362,6 +363,46 @@ pub fn open_command(url: &str) -> Vec<String> {
     #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
     {
         let _ = url;
+        Vec::new()
+    }
+}
+
+/// The argv that opens a **new native terminal window/tab** rooted at `dir` on
+/// this platform. Empty when the platform is unrecognised, so the caller spawns
+/// nothing. This is separate from the embedded PTY panes: it hands the directory
+/// to the OS terminal application and then detaches.
+pub fn open_terminal_command(dir: &Path) -> Vec<String> {
+    let dir = dir.to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            "open".to_string(),
+            "-a".to_string(),
+            "Terminal".to_string(),
+            dir,
+        ]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer Windows Terminal when present; if it is missing the spawn simply
+        // fails and the caller logs the error. `-d` sets the starting directory.
+        vec!["wt".to_string(), "-d".to_string(), dir]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Debian/Ubuntu expose a desktop-environment independent terminal
+        // alternative. It is not universal, but it is the least surprising first
+        // attempt; absence is reported by the caller rather than falling back to a
+        // specific desktop's terminal that may not be installed.
+        vec![
+            "x-terminal-emulator".to_string(),
+            "--working-directory".to_string(),
+            dir,
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        let _ = dir;
         Vec::new()
     }
 }
@@ -762,5 +803,25 @@ mod tests {
         assert_eq!(argv, ["open", "https://example.com"]);
         #[cfg(all(unix, not(target_os = "macos")))]
         assert_eq!(argv, ["xdg-open", "https://example.com"]);
+    }
+
+    #[test]
+    fn open_terminal_command_targets_the_directory_on_this_platform() {
+        let dir = Path::new("/tmp/usagi-terminal");
+        let argv = open_terminal_command(dir);
+        assert!(argv.iter().any(|a| a == "/tmp/usagi-terminal"));
+        // The first element is the program to spawn.
+        assert!(!argv.is_empty());
+        #[cfg(target_os = "macos")]
+        assert_eq!(argv, ["open", "-a", "Terminal", "/tmp/usagi-terminal"]);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        assert_eq!(
+            argv,
+            [
+                "x-terminal-emulator",
+                "--working-directory",
+                "/tmp/usagi-terminal"
+            ]
+        );
     }
 }

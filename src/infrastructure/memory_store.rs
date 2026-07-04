@@ -136,9 +136,10 @@ impl MemoryStore {
     /// (whose target file is already persisted by the time the index rebuilds) or
     /// break `memory list` — the index and `MEMORY.md` simply rebuild from the
     /// files that parse, mirroring how [`load_index`](Self::load_index) self-heals
-    /// a corrupt cache. The strict [`scan`](Self::scan) stays the choice where
-    /// every memory must be readable.
-    fn scan_lenient(&self) -> Result<Vec<Memory>> {
+    /// a corrupt cache. Full-text `memory search` uses it too, so one unparseable
+    /// file yields partial results instead of failing the whole query. The strict
+    /// [`scan`](Self::scan) stays the choice where every memory must be readable.
+    pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
         use rayon::prelude::*;
 
         let parsed: Vec<(PathBuf, Result<Memory>)> = self
@@ -160,7 +161,7 @@ impl MemoryStore {
             match memory {
                 Ok(memory) => memories.push(memory),
                 Err(e) => ErrorLog::record(&format!(
-                    "skipping unparseable memory file {} while rebuilding the index: {e:#}",
+                    "skipping unparseable memory file {}: {e:#}",
                     path.display()
                 )),
             }
@@ -227,7 +228,63 @@ impl MemoryStore {
         // usecase layer produces today.
         let target = self.dir.join(memory_file_name(&memory.name)?);
         json_file::write_text_atomic(&target, &memory.to_markdown())?;
-        self.rebuild_derived()?;
+        self.reindex_after_write(memory)?;
+        Ok(())
+    }
+
+    /// Refresh the derived files to reflect `memory` having just been written,
+    /// patching only its entry instead of re-reading and re-parsing every markdown
+    /// file. A full [`rebuild_derived`](Self::rebuild_derived) on every write costs
+    /// O(all memories) reads + parses while the store lock is held; the write
+    /// already carries the new `memory`, so its summary is spliced into the cached,
+    /// name-sorted list directly. `MEMORY.md` is then re-rendered from that list
+    /// (its own newest-first ordering is applied by [`render_toc`]). A missing or
+    /// unreadable cache falls back to a full rebuild (self-healing, matching
+    /// [`summaries`](Self::summaries)).
+    fn reindex_after_write(&self, memory: &Memory) -> Result<()> {
+        let Some(mut summaries) = self.load_index()?.map(|index| index.memories) else {
+            return self.rebuild_derived().map(|_| ());
+        };
+        // The cache is name-sorted (rebuilt from `scan_lenient`, which sorts by
+        // name), so a binary search finds either the entry to replace (an edit) or
+        // the slot to insert a new name at, keeping it sorted. `name` is a memory's
+        // stable, unique identity, so there is at most one entry per name.
+        let summary = memory.summary();
+        match summaries.binary_search_by(|s| s.name.cmp(&memory.name)) {
+            Ok(pos) => summaries[pos] = summary,
+            Err(pos) => summaries.insert(pos, summary),
+        }
+        self.write_derived(&summaries)
+    }
+
+    /// Refresh the derived files after the memory named `name` was removed,
+    /// dropping only its entry rather than rebuilding from every markdown file (see
+    /// [`reindex_after_write`](Self::reindex_after_write)). A missing or unreadable
+    /// cache falls back to a full rebuild; a cache that never listed the name is
+    /// already consistent with the removal, so it is left untouched.
+    fn reindex_after_remove(&self, name: &str) -> Result<()> {
+        let Some(mut summaries) = self.load_index()?.map(|index| index.memories) else {
+            return self.rebuild_derived().map(|_| ());
+        };
+        if let Ok(pos) = summaries.binary_search_by(|s| s.name.as_str().cmp(name)) {
+            summaries.remove(pos);
+            self.write_derived(&summaries)?;
+        }
+        Ok(())
+    }
+
+    /// Write the name-sorted `summaries` to the derived files: `index.json` (a
+    /// rebuildable cache, written atomically but without an fsync) and `MEMORY.md`
+    /// (a committed, human/agent-facing table of contents, kept durable).
+    fn write_derived(&self, summaries: &[MemorySummary]) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .context(format!("failed to create {}", self.dir.display()))?;
+        let index = IndexFileRef {
+            version: json_file::FILE_FORMAT_VERSION,
+            memories: summaries,
+        };
+        json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)?;
+        json_file::write_text_atomic(&self.toc_path(), &render_toc(summaries))?;
         Ok(())
     }
 
@@ -241,7 +298,7 @@ impl MemoryStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e).context(format!("failed to remove {}", path.display())),
         }
-        self.rebuild_derived()?;
+        self.reindex_after_remove(name)?;
         Ok(true)
     }
 
@@ -294,18 +351,9 @@ impl MemoryStore {
             // Nothing stored and no directory yet: don't create files eagerly.
             return Ok(summaries);
         }
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-
-        let index = IndexFileRef {
-            version: json_file::FILE_FORMAT_VERSION,
-            memories: &summaries,
-        };
-        // The canonical "pretty JSON + trailing newline, written atomically" path
-        // lives in `json_file::write_atomic`; reuse it for the index. `MEMORY.md`
-        // is hand-rolled markdown, so it stays on `write_text_atomic`.
-        json_file::write_atomic(&self.dir, &self.index_path(), &index)?;
-        json_file::write_text_atomic(&self.toc_path(), &render_toc(&summaries))?;
+        // `index.json` is a rebuildable cache (written without an fsync); `MEMORY.md`
+        // stays durable (see [`write_derived`](Self::write_derived)).
+        self.write_derived(&summaries)?;
         Ok(summaries)
     }
 }
@@ -486,6 +534,53 @@ mod tests {
     }
 
     #[test]
+    fn remove_rebuilds_the_derived_files_when_the_cache_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        store.write(&memory("two", "Two")).unwrap();
+        // Drop the cache so the removal cannot patch it incrementally; it must fall
+        // back to a full rebuild from the markdown files that remain.
+        fs::remove_file(store.index_path()).unwrap();
+
+        assert!(store.remove("one").unwrap());
+
+        let names: Vec<String> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["two".to_string()]);
+        assert!(store.index_path().is_file());
+    }
+
+    #[test]
+    fn remove_leaves_the_cache_untouched_when_the_name_is_absent_from_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("two", "Two")).unwrap();
+        // A markdown file lands on disk without going through `write`, so the cache
+        // (built from "two" alone) never lists it.
+        fs::write(
+            store.dir().join("one.md"),
+            memory("one", "One").to_markdown(),
+        )
+        .unwrap();
+
+        // Removing "one" deletes its file and finds no cache entry to drop, so the
+        // cache is left as-is — it is already consistent with the removal.
+        assert!(store.remove("one").unwrap());
+        let names: Vec<String> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, vec!["two".to_string()]);
+    }
+
+    #[test]
     fn summaries_rebuild_when_index_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -566,12 +661,10 @@ mod tests {
         // A corrupt, unparseable memory file lands beside the valid one.
         fs::write(store.dir().join("broken.md"), "not a memory").unwrap();
 
-        // Writing another memory still succeeds — the unrelated corrupt sibling is
-        // skipped during the rebuild instead of failing the whole write.
+        // Writing another memory still succeeds. The incremental index update
+        // patches only "two"'s entry into the cached list, so it never reads — and
+        // cannot choke on — the unrelated corrupt sibling.
         store.write(&memory("two", "Two")).unwrap();
-
-        // The index rebuilt from the files that parse; the corrupt one is skipped,
-        // but the strict `scan` still surfaces it.
         let names: Vec<String> = store
             .summaries()
             .unwrap()
@@ -579,6 +672,18 @@ mod tests {
             .map(|s| s.name.clone())
             .collect();
         assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
+
+        // A *full rebuild* — forced here by dropping the cache — is where the whole
+        // directory is scanned, and it stays tolerant: it indexes the files that
+        // parse and skips the corrupt one, which the strict `scan` still surfaces.
+        fs::remove_file(store.index_path()).unwrap();
+        let rebuilt: Vec<String> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(rebuilt, vec!["one".to_string(), "two".to_string()]);
         assert!(store.scan().is_err());
 
         // The skip is recorded in the daily log rather than silently swallowed.

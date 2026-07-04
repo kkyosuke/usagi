@@ -21,23 +21,31 @@
 #       キーチェーンからのサービスアカウントトークン取得。解決ロジック自体は
 #       `SecretResolver` を注入して env_resolver/mod.rs に切り出し、計測対象に含めてある。
 #   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
+#   - tui/io/loading\.rs      : 遅いブロッキング処理をワーカースレッドで走らせつつ、
+#       実端末にローディング画面をアニメ描画する実 IO（スレッド生成・アニメクロック・
+#       端末描画）。描画するフレーム自体の純ロジックは widgets::loading_screen に
+#       切り出して計測対象に含めてある。
 #   - tui/app/mod\.rs / tui/chat/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs
 #     / home/terminal/pool\.rs / tui/open/mod\.rs / tui/config/mod\.rs
 #     / tui/config/provisioning\.rs / tui/welcome/mod\.rs
 #                             : 実端末・実 PTY・実スレッド（chat は ollama 子プロセス）を
-#       束ねるオーケストレータ。chat の会話状態・描画・イベントループの純ロジックは
-#       tui/chat/{state,ui,event}.rs に切り出して計測対象に含めてある。
+#       束ねるオーケストレータ。chat の会話状態・描画の純ロジックは
+#       tui/chat/{state,ui}.rs に切り出して計測対象に含めてある。
 #       terminal/pane / terminal/pool の純ロジック（キー/マウスの入力変換は
 #       home/pane_input.rs、タブのインデックス・ラベル算術は home/terminal/tabs.rs）は
 #       別モジュールへ切り出して計測対象に含めてあり、ここに残るのは実 IO の束ねだけ。
 # これら以外の薄いラッパ（hop/run/mcp/llm_mcp/agent_phase/clean、splash/gallery/
 # new、io/echo）は依存を注入してテスト可能にし、計測対象に含めている。
+#   - infrastructure/secret_store\.rs : OS ネイティブのシークレットストア（keyring）への
+#       実 IO（`usagi op login` のトークン保存・env_resolver のトークン取得）。
+#       `SecretStore` トレイトは注入の継ぎ目で、`op_auth` / cli `op` のテストは
+#       in-memory フェイクで計測対象に含めてある。
 #   - infrastructure/setup_runner\.rs : セッション setup コマンドを子プロセスで実行する
 #       実 IO。cargo llvm-cov --workspace ではバイナリクレートと lib クレートの両方が
 #       コンパイルされ、テストが触れるのは lib 側のシンボルだけのため、binary 側の
 #       インスタンスが常に未カバーになってしまう（二重ビルド問題）。実 IO 層として
 #       除外することで正確な計測結果を維持する。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/chat/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/secret_store\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/io/loading\.rs|tui/app/mod\.rs|tui/chat/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

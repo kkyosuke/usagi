@@ -90,7 +90,7 @@ src/
 │   ├── repo_paths.rs           # リポジトリ内 usagi メタデータの配置（STATE_DIR=".usagi"）の正本。各ストア・session・gitignore が参照
 │   ├── storage.rs              # グローバル ~/.usagi/ の load/save（Storage）
 │   ├── workspace_store.rs      # <repo>/.usagi/ の state.json / settings.json（WorkspaceStore）
-│   ├── history_store.rs        # <repo>/.usagi/history.jsonl の load/append（HistoryStore）
+│   ├── history_store.rs        # <repo>/.usagi/history.json の load/append（HistoryStore）
 │   ├── open_panes_store.rs     # worktree 別に開いていたペイン（agent/terminal）を記録し restore_panes で復元（~/.usagi/open-panes/）
 │   ├── resume_focus_store.rs   # ワークスペース別に終了時のセッション・エンゲージメント段階を記録し起動時に復帰（~/.usagi/resume-focus/）
 │   ├── trace_log.rs            # 操作トレース logs/trace-YYYY-MM-DD.jsonl の記録（USAGI_TRACE。TraceLog）
@@ -101,16 +101,17 @@ src/
 │   ├── resource.rs             # sysinfo による実プロセスの CPU/メモリ計測（ResourceSampler トレイト + SysinfoSampler。集計は domain/resource）
 │   ├── session_monitor.rs      # 入力待ち判定の純粋ロジック（phase 優先・ベル基準値・待ち集合・アタッチ）
 │   ├── skills.rs               # バイナリ同梱スキル（assets/skills/）を ~/.usagi/skills/ へ展開（materialize）し worktree の .claude/skills/<name> をスキルごとに symlink（link、プロジェクト独自スキルと共存）。配布の仕組みは 04-orchestration が正本
-│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / pr_link_store が共用
+│   ├── worktree_keyed_store.rs # worktree → ファイル名（canonical path のハッシュ）導出の正本。agent_state_store / agent_prompt_store / agent_live_prompt_store / pr_link_store が共用
 │   ├── agent_state_store.rs    # worktree 別の Agent phase の記録/読み出し・フック JSON のパース（~/.usagi/agent-state/。遷移ポリシーは usecase/agent_phase）
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
+│   ├── agent_live_prompt_store.rs # worktree 別に session_prompt(live) の live プロンプトを追記/取り出し（~/.usagi/agent-live-prompts/）
 │   ├── pr_link_store.rs        # worktree 別に検出した PR 群（PrLink のリスト）を URL 単位で重複排除しつつ蓄積/読み出し（~/.usagi/pr-links/）。sync が state.json の pr へ畳み込む
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線）・session_system_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP
-    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / op / mcp / llm_mcp / op_mcp / agent_phase（隠し・フック用））
+    ├── cli/                    # サブコマンド（init / hop / status / clean / config / doctor / feature（Agent CLI の機能サポート表）/ icon / run / issue / memory / mcp / llm_mcp / agent_phase（隠し・フック用））
     ├── color.rs                # NO_COLOR / CLICOLOR_FORCE から terminal colour の有効/無効を判定
     ├── theme.rs                # CLI/TUI の色セット（Palette トレイト + 固定 RGB/ANSI-256 値）の正本
     ├── mcp/                    # MCP サーバ（JSON-RPC 2.0 フレーミングを共有）
@@ -119,7 +120,6 @@ src/
     │   ├── issue/             # issue 操作ツール（mod=McpServer・args / json=入力スキーマ）。JSON 出力は usecase/issue/view が正本。memory ツールもマージして公開
     │   ├── memory.rs           # メモリ操作ツール（スキーマ・引数・usecase/memory への委譲。issue サーバが呼ぶ）
     │   ├── llm.rs              # ローカル LLM 委譲ツール（LlmMcpServer / LlmBackend）
-    │   ├── op.rs               # 1Password 読み取りツール（OpMcpServer / OpBackend。op CLI へシェルアウト）
     │   └── session.rs          # セッション操作ツール（SessionMcpServer / AgentBackend）
     └── tui/                    # 自前レンダリングの TUI（console + crossterm、ratatui は不使用）
         ├── app/                # TUI オーケストレーター（画面グラフの遷移を管理 / event）

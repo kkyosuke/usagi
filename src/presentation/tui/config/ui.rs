@@ -6,7 +6,10 @@ use crate::presentation::tui::widgets;
 
 use crate::domain::settings::SkillFeature;
 
-use super::state::{Config, Field, InstallModal, LocalField, ModelModal, SetupCommandsModal};
+use super::state::{
+    Config, EnvModal, Field, InstallModal, LocalField, ModelModal, SessionLabelsModal,
+    SetupCommandsModal,
+};
 
 /// The label of the Save button row.
 const SAVE_LABEL: &str = "[ Save ]";
@@ -17,11 +20,11 @@ const SAVE_LABEL: &str = "[ Save ]";
 /// the terminal and clips any line that overruns it on a narrow screen.
 const MODAL_INNER_WIDTH: usize = 42;
 
-/// How many command rows the setup-command editor shows at once. The editor box
-/// always reserves exactly this many rows (padding with blanks and scrolling the
-/// window to keep the caret visible) so adding a line never grows the box or
-/// shifts it on screen.
-const SETUP_MODAL_VISIBLE_LINES: usize = 8;
+/// How many entry rows the text-editor modals (setup commands, env vars) show at
+/// once. The editor box always reserves exactly this many rows (padding with
+/// blanks and scrolling the window to keep the caret visible) so adding a line
+/// never grows the box or shifts it on screen.
+const EDITOR_MODAL_VISIBLE_LINES: usize = 8;
 
 /// Builds the centred mascot, title, and subtitle block.
 ///
@@ -230,13 +233,13 @@ fn setup_modal_frame(
     let lines = modal.lines();
     // Scroll a fixed-size window so the caret row stays visible without changing
     // the number of rendered rows (and thus the box height / position).
-    let offset = cursor_row.saturating_sub(SETUP_MODAL_VISIBLE_LINES - 1);
+    let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
     let mut body = vec![
         "新規セッション作成後に実行するコマンド".to_string(),
         "1 行につき 1 コマンド（session root で実行）".to_string(),
         String::new(),
     ];
-    for win in 0..SETUP_MODAL_VISIBLE_LINES {
+    for win in 0..EDITOR_MODAL_VISIBLE_LINES {
         let i = offset + win;
         let Some(line) = lines.get(i) else {
             // Pad the unused rows so the box keeps a constant height.
@@ -267,6 +270,100 @@ fn setup_modal_frame(
     )
 }
 
+/// Builds the workspace-env editor. Each visible line maps to one
+/// `NAME=op://vault/item/field` binding; saving the modal keeps only the valid
+/// ones (a name plus a non-empty reference) before the settings are persisted.
+fn env_modal_frame(raw_height: usize, raw_width: usize, modal: &EnvModal) -> Vec<String> {
+    let (cursor_row, cursor_col) = modal.cursor();
+    let lines = modal.lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
+    let mut body = vec![
+        "1Password から解決する環境変数".to_string(),
+        "NAME=op://vault/item/field（1 行 1 件）".to_string(),
+        String::new(),
+    ];
+    for win in 0..EDITOR_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Env Vars",
+        MODAL_INNER_WIDTH.max(56),
+        &body,
+    )
+}
+
+/// Builds the workspace session-label editor. Each visible line maps to one
+/// `id | name | color | icon` label; saving the modal keeps only the valid ones
+/// (an id plus a name, unique by id) before the settings are persisted.
+fn session_labels_modal_frame(
+    raw_height: usize,
+    raw_width: usize,
+    modal: &SessionLabelsModal,
+) -> Vec<String> {
+    let (cursor_row, cursor_col) = modal.cursor();
+    let lines = modal.lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
+    let mut body = vec![
+        "切替でセッションに付けるステータスラベル".to_string(),
+        "id | name | color | icon（1 行 1 件）".to_string(),
+        String::new(),
+    ];
+    for win in 0..EDITOR_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
+    widgets::render_modal(
+        raw_height,
+        raw_width,
+        "Session Labels",
+        MODAL_INNER_WIDTH.max(56),
+        &body,
+    )
+}
+
 /// Builds the full configuration frame for a raw terminal size.
 pub fn render_frame(
     raw_height: usize,
@@ -284,6 +381,12 @@ pub fn render_frame(
     }
     if let Some(modal) = config.setup_modal() {
         return setup_modal_frame(raw_height, raw_width, modal);
+    }
+    if let Some(modal) = config.env_modal() {
+        return env_modal_frame(raw_height, raw_width, modal);
+    }
+    if let Some(modal) = config.session_labels_modal() {
+        return session_labels_modal_frame(raw_height, raw_width, modal);
     }
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
@@ -417,15 +520,19 @@ mod tests {
         assert!(lines[9].contains("Local LLM Model"));
         assert!(lines[9].contains('—'));
         assert!(!lines[9].contains('<'));
+        // Global Env Vars is an action row too: plain edit summary, no chevrons.
+        assert!(lines[10].contains("Env Vars"));
+        assert!(lines[10].contains("Edit (none)"));
+        assert!(!lines[10].contains('<'));
         // The shipped-skill feature rows follow the fixed fields: a chooser
         // showing the feature's on/off state (on by default).
-        assert!(lines[10].contains("PR Skills"));
-        assert!(lines[10].contains("On"));
+        assert!(lines[11].contains("PR Skills"));
+        assert!(lines[11].contains("On"));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 8 && *i != 9)
+            .filter(|(i, _)| *i != 8 && *i != 9 && *i != 10)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));
@@ -452,7 +559,7 @@ mod tests {
 
     #[test]
     fn notice_lines_render_text_when_present() {
-        let lines = notice_lines("", Some("Saved 🐰"));
+        let lines = notice_lines("", Some("Saved 󰤇"));
         assert_eq!(lines.len(), 2);
         assert!(lines[1].contains("Saved"));
     }
@@ -501,7 +608,7 @@ mod tests {
     #[test]
     fn render_frame_combines_all_sections() {
         let config = sample_config();
-        let frame = render_frame(0, 0, &config, Some("Saved 🐰"));
+        let frame = render_frame(0, 0, &config, Some("Saved 󰤇"));
         let joined = frame.join("\n");
         assert!(joined.contains("Config"));
         assert!(joined.contains("Theme"));
@@ -567,7 +674,7 @@ mod tests {
     fn notice_slot_keeps_layout_stable_across_toggling() {
         let config = sample_config();
         let without = render_frame(24, 80, &config, None);
-        let with = render_frame(24, 80, &config, Some("Saved 🐰"));
+        let with = render_frame(24, 80, &config, Some("Saved 󰤇"));
         assert_eq!(without.len(), with.len());
     }
 
@@ -705,5 +812,135 @@ mod tests {
         let joined = render_frame(40, 80, &config, None).join("\n");
         assert!(joined.contains('·'));
         assert!(joined.contains("cmd"));
+    }
+
+    /// A workspace-scoped config focused on the Env Vars row with the editor open
+    /// and `bindings` (`NAME`, `reference`) already populated.
+    fn config_with_open_env_modal(bindings: &[(&str, &str)]) -> Config {
+        use crate::domain::settings::LocalSettings;
+        let local = LocalSettings {
+            env: bindings
+                .iter()
+                .map(|(n, r)| (n.to_string(), r.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let mut config = Config::workspace(Settings::default(), local, Vec::new());
+        while config.selected_local_field() != Some(LocalField::EnvVars) {
+            config.move_down();
+        }
+        config.open_env_modal();
+        config
+    }
+
+    #[test]
+    fn env_modal_keeps_a_constant_height_as_lines_are_added() {
+        let empty = render_frame(40, 80, &config_with_open_env_modal(&[]), None);
+        let few = render_frame(
+            40,
+            80,
+            &config_with_open_env_modal(&[("A", "op://v/i/a"), ("B", "op://v/i/b")]),
+            None,
+        );
+        // Distinct names so the BTreeMap keeps every entry.
+        let many: Vec<(&str, &str)> = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"]
+            .iter()
+            .map(|n| (*n, "op://v/i/x"))
+            .collect();
+        let full = render_frame(40, 80, &config_with_open_env_modal(&many), None);
+        assert_eq!(empty.len(), few.len());
+        assert_eq!(empty.len(), full.len());
+        assert_eq!(box_row_count(&empty), box_row_count(&few));
+        assert_eq!(box_row_count(&empty), box_row_count(&full));
+    }
+
+    #[test]
+    fn env_modal_scrolls_to_keep_the_caret_row_visible() {
+        // The editor opens with the caret at the end, so with more bindings than
+        // the window the last one stays rendered while the first scrolls out.
+        let bindings: Vec<(&str, &str)> =
+            ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH", "II", "JJ"]
+                .iter()
+                .map(|n| (*n, "op://v/i/x"))
+                .collect();
+        let config = config_with_open_env_modal(&bindings);
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("JJ=op://v/i/x"));
+        assert!(!joined.contains("AA=op://v/i/x"));
+        assert!(joined.contains("Env Vars"));
+    }
+
+    #[test]
+    fn env_modal_renders_empty_non_cursor_rows_with_placeholder() {
+        // An empty binding line that is NOT the cursor row renders with the "·"
+        // placeholder. Opening on an empty buffer gives one blank row (the cursor
+        // row); a newline then leaves row 0 empty and non-cursor (caret moves to
+        // row 1), exercising the else-if branch.
+        let mut config = config_with_open_env_modal(&[]);
+        config.env_modal_newline();
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("Env Vars"));
+        assert!(joined.contains("op://vault/item/field"));
+        assert!(joined.contains('·'));
+    }
+
+    /// A workspace-scoped config focused on the Session Labels row with the editor
+    /// open on an override of `count` distinct labels (id `l0`, `l1`, …).
+    fn config_with_open_session_labels_modal(count: usize) -> Config {
+        use crate::domain::settings::{
+            LabelColor, LocalSettings, SessionLabelDef, SessionLabelMaster,
+        };
+        let labels = (0..count)
+            .map(|i| SessionLabelDef {
+                id: format!("l{i}"),
+                name: format!("Label {i}"),
+                color: LabelColor::Gray,
+                icon: None,
+            })
+            .collect();
+        let local = LocalSettings {
+            session_labels: Some(SessionLabelMaster { labels }),
+            ..Default::default()
+        };
+        let mut config = Config::workspace(Settings::default(), local, Vec::new());
+        while config.selected_local_field() != Some(LocalField::SessionLabels) {
+            config.move_down();
+        }
+        config.open_session_labels_modal();
+        config
+    }
+
+    #[test]
+    fn session_labels_modal_keeps_a_constant_height_as_lines_are_added() {
+        let empty = render_frame(40, 80, &config_with_open_session_labels_modal(0), None);
+        let few = render_frame(40, 80, &config_with_open_session_labels_modal(2), None);
+        let full = render_frame(40, 80, &config_with_open_session_labels_modal(12), None);
+        assert_eq!(empty.len(), few.len());
+        assert_eq!(empty.len(), full.len());
+        assert_eq!(box_row_count(&empty), box_row_count(&few));
+        assert_eq!(box_row_count(&empty), box_row_count(&full));
+    }
+
+    #[test]
+    fn session_labels_modal_scrolls_to_keep_the_caret_row_visible() {
+        // The editor opens with the caret at the end, so with more labels than the
+        // window the last one stays rendered while the first scrolls out.
+        let config = config_with_open_session_labels_modal(10);
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("l9 | Label 9 | gray"));
+        assert!(!joined.contains("l0 | Label 0 | gray"));
+        assert!(joined.contains("Session Labels"));
+    }
+
+    #[test]
+    fn session_labels_modal_renders_empty_non_cursor_rows_with_placeholder() {
+        // A newline on an empty buffer leaves row 0 empty and non-cursor (the caret
+        // moves to row 1), exercising the placeholder branch.
+        let mut config = config_with_open_session_labels_modal(0);
+        config.session_labels_modal_newline();
+        let joined = render_frame(40, 80, &config, None).join("\n");
+        assert!(joined.contains("Session Labels"));
+        assert!(joined.contains("id | name | color | icon"));
+        assert!(joined.contains('·'));
     }
 }

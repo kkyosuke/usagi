@@ -227,6 +227,7 @@ fn event_loop_attaches_a_live_session_end_to_end() {
             session_action_ui: crate::domain::settings::SessionActionUi::Menu,
             key_scheme: crate::domain::settings::KeyScheme::default(),
             agent_cli: crate::domain::settings::AgentCli::default(),
+            ai_available: false,
         }))
     };
     let mut rename = |_: &str, _: &str| SessionOutcome {

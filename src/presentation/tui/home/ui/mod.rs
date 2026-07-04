@@ -23,12 +23,12 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
-    command_palette_body, footer_line, input_line, mode_ladder, quit_confirm_frame,
-    remove_modal_body, switch_create_rows, switch_rename_rows, tab_menu_box, tab_rename_body,
+    command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
+    quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
     task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    ENV_MODAL_INNER, FOCUS_MENU_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
-use panes::{group_inline_insert_line, left_pane, right_pane_contents};
+use panes::{focus_menu_body, group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use panes::{
     attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
@@ -271,10 +271,12 @@ pub(super) fn left_pane_session_at(
     }
     // The body's 0-based line under the click; `None` for the chrome above it.
     let line = row.checked_sub(CHROME_TOP_ROWS)?;
-    if line >= body_rows_for(height) {
+    let body_rows = body_rows_for(height);
+    if line >= body_rows {
         return None;
     }
-    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar())
+    let scroll = panes::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
+    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -309,6 +311,35 @@ pub fn attached_geometry(
 /// overlay), so the preview's scroll clamp agrees with what is actually drawn.
 fn body_rows_for(height: usize) -> usize {
     height.saturating_sub(5).max(1)
+}
+
+/// Frames each new rabbit takes to join the `usagi run 2`-style launch loader.
+const RUN2_LOADING_GROW: usize = 3;
+/// Keep the one-frame terminal / agent launch flash recognisably "run 2" even
+/// though the event loop paints it only once before spawning the PTY.
+const RUN2_LOADING_MIN_RABBITS: usize = 3;
+/// The gallery's `usagi run 2` animation tops out at eight rabbits.
+const RUN2_LOADING_MAX_RABBITS: usize = 8;
+
+/// The launch overlay body: the same multiplying-rabbit visual as
+/// `usagi run 2`, clamped to the right pane so narrow terminals degrade to fewer
+/// rabbits instead of dropping the indicator while at least one can fit.
+fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
+    let span = RUN2_LOADING_MAX_RABBITS - RUN2_LOADING_MIN_RABBITS + 1;
+    let mut count = RUN2_LOADING_MIN_RABBITS + (frame / RUN2_LOADING_GROW) % span;
+    while count > 0 {
+        let block = widgets::multiplying_rabbits(count);
+        let block_w = block
+            .iter()
+            .map(|line| console::measure_text_width(line))
+            .max()
+            .unwrap_or(0);
+        if block_w <= right_w {
+            return block;
+        }
+        count -= 1;
+    }
+    Vec::new()
 }
 
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
@@ -358,7 +389,10 @@ fn append_total_beside_mascot(rabbit: &mut [String], total: ResourceUsage, left_
     let needed =
         console::measure_text_width(&rabbit[feet]) + 2 + console::measure_text_width(&label);
     if needed <= left_w {
-        rabbit[feet].push_str(&format!("  {label}"));
+        // Append the gap and label in place; two `push_str`s avoid the throwaway
+        // `String` a `format!` would allocate on every paint that shows the total.
+        rabbit[feet].push_str("  ");
+        rabbit[feet].push_str(&label);
     }
 }
 
@@ -398,9 +432,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // there while browsing.
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // The left sidebar honours the `Ctrl-B` toggle in every mode — 切替 (Switch)
-    // included, so the picker works collapsed to the rail (the cursor `>` and the
-    // dimming still render there). 切替's inline create / rename name input needs
+    // The left sidebar honours the `Ctrl-B` toggle on every usagi surface — 切替
+    // (Switch) included, so the picker works collapsed to the rail (the cursor `>`
+    // and the dimming still render there). 切替's inline create / rename name needs
     // room: at full width it rides the left pane inline (below), but collapsed to
     // the rail there is none, so it moves to the right pane instead (see
     // [`right_pane_contents`]). The pool sizes the 切替 preview to this same state,
@@ -489,23 +523,33 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines.extend(input_lines);
     lines.push(footer_line(width, state));
 
-    // Overlay the top-right corner, in priority order: a momentary blocking
-    // action (terminal / agent launch) shows the loading rabbit; otherwise any
-    // in-flight background session work (create / remove) shows the task status
-    // line; otherwise a `◆ N waiting` notice appears while at least one session
-    // is waiting for the user's input. The loading rabbit anchors to the top of
-    // the right pane (the rows below the title bar and mode ladder); the task
-    // status and waiting notice ride the header rows. The "update available"
-    // notice is no longer a corner overlay — the sidebar mascot speaks it
-    // (above) instead.
+    // Overlay status affordances in priority order: a momentary blocking action
+    // (terminal / agent launch) shows the loading rabbit centred in the right
+    // pane; otherwise any in-flight background session work (create / remove)
+    // shows the task status line in the top-right corner; otherwise a `◆ N
+    // waiting` notice appears while at least one session is waiting for the
+    // user's input. The task status and waiting notice ride the header rows. The
+    // "update available" notice is no longer a corner overlay — the sidebar
+    // mascot speaks it (above) instead. The mascot also speaks the current
+    // loading / background-task label, so the left-bottom usagi explains what is
+    // happening even when the header is visually busy.
     if let Some(loading) = state.loading() {
-        // The transient launch indicator is deliberate and short-lived, so it
-        // takes the corner even over a live pane.
-        widgets::overlay_top_right(
+        let loading_block = launch_loading_block(loading.frame(), right_w);
+        // The transient terminal / agent launch indicator is deliberate and
+        // short-lived, so it shows even over a live pane. It uses the same
+        // multiplying-rabbit visual as `usagi run 2` and is floated in the
+        // **centre of the right pane** (the rows below the header, the columns
+        // right of the divider) rather than tucked into the top-right corner, so
+        // the multiplying usagi read as "this pane is coming up" right where the
+        // new terminal / agent is about to paint.
+        widgets::overlay_region_centered(
             &mut lines,
-            body_start,
             width,
-            &widgets::loading_rabbit(loading.frame(), loading.label()),
+            left_w + SEP_WIDTH,
+            right_w,
+            body_start,
+            body_rows,
+            &loading_block,
         );
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
@@ -529,6 +573,32 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         );
     }
 
+    // Float the 在席 (Focus) action menu as a box centred over the **right pane**
+    // (not the whole screen), so the session sidebar stays visible around it. It
+    // shows only when the menu surface is the active thing on screen (see
+    // [`HomeState::focus_menu_overlay`] — no loading indicator, open overlay, or
+    // `:` palette is up), so it never collides with those. The session identity
+    // rides the box title; the body is the header-less menu ([`focus_menu_body`]).
+    // On the "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank;
+    // over a pane tab (the zoomed-out-from-没入 state) the pane's live preview
+    // keeps showing behind the box, so zooming out never blanks the terminal.
+    if state.focus_menu_overlay() {
+        let inner = widgets::modal_inner_width(right_w, FOCUS_MENU_INNER);
+        let body = focus_menu_body(state, inner);
+        let title = format!("session: {}", state.focused_session_name());
+        widgets::overlay_region_modal(
+            &mut lines,
+            width,
+            left_w + SEP_WIDTH,
+            right_w,
+            body_start,
+            body_rows,
+            &title,
+            FOCUS_MENU_INNER,
+            &body,
+        );
+    }
+
     // Float the `:` command palette as a centred box over the assembled frame, so
     // the workspace shows around it instead of a black backdrop. A fixed-height
     // body (see [`command_palette_body`]) centred over a constant-height frame
@@ -538,6 +608,15 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         let inner = widgets::modal_inner_width(width, PALETTE_INNER);
         let body = command_palette_body(state, inner);
         widgets::overlay_modal(&mut lines, width, "Command", inner, &body);
+    }
+
+    // Float the workspace-env editor (`env`) over the palette, so editing the
+    // 1Password bindings stays in the Overview. Its body is a fixed height, so the
+    // box never resizes as bindings are added (no layout shift).
+    if let Some(editor) = state.env_editor() {
+        let inner = widgets::modal_inner_width(width, ENV_MODAL_INNER);
+        let body = env_editor_body(editor);
+        widgets::overlay_modal(&mut lines, width, "Env Vars", inner, &body);
     }
 
     // Float the text modal (a text-dumping command's output) as a centred box
@@ -595,12 +674,18 @@ fn left_column(
         state.waiting_paths(),
         state.done_paths(),
         state.resource_usages(),
+        state.label_master(),
         left_w,
         body_rows,
         // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
         state.mode() == Mode::Switch,
         sidebar,
         state.now(),
+        // While renaming, the selected session's name line is drawn as the inline
+        // editable label in place (full sidebar only; the rail uses the right pane).
+        state
+            .rename()
+            .map(|rename| (rename.value(), rename.cursor())),
     );
     if sidebar == Sidebar::Full {
         // While naming a new session in 切替, insert the inline create row(s) into
@@ -608,6 +693,10 @@ fn left_column(
         // session rows in the regular sidebar flow. In 統合(unite) mode this keeps
         // the "+ new" input attached to the workspace that `c` targets, instead
         // of drifting to another workspace or to the whole column's foot.
+        // The list may be scrolled when it outgrows the pane; the inline input's
+        // insert positions are full-column lines, so lift them into the windowed
+        // column `left_pane` returned by subtracting the same scroll offset.
+        let scroll = panes::sidebar_scroll(state.list(), true, body_rows);
         if let Some(create) = state.create() {
             // `left_pane` always draws the persistent "+ new session" affordance at
             // the list foot; while the input is open it *becomes* that input, so
@@ -615,23 +704,18 @@ fn left_column(
             let persistent = group_inline_insert_line(
                 state.list(),
                 state.list().group_count().saturating_sub(1),
-            );
-            if persistent < left.len() {
+            )
+            .checked_sub(scroll);
+            if let Some(persistent) = persistent.filter(|&p| p < left.len()) {
                 left.remove(persistent);
             }
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
-            place_create_rows(&mut left, state.list(), rows);
+            place_create_rows(&mut left, state.list(), rows, scroll);
             left.truncate(body_rows);
         }
-        // While renaming a session's sidebar label in 切替, append the inline rename
-        // row (trimmed back if it would overflow).
-        if let Some(rename) = state.rename() {
-            for row in switch_rename_rows(rename.target(), rename.value(), rename.cursor(), left_w)
-            {
-                left.push(row);
-            }
-            left.truncate(body_rows);
-        }
+        // The inline rename is not spliced here: unlike create (a *new* row), it
+        // edits the selected session's own name line, which `left_pane` renders in
+        // place from the `rename` argument above.
     }
     left
 }
@@ -656,7 +740,12 @@ fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
 /// inserting new rows. The follower's header therefore stays on the same screen
 /// line (no CLS). The last group has no lower workspace to protect, so it keeps
 /// the single-workspace behaviour and appends the input after that group.
-fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<String>) {
+fn place_create_rows(
+    column: &mut Vec<String>,
+    list: &WorktreeList,
+    rows: Vec<String>,
+    scroll: usize,
+) {
     // The create row lives at the foot of the last group, so a cursor resting on
     // it targets that group; every other cursor targets its own group.
     let group = if list.create_row_selected() {
@@ -664,7 +753,9 @@ fn place_create_rows(column: &mut Vec<String>, list: &WorktreeList, rows: Vec<St
     } else {
         list.selected_group()
     };
-    let line = group_inline_insert_line(list, group);
+    // Insert positions are full-column lines; the window may be scrolled, so pull
+    // them back into the visible column the caller passed.
+    let line = group_inline_insert_line(list, group).saturating_sub(scroll);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);
     } else {
@@ -730,11 +821,11 @@ fn place_mascot(
                 Some(reaction) => {
                     widgets::workspace_rabbit_reaction(reaction, state.mascot_reaction_phase())
                 }
-                None => match state.update() {
-                    Some(latest) => widgets::workspace_rabbit_speaking(
+                None => match mascot_speech(state) {
+                    Some(speech) => widgets::workspace_rabbit_speaking(
                         mood,
                         load,
-                        &["アップデートがあるぴょん".to_string(), format!("v{latest}")],
+                        &speech,
                         // Leave room for the indent so the bubble still fits the pane.
                         left_w - RABBIT_INDENT,
                         blinking,
@@ -782,6 +873,30 @@ fn place_mascot(
     } else {
         None
     }
+}
+
+/// The line(s) the left-bottom mascot should say this frame, in priority order.
+///
+/// Operational status wins over informational news: when a blocking action is in
+/// progress, the launch loader animates in the right pane while the mascot says
+/// the action's label; otherwise background session tasks (create / remove) are
+/// spoken from the same bubble that used to carry only update notices. Update
+/// availability remains the fallback when no active work needs explaining.
+fn mascot_speech(state: &HomeState) -> Option<Vec<String>> {
+    if let Some(loading) = state.loading() {
+        return Some(vec![loading.label().to_string()]);
+    }
+    if let Some(row) = state.tasks().first() {
+        let mut speech = vec![row.label.clone()];
+        let extra = state.tasks().len().saturating_sub(1);
+        if extra > 0 {
+            speech.push(format!("ほか {extra} 件"));
+        }
+        return Some(speech);
+    }
+    state
+        .update()
+        .map(|latest| vec!["アップデートがあるぴょん".to_string(), format!("v{latest}")])
 }
 
 /// The screen rectangle the sidebar mascot's clickable body occupies, in 0-based

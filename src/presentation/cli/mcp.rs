@@ -62,6 +62,14 @@ mod tests {
             Ok("queued".to_string())
         }
 
+        fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+            Ok("sent".to_string())
+        }
+
+        fn agent_is_live(&self, _worktree: &Path) -> bool {
+            false
+        }
+
         fn remove(
             &self,
             _workspace_root: &Path,
@@ -118,5 +126,21 @@ mod tests {
             FakeBackend.prompt(Path::new("/tmp/wt"), "do it").unwrap(),
             "queued"
         );
+    }
+
+    #[test]
+    fn fake_backend_send_returns_its_confirmation() {
+        // `session_prompt` in `live` mode reaches the backend's send delegate for
+        // an existing session, which needs a real worktree; cover it directly.
+        assert_eq!(
+            FakeBackend.send(Path::new("/tmp/wt"), "do it now").unwrap(),
+            "sent"
+        );
+    }
+
+    #[test]
+    fn fake_backend_reports_no_live_pane() {
+        // The fake has no agent state, so `auto` mode resolves to the launch queue.
+        assert!(!FakeBackend.agent_is_live(Path::new("/tmp/wt")));
     }
 }

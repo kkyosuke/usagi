@@ -155,6 +155,60 @@ pub fn event_loop(
             continue;
         }
 
+        // The workspace-env editor captures every key, the same way the
+        // setup-command editor does: Enter inserts a new binding line, Ctrl-S
+        // applies the buffer into the in-memory local settings (still requiring
+        // the main Save button to persist), and Esc cancels.
+        if config.env_modal().is_some() {
+            match key {
+                Key::Char('\u{0013}') => {
+                    config.apply_env_modal();
+                    notice = None;
+                }
+                Key::Enter => config.env_modal_newline(),
+                Key::Backspace => config.env_modal_backspace(),
+                Key::Del => config.env_modal_delete_forward(),
+                Key::ArrowLeft => config.env_modal_cursor_left(),
+                Key::ArrowRight => config.env_modal_cursor_right(),
+                Key::ArrowUp => config.env_modal_cursor_up(),
+                Key::ArrowDown => config.env_modal_cursor_down(),
+                Key::Home => config.env_modal_cursor_home(),
+                Key::End => config.env_modal_cursor_end(),
+                Key::Char(c) => config.env_modal_insert(c),
+                Key::Escape => config.close_env_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
+        // The session-label editor captures every key, the same way the setup /
+        // env editors do: Enter inserts a new label line, Ctrl-S applies the
+        // buffer into the in-memory local override (still requiring the main Save
+        // button to persist), and Esc cancels.
+        if config.session_labels_modal().is_some() {
+            match key {
+                Key::Char('\u{0013}') => {
+                    config.apply_session_labels_modal();
+                    notice = None;
+                }
+                Key::Enter => config.session_labels_modal_newline(),
+                Key::Backspace => config.session_labels_modal_backspace(),
+                Key::Del => config.session_labels_modal_delete_forward(),
+                Key::ArrowLeft => config.session_labels_modal_cursor_left(),
+                Key::ArrowRight => config.session_labels_modal_cursor_right(),
+                Key::ArrowUp => config.session_labels_modal_cursor_up(),
+                Key::ArrowDown => config.session_labels_modal_cursor_down(),
+                Key::Home => config.session_labels_modal_cursor_home(),
+                Key::End => config.session_labels_modal_cursor_end(),
+                Key::Char(c) => config.session_labels_modal_insert(c),
+                Key::Escape => config.close_session_labels_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         match key {
             Key::ArrowUp | Key::Char('k') => {
                 config.move_up();
@@ -172,12 +226,14 @@ pub fn event_loop(
             }
             Key::Char(' ') => {
                 // Space opens the install modal on the Local LLM install action,
-                // the model picker on the active model row, or the setup-command
-                // editor on its action row; each is a no-op off its own row, so
-                // calling all three is safe.
+                // the model picker on the active model row, or the setup-command /
+                // env editor on their action rows; each is a no-op off its own row,
+                // so calling all of them is safe.
                 config.open_install_modal();
                 config.open_model_modal();
                 config.open_setup_modal();
+                config.open_env_modal();
+                config.open_session_labels_modal();
                 notice = None;
             }
             Key::Enter => {
@@ -196,6 +252,12 @@ pub fn event_loop(
                 } else if config.setup_row_active() {
                     config.open_setup_modal();
                     notice = None;
+                } else if config.env_row_active() {
+                    config.open_env_modal();
+                    notice = None;
+                } else if config.session_labels_row_active() {
+                    config.open_session_labels_modal();
+                    notice = None;
                 } else {
                     notice = activate_field(&mut config, true);
                 }
@@ -212,7 +274,11 @@ pub fn event_loop(
 /// and the active model row have no value to cycle (both are driven by their
 /// modals), so arrows are a no-op there; otherwise the field's value is cycled.
 fn activate_field(config: &mut Config, forward: bool) -> Option<String> {
-    if config.local_llm_needs_install() || config.model_row_active() {
+    if config.local_llm_needs_install()
+        || config.model_row_active()
+        || config.env_row_active()
+        || config.session_labels_row_active()
+    {
         None
     } else {
         change_field(config, forward)
@@ -229,7 +295,7 @@ fn change_field(config: &mut Config, forward: bool) -> Option<String> {
     if config.cycle_selected(forward) {
         None
     } else {
-        Some("Nothing to choose from 🐰".to_string())
+        Some("Nothing to choose from 󰤇".to_string())
     }
 }
 
@@ -245,7 +311,7 @@ fn run_install(config: &mut Config, install_runtime: &mut InstallRuntime) -> Opt
     Some(match result {
         Ok(()) => {
             config.set_pending_install(PendingInstall::Runtime);
-            "ランタイムのインストールを開始しました 🐰".to_string()
+            "ランタイムのインストールを開始しました 󰤇".to_string()
         }
         Err(e) => format!("Install failed: {e}"),
     })
@@ -260,14 +326,14 @@ fn run_model_select(config: &mut Config, pull_model: &mut PullModel) -> Option<S
     if config.model_modal_selection_installed() {
         config.select_model(&model);
         config.close_model_modal();
-        return Some(format!("Using {model} 🐰"));
+        return Some(format!("Using {model} 󰤇"));
     }
     let result = pull_model(&model);
     config.close_model_modal();
     Some(match result {
         Ok(()) => {
             config.set_pending_install(PendingInstall::Model(model.clone()));
-            format!("{model} のインストールを開始しました 🐰")
+            format!("{model} のインストールを開始しました 󰤇")
         }
         Err(e) => format!("Install failed: {e}"),
     })
@@ -307,12 +373,12 @@ fn reflect_install(config: &mut Config, view: Option<&InstallView>) -> Option<St
 /// confirmation, a save error, or a hint when there is nothing to save.
 fn save_changes(config: &mut Config, save: &mut Save) -> Option<String> {
     if !config.is_dirty() {
-        return Some("No changes to save 🐰".to_string());
+        return Some("No changes to save 󰤇".to_string());
     }
     Some(match save(config.settings(), config.local()) {
         Ok(()) => {
             config.mark_saved();
-            "Saved 🐰".to_string()
+            "Saved 󰤇".to_string()
         }
         Err(e) => format!("Failed to save: {e}"),
     })

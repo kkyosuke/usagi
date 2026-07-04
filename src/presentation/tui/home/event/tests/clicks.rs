@@ -97,6 +97,19 @@ fn a_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
 }
 
 #[test]
+fn a_double_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
+    // Users may naturally double-click the action row in 在席 as they do for
+    // confirming session rows. The first click opens the create input and the
+    // second click is swallowed by that overlay, so creation still proceeds.
+    let mut inputs = vec![click(0, CREATE_ROW), click(0, CREATE_ROW)];
+    inputs.extend(typed("focus").into_iter().map(|key| key.map(Input::Key)));
+    inputs.push(Ok(Input::Key(Key::Enter)));
+    inputs.push(Ok(Input::Key(Key::CtrlC)));
+    let created = run_capturing_creates_for_inputs(inputs, focused_state());
+    assert_eq!(created, vec!["focus"]);
+}
+
+#[test]
 fn a_click_while_the_command_palette_is_open_is_ignored() {
     // With the `:` palette open the click is swallowed, so closing it (`Esc`) and
     // pressing `Enter` focuses the still-selected root row, not the clicked `feat`.
@@ -348,10 +361,11 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         Ok(Input::Key(Key::CtrlC)),
     ]);
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -360,6 +374,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -368,15 +383,16 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -385,6 +401,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -401,6 +418,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &TaskHandle::new(),
         &mut wiring,
@@ -457,10 +475,11 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     };
     let mut reader = InputReader::new(inputs);
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -469,6 +488,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -477,15 +497,16 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -494,6 +515,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -510,6 +532,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &TaskHandle::new(),
         &mut wiring,
@@ -610,10 +633,11 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             Ok(Input::Key(Key::CtrlC)),
         ]);
         let monitor = MonitorHandle::detached();
-        let mut persist: fn(&str) = noop_persist;
+        let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
         let mut create: fn(&Path, &str, u64) = |_, _, _| {};
         let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
         let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+        let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
         let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
         let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
         let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> =
@@ -623,6 +647,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut branches: fn() -> Vec<String> = no_branches;
         let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
         let mut open_url: fn(&str) = noop_open_url;
+        let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
         let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
         let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
         let mut tab_op = |_: &Path, _: Option<TabNav>| -> (Vec<String>, usize) {
@@ -631,15 +656,16 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut close: fn(&mut HomeState, &Path) = noop_close;
         let mut save_resume = |_: &str, _: ResumeLevel| {};
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
-        let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-            ready_chat_ask;
+        let mut chat_ask = ready_chat_ask;
         let mut wiring = Wiring {
             interaction_epoch: 0,
+            watch_sessions: false,
             workspace_root: Path::new("/ws"),
             persist: &mut persist,
             dispatch_create: &mut create,
             rename_display: &mut rename,
             set_note: &mut note,
+            set_label: &mut set_label_fake,
             reorder_session: &mut reorder,
             dispatch_remove: &mut remove,
             unite_resolve: &mut unite_resolve,
@@ -648,6 +674,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             existing_branches: &mut branches,
             open_terminal: &mut open,
             open_url: &mut open_url,
+            open_external_terminal: &mut open_external_terminal,
             open_config: &mut config,
             chat_ask: &mut chat_ask,
             preview: &mut preview,
@@ -665,6 +692,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
                 &monitor,
                 &UpdateHandle::new(),
                 &SessionsRefreshHandle::new(),
+                &OneShot::<bool>::new(),
                 &OneShot::<Vec<AgentCli>>::new(),
                 &TaskHandle::new(),
                 &mut wiring,

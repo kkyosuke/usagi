@@ -10,6 +10,8 @@
 //!
 //! [`TerminalPool`]: super::pool::TerminalPool
 
+use crate::domain::settings::AgentCli;
+
 /// What an embedded pane runs: the configured AI agent CLI, or a plain shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneKind {
@@ -20,14 +22,19 @@ pub enum PaneKind {
     Terminal,
 }
 
-/// Stable tab-label identity for a live pane: its kind plus a monotonically
-/// assigned creation id. Labels are emitted in pane order, but duplicate
-/// ordinals are derived from creation-id order so dragging tabs does not rename
-/// them.
+/// Stable tab-label identity for a live pane: its kind, the agent CLI it runs
+/// (for an agent pane), plus a monotonically assigned creation id. Labels are
+/// emitted in pane order, but duplicate ordinals are derived from creation-id
+/// order so dragging tabs does not rename them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneTab {
     /// What the pane runs.
     pub kind: PaneKind,
+    /// For an agent pane, which CLI it runs — so the tab reads `Claude` /
+    /// `Codex` / `sakana.ai` / `Gemini` rather than a bare `agent`. `None` for a
+    /// terminal pane (and defensively falls back to `agent` for an agent pane
+    /// with no recorded CLI).
+    pub cli: Option<AgentCli>,
     /// Monotonic id assigned when the pane is spawned/restored.
     pub id: u64,
 }
@@ -154,48 +161,56 @@ pub fn active_after_close(active: usize, len_before: usize) -> Option<usize> {
     Some(active.min(new_len - 1))
 }
 
-/// One label per pane, in pane order: `agent` / `terminal`, with a 1-based
-/// ordinal appended only when a kind appears more than once (`terminal 1`,
-/// `terminal 2`) so duplicate tabs stay distinguishable while a lone tab reads
-/// cleanly. Duplicate ordinals are assigned by stable creation id, not current
-/// tab-strip order, so reordering tabs does not rename the panes.
+/// One label per pane, in pane order: an agent pane by its CLI display name
+/// (`Claude` / `Codex` / `sakana.ai` / `Gemini`), a plain shell as `terminal`,
+/// with a 1-based ordinal appended only when a label word appears more than once
+/// (`terminal 1`, `terminal 2`, or `Claude 1`, `Claude 2`) so duplicate tabs
+/// stay distinguishable while a lone tab reads cleanly. Ordinals are grouped by
+/// label word — a Claude and a Codex tab are each unique and stay bare — and
+/// assigned by stable creation id, not current tab-strip order, so reordering
+/// tabs does not rename the panes.
 pub fn tab_labels(panes: &[PaneTab]) -> Vec<String> {
-    let agent_ordinals = ordinals_for_kind(panes, PaneKind::Agent);
-    let terminal_ordinals = ordinals_for_kind(panes, PaneKind::Terminal);
-    let agent_total = agent_ordinals
-        .iter()
-        .filter(|&&ordinal| ordinal > 0)
-        .count();
-    let terminal_total = terminal_ordinals
-        .iter()
-        .filter(|&&ordinal| ordinal > 0)
-        .count();
-
-    panes
-        .iter()
-        .enumerate()
-        .map(|(index, pane)| match pane.kind {
-            PaneKind::Agent => label("agent", agent_ordinals[index], agent_total),
-            PaneKind::Terminal => label("terminal", terminal_ordinals[index], terminal_total),
-        })
+    // The base word for each pane, before numbering (agents differ by CLI, so a
+    // Claude and a Codex tab fall into separate groups).
+    let words: Vec<&str> = panes.iter().map(pane_word).collect();
+    let (ordinals, totals) = ordinals_by_word(panes, &words);
+    (0..panes.len())
+        .map(|index| label(words[index], ordinals[index], totals[index]))
         .collect()
 }
 
-/// A sparse vector keyed by pane index: entries for `kind` hold their 1-based
-/// ordinal in creation-id order, and entries for other kinds stay 0.
-fn ordinals_for_kind(panes: &[PaneTab], kind: PaneKind) -> Vec<usize> {
-    let mut by_creation: Vec<(usize, u64)> = panes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, pane)| (pane.kind == kind).then_some((index, pane.id)))
-        .collect();
-    by_creation.sort_by_key(|(index, id)| (*id, *index));
-
-    let mut ordinals = vec![0; panes.len()];
-    for (ordinal, (index, _)) in by_creation.into_iter().enumerate() {
-        ordinals[index] = ordinal + 1;
+/// The label word a pane groups under: an agent pane by its CLI display name
+/// (falling back to `agent` when no CLI is recorded), a terminal pane as
+/// `terminal`.
+fn pane_word(pane: &PaneTab) -> &'static str {
+    match pane.kind {
+        PaneKind::Agent => pane.cli.map_or("agent", AgentCli::display_name),
+        PaneKind::Terminal => "terminal",
     }
-    ordinals
+}
+
+/// Two vectors keyed by pane index: each pane's 1-based ordinal within its label
+/// word (in creation-id order) and the size of that word's group. A word with a
+/// single member gets ordinal 1 / total 1 so [`label`] renders it bare.
+fn ordinals_by_word(panes: &[PaneTab], words: &[&str]) -> (Vec<usize>, Vec<usize>) {
+    let mut ordinals = vec![0; panes.len()];
+    let mut totals = vec![0; panes.len()];
+    let mut distinct: Vec<&str> = Vec::new();
+    for &word in words {
+        if !distinct.contains(&word) {
+            distinct.push(word);
+        }
+    }
+    for word in distinct {
+        let mut members: Vec<usize> = (0..panes.len()).filter(|&i| words[i] == word).collect();
+        members.sort_by_key(|&i| (panes[i].id, i));
+        let total = members.len();
+        for (ordinal, index) in members.into_iter().enumerate() {
+            ordinals[index] = ordinal + 1;
+            totals[index] = total;
+        }
+    }
+    (ordinals, totals)
 }
 
 /// `word` on its own when it is the only pane of its kind, or `word N`
@@ -343,40 +358,89 @@ mod tests {
     }
 
     #[test]
-    fn labels_stay_bare_when_a_kind_is_unique() {
+    fn labels_name_an_agent_by_its_cli_and_stay_bare_when_unique() {
         let labels = tab_labels(&[
             PaneTab {
                 kind: PaneKind::Agent,
+                cli: Some(AgentCli::Claude),
                 id: 1,
             },
             PaneTab {
                 kind: PaneKind::Terminal,
+                cli: None,
                 id: 2,
             },
         ]);
-        assert_eq!(labels, vec!["agent".to_string(), "terminal".to_string()]);
+        assert_eq!(
+            labels,
+            vec!["Claude".to_string(), "terminal".to_string()],
+            "the lone agent reads as its CLI name; the lone terminal stays bare"
+        );
     }
 
     #[test]
-    fn labels_number_duplicates_of_a_kind() {
+    fn labels_keep_different_cli_agents_bare_and_distinct() {
         let labels = tab_labels(&[
             PaneTab {
                 kind: PaneKind::Agent,
+                cli: Some(AgentCli::Claude),
                 id: 1,
             },
             PaneTab {
-                kind: PaneKind::Terminal,
+                kind: PaneKind::Agent,
+                cli: Some(AgentCli::CodexFugu),
                 id: 2,
             },
             PaneTab {
                 kind: PaneKind::Terminal,
+                cli: None,
                 id: 3,
             },
         ]);
         assert_eq!(
             labels,
             vec![
-                "agent".to_string(),
+                "Claude".to_string(),
+                "sakana.ai".to_string(),
+                "terminal".to_string(),
+            ],
+            "distinct agent CLIs are each their own group, so all stay bare"
+        );
+    }
+
+    #[test]
+    fn labels_fall_back_to_agent_without_a_recorded_cli() {
+        let labels = tab_labels(&[PaneTab {
+            kind: PaneKind::Agent,
+            cli: None,
+            id: 1,
+        }]);
+        assert_eq!(labels, vec!["agent".to_string()]);
+    }
+
+    #[test]
+    fn labels_number_duplicates_of_a_word() {
+        let labels = tab_labels(&[
+            PaneTab {
+                kind: PaneKind::Agent,
+                cli: Some(AgentCli::Claude),
+                id: 1,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                cli: None,
+                id: 2,
+            },
+            PaneTab {
+                kind: PaneKind::Terminal,
+                cli: None,
+                id: 3,
+            },
+        ]);
+        assert_eq!(
+            labels,
+            vec![
+                "Claude".to_string(),
                 "terminal 1".to_string(),
                 "terminal 2".to_string(),
             ],
@@ -385,18 +449,42 @@ mod tests {
     }
 
     #[test]
+    fn labels_number_same_cli_agents() {
+        let labels = tab_labels(&[
+            PaneTab {
+                kind: PaneKind::Agent,
+                cli: Some(AgentCli::Claude),
+                id: 1,
+            },
+            PaneTab {
+                kind: PaneKind::Agent,
+                cli: Some(AgentCli::Claude),
+                id: 2,
+            },
+        ]);
+        assert_eq!(
+            labels,
+            vec!["Claude 1".to_string(), "Claude 2".to_string()],
+            "two agents of the same CLI are numbered within their word group"
+        );
+    }
+
+    #[test]
     fn labels_keep_duplicate_ordinals_after_reordering_tabs() {
         let labels = tab_labels(&[
             PaneTab {
                 kind: PaneKind::Terminal,
+                cli: None,
                 id: 7,
             },
             PaneTab {
                 kind: PaneKind::Terminal,
+                cli: None,
                 id: 2,
             },
             PaneTab {
                 kind: PaneKind::Terminal,
+                cli: None,
                 id: 5,
             },
         ]);

@@ -25,6 +25,15 @@ pub struct McpServer {
     repo: PathBuf,
 }
 
+/// An issue rendered as a ready-to-run agent prompt (see
+/// [`McpServer::render_prompt`]): the issue's number and title plus the prompt
+/// text fed to a session's agent.
+pub(crate) struct RenderedPrompt {
+    pub number: u32,
+    pub title: String,
+    pub prompt: String,
+}
+
 impl McpServer {
     /// Build a server operating on the repository at `repo`.
     pub fn new(repo: impl AsRef<Path>) -> Self {
@@ -69,26 +78,36 @@ impl McpServer {
 
     fn tool_to_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: NumberArgs = parse_args(arguments)?;
-        match issue::get(&self.repo, args.number).map_err(|e| e.to_string())? {
-            Some(issue) => Ok(to_pretty(&json!({
-                "number": issue.number,
-                "title": issue.title,
-                "prompt": issue::to_prompt(&issue),
-            }))),
-            None => Err(format!("no issue #{}", args.number)),
-        }
+        let rendered = self.render_prompt(args.number)?;
+        Ok(to_pretty(&json!({
+            "number": rendered.number,
+            "title": rendered.title,
+            "prompt": rendered.prompt,
+        })))
     }
 
-    fn tool_list(&self, arguments: Value) -> Result<String, String> {
-        let args: FilterArgs = parse_args(arguments)?;
-        let items = issue::list(&self.repo, &args.filter()).map_err(|e| e.to_string())?;
-        Ok(to_pretty(&listed_views(&items)))
+    /// Render issue `number` as a ready-to-run agent prompt, returning it as typed
+    /// fields (not JSON text). Shared by the `issue_to_prompt` tool and the unified
+    /// server's `session_delegate_issue`, so the composite can delegate an issue
+    /// without parsing this tool's serialized output back out. Errors if the issue
+    /// does not exist.
+    pub(crate) fn render_prompt(&self, number: u32) -> Result<RenderedPrompt, String> {
+        match issue::get(&self.repo, number).map_err(|e| e.to_string())? {
+            Some(issue) => Ok(RenderedPrompt {
+                number: issue.number,
+                title: issue.title.clone(),
+                prompt: issue::to_prompt(&issue),
+            }),
+            None => Err(format!("no issue #{number}")),
+        }
     }
 
     fn tool_search(&self, arguments: Value) -> Result<String, String> {
         let SearchArgs { query, filter } = parse_args(arguments)?;
-        let items =
-            issue::search(&self.repo, &query, &filter.filter()).map_err(|e| e.to_string())?;
+        // An omitted `query` lists every issue: an empty needle matches all, so
+        // one code path (`search`) subsumes what a separate `list` tool would do.
+        let items = issue::search(&self.repo, query.as_deref().unwrap_or(""), &filter.filter())
+            .map_err(|e| e.to_string())?;
         Ok(to_pretty(&listed_views(&items)))
     }
 
@@ -129,7 +148,6 @@ impl McpService for McpServer {
             "issue_create" => self.tool_create(arguments),
             "issue_get" => self.tool_get(arguments),
             "issue_to_prompt" => self.tool_to_prompt(arguments),
-            "issue_list" => self.tool_list(arguments),
             "issue_search" => self.tool_search(arguments),
             "issue_update" => self.tool_update(arguments),
             "issue_delete" => self.tool_delete(arguments),
@@ -168,9 +186,8 @@ struct NumberArgs {
     number: u32,
 }
 
-/// The shared issue filter accepted by both `issue_list` and (flattened into)
-/// `issue_search`, so the filter fields and their mapping to [`IssueFilter`] are
-/// defined once.
+/// The filter fields `issue_search` accepts (flattened into its args), and their
+/// mapping to [`IssueFilter`], defined once.
 #[derive(Deserialize)]
 struct FilterArgs {
     #[serde(default)]
@@ -202,7 +219,10 @@ impl FilterArgs {
 
 #[derive(Deserialize)]
 struct SearchArgs {
-    query: String,
+    /// Absent lists every issue (an empty needle matches all); present filters by
+    /// a full-text match. Optional so the one search tool subsumes a plain list.
+    #[serde(default)]
+    query: Option<String>,
     #[serde(flatten)]
     filter: FilterArgs,
 }

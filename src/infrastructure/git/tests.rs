@@ -149,6 +149,82 @@ fn default_branch_falls_back_to_main_when_detached() {
 }
 
 #[test]
+fn integration_base_prefers_the_remote_default() {
+    let (_tmp, work) = repo_with_remote();
+    let base = integration_base(&work);
+    assert_eq!(base.default, "main");
+    // origin/HEAD resolves, so sessions are measured against the remote ref.
+    assert_eq!(base.base, "origin/main");
+}
+
+#[test]
+fn integration_base_falls_back_to_the_local_branch_without_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let base = integration_base(dir.path());
+    // No origin/HEAD: the checked-out branch is used for both, so no
+    // `origin/<default>` probe is ever attempted for this repo's worktrees.
+    assert_eq!(base.default, "main");
+    assert_eq!(base.base, "main");
+}
+
+#[test]
+fn integration_base_falls_back_to_main_when_detached_without_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["checkout", "-q", "--detach"]);
+    // Detached HEAD and no remote: the hard-coded `main` fallback applies to
+    // both the name and the base.
+    let base = integration_base(dir.path());
+    assert_eq!(base.default, "main");
+    assert_eq!(base.base, "main");
+}
+
+#[test]
+fn ahead_behind_against_uses_the_base_ref_verbatim() {
+    let (_tmp, work) = repo_with_remote();
+    // Given an already-resolved base, the count is taken against it directly —
+    // `origin/main` here, matching what `integration_base` resolves for a remote
+    // repo. main is even with itself.
+    assert_eq!(
+        ahead_behind_against(&work, "main", "origin/main"),
+        Some((0, 0))
+    );
+
+    // A local base is used as given, with no `origin/` prepended: a feature
+    // branch one commit ahead of the local `main`.
+    let local = tempfile::tempdir().unwrap();
+    init_repo(local.path());
+    run(local.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(local.path().join("g"), "y").unwrap();
+    run(local.path(), &["add", "."]);
+    run(local.path(), &["commit", "-q", "-m", "ahead"]);
+    assert_eq!(
+        ahead_behind_against(local.path(), "feature", "main"),
+        Some((1, 0))
+    );
+    // A base that does not resolve yields None (no fallback probe).
+    assert_eq!(
+        ahead_behind_against(local.path(), "feature", "origin/main"),
+        None
+    );
+}
+
+#[test]
+fn diff_stat_against_measures_against_the_given_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    run(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.path().join("new.txt"), "a\nb\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "work"]);
+    // The base is used verbatim: +2 against local `main`.
+    assert_eq!(diff_stat_against(dir.path(), "main"), Some((2, 0)));
+    // An unresolved base yields None rather than probing an alternative.
+    assert_eq!(diff_stat_against(dir.path(), "origin/main"), None);
+}
+
+#[test]
 fn ahead_behind_counts_against_local_and_remote() {
     let (_tmp, work) = repo_with_remote();
     // origin/main exists, so the remote ref is used as the target. main is
@@ -228,6 +304,56 @@ fn diff_stat_measures_against_the_remote_default_and_returns_none_for_an_unknown
 
     // A default that resolves to no ref at all has no merge-base → None.
     assert_eq!(diff_stat(&work, "does-not-exist"), None);
+}
+
+#[test]
+fn diff_text_returns_the_patch_against_the_merge_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // Cut feature off main, then advance main past the merge-base to prove the
+    // patch is taken against the merge-base (main's later work must not appear).
+    run(dir.path(), &["branch", "feature"]);
+    std::fs::write(dir.path().join("main-only.txt"), "x\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "main moves on"]);
+
+    run(dir.path(), &["checkout", "-q", "feature"]);
+    std::fs::write(dir.path().join("a.txt"), "1\n2\n").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-q", "-m", "feature work"]);
+
+    let patch = diff_text(dir.path(), "main").unwrap();
+    // The feature's own file appears as an addition; main's later file does not.
+    assert!(patch.contains("a.txt"), "patch: {patch}");
+    assert!(patch.contains("+1"), "patch: {patch}");
+    assert!(!patch.contains("main-only.txt"), "patch: {patch}");
+}
+
+#[test]
+fn diff_text_is_empty_for_no_changes_and_none_for_an_unknown_base() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+
+    // On the default branch itself with a clean tree: the base resolves but the
+    // diff is empty — `Some("")`, distinct from a missing base.
+    assert_eq!(diff_text(dir.path(), "main").as_deref(), Some(""));
+
+    // A base that resolves to no ref at all → None (neither `origin/…` nor local).
+    assert_eq!(diff_text(dir.path(), "does-not-exist"), None);
+}
+
+#[test]
+fn diff_text_measures_against_the_remote_default() {
+    let (_tmp, work) = repo_with_remote();
+    // origin/main exists, so the diff is taken against the remote default (the
+    // first branch of `diff_text`'s `or_else`), matching `diff_stat`.
+    run(&work, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(work.join("n.txt"), "a\n").unwrap();
+    run(&work, &["add", "."]);
+    run(&work, &["commit", "-q", "-m", "one line"]);
+    let patch = diff_text(&work, "main").unwrap();
+    assert!(patch.contains("n.txt"), "patch: {patch}");
 }
 
 #[test]
@@ -393,6 +519,59 @@ fn ensure_excluded_is_idempotent_and_preserves_existing_content() {
 fn ensure_excluded_errors_outside_a_git_worktree() {
     let plain = tempfile::tempdir().unwrap();
     assert!(ensure_excluded(plain.path(), "/x").is_err());
+}
+
+#[test]
+fn ensure_all_excluded_appends_every_missing_pattern_in_one_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let exclude = dir.path().join(".git/info/exclude");
+    std::fs::write(&exclude, "# existing\n/.claude/skills/a\n").unwrap();
+
+    // Two of these are new; the middle one already present is left as-is.
+    ensure_all_excluded(
+        dir.path(),
+        &[
+            "/.claude/skills/a",
+            "/.claude/skills/b",
+            "/.claude/skills/c",
+        ],
+    )
+    .unwrap();
+
+    let content = std::fs::read_to_string(&exclude).unwrap();
+    for pattern in [
+        "/.claude/skills/a",
+        "/.claude/skills/b",
+        "/.claude/skills/c",
+    ] {
+        assert_eq!(content.lines().filter(|l| *l == pattern).count(), 1);
+    }
+    assert!(content.contains("# existing"));
+
+    // A repeat run with the same set is a no-op (nothing further appended).
+    let before = std::fs::read_to_string(&exclude).unwrap();
+    ensure_all_excluded(dir.path(), &["/.claude/skills/a", "/.claude/skills/b"]).unwrap();
+    assert_eq!(std::fs::read_to_string(&exclude).unwrap(), before);
+}
+
+#[test]
+fn ensure_all_excluded_is_a_noop_for_no_patterns() {
+    // No patterns means no work — and, notably, no git call, so this succeeds even
+    // outside a git worktree.
+    let plain = tempfile::tempdir().unwrap();
+    assert!(ensure_all_excluded(plain.path(), &[]).is_ok());
+}
+
+#[test]
+fn git_common_dir_resolves_inside_a_repo_and_is_none_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    let common = git_common_dir(dir.path()).expect("a repo has a common dir");
+    assert!(common.ends_with(".git"));
+
+    let plain = tempfile::tempdir().unwrap();
+    assert!(git_common_dir(plain.path()).is_none());
 }
 
 #[test]

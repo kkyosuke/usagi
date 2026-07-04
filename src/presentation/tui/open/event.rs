@@ -334,6 +334,40 @@ mod tests {
     }
 
     #[test]
+    fn unite_space_selects_the_cursor_row_after_filtering() {
+        // Switching to the Unite tab with `→`, narrowing with a filter, then
+        // `Space` selects (checks) the filtered cursor row — `Space` must reach
+        // the unite toggle, never the search filter. `Enter` opens the checked set.
+        let term = Term::stdout();
+        let mut reader = ScriptedReader::new(vec![
+            Ok(Key::ArrowRight), // Single -> Unite tab, nothing checked yet
+            Ok(Key::Char('b')),  // filter down to "beta"
+            Ok(Key::Char(' ')),  // Space selects the filtered cursor row
+            Ok(Key::Enter),      // open the checked set
+            Ok(Key::Escape),
+        ]);
+        let mut opened: Vec<Vec<String>> = Vec::new();
+        let mut open = |_t: &Term, ws: &[Workspace]| {
+            opened.push(ws.iter().map(|w| w.name.clone()).collect());
+            Ok(home::Outcome::Back)
+        };
+        let mut exists: fn(&Path) -> bool = exists_true;
+        let mut remove: fn(&str) -> Result<()> = remove_ok;
+        let mut actions = present_actions(&mut exists, &mut remove);
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            sample_list(),
+            None,
+            &mut open,
+            &mut actions,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        assert_eq!(opened, vec![vec!["beta".to_string()]]);
+    }
+
+    #[test]
     fn ctrl_c_returns_quit() {
         assert!(matches!(
             run(vec![Ok(Key::CtrlC)], sample_list()).unwrap(),

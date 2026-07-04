@@ -49,6 +49,23 @@ fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
 }
 
 #[test]
+fn switch_manual_status_keys_run_through_the_compat_loop() {
+    // Tab / Shift-Tab / digit / 0 on a session row drive the manual-status label
+    // through the compat-shim wiring (a no-op persist), covering the switch_key
+    // branches and the shim's `set_label` hook end to end. `sample_state` opens
+    // with the default (non-empty) label master, so the keys are live.
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::ArrowDown)); // cursor onto a session row
+    keys.push(Ok(Key::Tab)); // cycle forward
+    keys.push(Ok(Key::BackTab)); // cycle backward
+    keys.push(Ok(Key::Char('1'))); // select the first label
+    keys.push(Ok(Key::Char('0'))); // clear
+    keys.push(Ok(Key::CtrlC));
+    assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
 fn switch_ctrl_c_quits() {
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
@@ -292,26 +309,24 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
 }
 
 #[test]
-fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
+fn switch_ctrl_a_launches_agent_for_the_highlighted_session() {
     // `console` decodes Ctrl-A as `Key::Home`. In the base Switch list that has
-    // no caret to move, so the key is an IME-safe alias for `c` (create): a
-    // Japanese IME may compose bare `c`, but the control chord still reaches
-    // usagi. Once the inline input is open, Home keeps its normal caret meaning.
+    // no caret to move, so the key is an IME-safe alias for `a` (agent): a
+    // Japanese IME may compose bare `a`, but the control chord still reaches
+    // usagi. The action targets the currently highlighted session, matching
+    // Enter / `t` rather than falling back to the active/root row.
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
-    keys.push(Ok(Key::Home)); // Ctrl-A alias -> begin create
-    keys.extend(typed("Xwip"));
-    keys.push(Ok(Key::Home)); // inside create: caret to start
-    keys.push(Ok(Key::Del)); // delete the stray X, proving Home was not re-triggering create
-    keys.push(Ok(Key::End));
-    keys.push(Ok(Key::Enter)); // confirm -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    let created = RefCell::new(Vec::new());
-    let mut create = |name: &str| {
-        created.borrow_mut().push(name.to_string());
-        noop_create(name)
+    keys.push(Ok(Key::ArrowDown)); // highlight "main"
+    keys.push(Ok(Key::Home)); // Ctrl-A alias -> launch agent for "main"
+    keys.push(Ok(Key::Escape)); // Focus -> Switch after the pane closes
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    let opened = RefCell::new(None);
+    let mut open = |_h: &mut HomeState, d: &Path, agent: bool, new_pane: bool| {
+        *opened.borrow_mut() = Some((d.to_path_buf(), agent, new_pane));
+        Ok(PaneExit::Closed)
     };
-    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -325,7 +340,10 @@ fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*created.borrow(), vec!["wip"]);
+    assert_eq!(
+        *opened.borrow(),
+        Some((PathBuf::from("/r/main"), true, true))
+    );
 }
 
 #[test]
@@ -460,6 +478,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             name: "feat".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/ws/.usagi/sessions/feat"),
             worktrees: vec![worktree(Some("feat"), "/ws/feat")],
             created_at: Utc::now(),
@@ -469,6 +488,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
             name: "main".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/ws/.usagi/sessions/main"),
             worktrees: vec![worktree(Some("main"), "/ws/main")],
             created_at: Utc::now(),

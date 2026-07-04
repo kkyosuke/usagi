@@ -52,6 +52,7 @@ fn render_frame_removal_modal_prefixes_rows_in_unite_mode() {
             name: "beta".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/ws/tools/.usagi/sessions/beta"),
             worktrees: Vec::new(),
             created_at: Utc::now(),

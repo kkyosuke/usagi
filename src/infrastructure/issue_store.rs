@@ -106,9 +106,11 @@ impl IssueStore {
     /// (whose target file is already persisted by the time the index rebuilds) or
     /// break `issue list` — the index simply rebuilds from the files that parse,
     /// mirroring how [`load_index`](Self::load_index) self-heals a corrupt cache.
-    /// The strict [`scan`](Self::scan) stays the choice where every issue must be
-    /// readable (e.g. the dependency graph).
-    fn scan_lenient(&self) -> Result<Vec<Issue>> {
+    /// Full-text `issue search` uses it too, so one unparseable file yields partial
+    /// results instead of failing the whole query. The strict [`scan`](Self::scan)
+    /// stays the choice where every issue must be readable (e.g. the dependency
+    /// graph).
+    pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
         use rayon::prelude::*;
 
         let parsed: Vec<(PathBuf, Result<Issue>)> = self
@@ -130,7 +132,7 @@ impl IssueStore {
             match issue {
                 Ok(issue) => issues.push(issue),
                 Err(e) => ErrorLog::record(&format!(
-                    "skipping unparseable issue file {} while rebuilding the index: {e:#}",
+                    "skipping unparseable issue file {}: {e:#}",
                     path.display()
                 )),
             }
@@ -229,8 +231,65 @@ impl IssueStore {
             }
         }
 
-        self.rebuild_index()?;
+        self.reindex_after_write(issue)
+    }
+
+    /// Refresh `index.json` to reflect `issue` having just been written, patching
+    /// only its entry instead of re-reading and re-parsing every markdown file.
+    ///
+    /// A full [`rebuild_index`](Self::rebuild_index) on every write costs O(all
+    /// issues) file reads + parses while the store lock is held — so a single
+    /// `issue update` against a repository with hundreds of issues stalls every
+    /// other writer for the whole scan. The write already carries the new `issue`,
+    /// so its summary can be spliced into the cached, number-sorted list directly.
+    /// When the cache is missing or unreadable there is nothing to patch, so it
+    /// falls back to a full rebuild (self-healing, matching [`summaries`]).
+    ///
+    /// [`summaries`]: Self::summaries
+    fn reindex_after_write(&self, issue: &Issue) -> Result<()> {
+        let Some(mut issues) = self.load_index()?.map(|index| index.issues) else {
+            self.rebuild_index()?;
+            return Ok(());
+        };
+        // The cache is number-sorted (rebuilt from `scan_lenient`, which sorts by
+        // number), so a binary search finds either the entry to replace (title /
+        // status edit) or the slot to insert a new number at, keeping it sorted.
+        let summary = issue.summary();
+        match issues.binary_search_by_key(&issue.number, |s| s.number) {
+            Ok(pos) => issues[pos] = summary,
+            Err(pos) => issues.insert(pos, summary),
+        }
+        self.write_index(&issues)
+    }
+
+    /// Refresh `index.json` after the issue numbered `number` was removed, dropping
+    /// only its entry rather than rebuilding from every markdown file (see
+    /// [`reindex_after_write`](Self::reindex_after_write) for why). A missing or
+    /// unreadable cache falls back to a full rebuild; a cache that never listed the
+    /// number is already consistent with the removal, so it is left untouched.
+    fn reindex_after_remove(&self, number: u32) -> Result<()> {
+        let Some(mut issues) = self.load_index()?.map(|index| index.issues) else {
+            self.rebuild_index()?;
+            return Ok(());
+        };
+        if let Ok(pos) = issues.binary_search_by_key(&number, |s| s.number) {
+            issues.remove(pos);
+            self.write_index(&issues)?;
+        }
         Ok(())
+    }
+
+    /// Write the number-sorted `summaries` to `index.json` as the derived cache.
+    /// The cache is rebuildable from the markdown source of truth, so it is written
+    /// atomically but without an fsync (see [`json_file::write_atomic_cache`]).
+    fn write_index(&self, summaries: &[IssueSummary]) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .context(format!("failed to create {}", self.dir.display()))?;
+        let index = IndexFileRef {
+            version: json_file::FILE_FORMAT_VERSION,
+            issues: summaries,
+        };
+        json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)
     }
 
     /// Remove the issue with `number`, returning whether anything was deleted,
@@ -244,20 +303,76 @@ impl IssueStore {
         for file in files {
             fs::remove_file(&file).context(format!("failed to remove {}", file.display()))?;
         }
-        self.rebuild_index()?;
+        self.reindex_after_remove(number)?;
         Ok(true)
     }
 
     /// Metadata summaries for every issue.
     ///
-    /// Uses `index.json` when it is present and parseable; otherwise it rebuilds
-    /// the index from the markdown files (self-healing on a missing or corrupt
-    /// cache).
+    /// Uses `index.json` when it is present, parseable, and **fresh** with
+    /// respect to the markdown files; otherwise it rebuilds the index from the
+    /// files (self-healing on a missing, corrupt, or stale cache).
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
-        match self.load_index()? {
+        match self.load_fresh_index()? {
             Some(index) => Ok(index.issues),
             None => self.rebuild_index(),
         }
+    }
+
+    /// Load `index.json` only when it is *fresh* relative to the markdown files,
+    /// returning `None` when it is missing, unreadable, or stale (so the caller
+    /// rebuilds from the source of truth).
+    ///
+    /// The cache is a derived local file that usagi refreshes only through its
+    /// own [`write`](Self::write) / [`remove`](Self::remove) path. Issue files
+    /// can also change *outside* usagi — a `git pull`, a branch switch, a
+    /// session branch merge, or a hand edit — which leaves the cache lagging
+    /// behind the markdown source of truth. [`max_number`](Self::max_number)
+    /// already refuses to trust the cache for exactly this reason; `summaries`
+    /// (and thus `issue list`) must be equally defensive, or it returns stale
+    /// status/metadata that [`read`](Self::read) (`issue get`) does not.
+    ///
+    /// Freshness is checked cheaply — one `stat` of the index plus the directory
+    /// listing [`issue_files`](Self::issue_files) already performs, without
+    /// reading or parsing any markdown:
+    ///
+    /// - a different count of backing files than cached entries means issues
+    ///   were added or removed on disk outside usagi;
+    /// - any issue file newer than the index means an edit landed after the last
+    ///   cache refresh.
+    ///
+    /// usagi's own [`write_locked`](Self::write_locked) writes the markdown file
+    /// *then* the index, so a normally-managed store keeps an index at least as
+    /// new as every issue file and stays on this stat-only fast path. The one
+    /// gap the mtime check cannot see is an in-place edit within the same
+    /// filesystem-timestamp tick as the last index write; such near-simultaneous
+    /// writes come only from usagi itself (which refreshes the cache as part of
+    /// the same operation), not from the external tools this guards against.
+    fn load_fresh_index(&self) -> Result<Option<IndexFile>> {
+        // Stat the cache before reading it: a cache that cannot be dated cannot
+        // be freshness-checked, so there is no point parsing it. (A missing
+        // index lands here too, skipping the read that would find it gone.)
+        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
+            return Ok(None);
+        };
+        let Some(index) = self.load_index()? else {
+            return Ok(None);
+        };
+        let files = self.issue_files()?;
+        if files.len() != index.issues.len() {
+            return Ok(None);
+        }
+        for path in &files {
+            // A file whose mtime can't be read is treated as stale so an
+            // unreadable entry forces a rebuild rather than trusting the cache.
+            let fresh = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|mtime| mtime <= index_mtime);
+            if !fresh {
+                return Ok(None);
+            }
+        }
+        Ok(Some(index))
     }
 
     /// Load `index.json`, returning `None` when it is missing or unreadable (so
@@ -296,16 +411,10 @@ impl IssueStore {
             // Nothing stored and no directory yet: don't create files eagerly.
             return Ok(summaries);
         }
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-        let index = IndexFileRef {
-            version: json_file::FILE_FORMAT_VERSION,
-            issues: &summaries,
-        };
-        // The canonical "pretty JSON + trailing newline, written atomically" path
-        // lives in `json_file::write_atomic`; reuse it rather than re-implementing
-        // the serialise-and-write here.
-        json_file::write_atomic(&self.dir, &self.index_path(), &index)?;
+        // The number-sorted cache is written atomically but without an fsync: it is
+        // rebuildable from the markdown source of truth, so durability is not worth
+        // the cost in the store lock's hot path (see [`write_index`](Self::write_index)).
+        self.write_index(&summaries)?;
         Ok(summaries)
     }
 
@@ -365,6 +474,18 @@ mod tests {
             updated_at: ts,
             body: format!("Body for {title}."),
         }
+    }
+
+    /// Pin a file's modification time so freshness tests are independent of the
+    /// filesystem's timestamp granularity.
+    fn set_mtime(path: &Path, secs_from_epoch: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
     }
 
     #[test]
@@ -461,6 +582,54 @@ mod tests {
     }
 
     #[test]
+    fn remove_rebuilds_the_index_when_the_cache_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        store.write(&issue(2, "Two")).unwrap();
+        // Drop the cache so the removal cannot patch it incrementally; it must fall
+        // back to a full rebuild from the markdown files that remain.
+        fs::remove_file(store.index_path()).unwrap();
+
+        assert!(store.remove(1).unwrap());
+
+        // The rebuilt cache reflects the removal — only issue 2 is left.
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![2]);
+        assert!(store.index_path().is_file());
+    }
+
+    #[test]
+    fn remove_leaves_the_cache_untouched_when_the_number_is_absent_from_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(2, "Two")).unwrap();
+        // A markdown file for issue 1 lands on disk without going through `write`,
+        // so the cache (built from issue 2 alone) never lists it.
+        fs::write(
+            store.dir().join("001-one.md"),
+            issue(1, "One").to_markdown(),
+        )
+        .unwrap();
+
+        // Removing issue 1 deletes its file and finds no cache entry to drop, so the
+        // cache is left as-is — it is already consistent with the removal.
+        assert!(store.remove(1).unwrap());
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![2]);
+    }
+
+    #[test]
     fn summaries_rebuild_when_index_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -546,13 +715,10 @@ mod tests {
         // A corrupt, unparseable issue file lands beside the valid one.
         fs::write(store.dir().join("002-broken.md"), "not an issue").unwrap();
 
-        // Writing another issue still succeeds — the unrelated corrupt sibling is
-        // skipped during the index rebuild instead of failing the whole write.
+        // Writing another issue still succeeds. The incremental index update patches
+        // only issue 3's entry into the cached list, so it never reads — and cannot
+        // choke on — the unrelated corrupt sibling.
         store.write(&issue(3, "Third")).unwrap();
-
-        // The index rebuilt from the files that parse (1 and 3); the corrupt one
-        // is skipped — but the strict `scan` still surfaces it for callers that
-        // need every issue readable (e.g. the dependency graph).
         let nums: Vec<u32> = store
             .summaries()
             .unwrap()
@@ -560,6 +726,19 @@ mod tests {
             .map(|s| s.number)
             .collect();
         assert_eq!(nums, vec![1, 3]);
+
+        // A *full rebuild* — forced here by dropping the cache — is where the whole
+        // directory is scanned, and it stays tolerant: it indexes the files that
+        // parse (1 and 3) and skips the corrupt one, which the strict `scan` still
+        // surfaces for callers that need every issue readable (e.g. the graph).
+        fs::remove_file(store.index_path()).unwrap();
+        let rebuilt: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(rebuilt, vec![1, 3]);
         assert!(store.scan().is_err());
 
         // The skip is recorded in the daily log rather than silently swallowed.
@@ -715,6 +894,96 @@ mod tests {
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
         assert_eq!(store.scan().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn summaries_rebuild_when_an_issue_file_is_newer_than_the_index() {
+        // An issue file edited outside usagi (e.g. a git pull / branch switch)
+        // leaves the cache stale. `summaries` must detect the newer file and
+        // rebuild rather than returning the cached status — the bug this fixes.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+
+        let mut edited = issue(1, "One");
+        edited.status = IssueStatus::Done;
+        let path = store.dir().join("001-one.md");
+        fs::write(&path, edited.to_markdown()).unwrap();
+
+        // The edited markdown is strictly newer than the (now stale) index.
+        set_mtime(&store.index_path(), 1_000);
+        set_mtime(&path, 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].status, IssueStatus::Done);
+    }
+
+    #[test]
+    fn summaries_trust_a_fresh_index_without_rereading_the_markdown() {
+        // When nothing changed the fast path trusts the cache verbatim. Tamper
+        // the cache so it disagrees with the markdown but keep it newer than the
+        // file: the tampered value coming back proves no rebuild happened.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+
+        let mut cached = issue(1, "One").summary();
+        cached.title = "Cached title".to_string();
+        store.write_index(&[cached]).unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].title, "Cached title");
+    }
+
+    #[test]
+    fn summaries_rebuild_when_a_file_is_added_outside_usagi() {
+        // A second issue lands on disk without going through the store, so the
+        // cache lists only #1. Even when the new file is not newer than the
+        // index, the file-count mismatch forces a rebuild.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        fs::write(
+            store.dir().join("002-two.md"),
+            issue(2, "Two").to_markdown(),
+        )
+        .unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.dir().join("002-two.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![1, 2]);
+    }
+
+    #[test]
+    fn summaries_rebuild_when_a_file_is_removed_outside_usagi() {
+        // #2's file is deleted directly while the cache still lists both. The
+        // index is newer than the remaining file, so only the count mismatch
+        // flags the staleness.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        store.write(&issue(2, "Two")).unwrap();
+        fs::remove_file(store.dir().join("002-two.md")).unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![1]);
     }
 
     #[test]

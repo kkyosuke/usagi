@@ -58,6 +58,7 @@ fn session_record(name: &str, worktrees: usize) -> SessionRecord {
         name: name.to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
         created_at: Utc::now(),
@@ -78,7 +79,9 @@ fn state_on_alpha() -> HomeState {
 
 mod attached;
 mod caret_switch;
+mod env_editor;
 mod focus;
 mod homestate;
+mod labels;
 mod note_editor;
 mod worktree_list;

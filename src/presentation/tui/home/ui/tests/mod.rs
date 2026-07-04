@@ -72,7 +72,12 @@ fn attached_with_tabs(active: usize) -> (HomeState, TerminalGeometry) {
 fn chip_column(state: &HomeState, geo: TerminalGeometry, needle: &str) -> u16 {
     let rows = right_pane_contents(state, geo.cols as usize, 8);
     let chips = console::strip_ansi_codes(&rows[0]).into_owned();
-    let rel = chips.find(needle).expect("chip present in the strip row");
+    let byte = chips.find(needle).expect("chip present in the strip row");
+    // `.find` yields a byte offset; the chip layout is in display columns. The
+    // header preceding the chips carries multibyte glyphs (name, status, the agent
+    // label with its AI/phase icons), so measure the prefix's display width rather
+    // than trust the byte index.
+    let rel = console::measure_text_width(&chips[..byte]);
     geo.origin_col + rel as u16
 }
 
@@ -95,6 +100,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             name: n.to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from(format!("/ws/{n}")),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -121,6 +127,7 @@ fn switch_state_with_note(note: &str) -> HomeState {
         name: "alpha".to_string(),
         display_name: None,
         note: Some(note.to_string()),
+        label_id: None,
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
         created_at: Utc::now(),
@@ -132,6 +139,8 @@ fn switch_state_with_note(note: &str) -> HomeState {
 }
 
 mod attached_and_terminal;
+mod diff;
+mod env_editor;
 mod input_footer;
 mod notices_and_tasks;
 mod removal_modal;

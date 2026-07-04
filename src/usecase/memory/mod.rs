@@ -109,7 +109,15 @@ pub fn list(repo_root: &Path, filter: &MemoryFilter) -> Result<Vec<MemorySummary
 /// Full-text search memory names, titles and bodies (case-insensitive), then
 /// apply `filter`. Results are newest first.
 pub fn search(repo_root: &Path, query: &str, filter: &MemoryFilter) -> Result<Vec<MemorySummary>> {
-    let memories = MemoryStore::new(repo_root).scan()?;
+    // An empty query matches every memory, which is exactly what `list` returns —
+    // so take its index path instead of reading and parsing every memory's full
+    // Markdown body just to match-all and discard the bodies.
+    if query.is_empty() {
+        return list(repo_root, filter);
+    }
+    // Tolerant scan: one unparseable file is skipped (and logged) rather than
+    // failing the whole query, matching how `list` reads through the index.
+    let memories = MemoryStore::new(repo_root).scan_lenient()?;
     let needle = search::fold_query(query);
     let mut summaries: Vec<MemorySummary> = memories
         .into_iter()

@@ -1,4 +1,6 @@
 use super::*;
+use crate::presentation::theme::Palette;
+use console::Style;
 
 #[test]
 fn text_modal_body_windows_a_long_dump_with_more_counts() {
@@ -232,13 +234,15 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
-fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
-    // The `>` cursor only appears in 切替 (Switch): the selected row carries it
-    // when `in_switch` is set. (The kind dot reflects freshness — a just-built
-    // fixture is fresh `●`; heat fading is covered in its own test.)
-    let (top, _) = worktree_row(
+fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
+    // The selected session in 切替 (Switch) uses the one-line usagi glyph on line
+    // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
+    // a just-built fixture is fresh `●`; heat fading is covered in its own test.)
+    let (top, detail) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -251,15 +255,21 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
-    assert!(top.contains('>'));
+    assert!(top.contains('󰤇'));
+    assert!(detail.contains('▎'));
+    assert!(!top.contains('>'));
     assert!(top.contains('●'));
     assert!(top.contains("main"));
 
-    // The same selected row outside Switch shows no cursor.
+    // The same selected row outside Switch keeps the session marker so it remains
+    // visible after the side menu has selected the session.
     let (top_no_switch, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -272,12 +282,20 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!top_no_switch.contains('>'));
+    assert!(top_no_switch.contains('󰤇'));
+    assert!(
+        top_no_switch.starts_with(&Style::new().success().bold().apply_to("󰤇").to_string()),
+        "selected marker after side-menu selection should be green: {top_no_switch:?}"
+    );
 
     let (other_top, _) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -290,14 +308,18 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(!other_top.contains('>'));
+    assert!(!other_top.contains('󰤇'));
     assert!(other_top.contains('●'));
     assert!(other_top.contains("feature"));
 
     let (detached_top, _) = worktree_row(
         &worktree(None, false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -310,6 +332,7 @@ fn worktree_row_marks_the_cursor_in_switch_and_shows_detached() {
         false,
         false,
         false,
+        None,
     );
     assert!(detached_top.contains("(detached)"));
 }
@@ -321,6 +344,8 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
     let with_note = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -333,11 +358,14 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     let without_note = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -350,6 +378,7 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
         false,
         false,
         false,
+        None,
     )
     .0;
     assert!(with_note.contains(NOTE_ICON));
@@ -376,6 +405,8 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
         let (top, _) = worktree_row(
             &worktree,
             "",
+            None,
+            0,
             10,
             10,
             DetailCols::default(),
@@ -388,6 +419,7 @@ fn worktree_row_heat_dot_fades_with_time_since_touched() {
             false,
             false,
             false,
+            None,
         );
         console::strip_ansi_codes(&top).into_owned()
     };
@@ -405,6 +437,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (active_top, active_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -417,6 +451,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     // The green `▎` accent bar runs down both lines of the active row (the
     // detail line carries it too, to the left of the agent state).
@@ -427,6 +462,8 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
     let (idle_top, idle_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         10,
         DetailCols::default(),
@@ -439,6 +476,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
         false,
         false,
         false,
+        None,
     );
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -450,6 +488,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -462,6 +502,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(ready_detail.contains('☾'));
     assert!(ready_detail.contains("ready"));
@@ -470,6 +511,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, running_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -482,6 +525,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         false,
+        None,
     );
     assert!(running_detail.contains('▶'));
     assert!(running_detail.contains("running"));
@@ -490,6 +534,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -502,6 +548,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         true,
         false,
+        None,
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
@@ -511,6 +558,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -523,6 +572,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         true,
         false,
         true,
+        None,
     );
     assert!(done_detail.contains('✓'));
     assert!(done_detail.contains("done"));
@@ -532,6 +582,8 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     let (absent_top, absent_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
+        None,
+        0,
         10,
         12,
         DetailCols::default(),
@@ -544,6 +596,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         false,
         false,
+        None,
     );
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
@@ -564,6 +617,13 @@ fn status_cell_right_aligns_the_status_and_blanks_the_root() {
     assert_eq!(local, format!(" {LOCAL_ICON} local"));
     // The root has no status: an all-blank field of the same width.
     assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
+    // `New` (freshly cut) and `Dirty` (work in progress) are unbadged — the field
+    // is all blanks, the same as the root, so a fresh/dirty branch shows nothing.
+    assert_eq!(status_cell(Some(BranchStatus::New)), " ".repeat(STATUS_COL));
+    assert_eq!(
+        status_cell(Some(BranchStatus::Dirty)),
+        " ".repeat(STATUS_COL)
+    );
 }
 
 #[test]
@@ -575,6 +635,8 @@ fn worktree_row_truncates_a_long_branch() {
             BranchStatus::Local,
         ),
         "",
+        None,
+        0,
         8,
         8,
         DetailCols::default(),
@@ -587,6 +649,7 @@ fn worktree_row_truncates_a_long_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains('…'));
 }
@@ -596,6 +659,8 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
     let (top, _) = worktree_row(
         &worktree(Some("feat-login"), false, BranchStatus::Local),
         "Login flow",
+        None,
+        0,
         20,
         20,
         DetailCols::default(),
@@ -608,6 +673,7 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
         false,
         false,
         false,
+        None,
     );
     assert!(top.contains("Login flow"));
     assert!(!top.contains("feat-login"));
@@ -616,22 +682,22 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 #[test]
 fn root_row_marks_selected_and_active() {
     // The `>` cursor shows on the selected root only in 切替 (Switch).
-    let (top, detail) = root_row(10, 20, false, true, false, true);
+    let (top, detail) = root_row(10, 0, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
     // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 20, false, true, false, false);
+    let (top_no_switch, _) = root_row(10, 0, 20, false, true, false, false);
     assert!(!top_no_switch.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
-    let (active_top, active_detail) = root_row(10, 20, false, false, true, false);
+    let (active_top, active_detail) = root_row(10, 0, 20, false, false, true, false);
     assert!(active_top.contains('▎'));
     assert!(active_detail.contains('▎'));
     assert!(!active_top.contains('*'));
 
-    let (idle_top, idle_detail) = root_row(10, 20, false, false, false, false);
+    let (idle_top, idle_detail) = root_row(10, 0, 20, false, false, false, false);
     assert!(!idle_top.contains('>'));
     assert!(!idle_top.contains('▎'));
     assert!(!idle_detail.contains('▎'));
@@ -643,8 +709,8 @@ fn root_row_shows_the_memo_marker_only_when_it_has_a_note() {
     // The root row carries its own note, like a session: the memo marker shows on
     // line 1 only when `has_note`, and is purely additive (the right-edge status
     // column does not shift), matching the worktree row.
-    let (with_note, _) = root_row(10, 20, true, false, false, false);
-    let (without_note, _) = root_row(10, 20, false, false, false, false);
+    let (with_note, _) = root_row(10, 0, 20, true, false, false, false);
+    let (without_note, _) = root_row(10, 0, 20, false, false, false, false);
     assert!(with_note.contains(NOTE_ICON));
     assert!(!without_note.contains(NOTE_ICON));
     assert_eq!(
@@ -664,11 +730,13 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // Line 0 is the root row; with the marker set it shows the memo glyph.
     assert!(lines[0].contains(NOTE_ICON));
@@ -683,11 +751,13 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     assert!(lines[0].contains(ROOT_NAME));
@@ -716,11 +786,13 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
         Sidebar::Full,
         now,
+        None,
     );
     // Root (2 lines) + divider + the session's 2 lines: the freshness label sits
     // on the session's detail line (index 4).
@@ -745,11 +817,13 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         5,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // The session's detail line (index 4) carries the `↑N ↓M` commit marker.
     let detail = console::strip_ansi_codes(&lines[4]);
@@ -798,11 +872,13 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         9,
         false,
         Sidebar::Full,
         now,
+        None,
     );
     // Detail lines: small at index 4, big at index 7 (each entry spans three rows).
     let small_detail = console::strip_ansi_codes(&lines[4]);
@@ -836,11 +912,13 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // Root (2 lines), a divider, then 3 lines per worktree (identity, detail,
     // resource).
@@ -872,11 +950,13 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&lines);
     // Both workspace names head their blocks (the unite header bar), and both
@@ -921,11 +1001,13 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     let plain_lines: Vec<_> = lines
         .iter()
@@ -955,11 +1037,13 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&full);
     assert!(rendered.contains("a1")); // wsA's session
@@ -986,11 +1070,13 @@ fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     let rendered = stripped(&lines);
@@ -1016,11 +1102,13 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         4,
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 4);
     // The second group's blank gap was never built; only the first empty workspace
@@ -1034,7 +1122,7 @@ fn sidebar_row_at_line_walks_a_single_group_layout() {
         worktree(Some("main"), true, BranchStatus::Pushed),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     assert_eq!(at(0), Some(0)); // root id
     assert_eq!(at(1), Some(0)); // root detail
     assert_eq!(at(2), None); // divider
@@ -1060,7 +1148,7 @@ fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     assert_eq!(at(0), None); // wsA header
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(3), None); // wsA divider
@@ -1087,7 +1175,7 @@ fn sidebar_row_at_line_walks_a_unite_rail_layout_with_gaps() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail, 0);
     assert_eq!(at(0), Some(0)); // wsA root
     assert_eq!(at(2), None); // wsA divider
     assert_eq!(at(3), Some(1)); // a1
@@ -1109,7 +1197,7 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full);
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
     // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message, 5-6 gap.
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(4), None); // empty-workspace message
@@ -1151,6 +1239,7 @@ fn row_select_click_works_in_unite_mode() {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -1175,6 +1264,7 @@ fn unite_with_prs() -> HomeState {
         name: "main".to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from("/ws/main"),
         worktrees: vec![worktree_with_pr(412)],
         created_at: Utc::now(),
@@ -1188,6 +1278,7 @@ fn unite_with_prs() -> HomeState {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1225,6 +1316,7 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1277,11 +1369,13 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         5,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
     // Root, divider, then only the first worktree made it in; the rest were never
@@ -1311,11 +1405,13 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         8,
         5,
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     assert_eq!(lines.len(), 5);
 }
@@ -1334,11 +1430,13 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(ready[4].contains('☾'));
     assert!(ready[4].contains("ready"));
@@ -1350,11 +1448,13 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(running[4].contains('▶'));
     assert!(running[4].contains("running"));
@@ -1366,11 +1466,13 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(waiting[4].contains('◆'));
     assert!(!waiting[4].contains('▶'));
@@ -1382,11 +1484,13 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         6,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(!absent[4].contains('▶'));
     assert!(!absent[4].contains('◆'));
@@ -1417,11 +1521,13 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &resources,
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(with_usage[4].contains("running"));
     // The resource line is icon-led (the CPU / memory glyphs in place of the words),
@@ -1441,11 +1547,13 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(without[4].contains("running"));
     let idle_resource = console::strip_ansi_codes(&without[5]);
@@ -1461,11 +1569,13 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &empty,
         &empty,
         &resources,
+        &crate::domain::settings::SessionLabelMaster::default(),
         40,
         8,
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert!(console::strip_ansi_codes(&in_switch[5]).contains("12%"));
 }
@@ -1484,11 +1594,13 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         4,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // 3 worktrees would be 2 (root) + 1 (divider) + 6 lines; trimmed to 4.
     assert_eq!(lines.len(), 4);
@@ -1511,11 +1623,13 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // The root is not active; the active "feature" row carries the green `▎`
     // accent bar down all three of its lines (identity + detail + resource).
@@ -1524,6 +1638,38 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
     assert!(lines[6].contains('▎'));
     assert!(lines[7].contains('▎'));
     assert!(lines[8].contains('▎'));
+}
+
+#[test]
+fn left_pane_marks_the_selected_session_with_a_rabbit_stack() {
+    let mut list = list_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        worktree(Some("feature"), false, BranchStatus::Local),
+    ]);
+    list.move_down(); // root -> main
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        9,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    // root(2) + divider(1), then the selected session's three rows.
+    assert!(plain[3].starts_with('󰤇'));
+    assert!(plain[4].starts_with('▎'));
+    assert!(plain[5].starts_with('▎'));
 }
 
 #[test]
@@ -1540,11 +1686,13 @@ fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
         9,
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     // Root (2 rows), a divider, then 3 rows per worktree — the same shape as the
     // full sidebar, so toggling never shifts an entry to a different row.
@@ -1589,11 +1737,13 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             30,
             20,
             false,
             sidebar,
             Utc::now(),
+            None,
         )
         .len()
     };
@@ -1608,11 +1758,13 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             30,
             20,
             false,
             sidebar,
             Utc::now(),
+            None,
         )
         .len()
     };
@@ -1638,11 +1790,13 @@ fn rail_shows_the_active_bar_down_all_rows_and_the_agent_glyph_on_row_two() {
         &empty,
         &empty,
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
         9,
         false,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     // "feature" is the second worktree: root (2) + divider (1) + main (3) puts its
     // rows at indices 6,7,8.
@@ -1674,11 +1828,13 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             waiting,
             done,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
             8,
             false,
             Sidebar::Rail,
             Utc::now(),
+            None,
         );
         // Rows: 0/1 root, 2 divider, 3 worktree kind, 4 worktree agent state.
         console::strip_ansi_codes(&lines[4]).into_owned()
@@ -1703,22 +1859,28 @@ fn rail_sidebar_marks_the_switch_cursor() {
             &empty,
             &empty,
             &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
             8,
             true,
             Sidebar::Rail,
             Utc::now(),
+            None,
         )
     };
-    // In 切替 the cursor row shows the `>` marker; here the cursor is on the root.
+    // In 切替 the cursor row shows the `>` marker on non-session rows; here the
+    // cursor is on the root.
     let on_root = rail(&list);
     assert!(console::strip_ansi_codes(&on_root[0]).contains('>'));
-    // Moving the cursor onto the worktree marks its row 1 and fades the root entry
+    // Moving the cursor onto the worktree marks its three session rows with the
+    // one-line usagi glyph and vertical continuations, and fades the root entry
     // (the cursor leaves it), so the highlighted session still reads first.
     list.move_down();
     let on_session = rail(&list);
     assert!(!console::strip_ansi_codes(&on_session[0]).contains('>'));
-    assert!(console::strip_ansi_codes(&on_session[3]).contains('>'));
+    assert!(console::strip_ansi_codes(&on_session[3]).contains('󰤇'));
+    assert!(console::strip_ansi_codes(&on_session[4]).contains('▎'));
+    assert!(console::strip_ansi_codes(&on_session[5]).contains('▎'));
 }
 
 #[test]
@@ -1747,11 +1909,13 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         9,
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     assert_eq!(dimmed.len(), 9);
     assert!(console::strip_ansi_codes(&dimmed[0]).contains(ROOT_NAME));
@@ -1775,11 +1939,13 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         30,
         8,
         false,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     let rendered = stripped(&lines);
     // The first session (rows 3,4 after the root pair + divider) shows `<icon> 1`.
@@ -2062,11 +2228,13 @@ fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         80,
         12,
         true,
         Sidebar::Full,
         Utc::now(),
+        None,
     );
     // root(2) + divider(1) + session(3) = 6, so the create row is line 6.
     let create = console::strip_ansi_codes(&lines[6]).into_owned();
@@ -2085,11 +2253,13 @@ fn rail_pane_draws_the_create_row_glyph() {
         &HashSet::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
         5,
         12,
         true,
         Sidebar::Rail,
         Utc::now(),
+        None,
     );
     let create = console::strip_ansi_codes(lines.last().unwrap()).into_owned();
     assert!(create.contains('+'));
@@ -2103,12 +2273,12 @@ fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
     let list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     assert_eq!(list.create_row(), 2);
     assert_eq!(
-        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full),
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full, 0),
         Some(2)
     );
     // The rail keeps the same row layout, so the create row lands on the same line.
     assert_eq!(
-        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail),
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail, 0),
         Some(2)
     );
 }
@@ -2122,4 +2292,168 @@ fn switch_preview_prompts_to_create_when_the_create_row_is_selected() {
     let text = console::strip_ansi_codes(&lines.join("\n")).into_owned();
     assert!(text.contains("+ new session"));
     assert!(text.contains("Type a name"));
+}
+
+/// A single workspace with `n` sessions named `s0`..`s{n-1}`, for the overflow
+/// scroll tests. `s0` is the primary.
+fn sessions(n: usize) -> Vec<WorktreeState> {
+    (0..n)
+        .map(|i| worktree(Some(&format!("s{i}")), i == 0, BranchStatus::Local))
+        .collect()
+}
+
+fn full_pane(list: &WorktreeList, rows: usize) -> Vec<String> {
+    left_pane(
+        list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        rows,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    )
+}
+
+#[test]
+fn sidebar_scroll_is_zero_while_the_list_fits_the_pane() {
+    let list = list_with(sessions(6));
+    // Fits (huge viewport) or a zero-height pane: nothing to scroll.
+    assert_eq!(sidebar_scroll(&list, true, 100), 0);
+    assert_eq!(sidebar_scroll(&list, true, 0), 0);
+    // The default cursor rests on the root row at the top, so even an overflowing
+    // list stays pinned to the top.
+    assert_eq!(sidebar_scroll(&list, true, 9), 0);
+}
+
+#[test]
+fn sidebar_scroll_reveals_a_selected_row_below_the_fold() {
+    let mut list = list_with(sessions(6));
+    // Root(2) + divider(1) + 6×3 sessions + create(1) = 22 lines; pane shows 9.
+    // Selecting the last session (flat row 6) scrolls just enough to seat its
+    // three-row block at the foot: its end line (21) minus the 9-row viewport.
+    list.focus_index(6);
+    assert_eq!(sidebar_scroll(&list, true, 9), 12);
+    // The create row is the very last line; scrolling for it clamps to the maximum
+    // (total 22 − viewport 9 = 13) rather than running past the list's foot.
+    list.focus_index(7);
+    assert_eq!(sidebar_scroll(&list, true, 9), 13);
+}
+
+#[test]
+fn left_pane_scrolls_the_selected_session_into_view() {
+    let mut list = list_with(sessions(6));
+    // Cursor on the root row: the window stays pinned to the top, so the first
+    // sessions show and the last is off screen.
+    let top = full_pane(&list, 9);
+    assert_eq!(top.len(), 9);
+    let top_txt = stripped(&top);
+    assert!(top_txt.contains("s0") && top_txt.contains("s1"));
+    assert!(!top_txt.contains("s5"));
+    // Selecting the last session scrolls it into view and pushes the first off the
+    // top — the whole off-window prefix is skipped, not merely truncated.
+    list.focus_index(6);
+    let scrolled = full_pane(&list, 9);
+    assert_eq!(scrolled.len(), 9);
+    let scrolled_txt = stripped(&scrolled);
+    assert!(scrolled_txt.contains("s5"));
+    assert!(!scrolled_txt.contains("s0"));
+}
+
+#[test]
+fn left_pane_keeps_the_create_row_visible_when_selected() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(list.create_row());
+    let lines = full_pane(&list, 9);
+    assert_eq!(lines.len(), 9);
+    let text = stripped(&lines);
+    assert!(text.contains("+ new session"));
+    assert!(!text.contains("s0"));
+}
+
+#[test]
+fn rail_pane_scrolls_the_selected_session_into_view() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(6);
+    let scrolled = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        8,
+        9,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+        None,
+    );
+    assert_eq!(scrolled.len(), 9);
+    // The rail carries no branch text, but the selected entry's active gutter bar
+    // still rides the scrolled window: the top rows (root + first sessions) are
+    // gone, so the window is a pure slice of the tail.
+    let rail_scroll = sidebar_scroll(&list, false, 9);
+    assert!(rail_scroll > 0);
+}
+
+#[test]
+fn sidebar_row_click_maps_through_the_scroll_offset() {
+    let mut list = list_with(sessions(6));
+    list.focus_index(6);
+    let scroll = sidebar_scroll(&list, true, 9);
+    assert_eq!(scroll, 12);
+    // Screen line 6 sits at full-column line 18 — the last session's identity row
+    // (flat row 6) — so a click there selects it, not whatever the un-scrolled
+    // layout would have had at line 6.
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Full, scroll),
+        Some(6)
+    );
+}
+
+#[test]
+fn sidebar_scroll_walks_past_an_empty_workspace_group() {
+    // Unite mode with an empty leading workspace forces the span walk through the
+    // empty-workspace message row before it reaches the selected session in the
+    // second group.
+    let mut list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new("wsA", Vec::new()),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![
+                worktree(Some("b0"), true, BranchStatus::Pushed),
+                worktree(Some("b1"), false, BranchStatus::Local),
+            ],
+        ),
+    ]);
+    // Flat rows: wsA root 0, wsB root 1, b0 2, b1 3. Select b1.
+    list.focus_index(3);
+    // Group A block (header + root 2 + divider + empty 1 = 5) then group B (gap 2 +
+    // header 1 + root 2 + divider 1 + 2×3 = 12) = 17, plus the create row = 18.
+    // b1's block ends at line 17, so a 9-row pane scrolls by 8.
+    assert_eq!(sidebar_scroll(&list, true, 9), 8);
+}
+
+#[test]
+fn pr_popup_hides_when_the_pinned_session_scrolls_off_the_top() {
+    let mut first = worktree_with_pr(412);
+    first.primary = true;
+    let mut worktrees = vec![first];
+    worktrees.extend(sessions(5).into_iter().skip(1)); // s1..s5, plain
+    let mut state = state_with(worktrees);
+    state.set_pr_popup(Some(0));
+    // Height 14 → a 9-row body. With the cursor at the top, the PR session's row is
+    // on screen, so its popup floats.
+    assert!(pr_popup_placement(&state, 14, 120).is_some());
+    // Selecting the last session scrolls the PR session off the top; its badge is no
+    // longer drawn, so nothing is pinned over an unrelated row.
+    state.focus_session(state.list().create_row());
+    assert!(pr_popup_placement(&state, 14, 120).is_none());
 }

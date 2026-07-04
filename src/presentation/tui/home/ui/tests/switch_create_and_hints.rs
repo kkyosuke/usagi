@@ -51,6 +51,7 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -83,6 +84,7 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
             name: "b1".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -123,25 +125,7 @@ fn splice_rows_inserts_inside_an_existing_column_without_replacing_rows() {
 }
 
 #[test]
-fn switch_rename_rows_show_the_target_and_typed_label() {
-    // Caret at the end of the label.
-    let rows = switch_rename_rows("main", "My main", "My main".len(), 40);
-    assert_eq!(rows.len(), 1);
-    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
-    assert!(plain.contains("rename main: My main"));
-}
-
-#[test]
-fn switch_rename_rows_place_the_caret_mid_label() {
-    // With the caret in the middle of the label the block caret falls on the
-    // character at the cursor rather than past the end, matching the create row.
-    let rows = switch_rename_rows("main", "abc", 1, 40);
-    let plain = console::strip_ansi_codes(&rows[0]).into_owned();
-    assert!(plain.contains("rename main: abc"));
-}
-
-#[test]
-fn render_frame_shows_the_inline_rename_row_in_switch() {
+fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_switch() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     state.switch_move_down(); // cursor onto "main"
@@ -150,9 +134,18 @@ fn render_frame_shows_the_inline_rename_row_in_switch() {
         state.rename_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
-    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-    // Prefilled with the branch name, then edited to "main 2".
-    assert!(joined.contains("rename main: main 2"));
+    let plain: Vec<String> = frame
+        .iter()
+        .map(|row| console::strip_ansi_codes(row).into_owned())
+        .collect();
+    // The selected session's own name line becomes the editable label in place:
+    // the `󰤇` marker and the typed "main 2" (prefilled "main", then edited) sit
+    // on the same row — the rename is not banished to a separate row at the list foot.
+    assert!(plain
+        .iter()
+        .any(|line| line.contains('󰤇') && line.contains("main 2")));
+    // And the old foot-anchored `rename <target>:` affordance is gone.
+    assert!(!plain.iter().any(|line| line.contains("rename main:")));
 }
 
 // --- command hints (command palette) -----------------------------------
@@ -204,8 +197,12 @@ fn hint_lines_list_every_command_for_a_bare_prompt() {
     let joined = stripped(&hint_lines(&state, 80));
     assert!(joined.contains("commands"));
     assert!(!joined.contains('›'));
+    // The bare prompt lists the first `HINT_MAX` workspace commands (alphabetical
+    // registry order) then folds the rest into an overflow line, so an early
+    // command shows while the tail (`session`, `unite`, …) is summarised.
     assert!(joined.contains("more"));
-    assert!(joined.contains("session"));
+    assert!(joined.contains("config"));
+    assert!(!joined.contains("session"));
 }
 
 #[test]

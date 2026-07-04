@@ -1,13 +1,13 @@
 ---
 number: 56
 title: refactor(tui-home): HomeState の神オブジェクト解体（表示文字列の ui 退避・サブ状態の型化・dispatch 重複統合）
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:15:51.176691+00:00
-updated_at: 2026-06-19T22:15:51.176691+00:00
+updated_at: 2026-07-04T00:14:18.219688+00:00
 ---
 
 ## 背景

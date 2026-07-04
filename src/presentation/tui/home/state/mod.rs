@@ -18,9 +18,10 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
-use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
+use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
 use crate::domain::workspace_state::{SessionRecord, WorktreeState};
 
@@ -41,19 +42,43 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu,
-    TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffView, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal,
+    RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::session_row;
-use modal::{FocusMenu, Overlay};
+use modal::{FocusMenu, FocusSubmenu, Overlay};
+
+/// The terminal row's inline choices, in display/default order. `open` preserves
+/// the existing fast path: add an embedded usagi pane/tab. `new` opens a native
+/// terminal application in the same directory.
+const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
+
+/// The fixed 在席 (Focus) menu display order, independent of registry order and
+/// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
+/// then `terminal`), then the read-only `diff` view, then the AI actions (`ai`,
+/// `chat`), then the destructive `close` last. Any command not in this list sorts
+/// after these, then in its original registry order among itself.
+fn session_menu_rank(name: &str) -> usize {
+    match name {
+        "agent" => 0,
+        "terminal" => 1,
+        "diff" => 2,
+        "ai" => 3,
+        "chat" => 4,
+        "close" => 5,
+        _ => 6,
+    }
+}
 
 use crate::presentation::tui::chat::state::Chat;
 
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
     let mut commands = registry.commands_in_scope(CommandScope::Session);
-    commands.sort_by(|a, b| a.name.cmp(b.name));
+    // A stable sort keeps any commands past the known four (all rank 4) in their
+    // original registry order rather than needing a secondary key.
+    commands.sort_by_key(|info| session_menu_rank(info.name));
     commands
 }
 
@@ -81,8 +106,10 @@ pub struct GroupSource {
 #[derive(Debug)]
 pub struct Submission {
     pub effect: Effect,
-    /// The command that was run and added to history, or `None` for empty input.
-    pub recorded: Option<String>,
+    /// The history entry that was run and added to history, or `None` for empty
+    /// input. Carries the command, its outcome, and the session it targeted so
+    /// the event loop can persist the whole entry (not just the command text).
+    pub recorded: Option<HistoryEntry>,
 }
 
 /// The result of attempting to create a session, applied back to the screen by
@@ -127,11 +154,11 @@ pub enum SessionReorder {
     Failed(LogLine),
 }
 
-/// A transient "working…" indicator shown in the top-right corner while a
-/// blocking action runs (creating or bulk-removing sessions, launching a
-/// terminal / agent). It carries the `label` to show beside the loading rabbit
-/// and a `frame` tick that advances on each step, so painting it repeatedly
-/// animates the rabbit. Read by the renderer through [`HomeState::loading`].
+/// A transient "working…" indicator shown while a blocking action runs
+/// (creating or bulk-removing sessions, launching a terminal / agent). It
+/// carries a `label` describing the action and a `frame` tick that advances on
+/// each step, so painting it repeatedly animates the chosen loader. Read by the
+/// renderer through [`HomeState::loading`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadingIndicator {
     label: String,
@@ -308,11 +335,6 @@ impl CommandLine {
         self.input.cursor()
     }
 
-    /// The committed history, oldest first.
-    fn history(&self) -> &[String] {
-        &self.history
-    }
-
     /// Replace the history wholesale (e.g. restored from disk), capped to the most
     /// recent [`MAX_COMMAND_HISTORY`] entries so a long-lived on-disk history
     /// never seeds an unbounded in-memory buffer.
@@ -465,6 +487,13 @@ pub struct HomeState {
     /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
     /// so zooming between modes never resets it.
     sidebar: Sidebar,
+    /// The effective manual-status label master 切替 (Switch) cycles with `Tab` /
+    /// the digit keys and the sidebar resolves each session's
+    /// [`label_id`](crate::domain::workspace_state::SessionRecord::label_id)
+    /// against. Injected from the effective settings by `mod.rs`; defaults to the
+    /// generic built-in set (see [`SessionLabelMaster`]). Empty leaves the feature
+    /// dormant — `Tab` is a no-op and no label column is drawn.
+    label_master: SessionLabelMaster,
     /// How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     /// prefix or single `Alt`-chords — so the rest reach the shell / agent.
     /// Injected from the effective settings by `mod.rs` and re-read when the
@@ -485,6 +514,11 @@ pub struct HomeState {
     /// to. Injected from the effective settings by `mod.rs`; defaults to
     /// [`DEFAULT_LOCAL_LLM_MODEL`](crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL).
     local_llm_model: String,
+    /// Whether the local LLM is usable (enabled and its model pulled) — gates the
+    /// `chat` row in the 在席 (Focus) menu so it only appears when a reply would
+    /// actually work. Injected from the effective settings (and a runtime probe)
+    /// by `mod.rs`; false by default.
+    ai_available: bool,
     /// The agent CLIs installed on this machine (PATH-probed), in canonical order,
     /// offered by the 在席 menu's agent picker. Injected by `mod.rs`; empty by
     /// default (tests that do not set it never expand the picker).
@@ -502,13 +536,6 @@ pub struct HomeState {
     /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
-    /// Whether the highlighted session's read-only note overlay is dismissed in
-    /// 切替 (Switch). The note auto-shows the moment a session is highlighted;
-    /// `Esc` hides it (before a second `Esc` backs out of 切替), and moving the
-    /// cursor to another row clears the flag so the next session's note shows.
-    /// Only meaningful in [`Mode::Switch`]; the note *editor* is independent of
-    /// it (it captures the keyboard through [`overlay`](Self::overlay)).
-    note_hidden: bool,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
     /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
     /// badge (in any mode, on the full sidebar) and held open across pointer moves —
@@ -570,6 +597,14 @@ pub struct HomeState {
     /// selected" (the menu / prompt shows). It is forced on whenever the session
     /// has no live panes, so an idle session always shows the action surface.
     focus_new_tab: bool,
+    /// Whether the 在席 (Focus) action menu floats over the *selected pane tab*
+    /// rather than the trailing "+ new" tab — the state after zooming out of a
+    /// live pane (`Ctrl-T` / `Ctrl-O a`): the selector stays on the pane the
+    /// zoom left, its live preview keeps showing behind the floating menu, and
+    /// the strip never grows a "+ new" chip for a tab that was never created.
+    /// Dropped when the menu is dismissed (`Esc`), when the tab selector moves
+    /// (the user is browsing previews), or when the mode changes.
+    focus_menu_over_pane: bool,
     /// A one-shot arming bit: 在席 (Focus) was reached by zooming *out* of a live
     /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
     /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
@@ -612,26 +647,25 @@ pub struct HomeState {
     /// The workspace's task issues, loaded from disk by `mod.rs` and read by the
     /// `issue` command. Empty until injected.
     issues: Vec<Issue>,
+    /// The recorded command history (oldest first), seeded from disk by `mod.rs`
+    /// and extended as commands run. Read by the `history` command for its
+    /// time-stamped, per-session listing; the ↑/↓ recall uses the separate
+    /// command-string buffer on [`CommandLine`].
+    history_entries: Vec<HistoryEntry>,
     /// The latest released version, set once the background update check finds a
     /// release newer than this build. While `None` (the check is pending, or the
     /// build is up to date) the sidebar mascot's "update available" notice is
     /// hidden.
     update: Option<Version>,
     /// The transient "working…" indicator, set while a blocking action runs
-    /// (session create / bulk remove / terminal launch). While `Some` the
-    /// top-right corner shows the loading rabbit.
+    /// (session create / bulk remove / terminal launch). While `Some` the right
+    /// pane shows the launch loader.
     loading: Option<LoadingIndicator>,
     /// The rows of the background-task panel (session create / remove running off
     /// the event-loop thread), refreshed each frame from the shared task handle.
     /// While non-empty the top-right corner stacks them instead of the update
     /// notice, so the user sees in-flight work without the screen freezing.
     tasks: Vec<TaskRow>,
-    /// The workspace root path — the directory the root row (`⌂ root`) operates
-    /// in. The list's worktrees carry their own paths, but the root row has
-    /// none, so this is stored separately to recognise the root's live embedded
-    /// session (keyed by this path in `live` / `running` / …). Injected by
-    /// `mod.rs`; empty until set (tests that never preview the root leave it so).
-    root_path: PathBuf,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
     /// sidebar reads it for the root row's memo marker; the 切替 preview and the
@@ -751,15 +785,16 @@ impl HomeState {
             session_menu_commands,
             session_action_ui: SessionActionUi::default(),
             sidebar: Sidebar::default(),
+            label_master: SessionLabelMaster::default(),
             key_scheme: KeyScheme::default(),
             prefix_pending: false,
             default_agent: AgentCli::default(),
             local_llm_model: crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_string(),
+            ai_available: false,
             installed_agents: Vec::new(),
             agent_choice: None,
             agent_initial_prompt: None,
             switch_return: ReturnMode::Base,
-            note_hidden: false,
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
@@ -770,6 +805,7 @@ impl HomeState {
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
+            focus_menu_over_pane: false,
             focus_return_attach: false,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
@@ -778,10 +814,10 @@ impl HomeState {
             sort_waiting: false,
             response_start: 0,
             issues: Vec::new(),
+            history_entries: Vec::new(),
             update: None,
             loading: None,
             tasks: Vec::new(),
-            root_path: PathBuf::new(),
             root_note: None,
             extra_groups: Vec::new(),
             op_target: None,
@@ -824,16 +860,19 @@ impl HomeState {
     /// Record the workspace root path so the root row (`⌂ root`) can be matched
     /// against the live / running / waiting / done path sets — its embedded
     /// session is keyed by this path, exactly as a worktree row is keyed by its
-    /// own. Injected by `mod.rs` at construction.
+    /// own. Injected by `mod.rs` at construction. The value now lives on the
+    /// primary [`WorkspaceGroup`] value type, so this delegates to the list's first
+    /// group (and [`rebuild_list`](Self::rebuild_list) carries it across rebuilds).
     pub fn set_root_path(&mut self, root: impl Into<PathBuf>) {
-        self.root_path = root.into();
+        self.list.set_root_path(root);
     }
 
-    /// The workspace root path the root row operates in (see [`set_root_path`]).
+    /// The workspace root path the root row operates in (see [`set_root_path`]),
+    /// read from the primary [`WorkspaceGroup`] value type.
     ///
     /// [`set_root_path`]: Self::set_root_path
     pub fn root_path(&self) -> &Path {
-        &self.root_path
+        self.list.root_path()
     }
 
     /// Set which right-pane action surface 在席 (Focus) presents (injected from
@@ -851,6 +890,101 @@ impl HomeState {
     /// `mod.rs` at construction).
     pub fn set_sidebar(&mut self, sidebar: Sidebar) {
         self.sidebar = sidebar;
+    }
+
+    /// Set the manual-status label master (injected from the effective settings by
+    /// `mod.rs` at construction, and re-read when the config screen closes).
+    pub fn set_label_master(&mut self, master: SessionLabelMaster) {
+        self.label_master = master;
+    }
+
+    /// The effective manual-status label master — read by the sidebar renderer to
+    /// resolve each session's [`label_id`] and by the footer to decide whether the
+    /// `Tab` hint applies.
+    ///
+    /// [`label_id`]: crate::domain::workspace_state::SessionRecord::label_id
+    pub fn label_master(&self) -> &SessionLabelMaster {
+        &self.label_master
+    }
+
+    /// The resolved manual-status label of the worktree at `index` in the first
+    /// group's rows (the sidebar's display order), or `None` when that session has
+    /// no label set or its stored id no longer resolves in the master. The sidebar
+    /// renderer calls this per row to draw the label column.
+    pub fn row_label(&self, index: usize) -> Option<&crate::domain::settings::SessionLabelDef> {
+        let id = self.list.row_label_id(index)?;
+        self.label_master.get(id)
+    }
+
+    /// The name of the session under the cursor and the label id to store next
+    /// when 切替's `Tab` (`forward`) / `Shift-Tab` cycles its manual status — the
+    /// next entry in the master, ringing through the "unset" slot — or `None` when
+    /// the cursor is not on a session or no labels are defined. Pure: the caller
+    /// persists it (and the reload refreshes the row); the inner `None` clears the
+    /// label.
+    pub fn cycle_selected_label(&self, forward: bool) -> Option<(String, Option<String>)> {
+        if self.label_master.is_empty() {
+            return None;
+        }
+        let name = self.list.selected().map(worktree_name)?.to_string();
+        let current = self
+            .sessions
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id.as_deref());
+        let new_id = self.next_label_in_cycle(current, forward);
+        // The ring has ≥ 2 slots (master non-empty), so a cycle always advances to
+        // a different slot; the equality guard is belt-and-braces.
+        (current.map(str::to_string) != new_id).then_some((name, new_id))
+    }
+
+    /// The name of the session under the cursor and the id of the master's
+    /// `index`-th label (what digit key `index + 1` selects), or `None` when the
+    /// cursor is not on a session, the index is out of range, or that label is
+    /// already set (a no-op). Pure, like [`cycle_selected_label`](Self::cycle_selected_label).
+    pub fn select_label_index(&self, index: usize) -> Option<(String, Option<String>)> {
+        let id = self.label_master.at(index)?.id.clone();
+        self.resolve_label_change(Some(id))
+    }
+
+    /// The name of the session under the cursor paired with `None` to clear its
+    /// manual status (the digit `0` key), or `None` when the cursor is not on a
+    /// session or it carries no label already. Pure, like
+    /// [`cycle_selected_label`](Self::cycle_selected_label).
+    pub fn clear_selected_label(&self) -> Option<(String, Option<String>)> {
+        self.resolve_label_change(None)
+    }
+
+    /// Pair the selected session's name with `new_id` when it differs from the
+    /// session's current label, or `None` when the cursor is not on a session or
+    /// the label is unchanged (so a repeat keypress writes nothing).
+    fn resolve_label_change(&self, new_id: Option<String>) -> Option<(String, Option<String>)> {
+        let name = self.list.selected().map(worktree_name)?.to_string();
+        let current = self
+            .sessions
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id.clone());
+        (current != new_id).then_some((name, new_id))
+    }
+
+    /// The label id one step from `current` through the master's ring — the labels
+    /// in order preceded by the "unset" slot (index 0). `forward` advances; a
+    /// `current` id no longer in the master is treated as the unset slot. Returns
+    /// `None` for the unset slot, `Some(id)` otherwise.
+    fn next_label_in_cycle(&self, current: Option<&str>, forward: bool) -> Option<String> {
+        let n = self.label_master.len();
+        let ring = n + 1;
+        let cur = match current {
+            None => 0,
+            Some(id) => self.label_master.position(id).map(|p| p + 1).unwrap_or(0),
+        };
+        let next = if forward {
+            (cur + 1) % ring
+        } else {
+            (cur + ring - 1) % ring
+        };
+        (next != 0).then(|| self.label_master.at(next - 1).unwrap().id.clone())
     }
 
     /// Set how the embedded terminal (没入) reserves its navigation keys
@@ -1023,6 +1157,13 @@ impl HomeState {
         self.local_llm_model = model.into();
     }
 
+    /// Set whether the local LLM is usable (enabled and its model pulled), gating
+    /// the `chat` row in the 在席 menu. Injected from the effective settings and a
+    /// runtime probe by `mod.rs`.
+    pub fn set_ai_available(&mut self, available: bool) {
+        self.ai_available = available;
+    }
+
     /// The configured local-LLM model name.
     pub fn local_llm_model(&self) -> &str {
         &self.local_llm_model
@@ -1073,8 +1214,18 @@ impl HomeState {
 
     /// Seed the command history with entries restored from disk (oldest first),
     /// so `history` and `↑`/`↓` recall reflect commands run in past sessions.
-    pub fn restore_history(&mut self, entries: Vec<String>) {
-        self.cmdline.set_history(entries);
+    pub fn restore_history<E: Into<HistoryEntry>>(&mut self, entries: Vec<E>) {
+        let mut entries: Vec<HistoryEntry> = entries.into_iter().map(Into::into).collect();
+        // The command line caps its own recall buffer, so hand it the full command
+        // list rather than pre-capping here.
+        self.cmdline
+            .set_history(entries.iter().map(|e| e.command.clone()).collect());
+        // Cap the retained entries (read by the `history` command) to the same bound.
+        let overflow = entries.len().saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            entries.drain(..overflow);
+        }
+        self.history_entries = entries;
     }
 
     /// Seed the recorded sessions (from `state.json`), shown by `session list`,
@@ -1122,7 +1273,7 @@ impl HomeState {
     /// — the primary, or an extra group with the same root — so adding twice does
     /// not duplicate it.
     pub fn add_extra_group(&mut self, group: GroupSource) -> bool {
-        if group.root_path == self.root_path
+        if group.root_path.as_path() == self.root_path()
             || self
                 .extra_groups
                 .iter()
@@ -1166,12 +1317,14 @@ impl HomeState {
         } else {
             self.list.selected_group()
         };
-        // `selected_group()` is always a valid group index, so group 0 is the
-        // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
-        match selected_group.checked_sub(1) {
-            None => self.root_path.clone(),
-            Some(i) => self.extra_groups[i].root_path.clone(),
-        }
+        // The root now lives on each group's value type, so resolve it straight
+        // from the cursor's group rather than juggling the primary field and the
+        // extra-group sources in parallel. `selected_group()` is always valid.
+        self.list
+            .groups()
+            .get(selected_group)
+            .map(|g| g.root_path().to_path_buf())
+            .unwrap_or_default()
     }
 
     /// The root-row note of the cursor's group (the primary's, or the matching
@@ -1194,20 +1347,20 @@ impl HomeState {
         // unknown qualifier falls through to name-only resolution.
         if let Some(workspace) = workspace {
             if workspace == self.list.workspace_name() {
-                return self.root_path.clone();
+                return self.root_path().to_path_buf();
             }
             if let Some(group) = self.extra_groups.iter().find(|g| g.name == workspace) {
                 return group.root_path.clone();
             }
         }
         if self.sessions.iter().any(|s| s.name == name) {
-            return self.root_path.clone();
+            return self.root_path().to_path_buf();
         }
         self.extra_groups
             .iter()
             .find(|g| g.sessions.iter().any(|s| s.name == name))
             .map(|g| g.root_path.clone())
-            .unwrap_or_else(|| self.root_path.clone())
+            .unwrap_or_else(|| self.root_path().to_path_buf())
     }
 
     /// Record the workspace a `session` operation is about to act on (the cursor's
@@ -1244,18 +1397,59 @@ impl HomeState {
     /// sort toggling on/off, or a session entering/leaving the waiting set) so the
     /// rows can be replaced wholesale without yanking the cursor back to the root.
     fn rebuild_list_keep_cursor(&mut self) {
-        let selected = self.list.selected_name().to_string();
-        let active = self.list.active_name().to_string();
+        enum RowAnchor {
+            Create,
+            Root(usize),
+            Session { group: usize, name: String },
+        }
+
+        let selected = if self.list.create_row_selected() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.selected() {
+            RowAnchor::Session {
+                group: self.list.selected_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.selected_group())
+        };
+        let active = if self.list.active_index() == self.list.create_row() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.active() {
+            RowAnchor::Session {
+                group: self.list.active_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.active_group())
+        };
         // The fresh list drops the `Ctrl-^` jump target, so carry it across the
-        // rebuild by name (it is re-validated lazily, so a session that vanished
-        // in this sync simply yields no jump).
-        let previous = self.list.previous_active_name().map(str::to_string);
+        // rebuild by its `(root, name)` identity (re-validated lazily, so a session
+        // that vanished in this sync simply yields no jump).
+        let previous = self.list.previous_active().cloned();
         self.rebuild_list();
-        // Restore the cursor (`select_by_name` moves both cursor and active onto
-        // the row; it is a no-op for the root row / a vanished session, leaving
-        // the rebuilt default on the root), then correct the active row.
-        self.list.select_by_name(&selected);
-        self.list.activate_by_name(&active);
+        // Restore by the row's identity *within its workspace group*. In 統合
+        // (unite) mode every workspace contributes a synthetic root row named
+        // `ROOT_NAME`, and several workspaces may also share a branch name; using
+        // the old name-only lookup would resolve those ambiguous rows to the first
+        // group and snap 切替 back to the top when a background refresh landed.
+        let resolve = |list: &WorktreeList, anchor: &RowAnchor| match anchor {
+            RowAnchor::Create => list.create_row(),
+            RowAnchor::Root(group) => list.group_root_row(*group).unwrap_or(0),
+            RowAnchor::Session { group, name } => list
+                .row_in_group_of_name(*group, name)
+                .or_else(|| list.group_root_row(*group))
+                .unwrap_or(0),
+        };
+        self.list.focus_index(resolve(&self.list, &selected));
+        // The active row is command-facing, so keep it on a real selectable row;
+        // if a corrupt/old state ever had it on the create affordance, normalize
+        // it to the primary root while rebuilding.
+        let active_row = match active {
+            RowAnchor::Create => 0,
+            ref anchor => resolve(&self.list, anchor),
+        };
+        self.list.activate_index(active_row);
         self.list.set_previous_active(previous);
     }
 
@@ -1266,6 +1460,10 @@ impl HomeState {
     /// order, or waiting-first when [`sort_waiting`](Self::sort_waiting) is on.
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
+        // The primary workspace root lives on the first group's value type; carry
+        // it across the rebuild (which replaces the list wholesale), exactly as the
+        // workspace name is carried above.
+        let root_path = self.list.root_path().to_path_buf();
         let order = self.display_order();
         let rows = order
             .iter()
@@ -1284,8 +1482,17 @@ impl HomeState {
             .iter()
             .map(|&i| self.sessions[i].note.is_some())
             .collect();
+        // Carry each session's manual-status label id onto its row so the sidebar
+        // can resolve it against the master; the id itself is cosmetic and every
+        // command still keys on the branch.
+        let label_ids = order
+            .iter()
+            .map(|&i| self.sessions[i].label_id.clone())
+            .collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
+        list.set_root_path(root_path);
         list.set_notes(notes);
+        list.set_label_ids(label_ids);
         // The root row's note lives on the workspace state (it belongs to no
         // session), so its marker is carried separately from the per-session notes.
         list.set_root_note_marker(self.root_note.is_some());
@@ -1294,6 +1501,7 @@ impl HomeState {
         for group in &self.extra_groups {
             list.add_group(WorkspaceGroup::from_sessions(
                 &group.name,
+                group.root_path.clone(),
                 &group.sessions,
                 group.root_note.is_some(),
             ));
@@ -1436,6 +1644,72 @@ impl HomeState {
         }
     }
 
+    /// Open the right-pane diff view from a load attempt: on success, parse and
+    /// show the patch (titled by the diffed branch → base) in the scrollable right
+    /// pane; on failure — no session highlighted, or the base branch could not be
+    /// resolved — log the error and open nothing. The impure git shell-out is the
+    /// caller's (the event loop); parsing / highlighting the patch and storing the
+    /// result is pure, so both outcomes are testable.
+    pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
+        match loaded {
+            Ok((title, patch)) => {
+                self.overlay = Overlay::Diff(DiffView {
+                    title,
+                    doc: crate::presentation::tui::diff::render(&patch),
+                    scroll: 0,
+                    split: false,
+                });
+            }
+            Err(e) => self.log_error(format!("diff failed: {e}")),
+        }
+    }
+
+    /// The open right-pane diff view, if any.
+    pub fn diff_view(&self) -> Option<&DiffView> {
+        match &self.overlay {
+            Overlay::Diff(diff) => Some(diff),
+            _ => None,
+        }
+    }
+
+    /// Close the diff view (the user dismissed it). Called only while the diff view
+    /// is the open overlay, so it clears the overlay outright.
+    pub fn close_diff(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// Scroll the diff view up one line (no-op when closed or at the top).
+    pub fn diff_scroll_up(&mut self) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            diff.scroll = diff.scroll.saturating_sub(1);
+        }
+    }
+
+    /// Scroll the diff view down one line, clamped so the last row stays in view
+    /// (no-op when closed). `visible` is the pane body height the view can show.
+    /// The row count is layout-aware: the split view folds paired add/del lines
+    /// into one visual row, so it clamps against fewer rows than the unified view.
+    pub fn diff_scroll_down(&mut self, visible: usize) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            let total = if diff.split {
+                crate::presentation::tui::diff::split_rows(&diff.doc).len()
+            } else {
+                diff.doc.rows.len()
+            };
+            let max = total.saturating_sub(visible);
+            diff.scroll = (diff.scroll + 1).min(max);
+        }
+    }
+
+    /// Toggle the diff view between the unified and split (side-by-side) layouts
+    /// (no-op when closed), resetting the scroll so the switch lands at the top.
+    pub fn diff_toggle_split(&mut self) {
+        if let Overlay::Diff(diff) = &mut self.overlay {
+            diff.split = !diff.split;
+            diff.scroll = 0;
+        }
+    }
+
     /// The open right-pane preview, if any.
     pub fn preview(&self) -> Option<&Preview> {
         match &self.overlay {
@@ -1560,10 +1834,11 @@ impl HomeState {
     /// Reflects freshly detected pull-request links in the sidebar `#N` badge of
     /// the session row at `root`, without waiting for the next workspace re-sync.
     ///
-    /// The attached pane calls this when it spots a new `/pull/<N>` URL in the
-    /// shell output, passing the PR-link store's accumulated set so the live badge
-    /// matches what a later re-sync would fold in from `pr-links/`. Returns whether
-    /// anything changed, so the caller repaints only when it did.
+    /// The attached pane and background watcher call this when they spot a new
+    /// `/pull/<N>` URL in shell output, passing the PR-link store's accumulated
+    /// set so the live badge matches what a later re-sync would fold in from
+    /// `pr-links/`. Returns whether anything changed, so the caller repaints only
+    /// when it did.
     pub fn set_pr_links(
         &mut self,
         root: &Path,
@@ -1628,21 +1903,27 @@ impl HomeState {
     /// [`surface_writer`](Self::surface_writer).
     pub fn show_attached(&mut self) {
         self.mode = Mode::Attached;
+        // Attaching consumes any menu still floating over a pane tab, so a later
+        // return to 在席 starts from its regular surface rather than a stale menu.
+        self.focus_menu_over_pane = false;
     }
 
     /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
     /// so drop the surface and return to the focused session's action surface.
-    /// The tab selector lands on the trailing "+ new" tab — the launch surface —
-    /// so zooming out with `Ctrl-T` opens the action menu over the live panes
-    /// (which still ride the strip). When this was a deliberate zoom-out the caller
-    /// arms [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
+    /// The tab selector lands on the trailing "+ new" tab — the launch surface.
+    /// A deliberate zoom-out (`Ctrl-T` / `Ctrl-O a`) instead keeps the pane's
+    /// own tab selected with the menu floating over its preview — the caller
+    /// follows up with [`focus_menu_over_active_pane`] — and arms
+    /// [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
     /// rather than stepping back onto its preview (see [`focus_discard_new_tab`]).
     ///
+    /// [`focus_menu_over_active_pane`]: Self::focus_menu_over_active_pane
     /// [`arm_focus_return_attach`]: Self::arm_focus_return_attach
     /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
         self.focus_new_tab = true;
+        self.focus_menu_over_pane = false;
         self.clear_terminal_surface();
         // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
         // exited on the second key; clear it so 在席 starts without one pending.
@@ -1828,9 +2109,8 @@ impl HomeState {
 
     /// Begin or advance the transient "working…" indicator with `label`, ticking
     /// its animation frame. Call it before each step of a blocking action (and
-    /// repaint) so the top-right loading rabbit appears and hops; a multi-step
-    /// action (e.g. a bulk removal) steps once per item so the rabbit animates as
-    /// it progresses.
+    /// repaint) so the loading indicator appears; a multi-step action (e.g. a
+    /// bulk removal) steps once per item so the loader animates as it progresses.
     pub fn step_loading(&mut self, label: impl Into<String>) {
         let frame = self.loading.as_ref().map_or(0, |l| l.frame + 1);
         self.loading = Some(LoadingIndicator {
@@ -1840,15 +2120,13 @@ impl HomeState {
     }
 
     /// Clear the "working…" indicator once the blocking action has finished, so
-    /// the top-right corner returns to its resting state (the update notice, or
-    /// nothing).
+    /// the screen returns to its resting state.
     pub fn finish_loading(&mut self) {
         self.loading = None;
     }
 
     /// The transient "working…" indicator, when an action is in flight — the
-    /// top-right loading rabbit is shown (taking the corner over the update
-    /// notice) only while this is `Some`.
+    /// launch loader is shown only while this is `Some`.
     pub fn loading(&self) -> Option<&LoadingIndicator> {
         self.loading.as_ref()
     }
@@ -1948,13 +2226,14 @@ impl HomeState {
         self.update_confirm = false;
     }
 
-    /// React to a click on the resting sidebar mascot: when it is announcing an
-    /// available update ([`update`](Self::update) is `Some`), raise the
-    /// update-confirmation modal; otherwise play a one-shot click reaction. The
-    /// event loop calls this on a hit so the rabbit either offers the update or
-    /// just does something cute back.
+    /// React to a click on the resting sidebar mascot: when it is visibly
+    /// announcing an available update ([`update`](Self::update) is `Some` and no
+    /// loading / background task is using the bubble), raise the update-confirm
+    /// modal; otherwise play a one-shot click reaction. The event loop calls this
+    /// on a hit so the rabbit either offers the update or just does something
+    /// cute back, matching what its bubble currently says.
     pub fn click_mascot(&mut self, now: Instant) {
-        if self.update.is_some() {
+        if self.update.is_some() && self.loading.is_none() && self.tasks.is_empty() {
             self.open_update_confirm();
         } else {
             self.kick_mascot_reaction(now);
@@ -2050,9 +2329,6 @@ impl HomeState {
         self.mode = Mode::Switch;
         self.switch_return = return_to;
         self.overlay.clear_create();
-        // A fresh 切替 shows the highlighted session's note (any prior dismissal
-        // belonged to the previous visit).
-        self.note_hidden = false;
         // Any 在席 `Ctrl-O` leader is abandoned by leaving the surface.
         self.prefix_pending = false;
     }
@@ -2065,24 +2341,18 @@ impl HomeState {
     /// Move the Switch cursor up one row, wrapping (delegates to the list).
     pub fn switch_move_up(&mut self) {
         self.list.move_up();
-        // The cursor now sits on a different session, so re-show its note even if
-        // the previous row's note was dismissed.
-        self.note_hidden = false;
     }
 
     /// Move the Switch cursor down one row, wrapping (delegates to the list).
     pub fn switch_move_down(&mut self) {
         self.list.move_down();
-        self.note_hidden = false;
     }
 
     /// Move the Switch cursor straight to a selectable `row` (0 is the root row),
     /// clamped to the rows that exist — used when a left click selects a session
-    /// row directly. Re-shows the now-selected session's note like the cursor
-    /// moves above.
+    /// row directly.
     pub fn switch_select(&mut self, row: usize) {
         self.list.focus_index(row);
-        self.note_hidden = false;
     }
 
     /// Begin inline session creation in 切替: open an empty name input that
@@ -2308,30 +2578,15 @@ impl HomeState {
 
     /// The highlighted session's read-only note when its overlay is currently
     /// shown in 切替 (Switch), else `None`: it shows when the cursor is on a
-    /// session that has a note, it has not been dismissed with `Esc`, and no note
-    /// *editor* is open (the editor takes over the overlay). The right-pane
-    /// renderer draws the note exactly when this is `Some` — so its absence is a
-    /// genuine path, not a dead branch behind a separate predicate.
+    /// session that has a note and no note *editor* is open (the editor takes
+    /// over the overlay). The right-pane renderer draws the note exactly when
+    /// this is `Some` — so its absence is a genuine path, not a dead branch
+    /// behind a separate predicate.
     pub fn visible_switch_note(&self) -> Option<&str> {
-        if self.mode != Mode::Switch || self.note_hidden || matches!(self.overlay, Overlay::Note(_))
-        {
+        if self.mode != Mode::Switch || matches!(self.overlay, Overlay::Note(_)) {
             return None;
         }
         self.selected_session_note()
-    }
-
-    /// Whether the highlighted session's read-only note overlay is shown in 切替
-    /// (Switch) — see [`visible_switch_note`](Self::visible_switch_note). Read by
-    /// the event loop and the footer to decide whether `Esc` first hides the note
-    /// or backs out of 切替.
-    pub fn switch_note_visible(&self) -> bool {
-        self.visible_switch_note().is_some()
-    }
-
-    /// Dismiss the highlighted session's read-only note overlay in 切替 (Switch)
-    /// (the first `Esc`). Moving the cursor to another row re-shows it.
-    pub fn hide_switch_note(&mut self) {
-        self.note_hidden = true;
     }
 
     /// The worktree whose PR popup is pinned open (by index in the list's
@@ -2430,6 +2685,48 @@ impl HomeState {
         }
     }
 
+    /// Open the workspace-env editor (the `env` command) over the palette, seeded
+    /// from the workspace's current bindings. Replaces any open overlay.
+    pub fn open_env_editor(&mut self, env: crate::domain::settings::SecretEnv) {
+        self.overlay = Overlay::Env(EnvEditor::new(&env));
+    }
+
+    /// The open env editor, when any — its buffer and caret are read through it.
+    pub fn env_editor(&self) -> Option<&EnvEditor> {
+        match &self.overlay {
+            Overlay::Env(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// The open env editor for editing, when any: the event loop routes its keys
+    /// to the buffer's own methods (via [`EnvEditor::area_mut`]).
+    pub fn env_editor_mut(&mut self) -> Option<&mut EnvEditor> {
+        match &mut self.overlay {
+            Overlay::Env(editor) => Some(editor),
+            _ => None,
+        }
+    }
+
+    /// Cancel the env editor, discarding the edits and returning to the Overview.
+    /// Called only while the env editor is the open overlay, so it clears the
+    /// overlay outright (the palette stays open beneath it).
+    pub fn env_editor_cancel(&mut self) {
+        self.overlay = Overlay::None;
+    }
+
+    /// Accept the env edit: close the editor and return the parsed bindings for
+    /// the event loop to persist. A no-op (returning `None`) when not editing.
+    pub fn confirm_env_editor(&mut self) -> Option<crate::domain::settings::SecretEnv> {
+        match std::mem::take(&mut self.overlay) {
+            Overlay::Env(editor) => Some(editor.bindings()),
+            other => {
+                self.overlay = other;
+                None
+            }
+        }
+    }
+
     // --- 在席 (Focus) ------------------------------------------------------
 
     /// Enter 在席 (Focus) on the session at `row` (0 is the root row): make it the
@@ -2454,6 +2751,7 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        self.focus_menu_over_pane = false;
         // A fresh 在席 entry is not the zoom-out-from-没入 path, so the one-shot
         // return-to-pane arming never carries into it.
         self.focus_return_attach = false;
@@ -2473,6 +2771,27 @@ impl HomeState {
         }
         self.touch_active(Utc::now());
         self.enter_focus_surface();
+        true
+    }
+
+    /// Enter 在席 (Focus) on the session named `name`, landing on its **existing**
+    /// live pane (whatever tab the pool has active) rather than the trailing
+    /// "+ new" action surface — the mirror of [`enter_focus_named`] used when the
+    /// user did not ask for a fresh tab. Falls back to the "+ new" surface for an
+    /// idle session (no live pane), where [`focus_on_new_tab`](Self::focus_on_new_tab)
+    /// is forced on anyway. Returns whether a session matched.
+    ///
+    /// Used by the auto-focus a finished `close` requests: the neighbouring
+    /// session opens in the state it was left in (its running agent/terminal),
+    /// not a new-tab prompt.
+    pub fn enter_focus_named_existing(&mut self, name: &str) -> bool {
+        if !self.enter_focus_named(name) {
+            return false;
+        }
+        // `enter_focus_surface` lands on the "+ new" tab; drop that so the
+        // session's existing pane shows (an idle one has no pane, so
+        // `focus_on_new_tab` stays true and the action surface shows regardless).
+        self.focus_new_tab = false;
         true
     }
 
@@ -2515,17 +2834,17 @@ impl HomeState {
         self.enter_switch(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in alphabetical order by
-    /// name (`agent`, `chat`, `close`, `terminal`). Prompt-taking commands such as
-    /// `ai <prompt>` are kept out of the pickable menu because they need typed
-    /// arguments; they are available from the Prompt UI instead. `close` is
-    /// filtered out on the root row, which belongs to no session and so cannot
-    /// be closed. `agent` is filtered out when the focused session already has a
-    /// live `agent` pane, since its agent is already running.
+    /// The Session-scope commands the 在席 menu lists, in the fixed display order
+    /// (see [`session_menu_rank`]). The prompt-taking `ai <prompt>` is kept out of
+    /// the pickable menu (it needs typed arguments; use the Prompt UI). `chat` is
+    /// filtered out unless the local LLM is usable (enabled and its model pulled),
+    /// so it only appears when a reply would actually work. `close` / `diff` are
+    /// filtered out on the root row, which belongs to no session. `agent` always
+    /// stays: a session can hold one agent pane per CLI.
     ///
     /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_active(), self.agent_tab_open())
+        self.menu_commands_for_root(self.list.root_active())
     }
 
     /// The same Session-scope command list as [`focus_menu_commands`], but
@@ -2534,32 +2853,30 @@ impl HomeState {
     /// so its `close` visibility must follow that row — otherwise a session row
     /// previewed while the root row is active would hide `close` (and vice
     /// versa), showing the active row's menu instead of the highlighted one's.
-    /// The preview only renders this menu for a row with no live panes, so its
-    /// `agent` is never hidden (there is no agent pane open to hide it for).
     pub fn preview_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_selected(), false)
+        self.menu_commands_for_root(self.list.root_selected())
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands sorted alphabetically by name, with `ai` hidden
-    /// from the menu (it requires a prompt argument), `close` hidden when `root`
-    /// (the row belongs to no session), and `agent` hidden when `agent_open` (a
-    /// live agent pane already exists for the resolved session).
-    fn menu_commands_for_root(&self, root: bool, agent_open: bool) -> Vec<CommandInfo> {
+    /// Session-scope commands in the fixed display order (see
+    /// [`session_menu_rank`]): the prompt-taking `ai` is kept out of the menu,
+    /// `chat` is gated on local-LLM availability, and the session-only `close` /
+    /// `diff` are hidden when `root` (the row belongs to no session).
+    fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
             .filter(|info| info.name != "ai")
-            .filter(|info| info.name != "close" || !root)
-            .filter(|info| info.name != "agent" || !agent_open)
+            .filter(|info| info.name != "chat" || self.ai_available)
+            .filter(|info| !matches!(info.name, "close" | "diff") || !root)
             .collect()
     }
 
     /// Whether the focused session already has a live `agent` pane — a tab the
     /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
-    /// agents run). The 在席 menu hides the `agent` launch command in that case,
-    /// and `ai <prompt>` skips its installed-CLI gate: the prompt is delivered to
-    /// that pane (whatever CLI it runs) rather than freshly spawning the default.
+    /// agents run). `ai <prompt>` uses this to skip its installed-CLI gate,
+    /// delivering the prompt to that pane (whatever CLI it runs) rather than
+    /// freshly spawning the default.
     pub fn agent_tab_open(&self) -> bool {
         self.terminal.tabs.as_ref().is_some_and(|strip| {
             strip
@@ -2590,12 +2907,78 @@ impl HomeState {
         self.focus_new_tab || self.focus_pane_count() == 0
     }
 
+    /// Whether the 在席 (Focus) action **menu** is currently presented as a
+    /// floating overlay modal (centred over the right pane) rather than inline in
+    /// the pane.
+    ///
+    /// This is true only for the menu surface ([`SessionActionUi::Menu`]) — the
+    /// prompt surface stays inline — and only while 在席 actually shows that
+    /// surface: on the trailing "+ new" tab (which [`focus_on_new_tab`] also
+    /// reports for an idle session with no live panes), or floating over the
+    /// selected pane tab after a zoom-out (see
+    /// [`focus_menu_over_active_pane`](Self::focus_menu_over_active_pane)).
+    ///
+    /// It yields to whatever else has claimed the screen so the floating menu
+    /// never fights another surface for the pane: the momentary loading indicator,
+    /// and any open overlay ([`Overlay`] — the note editor, a text modal a menu
+    /// command opened, the Markdown preview / diff view, …) or the `:` command
+    /// palette, each of which captures the keyboard and draws its own box.
+    ///
+    /// The renderer floats the menu when this holds and [`focus_pane`] leaves the
+    /// pane behind it clear, so the two read the one predicate and never disagree
+    /// on where the menu is drawn.
+    ///
+    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
+    /// [`focus_pane`]: super::ui::panes
+    pub fn focus_menu_overlay(&self) -> bool {
+        self.mode == Mode::Focus
+            && self.session_action_ui == SessionActionUi::Menu
+            && (self.focus_on_new_tab() || self.focus_menu_over_pane)
+            && self.loading().is_none()
+            && matches!(self.overlay, Overlay::None)
+            && !self.command_palette_open()
+    }
+
+    /// Whether the 在席 action menu currently floats over the selected pane tab
+    /// (rather than living on the "+ new" tab) — the zoomed-out-from-没入 state
+    /// set by [`focus_menu_over_active_pane`](Self::focus_menu_over_active_pane).
+    /// Key routing reads this so the menu keeps the keyboard while a pane tab is
+    /// selected beneath it.
+    pub fn focus_menu_over_pane(&self) -> bool {
+        self.focus_menu_over_pane
+    }
+
+    /// Keep the 在席 action menu floating over the pane tab a zoom-out left
+    /// (`Ctrl-T` / `Ctrl-O a`): step the selector off the "+ new" tab
+    /// [`leave_attached`](Self::leave_attached) landed on, so the pane's own tab
+    /// stays selected — its live preview keeps showing behind the floating menu
+    /// and the strip never grows a "+ new" chip for a tab that was never
+    /// created. Only the menu surface floats; with the prompt UI configured the
+    /// prompt draws inline on the "+ new" tab, so this is then a no-op and the
+    /// zoom-out keeps its "+ new" landing.
+    pub fn focus_menu_over_active_pane(&mut self) {
+        if self.session_action_ui == SessionActionUi::Menu {
+            self.focus_new_tab = false;
+            self.focus_menu_over_pane = true;
+        }
+    }
+
+    /// Dismiss the menu floating over a pane tab, returning whether it was up.
+    /// The 在席 `Esc` handler consumes this after the one-shot re-attach bit: a
+    /// dismissed menu leaves the selected pane's preview showing, one step short
+    /// of leaving 在席.
+    pub fn close_focus_menu_over_pane(&mut self) -> bool {
+        std::mem::take(&mut self.focus_menu_over_pane)
+    }
+
     /// Move 在席's tab selector to the next tab, wrapping through the live panes
     /// and the trailing "+ new" tab (`[pane 0 … pane n-1, + new]`). Returns the
     /// pane index to make active (for the caller to apply to the terminal pool) on
     /// landing on a pane tab, or `None` when it lands on the "+ new" tab (or the
     /// session has no panes, leaving the selector on "+ new").
     pub fn focus_tab_next(&mut self) -> Option<usize> {
+        // Walking the strip is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;
@@ -2621,6 +3004,8 @@ impl HomeState {
     ///
     /// [`focus_tab_next`]: Self::focus_tab_next
     pub fn focus_tab_prev(&mut self) -> Option<usize> {
+        // Walking the strip is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;
@@ -2644,6 +3029,8 @@ impl HomeState {
     /// clicks; keyboard navigation uses [`focus_tab_next`](Self::focus_tab_next)
     /// / [`focus_tab_prev`](Self::focus_tab_prev).
     pub fn focus_select_pane_tab(&mut self, index: usize) -> Option<usize> {
+        // Clicking a tab is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;
@@ -2692,7 +3079,8 @@ impl HomeState {
         self.focus_menu.cursor()
     }
 
-    /// Whether the 在席 menu's `agent` row is expanded into the agent picker.
+    /// Whether any 在席 menu row is expanded into an inline picker (agent /
+    /// terminal / close).
     pub fn focus_menu_expanded(&self) -> bool {
         self.focus_menu.is_expanded()
     }
@@ -2705,6 +3093,18 @@ impl HomeState {
             .filter(|_| !self.installed_agents.is_empty())
     }
 
+    /// Whether the 在席 menu's `terminal` row is expanded into the open/new
+    /// picker.
+    pub fn focus_menu_terminal_expanded(&self) -> bool {
+        self.focus_menu.terminal_cursor().is_some()
+    }
+
+    /// The highlighted terminal action in the 在席 menu's terminal picker, or
+    /// `None` when the picker is collapsed.
+    pub fn focus_menu_terminal_cursor(&self) -> Option<usize> {
+        self.focus_menu.terminal_cursor()
+    }
+
     /// Whether the 在席 menu's `agent` row can expand into the picker: the cursor
     /// is on `agent` and more than one CLI is installed (so there is a choice).
     pub fn focus_menu_agent_can_expand(&self) -> bool {
@@ -2712,6 +3112,13 @@ impl HomeState {
             && self
                 .focus_selected_command()
                 .is_some_and(|info| info.name == "agent")
+    }
+
+    /// Whether the 在席 menu's `terminal` row can expand into the open/new
+    /// picker. It always has two choices; expansion is gated only by the cursor.
+    pub fn focus_menu_terminal_can_expand(&self) -> bool {
+        self.focus_selected_command()
+            .is_some_and(|info| info.name == "terminal")
     }
 
     /// Expand the 在席 menu's agent picker, highlighting the configured default
@@ -2728,10 +3135,19 @@ impl HomeState {
             .iter()
             .position(|&cli| cli == self.default_agent)
             .unwrap_or(0);
-        self.focus_menu.expand(default_index);
+        self.focus_menu.expand(FocusSubmenu::Agent, default_index);
     }
 
-    /// Collapse the 在席 menu's agent picker, returning whether it was expanded
+    /// Expand the 在席 menu's terminal picker, highlighting `open` (the default
+    /// embedded-pane action).
+    pub fn focus_menu_expand_terminal(&mut self) {
+        if !self.focus_menu_terminal_can_expand() {
+            return;
+        }
+        self.focus_menu.expand(FocusSubmenu::Terminal, 0);
+    }
+
+    /// Collapse the 在席 menu's inline picker, returning whether one was expanded
     /// (so the caller treats `←` / `Esc` as consumed only then).
     pub fn focus_menu_collapse_agent(&mut self) -> bool {
         self.focus_menu.collapse()
@@ -2786,8 +3202,25 @@ impl HomeState {
             .copied()
     }
 
+    /// The terminal action highlighted in the picker (`open` / `new`), or `None`
+    /// when the picker is collapsed.
+    pub fn focus_menu_selected_terminal_action(&self) -> Option<&'static str> {
+        self.focus_menu.terminal_cursor()?;
+        TERMINAL_MENU_ACTIONS
+            .get(
+                self.focus_menu
+                    .terminal_selected(TERMINAL_MENU_ACTIONS.len()),
+            )
+            .copied()
+    }
+
+    /// The terminal actions shown below the expanded terminal row.
+    pub fn focus_menu_terminal_actions(&self) -> &'static [&'static str] {
+        &TERMINAL_MENU_ACTIONS
+    }
+
     /// Move the 在席 menu cursor up one row, wrapping (delegated to [`FocusMenu`],
-    /// which keeps it underflow-safe). Acts on the agent picker while expanded.
+    /// which keeps it underflow-safe). Acts on the active picker while expanded.
     pub fn focus_menu_move_up(&mut self) {
         let count = self.focus_menu_nav_count();
         self.focus_menu.move_up(count);
@@ -2804,9 +3237,13 @@ impl HomeState {
     /// the Session-scope commands.
     fn focus_menu_nav_count(&self) -> usize {
         if self.focus_menu.is_expanded() {
-            self.installed_agents.len()
-        } else if self.focus_menu.is_close_expanded() {
-            2
+            if self.focus_menu_terminal_expanded() {
+                TERMINAL_MENU_ACTIONS.len()
+            } else if self.focus_menu.is_close_expanded() {
+                2
+            } else {
+                self.installed_agents.len()
+            }
         } else {
             self.focus_menu_commands().len()
         }
@@ -2883,11 +3320,15 @@ impl HomeState {
         // command's response — the prompt has no echo line, so the response
         // starts at the current log end.
         self.response_start = self.log.len();
-        let result = self.dispatch_and_record(&entry, CommandScope::Session);
+        let session = match self.focused_session_name() {
+            name if name == ROOT_NAME => None,
+            name => Some(name),
+        };
+        let (result, recorded) = self.dispatch_and_record(&entry, CommandScope::Session, session);
         let effect = self.record_response(result);
         Submission {
             effect,
-            recorded: Some(entry),
+            recorded: Some(recorded),
         }
     }
 
@@ -2979,11 +3420,11 @@ impl HomeState {
         self.response_start = self.log.len();
         self.log.push(LogLine::command(entry.clone()));
         self.trim_log();
-        let result = self.dispatch_and_record(&entry, self.command_scope());
+        let (result, recorded) = self.dispatch_and_record(&entry, self.command_scope(), None);
         let effect = self.record_response(result);
         Submission {
             effect,
-            recorded: Some(entry),
+            recorded: Some(recorded),
         }
     }
 
@@ -2994,16 +3435,37 @@ impl HomeState {
     /// [`CommandScope::Session`]) so both record history identically and refuse
     /// commands outside their surface's scope; folding the result into the log is
     /// [`record_response`](Self::record_response).
-    fn dispatch_and_record(&mut self, entry: &str, scope: CommandScope) -> CommandResult {
+    fn dispatch_and_record(
+        &mut self,
+        entry: &str,
+        scope: CommandScope,
+        session: Option<String>,
+    ) -> (CommandResult, HistoryEntry) {
         let result = self.registry.dispatch_in_scope(
             entry,
             scope,
-            self.cmdline.history(),
+            &self.history_entries,
             &self.list.refs(),
             &self.issues,
         );
+        let success = !result.lines.iter().any(|line| line.kind == LineKind::Error);
         self.cmdline.push_history(entry.to_string());
-        result
+        let recorded = HistoryEntry::now(entry, session, success);
+        self.push_history_entry(recorded.clone());
+        (result, recorded)
+    }
+
+    /// Append one full history entry to the display history, capping it to the
+    /// same most-recent window used for command recall.
+    fn push_history_entry(&mut self, entry: HistoryEntry) {
+        self.history_entries.push(entry);
+        let overflow = self
+            .history_entries
+            .len()
+            .saturating_sub(MAX_COMMAND_HISTORY);
+        if overflow > 0 {
+            self.history_entries.drain(..overflow);
+        }
     }
 
     /// Fold a command `result` into the log and advance the results-band start,
@@ -3114,7 +3576,11 @@ impl HomeState {
             .sessions
             .iter()
             .map(|session| {
-                RemoveEntry::new(session.name.clone(), self.root_path.clone(), primary_label)
+                RemoveEntry::new(
+                    session.name.clone(),
+                    self.root_path().to_path_buf(),
+                    primary_label,
+                )
             })
             .collect();
 

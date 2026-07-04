@@ -39,7 +39,8 @@ use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
 use crate::infrastructure::{
-    agent_prompt_store, agent_state_store, git, open_panes_store, pr_link_store,
+    agent_live_prompt_store, agent_prompt_store, agent_state_store, git, open_panes_store,
+    pr_link_store,
 };
 use crate::usecase::workspace_state;
 
@@ -177,17 +178,27 @@ fn create_with_setup_runner(
     let skill_settings =
         crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
     let skill_excludes = crate::infrastructure::skills::git_exclude_patterns();
+    let exclude_patterns: Vec<&str> = skill_excludes.iter().map(String::as_str).collect();
     for wt in &worktrees {
-        for pattern in &skill_excludes {
-            let _ = git::ensure_excluded(wt, pattern);
-        }
+        // Exclude every skill's symlink in one pass so the exclude path is resolved
+        // and the file rewritten once per worktree, not once per skill pattern.
+        let _ = git::ensure_all_excluded(wt, &exclude_patterns);
         let _ = crate::infrastructure::skills::link(wt, &skill_settings);
     }
 
     let local_settings = crate::usecase::settings::load_local(workspace_root).unwrap_or_default();
-    run_setup_commands(&dest_root, name, &local_settings, setup_runner);
 
+    // Record the session *before* running setup, then release the store lock so
+    // the (arbitrary, possibly minutes-long) user setup commands do not hold it.
+    // Holding the lock across e.g. `npm ci` would make every concurrent
+    // create/remove and background `workspace_state::sync` fail on the
+    // lock-acquire timeout. Recording first keeps reconcile from mistaking this
+    // now-registered worktree for a stray while setup runs; a setup failure is
+    // logged, never rolled back (the worktree already exists for the user to fix).
     record(&store, name, &dest_root, &worktrees)?;
+    drop(_lock);
+
+    run_setup_commands(&dest_root, name, &local_settings, setup_runner);
 
     crate::infrastructure::trace_log::TraceLog::record(
         crate::domain::trace::TraceEvent::now(
@@ -302,6 +313,7 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
         name: name.to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
@@ -387,6 +399,27 @@ pub fn set_note(workspace_root: &Path, name: &str, note: &str) -> Result<Option<
             Some(trimmed.to_string())
         };
         session.note.clone()
+    })
+}
+
+/// Set (or clear) a session's manual status label in `state.json`, leaving its
+/// branch / identity untouched.
+///
+/// `label_id` is the [`SessionLabelDef`](crate::domain::settings::SessionLabelDef)
+/// id to assign, or `None` to clear the label. The id is stored verbatim — this
+/// usecase does not validate it against the effective label master (an id that no
+/// longer resolves simply reads as unset at display time), so the presentation
+/// layer, which owns the master, decides which id to pass. Returns the id now
+/// stored (`None` when cleared). Fails when no session named `name` exists.
+pub fn set_label(
+    workspace_root: &Path,
+    name: &str,
+    label_id: Option<&str>,
+) -> Result<Option<String>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_session(&store, name, |session| {
+        session.label_id = label_id.map(str::to_string);
+        session.label_id.clone()
     })
 }
 
@@ -623,8 +656,9 @@ pub fn remove(
     // Clear the chat history and every per-worktree file usagi keeps for each
     // worktree so nothing outlives the session: a path reused later starts clean
     // rather than inheriting the removed session's agent phase, PR badges, queued
-    // prompt, or open-pane snapshot — all of which are keyed by the worktree path
-    // and would otherwise be re-read by a session recreated there. The TUI also
+    // prompt (launch-time or live), or open-pane snapshot — all of which are keyed
+    // by the worktree path and would otherwise be re-read by a session recreated
+    // there. The TUI also
     // clears the phase and pane snapshot as it evicts the live pool, but removal
     // can come from the CLI or MCP with no TUI running, so the durable files are
     // wiped here for every caller. This runs *before* the worktree directories
@@ -635,6 +669,7 @@ pub fn remove(
         agent_state_store::clear(&wt.path);
         pr_link_store::clear(&wt.path);
         agent_prompt_store::clear(&wt.path);
+        agent_live_prompt_store::clear(&wt.path);
         open_panes_store::clear(&wt.path);
     }
 
@@ -1510,6 +1545,54 @@ mod tests {
         assert!(err.to_string().contains("no such session"));
     }
 
+    // --- set_label ---------------------------------------------------------
+
+    fn label_of(root: &Path, name: &str) -> Option<String> {
+        list(root)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.label_id)
+    }
+
+    #[test]
+    fn set_label_sets_clears_and_leaves_other_sessions_alone() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        create(root.path(), "other").unwrap();
+
+        // Assign a label id → it is stored verbatim and returned.
+        let stored = set_label(root.path(), "feature", Some("review")).unwrap();
+        assert_eq!(stored.as_deref(), Some("review"));
+        assert_eq!(label_of(root.path(), "feature").as_deref(), Some("review"));
+        // Other sessions keep their (unset) label.
+        assert_eq!(label_of(root.path(), "other"), None);
+
+        // Re-assigning replaces the id (the usecase does not validate it).
+        set_label(root.path(), "feature", Some("done")).unwrap();
+        assert_eq!(label_of(root.path(), "feature").as_deref(), Some("done"));
+
+        // Clearing with None removes the label.
+        let stored = set_label(root.path(), "feature", None).unwrap();
+        assert_eq!(stored, None);
+        assert_eq!(label_of(root.path(), "feature"), None);
+    }
+
+    #[test]
+    fn set_label_errors_without_state_or_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No state.json yet.
+        let err = set_label(root.path(), "x", Some("todo")).unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
+
+        // State exists but the named session does not.
+        create(root.path(), "present").unwrap();
+        let err = set_label(root.path(), "absent", Some("todo")).unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+    }
+
     // --- remove ------------------------------------------------------------
 
     fn sessions_of(root: &Path) -> Vec<String> {
@@ -1741,6 +1824,7 @@ mod tests {
             name: "ghost".to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: ghost_root.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

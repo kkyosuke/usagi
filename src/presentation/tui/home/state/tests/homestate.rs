@@ -7,6 +7,7 @@ fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
         name: name.to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: Vec::new(),
         created_at: Utc::now(),
@@ -164,6 +165,48 @@ fn workspace_root_for_session_honours_the_workspace_qualifier() {
         state.workspace_root_for_session(Some("ghost"), "b1"),
         PathBuf::from("/wsB")
     );
+}
+
+#[test]
+fn group_value_type_carries_each_workspace_root() {
+    use std::path::Path;
+    // The root now lives on the `WorkspaceGroup` value type: the primary's is the
+    // injected root, each extra group's is its own, and they survive a re-sync.
+    let state = united_state();
+    assert_eq!(state.list().groups()[0].root_path(), Path::new("/usagi"));
+    assert_eq!(state.list().groups()[1].root_path(), Path::new("/wsB"));
+    // The legacy single-workspace accessor delegates to the primary group.
+    assert_eq!(state.root_path(), Path::new("/usagi"));
+}
+
+#[test]
+fn ctrl_caret_jump_back_disambiguates_same_named_sessions_across_groups() {
+    // Two workspaces each hold a session named "shared"; the Ctrl-^ jump-back
+    // must return to the exact one left, not the first same-named match.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main"), session("shared")]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![session("shared")],
+    }]);
+    // Flat rows: 0 usagi root, 1 main, 2 shared(A), 3 wsB root, 4 shared(B).
+    assert_eq!(state.list().session_count(), 5);
+    assert_eq!(state.list().refs().len(), 5);
+
+    // Focus wsB's "shared" (row 4), then focus the primary's "main" (row 1), so the
+    // row left behind is wsB's "shared".
+    state.enter_focus(4);
+    state.enter_focus(1);
+    // Ctrl-^ returns to wsB's "shared" at row 4 — not the primary's at row 2 that a
+    // bare-name lookup would return first.
+    assert_eq!(state.previous_session_row(), Some(4));
+
+    // A background re-sync of the primary keeps the qualified jump target intact.
+    state.refresh_sessions(vec![session("main"), session("shared")]);
+    assert_eq!(state.previous_session_row(), Some(4));
 }
 
 #[test]
@@ -501,6 +544,29 @@ fn clicking_the_mascot_opens_the_update_modal_when_an_update_is_available() {
 }
 
 #[test]
+fn clicking_the_mascot_reacts_when_work_status_hides_the_update_notice() {
+    use crate::domain::version::Version;
+    use std::time::Instant;
+
+    let mut loading = state();
+    loading.set_update(Version::parse("9.9.9"));
+    loading.step_loading("エージェント起動中…");
+    loading.click_mascot(Instant::now());
+    assert!(!loading.update_confirm());
+    assert!(loading.mascot_reacting());
+
+    let mut tasking = state();
+    tasking.set_update(Version::parse("9.9.9"));
+    tasking.set_tasks(vec![crate::presentation::tui::home::tasks::TaskRow {
+        label: "作成中… main".to_string(),
+        mark: crate::presentation::tui::home::tasks::TaskMark::Running(0),
+    }]);
+    tasking.click_mascot(Instant::now());
+    assert!(!tasking.update_confirm());
+    assert!(tasking.mascot_reacting());
+}
+
+#[test]
 fn clicking_the_mascot_without_an_update_plays_a_reaction() {
     use std::time::Instant;
     let mut state = state();
@@ -623,7 +689,18 @@ fn submitting_a_command_echoes_and_runs_it() {
             size: ModalSize::Large,
         }
     );
-    assert_eq!(submission.recorded.as_deref(), Some("man"));
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("man")
+    );
+    assert_eq!(
+        submission
+            .recorded
+            .as_ref()
+            .and_then(|e| e.session.as_ref()),
+        None
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| e.success));
     let echoed = state.log().iter().find(|l| l.kind == LineKind::Command);
     assert_eq!(echoed.unwrap().text, "man");
     let modal = state.text_modal().expect("man opens a text modal");
@@ -632,6 +709,20 @@ fn submitting_a_command_echoes_and_runs_it() {
     // The band shows none of the modal's output (its response is empty).
     assert!(state.response_lines().is_empty());
     assert_eq!(state.input(), "");
+}
+
+#[test]
+fn submitting_an_error_command_records_failure() {
+    let mut state = state();
+    for c in "nope".chars() {
+        state.push_char(c);
+    }
+    let submission = state.submit();
+    assert_eq!(
+        submission.recorded.as_ref().map(|e| e.command.as_str()),
+        Some("nope")
+    );
+    assert!(submission.recorded.as_ref().is_some_and(|e| !e.success));
 }
 
 #[test]

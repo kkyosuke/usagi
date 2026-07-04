@@ -1,13 +1,13 @@
 ---
 number: 69
 title: refactor(usecase): session の表示ラベル解決を presentation 層へ寄せる
-status: todo
+status: done
 priority: low
 labels: [refactor, review]
 dependson: []
 related: [56]
 created_at: 2026-06-20T12:04:46.619614+00:00
-updated_at: 2026-06-20T12:04:46.619614+00:00
+updated_at: 2026-07-04T00:14:14.820466+00:00
 ---
 
 ## 背景

@@ -47,10 +47,11 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     });
     let count = std::cell::Cell::new(0u32);
 
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
@@ -63,18 +64,20 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || count.set(count.get() + 1);
     let mut unite_resolve = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,
@@ -83,6 +86,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -105,6 +109,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         &monitor,
         &update,
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,

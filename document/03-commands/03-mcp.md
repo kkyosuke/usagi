@@ -15,6 +15,12 @@
   不要になったセッションを削除できます。コーディネータ役のエージェントが、並行する worktree にタスクを
   振り分けるオーケストレータとして振る舞えます。
 
+> MCP の tool 面は CLI と 1:1 対応ではなく、**エージェントが選びやすいワークフロー単位**に寄せています。
+> 一覧と検索は `issue_search` / `memory_search` の 1 tool（`query` 省略で全件）に、メモリの保存と更新は
+> `memory_save` の 1 tool（upsert）に、セッションへのプロンプト送信は配送先を `mode` で選ぶ `session_prompt`
+> の 1 tool に統合。さらに「issue を新セッションに委譲」の定番手順を `session_delegate_issue` の 1 tool に
+> まとめています。CLI は人間向けに `list` / `search` / `update` を別コマンドのまま残します（IF ごとに最適化）。
+
 ## 目次
 
 - [概要](#概要)
@@ -22,6 +28,7 @@
 - [アーキテクチャ](#アーキテクチャ)
 - [対応 tool 一覧](#対応-tool-一覧)
 - [`session_prompt` の挙動](#session_prompt-の挙動)
+- [`session_delegate_issue` の挙動](#session_delegate_issue-の挙動)
 - [`session_remove` の挙動](#session_remove-の挙動)
 - [JSON-RPC プロトコル](#json-rpc-プロトコル)
 - [エラーハンドリング](#エラーハンドリング)
@@ -88,27 +95,31 @@ AIエージェント ⇄ (stdio JSON-RPC)
 presentation/cli/mcp.rs    … stdin ループ + エージェント CLI バックエンド（薄い I/O ラッパ。カバレッジ対象外）
         │  handle_line(line) ごとに委譲
         ▼
-presentation/mcp/usagi.rs  … UsagiMcpServer：issue/memory サーバと session サーバを合成し tool をマージ
+presentation/mcp/usagi.rs  … UsagiMcpServer：issue/memory サーバと session サーバを合成し tool をマージ。
+        │                        さらに合成層だけの session_delegate_issue（両サーバの tool を順に呼ぶ）を追加
         ├─ presentation/mcp/issue/   … issue tool 実装。memory tool をマージして公開
-        │   └ presentation/mcp/memory.rs … memory tool 実装（issue サーバが呼ぶ）
-        └─ presentation/mcp/session.rs … session tool 実装（prompt は AgentBackend 経由）
+        │   └ presentation/mcp/memory.rs … memory tool 実装（issue サーバが呼ぶ。save は upsert 1 本）
+        └─ presentation/mcp/session.rs … session tool 実装（prompt の配送/remove は AgentBackend 経由）
         │  各 tool が呼ぶ
         ▼
-usecase/issue, usecase/memory, usecase/session … create/get/list/search/update/delete・worktree 生成 ほか
+usecase/issue, usecase/memory, usecase/session … create/get/search/update/delete・worktree 生成 ほか
         │
         ▼
 infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ の markdown + index.json
-（テスト時）FakeBackend / （本番）CliAgentBackend → agent-prompts/ へキュー（TUI が起動時に消費）
+（テスト時）FakeBackend / （本番）CliAgentBackend
+  └─ session_prompt → mode(auto) が agent phase を見て振り分け
+       ├─ queue → agent-prompts/ へキュー（TUI が起動時に消費）
+       └─ live  → agent-live-prompts/ へキュー（起動中 TUI が live pane へ注入）
 ```
 
 | モジュール | 役割 |
 |---|---|
-| `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。カレントディレクトリ（issue / memory 用）とそこから解決した workspace root（`usecase/session::workspace_root`。session 用）を `UsagiMcpServer` に渡して構築し、stdin を 1 行ずつ読み `handle_line` の戻り値を stdout へ書く。本番 `AgentBackend`（`session_prompt` のプロンプトを `agent-prompts/` へキューし、`session_remove` で実効設定の agent を解決して `usecase/session::remove` を呼ぶ）もここに置く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
+| `presentation/cli/mcp.rs` | `usagi mcp` のエントリ。カレントディレクトリ（issue / memory 用）とそこから解決した workspace root（`usecase/session::workspace_root`。session 用）を `UsagiMcpServer` に渡して構築し、stdin を 1 行ずつ読み `handle_line` の戻り値を stdout へ書く。本番 `AgentBackend`（`session_prompt` のプロンプトを配送先に応じて `agent-prompts/` か `agent-live-prompts/` へキューし、agent phase ファイルからライブペインの有無を判定し、`session_remove` で実効設定の agent を解決して `usecase/session::remove` を呼ぶ）もここに置く。ブロッキング I/O のみで、`hop` 同様カバレッジ計測の対象外。 |
 | `presentation/mcp/mod.rs` | JSON-RPC 2.0 の共有フレーミング（`dispatch_line` / レスポンス整形 / `McpService` トレイト）。各サーバが共有。 |
-| `presentation/mcp/usagi.rs` | `usagi` サーバの `UsagiMcpServer`。issue/memory サーバと session サーバを合成し、`tool_schemas` / `call_tool` で両者の tool をマージ・振り分けて 1 サーバで公開する。ユニットテストで網羅。 |
+| `presentation/mcp/usagi.rs` | `usagi` サーバの `UsagiMcpServer`。issue/memory サーバと session サーバを合成し、`tool_schemas` / `call_tool` で両者の tool をマージ・振り分けて 1 サーバで公開する。両サーバにまたがる `session_delegate_issue`（issue のプロンプト化→セッション作成→プロンプト投入を順に呼ぶ）はこの合成層が持つ。ユニットテストで網羅。 |
 | `presentation/mcp/issue/` | issue tool を提供する `McpServer`。`tool_schemas` / `call_tool` で `presentation/mcp/memory.rs` の memory tool をマージする。 |
 | `presentation/mcp/memory.rs` | memory tool の実装（スキーマ・引数パース・`usecase/memory` への委譲）。issue サーバから呼ばれる。 |
-| `presentation/mcp/session.rs` | session tool を提供する `SessionMcpServer`。実エージェント・実ファイルに触れる操作（`session_prompt` / `session_remove`）を `AgentBackend` トレイトで抽象化し、ユニットテストで網羅。 |
+| `presentation/mcp/session.rs` | session tool を提供する `SessionMcpServer`。実エージェント・実ファイルに触れる操作（`session_prompt` の 2 チャネル配送・ライブペイン検知・`session_remove`）を `AgentBackend` トレイトで抽象化し、ユニットテストで網羅。`mode` → チャネルの振り分けはサーバ側（テスト可能）で決める。 |
 | `usecase/issue`・`usecase/memory`・`usecase/session` ほか | tool が呼ぶビジネスロジック。MCP 固有の知識は持たない。 |
 
 依存方向はクリーンアーキテクチャに従い `presentation → usecase → infrastructure`。MCP 層は
@@ -116,7 +127,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 18 tool（issue 7 + memory 6 + session 5）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 18 tool（issue 6 + memory 4 + session 7 + オーケストレーション 1）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
@@ -124,35 +135,37 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `issue_create` | `title` | `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 作成された issue |
 | `issue_get` | `number` | — | issue（存在しなければ `null`） |
 | `issue_to_prompt` | `number` | — | `{ "number": N, "prompt": "…", "title": "…" }`（issue が無ければ実行エラー） |
-| `issue_list` | — | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与） |
-| `issue_search` | `query` | `status` / `priority` / `label` / `parent` / `milestone` / `ready` | 一致した issue 配列（`list` と同形式） |
+| `issue_search` | — | `query` / `status` / `priority` / `label` / `parent` / `milestone` / `ready` | issue 配列（各要素に `ready` と `unmet_deps` を付与）。`query` 省略で全件、指定で全文検索 |
 | `issue_update` | `number` | `title` / `status` / `priority` / `labels` / `dependson` / `related` / `parent` / `milestone` / `body` | 更新後の issue |
 | `issue_delete` | `number` | — | `{ "number": N, "deleted": bool }` |
-| `memory_save` | `name` / `title` | `type` / `related` / `body` | 保存されたメモリ（同名なら upsert） |
+| `memory_save` | `name` | `title` / `type` / `related` / `body` | 保存されたメモリ（upsert。既存は部分更新、新規は `title` 必須） |
 | `memory_get` | `name` | — | メモリ（存在しなければ `null`） |
-| `memory_list` | — | `type` | メモリ配列（`updated_at` の新しい順） |
-| `memory_search` | `query` | `type` | 一致したメモリ配列（`list` と同形式） |
-| `memory_update` | `name` | `title` / `type` / `related` / `body` | 更新後のメモリ |
+| `memory_search` | — | `query` / `type` | メモリ配列（`updated_at` の新しい順）。`query` 省略で全件、指定で全文検索 |
 | `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
 | `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `created_at` / `worktrees`） |
-| `session_prompt` | `name` / `prompt` | — | プロンプトを対象セッションにキューした旨の確認メッセージ（[挙動](#session_prompt-の挙動)） |
+| `session_prompt` | `name` / `prompt` | `mode`（`auto` / `queue` / `live`、既定 `auto`） | `{ "name": "…", "delivered_to": "queue" \| "live", "detail": "…" }`（[挙動](#session_prompt-の挙動)） |
 | `session_pr` | `name` | — | `{ "name": "…", "root": "…", "pr": [{ "number": N, "url": "…" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
+| `session_delegate_issue` | `number` | `name` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
 
 - `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`、`type`（memory）は `user` / `feedback` / `project` / `reference`。
-- `memory_save` は **`name` が既存なら上書き**（in-place 更新、`created_at` は保持）。`name` は与えた文字列をスラッグ化して識別子にします。
-- `dependson` はブロックする先行条件、`related` はブロックしない関連、`parent` は所属（Epic ⊃ サブタスク）、`milestone` は束ね。`issue_list` / `issue_search` は `parent` / `milestone` でも絞り込めます。
+- **`memory_save` は upsert 1 本**です。`name` が既存なら**渡したフィールドだけを部分更新**（未指定は保持、`created_at` も保持）、無ければ新規作成（このとき `title` 必須）。`name` は与えた文字列をスラッグ化して識別子にします。別途の `memory_update` tool はありません（body だけ直したいときは `name` と `body` だけ渡せば type 等は保たれます）。
+- **一覧は検索の特殊形として統合**しています。`issue_search` / `memory_search` は `query` を省略すると全件を返し（空クエリはすべてに一致）、`query` を与えると全文検索に絞り込みます。フィルタ（`status` / `type` など）は `query` の有無にかかわらず併用できます。別途の `issue_list` / `memory_list` tool はありません。
+- `dependson` はブロックする先行条件、`related` はブロックしない関連、`parent` は所属（Epic ⊃ サブタスク）、`milestone` は束ね。`issue_search` は `parent` / `milestone` でも絞り込めます。
 - `issue_update` の `parent` / `milestone` は三状態です: 省略すると変更なし、**`null` を明示すると解除**、値を渡すと設定します。
-- `issue_list` / `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
+- `issue_search` は CLI と同じく **`dependson` がすべて `done` の issue を `ready: true`**
   とし、未達の依存番号を `unmet_deps` に入れて返します（着手可能なタスクの判別用）。
 - `ready: true`（引数）を渡すと着手可能な issue だけに絞り込みます。
 - `issue_to_prompt` は issue を **そのまま実行できるエージェント向けプロンプト**に整形して返します
   （実装手順・status 更新の指示と issue 本文を含む）。プロンプトはリポジトリ非依存の文言で、特定言語の
   コマンドや usagi 固有のパスは埋め込みません（リポジトリ側の規約ドキュメントに従わせます）。
-  `issue_to_prompt(number)` → `session_create(name)` →
-  `session_prompt(name, prompt)` と組み合わせると、コーディネータ役のエージェントが「issue を特定の
-  セッションのエージェントに実装させる」オーケストレーションを最小手数で組めます。
+  `issue_to_prompt(number)` → `session_create(name)` → `session_prompt(name, prompt)` の 3 手を
+  1 回で行うのが **`session_delegate_issue`** です（[挙動](#session_delegate_issue-の挙動)）。プロンプトを
+  自分で調整したい／既存セッションに載せたい場合はこの primitive 3 つを直接使います。
+- `session_delegate_issue` は「issue を新しいセッションに委譲して着手させる」というオーケストレーションの
+  定番手順を 1 tool にまとめたものです。issue をプロンプト化し、`name`（既定 `issue-<番号>`）でセッションを
+  作成し、そのプロンプトを起動時キューに積むまでを行います（[挙動](#session_delegate_issue-の挙動)）。
 - `session_create` は `name` をセッション名として `<root>/.usagi/sessions/<name>/` に worktree を生成します
   （各リポジトリで切るブランチは `usagi/<name>`）。空・パス区切り文字を含む名前は拒否し、
   既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
@@ -164,6 +177,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 - `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
   PR URL を返します。PR が記録されていないセッションは `pr: []` を返します。存在しないセッション名は
   実行エラー（`isError: true`）になります。
+- `session_prompt` は 1 つの tool で 2 つの配送チャネル（起動時キュー / 起動中ペイン）を持ち、`mode` で
+  選びます。既定の `auto` はライブペインの有無を検知して自動で振り分けます。どちらに配送したかは返り値の
+  `delivered_to` でわかります（[挙動](#session_prompt-の挙動)）。
 - `session_remove` はセッションの全 worktree とブランチを破棄し、コピーされたファイルとエージェントの会話履歴を
   消して `state.json` から削除します。`usagi clean` が起動するバックグラウンドエージェントは、このツールで
   放置セッションを片付けます（[挙動](#session_remove-の挙動)）。
@@ -174,20 +190,56 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## `session_prompt` の挙動
 
-`session_prompt` は、対象セッションの worktree に**プロンプトをキュー（queue）するだけ**で、その場では
-エージェントを起動しません。`usagi mcp` は動作中の TUI に手を伸ばしてペインを操作できない別プロセスのため、
-プロンプトを worktree 別の一時ファイル（[`agent-prompts/`](../data/01-global.md#agent-prompts)）へ保存し、
-**ホーム画面がそのセッションのエージェントペインを次にフレッシュ起動するとき**に取り出して、エージェントの
-**最初のメッセージ**として渡します。これにより委譲したプロンプトは、デタッチで走るのではなく、
-セッションの**右ペイン**で対話的に実行されます。
+`session_prompt` は対象セッションのエージェントにプロンプトを渡す唯一の tool です。その場ではエージェントの
+応答を返さず（起動もしません）、**2 つの配送チャネル**のいずれかにプロンプトを託します。`usagi mcp` は
+動作中の TUI に手を伸ばしてペインを操作できない別プロセスのため、どちらもファイル経由でキューします。
 
-- キューしたプロンプトは、[在席](../design/home/02-layout.md#在席focus)から `agent` を実行して**エージェントペインを
-  新規 spawn する**ときに 1 回だけ消費されます（再アタッチや、後から在席のアクションで `a`（agent）で開く 2 枚目のエージェント
-  タブには再送されません）。フレッシュ起動が起きるまではキューに残ります。
-- プロンプトの引き渡し方はエージェント CLI 依存です。Claude は起動時の位置引数（`claude … '<prompt>'`）として
-  受け取り、対話モードのままそのプロンプトに着手します。Gemini はこの経路を持たないため素起動します。
-- 作業はセッションのブランチ（worktree）上で隔離されます。同じ worktree を共有するため、キューしたプロンプトは
-  その worktree のエージェントに届きます。
+| チャネル | キュー先 | 配送タイミング |
+|---|---|---|
+| 起動時キュー（queue） | [`agent-prompts/`](../data/01-global.md#agent-prompts) | ホーム画面がそのセッションのエージェントペインを**次にフレッシュ起動するとき**に、エージェントの**最初のメッセージ**として渡す |
+| ライブキュー（live） | [`agent-live-prompts/`](../data/01-global.md#agent-live-prompts) | **すでに起動中のエージェントペイン**へ、動作中の TUI の監視スレッドが「貼り付け → Enter」で流し込む |
+
+どちらを使うかは `mode` 引数で決めます（省略時 `auto`）。
+
+- **`auto`（既定）**: セッションにライブなエージェントペインが検知できれば **live**、なければ **queue** を選びます。
+  ペインの有無は、エージェントの lifecycle フックが worktree 別に記録する agent phase ファイル（ペインが死ぬと
+  ホーム画面がクリアする）で判定します。**呼び出し側はエージェントが起動中かどうかを知らなくてよい**のが利点です。
+- **`queue`**: ライブペインの有無にかかわらず、常に起動時キューへ入れます。
+- **`live`**: 常にライブキューへ入れます（ペインがまだ無ければ、開くまでキューで待ちます）。
+
+返り値の `delivered_to` に、実際に配送したチャネル（`"queue"` / `"live"`）が入るため、`auto` を使っても
+どちらに届いたかが確認できます。`detail` にはチャネルごとの確認メッセージが入ります。
+
+- **起動時キュー**にキューしたプロンプトは、[在席](../design/home/02-layout.md#在席focus)から `agent` を実行して
+  **エージェントペインを新規 spawn する**ときに 1 回だけ消費されます（再アタッチや 2 枚目のエージェントタブには
+  再送されません）。フレッシュ起動が起きるまではキューに残ります。引き渡し方はエージェント CLI 依存で、Claude は
+  起動時の位置引数（`claude … '<prompt>'`）として受け取り、対話モードのままそのプロンプトに着手します。Gemini は
+  この経路を持たないため素起動します。
+- **ライブキュー**のプロンプトは、対象セッションに live agent ペインがある場合 TUI の監視 tick（約 200 ms 間隔）で
+  配送されます。複数回送ったプロンプトは追記順に、各 1 回だけ配送されます。配送は「取り出し → 書き込み」の順で
+  行い、PTY への書き込みが失敗したプロンプト（および同じ tick でそれ以降にあった未配送分）はライブキューの
+  **先頭へ戻して**次の tick で再試行するため、キュー済みと返答したのに黙って失われることはありません。書き込みは
+  端末の paste と同じ扱いで、対象プログラムが bracketed paste mode を有効にしているときはプロンプト全体を
+  bracketed paste で包んでから Enter を送り、複数行プロンプトが途中で複数回 submit されるのを避けます。
+- 作業はどちらのチャネルでもセッションのブランチ（worktree）上で隔離されます。
+- `prompt` にはサイズ上限（128 KiB）があります。超えるとチャネルへ書き込む前にツールエラーとして拒否します。
+
+## `session_delegate_issue` の挙動
+
+`session_delegate_issue` は、コーディネータ役のエージェントが最も多用する「issue を新しいセッションに委譲して
+着手させる」手順を 1 呼び出しにまとめた**オーケストレーション tool**です。次の 3 ステップを順に行います。
+
+1. `issue_to_prompt(number)` で issue を実行プロンプトに整形する（issue が無ければ実行エラー）。
+2. `session_create(name)` でセッションを作成する（`name` 既定は `issue-<番号>`。名前が既存なら重複エラー）。
+3. `session_prompt(name, prompt, mode=queue)` でそのプロンプトを起動時キューに積む。
+
+- 新規作成したセッションには live なエージェントペインが存在しないため、配送は常に**起動時キュー**（`queue`）です。
+  返り値の `delivered_to` も常に `"queue"` になります。
+- **新しいロジックは足していません**。既存の 3 tool（`issue_to_prompt` / `session_create` / `session_prompt`）を
+  合成サーバ（`usagi.rs`）が順に呼ぶだけなので、採番・検証・キューなどの挙動は primitive と完全に一致します。
+- primitive はそのまま残っています。**プロンプトを手で調整したい**、**既存セッションに載せたい**、**live 送信したい**
+  といったケースでは `issue_to_prompt` → `session_prompt`（`mode` 指定）を直接使ってください。
+- 途中のステップが失敗すると（issue 不在・セッション名重複など）その時点でツールエラーを返します。
 
 ## `session_remove` の挙動
 
@@ -267,7 +319,14 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 - **protocolVersion**: `2024-11-05` を返します。
 - **状態を持たない**: サーバは内部状態を保持せず、各 tool 呼び出しが `.usagi/issues/` / `.usagi/memory/` /
   `state.json` を直接読み書きします。CLI・TUI と MCP を混在して使っても整合します。
-- **1 サーバに合成**: issue/memory（リポジトリの純粋な読み書き）と session（`session_prompt` でプロンプトを
-  キューする `AgentBackend` を要する）は依存関係が異なるため、それぞれ独立にユニットテストされた別サーバの
+- **1 サーバに合成**: issue/memory（リポジトリの純粋な読み書き）と session（`session_prompt` で
+  プロンプトをキューする `AgentBackend` を要する）は依存関係が異なるため、それぞれ独立にユニットテストされた別サーバの
   まま `usagi.rs` で合成し、tool のマージと振り分けだけをこの層が担います。これにより登録は `usagi` 1 つで
   済みつつ、各サーバの責務とテストは分離されます。
+- **tool はワークフロー単位に統合**: CRUD をそのまま tool 化せず、エージェントの意図に寄せています。
+  - **重複の統合**: 一覧/検索は `*_search`（`query` 省略で全件）に、メモリの保存/更新は `memory_save`（upsert）に、
+    起動時キュー/ライブ送信は `session_prompt`（`mode`）に畳み込み、選ぶ tool 数と紛らわしい 2 択を減らす。
+  - **手順の統合**: 頻出のオーケストレーション（issue→新セッション委譲）を `session_delegate_issue` の 1 呼び出しに。
+    ただし primitive（`issue_to_prompt` / `session_create` / `session_prompt`）は残し、細かい制御が要るときはそれらを使う。
+  - issue/memory の CRUD は「エージェントが所有するデータストアの素の操作」で、無理に融合すると機能が隠れるため
+    残しています。CLI（人間向け）とは IF を分けて最適化しています。

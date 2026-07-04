@@ -40,11 +40,35 @@ use state::{
 /// sessions to show. `sync` rewrites each session worktree's status; for a
 /// non-git root it fails harmlessly, so we fall back to the saved sessions
 /// (via the usecase, which owns the store access).
+///
+/// Slow — a `git status` fan-out per worktree plus the cross-process state
+/// lock, proportional to the session count — so call it only off the event-loop
+/// thread (the detach refresh and the create / remove workers). Operations that
+/// only edit state.json metadata (rename / note / label / reorder) re-read via
+/// [`workspace_state::recorded_sessions`](crate::usecase::workspace_state::recorded_sessions)
+/// instead, which touches no git.
 fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     if let Ok(state) = crate::usecase::workspace_state::sync(root) {
         return Some(state.sessions);
     }
     crate::usecase::workspace_state::recorded_sessions(root)
+}
+
+/// How often the background watcher stats `state.json` for an external change (a
+/// create / remove made by an agent's MCP call, another usagi window, or the CLI).
+/// Paired with the event loop's own `WATCH_SESSIONS_TICK`, so a change lands in the
+/// sidebar within roughly a second — cheap enough to poll continuously while the
+/// screen is open.
+const SESSIONS_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The last-modified time of `state.json` at `path`, or `None` when it does not
+/// exist yet or cannot be stat'd — the watcher's change signal. A stable value
+/// means no external write since the last poll; any change (including the file
+/// first appearing) re-reads the recorded sessions.
+fn state_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 /// Track a freshly spawned session-worker handle, first dropping the handles of
@@ -97,6 +121,25 @@ fn complete_or_record_panic(
     }
 }
 
+/// Resolve the workspace's 1Password-backed secret env for a pane about to spawn,
+/// off the UI thread and with the loading rabbit animating.
+///
+/// Resolving `op://` references spawns one `op read` per binding (each up to a
+/// 30s timeout); running it inline froze the launch with no feedback whenever
+/// 1Password was slow or locked. [`run_with_loading`](crate::presentation::tui::io::loading::run_with_loading)
+/// moves the work to a worker thread and animates a centred loading rabbit while
+/// it runs — a binding-free workspace resolves within the grace period and shows
+/// nothing. A worker panic degrades to an empty env rather than crashing.
+fn resolve_pane_env(term: &Term, dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let ws_root = crate::usecase::session::workspace_root(dir);
+    crate::presentation::tui::io::loading::run_with_loading(
+        term,
+        "環境変数を解決中…",
+        move || crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root),
+    )
+    .unwrap_or_default()
+}
+
 /// The workspace data [`run`] needs at startup, loaded from disk without a
 /// `Term`: the recorded sessions (and any load-error notice), task issues,
 /// effective settings, and command history.
@@ -115,7 +158,7 @@ pub struct Preload {
     notice: Option<String>,
     issues: Vec<crate::domain::issue::Issue>,
     settings: crate::domain::settings::Settings,
-    history: Vec<String>,
+    history: Vec<crate::domain::history::HistoryEntry>,
 }
 
 /// Loads the [`Preload`] for a workspace. Pure disk / PATH work with no `Term`,
@@ -146,9 +189,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
     // `open_config`) so a change takes effect without reopening this screen.
     let settings = effective_settings(&workspace.path);
     // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
-    let history = crate::usecase::history::load(&workspace.path)
-        .map(|entries| entries.into_iter().map(|e| e.command).collect())
-        .unwrap_or_default();
+    let history = crate::usecase::history::load(&workspace.path).unwrap_or_default();
     Preload {
         sessions,
         root_note,
@@ -224,6 +265,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
+    // The manual-status label master 切替 assigns with `Tab` / the digit keys and
+    // the sidebar's status column resolves each session's `label_id` against.
+    state.set_label_master(settings.session_labels.clone());
     // How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     // prefix or single `Alt`-chords — so the rest reach the shell / agent.
     state.set_key_scheme(settings.key_scheme);
@@ -236,6 +280,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     state.set_default_agent(settings.agent_cli);
     // The local model the 在席 `chat` overlay talks to.
     state.set_local_llm_model(settings.local_llm.model.clone());
+    // `state.ai_available` (which gates the 在席 `chat` row) stays false until the
+    // background probe below lands — mirroring the installed-agent probe — so a cold
+    // `ollama show` never delays the first paint.
     // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
     // so selecting a project lands on the session list the mascot animation glides
     // into; no explicit mode switch is needed here.
@@ -246,8 +293,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // Persisting a command is best-effort; a write failure must not break the
     // screen, so the error is intentionally dropped (cf. `hop`'s notification).
     let history_root = workspace.path.clone();
-    let mut persist = move |command: &str| {
-        let _ = crate::usecase::history::append(&history_root, command);
+    let mut persist = move |entry: &crate::domain::history::HistoryEntry| {
+        let _ = crate::usecase::history::append(&history_root, entry);
     };
 
     // The background session tasks (create / remove) the event loop dispatches
@@ -301,9 +348,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         move || crate::usecase::session::existing_branch_names(&branches_root);
 
     // Renaming a session's sidebar label persists the new display name to
-    // state.json and re-reads the sessions so the pane reflects it. The branch /
-    // identity is untouched, so the renamed session keeps its row: `select` holds
-    // its name to keep the cursor on it after the list rebuilds.
+    // state.json and re-reads the recorded sessions so the pane reflects it. The
+    // branch / identity is untouched, so the renamed session keeps its row:
+    // `select` holds its name to keep the cursor on it after the list rebuilds.
+    //
+    // The re-read uses `recorded_sessions` (a plain state.json read), not
+    // `reload_sessions`: a rename changes only state.json metadata and never git,
+    // so the last-synced worktree status already on disk stays valid — running a
+    // git fan-out here would just block the UI thread for a label edit. The
+    // background monitor keeps the badges live.
     //
     // Unlike create / remove this stays synchronous (no git work to block on),
     // but it still load-modify-saves `state.json`, so it takes the same op-lock
@@ -322,7 +375,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     "Renamed \"{name}\" to \"{}\" 🏷",
                     stored.as_deref().unwrap_or(name)
                 )),
-                sessions: reload_sessions(root),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
                 select: Some(name.to_string()),
                 root_note: None,
             },
@@ -343,6 +396,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // synchronous (no git work) but still load-modify-saves `state.json`, so it
     // takes the same op-lock to serialise against the background create / remove
     // workers. `select` keeps the cursor on the edited session after the rebuild.
+    // The re-read is git-free (`recorded_sessions`): a note touches only
+    // state.json, so there is nothing for a git sync to refresh here.
     let note_lock = op_lock.clone();
     let mut set_note = |root: &Path, name: &str, note: &str| {
         let _guard = lock_session_ops(&note_lock);
@@ -358,7 +413,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Some(_) => format!("Saved note for \"{name}\" 📝"),
                     None => format!("Cleared note for \"{name}\" 📝"),
                 }),
-                sessions: reload_sessions(root),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
                 // The root row is not selectable by session name; the session path
                 // keeps the cursor on the session it edited.
                 select: (!is_root).then(|| name.to_string()),
@@ -375,11 +430,46 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Reordering a session (`K` / `J` in 切替) swaps it with its neighbour in
-    // state.json and re-reads the sessions so the pane reflects the new order.
+    // Assigning a manual status label (`Tab` / digit keys in 切替) persists the
+    // label id to state.json and re-reads the sessions so the sidebar's status
+    // column reflects it. The branch / identity is untouched, so the session keeps
+    // its row: `select` holds its name to keep the cursor on it after the rebuild.
     // Like rename / note it stays synchronous (no git work) but still
     // load-modify-saves state.json, so it takes the same op-lock to serialise
-    // against the background create / remove workers.
+    // against the background create / remove workers. The re-read is git-free
+    // (`recorded_sessions`): a label, like a note, touches only state.json, so a
+    // git fan-out on the UI thread would freeze the screen for nothing once many
+    // sessions are open — and `Tab` cycles, so it can fire in quick bursts.
+    let label_lock = op_lock.clone();
+    let mut set_label = |root: &Path, name: &str, id: Option<&str>| {
+        let _guard = lock_session_ops(&label_lock);
+        match crate::usecase::session::set_label(root, name, id) {
+            Ok(stored) => SessionOutcome {
+                line: LogLine::output(match stored {
+                    Some(id) => format!("Set status \"{id}\" for \"{name}\" 🏷"),
+                    None => format!("Cleared status for \"{name}\" 🏷"),
+                }),
+                sessions: crate::usecase::workspace_state::recorded_sessions(root),
+                select: Some(name.to_string()),
+                root_note: None,
+            },
+            Err(e) => SessionOutcome {
+                line: LogLine::error(format!("status failed: {e}")),
+                sessions: None,
+                select: None,
+                root_note: None,
+            },
+        }
+    };
+
+    // Reordering a session (`K` / `J` in 切替) swaps it with its neighbour in
+    // state.json and re-reads the recorded sessions so the pane reflects the new
+    // order. Like rename / note it stays synchronous (no git work) but still
+    // load-modify-saves state.json, so it takes the same op-lock to serialise
+    // against the background create / remove workers. The re-read is git-free
+    // (`recorded_sessions`): reordering only rewrites state.json's session order,
+    // so a git fan-out on the UI thread would be pure latency — pressing `K`/`J`
+    // must not stall behind a worktree status pass.
     let reorder_root = workspace.path.clone();
     let reorder_lock = op_lock.clone();
     let mut reorder_session = |name: &str, up: bool| {
@@ -388,7 +478,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // A successful move re-reads the (now reordered) sessions; if the
             // re-read somehow yields nothing, treat it as no change rather than
             // blanking the pane.
-            Ok(true) => match reload_sessions(&reorder_root) {
+            Ok(true) => match crate::usecase::workspace_state::recorded_sessions(&reorder_root) {
                 Some(sessions) => SessionReorder::Moved(sessions),
                 None => SessionReorder::Stationary,
             },
@@ -397,6 +487,21 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             Err(e) => SessionReorder::Failed(LogLine::error(format!("reorder failed: {e}"))),
         }
     };
+
+    // Whether the 在席 (Focus) menu offers the `chat` command: only when the local
+    // LLM is enabled and its model is pulled, so it appears only when a reply would
+    // actually work. The probe is an `ollama show`, which can block on a cold /
+    // wedged `ollama` server, so it runs on a background thread rather than delaying
+    // the first paint: the menu omits `chat` until the probe lands, and the event
+    // loop flips it on when it does. Re-probed when the config screen closes.
+    let ai_available = oneshot::OneShot::new();
+    {
+        let handle = ai_available.clone();
+        let settings = settings.clone();
+        std::thread::spawn(move || {
+            handle.set(local_llm_available(&settings));
+        });
+    }
 
     // The agents installed on this machine (which 在席's agent picker offers as
     // alternatives to the configured default). Probing them shells out to each
@@ -578,6 +683,47 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         });
     }
 
+    // Reflect session create / remove made outside this screen — an agent's MCP
+    // `session_create` / `session_remove`, another usagi window, or the CLI — which
+    // write `state.json` with no signal to this process. Poll the file's mtime on a
+    // background thread and, when it changes, re-read the recorded sessions and
+    // publish them through the same `sessions_refresh` slot a detach uses; the event
+    // loop (kept ticking by `watch_sessions`) applies them on the next frame without
+    // yanking the cursor. Reading the recorded state (no git re-sync) neither writes
+    // the file back — which would retrigger this poll forever — nor blocks on the git
+    // fan-out: a newly-appeared session's worktree statuses fill in on the next real
+    // sync (detach / restart). Like the entry re-sync above, the thread is detached
+    // (it only reads, so it never leaves half-written state): `watch_stop` below tells
+    // it to exit when the screen closes, so it stops within one poll instead of piling
+    // up across re-entries — and quitting never waits on it.
+    let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let handle = sessions_refresh.clone();
+        let root = workspace.path.clone();
+        let state_path =
+            crate::infrastructure::workspace_store::WorkspaceStore::new(&root).state_path();
+        let stop = watch_stop.clone();
+        std::thread::spawn(move || {
+            // Seed with the state already on screen so only a later external write
+            // triggers a refresh, not the current contents.
+            let mut last = state_mtime(&state_path);
+            loop {
+                std::thread::sleep(SESSIONS_WATCH_POLL);
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let mtime = state_mtime(&state_path);
+                if mtime == last {
+                    continue;
+                }
+                last = mtime;
+                if let Some(sessions) = crate::usecase::workspace_state::recorded_sessions(&root) {
+                    handle.set(sessions);
+                }
+            }
+        });
+    }
+
     // Opening a terminal embeds a live shell in the right pane: the pane stays
     // inside the workspace screen (sidebar still visible) and runs the shell
     // until the user detaches, switches sessions, or it exits. `:agent` is the
@@ -637,14 +783,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 });
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
-            // A session holds at most one agent: a request to add an agent pane
-            // (在席's `agent`, or `Ctrl-G` routed through `new_pane`) when a live one
-            // already exists reuses it — activating its tab below — rather than
-            // spawning a second. This also keeps the queued prompt unconsumed (no
-            // fresh spawn). A dead agent pane (its CLI exited while detached, not
-            // yet reaped) is not reused: the launch falls through to a fresh spawn
-            // so an `ai <prompt>` reaches a living agent instead of a defunct PTY.
-            let reuse_agent = run_agent && new_pane && pool.has_agent_pane(dir);
+            // A session holds at most one agent *per CLI*: a request to add an agent
+            // pane (在席's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
+            // that already has a pane reuses it — activating its tab below — rather
+            // than spawning a duplicate. A *different* CLI still spawns its own agent
+            // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
+            // spawn).
+            let reuse_agent = run_agent && new_pane && pool.has_agent_pane_of(dir, cli);
             // Deliver a prompt queued for this session (via MCP `session_prompt`) only
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
             // spawns; `enter` spawns only when no pane is live yet; reusing an existing
@@ -678,14 +823,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             };
             let initial = Some(spawn_command.as_str());
             let later_initial = Some(plain_command.as_str());
-            // Resolve workspace-scoped secret env only when this request will
-            // actually spawn a fresh shell. Re-attaching to an existing pane
-            // keeps the environment it was originally launched with.
+            // Resolve effective secret env (global plus workspace-local) only
+            // when this request will actually spawn a fresh shell. Re-attaching
+            // to an existing pane keeps the environment it was originally
+            // launched with.
             let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
             let pane_env = if will_spawn {
-                crate::infrastructure::env_resolver::resolve_workspace_env(
-                    &crate::usecase::session::workspace_root(dir),
-                )
+                resolve_pane_env(term, dir)
             } else {
                 std::collections::BTreeMap::new()
             };
@@ -700,7 +844,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 // re-attach the session's active pane (spawning the first when the
                 // session is new).
                 if reuse_agent {
-                    pool.activate_agent(dir);
+                    pool.activate_agent_of(dir, cli);
                 } else if new_pane {
                     let kind = if run_agent {
                         terminal::tabs::PaneKind::Agent
@@ -792,16 +936,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // action from the session's menu, leaving every pane alive in
                         // the pool (like `Ctrl-O`, but one level shallower).
                         terminal::pane::PaneStep::ToFocus => return Ok(PaneExit::ToFocus),
-                        // `Ctrl-G`: a session holds at most one agent — jump to the
-                        // existing agent tab when present, else add one (then loop, so
-                        // the next iteration drives it and republishes the tab strip
-                        // without leaving 没入).
+                        // `Ctrl-G`: a session holds at most one agent per CLI — jump
+                        // to this CLI's existing agent tab when present, else add one
+                        // (then loop, so the next iteration drives it and republishes
+                        // the tab strip without leaving 没入). `cli` is the launch CLI
+                        // resolved for this session drive (the 在席 choice or the
+                        // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
-                            if !pool.activate_agent(dir) {
-                                let add_env =
-                                    crate::infrastructure::env_resolver::resolve_workspace_env(
-                                        &crate::usecase::session::workspace_root(dir),
-                                    );
+                            if !pool.activate_agent_of(dir, cli) {
+                                let add_env = resolve_pane_env(term, dir);
                                 pool.add_pane(
                                     term,
                                     dir,
@@ -1004,6 +1147,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     session_action_ui: settings.session_action_ui,
                     key_scheme: settings.key_scheme,
                     agent_cli: settings.agent_cli,
+                    ai_available: local_llm_available(&settings),
                 }))
             }
             crate::presentation::tui::config::Outcome::Quit => Ok(None),
@@ -1106,14 +1250,35 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 .spawn();
         }
     };
+    let mut open_external_terminal = |dir: &Path| -> std::result::Result<(), String> {
+        use std::process::{Command, Stdio};
+        let argv = terminal::link::open_terminal_command(dir);
+        let Some((cmd, rest)) = argv.split_first() else {
+            return Err(
+                "opening an external terminal is not supported on this platform".to_string(),
+            );
+        };
+        Command::new(cmd)
+            .args(rest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("failed to open external terminal: {e}"))
+    };
 
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
+        // The state.json watcher below is always running, so let the idle loop wake
+        // to apply the refreshes it publishes.
+        watch_sessions: true,
         workspace_root: &workspace.path,
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
         set_note: &mut set_note,
+        set_label: &mut set_label,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,
@@ -1122,6 +1287,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -1138,6 +1304,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         &monitor,
         &update,
         &sessions_refresh,
+        &ai_available,
         &installed_agents,
         &tasks,
         &mut wiring,
@@ -1150,6 +1317,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // at most this waits out the git work in flight (serialised by the op-lock).
     // Their completions go undrained, which is fine: nothing renders after exit
     // and the pool (its shells) is about to be dropped anyway.
+    //
+    // Signal the detached state.json watcher to stop so it exits within one
+    // `SESSIONS_WATCH_POLL` instead of outliving the screen (it is not joined —
+    // quitting never waits on a read-only poller).
+    watch_stop.store(true, std::sync::atomic::Ordering::SeqCst);
     for worker in workers.borrow_mut().drain(..) {
         let _ = worker.join();
     }
@@ -1191,13 +1363,27 @@ fn restore_open_panes(
         dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
     }
 
+    // Secret env is keyed by *workspace root*, and every session worktree of a
+    // workspace strips back to the same root (`session::workspace_root`), so a
+    // restore that spans the root plus N session worktrees would otherwise resolve
+    // the identical `op://` bindings N+1 times — each an `op read` subprocess with
+    // a multi-second timeout, run sequentially on the startup path. Memoize the
+    // resolution per workspace root so the `op` CLI is invoked once and reused,
+    // keeping startup from stalling on redundant 1Password reads.
+    let mut env_by_root: std::collections::HashMap<
+        PathBuf,
+        std::collections::BTreeMap<String, String>,
+    > = std::collections::HashMap::new();
+
     for (dir, label) in dirs {
         let Some(snapshot) = open_panes_store::load(&dir) else {
             continue;
         };
-        let pane_env = crate::infrastructure::env_resolver::resolve_workspace_env(
-            &crate::usecase::session::workspace_root(&dir),
-        );
+        let ws_root = crate::usecase::session::workspace_root(&dir);
+        let pane_env = env_by_root
+            .entry(ws_root.clone())
+            .or_insert_with(|| crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root))
+            .clone();
         for pane in &snapshot.panes {
             let spawned = match pane.kind {
                 StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
@@ -1256,7 +1442,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
             true,
             tasks::Completion {
                 line: LogLine::output(format!(
-                    "Created session \"{}\" ({} worktree(s)) 🐰",
+                    "Created session \"{}\" ({} worktree(s)) 󰤇",
                     created.name,
                     created.worktrees.len()
                 )),
@@ -1360,4 +1546,15 @@ fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
     crate::infrastructure::storage::Storage::open_default()
         .and_then(|storage| crate::usecase::settings::effective(&storage, root))
         .unwrap_or_default()
+}
+
+/// Whether the local LLM is usable right now: enabled in settings and its model
+/// pulled. Gates the 在席 `chat` menu row. Probed with `ollama show` (via the
+/// system runner), so callers run it off the first-paint path.
+fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
+    settings.local_llm.enabled
+        && crate::usecase::local_llm::model_present(
+            &crate::usecase::doctor::SystemRunner,
+            &settings.local_llm.model,
+        )
 }

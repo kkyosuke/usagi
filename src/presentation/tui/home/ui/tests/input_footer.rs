@@ -285,22 +285,14 @@ fn footer_elides_to_fit_a_narrow_terminal() {
 }
 
 #[test]
-fn switch_footer_advertises_closing_the_note_while_it_shows() {
-    // While the highlighted session's note is showing, `Esc` first closes it, so
-    // the footer names that instead of the back-out it normally advertises.
-    let mut state = switch_state_with_note("todo");
-    // `Esc close note` is the lowest-priority trailing key, so measure where the
-    // full footer fits (narrow widths elide it; the `?` cheat sheet keeps it
-    // discoverable).
-    assert!(
-        footer_line(200, &state).contains("Esc close note"),
-        "the footer offers closing the note"
-    );
-    // Dismissed, `Esc` backs out again — the footer reverts.
-    state.hide_switch_note();
-    let backed = footer_line(200, &state);
-    assert!(backed.contains("Esc back"));
-    assert!(!backed.contains("close note"));
+fn switch_footer_advertises_backing_out_while_the_note_shows() {
+    // The read-only note overlay does not capture `Esc` (it follows the cursor
+    // instead of being dismissed), so the footer keeps advertising the back-out
+    // even while a note is showing.
+    let state = switch_state_with_note("todo");
+    let footer = footer_line(200, &state);
+    assert!(footer.contains("Esc back"));
+    assert!(!footer.contains("close note"));
 }
 
 #[test]

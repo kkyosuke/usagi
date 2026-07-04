@@ -1,5 +1,6 @@
 use super::super::oneshot::OneShot;
 use super::super::state::{GroupSource, LogLine};
+use super::super::tasks::AutoFocus;
 use super::super::terminal::tabs::TabNav;
 use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
@@ -19,6 +20,7 @@ fn reload(ui: SessionActionUi) -> ConfigReload {
         session_action_ui: ui,
         key_scheme: crate::domain::settings::KeyScheme::default(),
         agent_cli: AgentCli::default(),
+        ai_available: false,
     }
 }
 
@@ -58,6 +60,15 @@ fn noop_rename(_: &str, _: &str) -> SessionOutcome {
 fn noop_set_note(_: &str, _: &str) -> SessionOutcome {
     SessionOutcome {
         line: LogLine::output("note saved"),
+        sessions: None,
+        select: None,
+        root_note: None,
+    }
+}
+
+fn noop_set_label(_: &str, _: Option<&str>) -> SessionOutcome {
+    SessionOutcome {
+        line: LogLine::output("label saved"),
         sessions: None,
         select: None,
         root_note: None,
@@ -200,6 +211,8 @@ fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
 
 fn noop_persist(_: &str) {}
 
+fn noop_persist_entry(_: &crate::domain::history::HistoryEntry) {}
+
 /// A no-op browser launcher for the loop fakes: clicking a PR in the popup shells
 /// out for real only in production, so the tests just drop the URL.
 fn noop_open_url(_: &str) {}
@@ -312,6 +325,77 @@ fn run_full(
     )
 }
 
+fn run_full_external(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    open_terminal: &mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    open_external_terminal: &mut dyn FnMut(&Path) -> std::result::Result<(), String>,
+) -> Result<Outcome> {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let tasks = TaskHandle::new();
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _: Option<AutoFocus>| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut dispatch_update = || {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        watch_sessions: false,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal,
+        open_url: &mut open_url,
+        open_external_terminal,
+        open_config: &mut config,
+        chat_ask: &mut chat_ask,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    event_loop(
+        &term,
+        &mut reader,
+        state,
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &tasks,
+        &mut wiring,
+    )
+}
+
 /// Like [`run_full`] but with a custom `tab_op`, so a test can mirror production
 /// where 切替 / 在席 republish the focused session's live pane strip each frame
 /// (the default [`run_full`] uses [`noop_tab_op`], which never publishes a strip).
@@ -415,6 +499,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             name: n.to_string(),
             display_name: None,
             note: None,
+            label_id: None,
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
             created_at: Utc::now(),
@@ -758,7 +843,7 @@ fn run_with_tasks(
 ) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut branches: fn() -> Vec<String> = no_branches;
@@ -768,25 +853,28 @@ fn run_with_tasks(
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
     // The unite target root is irrelevant to this single-workspace fake, so wrap
     // the caller's removal hook to the production 3-arg shape, dropping the root.
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool, _| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove_w,
         unite_resolve: &mut unite_resolve,
@@ -795,6 +883,7 @@ fn run_with_tasks(
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -811,6 +900,7 @@ fn run_with_tasks(
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         tasks,
         &mut wiring,
@@ -825,7 +915,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let term = Term::stdout();
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let tasks = TaskHandle::new();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
@@ -837,22 +927,25 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,
@@ -861,6 +954,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -877,6 +971,80 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &tasks,
+        &mut wiring,
+    )
+}
+
+/// Run the real loop idle — no live session and nothing in flight — but with
+/// `watch_sessions` on, so it wakes on the watch tick to apply a session list a
+/// background watcher published instead of blocking on the next key. Mirrors
+/// [`run_with_live_session`], swapping the live monitor for a detached one and
+/// turning the watcher flag on, so the loop's idle-watching read path is
+/// exercised directly.
+fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
+    let term = Term::stdout();
+    let monitor = MonitorHandle::detached();
+    let tasks = TaskHandle::new();
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
+    let mut dispatch_update = || {};
+    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        watch_sessions: true,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
+        open_config: &mut config,
+        chat_ask: &mut chat_ask,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    event_loop(
+        &term,
+        reader,
+        sample_state(),
+        &monitor,
+        &UpdateHandle::new(),
+        &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &tasks,
         &mut wiring,
@@ -979,10 +1147,11 @@ fn unite_add_and_remove_run_through_the_palette() {
     keys.push(Ok(Key::CtrlC));
     let mut reader = ScriptedReader::new(keys);
 
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
@@ -995,17 +1164,19 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
         unite_resolve: &mut unite_resolve,
@@ -1014,6 +1185,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -1030,6 +1202,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
+        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &TaskHandle::new(),
         &mut wiring,
@@ -1067,13 +1240,33 @@ fn selected_dir_roots_at_the_cursor_groups_workspace() {
     );
 }
 
+#[test]
+fn pending_pr_link_updates_refresh_sidebar_rows() {
+    let pr = crate::domain::workspace_state::PrLink {
+        number: 412,
+        url: "https://github.com/o/r/pull/412".to_string(),
+    };
+    let monitor =
+        MonitorHandle::with_pr_link_updates(vec![(PathBuf::from("/r/feat"), vec![pr.clone()])]);
+    let mut state = sample_state();
+
+    assert!(apply_pending_pr_links(&mut state, &monitor));
+    assert_eq!(state.list().worktrees()[1].pr, vec![pr]);
+    // The drain is one-shot; a second pass has nothing to apply and should not
+    // force a repaint.
+    assert!(!apply_pending_pr_links(&mut state, &monitor));
+}
+
 mod attached;
 mod background_tasks;
 mod clicks;
 mod config_switch;
 mod ctrl_caret;
+mod diff;
+mod env_editor;
 mod focus_menu;
 mod focus_prompt;
+mod labels;
 mod mascot_click;
 mod notes;
 mod palette;

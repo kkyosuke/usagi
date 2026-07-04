@@ -105,11 +105,12 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
 #[test]
 fn ctrl_t_in_the_pane_zooms_out_to_focus() {
     // Attaching to a live session; the pane returns ToFocus (Ctrl-T), so the loop
-    // leaves 没入 for 在席 (Focus) — the session's action menu — leaving the pane
-    // alive *without* re-attaching: the pane opens exactly once. ToFocus arms a
-    // one-shot return-to-pane (the next Esc would re-attach), but a deliberate key
-    // (here ↓ in the menu) cancels it, so the following Esc peels back to Switch
-    // instead (then Esc is inert; fallback Ctrl-C quits).
+    // leaves 没入 for 在席 (Focus) — the action menu floating over the pane's tab —
+    // leaving the pane alive *without* re-attaching: the pane opens exactly once.
+    // ToFocus arms a one-shot return-to-pane (the next Esc would re-attach), but a
+    // deliberate key (here ↓ in the menu) cancels it, so the following Escapes
+    // first dismiss the floating menu, then peel back to Switch (then the
+    // fallback Ctrl-C quits).
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
@@ -120,8 +121,8 @@ fn ctrl_t_in_the_pane_zooms_out_to_focus() {
     let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToFocus -> Focus (arm return)
     keys.push(Ok(Key::ArrowDown)); // a menu move cancels the one-shot return arming
-    keys.push(Ok(Key::Escape)); // Focus -> Switch (no longer armed)
-    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // dismiss the menu floating over the pane tab
+    keys.push(Ok(Key::Escape)); // Focus -> Switch; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,
@@ -229,4 +230,44 @@ fn a_double_click_in_an_attached_pane_switches_to_the_clicked_session() {
         *opened.borrow(),
         vec![PathBuf::from("/r/feat"), PathBuf::from("/r/main")],
     );
+}
+
+#[test]
+fn a_double_click_on_the_create_row_in_an_attached_pane_opens_inline_create() {
+    // From 没入, the pane reports a double click on the sidebar create row as
+    // PaneExit::ToSession(create_row). The event loop leaves the pane alive,
+    // opens the same inline create editor used by 切替 / 在席, and the typed name
+    // is dispatched through the normal create callback.
+    let state = sample_state();
+    let create_row = state.list().create_row();
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
+        opened.borrow_mut().push(d.to_path_buf());
+        Ok(PaneExit::ToSession(create_row))
+    };
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat -> ToSession(create_row) -> inline create
+    keys.extend(typed("wip"));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![PathBuf::from("/r/feat")]);
+    assert_eq!(*created.borrow(), vec!["wip"]);
 }

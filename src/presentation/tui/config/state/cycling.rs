@@ -110,7 +110,8 @@ impl Config {
             // The model is no longer cycled with ←/→: it is chosen from the
             // picker modal (which also pulls an uninstalled choice), so arrows
             // are a no-op here and the event layer opens the modal instead.
-            Field::LocalLlmModel => false,
+            // Env Vars likewise opens a text editor action rather than cycling.
+            Field::LocalLlmModel | Field::EnvVars => false,
         }
     }
 
@@ -123,7 +124,9 @@ impl Config {
         // disjoint. Every other local field cycles a fixed set in place.
         match field {
             LocalField::DefaultBranch => self.cycle_default_branch(forward),
-            LocalField::SetupCommands => false,
+            // Action rows open an editor rather than cycling a value in place, so
+            // ←/→ have nothing to change.
+            LocalField::SetupCommands | LocalField::EnvVars | LocalField::SessionLabels => false,
             LocalField::AgentCli => {
                 // The override cycles "follow global" then each installed agent;
                 // an already-set override is kept selectable even if uninstalled.

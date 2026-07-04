@@ -114,17 +114,39 @@ impl Command for HistoryCommand {
         "Show the command history"
     }
 
-    fn run(&self, _args: &str, ctx: &CommandContext) -> CommandResult {
-        if ctx.history.is_empty() {
-            return CommandResult::line(LogLine::output("No commands in history yet."));
-        }
-        let lines = ctx
-            .history
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| LogLine::output(format!("  {:>3}  {entry}", i + 1)))
+    fn usage(&self) -> &'static str {
+        "history [session]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["history", "history my-feature"]
+    }
+
+    fn run(&self, args: &str, ctx: &CommandContext) -> CommandResult {
+        // An optional argument filters the listing to one session (worktree) by
+        // name; with none, every recorded command is shown chronologically.
+        let filter = args.trim();
+        let session = if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        };
+        let lines = crate::usecase::history::view(ctx.history, session)
+            .into_iter()
+            .map(LogLine::output)
             .collect();
         CommandResult::modal("History", lines)
+    }
+
+    fn complete_args(&self, args: &str, ctx: &CompletionContext) -> Vec<String> {
+        // `history [session]` takes a single session-name argument, so completion
+        // offers the workspace's session names while the first token is typed.
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ctx.session_names.iter().map(|n| n.to_string()).collect()
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -429,10 +451,12 @@ fn switch(name: &str, _ctx: &CommandContext) -> CommandResult {
     }
 }
 
-/// `terminal`: open an interactive shell in the selected worktree, or at the
-/// workspace root when the root row is selected. The spawn is a side effect
-/// ([`Effect::OpenTerminal`]) performed by the event loop, which holds the
-/// worktree paths and the terminal handle.
+/// `terminal [open|new]`: open an interactive shell in the selected worktree, or
+/// at the workspace root when the root row is selected. With no argument, and
+/// with `open`, it adds an embedded usagi pane/tab. `new` opens the platform's
+/// native terminal app at the same directory. Both spawns are side effects
+/// performed by the event loop, which holds the worktree paths and terminal
+/// launchers.
 pub(super) struct TerminalCommand;
 
 impl Command for TerminalCommand {
@@ -444,14 +468,41 @@ impl Command for TerminalCommand {
         "Open an interactive terminal in the selected session"
     }
 
+    fn usage(&self) -> &'static str {
+        "terminal [open|new]"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["terminal", "terminal open", "terminal new"]
+    }
+
     fn scope(&self) -> CommandScope {
         CommandScope::Session
     }
 
-    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
-        CommandResult {
-            lines: Vec::new(),
-            effect: Effect::OpenTerminal,
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        match args.trim() {
+            "" | "open" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenTerminal,
+            },
+            "new" => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::OpenExternalTerminal,
+            },
+            arg => CommandResult::line(LogLine::error(format!(
+                "unknown terminal action \"{arg}\" (try {})",
+                self.usage()
+            ))),
+        }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            ["open", "new"].iter().map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
         }
     }
 }
@@ -800,9 +851,6 @@ fn issue_line(listed: &ListedIssue) -> LogLine {
 /// a bare name is accepted: `preview README` resolves to `README.md`. Reading the
 /// file is the event loop's job, so this command only validates the argument and
 /// returns [`Effect::OpenPreview`] carrying the target.
-///
-/// `preview diff` (the planned session-vs-main diff view) is not built yet; it is
-/// recognised so the surface is discoverable, but only reports that for now.
 pub(super) struct PreviewCommand;
 
 impl Command for PreviewCommand {
@@ -831,16 +879,38 @@ impl Command for PreviewCommand {
         if target.is_empty() {
             return CommandResult::line(LogLine::error(format!("usage: {}", self.usage())));
         }
-        // The diff view is tracked separately and not implemented yet; recognise
-        // it so the command reads coherently rather than trying to open `diff.md`.
-        if target == "diff" {
-            return CommandResult::line(LogLine::output(
-                "Diff preview is coming soon 🐰 (for now, preview a Markdown file)",
-            ));
-        }
         CommandResult {
             lines: Vec::new(),
             effect: Effect::OpenPreview(target.to_string()),
+        }
+    }
+}
+
+/// `diff`: open the focused session's diff against the base branch in the
+/// right pane — the whole patch behind the sidebar's `+N -M` badge, scrollable
+/// like the Markdown preview. A 在席 (Focus) command, so it runs against the
+/// session under the cursor from the Focus menu / prompt. Gathering the diff
+/// (resolving the highlighted worktree and shelling out to git) is the event
+/// loop's job, so this command only requests the view via [`Effect::OpenDiff`].
+pub(super) struct DiffCommand;
+
+impl Command for DiffCommand {
+    fn name(&self) -> &'static str {
+        "diff"
+    }
+
+    fn description(&self) -> &'static str {
+        "Show the focused session's diff against the base branch"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenDiff,
         }
     }
 }
@@ -869,6 +939,35 @@ impl Command for ConfigCommand {
         CommandResult {
             lines: Vec::new(),
             effect: Effect::OpenConfig,
+        }
+    }
+}
+
+/// `env`: edit this workspace's 1Password-backed environment bindings
+/// (`NAME=op://vault/item/field`), resolved and injected into panes launched in
+/// this workspace. It opens an editor as an overlay over the command palette
+/// ([`Effect::OpenEnvEditor`]) — staying in the Overview and returning to it on
+/// save / cancel — rather than handing off to the full Config screen (the same
+/// bindings are also editable from `config` → Env Vars).
+pub(super) struct EnvCommand;
+
+impl Command for EnvCommand {
+    fn name(&self) -> &'static str {
+        "env"
+    }
+
+    fn description(&self) -> &'static str {
+        "Edit this workspace's 1Password-backed environment variables"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenEnvEditor,
         }
     }
 }
@@ -908,7 +1007,7 @@ impl Command for ComingSoonCommand {
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
         CommandResult::line(LogLine::output(format!(
-            "\"{}\" is coming soon 🐰",
+            "\"{}\" is coming soon 󰤇",
             self.name
         )))
     }

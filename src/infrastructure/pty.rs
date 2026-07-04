@@ -79,11 +79,50 @@ impl vt100::Callbacks for ScreenCallbacks {
     }
 }
 
+/// Cloneable handle for injecting input into a live PTY from outside the render
+/// loop.
+///
+/// The home screen normally writes to a pane through `&mut PtySession` while the
+/// pane is focused. A live MCP send is different: the `usagi mcp` process can
+/// only leave a prompt on disk, and the terminal-pool watcher (a background
+/// thread in the TUI process) must pick it up and type it into the already-open
+/// agent pane even when that pane is detached. This handle shares the PTY input
+/// writer with the owner while also exposing the parser's bracketed-paste flag
+/// so the caller can encode multi-line prompts exactly as a terminal paste.
+#[derive(Clone)]
+pub struct PtyInputHandle {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+}
+
+impl PtyInputHandle {
+    /// Whether the running program has asked for bracketed paste mode
+    /// (DECSET 2004). See [`PtySession::bracketed_paste`].
+    pub fn bracketed_paste(&self) -> bool {
+        self.parser
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .screen()
+            .bracketed_paste()
+    }
+
+    /// Forward raw input bytes to the shell.
+    pub fn write(&self, bytes: &[u8]) -> Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(())
+    }
+}
+
 /// A running shell attached to a pseudo-terminal, with its output parsed into a
 /// terminal screen grid.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
     /// Bumped by the reader thread after every chunk it parses, so the render
@@ -109,12 +148,12 @@ pub struct PtySession {
 }
 
 /// The stack the PTY reader thread is given. The thread only loops over a
-/// blocking `read` into an 8 KiB buffer and hands the bytes to `vt100::Parser`
-/// (whose own grid lives on the heap), so it needs far less than a thread's
-/// 2 MiB default stack. One reader thread runs per live pane, so with many
-/// sessions and panes open at once the default stacks alone reserve tens of MiB
-/// of address space; a tighter stack keeps that footprint small. 256 KiB leaves
-/// ample headroom over the shallow read/parse call chain.
+/// blocking `read` into a heap-allocated buffer and hands the bytes to
+/// `vt100::Parser` (whose own grid lives on the heap), so it needs far less than a
+/// thread's 2 MiB default stack. One reader thread runs per live pane, so with
+/// many sessions and panes open at once the default stacks alone reserve tens of
+/// MiB of address space; a tighter stack keeps that footprint small. 256 KiB
+/// leaves ample headroom over the shallow read/parse call chain.
 const READER_STACK_BYTES: usize = 256 * 1024;
 
 /// Configure `cmd` to run `command` in `shell` and then exit, so the launch
@@ -154,9 +193,10 @@ impl PtySession {
     /// command does, so leaving the agent returns to 在席 (Focus) rather than
     /// dropping the user at a bare shell prompt.
     ///
-    /// `env` is a map of workspace-scoped secret environment variables already
-    /// resolved by the caller. The values are injected through the child process
-    /// environment, never through the launch command line.
+    /// `env` is a map of effective (global plus workspace-local) secret
+    /// environment variables already resolved by the caller. The values are
+    /// injected through the child process environment, never through the launch
+    /// command line.
     ///
     /// `scrollback` caps how many scrolled-off lines the embedded terminal keeps
     /// for the user to scroll back over (the `vt100` parser grows the buffer
@@ -207,6 +247,7 @@ impl PtySession {
             .master
             .take_writer()
             .context("failed to write to the pseudo-terminal")?;
+        let writer = Arc::new(Mutex::new(writer));
 
         let bell = Arc::new(AtomicU64::new(0));
         let cursor_shape = Arc::new(AtomicU16::new(0));
@@ -251,7 +292,14 @@ impl PtySession {
                         alive,
                         generation: Arc::clone(&generation),
                     };
-                    let mut buf = [0u8; 8192];
+                    // A 64 KiB read buffer (heap, so the reader thread's stack is
+                    // untouched): during an output flood each `read` returns up to
+                    // this much at once, so a burst is drained in ~1/8 the read
+                    // syscalls, parser-lock acquisitions, and generation bumps that
+                    // an 8 KiB buffer took — cutting contention with the render loop
+                    // that locks the same parser. `parser.process` handles any chunk
+                    // size, so this only changes throughput, not correctness.
+                    let mut buf = vec![0u8; 64 * 1024];
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
@@ -321,6 +369,22 @@ impl PtySession {
         Arc::clone(&self.bell)
     }
 
+    /// A shared handle to the screen-grid parser, so a background watcher can
+    /// scan the pane's output (e.g. for pull-request URLs) without owning — or
+    /// blocking the render loop that borrows — the session. The watcher locks it
+    /// only briefly and off its own state lock (see the terminal pool's watcher).
+    pub fn parser_handle(&self) -> Arc<Mutex<vt100::Parser<ScreenCallbacks>>> {
+        Arc::clone(&self.parser)
+    }
+
+    /// A shared handle to the output generation counter (see
+    /// [`generation`](Self::generation)), so a background watcher can tell whether
+    /// the pane produced new output since it last scanned it — and skip the
+    /// (whole-grid) scan when it did not — without owning the session.
+    pub fn generation_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.generation)
+    }
+
     /// The shell's process id — also its process-group id, since portable-pty
     /// launches it as a session leader (`setsid`), so it is the root a resource
     /// sampler walks to total the session's whole process tree (the shell and any
@@ -343,11 +407,19 @@ impl PtySession {
         Arc::clone(&self.alive)
     }
 
+    /// A cloneable handle that can write to this PTY without borrowing the
+    /// owning [`PtySession`]. Used by the terminal-pool watcher to inject
+    /// MCP-sent prompts into a backgrounded agent pane.
+    pub fn input_handle(&self) -> PtyInputHandle {
+        PtyInputHandle {
+            writer: Arc::clone(&self.writer),
+            parser: Arc::clone(&self.parser),
+        }
+    }
+
     /// Forward raw input bytes to the shell.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
-        Ok(())
+        self.input_handle().write(bytes)
     }
 
     /// Resize the PTY (and its screen grid) to `rows`×`cols`. Best-effort: a
@@ -384,6 +456,16 @@ impl PtySession {
         } else {
             0
         }
+    }
+
+    /// The scroll offset currently applied to the buffered history (`0` is the
+    /// live screen). Output streaming in while the pane is scrolled back advances
+    /// this on its own — the vendored `vt100`'s `scroll_up` bumps the offset as
+    /// lines enter the scrollback so the viewed region stays pinned — so the
+    /// render loop reads it back to keep its tracked offset in step (otherwise a
+    /// later wheel notch would scroll relative to a stale value).
+    pub fn scrollback(&self) -> usize {
+        self.parser().screen().scrollback()
     }
 
     /// Whether the shell is still running (the reader has not hit EOF).
@@ -605,6 +687,34 @@ mod tests {
             screen.scrollback(),
             0,
             "an offset region must not feed the scrollback"
+        );
+    }
+
+    /// While the pane is scrolled back, output streaming in advances the parser's
+    /// own offset so the viewed region stays pinned to the same lines. The render
+    /// loop (`terminal/pane.rs`) relies on this to re-read the offset and keep its
+    /// tracked value in step — otherwise a later wheel notch scrolls relative to a
+    /// stale offset and the view jumps by however many lines streamed in. This
+    /// guards the offset auto-advance in the vendored `vt100` `scroll_up`.
+    #[test]
+    fn streaming_output_advances_the_offset_while_scrolled_back() {
+        let mut parser = vt100::Parser::new(6, 20, 1000);
+        for i in 0..50 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // Scroll back a few lines into the history.
+        parser.screen_mut().set_scrollback(3);
+        assert_eq!(parser.screen().scrollback(), 3);
+        // Ten more lines stream in with no further scroll input.
+        for i in 50..60 {
+            parser.process(format!("line {i}\r\n").as_bytes());
+        }
+        // The offset advanced by the ten streamed lines so the same content stays
+        // in view — the value the render loop must adopt.
+        assert_eq!(
+            parser.screen().scrollback(),
+            13,
+            "the offset must track the lines that streamed in while scrolled back"
         );
     }
 }

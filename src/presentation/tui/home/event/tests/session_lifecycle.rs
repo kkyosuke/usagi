@@ -197,6 +197,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                 worktrees: vec![worktree(Some("main"), "/r/main")],
                 created_at: Utc::now(),
@@ -206,6 +207,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
                 name: name.to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/newx"),
                 worktrees: vec![worktree(Some(name), "/r/newx")],
                 created_at: Utc::now(),
@@ -265,6 +267,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "main".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/main"),
                                     worktrees: vec![worktree(Some("main"), "/r/main")],
                                     created_at: Utc::now(),
@@ -274,6 +277,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "feat".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/feat"),
                                     worktrees: vec![worktree(Some("feat"), "/r/feat")],
                                     created_at: Utc::now(),
@@ -283,6 +287,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                                     name: "newx".to_string(),
                                     display_name: None,
                                     note: None,
+                                    label_id: None,
                                     root: PathBuf::from("/ws/.usagi/sessions/newx"),
                                     worktrees: vec![worktree(Some("newx"), "/r/newx")],
                                     created_at: Utc::now(),
@@ -322,7 +327,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         opened.borrow_mut().push(dir.to_path_buf());
         Ok(PaneExit::Closed)
     };
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, name: &str, interaction_epoch: u64| {
         let id = tasks.begin(TaskKind::CreateSession, name);
         *task_id.borrow_mut() = Some(id);
@@ -333,6 +338,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     };
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, _: &str, _: bool, _| {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
@@ -340,6 +346,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
@@ -347,15 +354,16 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -364,6 +372,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -382,6 +391,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
             &monitor,
             &UpdateHandle::new(),
             &SessionsRefreshHandle::new(),
+            &OneShot::<bool>::new(),
             &OneShot::<Vec<AgentCli>>::new(),
             &tasks,
             &mut wiring,
@@ -404,8 +414,7 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
     // only open `/main` if the close landed in 在席 on `main`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Focus(main)
     keys.push(Ok(Key::Char('t'))); // Focus menu shortcut: open terminal on `main`
 
@@ -427,6 +436,7 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
+                label_id: None,
                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                 worktrees: vec![worktree(Some("main"), "/r/main")],
                 created_at: Utc::now(),
@@ -497,6 +507,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
                                 name: "main".to_string(),
                                 display_name: None,
                                 note: None,
+                                label_id: None,
                                 root: PathBuf::from("/ws/.usagi/sessions/main"),
                                 worktrees: vec![worktree(Some("main"), "/r/main")],
                                 created_at: Utc::now(),
@@ -513,10 +524,13 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         }
     }
 
+    // Reach `close` (last) with ArrowDown, not ArrowUp: this reader completes the
+    // remove task on ArrowUp, and that must only fire *after* close is dispatched.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> close
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
+    keys.push(Ok(Key::ArrowDown)); // diff -> close (last)
     keys.push(Ok(Key::Enter)); // dispatch close, but leave the task running
     keys.push(Ok(Key::ArrowUp)); // another Switch operation before completion lands
     keys.push(Ok(Key::Char('c'))); // still Switch: begin inline create
@@ -533,10 +547,11 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     };
     let term = Term::stdout();
     let monitor = MonitorHandle::detached();
-    let mut persist: fn(&str) = noop_persist;
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, name: &str, _: bool, auto_focus: Option<AutoFocus>| {
         let id = tasks.begin(TaskKind::RemoveSession, name);
@@ -553,6 +568,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     };
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut open_url: fn(&str) = noop_open_url;
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
@@ -560,15 +576,16 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
-        ready_chat_ask;
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
+        watch_sessions: false,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
         unite_resolve: &mut unite_resolve,
@@ -577,6 +594,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         existing_branches: &mut branches,
         open_terminal: &mut open,
         open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
         chat_ask: &mut chat_ask,
         preview: &mut preview,
@@ -595,6 +613,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
             &monitor,
             &UpdateHandle::new(),
             &SessionsRefreshHandle::new(),
+            &OneShot::<bool>::new(),
             &OneShot::<Vec<AgentCli>>::new(),
             &tasks,
             &mut wiring,
@@ -779,15 +798,14 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
 
 #[test]
 fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
-    // The 在席 menu lists its commands alphabetically (`agent`, `chat`, `close`,
-    // `terminal`) with `agent` highlighted by default; two ArrowDowns land on
-    // `close`. Enter removes the focused session like `session remove feat` (no
-    // `--force`), then drops into 切替 (Switch) — the `c` keypress that follows opens
-    // the inline create input (a Switch-only action), proving the landing mode.
+    // The 在席 menu lists its commands in the fixed order (`agent`, `terminal`,
+    // `close`) with `agent` highlighted by default; `close` is last, so ArrowUp
+    // wraps up to it. Enter removes the focused session like `session remove feat`
+    // (no `--force`), then drops into 切替 (Switch) — the `c` keypress that follows
+    // opens the inline create input (a Switch-only action), proving the landing mode.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> `close`
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to `close` (last)
     keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
@@ -914,8 +932,7 @@ fn focus_menu_close_picker_enter_runs_plain_close() {
     // `→` on the close row opens the picker; `Enter` on option 0 runs plain `close`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker (option 0 = close)
     keys.push(Ok(Key::Enter)); // run `close` -> 切替
     keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
@@ -975,8 +992,7 @@ fn focus_menu_close_picker_enter_on_force_runs_force_close() {
     // `→` opens the picker; `↓` selects `--force`; `Enter` runs `close --force`.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.push(Ok(Key::ArrowDown)); // option 0 -> option 1 (close --force)
     keys.push(Ok(Key::Enter)); // run `close --force` -> 切替
@@ -1037,8 +1053,7 @@ fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(Str
     // Start: navigate to close row, open picker, then apply caller's keys.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus (feat)
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::ArrowDown)); // chat -> close
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to close (last)
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.extend(extra_keys);
     let term = Term::stdout();
@@ -1123,7 +1138,7 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
     keys.push(Ok(Key::Char('k')));
     keys.push(Ok(Key::ArrowUp)); // cursor 0
     keys.push(Ok(Key::Home)); // ignored
-    keys.push(Ok(Key::Enter)); // confirm
+    keys.push(Ok(Key::Char('y'))); // confirm via the yes-key (same as Enter)
     keys.push(Ok(Key::Escape)); // back to the palette
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -1172,6 +1187,7 @@ fn removal_modal_cancels_via_escape_and_keeps_open_on_empty_enter() {
     let mut keys = cmd("session remove");
     keys.push(Ok(Key::Enter)); // open
     keys.push(Ok(Key::Enter)); // nothing checked -> stays open
+    keys.push(Ok(Key::Char('Y'))); // nothing checked (yes-key) -> also stays open
     keys.push(Ok(Key::Char(' '))); // check alpha
     keys.push(Ok(Key::Escape)); // cancel the modal
     keys.push(Ok(Key::Escape)); // back to the palette

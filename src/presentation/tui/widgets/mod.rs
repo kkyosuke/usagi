@@ -15,11 +15,11 @@ pub mod text_area;
 pub mod text_input;
 
 pub use rabbit::{
-    done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, multiplying_rabbits,
-    rabbit_height, rabbit_lines, rabbit_lines_at, rabbit_width, running_rabbit,
-    running_rabbit_width, workspace_rabbit, workspace_rabbit_rail, workspace_rabbit_rail_width,
-    workspace_rabbit_reaction, workspace_rabbit_speaking, workspace_rabbit_width, MascotReaction,
-    RabbitMood,
+    done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, loading_screen,
+    multiplying_rabbits, rabbit_height, rabbit_lines, rabbit_lines_at, rabbit_width,
+    running_rabbit, running_rabbit_width, workspace_rabbit, workspace_rabbit_rail,
+    workspace_rabbit_rail_width, workspace_rabbit_reaction, workspace_rabbit_speaking,
+    workspace_rabbit_width, MascotReaction, RabbitMood,
 };
 
 use crate::presentation::theme::{self, Palette};
@@ -420,6 +420,48 @@ pub fn overlay_centered(base: &mut [String], width: usize, block: &[String]) {
     overlay_block(base, top, left, block_w, block);
 }
 
+/// Composites `block` centred inside a rectangular display region of `base`.
+///
+/// `region_left` / `region_width` bound the columns, and `region_top` /
+/// `region_height` bound the rows. The block is skipped when it cannot fit the
+/// region or when the region sits off-screen. As with [`overlay_centered`], rows
+/// are composited over the existing frame rather than blanking it, so the pane
+/// behind stays visible around the floating indicator.
+pub fn overlay_region_centered(
+    base: &mut [String],
+    width: usize,
+    region_left: usize,
+    region_width: usize,
+    region_top: usize,
+    region_height: usize,
+    block: &[String],
+) {
+    let block_w = block
+        .iter()
+        .map(|line| console::measure_text_width(line))
+        .max()
+        .unwrap_or(0);
+    let block_h = block.len();
+    if block_w == 0
+        || block_h == 0
+        || block_w > region_width
+        || block_h > region_height
+        || region_left >= width
+        || region_top >= base.len()
+    {
+        return;
+    }
+    let left = region_left + centered_padding(region_width, block_w);
+    if left + block_w > width {
+        return;
+    }
+    let top = region_top + region_height.saturating_sub(block_h) / 2;
+    if top >= base.len() {
+        return;
+    }
+    overlay_block(base, top, left, block_w, block);
+}
+
 /// Composites the pre-sized `block` onto `base` with its top-left at `(top,
 /// left)`, **clamped** so the whole block stays on screen: `left` is pulled back
 /// so the block's right edge fits `width`, and `top` is pulled up so its bottom
@@ -662,6 +704,21 @@ pub fn block_selection(
 /// each side. The returned rows are not yet placed; [`render_modal`] centres
 /// them. A shared primitive so every modal dialog shares one frame.
 pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
+    // A plain frame: `Style::new()` carries no attributes, so `apply_to` emits no
+    // ANSI and the output is byte-for-byte the unstyled box.
+    boxed_styled(title, inner_width, lines, &Style::new())
+}
+
+/// Like [`boxed`] but paints the frame — the border glyphs and the embedded
+/// title — in `border`. The content lines keep whatever styling they already
+/// carry; only the box outline is recoloured. This lets a box signal state
+/// (e.g. an open editor) by its frame colour without touching the text inside.
+pub fn boxed_styled(
+    title: &str,
+    inner_width: usize,
+    lines: &[String],
+    border: &Style,
+) -> Vec<String> {
     // Columns between the two corner glyphs: the content area plus one space of
     // padding on each side.
     let span = inner_width + 2;
@@ -675,17 +732,19 @@ pub fn boxed(title: &str, inner_width: usize, lines: &[String]) -> Vec<String> {
     let label_width = console::measure_text_width(&label);
     let top = format!("┌{label}{}┐", "─".repeat(span.saturating_sub(label_width)));
     let bottom = format!("└{}┘", "─".repeat(span));
+    // The side border is one styled glyph reused on both edges of every row.
+    let edge = border.apply_to("│").to_string();
 
     let mut out = Vec::with_capacity(lines.len() + 2);
-    out.push(top);
+    out.push(border.apply_to(top).to_string());
     for line in lines {
         // Clip first so a line wider than the box can never push the right
         // border out; then pad short lines so every row is exactly `inner_width`.
         let line = clip_to_width(line, inner_width);
         let pad = inner_width.saturating_sub(console::measure_text_width(&line));
-        out.push(format!("│ {line}{} │", " ".repeat(pad)));
+        out.push(format!("{edge} {line}{} {edge}", " ".repeat(pad)));
     }
-    out.push(bottom);
+    out.push(border.apply_to(bottom).to_string());
     out
 }
 
@@ -806,6 +865,42 @@ pub fn overlay_modal(
 ) {
     let inner = modal_inner_width(width, inner_width);
     overlay_centered(base, width, &boxed(title, inner, body));
+}
+
+/// Composites a titled modal box centred inside a rectangular **region** of
+/// `base`, the region-scoped sibling of [`overlay_modal`]: it wraps `body` in a
+/// [`boxed`] frame and overlays it with [`overlay_region_centered`], so the box
+/// floats within one pane (e.g. the right pane) while the columns outside the
+/// region — the sidebar — stay visible around it.
+///
+/// `region_left` / `region_width` bound the columns and `region_top` /
+/// `region_height` the rows the box is centred within. `inner_width` is clamped
+/// to the region (not the whole screen), so a body built with
+/// [`modal_inner_width`]`(region_width, inner_width)` lines its rows up inside the
+/// box. The box is skipped when it cannot fit the region (see
+/// [`overlay_region_centered`]).
+#[allow(clippy::too_many_arguments)]
+pub fn overlay_region_modal(
+    base: &mut [String],
+    width: usize,
+    region_left: usize,
+    region_width: usize,
+    region_top: usize,
+    region_height: usize,
+    title: &str,
+    inner_width: usize,
+    body: &[String],
+) {
+    let inner = modal_inner_width(region_width, inner_width);
+    overlay_region_centered(
+        base,
+        width,
+        region_left,
+        region_width,
+        region_top,
+        region_height,
+        &boxed(title, inner, body),
+    );
 }
 
 #[cfg(test)]
@@ -1169,6 +1264,98 @@ mod tests {
     }
 
     #[test]
+    fn overlay_region_centered_floats_inside_the_given_rectangle() {
+        // A 2×2 block centred inside the 10-column region starting at col 5 and
+        // the 4-row region starting at row 1 lands at col 9, row 2.
+        let mut base = vec![".".repeat(20); 6];
+        overlay_region_centered(
+            &mut base,
+            20,
+            5,
+            10,
+            1,
+            4,
+            &["XX".to_string(), "YY".to_string()],
+        );
+        assert_eq!(base[0], ".".repeat(20));
+        assert_eq!(base[1], ".".repeat(20));
+        assert_eq!(base[4], ".".repeat(20));
+        assert_eq!(base[5], ".".repeat(20));
+
+        let first = console::strip_ansi_codes(&base[2]).into_owned();
+        let second = console::strip_ansi_codes(&base[3]).into_owned();
+        assert_eq!(&first[9..11], "XX");
+        assert_eq!(&second[9..11], "YY");
+    }
+
+    #[test]
+    fn overlay_region_modal_boxes_the_body_and_floats_it_within_the_region() {
+        // A titled box floats centred inside the right-hand region (cols 10..30 of
+        // a 30-wide frame), leaving the columns to its left — the "sidebar" — intact.
+        let mut base = vec![".".repeat(30); 8];
+        overlay_region_modal(
+            &mut base,
+            30,
+            10, // region_left
+            20, // region_width
+            1,  // region_top
+            6,  // region_height
+            "T",
+            8, // inner_width
+            &["hi".to_string()],
+        );
+        let joined = console::strip_ansi_codes(&base.join("\n")).into_owned();
+        // The body and the box frame (with its embedded title) both landed.
+        assert!(joined.contains("hi"));
+        assert!(joined.contains("┌─ T"));
+        assert!(joined.contains('└'));
+        // Every row keeps its leading sidebar columns (cols 0..10) untouched.
+        for row in &base {
+            let plain = console::strip_ansi_codes(row).into_owned();
+            assert_eq!(&plain[..10], "..........");
+        }
+    }
+
+    #[test]
+    fn overlay_region_modal_clamps_the_inner_width_to_the_region() {
+        // A desired inner width wider than the region is clamped so the box still
+        // fits inside it (rather than being skipped for overrunning).
+        let mut base = vec![" ".repeat(30); 6];
+        overlay_region_modal(&mut base, 30, 10, 16, 0, 6, "", 999, &["x".to_string()]);
+        let joined = console::strip_ansi_codes(&base.join("\n")).into_owned();
+        assert!(joined.contains('┌'));
+        assert!(joined.contains('x'));
+    }
+
+    #[test]
+    fn overlay_region_centered_is_skipped_when_it_cannot_fit_the_region() {
+        let mut base = vec!["keep".to_string(); 2];
+        overlay_region_centered(&mut base, 20, 5, 1, 0, 2, &["XX".to_string()]);
+        overlay_region_centered(
+            &mut base,
+            20,
+            5,
+            10,
+            0,
+            1,
+            &["X".to_string(), "Y".to_string()],
+        );
+        overlay_region_centered(&mut base, 20, 20, 10, 0, 2, &["X".to_string()]);
+        assert_eq!(base, vec!["keep".to_string(); 2]);
+    }
+
+    #[test]
+    fn overlay_region_centered_is_skipped_when_centering_would_leave_the_frame() {
+        let mut base = vec!["keep".to_string(); 2];
+        // The region itself may extend beyond the frame even though its left/top
+        // edge is visible. In that case the centred block would spill, so it is
+        // skipped instead of clamped into a misleading position.
+        overlay_region_centered(&mut base, 10, 8, 10, 0, 1, &["XXXXXX".to_string()]);
+        overlay_region_centered(&mut base, 10, 0, 1, 1, 4, &["X".to_string()]);
+        assert_eq!(base, vec!["keep".to_string(); 2]);
+    }
+
+    #[test]
     fn overlay_at_anchors_a_box_at_the_given_cell_keeping_the_surrounding_content() {
         // The box is placed with its top-left at (1, 8): rows 1..4 carry it, and on
         // those rows the base columns to its left and right survive.
@@ -1383,6 +1570,24 @@ mod tests {
             console::measure_text_width(&lines[1]),
             console::measure_text_width(&lines[2]),
         );
+    }
+
+    #[test]
+    fn boxed_styled_paints_the_frame_but_not_the_content() {
+        let border = Style::new().force_styling(true).cyan();
+        let lines = boxed_styled("Title", 10, &["hi".to_string()], &border);
+        // The border rows carry the colour; strip it and the plain box remains.
+        assert!(lines[0].contains("\u{1b}["), "the top border is coloured");
+        assert!(
+            lines.last().unwrap().contains("\u{1b}["),
+            "the bottom border is coloured"
+        );
+        assert!(console::strip_ansi_codes(&lines[0]).starts_with('┌'));
+        // The side glyphs are coloured but the content text between them is not.
+        assert!(lines[1].starts_with("\u{1b}["), "the left edge is coloured");
+        let plain = console::strip_ansi_codes(&lines[1]);
+        assert!(plain.starts_with("│ hi"), "content follows the left edge");
+        assert!(plain.ends_with("│"), "content is closed by the right edge");
     }
 
     #[test]

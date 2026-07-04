@@ -1,13 +1,13 @@
 ---
 number: 7
 title: history コマンド（コマンド実行履歴の表示）
-status: todo
+status: done
 priority: medium
 labels: [tui]
 dependson: [2]
 related: []
 created_at: 2026-06-16T23:00:12.312491+00:00
-updated_at: 2026-06-16T23:00:12.312491+00:00
+updated_at: 2026-07-02T22:14:43.272033+00:00
 ---
 
 # `history` コマンド（コマンド実行履歴の表示）

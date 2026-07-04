@@ -215,7 +215,7 @@ fn notice_lines(block_pad: &str, notice: Option<&str>) -> Vec<String> {
 /// Returns the footer text only; [`render_frame`] pins it to the bottom edge.
 fn footer_lines(width: usize, mode: Mode) -> Vec<String> {
     let help = match mode {
-        Mode::Single => "←→ tab / ↑↓ move / type,/: filter / Enter open / Esc back",
+        Mode::Single => "←→ tab / ↑↓ move / type filter / Enter open / Esc back",
         Mode::Unite => "←→ tab / ↑↓ move / Space toggle / Enter open checked / Esc single",
     };
     vec![widgets::dim_line(width, help)]
@@ -260,9 +260,17 @@ pub fn mascot_top(
     let block_pad = " ".repeat(widgets::centered_padding(width, widgets::BLOCK_WIDTH));
     let body = body_lines(width, &block_pad, list, notice, now);
     let footer = footer_lines(width, list.mode());
+    mascot_top_for(height, body.len(), footer.len())
+}
+
+/// The mascot's frame row given an already-measured body and footer. The shared
+/// anchor math behind [`mascot_top`], so [`render_frame`] — which has already
+/// built the body — reuses it instead of rebuilding the body (and welcome's) just
+/// to measure where the mascot lands.
+fn mascot_top_for(height: usize, body_lines: usize, footer_lines: usize) -> usize {
     // Anchor to the shared mascot row, but never so low that the body overflows
     // the footer on a short terminal.
-    let available = height.saturating_sub(body.len() + footer.len());
+    let available = height.saturating_sub(body_lines + footer_lines);
     welcome::mascot_top_padding(height).min(available)
 }
 
@@ -286,7 +294,9 @@ pub fn render_frame(
     let mut lines = Vec::with_capacity(height);
 
     // Pin the mascot to the shared row so it never jumps from the welcome screen.
-    let top_padding = mascot_top(raw_height, raw_width, list, notice, now);
+    // The body is already built, so measure it directly rather than rebuilding it
+    // (and welcome's body) inside `mascot_top`.
+    let top_padding = mascot_top_for(height, body.len(), footer.len());
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -630,7 +640,7 @@ mod tests {
             24,
             80,
             &list,
-            Some("Opening \"alpha\" is coming soon 🐰"),
+            Some("Opening \"alpha\" is coming soon 󰤇"),
             now(),
         );
         assert_eq!(without.len(), with.len());

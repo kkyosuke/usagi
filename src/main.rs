@@ -2,10 +2,8 @@ use std::path::Path;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use usagi::infrastructure::secret_store::SecretStore;
 use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 use usagi::presentation::mcp::llm::LlmBackend;
-use usagi::presentation::mcp::op::OpBackend;
 use usagi::presentation::mcp::session::AgentBackend;
 use usagi::usecase::session;
 
@@ -14,10 +12,11 @@ use usagi::usecase::session;
 /// and unit-testable.
 ///
 /// `prompt` *queues* the prompt for the target session's worktree rather than
-/// running an agent itself: the `usagi mcp` process cannot reach into a running
-/// TUI to drive a pane, so it leaves the prompt in `agent_prompt_store` and the
+/// running an agent itself: it leaves the prompt in `agent_prompt_store` and the
 /// home screen delivers it the next time it freshly launches that session's
-/// agent pane.
+/// agent pane. `send` is the live counterpart: it appends the prompt to
+/// `agent_live_prompt_store`, which a currently running TUI drains into the
+/// session's existing agent pane.
 ///
 /// `remove` resolves the workspace's effective agent CLI (so the removed
 /// session's persisted conversation is discarded with the right adapter) and
@@ -34,6 +33,25 @@ impl AgentBackend for CliAgentBackend {
             usagi home screen (focus the session, then run `agent`)."
                 .to_string(),
         )
+    }
+
+    fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+        usagi::infrastructure::agent_live_prompt_store::append(worktree, prompt)
+            .map_err(|e| e.to_string())?;
+        Ok(
+            "Queued the prompt for this session's running agent pane. A running usagi TUI \
+            delivers it to the live agent by pasting it and pressing Enter; if no live \
+            agent pane is open, it waits until one is available."
+                .to_string(),
+        )
+    }
+
+    fn agent_is_live(&self, worktree: &Path) -> bool {
+        // A recorded agent phase means a pane was launched in this worktree and
+        // its lifecycle hooks fired; the home screen clears it when the pane dies,
+        // so its presence tracks a live pane. `session_prompt`'s `auto` mode uses
+        // this to prefer the live channel when the session's agent is running.
+        usagi::infrastructure::agent_state_store::read(worktree).is_some()
     }
 
     fn remove(
@@ -184,130 +202,6 @@ impl WaitableChild for RealChild {
     }
 }
 
-/// The longest a single `op` CLI call may take before it is killed and the MCP
-/// tool fails. 1Password reads should be quick; the budget only prevents a
-/// wedged authentication helper or CLI process from blocking the agent forever.
-const OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// How often the wait loop re-polls the `op` child while it runs.
-const OP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-/// Largest `op` stdout captured; item JSON is usually small, but this bounds a
-/// hostile or unexpectedly huge response.
-const MAX_OP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-/// How much of `op`'s stderr is echoed back in an error.
-const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
-
-/// The production [`OpBackend`] for `usagi op-mcp`, wired in at the composition
-/// root so the op-mcp transport stays free of subprocess IO and unit-testable.
-/// Each tool call runs exactly one `op` invocation with stdin closed, returning
-/// stdout on success and a bounded stderr diagnostic on failure.
-struct OpCliBackend {
-    service_account_token: Option<String>,
-}
-
-impl OpBackend for OpCliBackend {
-    fn run(&self, args: &[String]) -> Result<String, String> {
-        let mut command = std::process::Command::new("op");
-        command
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if let Some(token) = self.service_account_token.as_deref() {
-            command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("failed to start op: {e}"))?;
-
-        let mut out = child
-            .stdout
-            .take()
-            .ok_or_else(|| "failed to open op stdout".to_string())?;
-        let mut err = child
-            .stderr
-            .take()
-            .ok_or_else(|| "failed to open op stderr".to_string())?;
-        let out_reader = std::thread::spawn(move || read_capped(&mut out, MAX_OP_OUTPUT_BYTES));
-        let err_reader = std::thread::spawn(move || read_capped(&mut err, MAX_OP_STDERR_BYTES));
-
-        let status = wait_with_timeout(&mut RealChild(child), OP_TIMEOUT, OP_POLL);
-        let stdout_result = out_reader
-            .join()
-            .unwrap_or_else(|_| Ok((Vec::new(), false)));
-        let stderr_result = err_reader
-            .join()
-            .unwrap_or_else(|_| Ok((Vec::new(), false)));
-
-        let Some(status) = status else {
-            return Err(format!(
-                "op did not finish within {OP_TIMEOUT:?} and was terminated"
-            ));
-        };
-        let (stdout, stdout_truncated) =
-            stdout_result.map_err(|e| format!("failed to read op output: {e}"))?;
-        let (stderr, stderr_truncated) = stderr_result.unwrap_or((Vec::new(), false));
-        if !status.success() {
-            let mut detail = String::from_utf8_lossy(&stderr).trim().to_string();
-            if stderr_truncated {
-                detail.push_str(" …(truncated)");
-            }
-            if detail.is_empty() {
-                detail = "no stderr".to_string();
-            }
-            return Err(format!("op exited with {status}: {detail}"));
-        }
-
-        let mut text = String::from_utf8_lossy(&stdout).to_string();
-        if stdout_truncated {
-            text.push_str(" …(truncated)");
-        }
-        Ok(text.trim_end_matches(['\n', '\r']).to_string())
-    }
-}
-
-/// The production [`SecretStore`] backed by the operating system's native secret
-/// store. It is deliberately kept at the composition root because it is pure
-/// process/OS IO; the use cases are tested against an injected fake store.
-/// The production [`SecretStore`] backed by the operating system's native secret
-/// store via the cross-platform [`keyring`] crate: Apple Keychain on macOS, the
-/// Windows Credential Manager on Windows, and the Linux kernel keyutils store on
-/// Linux. Kept at the composition root because it is pure OS IO; the use cases
-/// are tested against an injected fake store.
-struct SystemSecretStore;
-
-/// The keyring "service" namespace usagi stores its credentials under. The entry
-/// "user" is the secret's key (e.g. the 1Password token key).
-const KEYRING_SERVICE: &str = "usagi";
-
-impl SecretStore for SystemSecretStore {
-    fn get(&self, key: &str) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-            .map_err(|e| format!("opening keychain entry: {e}"))?;
-        match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(format!("reading keychain entry: {e}")),
-        }
-    }
-
-    fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-            .map_err(|e| format!("opening keychain entry: {e}"))?;
-        entry
-            .set_password(value)
-            .map_err(|e| format!("writing keychain entry: {e}"))
-    }
-
-    fn delete(&self, key: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-            .map_err(|e| format!("opening keychain entry: {e}"))?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(format!("deleting keychain entry: {e}")),
-        }
-    }
-}
-
 #[derive(Parser)]
 #[command(
     name = "usagi",
@@ -395,7 +289,7 @@ enum Commands {
         #[command(subcommand)]
         command: usagi::presentation::cli::memory::MemoryCommand,
     },
-    /// Manage the 1Password credential used by `usagi op-mcp`
+    /// Store the 1Password credential used to resolve workspace `op://` env vars
     Op {
         #[command(subcommand)]
         command: usagi::presentation::cli::op::OpCommand,
@@ -414,11 +308,6 @@ enum Commands {
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
     #[command(hide = true)]
     Mcp,
-    /// Run the 1Password CLI MCP server over stdio (for AI agents to read secrets)
-    ///
-    /// Hidden from the CLI: launched by AI agents, not invoked by hand.
-    #[command(hide = true)]
-    OpMcp,
     /// Play a usagi animation (1=走る 2=増える 3,4=読み込み 5=マスコット)
     Run {
         /// Which animation to play (1–5)
@@ -486,12 +375,10 @@ fn main() -> anyhow::Result<()> {
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::Op { command } => {
-            let storage = usagi::infrastructure::storage::Storage::open_default()?;
             let mut stdout = std::io::stdout();
             usagi::presentation::cli::op::run(
                 command,
-                &SystemSecretStore,
-                &storage,
+                &usagi::infrastructure::secret_store::SystemSecretStore,
                 Some(Box::new(|| {
                     console::Term::stderr()
                         .read_secure_line()
@@ -520,17 +407,6 @@ fn main() -> anyhow::Result<()> {
             let stdout = std::io::stdout();
             usagi::presentation::cli::mcp::run(
                 Box::new(CliAgentBackend),
-                stdin.lock(),
-                stdout.lock(),
-            )
-        }
-        Commands::OpMcp => {
-            let stdin = std::io::stdin();
-            let stdout = std::io::stdout();
-            usagi::presentation::cli::op_mcp::run(
-                Box::new(OpCliBackend {
-                    service_account_token: op_service_account_token(),
-                }),
                 stdin.lock(),
                 stdout.lock(),
             )
@@ -568,7 +444,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
         Commands::Update { .. } => Some("update"),
-        Commands::LlmMcp { .. } | Commands::Mcp | Commands::OpMcp => None,
+        Commands::LlmMcp { .. } | Commands::Mcp => None,
     }
 }
 
@@ -589,21 +465,6 @@ fn trace_command(name: Option<&'static str>, ok: bool) {
 /// swallowed so logging never masks the original error on its way to stderr.
 fn log_error(error: &anyhow::Error) {
     usagi::infrastructure::error_log::ErrorLog::record(&format!("{error:#}"));
-}
-
-/// The 1Password service account token registered in global settings, if any.
-///
-/// Best-effort at the composition root: if settings cannot be read, `op-mcp`
-/// still starts and simply relies on an ambient `op` session (or returns `op`'s
-/// own "not signed in" error). The token is supplied to `op` through an
-/// environment variable, not a command-line argument, so it does not appear in
-/// agent launch commands or process listings.
-fn op_service_account_token() -> Option<String> {
-    use usagi::infrastructure::secret_store::OP_SERVICE_ACCOUNT_TOKEN_KEY;
-    SystemSecretStore
-        .get(OP_SERVICE_ACCOUNT_TOKEN_KEY)
-        .ok()
-        .flatten()
 }
 
 /// Spawn `command` via `sh -c` detached in the background, with `cwd` as its

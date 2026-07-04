@@ -11,7 +11,8 @@ use console::{style, Style};
 
 use super::super::command::{CommandInfo, Hint};
 use super::super::state::{
-    CreateInput, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, WorktreeList, ROOT_NAME,
+    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, WorktreeList,
+    ROOT_NAME,
 };
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
@@ -21,10 +22,14 @@ use super::{
     PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
-use crate::domain::settings::{AgentCli, SessionActionUi, Sidebar};
+use crate::domain::settings::{
+    AgentCli, LabelColor, SessionActionUi, SessionLabelDef, SessionLabelMaster, Sidebar,
+};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
+use crate::presentation::tui::diff::{split_rows, DiffRow, DiffSpan, RowKind, SplitRow};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use crate::presentation::tui::widgets;
+use unicode_width::UnicodeWidthChar;
 
 /// The Nerd Font git glyph for a branch lifecycle status.
 fn status_icon(status: BranchStatus) -> char {
@@ -42,7 +47,7 @@ fn status_icon(status: BranchStatus) -> char {
 /// never drift apart.
 fn status_style(status: BranchStatus) -> Style {
     match status {
-        BranchStatus::New => Style::new().info().bright(),
+        BranchStatus::New => Style::new().info(),
         BranchStatus::Dirty => Style::new().feature(),
         BranchStatus::Local => Style::new().warning(),
         BranchStatus::Pushed => Style::new().success(),
@@ -58,9 +63,22 @@ pub(super) fn status_label(status: BranchStatus) -> String {
     status_style(status).apply_to(text).to_string()
 }
 
+/// Whether a branch lifecycle status is shown as a sidebar badge. `New` (freshly
+/// cut, no work yet) and `Dirty` (uncommitted work in progress) are deliberately
+/// **not** badged — they add noise without telling the user anything they don't
+/// already know — so only the settled states (`Local` / `Pushed` / `Synced`) get
+/// a badge on both the full sidebar and the rail.
+fn status_has_badge(status: BranchStatus) -> bool {
+    !matches!(status, BranchStatus::New | BranchStatus::Dirty)
+}
+
 /// The single colour-coded git-status glyph shown on the collapsed rail (the icon
-/// from [`status_label`] without the word), in the same colour.
+/// from [`status_label`] without the word), in the same colour — or a blank for an
+/// unbadged status (`New` / `Dirty`; see [`status_has_badge`]).
 fn rail_status_glyph(status: BranchStatus) -> String {
+    if !status_has_badge(status) {
+        return " ".to_string();
+    }
     status_style(status)
         .apply_to(status_icon(status))
         .to_string()
@@ -68,20 +86,103 @@ fn rail_status_glyph(status: BranchStatus) -> String {
 
 /// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
 /// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
-/// status (the root row).
+/// badge — the root row (`None`) or an unbadged status (`New` / `Dirty`; see
+/// [`status_has_badge`]).
 pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
     match status {
-        None => " ".repeat(STATUS_COL),
-        Some(status) => {
+        Some(status) if status_has_badge(status) => {
             let label = status_label(status);
             let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
             format!("{}{label}", " ".repeat(pad))
         }
+        _ => " ".repeat(STATUS_COL),
     }
+}
+
+/// The largest column width the manual-status label cell may claim on the full
+/// sidebar, so a long user-defined label name cannot crowd out the branch name;
+/// a longer label is clipped to this. Only reserved when a visible session
+/// actually carries a label (else the column is dropped entirely).
+const LABEL_COL_MAX: usize = 12;
+
+/// The [`Style`] a manual-status [`LabelColor`] paints in, resolved through the
+/// semantic [`Palette`] so the label column follows a theme retune like every
+/// other coloured element (`Gray` reads as a dim, unobtrusive tag).
+fn label_style(color: LabelColor) -> Style {
+    match color {
+        LabelColor::Gray => Style::new().dim(),
+        LabelColor::Red => Style::new().danger(),
+        LabelColor::Green => Style::new().success(),
+        LabelColor::Yellow => Style::new().warning(),
+        LabelColor::Blue => Style::new().info(),
+        LabelColor::Magenta => Style::new().feature(),
+        LabelColor::Cyan => Style::new().accent(),
+    }
+}
+
+/// The manual-status label column on a full-sidebar row: a leading space
+/// separator then the colour-coded `<glyph> <name>` for `label`, clipped/padded
+/// to fill `col` columns so the note / status fields stay aligned down the list.
+/// An unset row (or `col == 0`, when no visible session carries a label) fills
+/// the same width with blanks, holding the column.
+fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
+    if col == 0 {
+        return String::new();
+    }
+    // One column is the separating space before the label; the rest is its body.
+    let inner = col - 1;
+    let body = match label {
+        None => " ".repeat(inner),
+        Some(def) => {
+            let text = format!("{} {}", def.glyph(), def.name);
+            let padded = pad_to_width(clip_to_width(&text, inner), inner);
+            label_style(def.color).apply_to(padded).to_string()
+        }
+    };
+    format!(" {body}")
+}
+
+/// The width the manual-status label column claims across the visible sessions:
+/// the widest resolved `<glyph> <name>` (capped at [`LABEL_COL_MAX`]) plus one
+/// separating space, or `0` when no visible session carries a label — in which
+/// case the column is dropped and the sidebar is byte-for-byte what it was before
+/// the feature. Mirrors how [`detail_cols`] sizes the detail cluster.
+fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
+    let widest = list
+        .groups()
+        .iter()
+        .flat_map(|g| {
+            (0..g.worktrees().len()).filter_map(|i| g.row_label_id(i).and_then(|id| master.get(id)))
+        })
+        .map(|def| console::measure_text_width(&format!("{} {}", def.glyph(), def.name)))
+        .max()
+        .unwrap_or(0)
+        .min(LABEL_COL_MAX);
+    if widest == 0 {
+        0
+    } else {
+        widest + 1
+    }
+}
+
+/// The single colour-coded glyph for a session's manual-status label on the
+/// collapsed rail (the icon from [`label_cell`] without the name), or `None` when
+/// the session carries no label — the rail then keeps its agent / kind glyph.
+fn rail_label_glyph(label: Option<&SessionLabelDef>) -> Option<String> {
+    label.map(|def| label_style(def.color).apply_to(def.glyph()).to_string())
 }
 
 /// The state of a session's embedded agent, shown by an icon on the row's first
 /// line and spelled out on its detail line.
+/// Nerd Font glyph flagging that the row's detail line reports an **AI agent's**
+/// state (rather than a plain shell). It leads the agent label — `<robot> ☾ ready`
+/// — so an agent-backed session reads at a glance. Kept in the Font Awesome **4**
+/// range (like the git-status glyphs above), where every Nerd Font — old or partial
+/// — carries it: the FA5 `nf-fa-robot` (U+F544) is absent from those and shows a `?`
+/// fallback (the same trap noted for [`MEM_ICON`]). Without any Nerd Font the phase
+/// glyph and word beside it still carry the meaning.
+const AGENT_ICON: char = '\u{f17b}'; // nf-fa-android — an AI agent (robot) drives this session
+
 #[derive(Clone, Copy)]
 enum AgentState {
     /// No live embedded session: the row carries no agent detail.
@@ -118,27 +219,33 @@ impl AgentState {
         }
     }
 
-    /// The detail-line content: an icon together with its label — `☾ ready`
-    /// (dim), `▶ running` (green), `◆ waiting` (yellow), or `✓ done` (cyan) —
-    /// clipped to `width`, or `None` when absent (the row has no agent in use).
+    /// The detail-line content: an [AI-agent glyph](AGENT_ICON), then a phase icon
+    /// together with its label — `<robot> ☾ ready` (dim), `<robot> ▶ running`
+    /// (green), `<robot> ◆ waiting` (yellow), or `<robot> ✓ done` (cyan) — clipped
+    /// to `width`, or `None` when absent (the row has no agent in use). The AI glyph
+    /// rides inside the same styled span, so it takes the phase's colour.
     fn detail(self, width: usize) -> Option<String> {
         match self {
             AgentState::Absent => None,
-            AgentState::Ready => Some(style(clip_to_width_cow("☾ ready", width)).dim().to_string()),
+            AgentState::Ready => Some(
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾ ready"), width))
+                    .dim()
+                    .to_string(),
+            ),
             AgentState::Running => Some(
-                style(clip_to_width_cow("▶ running", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶ running"), width))
                     .success()
                     .bold()
                     .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow("◆ waiting", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆ waiting"), width))
                     .warning()
                     .bold()
                     .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow("✓ done", width))
+                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓ done"), width))
                     .accent()
                     .bold()
                     .to_string(),
@@ -161,13 +268,17 @@ impl AgentState {
     }
 }
 
-/// The far-left gutter cell shared by both of a row's lines. In 切替 (Switch) the
-/// keyboard is on the list, so the selected row shows a red `>` cursor. The
-/// **active** session — the one subsequent commands operate on — is marked by a
-/// green `▎` accent bar that runs down both of its lines (this replaces the old
-/// `*` marker, whose meaning and mid-row position read poorly). Outside Switch
-/// there is no cursor, so the gutter only ever carries the active bar; when the
-/// cursor and the active row coincide in Switch, the cursor takes the column.
+/// The one-cell usagi glyph used as the first line of a selected session's
+/// gutter stack. It is in Nerd Font's PUA range, not an emoji, so it stays
+/// one-column wide in the sidebar when the user's terminal font supports it.
+const SELECTED_SESSION_GLYPH: char = '\u{f0907}';
+
+/// The far-left gutter cell used by root/action rows. In 切替 (Switch) the
+/// keyboard is on the list, so the selected non-session row shows a red `>`
+/// cursor. The **active** session — the one subsequent commands operate on — is
+/// marked by a green `▎` accent bar that runs down its row. Outside Switch there
+/// is no cursor, so the gutter only ever carries the active bar; when the cursor
+/// and the active row coincide in Switch, the cursor takes the column.
 fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
     if in_switch && selected {
         style(">").danger().bold().to_string()
@@ -175,6 +286,37 @@ fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
         style("▎").success().bold().to_string()
     } else {
         " ".to_string()
+    }
+}
+
+/// The three-line gutter stack for a selected session row:
+///
+/// ```text
+/// 󰤇
+/// ▎
+/// ▎
+/// ```
+///
+/// Session entries occupy three fixed rows, so the marker can span the whole
+/// entry and remain visible after the side menu has selected the session. It is
+/// red while the cursor is in 切替, then green after the session is selected. The
+/// root and the "+ new session" action keep the compact `>` cursor in 切替
+/// because they are not sessions and do not have a three-row body.
+fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize) -> String {
+    if selected {
+        let mark = if row == 0 {
+            SELECTED_SESSION_GLYPH.to_string()
+        } else {
+            "▎".to_string()
+        };
+        let style = if in_switch {
+            Style::new().danger().bold()
+        } else {
+            Style::new().success().bold()
+        };
+        style.apply_to(mark).to_string()
+    } else {
+        gutter_cell(false, active, in_switch)
     }
 }
 
@@ -293,13 +435,14 @@ fn tint_by_load(field: String, load: Load) -> String {
 fn resource_line(
     usage: ResourceUsage,
     detail_width: usize,
+    selected: bool,
     active: bool,
     in_switch: bool,
 ) -> String {
     let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
         .dim()
         .to_string();
-    detail_line(&gutter_cell(false, active, in_switch), detail)
+    detail_line(&session_gutter_cell(selected, active, in_switch, 2), detail)
 }
 
 /// The line-1 cell between the session name and the right-edge git status: a
@@ -315,9 +458,9 @@ fn note_cell(has_note: bool) -> String {
     }
 }
 
-/// Builds a worktree's two lines. The far-left gutter carries a `>` cursor for
-/// the selected entry in 切替 (Switch) or a green `▎` accent bar down the active
-/// worktree's two lines; line 1 then has the freshness ("heat") kind dot
+/// Builds a worktree's first two lines. The far-left gutter carries the selected
+/// session's `󰤇` / `▎` stack, falling back to a green `▎` accent bar down the
+/// active worktree's lines when the session is not selected; line 1 then has the freshness ("heat") kind dot
 /// (`●`/`◐`/`○`, fading by time since the session was last touched, measured
 /// against `now`), the branch name, a memo marker (`NOTE_ICON`, when `has_note`),
 /// and the git `status` at the right edge. Line 2 is indented under the name and,
@@ -327,6 +470,8 @@ fn note_cell(has_note: bool) -> String {
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
     label: &str,
+    status_label: Option<&SessionLabelDef>,
+    label_col: usize,
     name_width: usize,
     detail_width: usize,
     cols: DetailCols,
@@ -339,24 +484,45 @@ pub(super) fn worktree_row(
     running: bool,
     waiting: bool,
     done: bool,
+    // While inline-renaming this (selected) session in 切替, the label being typed
+    // and the caret's byte offset into it: line 1's name cell becomes that
+    // editable field in place, so the rename happens on the row itself rather than
+    // in a separate input at the list foot.
+    rename: Option<(&str, usize)>,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
-    // The session's sidebar label (its custom display name, or the branch when
-    // unset); a detached worktree with no label falls back to the placeholder.
-    let name = if label.is_empty() {
-        worktree.branch.as_deref().unwrap_or(DETACHED)
+    let gutter = session_gutter_cell(selected, active, in_switch, 0);
+    let line1 = if let Some((value, cursor)) = rename {
+        // Inline rename: the session's own name line turns into the editable label
+        // with a block caret. The gutter cursor and kind dot stay put so the row
+        // does not shift, and the field runs across where the note and status
+        // fields sat (dropped while editing) so a longer name has room to type.
+        let (before, after) = value.split_at(cursor);
+        let field = widgets::block_caret(before, after, &Style::new().accent().bold());
+        let field_width = name_width + label_col + ACTIVE_COL + 1 + STATUS_COL;
+        format!("{gutter} {kind} {}", clip_to_width(&field, field_width))
     } else {
-        label
+        // The session's sidebar label (its custom display name, or the branch when
+        // unset); a detached worktree with no label falls back to the placeholder.
+        let name = if label.is_empty() {
+            worktree.branch.as_deref().unwrap_or(DETACHED)
+        } else {
+            label
+        };
+        let branch = name_cell(name, name_width, active || selected);
+        let status = status_cell(Some(worktree.status));
+        // The manual-status label sits between the branch name and the memo marker
+        // in its own fixed-width column (blank when this row has none, dropped
+        // entirely when no visible session carries a label — `label_col == 0`), so
+        // the note and git-status fields stay aligned down the list.
+        let status_tag = label_cell(status_label, label_col);
+        // Three columns sit between the name and the right-edge status (the old
+        // active-marker cell, now home to the memo marker — the active bar lives in
+        // the gutter). The cell is a constant width whether or not a note is
+        // present, so the status field never shifts.
+        let note = note_cell(has_note);
+        format!("{gutter} {kind} {branch}{status_tag}{note}{status}")
     };
-    let branch = name_cell(name, name_width, active || selected);
-    let status = status_cell(Some(worktree.status));
-    let gutter = gutter_cell(selected, active, in_switch);
-    // Three columns sit between the name and the right-edge status (the old
-    // active-marker cell, now home to the memo marker — the active bar lives in
-    // the gutter). The cell is a constant width whether or not a note is present,
-    // so the status field never shifts.
-    let note = note_cell(has_note);
-    let line1 = format!("{gutter} {kind} {branch}{note}{status}");
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
     // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
@@ -381,7 +547,7 @@ pub(super) fn worktree_row(
         cells.push(pr_cell(&worktree.pr, cols.pr));
     }
     let detail = detail_content(agent, &cells, detail_width);
-    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
+    let line2 = detail_line(&session_gutter_cell(selected, active, in_switch, 1), detail);
     (line1, line2)
 }
 
@@ -445,7 +611,7 @@ pub(super) struct DetailCols {
 pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 
 /// The fixed-width pull-request cell for a worktree's [`PrLink`]s: a single
-/// `<icon> <count>` badge (bright blue, underlined to read as a link) — the PR glyph and
+/// `<icon> <count>` badge (soft link blue, underlined to read as a link) — the PR glyph and
 /// how many PRs the session carries — right-aligned in `width` display columns so
 /// the badges line up down the list. Folding several PRs into one count keeps the
 /// detail line from being crowded out by a long `#442 #447 …` run (the full list is
@@ -458,7 +624,6 @@ fn pr_cell(prs: &[PrLink], width: usize) -> String {
     }
     let badge = style(format!("{PR_ICON} {}", prs.len()))
         .info()
-        .bright()
         .underlined()
         .to_string();
     rpad(&badge, width)
@@ -643,6 +808,7 @@ fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
 /// carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
+    label_col: usize,
     detail_width: usize,
     has_note: bool,
     selected: bool,
@@ -653,10 +819,14 @@ pub(super) fn root_row(
     let name = name_cell(ROOT_NAME, name_width, active || selected);
     let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
+    // The root belongs to no session, so it carries no manual-status label — but it
+    // reserves the same (blank) label column as the sessions below, so the note /
+    // status fields stay aligned.
+    let status_tag = label_cell(None, label_col);
     // The same constant-width memo cell a worktree row uses, so the (blank) status
     // field stays aligned with the sessions below whether or not a note is present.
     let note = note_cell(has_note);
-    let line1 = format!("{gutter} {kind} {name}{note}{status}");
+    let line1 = format!("{gutter} {kind} {name}{status_tag}{note}{status}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -730,28 +900,54 @@ fn root_glyph() -> String {
 /// ```
 ///
 /// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down all three rows; the 切替 `>` cursor stays
-/// a point on row 1, matching the full sidebar.
+/// in use. The active `▎` bar runs down all three rows; a selected session uses
+/// the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps the
+/// compact `>` cursor in 切替.
+#[allow(clippy::too_many_arguments)]
 fn rail_entry(
     selected: bool,
+    session: bool,
     active: bool,
     in_switch: bool,
     kind: &str,
     git: Option<&str>,
+    label: Option<&str>,
     agent: Option<&str>,
 ) -> (String, String, String) {
-    let gutter = gutter_cell(selected, active, in_switch);
-    let bar = gutter_cell(false, active, in_switch);
+    let gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 0)
+    } else {
+        gutter_cell(selected, active, in_switch)
+    };
+    let detail_gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 1)
+    } else {
+        gutter_cell(false, active, in_switch)
+    };
+    let resource_gutter = if session {
+        session_gutter_cell(selected, active, in_switch, 2)
+    } else {
+        gutter_cell(false, active, in_switch)
+    };
     // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
     // the git glyph and the column under the kind dot stays blank.
     let top = pad_to_width(
         format!("{gutter} {kind} {}", git.unwrap_or(" ")),
         RAIL_WIDTH,
     );
-    let detail = pad_to_width(format!("{bar}   {}", agent.unwrap_or(" ")), RAIL_WIDTH);
+    // Row 2: the manual-status glyph sits at column 2 (under the kind dot, blank
+    // when the session has no label) and the agent glyph at column 4 (under git).
+    let detail = pad_to_width(
+        format!(
+            "{detail_gutter} {} {}",
+            label.unwrap_or(" "),
+            agent.unwrap_or(" ")
+        ),
+        RAIL_WIDTH,
+    );
     // The resource row's rail twin: the active bar runs down it, but the rail has
     // no room for the CPU / memory figure, so the rest is blank.
-    let resource = pad_to_width(bar, RAIL_WIDTH);
+    let resource = pad_to_width(resource_gutter, RAIL_WIDTH);
     (top, detail, resource)
 }
 
@@ -783,9 +979,9 @@ fn rail_create_row(selected: bool, in_switch: bool) -> String {
     pad_to_width(format!("{gutter} {label}"), RAIL_WIDTH)
 }
 
-fn push_unite_workspace_gap(lines: &mut Vec<String>, width: usize) {
+fn push_unite_workspace_gap(win: &mut LineWindow, width: usize) {
     for _ in 0..UNITE_WORKSPACE_GAP_ROWS {
-        lines.push(pad_to_width(String::new(), width));
+        win.push(pad_to_width(String::new(), width));
     }
 }
 
@@ -797,16 +993,157 @@ fn line_hits_unite_workspace_gap(line: usize, cur: &mut usize) -> bool {
     false
 }
 
-fn group_block_rows(list: &WorktreeList, group_index: usize, worktree_count: usize) -> usize {
+/// The number of body lines one workspace group occupies in the sidebar: the
+/// (統合(unite)) inter-workspace gap and group header, the two-row root entry, the
+/// one-row divider, then either the single empty-workspace message or
+/// [`SESSION_ROWS`] rows per session. `with_headers` matches the full sidebar,
+/// which heads each 統合 group with its name; the collapsed rail draws no header
+/// (but keeps the gap), so it passes `false`. Shared by the create/rename insert
+/// anchor ([`group_inline_insert_line`]) and the scroll maths
+/// ([`sidebar_total_lines`] / [`selected_row_span`]) so every caller walks the one
+/// layout [`left_pane`] / [`rail_pane`] draw.
+fn group_block_rows(
+    list: &WorktreeList,
+    group_index: usize,
+    worktree_count: usize,
+    with_headers: bool,
+) -> usize {
     let united = list.group_count() > 1;
     let gap = usize::from(united && group_index > 0) * UNITE_WORKSPACE_GAP_ROWS;
-    let header = usize::from(united);
+    let header = usize::from(united && with_headers);
     let body = if worktree_count == 0 {
         1
     } else {
         SESSION_ROWS * worktree_count
     };
     gap + header + 2 + 1 + body
+}
+
+/// The total body lines the sidebar draws for `list`: every group's block plus the
+/// trailing persistent "+ new session" row. `with_headers` matches the sidebar
+/// variant (full draws 統合 group headers, the rail does not). The scroll offset
+/// clamps against this so the window never runs past the list's foot.
+fn sidebar_total_lines(list: &WorktreeList, with_headers: bool) -> usize {
+    list.groups()
+        .iter()
+        .enumerate()
+        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), with_headers))
+        .sum::<usize>()
+        + 1 // the "+ new session" row at the foot
+}
+
+/// The `(start line, height)` the selected row occupies in the full-column
+/// layout: the two-row root entry, one [`SESSION_ROWS`] block per session, or the
+/// single "+ new session" row at the foot. Walks the same layout as
+/// [`sidebar_row_at_line_walk`] so the scroll offset reveals exactly the row the
+/// renderer draws as selected.
+fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) {
+    let united = list.group_count() > 1;
+    let sel = list.selected_index();
+    let mut cur = 0usize;
+    let mut flat = 0usize;
+    for (g, group) in list.groups().iter().enumerate() {
+        if united && g > 0 {
+            cur += UNITE_WORKSPACE_GAP_ROWS;
+        }
+        if with_headers && united {
+            cur += 1;
+        }
+        if flat == sel {
+            return (cur, 2); // the root entry (its divider is not part of the row)
+        }
+        cur += 2 + 1; // root entry + divider
+        flat += 1;
+        if group.worktrees().is_empty() {
+            cur += 1; // the empty-workspace message
+            continue;
+        }
+        for _ in group.worktrees() {
+            if flat == sel {
+                return (cur, SESSION_ROWS);
+            }
+            cur += SESSION_ROWS;
+            flat += 1;
+        }
+    }
+    (cur, 1) // the "+ new session" row
+}
+
+/// The body-line scroll offset for a sidebar taller than its `viewport_rows`,
+/// chosen so the selected row stays visible. Zero while the list fits (top
+/// pinned); once the selected row's foot drops below the fold it scrolls just far
+/// enough to reveal that row at the bottom, clamped so the window never runs past
+/// the list's end. A pure function of the list, the sidebar variant, and the
+/// viewport height, so the renderer ([`left_pane`] / [`rail_pane`]) and every
+/// hit-test compute the identical offset and never disagree on what is on screen.
+pub(super) fn sidebar_scroll(
+    list: &WorktreeList,
+    with_headers: bool,
+    viewport_rows: usize,
+) -> usize {
+    let total = sidebar_total_lines(list, with_headers);
+    if viewport_rows == 0 || total <= viewport_rows {
+        return 0;
+    }
+    let (start, len) = selected_row_span(list, with_headers);
+    let end = start + len;
+    let scroll = end.saturating_sub(viewport_rows);
+    scroll.min(total - viewport_rows)
+}
+
+/// Accumulates a scrolled window of body lines: only lines whose full-column
+/// index lands in `[scroll, scroll + cap)` are kept, so the sidebar can show a
+/// slice of a list taller than the pane while the builders still walk the whole
+/// layout — keeping every row's flat index (and therefore its selected / active
+/// styling) correct. Lines above the window are counted but not stored; a caller
+/// skips *building* an entire off-window entry via [`Self::above`] / [`Self::full`]
+/// so the per-frame styling cost stays bound to the visible rows even with many
+/// sessions open.
+struct LineWindow {
+    scroll: usize,
+    cap: usize,
+    seen: usize,
+    out: Vec<String>,
+}
+
+impl LineWindow {
+    fn new(scroll: usize, cap: usize) -> Self {
+        Self {
+            scroll,
+            cap,
+            seen: 0,
+            out: Vec::new(),
+        }
+    }
+
+    /// Record one built line, keeping it only when it falls inside the window.
+    fn push(&mut self, line: String) {
+        if self.seen >= self.scroll && self.out.len() < self.cap {
+            self.out.push(line);
+        }
+        self.seen += 1;
+    }
+
+    /// Advance past `n` lines without building them (they sit above the window).
+    fn skip(&mut self, n: usize) {
+        self.seen += n;
+    }
+
+    /// Whether the next `n` lines all sit above the window, so the caller can skip
+    /// building them and just [`Self::skip`] ahead.
+    fn above(&self, n: usize) -> bool {
+        self.seen + n <= self.scroll
+    }
+
+    /// Whether the window is already filled — every remaining line is below it, so
+    /// the caller can stop building entirely.
+    fn full(&self) -> bool {
+        self.seen >= self.scroll + self.cap
+    }
+
+    fn into_lines(self) -> Vec<String> {
+        self.out
+    }
 }
 
 /// Builds the collapsed-rail sidebar ([`Sidebar::Rail`]): the root entry first, a
@@ -824,32 +1161,38 @@ fn rail_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    label_master: &SessionLabelMaster,
     rows: usize,
     in_switch: bool,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
-    let mut lines: Vec<String> = Vec::new();
+    // Scroll so the selected entry stays on screen once the list outgrows the rail
+    // (the rail draws no 統合 group header, so `with_headers` is false).
+    let scroll = sidebar_scroll(list, false, rows);
+    let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (the
     // 統合 group separators are pure decoration and do not advance it).
     let mut flat_row = 0usize;
     let united = list.group_count() > 1;
     'groups: for (g, group) in list.groups().iter().enumerate() {
-        if lines.len() >= rows {
+        if win.full() {
             break;
         }
         // In 統合(unite) mode two blank rows separate each workspace's block.
         if united && g > 0 {
-            push_unite_workspace_gap(&mut lines, RAIL_WIDTH);
+            push_unite_workspace_gap(&mut win, RAIL_WIDTH);
         }
         // The root entry is two rows (then a divider), matching the full sidebar's
         // [`root_row`]; only worktree entries carry the third resource row, so the
         // root drops the rail entry's (blank) third line.
         let (mut root_top, mut root_detail, _) = rail_entry(
             flat_row == list.selected_index(),
+            false,
             flat_row == list.active_index(),
             in_switch,
             &root,
+            None,
             None,
             None,
         );
@@ -857,27 +1200,34 @@ fn rail_pane(
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
-        lines.push(root_top);
-        lines.push(root_detail);
+        win.push(root_top);
+        win.push(root_detail);
         flat_row += 1;
-        lines.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
+        win.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
         if group.worktrees().is_empty() {
             // Mirror the full sidebar's single empty-message row so the row count
             // matches and toggling never shifts the layout.
-            lines.push(pad_to_width(String::new(), RAIL_WIDTH));
+            win.push(pad_to_width(String::new(), RAIL_WIDTH));
             continue;
         }
-        for w in group.worktrees() {
-            // Stop once the built rows fill the rail: the trailing `truncate(rows)`
-            // discards the rest, so building beyond the visible height is wasted
-            // work (same bound as the full sidebar above).
-            if lines.len() >= rows {
+        for (i, w) in group.worktrees().iter().enumerate() {
+            // Stop once the window is filled: everything past it is off screen, so
+            // building it is wasted work (same bound as the full sidebar).
+            if win.full() {
                 break 'groups;
+            }
+            // The whole entry sits above the scrolled window — skip building it and
+            // just advance the line / flat-row counters.
+            if win.above(SESSION_ROWS) {
+                win.skip(SESSION_ROWS);
+                flat_row += 1;
+                continue;
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
             let kind = kind_dot(heat_of(w.updated_at, now));
             let git = rail_status_glyph(w.status);
+            let label = rail_label_glyph(group.row_label_id(i).and_then(|id| label_master.get(id)));
             let agent = AgentState::from_flags(
                 live.contains(&w.path),
                 running.contains(&w.path),
@@ -887,10 +1237,12 @@ fn rail_pane(
             .rail_icon();
             let (mut top, mut detail, mut resource) = rail_entry(
                 selected,
+                true,
                 active,
                 in_switch,
                 &kind,
                 Some(&git),
+                label.as_deref(),
                 agent.as_deref(),
             );
             if in_switch && !selected {
@@ -898,21 +1250,20 @@ fn rail_pane(
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
             }
-            lines.push(top);
-            lines.push(detail);
-            lines.push(resource);
+            win.push(top);
+            win.push(detail);
+            win.push(resource);
             flat_row += 1;
         }
     }
-    if lines.len() < rows {
+    if !win.full() {
         let mut row = rail_create_row(list.create_row_selected(), in_switch);
         if in_switch && !list.create_row_selected() {
             row = dim_row(&row);
         }
-        lines.push(row);
+        win.push(row);
     }
-    lines.truncate(rows);
-    lines
+    win.into_lines()
 }
 
 /// Re-renders an already-styled row uniformly dimmed: strips its colours and
@@ -982,11 +1333,17 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
     None
 }
 
+/// The flat selectable row a 0-based *screen* body `line` maps to, given the
+/// sidebar's current `scroll` offset (see [`sidebar_scroll`]). The screen line is
+/// lifted back into the full-column layout by adding `scroll` before the walk, so a
+/// click resolves to the right row even when the list is scrolled.
 pub(super) fn sidebar_row_at_line_for_sidebar(
     list: &WorktreeList,
     line: usize,
     sidebar: Sidebar,
+    scroll: usize,
 ) -> Option<usize> {
+    let line = line + scroll;
     match sidebar {
         Sidebar::Full => sidebar_row_at_line_walk(list, line, true),
         Sidebar::Rail => sidebar_row_at_line_walk(list, line, false),
@@ -1006,7 +1363,7 @@ pub(super) fn group_inline_insert_line(list: &WorktreeList, group: usize) -> usi
         .iter()
         .enumerate()
         .take(group + 1)
-        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len()))
+        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), true))
         .sum()
 }
 
@@ -1042,20 +1399,40 @@ pub(super) fn left_pane(
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
     resources: &HashMap<PathBuf, ResourceUsage>,
+    label_master: &SessionLabelMaster,
     left_w: usize,
     rows: usize,
     in_switch: bool,
     sidebar: Sidebar,
     now: DateTime<Utc>,
+    // The inline rename being typed (its label and caret offset) when 切替's rename
+    // input is open, so the selected session's name line renders as that editable
+    // field in place. `None` when not renaming. Only the full sidebar edits inline;
+    // the rail has no room and renders the input in the right pane instead.
+    rename: Option<(&str, usize)>,
 ) -> Vec<String> {
     if sidebar == Sidebar::Rail {
         // The 5-column rail has no room for a CPU / memory figure, so the rail
         // shows only the agent glyph; the resource line belongs to the full list.
-        return rail_pane(list, live, running, waiting, done, rows, in_switch, now);
+        return rail_pane(
+            list,
+            live,
+            running,
+            waiting,
+            done,
+            label_master,
+            rows,
+            in_switch,
+            now,
+        );
     }
-    // Line 1: prefix + name + the (now-blank) active-marker cell + a space + the
-    // right-edge status field.
-    let name_width = left_w.saturating_sub(NAME_PREFIX + ACTIVE_COL + 1 + STATUS_COL);
+    // The manual-status label column, reserved across every group's rows so the
+    // labels line up; `0` (no visible session carries a label) drops it, leaving
+    // the sidebar exactly as it was before the feature.
+    let label_col = label_col_width(list, label_master);
+    // Line 1: prefix + name + the manual-status label column + the (now-blank)
+    // active-marker cell + a space + the right-edge status field.
+    let name_width = left_w.saturating_sub(NAME_PREFIX + label_col + ACTIVE_COL + 1 + STATUS_COL);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
     // Size the detail line's right-cluster columns once across every group's
@@ -1088,22 +1465,27 @@ pub(super) fn left_pane(
     // In 統合(unite) mode each workspace's rows are headed by its name.
     let united = list.group_count() > 1;
 
-    let mut lines: Vec<String> = Vec::new();
+    // Scroll so the selected row stays on screen once the list outgrows the pane;
+    // the window keeps only the visible slice while the loop walks the whole layout
+    // so every flat index (and its selected / active styling) stays correct.
+    let scroll = sidebar_scroll(list, true, rows);
+    let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (group
     // headers are pure decoration and do not advance it).
     let mut flat_row = 0usize;
     'groups: for (g, group) in list.groups().iter().enumerate() {
-        if lines.len() >= rows {
+        if win.full() {
             break;
         }
         if united && g > 0 {
-            push_unite_workspace_gap(&mut lines, left_w);
+            push_unite_workspace_gap(&mut win, left_w);
         }
         if united {
-            lines.push(group_header(group.name(), left_w));
+            win.push(group_header(group.name(), left_w));
         }
         let (mut root_top, mut root_detail) = root_row(
             name_width,
+            label_col,
             detail_width,
             group.root_has_note(),
             flat_row == list.selected_index(),
@@ -1114,10 +1496,10 @@ pub(super) fn left_pane(
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
-        lines.push(root_top);
-        lines.push(root_detail);
+        win.push(root_top);
+        win.push(root_detail);
         flat_row += 1;
-        lines.push(
+        win.push(
             style(format!("{indent}{}", "─".repeat(inner_w)))
                 .dim()
                 .to_string(),
@@ -1125,7 +1507,7 @@ pub(super) fn left_pane(
         if group.worktrees().is_empty() {
             // No sessions yet in this workspace — show the empty message under the
             // divider.
-            lines.push(
+            win.push(
                 style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
                     .dim()
                     .to_string(),
@@ -1133,18 +1515,27 @@ pub(super) fn left_pane(
             continue;
         }
         for (i, w) in group.worktrees().iter().enumerate() {
-            // Stop once the rows built already fill the pane: the trailing
-            // `truncate(rows)` would discard anything past this, so building it is
-            // wasted work. With many sessions open this bounds the per-frame cost
-            // (styling, dimming, ANSI rewriting) to the visible rows.
-            if lines.len() >= rows {
+            // Stop once the window is filled: everything past it is off screen, so
+            // building it is wasted work. With many sessions open this bounds the
+            // per-frame cost (styling, dimming, ANSI rewriting) to the visible rows.
+            if win.full() {
                 break 'groups;
+            }
+            // The whole entry sits above the scrolled window — skip building it and
+            // just advance the line / flat-row counters.
+            if win.above(SESSION_ROWS) {
+                win.skip(SESSION_ROWS);
+                flat_row += 1;
+                continue;
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
+            let status_label = group.row_label_id(i).and_then(|id| label_master.get(id));
             let (mut top, mut detail) = worktree_row(
                 w,
                 group.display_label(i),
+                status_label,
+                label_col,
                 name_width,
                 detail_width,
                 cols,
@@ -1157,33 +1548,35 @@ pub(super) fn left_pane(
                 running.contains(&w.path),
                 waiting.contains(&w.path),
                 done.contains(&w.path),
+                // The rename input targets the selected session, so its editable
+                // label rides that row only; every other row renders normally.
+                if selected { rename } else { None },
             );
             // Every session draws a third CPU / memory line at a fixed height, so
             // the list never reflows as a session goes live or idle. An unsampled
             // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
             // the row.
             let usage = resources.get(&w.path).copied().unwrap_or_default();
-            let mut resource = resource_line(usage, detail_width, active, in_switch);
+            let mut resource = resource_line(usage, detail_width, selected, active, in_switch);
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
             }
-            lines.push(top);
-            lines.push(detail);
-            lines.push(resource);
+            win.push(top);
+            win.push(detail);
+            win.push(resource);
             flat_row += 1;
         }
     }
-    if lines.len() < rows {
+    if !win.full() {
         let mut row = create_row(list.create_row_selected(), in_switch, left_w);
         if in_switch && !list.create_row_selected() {
             row = dim_row(&row);
         }
-        lines.push(row);
+        win.push(row);
     }
-    lines.truncate(rows);
-    lines
+    win.into_lines()
 }
 
 /// Renders one log line, coloured by kind. Command lines get a `❯` prompt.
@@ -1564,10 +1957,15 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     if col >= left_w || row < BODY_TOP {
         return None;
     }
-    let line = (row - BODY_TOP) as usize;
-    if line >= super::body_rows_for(height) {
+    let body_rows = super::body_rows_for(height);
+    let screen_line = (row - BODY_TOP) as usize;
+    if screen_line >= body_rows {
         return None;
     }
+    // Lift the screen line back into the full-column layout the entries are walked
+    // in, so the badge resolves correctly when the list is scrolled.
+    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let line = screen_line + scroll;
     // The badge only lives on each entry's detail line.
     let (idx, _) = full_sidebar_worktree_entries(state.list())
         .into_iter()
@@ -1644,7 +2042,7 @@ fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
 }
 
 /// Builds the pinned PR popup for a session's `prs`: its `#<number>` links
-/// (bright blue, underlined), space-joined and wrapped to [`PR_POPUP_INNER`]
+/// (soft link blue, underlined), space-joined and wrapped to [`PR_POPUP_INNER`]
 /// columns, wrapped in a titled box ready to float beside the session's row (see
 /// [`pr_popup_placement`]). Empty `prs` yields no box (the popup only shows for a
 /// PR-bearing session), so the overlay is a no-op.
@@ -1661,7 +2059,6 @@ pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<St
                 .map(|pr| {
                     style(format!("#{}", pr.number))
                         .info()
-                        .bright()
                         .underlined()
                         .to_string()
                 })
@@ -1714,11 +2111,17 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     let (_, entry_line) = full_sidebar_worktree_entries(state.list())
         .into_iter()
         .find(|&(global, _)| global == idx)?;
+    // Lift the entry into screen space by the sidebar's scroll offset; if the
+    // session's row has scrolled off the top of the pane, its badge is not on
+    // screen, so pin nothing rather than float the box over an unrelated row.
+    let body_rows = super::body_rows_for(height);
+    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let screen_line = entry_line.checked_sub(scroll).filter(|&l| l < body_rows)?;
     // `render_frame` overlays the box while `lines` holds only the chrome above the
     // body (`BODY_TOP` rows) and the body itself, so the anchor clamps against that
     // same length — and the left edge against the width — exactly as `overlay_at`.
-    let base_len = BODY_TOP as usize + super::body_rows_for(height);
-    let raw_top = BODY_TOP as usize + entry_line;
+    let base_len = BODY_TOP as usize + body_rows;
+    let raw_top = BODY_TOP as usize + screen_line;
     let top = raw_top.min(base_len.saturating_sub(popup.len()));
     let left = (left_w + super::SEP_WIDTH).min(width - block_w);
     Some((popup, top, left))
@@ -1817,7 +2220,9 @@ pub(super) const ROOT_ENTRY_LINES: usize = 3;
 /// ellipsis) instead of shoving the divider and tabs sideways, and the 切替
 /// preview does not jitter as the cursor moves between sessions.
 const HEADER_NAME_COL: usize = 16;
-const HEADER_AGENT_COL: usize = 9;
+/// Wide enough for the longest agent label with its leading [AI glyph](AGENT_ICON)
+/// and phase icon: `<robot> ▶ running` measures 11 columns.
+const HEADER_AGENT_COL: usize = 11;
 /// The status + agent block that follows the name: the right-edge status field
 /// ([`STATUS_COL`]) and the agent label, with a two-space gap between them.
 const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
@@ -1927,7 +2332,7 @@ fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
 /// the description never shifts as the cursor moves on/off the row; with a
 /// single CLI (the chevron can never show) no slot is reserved.
 fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
-    let chevron = if state.focus_menu_expanded() {
+    let chevron = if state.focus_menu_agent_cursor().is_some() {
         "▾ "
     } else if state.focus_menu_agent_can_expand() {
         "▸ "
@@ -1938,6 +2343,22 @@ fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> S
     };
     let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
     menu_row("agent", &desc, selected, width)
+}
+
+/// The 在席 menu's `terminal` row: like a plain command row but it can expand
+/// into the `open` / `new` picker. `open` is the default and preserves the
+/// existing embedded-tab behaviour. The row always reserves the same 2-column
+/// chevron slot as `agent` and `close` so descriptions never shift (no CLS).
+fn focus_terminal_command_row(state: &HomeState, selected: bool, width: usize) -> String {
+    let chevron = if state.focus_menu_terminal_expanded() {
+        "▾ "
+    } else if state.focus_menu_terminal_can_expand() {
+        "▸ "
+    } else {
+        "  "
+    };
+    let desc = format!("{chevron}Open a shell");
+    menu_row("terminal", &desc, selected, width)
 }
 
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
@@ -1964,7 +2385,11 @@ fn focus_agent_pick_row(cli: AgentCli, selected: bool, is_default: bool, width: 
 }
 
 /// The 在席 menu's `close` row: like a plain command row but carries a `▾`/`▸`
-/// expand affordance to open the close picker (plain close vs. close --force).
+/// expand affordance to open the close picker (plain close vs. close --force) —
+/// `▾` while the picker is open, `▸` when the cursor is on this row (it can
+/// always expand). When the cursor is elsewhere the slot is held with blanks so
+/// the description never shifts as the cursor moves on/off the row (no CLS),
+/// mirroring the `agent` row.
 fn focus_close_command_row(
     state: &HomeState,
     info: &CommandInfo,
@@ -1976,7 +2401,7 @@ fn focus_close_command_row(
     } else if state.focus_close_can_expand() {
         "▸ "
     } else {
-        ""
+        "  "
     };
     let desc = format!("{chevron}{}", info.description);
     menu_row(info.name, &desc, selected, width)
@@ -2002,6 +2427,29 @@ fn focus_close_pick_row(force: bool, selected: bool, width: usize) -> String {
     clip_to_width(&format!("      {marker} {name}{hint}"), width)
 }
 
+/// One terminal-picker sub-row, indented under the expanded `terminal` row:
+/// `open` adds an embedded usagi tab (the default), while `new` opens a native
+/// terminal app rooted at the same directory.
+fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String {
+    let marker = menu_marker(selected);
+    let name = if selected {
+        style(format!("{action:<10}")).cyan().bold().to_string()
+    } else {
+        style(format!("{action:<10}")).cyan().to_string()
+    };
+    let desc = if action == "new" {
+        "new terminal"
+    } else {
+        "add tab"
+    };
+    let tag = if action == "open" {
+        style("(default)").dim().to_string()
+    } else {
+        style(desc).dim().to_string()
+    };
+    clip_to_width(&format!("      {marker} {name}{tag}"), width)
+}
+
 /// The `session: <name>` header line shown above the 在席 (Focus) action surface
 /// when the session has no live panes (an idle session, no tab strip). With live
 /// panes the identity rides the tab strip ([`active_session_header`]) instead.
@@ -2014,8 +2462,10 @@ fn focus_session_header(state: &HomeState) -> String {
 
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. Shared by the idle-session [`focus_menu`] and the "+ new" tab.
-fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
+/// and a key hint. Rendered as the body of the floating menu overlay modal (see
+/// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
+/// identity rides the modal's title rather than a header line here.
+pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
@@ -2027,7 +2477,7 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
             lines.push(focus_agent_command_row(state, selected, width));
-            if expanded {
+            if state.focus_menu_agent_cursor().is_some() {
                 let agent_cursor = state.focus_menu_agent_cursor();
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
@@ -2049,6 +2499,18 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                     lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
                 }
             }
+        } else if info.name == "terminal" {
+            lines.push(focus_terminal_command_row(state, selected, width));
+            if state.focus_menu_terminal_expanded() {
+                let terminal_cursor = state.focus_menu_terminal_cursor();
+                for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
+                    lines.push(focus_terminal_pick_row(
+                        action,
+                        Some(j) == terminal_cursor,
+                        width,
+                    ));
+                }
+            }
         } else {
             lines.push(focus_menu_row(info, selected, width));
         }
@@ -2056,16 +2518,18 @@ fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // a row-specific expand affordance while the cursor can open one, else base.
-    let hint = if expanded {
-        "↑↓ move   Enter launch   ← back".to_string()
-    } else if close_expanded {
-        "↑↓ move   Enter run   ← back".to_string()
+    let hint = if close_expanded {
+        "↑↓ move   Enter run   ← back"
+    } else if expanded {
+        "↑↓ move   Enter launch   ← back"
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+    } else if state.focus_menu_terminal_can_expand() {
+        "↑↓ move   Enter run   → pick terminal   t terminal   a agent"
     } else if state.focus_close_can_expand() {
-        "↑↓ move   Enter run   → expand   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   → expand   t terminal   a agent"
     } else {
-        "↑↓ move   Enter run   t terminal   a agent".to_string()
+        "↑↓ move   Enter run   t terminal   a agent"
     };
     lines.push(style(hint).dim().to_string());
     lines
@@ -2085,14 +2549,6 @@ fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
     lines
 }
 
-/// Builds the 在席 (Focus) menu: a short header, one row per Session-scope
-/// command (`›` cursor on the highlighted one), and a key hint.
-pub(super) fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![focus_session_header(state), String::new()];
-    lines.extend(focus_menu_body(state, width));
-    lines
-}
-
 /// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
 /// line (`❯ <input>▏`), and the Session-scope hint below it.
 pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
@@ -2106,22 +2562,37 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
 /// width in `chars`) lands exactly under it, as it does for the pane labels.
 const FOCUS_NEW_TAB_LABEL: &str = "+ new";
 
+/// A blank right pane of exactly `rows` rows — the pane behind a floating overlay
+/// that owns the surface (e.g. the 在席 menu modal), so the modal reads against an
+/// empty pane rather than stale content showing through.
+fn blank_pane(rows: usize) -> Vec<String> {
+    vec![String::new(); rows]
+}
+
 /// Builds the 在席 (Focus) right pane. With no live panes it is the session's
-/// action surface alone — the menu or prompt with its own `session:` header,
-/// exactly as before. With live panes it gains a **tab strip**: one chip per live
-/// pane followed by a "+ new" chip, the session identity beside it (shared with
-/// 没入), and below it either the selected pane's live preview or — on the "+ new"
-/// tab — the action surface (header-less, the identity already rides the strip).
+/// action surface — the prompt inline (its own `session:` header), or, on the
+/// menu UI, a blank pane behind the floating menu overlay modal. With live panes
+/// it gains a **tab strip**: one chip per live pane followed by a "+ new" chip
+/// while that launch surface is selected, the session identity beside it (shared
+/// with 没入), and below it either the selected pane's live preview or — on the
+/// "+ new" tab — the prompt surface (header-less; the menu again floats as an
+/// overlay rather than drawing inline). After a zoom-out the menu floats over the
+/// selected pane tab instead: the preview drawn here keeps showing behind it.
 fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
-    // No live panes: the action surface fills the pane, just as it did before
-    // tabs existed (its own `session:` header, no strip).
+    // No live panes: the prompt surface fills the pane. The menu never renders
+    // inline — it floats as an overlay modal centred over the pane (composited by
+    // [`render_frame`] when [`HomeState::focus_menu_overlay`] holds), so on the
+    // menu UI the pane behind it stays blank.
     let Some(strip) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) else {
-        let mut lines = match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu(state, width),
-            SessionActionUi::Prompt => focus_prompt(state, width),
+        let lines = match state.session_action_ui() {
+            SessionActionUi::Menu => blank_pane(rows),
+            SessionActionUi::Prompt => {
+                let mut lines = focus_prompt(state, width);
+                lines.truncate(rows);
+                lines.resize(rows, String::new());
+                lines
+            }
         };
-        lines.truncate(rows);
-        lines.resize(rows, String::new());
         return lines;
     };
 
@@ -2143,11 +2614,13 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut lines = header_tab_rows(header, Some(&combined), width);
 
     if on_new {
-        // The "+ new" tab: the action surface that launches the next pane.
-        lines.push(String::new());
-        match state.session_action_ui() {
-            SessionActionUi::Menu => lines.extend(focus_menu_body(state, width)),
-            SessionActionUi::Prompt => lines.extend(focus_prompt_body(state, width)),
+        // The "+ new" tab: the action surface that launches the next pane. The
+        // menu floats as an overlay modal (see [`HomeState::focus_menu_overlay`]),
+        // so on the menu UI only the tab strip shows behind it here; the prompt
+        // stays inline.
+        if state.session_action_ui() == SessionActionUi::Prompt {
+            lines.push(String::new());
+            lines.extend(focus_prompt_body(state, width));
         }
     } else {
         // A pane tab: preview the pane's live screen (the snapshot taken before
@@ -2243,8 +2716,9 @@ fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<St
 /// The 切替 (Switch) display-name input rendered in the **right pane** while
 /// renaming a session with the sidebar collapsed to the rail: a header naming the
 /// session, the typed label in a bordered box with a block caret, a hint, and the
-/// key hint pinned to the bottom row. At full width it rides the left pane inline
-/// instead (see [`super::switch_rename_rows`]).
+/// key hint pinned to the bottom row. At full width there is room to edit on the
+/// row itself, so the session's own name line becomes the editable label in place
+/// (see the `rename` branch of [`worktree_row`]) and this pane is not used.
 fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
     let value = widgets::block_caret(rename.value(), "", &Style::new().accent());
@@ -2351,8 +2825,16 @@ fn note_box(
                 .collect()
         }
     };
-    // `boxed` clips each line (and the block-caret one, ANSI included) to `inner`.
-    widgets::boxed("note", inner, &body)
+    // `boxed`/`boxed_styled` clip each line (and the block-caret one, ANSI
+    // included) to `inner`. While editing, paint the frame in the accent colour
+    // and mark the title so the open editor is unmistakable — visually distinct
+    // from the read-only note, which keeps the plain frame.
+    match caret {
+        Some(_) => {
+            widgets::boxed_styled("note (編集中)", inner, &body, &Style::new().accent().bold())
+        }
+        None => widgets::boxed("note", inner, &body),
+    }
 }
 
 /// The byte span `[start, end)` of `selection` that lies on line `row` (whose
@@ -2375,8 +2857,8 @@ fn selection_on_line(
 
 /// The floating note overlay for the right pane, or `None` when none applies. The
 /// **editor** (when open, in any mode) wins; otherwise the highlighted session's
-/// **read-only** note shows while browsing in 切替 (until `Esc` dismisses it, see
-/// [`HomeState::switch_note_visible`]). The box is a narrow top-right column (see
+/// **read-only** note shows while browsing in 切替 (see
+/// [`HomeState::visible_switch_note`]). The box is a narrow top-right column (see
 /// [`note_box_width`]) composited over the pane by [`right_pane_contents`], so
 /// the preview underneath — the session header, the live terminal — stays
 /// readable to its left and below it. `rows` caps the box height so the pane
@@ -2535,6 +3017,15 @@ fn switch_preview_header(state: &HomeState) -> (String, bool) {
 /// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
 /// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
+    // A momentary launch (terminal / agent spawn) blanks the right pane so the
+    // centred loading rabbit (composited over the frame in [`super::frame`])
+    // reads as a dedicated loading screen. Without this the 在席 action menu
+    // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
+    // choices would show through while the spawn blocks. Return an empty pane of
+    // the right height and let the overlay own the whole surface.
+    if state.loading().is_some() {
+        return vec![String::new(); rows];
+    }
     // The Markdown preview, when open, takes over the right pane regardless of
     // mode (it is opened from the `:` palette and captures the keyboard while
     // shown).
@@ -2546,6 +3037,11 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // while shown). The sidebar to its left keeps rendering as usual.
     if let Some(chat) = state.chat() {
         return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
+    }
+    // The diff view likewise takes over the right pane (opened from the `:`
+    // palette, capturing the keyboard while shown).
+    if let Some(diff) = state.diff_view() {
+        return diff_pane(diff, right_w, rows);
     }
     // The base pane for the current mode. The session-note overlay (the editor,
     // or the read-only note while browsing in 切替) is composited over its top
@@ -2649,6 +3145,280 @@ pub(super) fn preview_pane(preview: &Preview, width: usize, rows: usize) -> Vec<
         }
     }
     lines
+}
+
+// Background tints for the diff view (256-colour cube), chosen to read against a
+// dark terminal like GitHub's dark diff: a subtle base tint for each add/del
+// line and a brighter one for the word-level changed ranges within it.
+const DIFF_ADD_BG: u8 = 22; // dark green
+const DIFF_ADD_EMPH_BG: u8 = 28; // brighter green
+const DIFF_DEL_BG: u8 = 52; // dark red
+const DIFF_DEL_EMPH_BG: u8 = 88; // brighter red
+const DIFF_NUM_FG: u8 = 244; // dim grey line numbers
+const DIFF_HUNK_FG: u8 = 37; // teal hunk headers
+
+/// Render the right-pane diff view: a one-row header (title + scroll position)
+/// over a window of diff rows, laid out unified or side-by-side. The window is
+/// clamped so the last row stays in view (matching the event loop's scroll
+/// clamp), and every row is exactly `width` columns so the layout never shifts.
+pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<String> {
+    let body_h = rows.saturating_sub(1);
+    // An empty patch (a session that changed nothing) shows a friendly line
+    // instead of a blank pane.
+    if view.doc.is_empty() {
+        let mut lines = Vec::with_capacity(rows);
+        lines.push(diff_header(view, 0, 0, 0, width));
+        if rows > 1 {
+            lines.push(
+                style(clip_to_width(
+                    "No changes against the base branch 🐰",
+                    width,
+                ))
+                .to_string(),
+            );
+            lines.resize(rows, String::new());
+        }
+        lines.truncate(rows);
+        return lines;
+    }
+
+    let num_w = num_width(&view.doc);
+    // The renderable rows depend on the layout: split folds paired add/del lines
+    // into one visual row.
+    let split = view.split.then(|| split_rows(&view.doc));
+    let total = split.as_ref().map_or(view.doc.rows.len(), Vec::len);
+    let max_start = total.saturating_sub(body_h);
+    let start = view.scroll.min(max_start);
+    let end = (start + body_h).min(total);
+
+    let mut lines = Vec::with_capacity(rows);
+    lines.push(diff_header(view, start, end, total, width));
+    if rows <= 1 {
+        lines.truncate(rows);
+        return lines;
+    }
+    for i in 0..body_h {
+        let row = match &split {
+            Some(split) => split
+                .get(start + i)
+                .map(|sr| diff_split_row(&view.doc, *sr, num_w, width)),
+            None => view
+                .doc
+                .rows
+                .get(start + i)
+                .map(|r| diff_unified_row(r, num_w, width)),
+        };
+        lines.push(row.unwrap_or_default());
+    }
+    lines
+}
+
+/// The diff view's one-row header: an icon, the branch → base title, the layout
+/// name, and a `start-end/total` position once it scrolls.
+fn diff_header(view: &DiffView, start: usize, end: usize, total: usize, width: usize) -> String {
+    let layout = if view.split { "split" } else { "unified" };
+    let header = if total > end.saturating_sub(start) && total > 0 {
+        format!(
+            " {}  [{}]  ({}-{}/{})",
+            view.title,
+            layout,
+            start + 1,
+            end,
+            total
+        )
+    } else {
+        format!(" {}  [{}]", view.title, layout)
+    };
+    style(clip_to_width(&header, width)).bold().to_string()
+}
+
+/// The line-number gutter width: the digit count of the largest line number in
+/// the diff (at least 2), so the gutter is as narrow as the content allows.
+fn num_width(doc: &crate::presentation::tui::diff::DiffDoc) -> usize {
+    let max = doc
+        .rows
+        .iter()
+        .filter_map(|r| r.old_no.max(r.new_no))
+        .max()
+        .unwrap_or(0);
+    (max.to_string().len()).max(2)
+}
+
+/// Render one diff row in the unified layout: a `old new` line-number gutter, a
+/// `+`/`-`/space marker, then the syntax-highlighted content on its add/del/
+/// context background. Header / hunk / meta rows span the full width instead.
+fn diff_unified_row(row: &DiffRow, num_w: usize, width: usize) -> String {
+    match row.kind {
+        RowKind::FileHeader => style(clip_to_width(&row.text(), width)).bold().to_string(),
+        RowKind::Hunk => style(clip_to_width(&row.text(), width))
+            .color256(DIFF_HUNK_FG)
+            .to_string(),
+        RowKind::Meta => style(clip_to_width(&row.text(), width)).dim().to_string(),
+        RowKind::Context | RowKind::Add | RowKind::Del => {
+            let gutter = diff_gutter(row.old_no, row.new_no, num_w);
+            let gutter_w = num_w * 2 + 2;
+            let marker = match row.kind {
+                RowKind::Add => '+',
+                RowKind::Del => '-',
+                _ => ' ',
+            };
+            let (base_bg, emph_bg) = diff_backgrounds(row.kind);
+            // Budget: the pane width less the gutter and the one-column marker.
+            let budget = width.saturating_sub(gutter_w + 1);
+            let marker_styled = match base_bg {
+                Some(bg) => style(marker.to_string()).on_color256(bg).to_string(),
+                None => marker.to_string(),
+            };
+            let content = diff_content(&row.spans, &row.changed, base_bg, emph_bg, budget);
+            format!("{gutter}{marker_styled}{content}")
+        }
+    }
+}
+
+/// Render one side-by-side row: a full-width header, or old (left) and new
+/// (right) columns separated by a dim bar, each a fixed `col_w` wide so the two
+/// halves always line up.
+fn diff_split_row(
+    doc: &crate::presentation::tui::diff::DiffDoc,
+    row: SplitRow,
+    num_w: usize,
+    width: usize,
+) -> String {
+    match row {
+        SplitRow::Full(i) => diff_unified_row(&doc.rows[i], num_w, width),
+        SplitRow::Pair { left, right } => {
+            let col_w = width.saturating_sub(1) / 2;
+            let left = diff_half(left.map(|i| &doc.rows[i]), true, num_w, col_w);
+            let right = diff_half(right.map(|i| &doc.rows[i]), false, num_w, col_w);
+            let sep = style("│").dim().to_string();
+            format!("{left}{sep}{right}")
+        }
+    }
+}
+
+/// One column of the split layout: a single line number + the content on its
+/// tint, padded to exactly `col_w`. An absent row (the short side of a replaced
+/// block) renders as blank padding.
+fn diff_half(row: Option<&DiffRow>, is_left: bool, num_w: usize, col_w: usize) -> String {
+    let Some(row) = row else {
+        return " ".repeat(col_w);
+    };
+    let no = if is_left { row.old_no } else { row.new_no };
+    let num = no.map(|n| n.to_string()).unwrap_or_default();
+    let gutter = format!("{num:>num_w$} ");
+    let gutter_styled = style(&gutter).color256(DIFF_NUM_FG).to_string();
+    let (base_bg, emph_bg) = diff_backgrounds(row.kind);
+    let budget = col_w.saturating_sub(num_w + 1);
+    let content = diff_content(&row.spans, &row.changed, base_bg, emph_bg, budget);
+    format!("{gutter_styled}{content}")
+}
+
+/// The `old new ` line-number gutter for the unified layout (each number
+/// right-aligned in `num_w` columns), dimmed and blank where a number is absent.
+fn diff_gutter(old: Option<usize>, new: Option<usize>, num_w: usize) -> String {
+    let old = old.map(|n| n.to_string()).unwrap_or_default();
+    let new = new.map(|n| n.to_string()).unwrap_or_default();
+    style(format!("{old:>num_w$} {new:>num_w$} "))
+        .color256(DIFF_NUM_FG)
+        .to_string()
+}
+
+/// The base and word-emphasis background tints for a row kind (`None` for context
+/// and headers, which take no background).
+fn diff_backgrounds(kind: RowKind) -> (Option<u8>, Option<u8>) {
+    match kind {
+        RowKind::Add => (Some(DIFF_ADD_BG), Some(DIFF_ADD_EMPH_BG)),
+        RowKind::Del => (Some(DIFF_DEL_BG), Some(DIFF_DEL_EMPH_BG)),
+        _ => (None, None),
+    }
+}
+
+/// Render a content line's spans into `budget` display columns: each character
+/// keeps its syntax-highlight foreground, sits on the base tint, and switches to
+/// the brighter emphasis tint inside a `changed` word range. Runs of like-styled
+/// characters are coalesced, the line is clipped to the budget, and — when a
+/// background is set — the remaining columns are padded so the tint fills the row.
+fn diff_content(
+    spans: &[DiffSpan],
+    changed: &[(usize, usize)],
+    base_bg: Option<u8>,
+    emph_bg: Option<u8>,
+    budget: usize,
+) -> String {
+    let mut out = String::new();
+    let mut col = 0usize; // display columns emitted
+    let mut idx = 0usize; // char index into the content (for `changed`)
+    let mut run = String::new();
+    let mut run_fg: Option<Rgb> = None;
+    let mut run_emph = false;
+
+    for span in spans {
+        for ch in span.text.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col + w > budget {
+                push_diff_run(&mut out, &run, run_fg, run_emph, base_bg, emph_bg);
+                run.clear();
+                return pad_diff(out, col, budget, base_bg);
+            }
+            let emph = in_changed(idx, changed);
+            if !run.is_empty() && (span.color != run_fg || emph != run_emph) {
+                push_diff_run(&mut out, &run, run_fg, run_emph, base_bg, emph_bg);
+                run.clear();
+            }
+            if run.is_empty() {
+                run_fg = span.color;
+                run_emph = emph;
+            }
+            run.push(ch);
+            col += w;
+            idx += 1;
+        }
+    }
+    push_diff_run(&mut out, &run, run_fg, run_emph, base_bg, emph_bg);
+    pad_diff(out, col, budget, base_bg)
+}
+
+/// Append a coalesced run of like-styled characters to `out`, applying its
+/// foreground colour and its background (the emphasis tint when `emph`, else the
+/// base tint). A run with no background and no colour is emitted verbatim.
+fn push_diff_run(
+    out: &mut String,
+    run: &str,
+    fg: Option<Rgb>,
+    emph: bool,
+    base_bg: Option<u8>,
+    emph_bg: Option<u8>,
+) {
+    if run.is_empty() {
+        return;
+    }
+    let bg = if emph { emph_bg } else { base_bg };
+    let mut styled = style(run.to_string());
+    if let Some(fg) = fg {
+        styled = styled.color256(rgb_to_ansi256(fg));
+    }
+    if let Some(bg) = bg {
+        styled = styled.on_color256(bg);
+    }
+    out.push_str(&styled.to_string());
+}
+
+/// Pad the emitted content out to `budget` columns so a set background tint fills
+/// the whole row (GitHub-style); with no background the row is left as-is.
+fn pad_diff(mut out: String, col: usize, budget: usize, base_bg: Option<u8>) -> String {
+    if col < budget {
+        let pad = " ".repeat(budget - col);
+        match base_bg {
+            Some(bg) => out.push_str(&style(pad).on_color256(bg).to_string()),
+            None => out.push_str(&pad),
+        }
+    }
+    out
+}
+
+/// Whether char index `idx` falls inside any half-open `changed` range.
+fn in_changed(idx: usize, changed: &[(usize, usize)]) -> bool {
+    changed.iter().any(|&(s, e)| idx >= s && idx < e)
 }
 
 /// Render one [`MarkdownLine`] to a styled, width-clipped row: its prefix marker
@@ -2773,6 +3543,223 @@ mod tests {
                 "{plain:?} keeps the memory figure"
             );
         }
+    }
+
+    fn label_def(id: &str, name: &str, color: LabelColor, icon: Option<&str>) -> SessionLabelDef {
+        SessionLabelDef {
+            id: id.to_string(),
+            name: name.to_string(),
+            color,
+            icon: icon.map(str::to_string),
+        }
+    }
+
+    fn wt(branch: &str, path: &str) -> WorktreeState {
+        WorktreeState {
+            branch: Some(branch.to_string()),
+            path: PathBuf::from(path),
+            head: "abc1234".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::Local,
+            diff: None,
+            ahead_behind: None,
+            pr: Vec::new(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn rail_status_glyph_badges_settled_states_and_blanks_new_and_dirty() {
+        // `New` / `Dirty` are unbadged: a single blank so the rail's git column is
+        // empty for a fresh or work-in-progress branch.
+        assert_eq!(rail_status_glyph(BranchStatus::New), " ");
+        assert_eq!(rail_status_glyph(BranchStatus::Dirty), " ");
+        // The settled states still show their coloured glyph.
+        for status in [
+            BranchStatus::Local,
+            BranchStatus::Pushed,
+            BranchStatus::Synced,
+        ] {
+            let glyph = console::strip_ansi_codes(&rail_status_glyph(status)).into_owned();
+            assert_eq!(glyph, status_icon(status).to_string());
+        }
+        // The predicate itself: only new/dirty are unbadged.
+        assert!(!status_has_badge(BranchStatus::New));
+        assert!(!status_has_badge(BranchStatus::Dirty));
+        assert!(status_has_badge(BranchStatus::Synced));
+    }
+
+    #[test]
+    fn label_style_maps_every_colour_to_its_palette_role() {
+        // Each colour renders through the semantic palette; cover all arms and pin
+        // the mapping to the concrete ANSI colour it should resolve to.
+        for (color, expected) in [
+            (LabelColor::Gray, Style::new().dim()),
+            (LabelColor::Red, Style::new().danger()),
+            (LabelColor::Green, Style::new().success()),
+            (LabelColor::Yellow, Style::new().warning()),
+            (LabelColor::Blue, Style::new().info()),
+            (LabelColor::Magenta, Style::new().feature()),
+            (LabelColor::Cyan, Style::new().accent()),
+        ] {
+            assert_eq!(
+                label_style(color)
+                    .force_styling(true)
+                    .apply_to("x")
+                    .to_string(),
+                expected.force_styling(true).apply_to("x").to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn label_cell_renders_the_glyph_and_name_pads_blank_and_drops_at_zero() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        // A set label shows its glyph and name, and the cell is exactly `col` wide.
+        let cell = label_cell(Some(&def), 10);
+        let plain = console::strip_ansi_codes(&cell).into_owned();
+        assert!(plain.contains("◇ Review"), "{plain:?} shows the label");
+        assert_eq!(console::measure_text_width(&cell), 10);
+        // An unset row holds the same width in blanks.
+        let blank = label_cell(None, 10);
+        assert_eq!(console::measure_text_width(&blank), 10);
+        assert!(console::strip_ansi_codes(&blank).trim().is_empty());
+        // A zero-width column (no visible label anywhere) draws nothing.
+        assert_eq!(label_cell(Some(&def), 0), "");
+        assert_eq!(label_cell(None, 0), "");
+    }
+
+    #[test]
+    fn label_cell_clips_a_long_name_to_the_column() {
+        let def = label_def("x", "A very long status name", LabelColor::Gray, None);
+        let cell = label_cell(Some(&def), 8);
+        assert_eq!(console::measure_text_width(&cell), 8);
+    }
+
+    #[test]
+    fn label_col_width_sizes_to_the_widest_visible_label_and_caps_it() {
+        let master = SessionLabelMaster {
+            labels: vec![
+                label_def("todo", "Todo", LabelColor::Gray, Some("○")),
+                label_def("long", "Averylonglabelname", LabelColor::Gray, Some("◇")),
+            ],
+        };
+        // No labels assigned → the column is dropped (0), leaving the sidebar as it
+        // was before the feature.
+        let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
+        assert_eq!(label_col_width(&list, &master), 0);
+        // A short label → its `<glyph> <name>` width plus a separating space.
+        list.set_label_ids(vec![Some("todo".to_string())]);
+        assert_eq!(
+            label_col_width(&list, &master),
+            "○ Todo".chars().count() + 1
+        );
+        // A label longer than the cap is clamped to LABEL_COL_MAX (+1 separator).
+        list.set_label_ids(vec![Some("long".to_string())]);
+        assert_eq!(label_col_width(&list, &master), LABEL_COL_MAX + 1);
+    }
+
+    #[test]
+    fn rail_label_glyph_shows_the_coloured_glyph_or_nothing() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        let glyph = rail_label_glyph(Some(&def)).unwrap();
+        assert!(console::strip_ansi_codes(&glyph).contains('◇'));
+        assert_eq!(rail_label_glyph(None), None);
+    }
+
+    #[test]
+    fn worktree_row_draws_the_manual_status_label_on_line_one() {
+        let def = label_def("review", "Review", LabelColor::Magenta, Some("◇"));
+        let (line1, _) = worktree_row(
+            &wt("main", "/r/main"),
+            "",
+            Some(&def),
+            "◇ Review".chars().count() + 1,
+            10,
+            20,
+            DetailCols::default(),
+            false,
+            Utc::now(),
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        assert!(console::strip_ansi_codes(&line1).contains("◇ Review"));
+    }
+
+    #[test]
+    fn root_row_reserves_the_label_column_without_drawing_a_label() {
+        // The root carries no label, but with a label column active its blank cell
+        // keeps the note / status fields aligned with the sessions below.
+        let (with_col, _) = root_row(10, 8, 20, false, false, false, false);
+        let (without_col, _) = root_row(10, 0, 20, false, false, false, false);
+        assert_eq!(
+            console::measure_text_width(&with_col),
+            console::measure_text_width(&without_col) + 8
+        );
+    }
+
+    #[test]
+    fn left_pane_full_and_rail_draw_a_sessions_manual_label() {
+        let master = SessionLabelMaster {
+            labels: vec![label_def(
+                "review",
+                "Review",
+                LabelColor::Magenta,
+                Some("◇"),
+            )],
+        };
+        let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
+        list.set_label_ids(vec![Some("review".to_string())]);
+        let empty = HashSet::new();
+        let res = HashMap::new();
+        let join = |lines: Vec<String>| {
+            lines
+                .iter()
+                .map(|l| console::strip_ansi_codes(l).into_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // The full sidebar spells out the label (glyph + name) beside the session.
+        let full = join(left_pane(
+            &list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &res,
+            &master,
+            60,
+            40,
+            false,
+            Sidebar::Full,
+            Utc::now(),
+            None,
+        ));
+        assert!(full.contains("◇ Review"), "{full:?}");
+        // The collapsed rail shows just the coloured glyph.
+        let rail = join(left_pane(
+            &list,
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &res,
+            &master,
+            RAIL_WIDTH,
+            40,
+            false,
+            Sidebar::Rail,
+            Utc::now(),
+            None,
+        ));
+        assert!(rail.contains('◇'), "{rail:?}");
     }
 
     #[test]
@@ -3091,7 +4078,7 @@ mod tests {
         let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.ends_with("+124 -18"));
 
         // With no agent the cluster still rides the right edge.
@@ -3143,7 +4130,7 @@ mod tests {
         let cells = vec![time, commits, badge];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
     }
@@ -3264,7 +4251,7 @@ mod tests {
         let cells = vec![badge, cell];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with("▶ running"));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
         assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
         assert!(plain.ends_with(format!("{PR_ICON} 2").as_str()));
     }

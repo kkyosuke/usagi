@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::LogLine;
 use crate::presentation::tui::chat::state::Chat;
+use crate::presentation::tui::diff::DiffDoc;
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -51,8 +52,12 @@ pub(super) enum Overlay {
     /// keyboard while open, but it is interactive: the conversation state lives
     /// here while the event loop drives the (async) model request.
     Chat(Chat),
+    /// The right-pane diff view (the `diff` command).
+    Diff(DiffView),
     /// The session-note editor modal.
     Note(NoteEditor),
+    /// The workspace-env editor modal (the `env` command), overlaying the palette.
+    Env(EnvEditor),
 }
 
 /// Which tab-menu row is currently highlighted.
@@ -520,6 +525,45 @@ impl NoteEditor {
     }
 }
 
+/// The workspace-env editor modal, opened by the `env` command as an overlay
+/// over the command palette (Overview). It holds the multi-line buffer of
+/// `NAME=op://vault/item/field` bindings, seeded from the workspace's current
+/// settings. Editing and caret movement live on [`TextArea`] (the event loop
+/// routes keys straight to it, like the note editor); the modal bundles it and
+/// parses the valid bindings on confirm. Because it overlays the palette rather
+/// than replacing it, closing it (save or cancel) returns to the Overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvEditor {
+    area: TextArea,
+}
+
+impl EnvEditor {
+    /// Open the editor seeded from `env` (one `NAME=reference` line per binding,
+    /// in sorted order), caret at the end.
+    pub(super) fn new(env: &crate::domain::settings::SecretEnv) -> Self {
+        Self {
+            area: TextArea::from_text(&crate::domain::settings::format_env_bindings(env)),
+        }
+    }
+
+    /// The text buffer, for rendering its lines and caret.
+    pub fn area(&self) -> &TextArea {
+        &self.area
+    }
+
+    /// The editable buffer: the event loop routes its keys straight to the
+    /// [`TextArea`]'s own editing methods, so the modal has no per-key forwarders.
+    pub fn area_mut(&mut self) -> &mut TextArea {
+        &mut self.area
+    }
+
+    /// The valid bindings currently in the buffer (see
+    /// [`crate::domain::settings::parse_env_bindings`] for the filtering rule).
+    pub(super) fn bindings(&self) -> crate::domain::settings::SecretEnv {
+        crate::domain::settings::parse_env_bindings(&self.area.text())
+    }
+}
+
 /// How big a [`TextModal`] is drawn. Most text-dumping commands (`history` /
 /// `session list` / `issue …`) use the compact [`Normal`](Self::Normal) floating
 /// box; `man` uses [`Large`](Self::Large), which fills most of the terminal so
@@ -559,6 +603,21 @@ pub struct Preview {
     pub title: String,
     pub lines: Vec<MarkdownLine>,
     pub scroll: usize,
+}
+
+/// The right-pane diff view, opened by the `diff` command. Like [`Preview`] it
+/// takes over the right pane, but it renders a parsed, syntax-highlighted
+/// [`DiffDoc`] (GitHub-style: line-number gutter, per-line add/del backgrounds,
+/// word-level emphasis) rather than Markdown. `title` names the diffed branch →
+/// base, `scroll` is the first visible row, and `split` toggles the unified
+/// layout (default) against the side-by-side one. While open it captures the keys
+/// (scroll / toggle layout / dismiss).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffView {
+    pub title: String,
+    pub doc: DiffDoc,
+    pub scroll: usize,
+    pub split: bool,
 }
 
 /// One row in the open session-removal checklist.
@@ -704,10 +763,21 @@ impl RemoveModal {
     }
 }
 
+/// Which inline sub-picker is expanded under a 在席 (Focus) menu row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FocusSubmenu {
+    /// The `agent` row's installed-CLI picker.
+    Agent,
+    /// The `terminal` row's `open` / `new` picker.
+    Terminal,
+    /// The `close` row's plain / `--force` picker.
+    Close,
+}
+
 /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted, and
-/// — when the `agent` row is expanded into the agent picker — which installed
-/// agent is highlighted. The Session-scope command list is always non-empty, so
-/// the navigation methods take the current `count` and keep the cursor
+/// — when the `agent` or `terminal` row is expanded into a picker — which
+/// sub-action is highlighted. The Session-scope command list is always non-empty,
+/// so the navigation methods take the current `count` and keep the cursor
 /// underflow-safe and in range.
 ///
 /// The agent picker (案A) lets a session launch a CLI other than the configured
@@ -719,12 +789,9 @@ impl RemoveModal {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct FocusMenu {
     cursor: usize,
-    /// The agent picker's sub-cursor while the `agent` row is expanded, or `None`
-    /// when the menu is in its normal (collapsed) state.
-    agent_cursor: Option<usize>,
-    /// The close picker's sub-cursor while the `close` row is expanded, or `None`
-    /// when collapsed. `0` = plain close, `1` = close --force.
-    close_cursor: Option<usize>,
+    /// The expanded inline picker and its sub-cursor, or `None` when the menu is
+    /// in its normal (collapsed) state.
+    expanded: Option<(FocusSubmenu, usize)>,
 }
 
 impl FocusMenu {
@@ -733,78 +800,91 @@ impl FocusMenu {
         self.cursor
     }
 
-    /// Whether the `agent` row is expanded into the agent picker.
+    /// Whether any row is expanded into an inline picker.
     pub(super) fn is_expanded(self) -> bool {
-        self.agent_cursor.is_some()
+        self.expanded.is_some()
     }
 
     /// Whether the `close` row is expanded into the close picker.
     pub(super) fn is_close_expanded(self) -> bool {
-        self.close_cursor.is_some()
+        self.close_cursor().is_some()
     }
 
     /// The agent picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn agent_cursor(self) -> Option<usize> {
-        self.agent_cursor
+        match self.expanded {
+            Some((FocusSubmenu::Agent, cursor)) => Some(cursor),
+            _ => None,
+        }
+    }
+
+    /// The terminal picker's highlighted index while expanded, or `None`
+    /// collapsed.
+    pub(super) fn terminal_cursor(self) -> Option<usize> {
+        match self.expanded {
+            Some((FocusSubmenu::Terminal, cursor)) => Some(cursor),
+            _ => None,
+        }
     }
 
     /// The close picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn close_cursor(self) -> Option<usize> {
-        self.close_cursor
+        match self.expanded {
+            Some((FocusSubmenu::Close, cursor)) => Some(cursor),
+            _ => None,
+        }
     }
 
     /// Reset to the top, collapsed (entering 在席 / leaving for 切替).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
-        self.agent_cursor = None;
-        self.close_cursor = None;
+        self.expanded = None;
     }
 
-    /// Expand the agent picker, highlighting `default_index` (the configured
-    /// agent's position in the installed list, clamped by the renderer).
-    pub(super) fn expand(&mut self, default_index: usize) {
-        self.agent_cursor = Some(default_index);
+    /// Expand an inline picker, highlighting `default_index` (clamped by the
+    /// renderer).
+    pub(super) fn expand(&mut self, submenu: FocusSubmenu, default_index: usize) {
+        self.expanded = Some((submenu, default_index));
     }
 
-    /// Collapse the agent picker back to the normal menu. Returns whether it was
+    /// Collapse an inline picker back to the normal menu. Returns whether it was
     /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
     pub(super) fn collapse(&mut self) -> bool {
-        self.agent_cursor.take().is_some()
+        self.expanded.take().is_some()
     }
 
     /// Expand the close picker, starting at option 0 (plain close).
     pub(super) fn expand_close(&mut self) {
-        self.close_cursor = Some(0);
+        self.expanded = Some((FocusSubmenu::Close, 0));
     }
 
     /// Collapse the close picker back to the normal menu. Returns whether it was
     /// expanded (so the caller can treat `←` / `Esc` as "consumed" only then).
     pub(super) fn collapse_close(&mut self) -> bool {
-        self.close_cursor.take().is_some()
+        if self.is_close_expanded() {
+            self.expanded = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Move up one row, wrapping. Acts on whichever picker is open, or the
     /// command list when none is. `count` is clamped to at least 1.
     pub(super) fn move_up(&mut self, count: usize) {
         let count = count.max(1);
-        if let Some(c) = &mut self.agent_cursor {
-            *c = c.checked_sub(1).unwrap_or(count - 1);
-        } else if let Some(c) = &mut self.close_cursor {
-            *c = c.checked_sub(1).unwrap_or(count - 1);
-        } else {
-            self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1);
+        match &mut self.expanded {
+            Some((_, c)) => *c = c.checked_sub(1).unwrap_or(count - 1),
+            None => self.cursor = self.cursor.checked_sub(1).unwrap_or(count - 1),
         }
     }
 
     /// Move down one row, wrapping (the mirror of [`move_up`](Self::move_up)).
     pub(super) fn move_down(&mut self, count: usize) {
         let count = count.max(1);
-        if let Some(c) = &mut self.agent_cursor {
-            *c = (*c + 1) % count;
-        } else if let Some(c) = &mut self.close_cursor {
-            *c = (*c + 1) % count;
-        } else {
-            self.cursor = (self.cursor + 1) % count;
+        match &mut self.expanded {
+            Some((_, c)) => *c = (*c + 1) % count,
+            None => self.cursor = (self.cursor + 1) % count,
         }
     }
 
@@ -816,12 +896,22 @@ impl FocusMenu {
     /// The selected agent-picker index, clamped to the available `count`. `0`
     /// when collapsed (no picker open).
     pub(super) fn agent_selected(self, count: usize) -> usize {
-        self.agent_cursor.unwrap_or(0).min(count.saturating_sub(1))
+        self.agent_cursor()
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
+    }
+
+    /// The selected terminal-picker index, clamped to the available `count`. `0`
+    /// when collapsed (no picker open).
+    pub(super) fn terminal_selected(self, count: usize) -> usize {
+        self.terminal_cursor()
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
     }
 
     /// The selected close-picker index, clamped to 0 or 1. `0` when collapsed.
     pub(super) fn close_selected(self) -> usize {
-        self.close_cursor.unwrap_or(0).min(1)
+        self.close_cursor().unwrap_or(0).min(1)
     }
 }
 
@@ -893,7 +983,7 @@ mod tests {
         let mut menu = FocusMenu::default();
         // Expanding highlights the given default index and routes navigation to
         // the picker, leaving the command cursor untouched.
-        menu.expand(2);
+        menu.expand(FocusSubmenu::Agent, 2);
         assert!(menu.is_expanded());
         assert_eq!(menu.agent_cursor(), Some(2));
         assert_eq!(menu.cursor(), 0);
@@ -919,10 +1009,23 @@ mod tests {
     fn focus_menu_reset_clears_both_cursors() {
         let mut menu = FocusMenu::default();
         menu.move_down(3);
-        menu.expand(1);
+        menu.expand(FocusSubmenu::Agent, 1);
         menu.reset();
         assert_eq!(menu.cursor(), 0);
         assert!(!menu.is_expanded());
+    }
+
+    #[test]
+    fn focus_menu_expand_can_drive_the_terminal_picker() {
+        let mut menu = FocusMenu::default();
+        menu.expand(FocusSubmenu::Terminal, 0);
+        assert!(menu.is_expanded());
+        assert_eq!(menu.agent_cursor(), None);
+        assert_eq!(menu.terminal_cursor(), Some(0));
+        menu.move_down(2);
+        assert_eq!(menu.terminal_cursor(), Some(1));
+        assert_eq!(menu.terminal_selected(2), 1);
+        assert!(menu.collapse());
     }
 
     #[test]

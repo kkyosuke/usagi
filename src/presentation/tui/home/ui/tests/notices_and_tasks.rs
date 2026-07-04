@@ -189,11 +189,12 @@ fn task_status_line_is_empty_without_rows() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
+fn render_frame_speaks_task_status_before_the_update_notice() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     let mut state = state_with(Vec::new());
-    // The task status (top-right corner) and the update notice (sidebar mascot)
-    // now live in different places, so both show at once.
+    // Operational status takes the mascot bubble first: an in-flight task should
+    // explain what usagi is doing now, while the update notice waits until the
+    // workspace is idle.
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.set_tasks(vec![TaskRow {
         label: "作成中… main".to_string(),
@@ -201,7 +202,27 @@ fn render_frame_shows_the_task_status_alongside_the_spoken_update() {
     }]);
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("作成中… main"));
-    assert!(joined.contains("アップデートがあるぴょん"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
+    assert!(joined.contains('┬'));
+}
+
+#[test]
+fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
+    use super::super::super::tasks::{TaskMark, TaskRow};
+    let mut state = state_with(Vec::new());
+    state.set_tasks(vec![
+        TaskRow {
+            label: "作成中… main".to_string(),
+            mark: TaskMark::Running(0),
+        },
+        TaskRow {
+            label: "削除中… old".to_string(),
+            mark: TaskMark::Running(1),
+        },
+    ]);
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("作成中… main"));
+    assert!(joined.contains("ほか 1 件"));
 }
 
 #[test]
@@ -248,17 +269,18 @@ fn render_frame_speaks_the_update_from_the_sidebar_over_a_live_terminal() {
 }
 
 #[test]
-fn render_frame_keeps_the_loading_rabbit_over_a_live_terminal() {
-    // The transient launch indicator is deliberate, so it still takes the corner
-    // even while a live preview is on screen (it is painted during the blocking
-    // terminal / agent spawn, before the new pane draws over the screen).
+fn render_frame_keeps_the_run2_loading_over_a_live_terminal() {
+    // The transient launch indicator is deliberate, so it still floats over the
+    // right pane even while a live preview is on screen (it is painted during
+    // the blocking terminal / agent spawn, before the new pane draws over the
+    // screen).
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
     state.step_loading("ターミナル起動中…");
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(joined.contains("ターミナル起動中…"));
+    assert!(joined.contains("(｡･-･)"));
 }
 
 #[test]
@@ -273,33 +295,94 @@ fn update_notice_is_skipped_when_the_sidebar_is_too_narrow_for_the_mascot() {
 }
 
 #[test]
-fn render_frame_shows_the_loading_rabbit_while_an_action_runs() {
+fn render_frame_shows_the_run2_loading_while_an_action_runs() {
     let mut state = state_with(Vec::new());
     state.step_loading("削除中… 1/2");
     let joined = stripped(&render_frame(24, 100, &state));
-    assert!(joined.contains("削除中… 1/2"));
-    // The hopping rabbit's face rides the corner.
-    assert!(joined.contains("(･ㅅ･)"));
+    assert!(joined.contains("(｡･-･)"));
 }
 
 #[test]
-fn loading_rabbit_takes_the_corner_while_the_sidebar_speaks_the_update() {
-    // The loading rabbit owns the top-right corner during a blocking action; the
-    // update notice lives on the sidebar mascot, so both show at once.
+fn run2_loading_blanks_the_focus_action_menu() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+
+    // The idle 在席 menu floats as an overlay modal composited over the frame.
+    let idle = stripped(&render_frame(24, 100, &state));
+    assert!(idle.contains("Run a command:"));
+    assert!(idle.contains("Open a shell"));
+
+    state.step_loading("エージェント起動中…");
+    let pane = right_pane_contents(&state, 60, 12);
+    assert!(
+        pane.iter()
+            .all(|line| console::strip_ansi_codes(line).trim().is_empty()),
+        "loading should be a dedicated right-pane surface, not the focus menu"
+    );
+
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("(｡･-･)"));
+    assert!(!joined.contains("Run a command:"));
+    assert!(!joined.contains("Open a shell"));
+}
+
+#[test]
+fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
+    let mut state = state_with(Vec::new());
+    state.step_loading("エージェント起動中…");
+    let frame = render_frame(24, 100, &state);
+    let plain: Vec<String> = frame
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    assert!(plain.join("\n").contains("エージェント起動中…"));
+    let row = plain
+        .iter()
+        .position(|line| line.contains("(｡･-･)"))
+        .expect("run 2 loading rabbits are rendered");
+    let col = console::measure_text_width(
+        plain[row]
+            .split("(｡･-･)")
+            .next()
+            .expect("split always yields a prefix"),
+    );
+
+    let (_, width) = widgets::normalize_size(24, 100);
+    let (left_w, right_w) = layout(width, state.sidebar());
+    let body_start = CHROME_TOP_ROWS;
+    let body_rows = body_rows_for(24);
+    let expected_row = body_start + body_rows.saturating_sub(3) / 2 + 1;
+    let pane_start = left_w + SEP_WIDTH;
+    let pane_mid = pane_start + right_w / 2;
+
+    assert_eq!(row, expected_row);
+    assert!(col >= pane_start);
+    // The first rabbit starts left of the pane midpoint because the multiplying
+    // row spans several rabbits, proving the whole `usagi run 2` block is
+    // centred in the right pane rather than anchored to the far right edge.
+    assert!(col < pane_mid);
+}
+
+#[test]
+fn run2_loading_has_priority_in_the_sidebar_bubble() {
+    // The run 2 loading block owns the right pane during a blocking action; the
+    // sidebar mascot explains that action before showing informational update
+    // news.
     let mut state = state_with(Vec::new());
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 100, &state));
+    assert!(joined.contains("(｡･-･)"));
     assert!(joined.contains("作成中…"));
-    assert!(joined.contains("アップデートがあるぴょん"));
+    assert!(!joined.contains("アップデートがあるぴょん"));
 }
 
 #[test]
-fn loading_rabbit_is_skipped_when_the_terminal_is_too_narrow() {
+fn run2_loading_is_skipped_when_the_terminal_is_too_narrow() {
     // Like the update notice, the block is dropped rather than clobbering the
     // chrome when it cannot fit the width.
     let mut state = state_with(Vec::new());
     state.step_loading("作成中…");
     let joined = stripped(&render_frame(24, 10, &state));
-    assert!(!joined.contains("作成中…"));
+    assert!(!joined.contains("(｡･-･)"));
 }

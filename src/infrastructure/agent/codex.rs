@@ -4,8 +4,11 @@
 //! dotted-path overrides Codex would otherwise read from `~/.codex/config.toml`):
 //!
 //! - **MCP servers** — the unified `usagi` server, plus optional `usagi-llm`
-//!   and `usagi-op` servers when their settings are enabled
-//!   (`mcp_servers.<name>.command` / `.args`).
+//!   when the local-LLM setting is enabled
+//!   (`mcp_servers.<name>.command` / `.args`). Each usagi-owned server is marked
+//!   `default_tools_approval_mode = "approve"` so Codex does not ask before every
+//!   MCP tool call; shell command approvals remain governed by the launch
+//!   approval mode below.
 //! - **System prompt** — the session note (already in a worktree; delegate light
 //!   work to the local LLM when on) via `developer_instructions`, Codex's
 //!   additive instruction override.
@@ -19,9 +22,12 @@
 //!   are non-managed command hooks, the launch passes
 //!   `--dangerously-bypass-hook-trust` so they run without an interactive trust
 //!   prompt (usagi vets the hook command — it only ever runs usagi itself).
-//! - **Approval mode** — interactive Codex launches pass `--full-auto`, so tool
-//!   calls auto-run inside Codex's workspace sandbox without asking for approval
-//!   on every command or edit. Headless runs use Codex's stronger
+//! - **Approval mode** — interactive Codex launches pass
+//!   `--sandbox workspace-write --ask-for-approval on-request`, so tool calls
+//!   auto-run inside Codex's workspace sandbox and the model only escalates for
+//!   approval when it needs to step outside that sandbox, instead of prompting on
+//!   every command or edit. (Codex dropped the older `--full-auto` shorthand for
+//!   this pair.) Headless runs use Codex's stronger
 //!   `--dangerously-bypass-approvals-and-sandbox` because no user is present.
 //!
 //! When a worktree has a prior Codex conversation, the launch resumes it
@@ -67,6 +73,11 @@ const HOOK_PHASES: [(&str, &str); 6] = [
     ("Stop", "ended"),
 ];
 
+/// Codex MCP approval mode for usagi-owned MCP servers. `approve` skips the
+/// per-tool MCP confirmation prompt while leaving shell command approval policy
+/// untouched.
+const USAGI_MCP_APPROVAL_MODE: &str = "approve";
+
 /// Render `text` as a TOML basic string (double-quoted), escaping the backslash
 /// and double-quote that TOML treats specially. Used for the hook command and the
 /// system-prompt instruction, whose values may carry those characters; the
@@ -92,6 +103,24 @@ fn config_override(key: &str, value: &str) -> String {
     dash_c(&format!("{key}={value}"))
 }
 
+/// The Codex config overrides for one usagi-owned MCP server. Besides transport
+/// wiring, mark the server's tools as pre-approved so `agent codex-fugu` does not
+/// stop for a confirmation before every `issue_*` / `memory_*` / `session_*`
+/// call.
+fn mcp_server_overrides(name: &str, bin: &str, args: &[&str]) -> Vec<String> {
+    vec![
+        config_override(&format!("mcp_servers.{name}.command"), bin),
+        config_override(
+            &format!("mcp_servers.{name}.args"),
+            &toml_string_array(args),
+        ),
+        config_override(
+            &format!("mcp_servers.{name}.default_tools_approval_mode"),
+            &toml_basic_string(USAGI_MCP_APPROVAL_MODE),
+        ),
+    ]
+}
+
 /// Render a Codex args array as a TOML inline array of basic strings, e.g.
 /// `["llm-mcp","--model","qwen2.5-coder:7b"]`. The elements here come from fixed
 /// usagi wiring (subcommand names and a model from the allowlist), none of which
@@ -115,27 +144,27 @@ fn hook_override(usagi_bin: &str, event: &str, phase: &str) -> String {
 
 /// The `-c` config overrides shared by every Codex launch (fresh or resumed): the
 /// usagi MCP server(s), the system-prompt instruction, and the lifecycle hooks.
+/// Codex's own model flag (`-m <model>`) when the wiring pins one, else empty.
+/// The model name is escaped for the single-quoted shell context. Shared by the
+/// interactive and headless launches.
+fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
+    match wiring.model.as_deref() {
+        Some(model) => vec!["-m".to_string(), shell_single_quote(model)],
+        None => Vec::new(),
+    }
+}
+
 fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
     let bin = &wiring.usagi_bin;
     let local_llm_model = wiring.local_llm_model.as_deref();
     // The unified usagi MCP server is always wired in (issues, memories,
-    // sessions); optional servers join it when enabled.
-    let mut overrides = vec![
-        config_override("mcp_servers.usagi.command", bin),
-        config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
-    ];
+    // sessions); the optional local-LLM server joins it when enabled.
+    let mut overrides = mcp_server_overrides("usagi", bin, &["mcp"]);
     if let Some(model) = local_llm_model {
-        overrides.push(config_override("mcp_servers.usagi-llm.command", bin));
-        overrides.push(config_override(
-            "mcp_servers.usagi-llm.args",
-            &toml_string_array(&["llm-mcp", "--model", model]),
-        ));
-    }
-    if wiring.op_mcp_enabled {
-        overrides.push(config_override("mcp_servers.usagi-op.command", bin));
-        overrides.push(config_override(
-            "mcp_servers.usagi-op.args",
-            &toml_string_array(&["op-mcp"]),
+        overrides.extend(mcp_server_overrides(
+            "usagi-llm",
+            bin,
+            &["llm-mcp", "--model", model],
         ));
     }
     // The system prompt rides along as Codex's additive `developer_instructions`.
@@ -283,11 +312,11 @@ impl Agent for CodexAgent {
         // already working on it. The hooks are non-managed command hooks, so
         // Codex would otherwise prompt to trust each one; usagi vets them (they
         // only run usagi itself), so `--dangerously-bypass-hook-trust` lets them
-        // run unattended on both paths. `--full-auto` runs the interactive session
-        // low-friction — sandboxed (workspace-write) auto-execution with no
-        // per-command approval prompts — so the attended agent stops asking to
-        // approve every edit and command while still being confined to the
-        // worktree sandbox (unlike the headless path's full bypass).
+        // run unattended on both paths. `--sandbox workspace-write` keeps the
+        // interactive session confined to the worktree while
+        // `--ask-for-approval on-request` avoids per-command prompts unless the
+        // model needs to escalate beyond that sandbox. This is the modern Codex
+        // spelling of the removed `--full-auto` shorthand.
         let resuming = resume && initial_prompt.is_none();
         let mut parts = if resuming {
             vec![
@@ -295,15 +324,24 @@ impl Agent for CodexAgent {
                 "resume".to_string(),
                 "--last".to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "on-request".to_string(),
             ]
         } else {
             vec![
                 self.program.to_string(),
                 "--dangerously-bypass-hook-trust".to_string(),
-                "--full-auto".to_string(),
+                "--sandbox".to_string(),
+                "workspace-write".to_string(),
+                "--ask-for-approval".to_string(),
+                "on-request".to_string(),
             ]
         };
+        // An explicit model rides in as Codex's `-m`; absent, Codex uses its own
+        // configured default.
+        parts.extend(model_flag_parts(wiring));
         parts.extend(overrides);
         // A queued prompt rides along as Codex's trailing positional query (only
         // on the fresh path, where it is unambiguous). It is arbitrary user text,
@@ -334,21 +372,14 @@ impl Agent for CodexAgent {
             self.program.to_string(),
             "exec".to_string(),
             "--dangerously-bypass-approvals-and-sandbox".to_string(),
-            config_override("mcp_servers.usagi.command", bin),
-            config_override("mcp_servers.usagi.args", &toml_string_array(&["mcp"])),
         ];
+        parts.extend(model_flag_parts(wiring));
+        parts.extend(mcp_server_overrides("usagi", bin, &["mcp"]));
         if let Some(model) = wiring.local_llm_model.as_deref() {
-            parts.push(config_override("mcp_servers.usagi-llm.command", bin));
-            parts.push(config_override(
-                "mcp_servers.usagi-llm.args",
-                &toml_string_array(&["llm-mcp", "--model", model]),
-            ));
-        }
-        if wiring.op_mcp_enabled {
-            parts.push(config_override("mcp_servers.usagi-op.command", bin));
-            parts.push(config_override(
-                "mcp_servers.usagi-op.args",
-                &toml_string_array(&["op-mcp"]),
+            parts.extend(mcp_server_overrides(
+                "usagi-llm",
+                bin,
+                &["llm-mcp", "--model", model],
             ));
         }
         parts.push(shell_single_quote(prompt));
@@ -377,19 +408,26 @@ mod tests {
     /// resolved binary path the caller passes, with the local LLM off unless a
     /// model is given.
     fn wiring(usagi_bin: &str, local_llm_model: Option<&str>) -> AgentWiring {
-        wiring_with_op(usagi_bin, local_llm_model, false)
-    }
-
-    fn wiring_with_op(
-        usagi_bin: &str,
-        local_llm_model: Option<&str>,
-        op_mcp_enabled: bool,
-    ) -> AgentWiring {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
-            op_mcp_enabled,
+            model: None,
         }
+    }
+
+    #[test]
+    fn launch_and_headless_render_the_model_flag_only_when_set() {
+        // Default (no model): no `-m` flag, so Codex uses its own default.
+        let plain = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!plain.contains(" -m "), "{plain}");
+
+        // With a model set, both the interactive and headless launches carry `-m`.
+        let mut w = wiring("usagi", None);
+        w.model = Some("gpt-5-codex".to_string());
+        let launch = CodexAgent::new().launch_command(&w, false, None);
+        assert!(launch.contains("-m 'gpt-5-codex'"), "{launch}");
+        let headless = CodexAgent::new().headless_command(&w, "clean up");
+        assert!(headless.contains("-m 'gpt-5-codex'"), "{headless}");
     }
 
     /// Write a rollout transcript whose opening `session_meta` line records `cwd`,
@@ -413,29 +451,9 @@ mod tests {
         let launch = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(launch.contains("-c 'mcp_servers.usagi.command=usagi'"));
         assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
+        assert!(launch.contains("-c 'mcp_servers.usagi.default_tools_approval_mode=\"approve\"'"));
         // The local-LLM server is absent when no model is given.
         assert!(!launch.contains("usagi-llm"));
-    }
-
-    #[test]
-    fn launch_command_wires_in_the_op_server_only_when_enabled() {
-        // Off by default: no 1Password overrides appear.
-        let off = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(!off.contains("usagi-op"));
-        // Enabled: the `usagi-op` server is wired via `-c` overrides as `op-mcp`
-        // (no secret on the command line).
-        let on =
-            CodexAgent::new().launch_command(&wiring_with_op("usagi", None, true), false, None);
-        assert!(on.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
-        assert!(on.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
-    }
-
-    #[test]
-    fn headless_command_wires_in_the_op_server_when_enabled() {
-        let cmd =
-            CodexAgent::new().headless_command(&wiring_with_op("usagi", None, true), "clean up");
-        assert!(cmd.contains("-c 'mcp_servers.usagi-op.command=usagi'"));
-        assert!(cmd.contains("-c 'mcp_servers.usagi-op.args=[\"op-mcp\"]'"));
     }
 
     #[test]
@@ -451,6 +469,9 @@ mod tests {
         assert!(launch.contains(
             "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
         ));
+        assert!(
+            launch.contains("-c 'mcp_servers.usagi-llm.default_tools_approval_mode=\"approve\"'")
+        );
     }
 
     #[test]
@@ -581,17 +602,21 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_runs_full_auto_so_the_attended_session_stops_prompting() {
-        // Both the fresh and resumed interactive launches carry `--full-auto`, so
-        // Codex auto-executes within the workspace sandbox instead of asking the
-        // user to approve every edit and command.
+    fn launch_command_uses_modern_approval_flags_for_attended_sessions() {
+        // Both the fresh and resumed interactive launches carry Codex's modern
+        // spelling of the old `--full-auto` shorthand: run inside the workspace
+        // sandbox, and ask only when the model requests escalation.
         let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(fresh.contains(" --full-auto "));
-        assert!(fresh.starts_with("codex --dangerously-bypass-hook-trust --full-auto "));
+        assert!(fresh.contains(" --sandbox workspace-write --ask-for-approval on-request "));
+        assert!(fresh.starts_with(
+            "codex --dangerously-bypass-hook-trust --sandbox workspace-write --ask-for-approval on-request "
+        ));
         let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert!(
-            resumed.starts_with("codex resume --last --dangerously-bypass-hook-trust --full-auto ")
-        );
+        assert!(resumed.starts_with(
+            "codex resume --last --dangerously-bypass-hook-trust --sandbox workspace-write --ask-for-approval on-request "
+        ));
+        assert!(!fresh.contains("--full-auto"));
+        assert!(!resumed.contains("--full-auto"));
     }
 
     #[test]
@@ -619,6 +644,7 @@ mod tests {
             "codex exec --dangerously-bypass-approvals-and-sandbox -c 'mcp_servers.usagi.command=usagi'"
         ));
         assert!(launch.contains("-c 'mcp_servers.usagi.args=[\"mcp\"]'"));
+        assert!(launch.contains("-c 'mcp_servers.usagi.default_tools_approval_mode=\"approve\"'"));
         assert!(launch.ends_with(" 'clean up'"));
         // The local-LLM server is absent when no model is given, and no hooks ride along.
         assert!(!launch.contains("usagi-llm"));
@@ -635,6 +661,9 @@ mod tests {
         assert!(launch.contains(
             "-c 'mcp_servers.usagi-llm.args=[\"llm-mcp\",\"--model\",\"qwen2.5-coder:7b\"]'"
         ));
+        assert!(
+            launch.contains("-c 'mcp_servers.usagi-llm.default_tools_approval_mode=\"approve\"'")
+        );
     }
 
     #[test]

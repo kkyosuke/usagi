@@ -7,7 +7,9 @@ use crate::presentation::theme::Palette;
 use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
-use super::super::state::{HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList};
+use super::super::state::{
+    EnvEditor, HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList,
+};
 use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
@@ -436,13 +438,6 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     } else {
         match state.mode() {
         Mode::Switch => {
-            // While the highlighted session's note is showing, `Esc` first hides
-            // it (a second `Esc` then backs out), so the footer names that.
-            let esc = if state.switch_note_visible() {
-                "Esc close note"
-            } else {
-                "Esc back"
-            };
             // `s sort` names the waiting-first toggle and reflects its state.
             let sort = if state.sort_waiting() {
                 "s sort:on"
@@ -450,7 +445,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / {esc}"
+                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
@@ -526,27 +521,6 @@ pub(super) fn switch_create_rows(
         );
     }
     rows
-}
-
-/// Builds the inline rename row appended to the left pane in 切替 (Switch) while
-/// editing a session's sidebar label: `rename <target>: <input>` with a block
-/// caret on the character being edited (`cursor`, a byte offset into `input`),
-/// clipped to the pane width. The label is cosmetic, so there is no validation
-/// row.
-pub(super) fn switch_rename_rows(
-    target: &str,
-    input: &str,
-    cursor: usize,
-    left_w: usize,
-) -> Vec<String> {
-    let base = Style::new().accent().bold();
-    let (before, after) = input.split_at(cursor);
-    let value = widgets::block_caret(before, after, &base);
-    let label = clip_to_width(
-        &format!("{}{value}", base.apply_to(format!("rename {target}: "))),
-        left_w,
-    );
-    vec![label]
 }
 
 pub(super) fn tab_menu_box(menu: &TabMenu) -> Vec<String> {
@@ -658,6 +632,61 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
     body
 }
 
+/// Inner (content) width of the workspace-env editor box — wide enough for a
+/// typical `NAME=op://vault/item/field` binding before [`widgets::overlay_modal`]
+/// clips any overrun to the terminal.
+pub(super) const ENV_MODAL_INNER: usize = 56;
+
+/// Editor rows the env modal always reserves (padded with blanks, scrolled to
+/// keep the caret visible) so adding a binding line never grows or shifts the
+/// box — no layout shift.
+const ENV_MODAL_VISIBLE_LINES: usize = 8;
+
+/// Builds the body of the workspace-env editor (`env`) at a **fixed height**: a
+/// two-line format hint, a fixed window of `NAME=op://…` binding rows (numbered,
+/// with a block caret on the cursor row and a `·` placeholder on other empty
+/// rows), and a key-hint footer. The window scrolls to keep the caret visible
+/// without changing the row count, so the box keeps the same size and position as
+/// bindings are added (no layout shift). The border / centring are added by
+/// [`widgets::overlay_modal`] so the workspace shows through around it.
+pub(super) fn env_editor_body(editor: &EnvEditor) -> Vec<String> {
+    let (cursor_row, cursor_col) = editor.area().cursor();
+    let lines = editor.area().lines();
+    // Scroll a fixed-size window so the caret row stays visible without changing
+    // the number of rendered rows (and thus the box height / position).
+    let offset = cursor_row.saturating_sub(ENV_MODAL_VISIBLE_LINES - 1);
+    let mut body = vec![
+        style("1Password から解決する環境変数").dim().to_string(),
+        style("NAME=op://vault/item/field（1 行 1 件）")
+            .dim()
+            .to_string(),
+        String::new(),
+    ];
+    for win in 0..ENV_MODAL_VISIBLE_LINES {
+        let i = offset + win;
+        let Some(line) = lines.get(i) else {
+            // Pad the unused rows so the box keeps a constant height.
+            body.push(String::new());
+            continue;
+        };
+        let number = format!("{:>2} ", i + 1);
+        if i == cursor_row {
+            let (before, after) = line.split_at(cursor_col);
+            body.push(format!(
+                "{number}{}",
+                widgets::block_caret(before, after, &Style::new().accent())
+            ));
+        } else if line.is_empty() {
+            body.push(format!("{number}{}", style("·").dim()));
+        } else {
+            body.push(format!("{number}{line}"));
+        }
+    }
+    body.push(String::new());
+    body.push(style("Ctrl-S 保存  Enter 改行  Esc 取消").dim().to_string());
+    body
+}
+
 /// Builds the centred quit-confirmation modal. `Ctrl-C` raises it only when a
 /// session is still live (naming how many are running and warning they will be
 /// stopped); `Ctrl-Q` always raises it, so with nothing live (`live == 0`) it
@@ -718,6 +747,12 @@ pub(super) fn update_confirm_frame(
 /// Inner (content) width of the text modal box, before the borders and the
 /// space of padding [`widgets::boxed`] adds on each side.
 pub(super) const TEXT_MODAL_INNER: usize = 60;
+
+/// Inner (content) width of the floating 在席 (Focus) menu overlay modal, sized
+/// to hold the widest key hint (`↑↓ move   Enter run   → pick terminal   …`)
+/// without clipping. Clamped to the right pane by [`widgets::modal_inner_width`]
+/// so a narrow pane still fits the box.
+pub(super) const FOCUS_MENU_INNER: usize = 60;
 
 /// Builds the body of the text modal: a scrollable window over a text-dumping
 /// command's output (`man` / `history` / `session list`), coloured by line kind,

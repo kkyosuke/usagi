@@ -19,7 +19,7 @@
 //! becomes several [`SpanStyle::Code`] spans carrying a per-token foreground
 //! [`Rgb`]. An unknown or absent language falls back to plain, uncoloured text.
 
-mod highlight;
+pub(crate) mod highlight;
 
 /// The inline emphasis of a run of text within a rendered line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

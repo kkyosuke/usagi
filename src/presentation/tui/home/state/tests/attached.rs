@@ -232,7 +232,7 @@ fn apply_task_completion_logs_and_refreshes_keeping_the_cursor() {
     // A finished background create refreshes the list with a new session; the
     // cursor stays on "feature" rather than snapping back to the root row.
     state.apply_task_completion(
-        LogLine::output("Created session \"x\" 🐰"),
+        LogLine::output("Created session \"x\" 󰤇"),
         Some(vec![
             session_record("main", 1),
             session_record("feature", 1),
@@ -270,6 +270,7 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
         name: "feature".to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from("/repo/.usagi/sessions/feature"),
         worktrees: vec![merged_a, merged_b, local_c],
         created_at: Utc::now(),
@@ -297,6 +298,7 @@ fn a_session_with_no_worktrees_still_yields_a_row() {
         name: "empty".to_string(),
         display_name: None,
         note: None,
+        label_id: None,
         root: PathBuf::from("/repo/.usagi/sessions/empty"),
         worktrees: Vec::new(),
         created_at: Utc::now(),
@@ -340,6 +342,86 @@ fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
     state.refresh_sessions(vec![session_record("alpha", 1)]);
     assert_eq!(state.list().selected_name(), ROOT_NAME);
     assert_eq!(state.list().active_name(), ROOT_NAME);
+}
+
+#[test]
+fn refresh_sessions_keeps_the_switch_cursor_on_the_create_row() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(state.list().create_row());
+    assert!(state.list().create_row_selected());
+
+    // The persistent "+ new session" row is not a session name, so preserving
+    // only by selected_name() would collapse it to ROOT_NAME. Keep the cursor on
+    // the affordance while background refreshes replace the real rows above it.
+    state.refresh_sessions(vec![
+        session_record("alpha", 1),
+        session_record("beta", 1),
+        session_record("gamma", 1),
+    ]);
+    assert!(state.list().create_row_selected());
+}
+
+#[test]
+fn refresh_sessions_normalizes_a_corrupt_active_create_row_to_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.enter_switch(ReturnMode::Base);
+    // The active row is command-facing and should never point at the create
+    // affordance, but older/corrupt state must be normalized safely if it does.
+    state.list.activate_index(state.list.create_row());
+
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().active_index(), 0);
+    assert_eq!(state.list().active_name(), ROOT_NAME);
+}
+
+#[test]
+fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("beta", 1)],
+    }]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(2); // primary root, alpha, then tools' root row.
+    assert_eq!(state.list().selected_group(), 1);
+    assert!(state.list().root_selected());
+
+    // A primary-workspace re-sync landing while the user is in 切替 must not
+    // resolve the ambiguous `ROOT_NAME` to the first workspace's root row.
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.list().selected_group(), 1);
+    assert!(state.list().root_selected());
+}
+
+#[test]
+fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate_names() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("alpha", 1)],
+    }]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(3); // primary root, primary alpha, tools root, tools alpha.
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "alpha");
+
+    // The branch name is present in both workspaces; preserving only by name
+    // would jump to the primary group's alpha (row 1). The cursor should stay on
+    // the extra group's alpha row.
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().selected_index(), 3);
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "alpha");
 }
 
 #[test]
@@ -523,7 +605,7 @@ fn input_mistakes_are_shown_but_not_recorded() {
 fn applied_failure_lines_are_recorded_success_lines_are_not() {
     let (mut state, spy) = state_with_spy();
     // A background task / session outcome that succeeded only logs its line.
-    state.apply_task_completion(LogLine::output("Created session \"x\" 🐰"), None, None);
+    state.apply_task_completion(LogLine::output("Created session \"x\" 󰤇"), None, None);
     state.apply_session_outcome(SessionOutcome {
         line: LogLine::output("Renamed \"x\""),
         sessions: None,
@@ -852,6 +934,62 @@ fn preview_scrolling_is_a_no_op_when_no_preview_is_open() {
     state.preview_scroll_up();
     state.preview_scroll_down(5);
     assert!(state.preview().is_none());
+}
+
+#[test]
+fn open_diff_result_parses_the_patch_into_the_diff_view() {
+    let mut state = state();
+    assert!(state.diff_view().is_none());
+    let patch = "diff --git a/f b/f\n@@ -1 +1 @@\n-old\n+new".to_string();
+    state.open_diff_result(Ok(("feature → main".to_string(), patch)));
+    // The diff view is titled by branch → base, starts unified at the top, and
+    // holds the parsed rows (file header + hunk + del + add).
+    let view = state.diff_view().expect("diff view is open");
+    assert_eq!(view.title, "feature → main");
+    assert!(!view.split);
+    assert_eq!(view.scroll, 0);
+    assert_eq!(view.doc.rows.len(), 4);
+    assert!(!view.doc.is_empty());
+
+    // Scrolling and toggling the layout run through the view's own helpers.
+    state.diff_scroll_down(2);
+    assert_eq!(state.diff_view().unwrap().scroll, 1);
+    state.diff_scroll_up();
+    assert_eq!(state.diff_view().unwrap().scroll, 0);
+    state.diff_toggle_split();
+    assert!(state.diff_view().unwrap().split);
+    // Scrolling in the split layout clamps against the folded (split) row count.
+    state.diff_scroll_down(1);
+    state.close_diff();
+    assert!(state.diff_view().is_none());
+}
+
+#[test]
+fn open_diff_result_reports_an_empty_patch_as_no_changes() {
+    let mut state = state();
+    state.open_diff_result(Ok(("main → main".to_string(), String::new())));
+    let view = state.diff_view().expect("diff view is open");
+    assert!(view.doc.is_empty());
+}
+
+#[test]
+fn open_diff_result_logs_a_failure_and_opens_nothing() {
+    let mut state = state();
+    state.open_diff_result(Err(anyhow::anyhow!("highlight a session")));
+    assert!(state.diff_view().is_none());
+    let last = state.log().last().unwrap();
+    assert_eq!(last.kind, LineKind::Error);
+    assert!(last.text.contains("diff failed"));
+    assert!(last.text.contains("highlight a session"));
+}
+
+#[test]
+fn diff_scroll_and_toggle_are_no_ops_when_closed() {
+    let mut state = state();
+    state.diff_scroll_up();
+    state.diff_scroll_down(5);
+    state.diff_toggle_split();
+    assert!(state.diff_view().is_none());
 }
 
 // --- session freshness ("heat") dot --------------------------------------
