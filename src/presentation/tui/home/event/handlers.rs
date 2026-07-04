@@ -333,7 +333,7 @@ pub(super) fn switch_key(
             // clicking it or pressing Enter starts the inline create editor, while
             // typing a printable character starts the editor and inserts that
             // character as the first byte of the session name.
-            Key::Enter => begin_switch_create(state, wiring, None),
+            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
             Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
             // Keep keyboard escape hatches on the row: arrows still navigate away
             // (the create row carries no session, so it needs no note / tab keys),
@@ -391,19 +391,14 @@ pub(super) fn switch_key(
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
         }
-        // `a` launches an agent for the highlighted session (the 切替 analogue of
-        // 在席 menu's `agent` action). `Ctrl-A` is decoded by `console` as
-        // `Key::Home`, so accept that as an IME-safe alias: with a Japanese IME
-        // left on, bare `a` may compose into kana and never reach usagi, but the
-        // control chord still does. Inline create / rename inputs consume `Home`
-        // earlier and keep its caret meaning there.
-        Key::Char('a') | Key::Home => {
-            let row = state.list().selected_index();
-            state.enter_focus(row);
-            launch_agent(term, state, painter, wiring, None);
-        }
-        // `c` begins inline session creation.
-        Key::Char('c') => {
+        // `c` begins inline session creation. `Ctrl-A` (which `console` decodes
+        // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
+        // bare letter `c` composes into kana and never reaches usagi, but a
+        // control chord still does — mirroring the note editor's `Ctrl-E` below.
+        // It is unambiguous here, as 切替 list navigation has no caret to move
+        // (the inline create / rename inputs consume `Home` earlier and return
+        // before this match).
+        Key::Char('c') | Key::Home => {
             begin_switch_create(state, wiring, None);
         }
         // `Space` folds / unfolds the workspace under the cursor in 統合(unite)
