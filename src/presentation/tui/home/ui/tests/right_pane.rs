@@ -7,10 +7,10 @@ fn right_pane_previews_the_cursor_row_in_switch() {
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     assert_eq!(state.mode(), Mode::Switch);
     let preview = stripped(&right_pane_contents(&state, 40, 12));
-    // The root row previews its action menu (the workspace-root note shows).
+    // The idle root row rests the mascot (the workspace-root header still shows).
     assert!(preview.contains("root"));
     assert!(preview.contains("workspace root"));
-    assert!(preview.contains("terminal"));
+    assert!(preview.contains("(='-')"));
 }
 
 #[test]
@@ -167,51 +167,58 @@ fn switch_preview_shows_the_root_live_session_as_its_screen() {
 }
 
 #[test]
-fn switch_preview_shows_an_idle_root_as_its_action_menu() {
-    // The mirror of the regression above: a root with no live embedded session
-    // still previews the action menu it would open, even with the root path set.
+fn switch_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
+    // The menu UI focuses as a floating modal, so an idle root previews the
+    // resting mascot and a quip — not the inline choices it once promised.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     let preview = stripped(&switch_preview(&state, 40, 12));
     assert!(preview.contains("workspace root"));
-    assert!(preview.contains("Run a command"));
+    assert!(preview.contains("(='-')"), "the mascot rests in the pane");
+    assert!(preview.contains("Enter"), "the quip nods to Enter");
+    assert!(!preview.contains("Run a command"));
     assert!(!preview.contains("live terminal"));
 }
 
 #[test]
-fn switch_preview_shows_an_idle_session_as_its_action_menu() {
+fn switch_preview_rests_the_mascot_for_an_idle_session_on_the_menu_ui() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     state.switch_move_down();
     let preview = stripped(&switch_preview(&state, 40, 12));
-    // An idle session previews the 在席 action menu it would open.
+    // An idle session rests the mascot rather than previewing the menu, whose
+    // choices selecting only reveals as a floating modal.
     assert!(preview.contains("pushed"));
-    assert!(preview.contains("Run a command"));
-    assert!(preview.contains("terminal"));
-    assert!(preview.contains("agent"));
+    assert!(preview.contains("(='-')"), "the mascot rests in the pane");
+    assert!(!preview.contains("Run a command"));
     assert!(!preview.contains("live terminal"));
 }
 
 #[test]
-fn switch_preview_action_menu_follows_the_cursor_not_the_active_row() {
-    // Regression: the 切替 preview's action menu was resolved for the *active*
-    // row, so highlighting an idle session while the root row stayed active
-    // previewed the root's menu — dropping `close` from a session that can be
-    // closed. The preview is the highlighted row's, so it must offer `close`.
+fn switch_preview_centres_the_idle_mascot_with_a_quip_below_it() {
+    // The mascot sits in the middle of the pane (blank rows above and below) with
+    // its witty English quip on the row beneath it.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.set_root_path(PathBuf::from("/repo"));
     state.enter_switch(super::super::super::state::ReturnMode::Base);
-    // The root row is the active one (the default); move the cursor onto the
-    // session without activating it.
     state.switch_move_down();
-    assert!(state.list().root_active());
-    assert!(!state.list().root_selected());
-    let preview = stripped(&switch_preview(&state, 40, 12));
-    assert!(preview.contains("Run a command"));
-    assert!(preview.contains("close"));
+    let lines: Vec<String> = switch_preview(&state, 40, 12)
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).trim_end().to_string())
+        .collect();
+    let face = lines
+        .iter()
+        .position(|l| l.contains("(='-')"))
+        .expect("the mascot's face shows");
+    // The face is the middle of the three-row mascot, so the quip sits three rows
+    // below it (mascot feet, a blank separator, then the caption).
+    let quip = &lines[face + 3];
+    assert!(!quip.trim().is_empty(), "a quip sits below the mascot");
+    assert!(quip.contains("Enter"), "the quip nods to Enter");
+    // The mascot is pushed down off the top row, so it reads as centred.
+    assert!(face > 2, "the mascot is not pinned to the top");
 }
 
 #[test]
@@ -246,8 +253,8 @@ fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
     let last = console::strip_ansi_codes(preview.last().unwrap()).into_owned();
     assert!(!last.contains("Enter focus"));
     assert!(!last.contains("x close tab"));
-    // The action-menu preview is still shown.
-    assert!(stripped(&preview).contains("Run a command"));
+    // The idle mascot fills the pane.
+    assert!(stripped(&preview).contains("(='-')"));
 }
 
 #[test]
