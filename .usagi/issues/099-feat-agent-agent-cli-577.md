@@ -2,12 +2,12 @@
 number: 99
 title: feat(agent): セッション単位の agent CLI・モデル指定 — モデル注入点（#577）に供給源を接続する
 status: todo
-priority: medium
+priority: high
 labels: [orchestration, agent]
 dependson: []
 related: []
 created_at: 2026-07-04T05:09:26.842394+00:00
-updated_at: 2026-07-04T05:09:26.842394+00:00
+updated_at: 2026-07-04T05:14:01.144881+00:00
 ---
 
 ## 背景
