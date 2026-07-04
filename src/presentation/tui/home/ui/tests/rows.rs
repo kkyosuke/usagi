@@ -873,16 +873,13 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
     // many changed lines each carries — the point of the fixed columns. Measured
     // CJK-aware (ambiguous glyphs = two columns), since that is the width the detail
     // line is laid out and the terminal paints it in.
-    let col_of = |s: &str, ch: char| {
-        crate::presentation::tui::widgets::measure_width_cjk(
-            &s[..s.find(ch).expect("char present")],
-        )
-    };
+    let col_of =
+        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
     assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
     // Both detail lines fill the same width, so the cluster's right edge lines up.
     assert_eq!(
-        crate::presentation::tui::widgets::measure_width_cjk(&small_detail),
-        crate::presentation::tui::widgets::measure_width_cjk(&big_detail)
+        console::measure_text_width(&small_detail),
+        console::measure_text_width(&big_detail)
     );
 }
 
@@ -2109,7 +2106,7 @@ fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
     // Measured as the terminal paints it (arrows = two columns), the row fits the
     // pane — nothing bleeds into the right pane or gets clipped away.
     assert!(
-        crate::presentation::tui::widgets::measure_width_cjk(&detail) <= left_w,
+        console::measure_text_width(&detail) <= left_w,
         "detail line overruns the {left_w}-column sidebar: {detail:?}"
     );
     // Both the arrows and the PR badge survive intact.

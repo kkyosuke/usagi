@@ -112,13 +112,12 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     state.enter_switch(super::super::super::state::ReturnMode::Base);
 
     // The display column of the divider, used as the anchor for the tabs. Measured
-    // by the terminal's East Asian width (the identity is padded with the `_cjk`
-    // helpers, and a clipping ellipsis is two columns wide there), which is where
+    // by plain display width (the identity is padded the same way), which is where
     // the divider actually lands on screen.
     let divider_col = |lines: &[String]| {
         let top = console::strip_ansi_codes(&lines[0]).into_owned();
         let at = top.find('│').expect("the divider is drawn");
-        crate::presentation::tui::widgets::measure_width_cjk(&top[..at])
+        console::measure_text_width(&top[..at])
     };
 
     state.switch_move_down(); // cursor on the short-named session
