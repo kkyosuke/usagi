@@ -237,6 +237,13 @@ fn to_prompt_includes_metadata_and_body() {
     assert!(prompt.contains("リポジトリの規約"));
     assert!(!prompt.contains("cargo"));
     assert!(!prompt.contains(".agents/workflow.md"));
+    // The status lifecycle is spelled out: in-progress on start, and the done
+    // diff must ride the same PR (committed before the PR is opened) so merging
+    // carries `done` to the base branch — the single-writer path (issue #111).
+    assert!(prompt.contains("`in-progress`"));
+    assert!(prompt.contains("PR を開く前に"));
+    assert!(prompt.contains("`done`"));
+    assert!(prompt.contains("同じ PR に含める"));
 }
 
 #[test]

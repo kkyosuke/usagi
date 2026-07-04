@@ -1,14 +1,14 @@
 ---
 number: 111
 title: feat(orchestration): status ライフサイクルの単一書き手化 — 委譲プロンプトに「着手で in-progress・PR 前に done を自枝で」を組み込む
-status: todo
+status: done
 priority: high
 labels: [orchestration]
 dependson: []
 related: [100, 104]
 parent: 105
 created_at: 2026-07-04T21:47:21.070475+00:00
-updated_at: 2026-07-04T21:47:21.070475+00:00
+updated_at: 2026-07-04T23:12:19.549006+00:00
 ---
 
 ## 背景

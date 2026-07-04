@@ -227,11 +227,12 @@ pub fn to_prompt(issue: &Issue) -> String {
          \n\
          ## 進め方\n\
          \n\
-         1. 着手時に issue #{number} の status を `in-progress` に更新する（MCP ツール `issue_update`）。\n\
+         1. 着手時に、この worktree で issue #{number} の status を `in-progress` に更新する（MCP ツール `issue_update`）。これは着手済みを示すこの worktree 内のローカルな進捗表現で、マージするまで基点ブランチには反映されない。\n\
          2. issue の内容を実装し、必要に応じてテストを追加・更新する。\n\
          3. コミット前に、リポジトリの規約に沿ったフォーマット・Lint・テストを実行して通す。\n\
          4. 仕様やドキュメントに影響する変更があれば、対応するドキュメントも更新する。\n\
-         5. 完了したら issue #{number} の status を `done` に更新する。\n\
+         5. **PR を開く前に**、この worktree で issue #{number} の status を `done` に更新してコミットする（MCP ツール `issue_update`）。この status 差分は実装差分と同じブランチに載せ、同じ PR に含める（別コミットでよい）。issue の完了を反映できるのはこの worktree（枝）だけなので、PR がマージされて初めて基点ブランチの issue が `done` になる。マージ後に誰も `done` を立て直さないため、必ず PR を開く前にこのコミットを含めること。\n\
+         6. PR を作成する。\n\
          \n\
          ## issue #{number}: {title}\n\
          \n\
