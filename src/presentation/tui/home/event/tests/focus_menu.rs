@@ -89,6 +89,7 @@ fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Enter)); // focus main (idle)
     keys.push(Ok(Key::Char('/'))); // enter filter mode
+    keys.push(Ok(Key::ArrowLeft)); // inert while filtering (no picker to collapse)
     keys.push(Ok(Key::Char('z'))); // no command starts with "z"
     keys.push(Ok(Key::Char('z')));
     keys.push(Ok(Key::Enter)); // no match -> inert (nothing opened)
