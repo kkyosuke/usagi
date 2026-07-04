@@ -126,9 +126,9 @@
 │  ▎ ⌂   root      │   ┌─ command ───────────────────────┐  │  ┐ 中央にコマンドパレット（オーバーレイ）
 │  ▎     workspace │   │ ❯ se█                            │  │  │   入力欄 ❯ …
 │    ●   main  …   │   │   › session  Create or manage …  │  │  │   コマンド候補ヒント
-│      ▶ running   │   │     config   Edit local settings │  │  │
+│      🤖 ▶        │   │     config   Edit local settings │  │  │
 │    ○   feat/…    │   │ ── last ──────────────────────── │  │  │   直近コマンドの結果
-│      ◆ waiting   │   │ session feature-x created        │  │  │
+│      🤖 ◆        │   │ session feature-x created        │  │  │
 │                  │   └──────────────────────────────────┘  │  ┘
 │ [command] Tab: complete / ↑↓: history / Enter: run / Esc: close │  ← フッター
 └───────────────────────────────────────────────────────────┘
