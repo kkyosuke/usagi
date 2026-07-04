@@ -29,9 +29,11 @@ use crate::domain::settings::AgentCli;
 /// worktree, so the usual "create a worktree first" workflow step is redundant
 /// here. We tell the agent up front to skip it and work in place. Kept free of
 /// single quotes so it survives a single-quoted shell argument verbatim. Shared
-/// by every adapter that can inject a system prompt (Claude via
-/// `--append-system-prompt`, Codex via `developer_instructions`).
-const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。";
+/// by every adapter: those with a system-prompt flag inject it out of band
+/// (Claude via `--append-system-prompt`, Codex via `developer_instructions`),
+/// and those without one (Gemini, Antigravity) lead their opening prompt with it
+/// via [`session_opening_prompt`].
+pub(super) const SESSION_WORKTREE_PROMPT: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。";
 
 /// System-prompt addendum added when a local LLM MCP server is wired in.
 ///
@@ -48,6 +50,21 @@ const LOCAL_LLM_PROMPT: &str = "トークン節約のため、要約・命名・
 pub(super) fn session_system_prompt(local_llm_model: Option<&str>) -> String {
     match local_llm_model {
         Some(_) => format!("{SESSION_WORKTREE_PROMPT}{LOCAL_LLM_PROMPT}"),
+        None => SESSION_WORKTREE_PROMPT.to_string(),
+    }
+}
+
+/// The opening prompt for an agent that has no system-prompt flag (Gemini,
+/// Antigravity). These agents can't be told out of band that they already live in
+/// a usagi worktree, so the worktree note leads their opening prompt — delivered as
+/// the first conversational turn — with the user's queued prompt (if any) following
+/// after a blank line. The local-LLM delegation nudge is deliberately omitted: with
+/// no MCP wiring these agents have no `local_llm_ask` tool to delegate to. The
+/// result is escaped for the shell by the caller (the note itself carries no single
+/// quotes; the queued prompt may, and is escaped along with it).
+pub(super) fn session_opening_prompt(initial_prompt: Option<&str>) -> String {
+    match initial_prompt {
+        Some(prompt) => format!("{SESSION_WORKTREE_PROMPT}\n\n{prompt}"),
         None => SESSION_WORKTREE_PROMPT.to_string(),
     }
 }
@@ -110,24 +127,27 @@ mod tests {
     }
 
     #[test]
-    fn agent_for_gemini_launches_plain() {
+    fn agent_for_gemini_leads_with_the_worktree_note() {
+        // Gemini has no inline-injection flag, so the MCP/hooks wiring is not
+        // rendered; the session worktree note still leads the opening prompt.
         let agent = agent_for(AgentCli::Gemini);
         assert_eq!(agent.program(), "gemini");
-        assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
-            "gemini"
-        );
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        assert!(launch.starts_with("gemini -i='"));
+        assert!(launch.contains(SESSION_WORKTREE_PROMPT));
+        assert!(!launch.contains("mcp"));
     }
 
     #[test]
-    fn agent_for_antigravity_launches_plain() {
-        // Antigravity (`agy`) has no inline-injection flag, so like Gemini it
-        // launches plain — the MCP/hooks wiring is not rendered.
+    fn agent_for_antigravity_leads_with_the_worktree_note() {
+        // Antigravity (`agy`) has no inline-injection flag, so like Gemini the
+        // MCP/hooks wiring is not rendered; the session worktree note still leads the
+        // opening prompt.
         let agent = agent_for(AgentCli::Antigravity);
         assert_eq!(agent.program(), "agy");
-        assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
-            "agy"
-        );
+        let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        assert!(launch.starts_with("agy -i='"));
+        assert!(launch.contains(SESSION_WORKTREE_PROMPT));
+        assert!(!launch.contains("mcp"));
     }
 }
