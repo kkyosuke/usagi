@@ -131,10 +131,9 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     // the blank separator row below the mode ladder.
     let frame = render_frame(26, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    // The sidebar shows the agent state as icons only (no spelled-out word).
     assert!(joined.contains('▶'));
-    assert!(joined.contains("running"));
     assert!(joined.contains('◆'));
-    assert!(joined.contains("waiting"));
 }
 
 #[test]
