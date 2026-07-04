@@ -1224,6 +1224,11 @@ fn spawn_watcher(
                 shared.monitor.forget(&path);
                 agent_state_store::clear(&path);
             }
+            // Release phase-cache entries for sessions no longer tracked — those
+            // pruned just above and those a session removal took straight out of
+            // `shared.sessions` (which never enter the `dead` list). Keyed on the
+            // live set so the cache cannot grow unbounded across a long run.
+            phase_reader.retain(|path| shared.sessions.contains_key(path));
             let (notices, pr_jobs, live_prompt_targets) = if shared.sessions.is_empty() {
                 shared.resources.clear();
                 shared.resource_total = ResourceUsage::default();
