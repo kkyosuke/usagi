@@ -191,6 +191,9 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
     // taken, so a second poll does not re-apply a stale snapshot. The return tells
     // the loop whether to force a repaint (a landed list changes the git statuses).
     let mut state = state_with_sessions(&["main", "feat"]);
+    // The watcher / pane-exit sync publishes keyed by the workspace root, so a
+    // refresh for the primary must target its recorded root.
+    let root = state.root_path().to_path_buf();
     let refresh = SessionsRefreshHandle::new();
 
     // No sync has landed yet: the list is left exactly as it was, and the loop is
@@ -207,6 +210,7 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
 
     // A background sync reports that `feat` is gone and `next` was added.
     refresh.set(
+        root.clone(),
         ["main", "next"]
             .iter()
             .map(|n| SessionRecord {
@@ -232,11 +236,87 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
     );
 
     // The slot is now empty, so a further poll re-applies nothing.
-    refresh.set(Vec::new());
+    refresh.set(root.clone(), Vec::new());
     assert!(apply_pending_refresh(&mut state, &refresh));
     assert!(state.sessions().is_empty());
     assert!(!apply_pending_refresh(&mut state, &refresh));
     assert!(state.sessions().is_empty());
+}
+
+#[test]
+fn a_background_refresh_routes_to_the_workspace_it_names() {
+    // 統合(unite) mode: the watcher publishes each workspace's recorded sessions
+    // keyed by its root, so a refresh naming the extra group updates *that* group's
+    // rows (a session an agent delegated to a secondary workspace appears there),
+    // the primary keyed refresh updates the primary, and a refresh for a root no
+    // longer displayed is dropped rather than misfiled onto the primary.
+    let mut state = HomeState::new("primary", Vec::new(), None);
+    state.set_root_path("/primary");
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: Vec::new(),
+        issues: Vec::new(),
+    }]);
+    let refresh = SessionsRefreshHandle::new();
+
+    let session = |root: &str, name: &str| SessionRecord {
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        label_id: None,
+        root: PathBuf::from(format!("{root}/.usagi/sessions/{name}")),
+        worktrees: vec![worktree(Some(name), &format!("{root}/{name}"))],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+
+    // A session delegated to the secondary workspace, plus one to the primary, land
+    // in the same poll — both are applied, each to its own group.
+    refresh.set(PathBuf::from("/wsB"), vec![session("/wsB", "delegated")]);
+    refresh.set(PathBuf::from("/primary"), vec![session("/primary", "here")]);
+    // A stale refresh for a workspace dropped from unite mode is ignored.
+    refresh.set(PathBuf::from("/gone"), vec![session("/gone", "orphan")]);
+    assert!(apply_pending_refresh(&mut state, &refresh));
+
+    // The primary group shows its own session; the extra group shows the delegated
+    // one; the orphaned root's list appears nowhere.
+    assert_eq!(
+        state
+            .sessions()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["here".to_string()]
+    );
+    let branches = |group: usize| -> Vec<String> {
+        state.list().groups()[group]
+            .worktrees()
+            .iter()
+            .filter_map(|w| w.branch.clone())
+            .collect()
+    };
+    assert_eq!(
+        branches(0),
+        vec!["here".to_string()],
+        "primary group updated"
+    );
+    assert_eq!(
+        branches(1),
+        vec!["delegated".to_string()],
+        "extra group updated"
+    );
+    // Nowhere does the orphaned root's session appear.
+    assert!(
+        state
+            .list()
+            .groups()
+            .iter()
+            .flat_map(|g| g.worktrees())
+            .all(|w| w.branch.as_deref() != Some("orphan")),
+        "unknown-root refresh must be dropped, not misfiled"
+    );
 }
 
 #[test]

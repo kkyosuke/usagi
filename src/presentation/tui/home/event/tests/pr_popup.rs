@@ -94,6 +94,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -124,6 +125,7 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     let outcome = event_loop(
         &term,

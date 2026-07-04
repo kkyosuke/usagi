@@ -33,8 +33,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 
 use crate::domain::agent::Agent;
+use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::LocalSettings;
-use crate::domain::workspace_state::{PrLink, SessionRecord};
+use crate::domain::workspace_state::{BranchStatus, PrLink, SessionRecord};
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
@@ -478,8 +479,28 @@ pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
         .unwrap_or_default())
 }
 
+/// The pull requests associated with a session, plus enough of its worktree
+/// state to tell whether that work has landed. Returned by [`pr_links`].
+#[derive(Debug)]
+pub struct SessionPrs {
+    /// The session's root worktree (the directory PR links are keyed under).
+    pub root: PathBuf,
+    /// Whether every worktree of the session reads [`BranchStatus::Synced`] —
+    /// i.e. the default branch already contains all of it, so the work is merged.
+    /// `false` while any worktree still has un-integrated commits or changes.
+    ///
+    /// This is derived from the last workspace sync's cached status (no git spawn
+    /// and no GitHub query — usagi never calls `gh`), so it tracks the branch's
+    /// integration rather than the PR object's own state. It is the merged signal
+    /// available without querying GitHub; a PR closed *without* merging is
+    /// indistinguishable from an open one here (both read `merged: false`).
+    pub merged: bool,
+    /// The de-duplicated pull requests discovered for the session.
+    pub prs: Vec<PrLink>,
+}
+
 /// Return the pull requests associated with session `name`, along with the
-/// session's root worktree.
+/// session's root worktree and whether its branches are merged.
 ///
 /// PR links are primarily persisted in the out-of-band [`pr_link_store`] as soon
 /// as an agent prints a pull-request URL; workspace sync later folds them into
@@ -487,20 +508,106 @@ pub fn list(workspace_root: &Path) -> Result<Vec<SessionRecord>> {
 /// here and de-duplicate by URL so MCP callers see the newest harvested links
 /// even before the next sync, while still preserving links already present in
 /// older state files.
-pub fn pr_links(workspace_root: &Path, name: &str) -> Result<(PathBuf, Vec<PrLink>)> {
+///
+/// The `merged` flag aggregates the session's cached per-worktree
+/// [`BranchStatus`] ([`BranchStatus::aggregate`] — the least-progressed wins), so
+/// it reads merged only once *every* worktree is [`Synced`](BranchStatus::Synced).
+/// Reading the cache keeps this a cheap query with no git spawn.
+pub fn pr_links(workspace_root: &Path, name: &str) -> Result<SessionPrs> {
     let session = list(workspace_root)?
         .into_iter()
         .find(|s| s.name == name)
         .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+    let merged = BranchStatus::aggregate(session.worktrees.iter().map(|wt| wt.status))
+        == BranchStatus::Synced;
     let state_prs = session
         .worktrees
         .iter()
         .flat_map(|wt| wt.pr.iter().cloned());
     let recorded_prs = pr_link_store::get(&session.root);
-    Ok((
-        session.root,
-        PrLink::aggregate(state_prs.chain(recorded_prs)),
-    ))
+    Ok(SessionPrs {
+        root: session.root,
+        merged,
+        prs: PrLink::aggregate(state_prs.chain(recorded_prs)),
+    })
+}
+
+/// A coordinating agent's read-only view of one session's progress, assembled
+/// entirely from cached state — `state.json` (each worktree's last-synced
+/// [`BranchStatus`]) and the per-worktree agent-phase file — with no git spawn,
+/// so a coordinator can poll it freely. Returned by [`statuses`].
+#[derive(Debug)]
+pub struct SessionStatus {
+    /// The session name (`.usagi/sessions/<name>/`).
+    pub name: String,
+    /// The sidebar display-name override, or `None` when none is set.
+    pub display_name: Option<String>,
+    /// The session's root worktree — the directory the agent runs in and the key
+    /// its agent-phase and PR-link files are stored under.
+    pub root: PathBuf,
+    /// The agent's lifecycle phase recorded for the session root, or `None` when
+    /// no agent pane has run there (or its phase file was cleared when the pane
+    /// died). Surfaced to MCP callers as `none` in the latter case.
+    pub agent_phase: Option<AgentPhase>,
+    /// Per-worktree git status, one entry per repository the session spans.
+    pub worktrees: Vec<WorktreeStatus>,
+}
+
+/// One worktree's cached git status within a [`SessionStatus`].
+#[derive(Debug)]
+pub struct WorktreeStatus {
+    /// The worktree directory.
+    pub path: PathBuf,
+    /// The checked-out branch, or `None` for a detached HEAD.
+    pub branch: Option<String>,
+    /// The worktree's lifecycle status as of the last workspace sync.
+    pub status: BranchStatus,
+    /// The working tree had uncommitted changes at the last sync
+    /// (`status == Dirty`).
+    pub dirty: bool,
+    /// The default branch already contains everything this branch carried — i.e.
+    /// merged (`status == Synced`).
+    pub merged: bool,
+}
+
+/// Assemble the orchestration status of every recorded session for a
+/// coordinating agent, reading only cached state (no git spawn): each worktree's
+/// last-synced [`BranchStatus`] from `state.json` ([`list`]) and the agent's
+/// lifecycle phase from its per-worktree phase file
+/// ([`agent_state_store::read`]).
+///
+/// This is the read side of the orchestration loop: a coordinator polls it to
+/// learn when a delegated child has finished (`agent_phase == ended`) and when
+/// its branches have merged (`merged`), then tears the session down and delegates
+/// the next issue. Reusing the sync cache — rather than re-running the git
+/// inspection on every call — keeps the poll cheap; the statuses are as fresh as
+/// the last [`workspace_state::sync`] (which the running TUI performs in the
+/// background). The listing order matches [`list`] (the home list's order).
+pub fn statuses(workspace_root: &Path) -> Result<Vec<SessionStatus>> {
+    Ok(list(workspace_root)?
+        .into_iter()
+        .map(|session| {
+            let agent_phase = agent_state_store::read(&session.root);
+            let worktrees = session
+                .worktrees
+                .into_iter()
+                .map(|wt| WorktreeStatus {
+                    path: wt.path,
+                    branch: wt.branch,
+                    dirty: wt.status == BranchStatus::Dirty,
+                    merged: wt.status == BranchStatus::Synced,
+                    status: wt.status,
+                })
+                .collect();
+            SessionStatus {
+                name: session.name,
+                display_name: session.display_name,
+                root: session.root,
+                agent_phase,
+                worktrees,
+            }
+        })
+        .collect())
 }
 
 /// Move session `name` one row toward the top (`up = true`) or bottom of the
@@ -2110,5 +2217,91 @@ mod tests {
             workspace_root(Path::new("/repo/.usagi/issues")),
             PathBuf::from("/repo/.usagi/issues")
         );
+    }
+
+    /// Overwrite the recorded status of session `name`'s first worktree, so a test
+    /// can drive the `dirty` / `merged` derivations without a real git topology.
+    fn set_worktree_status(root: &Path, name: &str, status: BranchStatus) {
+        let store = WorkspaceStore::new(root);
+        let mut state = store.load().unwrap().unwrap();
+        let session = state.sessions.iter_mut().find(|s| s.name == name).unwrap();
+        session.worktrees[0].status = status;
+        store.save(&state).unwrap();
+    }
+
+    #[test]
+    fn statuses_reports_the_agent_phase_and_each_worktree_status() {
+        // agent_state_store reads/writes under the data dir, so point it at a
+        // throwaway home for the duration of the test.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "work").unwrap();
+
+        // No agent pane has run yet: phase is None. A freshly cut session branch
+        // reads `local` — not dirty, not merged.
+        let before = statuses(root.path()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].name, "work");
+        assert_eq!(before[0].root, created.root);
+        assert_eq!(before[0].agent_phase, None);
+        assert_eq!(before[0].worktrees.len(), 1);
+        assert_eq!(before[0].worktrees[0].status, BranchStatus::Local);
+        assert!(!before[0].worktrees[0].dirty);
+        assert!(!before[0].worktrees[0].merged);
+
+        // Once the agent's hooks record a phase for the session root, it is read
+        // back.
+        agent_state_store::write(&created.root, AgentPhase::Ended).unwrap();
+        let after = statuses(root.path()).unwrap();
+        assert_eq!(after[0].agent_phase, Some(AgentPhase::Ended));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn statuses_derive_dirty_and_merged_from_the_cached_status() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "work").unwrap();
+
+        // A dirty worktree reads dirty (and not merged).
+        set_worktree_status(root.path(), "work", BranchStatus::Dirty);
+        let dirty = statuses(root.path()).unwrap();
+        assert!(dirty[0].worktrees[0].dirty);
+        assert!(!dirty[0].worktrees[0].merged);
+
+        // A synced worktree reads merged (and not dirty).
+        set_worktree_status(root.path(), "work", BranchStatus::Synced);
+        let merged = statuses(root.path()).unwrap();
+        assert!(merged[0].worktrees[0].merged);
+        assert!(!merged[0].worktrees[0].dirty);
+    }
+
+    #[test]
+    fn pr_links_reports_merged_once_every_worktree_is_synced() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let created = create(root.path(), "work").unwrap();
+
+        // A freshly created session is not merged.
+        let open = pr_links(root.path(), "work").unwrap();
+        assert_eq!(open.root, created.root);
+        assert!(!open.merged);
+
+        // Once its only worktree is synced, the session reads merged.
+        set_worktree_status(root.path(), "work", BranchStatus::Synced);
+        assert!(pr_links(root.path(), "work").unwrap().merged);
+    }
+
+    #[test]
+    fn pr_links_errors_for_an_unknown_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let err = pr_links(root.path(), "ghost").unwrap_err();
+        assert!(err.to_string().contains("no such session"));
     }
 }

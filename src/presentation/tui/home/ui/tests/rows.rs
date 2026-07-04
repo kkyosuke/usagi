@@ -86,13 +86,16 @@ fn clip_to_width_keeps_ansi_escapes_without_counting_them() {
     // none without a TTY) carries sequences of zero display width: the clip
     // measures only the visible text and copies the escapes verbatim, so the
     // result keeps the colour, stays exactly the budget wide, and keeps "he" —
-    // the escapes never eat into the three-column budget.
+    // the escapes never eat into the three-column budget. Because it carried a
+    // style across the cut, the tail is closed with a reset (after the ellipsis)
+    // so the colour cannot bleed into what follows.
     let styled = "\x1b[31mhello\x1b[0m";
     let clipped = clip_to_width(styled, 3);
     assert_eq!(console::measure_text_width(&clipped), 3);
     assert!(clipped.starts_with("\x1b[31m"));
     assert!(clipped.contains("he"));
-    assert!(clipped.ends_with('…'));
+    assert!(clipped.ends_with("\x1b[0m"));
+    assert!(clipped.contains('…'));
 }
 
 #[test]
@@ -779,7 +782,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5min ago"),
+        detail.contains("5m ago"),
         "{detail:?} missing the relative time"
     );
 }
@@ -868,21 +871,18 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
     assert!(!small_detail.contains("ready"));
     assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
     assert!(big_detail.contains("+140 -88"));
-    assert!(big_detail.contains("12min ago"));
+    assert!(big_detail.contains("12m ago"));
     // The diff `+` lands in the same painted column on both rows regardless of how
     // many changed lines each carries — the point of the fixed columns. Measured
     // CJK-aware (ambiguous glyphs = two columns), since that is the width the detail
     // line is laid out and the terminal paints it in.
-    let col_of = |s: &str, ch: char| {
-        crate::presentation::tui::widgets::measure_width_cjk(
-            &s[..s.find(ch).expect("char present")],
-        )
-    };
+    let col_of =
+        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
     assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
     // Both detail lines fill the same width, so the cluster's right edge lines up.
     assert_eq!(
-        crate::presentation::tui::widgets::measure_width_cjk(&small_detail),
-        crate::presentation::tui::widgets::measure_width_cjk(&big_detail)
+        console::measure_text_width(&small_detail),
+        console::measure_text_width(&big_detail)
     );
 }
 
@@ -890,7 +890,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
 fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages() {
     // A single running session in a pane just wide enough that the freshness label
     // sits at the trim boundary: when its width is sized to the live label, the
-    // young `now` (3 cols) fits but the aged `12min ago` (9 cols) tips the cluster
+    // young `now` (3 cols) fits but the aged `12m ago` (7 cols) tips the cluster
     // over and drops the field — the detail line jumping purely because the clock
     // advanced. Reserving a constant width for the column decouples the decision
     // from the clock, so the same layout renders at every age.
@@ -920,7 +920,7 @@ fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages()
         console::strip_ansi_codes(&lines[4]).into_owned()
     };
     let young = render_at(base + chrono::Duration::seconds(30)); // `now`
-    let aged = render_at(base + chrono::Duration::minutes(12)); // `12min ago`
+    let aged = render_at(base + chrono::Duration::minutes(12)); // `12m ago`
     let shows_freshness = |detail: &str| detail.contains("ago") || detail.contains("now");
     assert_eq!(
         shows_freshness(&young),
@@ -2109,7 +2109,7 @@ fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
     // Measured as the terminal paints it (arrows = two columns), the row fits the
     // pane — nothing bleeds into the right pane or gets clipped away.
     assert!(
-        crate::presentation::tui::widgets::measure_width_cjk(&detail) <= left_w,
+        console::measure_text_width(&detail) <= left_w,
         "detail line overruns the {left_w}-column sidebar: {detail:?}"
     );
     // Both the arrows and the PR badge survive intact.

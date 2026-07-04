@@ -808,7 +808,7 @@ pub struct HomeState {
     logger: Box<dyn crate::infrastructure::error_log::Logger>,
     /// The wall-clock instant the current frame renders at, refreshed each paint
     /// by the event loop ([`set_now`](Self::set_now)). The left pane reads it to
-    /// turn each session's `updated_at` into a relative "Nmin ago" label. Kept on the
+    /// turn each session's `updated_at` into a relative "Nm ago" label. Kept on the
     /// state (rather than threaded through the pure `render_frame`) so the renderer
     /// stays a `&HomeState`-only function and its many test call sites are
     /// unaffected; tests that pin the label set a fixed value with `set_now`.
@@ -904,7 +904,7 @@ impl HomeState {
     }
 
     /// Record the instant the next frame renders at, so the left pane's relative
-    /// "Nmin ago" labels track real time. The event loop calls this before each paint;
+    /// "Nm ago" labels track real time. The event loop calls this before each paint;
     /// tests pin it to control the labels.
     pub fn set_now(&mut self, now: DateTime<Utc>) {
         self.now = now;
@@ -1510,6 +1510,26 @@ impl HomeState {
     pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
         self.sessions = sessions;
         self.rebuild_list_keep_cursor();
+    }
+
+    /// Swap in a freshly re-synced set of sessions for the workspace rooted at
+    /// `root`, routing them to the matching sidebar group: the primary workspace
+    /// or one of the 統合(unite) groups. Like [`refresh_sessions`](Self::refresh_sessions)
+    /// it keeps the cursor and active row on the same session names.
+    ///
+    /// Used by the background `state.json` watcher, which republishes each
+    /// workspace's recorded sessions keyed by its root (an agent's MCP
+    /// `session_create` / `session_delegate_issue`, another window, or the CLI may
+    /// have written any of them). A `root` matching no displayed workspace — one
+    /// dropped from unite mode after the refresh was queued — is ignored rather
+    /// than misfiled onto the primary.
+    pub fn refresh_sessions_for(&mut self, root: &Path, sessions: Vec<SessionRecord>) {
+        if root == self.root_path() {
+            self.refresh_sessions(sessions);
+        } else if let Some(i) = self.extra_groups.iter().position(|g| g.root_path == root) {
+            self.extra_groups[i].sessions = sessions;
+            self.rebuild_list_keep_cursor();
+        }
     }
 
     /// Rebuild the worktree pane while keeping the cursor, active row, and `Ctrl-^`

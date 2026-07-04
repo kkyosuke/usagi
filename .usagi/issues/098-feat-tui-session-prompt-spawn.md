@@ -1,13 +1,13 @@
 ---
 number: 98
 title: feat(tui): session_prompt 起動時キューの自動起動 — キュー検知でエージェントペインをバックグラウンド spawn する
-status: todo
+status: done
 priority: high
 labels: [orchestration, tui]
 dependson: []
 related: []
 created_at: 2026-07-04T05:09:01.647770+00:00
-updated_at: 2026-07-04T05:09:01.647770+00:00
+updated_at: 2026-07-04T12:34:59.667553+00:00
 ---
 
 ## 背景

@@ -58,6 +58,15 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
 /// needs no clipping costs no allocation. Callers that must own the result use
 /// [`clip_to_width`]; callers that only `Display` it (e.g. `style(…)`) take the
 /// [`Cow`](std::borrow::Cow) and avoid the copy.
+///
+/// When the cut carries over any SGR escape, the clipped text is closed with a
+/// [`RESET`] so the colour (or a `reverse`/background span, e.g. the caret cell
+/// [`block_caret`] draws) does not bleed into whatever is butted up after it —
+/// the padding and right border [`boxed`] appends, or the next `markdown_row`.
+/// This matches the sibling cuts [`slice_from_width`] / [`overlay_block`], which
+/// already reset. Without it a full-width (CJK) line clipped mid-caret leaves the
+/// box's padding and right `│` painted in reverse video, so the frame reads as
+/// broken.
 pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if console::measure_text_width(text) <= max {
@@ -70,6 +79,9 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
     let budget = max - 1;
     let mut out = String::with_capacity(text.len());
     let mut width = 0usize;
+    // Whether any SGR escape was carried across the cut, so the tail must be
+    // closed with a [`RESET`] lest its colour bleed past the clip.
+    let mut carried_escape = false;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         if ch == ESC {
@@ -79,6 +91,7 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
             // and parameter bytes through to (and including) the final byte
             // (`0x40..=0x7e`, excluding the `[` introducer itself).
             out.push(ch);
+            carried_escape = true;
             for c in chars.by_ref() {
                 out.push(c);
                 if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
@@ -95,118 +108,12 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
         out.push(ch);
     }
     out.push('…');
+    // Close any style the cut left open so it does not bleed into the padding,
+    // border, or row butted up after the clip.
+    if carried_escape {
+        out.push_str(RESET);
+    }
     Cow::Owned(out)
-}
-
-/// True for the characters usagi's UI draws **one column** wide even though the
-/// CJK width table ([`UnicodeWidthChar::width_cjk`]) classes them as wide (2):
-///
-/// - **Private Use Area** — every status / agent / kind / git icon is a Nerd Font
-///   glyph in the PUA, drawn single-width on a patched font (see the
-///   `SELECTED_SESSION_GLYPH` note in `home/ui/panes.rs`).
-/// - **U+2500–U+25FF** — box-drawing, block-element and geometric-shape glyphs
-///   (`─ │ ╭ █ ● ◐ ○ ◇ ◆ ▶`). Terminals draw these narrow so TUI borders and the
-///   sidebar's shape icons line up, and Nerd Fonts render them single-width too.
-///
-/// Every *other* ambiguous character (arrows `→`, enclosed alphanumerics `①`,
-/// CJK symbols `※ ★` …) is drawn two columns wide, which is exactly where
-/// [`glyph_width`] must trust `width_cjk` over the plain-width undercount.
-fn renders_single_width(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x2500..=0x25FF | 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD
-    )
-}
-
-/// The display width of one character as an **East Asian** terminal renders it:
-/// the single-width UI glyphs of [`renders_single_width`] are one column; every
-/// other character uses the CJK width table, where East Asian *Ambiguous*
-/// characters are **two** columns. This is the width usagi's target terminals
-/// actually paint these at — [`console::measure_text_width`] (and the plain
-/// [`UnicodeWidthChar::width`] the other helpers use) undercount ambiguous
-/// characters as 1, which lets a session name containing them shove the row's
-/// status field sideways.
-fn glyph_width(ch: char) -> usize {
-    if renders_single_width(ch) {
-        1
-    } else {
-        UnicodeWidthChar::width_cjk(ch).unwrap_or(0)
-    }
-}
-
-/// [`measure_text_width`](console::measure_text_width)'s East-Asian counterpart:
-/// the display width of `text` with ambiguous-width characters counted as 2
-/// (Nerd Font glyphs still 1). ANSI escapes are stripped first, so a styled
-/// string measures by its visible glyphs just like the console helper.
-pub fn measure_width_cjk(text: &str) -> usize {
-    console::strip_ansi_codes(text)
-        .chars()
-        .map(glyph_width)
-        .sum()
-}
-
-/// [`clip_to_width`]'s East-Asian counterpart: clips `text` to at most `max`
-/// display columns measured by [`measure_width_cjk`] (ambiguous = 2), appending
-/// an ellipsis when it has to cut. Two columns are reserved for the `…` because
-/// it is itself an ambiguous-width glyph (rendered 2 wide on these terminals);
-/// when `max` is too small to hold the ellipsis the head is cut without one.
-/// Used for the session-row cells that carry user text (names, status labels),
-/// so their reserved width matches what the terminal paints.
-pub fn clip_to_width_cjk(text: &str, max: usize) -> String {
-    if measure_width_cjk(text) <= max {
-        return text.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    const ELLIPSIS: char = '…';
-    let ellipsis_w = glyph_width(ELLIPSIS);
-    let (budget, add_ellipsis) = if max >= ellipsis_w {
-        (max - ellipsis_w, true)
-    } else {
-        // No room for the ellipsis: fill the columns with plain text instead.
-        (max, false)
-    };
-    let mut out = String::with_capacity(text.len());
-    let mut width = 0usize;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if ch == ESC {
-            // Carry the whole zero-width escape through, matching [`clip_to_width_cow`].
-            out.push(ch);
-            for c in chars.by_ref() {
-                out.push(c);
-                if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
-                    break;
-                }
-            }
-            continue;
-        }
-        let w = glyph_width(ch);
-        if width + w > budget {
-            break;
-        }
-        width += w;
-        out.push(ch);
-    }
-    if add_ellipsis {
-        out.push(ELLIPSIS);
-    }
-    out
-}
-
-/// The East-Asian counterpart of the home pane's `pad_to_width`: right-pads
-/// `content` with spaces to fill `width` columns measured by [`measure_width_cjk`]
-/// (ambiguous = 2). Content already that wide is returned unchanged.
-pub fn pad_to_width_cjk(content: String, width: usize) -> String {
-    let visible = measure_width_cjk(&content);
-    if visible >= width {
-        content
-    } else {
-        let mut content = content;
-        content.extend(std::iter::repeat_n(' ', width - visible));
-        content
-    }
 }
 
 /// Breaks `text` into lines no wider than `width` display columns, splitting
@@ -1570,6 +1477,47 @@ mod tests {
     }
 
     #[test]
+    fn clip_to_width_closes_a_style_the_cut_left_open() {
+        // A styled line cut mid-span must be closed with a RESET so its colour —
+        // or a reverse/background span — does not bleed into what is butted up
+        // after it (the padding and right border `boxed` appends).
+        let styled = Style::new()
+            .force_styling(true)
+            .red()
+            .apply_to("hello world")
+            .to_string();
+        let clipped = clip_to_width(&styled, 6);
+        assert!(clipped.ends_with(RESET), "clip must reset: {clipped:?}");
+        // Plain (unstyled) text carries no escape, so no stray reset is appended.
+        let plain = clip_to_width("hello world", 6);
+        assert!(!plain.contains(RESET));
+        assert!(plain.ends_with('…'));
+    }
+
+    #[test]
+    fn boxed_does_not_bleed_a_clipped_caret_span_onto_its_border() {
+        // A full-width (CJK) input with a reverse-video caret, clipped to the box:
+        // the reverse must not carry past the clip onto the padding and right `│`,
+        // so once `boxed` closes the row the border reads as a plain frame.
+        let base = Style::new().force_styling(true).accent();
+        let line = block_caret("あいうえおかきくけこ", "さしすせそ", &base);
+        let boxed = boxed("t", 12, &[line]);
+        // Every row stays the same display width — the clip never shifts the frame.
+        let width = console::measure_text_width(&boxed[0]);
+        for row in &boxed {
+            assert_eq!(console::measure_text_width(row), width, "row: {row:?}");
+        }
+        // The content row's tail (padding + right border) carries no open SGR: the
+        // last escape in it is a reset, not the reverse/colour the caret opened.
+        let content = &boxed[1];
+        let last_esc = content.rfind(ESC).expect("row carries styling");
+        assert!(
+            content[last_esc..].starts_with(RESET),
+            "border tail must be reset, not bled style: {content:?}",
+        );
+    }
+
+    #[test]
     fn caret_mark_is_zero_width_and_survives_clipping() {
         // The marker must not shift layout while embedded in a frame: both the
         // width measurement that pads modal/box rows and the truncation primitive
@@ -1792,80 +1740,5 @@ mod tests {
         // … and a row outside the box still carries its original content (the
         // frame shows around the float, not blanked).
         assert!(base[0].contains('a') || base.last().unwrap().contains('a'));
-    }
-
-    #[test]
-    fn glyph_width_counts_ambiguous_wide_but_ui_glyphs_narrow() {
-        // ASCII and full-width CJK are unchanged (1 and 2).
-        assert_eq!(glyph_width('a'), 1);
-        assert_eq!(glyph_width('あ'), 2);
-        // East Asian Ambiguous characters render two columns on the target
-        // terminals — the case this fix exists for.
-        assert_eq!(glyph_width('→'), 2); // U+2192 arrow
-        assert_eq!(glyph_width('①'), 2); // U+2460 enclosed number
-        assert_eq!(glyph_width('※'), 2); // U+203B reference mark
-        assert_eq!(glyph_width('…'), 2); // U+2026 ellipsis
-                                         // The single-width UI glyphs stay one column: box-drawing, block and
-                                         // geometric shapes (U+2500..U+25FF) and Nerd Font PUA icons.
-        assert_eq!(glyph_width('─'), 1); // U+2500 box drawing
-        assert_eq!(glyph_width('◆'), 1); // U+25C6 geometric shape
-        assert_eq!(glyph_width('●'), 1); // U+25CF kind dot
-        assert_eq!(glyph_width('\u{f00c}'), 1); // BMP PUA (git status icon)
-        assert_eq!(glyph_width('\u{f0907}'), 1); // supplementary PUA (selected glyph)
-                                                 // An unassigned / zero-width code point contributes nothing.
-        assert_eq!(glyph_width('\u{200b}'), 0); // zero-width space
-    }
-
-    #[test]
-    fn measure_width_cjk_sums_glyphs_and_ignores_ansi() {
-        assert_eq!(measure_width_cjk("main"), 4);
-        assert_eq!(measure_width_cjk("feat→x"), 7); // the arrow is two columns
-                                                    // SGR escapes have zero display width, matching console::measure_text_width.
-        let styled = style("feat→x").accent().to_string();
-        assert_eq!(measure_width_cjk(&styled), 7);
-    }
-
-    #[test]
-    fn clip_to_width_cjk_reserves_two_columns_for_the_ellipsis() {
-        // Fits already: returned unchanged, no ellipsis.
-        assert_eq!(clip_to_width_cjk("feat→", 8), "feat→");
-        // Must cut: the ellipsis is itself two columns wide, so the kept head plus
-        // the `…` measures exactly `max`.
-        let clipped = clip_to_width_cjk("feature→branch", 8);
-        assert!(clipped.ends_with('…'));
-        assert_eq!(measure_width_cjk(&clipped), 8);
-        // A zero budget yields the empty string.
-        assert_eq!(clip_to_width_cjk("feat", 0), "");
-        // Too narrow to hold the ellipsis: the head is cut without one, still
-        // within the budget.
-        let tiny = clip_to_width_cjk("→→", 1);
-        assert!(!tiny.contains('…'));
-        assert!(measure_width_cjk(&tiny) <= 1);
-    }
-
-    #[test]
-    fn clip_to_width_cjk_carries_ansi_escapes_through_the_cut() {
-        // A styled string keeps its colour when clipped: the SGR escape (zero
-        // width) is copied verbatim and does not count against the budget.
-        // `force_styling` makes the escapes present even though the test's stdout
-        // is not a terminal.
-        let styled = Style::new()
-            .force_styling(true)
-            .bold()
-            .apply_to("feature→x")
-            .to_string();
-        let clipped = clip_to_width_cjk(&styled, 6);
-        assert!(clipped.contains('\u{1b}'));
-        assert_eq!(measure_width_cjk(&clipped), 6);
-        assert!(console::strip_ansi_codes(&clipped).ends_with('…'));
-    }
-
-    #[test]
-    fn pad_to_width_cjk_fills_by_east_asian_width() {
-        // An ambiguous glyph counts as two, so a shorter string pads to the target.
-        let padded = pad_to_width_cjk("feat→".to_string(), 10);
-        assert_eq!(measure_width_cjk(&padded), 10);
-        // Content already at least that wide is returned unchanged.
-        assert_eq!(pad_to_width_cjk("→→→".to_string(), 4), "→→→");
     }
 }

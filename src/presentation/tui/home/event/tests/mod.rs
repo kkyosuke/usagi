@@ -205,6 +205,13 @@ fn noop_reorder(_: &str, _: bool) -> SessionReorder {
     SessionReorder::Stationary
 }
 
+/// An `autostart_queued` callback that starts nothing, for the loop tests that do
+/// not exercise queued-prompt autostart (its apply path is covered directly in
+/// [`apply_autostart`] tests).
+fn noop_autostart(_: &HomeState) -> Vec<String> {
+    Vec::new()
+}
+
 fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
     Some(TerminalView::from_rows(vec!["live".to_string()], None))
 }
@@ -384,6 +391,7 @@ fn run_full_external(
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -414,6 +422,7 @@ fn run_full_external(
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     event_loop(
         &term,
@@ -904,6 +913,7 @@ fn run_with_tasks(
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -934,6 +944,7 @@ fn run_with_tasks(
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     event_loop(
         &term,
@@ -984,6 +995,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1014,6 +1026,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     event_loop(
         &term,
@@ -1066,6 +1079,7 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: true,
@@ -1096,6 +1110,7 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     event_loop(
         &term,
@@ -1234,6 +1249,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1264,6 +1280,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     let outcome = event_loop(
         &term,
@@ -1327,6 +1344,29 @@ fn pending_pr_link_updates_refresh_sidebar_rows() {
     // The drain is one-shot; a second pass has nothing to apply and should not
     // force a repaint.
     assert!(!apply_pending_pr_links(&mut state, &monitor));
+}
+
+#[test]
+fn apply_autostart_logs_started_panes_and_reports_change() {
+    let mut state = sample_state();
+    let before = state.log().len();
+
+    // Nothing started (feature off / nothing queued): no log line, reports no
+    // change, so the loop does not force a repaint on its account.
+    let mut none = |_: &HomeState| Vec::<String>::new();
+    assert!(!apply_autostart(&mut state, &mut none));
+    assert_eq!(state.log().len(), before);
+
+    // Two panes started: each returned line is appended to the command log, and it
+    // reports a change so the loop repaints and the new sidebar badges show.
+    let mut two = |_: &HomeState| {
+        vec![
+            "queued prompt auto-started for feat: do X".to_string(),
+            "queued prompt auto-started for root: do Y".to_string(),
+        ]
+    };
+    assert!(apply_autostart(&mut state, &mut two));
+    assert_eq!(state.log().len(), before + 2);
 }
 
 mod attached;

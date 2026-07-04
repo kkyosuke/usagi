@@ -54,21 +54,32 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     crate::usecase::workspace_state::recorded_sessions(root)
 }
 
-/// How often the background watcher stats `state.json` for an external change (a
+/// How often the background watcher reads `state.json` for an external change (a
 /// create / remove made by an agent's MCP call, another usagi window, or the CLI).
 /// Paired with the event loop's own `WATCH_SESSIONS_TICK`, so a change lands in the
 /// sidebar within roughly a second — cheap enough to poll continuously while the
 /// screen is open.
 const SESSIONS_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The last-modified time of `state.json` at `path`, or `None` when it does not
-/// exist yet or cannot be stat'd — the watcher's change signal. A stable value
-/// means no external write since the last poll; any change (including the file
-/// first appearing) re-reads the recorded sessions.
-fn state_mtime(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
+/// A fingerprint of `state.json` at `path` — its byte length paired with a hash of
+/// its contents — or `None` when it does not exist yet or cannot be read. The
+/// watcher's change signal: a stable value means no external write since the last
+/// poll; any change (including the file first appearing) re-reads the recorded
+/// sessions.
+///
+/// Fingerprinting the **contents** rather than the mtime is deliberate. The mtime
+/// alone missed writes: filesystems record it at coarse (often 1-second)
+/// resolution, so an MCP `session_create` / `session_delegate_issue` that rewrites
+/// the file within the same tick as the previous write left the mtime unchanged
+/// and the new session never appeared until the next unrelated write or a restart.
+/// A content hash detects every distinct write regardless of timing, and reading a
+/// small JSON file every poll is negligible.
+fn state_fingerprint(path: &Path) -> Option<(usize, u64)> {
+    use std::hash::{Hash, Hasher};
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some((bytes.len(), hasher.finish()))
 }
 
 /// Track a freshly spawned session-worker handle, first dropping the handles of
@@ -587,6 +598,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // startup). Copied out so the pane driver can read it without holding `settings`.
     let restore_panes_enabled = settings.restore_panes_enabled;
 
+    // Whether a prompt queued for a pane-less session (MCP `session_delegate_issue`
+    // / `session_prompt`) auto-starts that session's agent pane in the background.
+    // Copied out so the autostart pass can read it without holding `settings`.
+    let autostart_queued_prompts_enabled = settings.autostart_queued_prompts;
+
     // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
     // renders into its own invocation; built once and reused for every launch.
     let agent_wiring = settings.agent_wiring(&usagi_bin);
@@ -636,6 +652,23 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             };
             state.restore_focus(&focus.session, level);
         }
+    }
+
+    // Pick up prompts queued before this screen opened — an issue delegated while
+    // no TUI was running — starting each pane-less target's agent in the background
+    // so a delegated issue is already being worked when the screen opens. Runs
+    // regardless of pane restore (a separate feature) and is gated by its own
+    // setting; a no-op when disabled or nothing is queued. The event loop keeps
+    // scanning for prompts queued *while* the screen runs (see `autostart_queued`).
+    for line in autostart_queued_prompts(
+        term,
+        &state,
+        &pool,
+        &agent_wiring,
+        default_cli,
+        autostart_queued_prompts_enabled,
+    ) {
+        state.log_output(line);
     }
 
     // Removing a session deletes its worktrees/branches and forgets it, on a
@@ -721,47 +754,65 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let root = workspace.path.clone();
         std::thread::spawn(move || {
             if let Ok(state) = crate::usecase::workspace_state::sync(&root) {
-                handle.set(state.sessions);
+                handle.set(root, state.sessions);
             }
         });
     }
 
     // Reflect session create / remove made outside this screen — an agent's MCP
-    // `session_create` / `session_remove`, another usagi window, or the CLI — which
-    // write `state.json` with no signal to this process. Poll the file's mtime on a
-    // background thread and, when it changes, re-read the recorded sessions and
-    // publish them through the same `sessions_refresh` slot a detach uses; the event
-    // loop (kept ticking by `watch_sessions`) applies them on the next frame without
-    // yanking the cursor. Reading the recorded state (no git re-sync) neither writes
-    // the file back — which would retrigger this poll forever — nor blocks on the git
-    // fan-out: a newly-appeared session's worktree statuses fill in on the next real
-    // sync (detach / restart). Like the entry re-sync above, the thread is detached
-    // (it only reads, so it never leaves half-written state): `watch_stop` below tells
-    // it to exit when the screen closes, so it stops within one poll instead of piling
+    // `session_create` / `session_delegate_issue` / `session_remove`, another usagi
+    // window, or the CLI — which write `state.json` with no signal to this process.
+    // Poll each workspace's file on a background thread and, when its contents
+    // change, re-read that workspace's recorded sessions and publish them (keyed by
+    // its root) through the same `sessions_refresh` slot a detach uses; the event
+    // loop (kept ticking by `watch_sessions`) routes each to its sidebar group on the
+    // next frame without yanking the cursor. **Every** workspace is watched, not just
+    // the primary: in 統合(unite) mode a session delegated to a secondary workspace
+    // writes *its* `state.json`, so watching only `workspaces[0]` missed it entirely.
+    // Reading the recorded state (no git re-sync) neither writes the file back —
+    // which would retrigger this poll forever — nor blocks on the git fan-out: a
+    // newly-appeared session's worktree statuses fill in on the next real sync
+    // (detach / restart). Like the entry re-sync above, the thread is detached (it
+    // only reads, so it never leaves half-written state): `watch_stop` below tells it
+    // to exit when the screen closes, so it stops within one poll instead of piling
     // up across re-entries — and quitting never waits on it.
     let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let handle = sessions_refresh.clone();
-        let root = workspace.path.clone();
-        let state_path =
-            crate::infrastructure::workspace_store::WorkspaceStore::new(&root).state_path();
+        // The root and its `state.json` path for every displayed workspace (the
+        // primary plus any unite groups).
+        let watched: Vec<(std::path::PathBuf, std::path::PathBuf)> = workspaces
+            .iter()
+            .map(|w| {
+                let state_path =
+                    crate::infrastructure::workspace_store::WorkspaceStore::new(&w.path)
+                        .state_path();
+                (w.path.clone(), state_path)
+            })
+            .collect();
         let stop = watch_stop.clone();
         std::thread::spawn(move || {
-            // Seed with the state already on screen so only a later external write
-            // triggers a refresh, not the current contents.
-            let mut last = state_mtime(&state_path);
+            // Seed each workspace with the state already on screen so only a later
+            // external write triggers a refresh, not the current contents.
+            let mut last: Vec<Option<(usize, u64)>> = watched
+                .iter()
+                .map(|(_, state_path)| state_fingerprint(state_path))
+                .collect();
             loop {
                 std::thread::sleep(SESSIONS_WATCH_POLL);
                 if stop.load(std::sync::atomic::Ordering::SeqCst) {
                     break;
                 }
-                let mtime = state_mtime(&state_path);
-                if mtime == last {
-                    continue;
-                }
-                last = mtime;
-                if let Some(sessions) = crate::usecase::workspace_state::recorded_sessions(&root) {
-                    handle.set(sessions);
+                for (i, (root, state_path)) in watched.iter().enumerate() {
+                    let fingerprint = state_fingerprint(state_path);
+                    if fingerprint == last[i] {
+                        continue;
+                    }
+                    last[i] = fingerprint;
+                    if let Some(sessions) = crate::usecase::workspace_state::recorded_sessions(root)
+                    {
+                        handle.set(root.clone(), sessions);
+                    }
                 }
             }
         });
@@ -1083,7 +1134,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 &workers,
                 std::thread::spawn(move || {
                     if let Some(sessions) = reload_sessions(&refresh_root) {
-                        refresh_handle.set(sessions);
+                        refresh_handle.set(refresh_root, sessions);
                     }
                 }),
             );
@@ -1494,6 +1545,22 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             .map_err(|e| format!("failed to open external terminal: {e}"))
     };
 
+    // Each idle tick, pick up prompts queued for pane-less sessions while the
+    // screen runs (an MCP `session_delegate_issue` / `session_prompt`) and start
+    // their agent panes in the background. Shares the pool with `open_terminal` /
+    // `preview`; the event loop calls one hook at a time, so their `RefCell`
+    // borrows never overlap.
+    let mut autostart_queued = |state: &HomeState| -> Vec<String> {
+        autostart_queued_prompts(
+            term,
+            state,
+            &pool,
+            &agent_wiring,
+            default_cli,
+            autostart_queued_prompts_enabled,
+        )
+    };
+
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
         // The state.json watcher below is always running, so let the idle loop wake
@@ -1526,6 +1593,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     let outcome = event::event_loop(
         term,
@@ -1662,6 +1730,114 @@ fn restore_open_panes(
     }
 }
 
+/// Auto-start any session that has a prompt queued for it but no live pane,
+/// spawning that session's agent pane in the background (nothing is attached) with
+/// the queued prompt as the agent's first message — so a delegated issue begins
+/// work without a human opening the pane. Its lifecycle hooks still move the
+/// sidebar badge (`▶ running` / `✓ done`) even unattached.
+///
+/// This mirrors [`restore_open_panes`]'s background agent spawn, but sourced from
+/// the queued-prompt store
+/// ([`agent_prompt_store`](crate::infrastructure::agent_prompt_store)) rather than
+/// the open-panes snapshot. Candidate dirs are the workspace root and every session
+/// worktree — the same set `restore_open_panes` scans. A session that already has a
+/// live pane is skipped, so its queued prompt is consumed the ordinary way (the
+/// next fresh launch) instead. Taking the prompt is one-shot; a spawn that fails
+/// re-queues it so a transient failure never silently drops a prompt the sender was
+/// told was queued.
+///
+/// Returns one log line per pane it started, for the caller to append to the
+/// command log — so it is visible why an agent opened already working on something
+/// the user did not type. A no-op (empty) when `enabled` is false or nothing is
+/// queued; the cheap [`any_queued`](crate::infrastructure::agent_prompt_store::any_queued)
+/// check gates the per-session work so an idle tick with no queue costs one
+/// directory listing.
+fn autostart_queued_prompts(
+    term: &Term,
+    state: &HomeState,
+    pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+    agent_wiring: &crate::domain::agent::AgentWiring,
+    default_cli: crate::domain::settings::AgentCli,
+    enabled: bool,
+) -> Vec<String> {
+    use terminal::tabs::PaneKind;
+
+    if !enabled || !crate::infrastructure::agent_prompt_store::any_queued() {
+        return Vec::new();
+    }
+
+    // The dirs a queued prompt may be keyed by — the workspace root and each
+    // session worktree — paired with the label shown when its pane starts. Deduped
+    // so a path is never handled twice (mirrors `restore_open_panes`).
+    let mut dirs: Vec<(PathBuf, String)> = Vec::new();
+    let root = state.root_path().to_path_buf();
+    if !root.as_os_str().is_empty() {
+        dirs.push((root, "root".to_string()));
+    }
+    for wt in state.list().worktrees() {
+        if dirs.iter().any(|(d, _)| d == &wt.path) {
+            continue;
+        }
+        dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
+    }
+
+    // Memoize secret-env resolution per workspace root, exactly as
+    // `restore_open_panes` does, so the `op` CLI is invoked once per root rather
+    // than once per session worktree.
+    let mut env_by_root: std::collections::HashMap<
+        PathBuf,
+        std::collections::BTreeMap<String, String>,
+    > = std::collections::HashMap::new();
+
+    let mut logs = Vec::new();
+    for (dir, label) in dirs {
+        // A live pane already drives this session (or an agent is running there):
+        // leave any queued prompt to the ordinary consume-on-fresh-launch path.
+        if pool.borrow().has_live_pane(&dir) {
+            continue;
+        }
+        // One-shot take: nothing queued for this worktree (or a file stamped for
+        // another) simply skips it.
+        let Some(prompt) = crate::infrastructure::agent_prompt_store::take(&dir) else {
+            continue;
+        };
+        let agent = crate::infrastructure::agent::agent_for(default_cli);
+        // Resume an existing conversation when one exists (a re-delegated session),
+        // else start fresh; the queued prompt is the opening message either way.
+        let resume = agent.has_resumable_session(&dir);
+        let command = agent.launch_command(agent_wiring, resume, Some(&prompt));
+        let ws_root = crate::usecase::session::workspace_root(&dir);
+        let pane_env = env_by_root
+            .entry(ws_root.clone())
+            .or_insert_with(|| crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root))
+            .clone();
+        match pool.borrow_mut().add_pane(
+            term,
+            &dir,
+            PaneKind::Agent,
+            terminal::pool::PaneLaunch {
+                agent_command: Some(&command),
+                cli: default_cli,
+                label: &label,
+                env: &pane_env,
+            },
+        ) {
+            Ok(()) => logs.push(format!("queued prompt auto-started for {label}: {prompt}")),
+            Err(err) => {
+                // The background spawn failed, so the prompt was not delivered.
+                // Re-queue it (best-effort) so a later tick — or a human opening the
+                // pane — still receives it, and record why the spawn failed.
+                let _ = crate::infrastructure::agent_prompt_store::set(&dir, &prompt);
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "failed to auto-start queued prompt for {}: {err:#}",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    logs
+}
+
 /// Create a session on a worker thread: run the git / filesystem work and build
 /// the [`Completion`](tasks::Completion) the event loop applies (the success or
 /// failure line, and the refreshed sessions read back with each worktree's git
@@ -1787,4 +1963,40 @@ fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
             &crate::usecase::doctor::SystemRunner,
             &settings.local_llm.model,
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::state_fingerprint;
+
+    #[test]
+    fn state_fingerprint_tracks_contents_not_mtime() {
+        // The core of the sidebar-refresh fix: the watcher's change signal keys off
+        // the file's contents, so a write that leaves the mtime unchanged (coarse
+        // filesystem resolution, or a second write within the same tick) is still
+        // detected. A missing file has no fingerprint.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        assert_eq!(state_fingerprint(&path), None, "no file yet");
+
+        std::fs::write(&path, b"{\"sessions\":[]}").unwrap();
+        let before = state_fingerprint(&path).expect("file exists");
+        // Re-reading the same bytes yields the same fingerprint — no spurious refresh.
+        assert_eq!(state_fingerprint(&path), Some(before));
+
+        // A new session grows the file: a different fingerprint regardless of mtime.
+        std::fs::write(&path, b"{\"sessions\":[{\"name\":\"x\"}]}").unwrap();
+        assert_ne!(state_fingerprint(&path), Some(before));
+
+        // A same-length rewrite (the mtime-coincidence case the old stat-only
+        // watcher missed) still changes the fingerprint because the bytes differ.
+        std::fs::write(&path, b"AAAA").unwrap();
+        let four_a = state_fingerprint(&path).expect("file exists");
+        std::fs::write(&path, b"BBBB").unwrap();
+        let four_b = state_fingerprint(&path).expect("file exists");
+        assert_ne!(
+            four_a, four_b,
+            "same length, different contents → new signal"
+        );
+    }
 }

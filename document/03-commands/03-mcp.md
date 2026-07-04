@@ -11,9 +11,10 @@
 - **memory**: `usagi memory`（[01-cli.md](01-cli.md#usagi-memory)）と同じメモリ操作（セッションをまたいで
   覚えておく知識の保存・想起）。
 - **session**: usagi のセッション（[4. オーケストレーション](../04-orchestration.md)）操作。セッションを
-  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、セッションに紐づく PR を取得し、
-  不要になったセッションを削除できます。コーディネータ役のエージェントが、並行する worktree にタスクを
-  振り分けるオーケストレータとして振る舞えます。
+  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、各セッションの進捗（エージェントの
+  phase・worktree の git 状態）をポーリングし、セッションに紐づく PR を取得し、不要になったセッションを削除
+  できます。コーディネータ役のエージェントが、並行する worktree にタスクを振り分け、完了を検知して片付ける
+  オーケストレータとして振る舞えます。
 
 > MCP の tool 面は CLI と 1:1 対応ではなく、**エージェントが選びやすいワークフロー単位**に寄せています。
 > 一覧と検索は `issue_search` / `memory_search` の 1 tool（`query` 省略で全件）に、メモリの保存と更新は
@@ -27,6 +28,7 @@
 - [起動と登録](#起動と登録)
 - [アーキテクチャ](#アーキテクチャ)
 - [対応 tool 一覧](#対応-tool-一覧)
+- [`session_status` の挙動](#session_status-の挙動)
 - [`session_prompt` の挙動](#session_prompt-の挙動)
 - [`session_delegate_issue` の挙動](#session_delegate_issue-の挙動)
 - [`session_remove` の挙動](#session_remove-の挙動)
@@ -108,7 +110,7 @@ usecase/issue, usecase/memory, usecase/session … create/get/search/update/dele
 infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ の markdown + index.json
 （テスト時）FakeBackend / （本番）CliAgentBackend
   └─ session_prompt → mode(auto) が agent phase を見て振り分け
-       ├─ queue → agent-prompts/ へキュー（TUI が起動時に消費）
+       ├─ queue → agent-prompts/ へキュー（TUI がフレッシュ起動時に消費／設定 ON なら稼働中に自動 spawn）
        └─ live  → agent-live-prompts/ へキュー（起動中 TUI が live pane へ注入）
 ```
 
@@ -127,7 +129,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 18 tool（issue 6 + memory 4 + session 7 + オーケストレーション 1）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 19 tool（issue 6 + memory 4 + session 8 + オーケストレーション 1）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
@@ -144,8 +146,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
 | `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `created_at` / `worktrees`） |
+| `session_status` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `agent_phase` / `worktrees`。各 worktree に `status` / `dirty` / `merged`）（[挙動](#session_status-の挙動)） |
 | `session_prompt` | `name` / `prompt` | `mode`（`auto` / `queue` / `live`、既定 `auto`） | `{ "name": "…", "delivered_to": "queue" \| "live", "detail": "…" }`（[挙動](#session_prompt-の挙動)） |
-| `session_pr` | `name` | — | `{ "name": "…", "root": "…", "pr": [{ "number": N, "url": "…" }] }` |
+| `session_pr` | `name` | — | `{ "name": "…", "root": "…", "merged": bool, "pr": [{ "number": N, "url": "…", "state": "open" \| "merged" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
 | `session_delegate_issue` | `number` | `name` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
 
@@ -175,11 +178,19 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
   カーソルは動きません。
 - `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
-  PR URL を返します。PR が記録されていないセッションは `pr: []` を返します。存在しないセッション名は
-  実行エラー（`isError: true`）になります。
+  PR URL を返します。各 PR には `state`（セッションの全 worktree がデフォルトブランチにマージ済みなら
+  `merged`、それ以外は `open`）が付き、返り値トップレベルの `merged` も同じ判定を返します。この状態は
+  キャッシュ済みの worktree 状態から導出し（usagi は GitHub に問い合わせません）、**マージせずにクローズ
+  された PR は open と区別できません**。PR が記録されていないセッションは `pr: []` を返します。存在しない
+  セッション名は実行エラー（`isError: true`）になります。
+- `session_status` は、コーディネータ役のエージェントがポーリングして委譲先の進捗を知るための読み取り専用
+  tool です。エージェントの phase と各 worktree の git 状態をキャッシュから返します（git を起動しません）
+  （[挙動](#session_status-の挙動)）。
 - `session_prompt` は 1 つの tool で 2 つの配送チャネル（起動時キュー / 起動中ペイン）を持ち、`mode` で
   選びます。既定の `auto` はライブペインの有無を検知して自動で振り分けます。どちらに配送したかは返り値の
-  `delivered_to` でわかります（[挙動](#session_prompt-の挙動)）。
+  `delivered_to` でわかります（[挙動](#session_prompt-の挙動)）。`name` に予約名 **`:root`** を渡すと、セッション
+  ではなく**ルート行のコーディネータ**へ配送でき、子セッションが完了を push で報告できます
+  （[ルート行への push 型完了報告](#ルート行コーディネータへの-push-型完了報告)）。
 - `session_remove` はセッションの全 worktree とブランチを破棄し、コピーされたファイルとエージェントの会話履歴を
   消して `state.json` から削除します。`usagi clean` が起動するバックグラウンドエージェントは、このツールで
   放置セッションを片付けます（[挙動](#session_remove-の挙動)）。
@@ -187,6 +198,29 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   （保存フォーマットの正本は [data/02-workspace.md](../data/02-workspace.md#statejson)）。
 
 入力スキーマ（JSON Schema）は `tools/list` のレスポンスに各 tool の `inputSchema` として含まれます。
+
+## `session_status` の挙動
+
+`session_status` は、コーディネータ役のエージェントが**委譲先セッションの進捗をポーリング**して、子の完了や
+PR のマージを検知し、`session_remove` → 次の issue 委譲へと自律ループを回すための読み取り専用 tool です。
+各セッションについて次を返します。
+
+| フィールド | 内容 |
+|---|---|
+| `agent_phase` | セッションの root worktree に記録されたエージェントの lifecycle phase（`ready` / `running` / `waiting` / `ended`）。ペインが一度も起動していない（またはペインが死んで phase がクリアされた）場合は `none`。TUI のバッジを駆動するのと同じ agent phase ファイルを読む。 |
+| `worktrees[].status` | worktree の git 状態（`new` / `dirty` / `local` / `pushed` / `synced`）。`usagi status`（[`state.json`](../data/02-workspace.md#statejson)）と同じ分類。 |
+| `worktrees[].dirty` | 未コミットの変更がある（`status == dirty`）。 |
+| `worktrees[].merged` | デフォルトブランチがこの worktree の内容をすべて含む＝マージ済み（`status == synced`）。 |
+
+- **読み取り専用・軽量**です。`state.json`（直近の同期で記録した worktree 状態）と agent phase ファイルだけを
+  読み、**git を起動しません**。値の鮮度は直近の[ワークスペース同期](../data/02-workspace.md#statejson)
+  （稼働中の TUI がバックグラウンドで実行）に一致します。ポーリング用途で繰り返し呼んでも安価です。
+- `agent_phase` の `ended` は「子エージェントがターンを終えた／プロセスが終了した」ことを、`merged` は
+  「作業がデフォルトブランチに取り込まれた」ことを示します。コーディネータはこの 2 つを見てセッションの完了を
+  判定し、`session_remove` で片付けてから次の issue を委譲します。
+- `merged` は worktree 状態から導出するため、リモートでマージされた反映にはローカルの
+  `origin/<default>` が最新である必要があります（`usagi status` と同じ制約。GitHub には問い合わせません）。
+- セッションが 1 件も無ければ空配列 `[]` を返します。並び順は `session_list` と同じ（ホーム一覧の表示順）。
 
 ## `session_prompt` の挙動
 
@@ -196,7 +230,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 | チャネル | キュー先 | 配送タイミング |
 |---|---|---|
-| 起動時キュー（queue） | [`agent-prompts/`](../data/01-global.md#agent-prompts) | ホーム画面がそのセッションのエージェントペインを**次にフレッシュ起動するとき**に、エージェントの**最初のメッセージ**として渡す |
+| 起動時キュー（queue） | [`agent-prompts/`](../data/01-global.md#agent-prompts) | ホーム画面がそのセッションのエージェントペインを**次にフレッシュ起動するとき**に、エージェントの**最初のメッセージ**として渡す。設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が有効なら、TUI 稼働中はホーム画面がキューを検知してペインを**バックグラウンドで自動 spawn** し、人が開くのを待たない（[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)） |
 | ライブキュー（live） | [`agent-live-prompts/`](../data/01-global.md#agent-live-prompts) | **すでに起動中のエージェントペイン**へ、動作中の TUI の監視スレッドが「貼り付け → Enter」で流し込む |
 
 どちらを使うかは `mode` 引数で決めます（省略時 `auto`）。
@@ -210,11 +244,30 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 返り値の `delivered_to` に、実際に配送したチャネル（`"queue"` / `"live"`）が入るため、`auto` を使っても
 どちらに届いたかが確認できます。`detail` にはチャネルごとの確認メッセージが入ります。
 
+### ルート行（コーディネータ）への push 型完了報告
+
+`name` に予約名 **`:root`** を渡すと、セッションではなく**ワークスペースのルート行**（[`⌂ root`](../04-orchestration.md#用語)）を
+配送先にできます。ルート行で動くコーディネータ役のエージェントへ、子セッションのエージェントが**自分の完了を
+push で報告**するための経路です。ポーリング（[`session_status`](#session_status-の挙動)）と違い、ポーリング間隔を
+待たずに完了が即座にコーディネータの入力として届くため、コーディネータは次のタスクへすぐ進めます。
+
+- `:root` はルート行の作業ディレクトリ（= workspace root）へ配送します。ルート行はどのセッションにも属さないため、
+  `:root` の解決に**セッションの存在は不要**です。配送チャネルの選び方（`mode` / `auto` の live・queue 判定）は
+  通常のセッション宛と同じで、コーディネータのペインが起動中なら **live** で即座に流し込み、起動していなければ
+  ルート行の agent ペインを**次にフレッシュ起動したとき**の起動時キューへ積みます。
+- 予約名は先頭に `:` を付けた `:root` です。セッション名は git ブランチ / ディレクトリ名になるため先頭 `:` を
+  持たず、`:root` が実在のセッションと衝突・混同することはありません。
+- 使い方は、委譲された子セッションのエージェントが作業を終えたときに、`session_prompt(name=":root", prompt="…完了報告…")`
+  を自分で呼ぶだけです（`mode` は既定の `auto` でよい）。報告文面は子エージェントが決められるため、完了した issue 番号・
+  開いた PR 番号・残課題などをコーディネータにそのまま伝えられます。
+
 - **起動時キュー**にキューしたプロンプトは、[在席](../design/home/02-layout.md#在席focus)から `agent` を実行して
   **エージェントペインを新規 spawn する**ときに 1 回だけ消費されます（再アタッチや 2 枚目のエージェントタブには
   再送されません）。フレッシュ起動が起きるまではキューに残ります。引き渡し方はエージェント CLI 依存で、Claude は
   起動時の位置引数（`claude … '<prompt>'`）として受け取り、対話モードのままそのプロンプトに着手します。Gemini は
-  この経路を持たないため素起動します。
+  この経路を持たないため素起動します。設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が
+  有効なら、この「フレッシュ起動」を人が起こすのを待たず、TUI がキューを検知してバックグラウンドで自動的に行います
+  （[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)）。OFF にすると従来どおり人がペインを開くまで消費されません。
 - **ライブキュー**のプロンプトは、対象セッションに live agent ペインがある場合 TUI の監視 tick（約 200 ms 間隔）で
   配送されます。複数回送ったプロンプトは追記順に、各 1 回だけ配送されます。配送は「取り出し → 書き込み」の順で
   行い、PTY への書き込みが失敗したプロンプト（および同じ tick でそれ以降にあった未配送分）はライブキューの
@@ -235,6 +288,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 - 新規作成したセッションには live なエージェントペインが存在しないため、配送は常に**起動時キュー**（`queue`）です。
   返り値の `delivered_to` も常に `"queue"` になります。
+- 設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が有効で TUI が稼働していれば、委譲した
+  セッションの agent ペインは人が開かなくても**バックグラウンドで自動起動**され、キュー済みプロンプトに着手します
+  （[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)）。OFF なら次に人がそのペインをフレッシュ起動するまでキューで待ちます。
 - **新しいロジックは足していません**。既存の 3 tool（`issue_to_prompt` / `session_create` / `session_prompt`）を
   合成サーバ（`usagi.rs`）が順に呼ぶだけなので、採番・検証・キューなどの挙動は primitive と完全に一致します。
 - primitive はそのまま残っています。**プロンプトを手で調整したい**、**既存セッションに載せたい**、**live 送信したい**

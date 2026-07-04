@@ -50,6 +50,7 @@ fn run_bg(
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut chat_ask = ready_chat_ask;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -70,6 +71,7 @@ fn run_bg(
         poll_pending_spawn,
         activate_pending,
         clear_pending_spawn,
+        autostart_queued: &mut autostart_queued,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,

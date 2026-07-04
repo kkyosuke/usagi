@@ -2,12 +2,12 @@
 //!
 //! Where [`super::issue`] exposes a repository's issues and [`super::llm`]
 //! exposes a local model, this server lets an agent drive usagi's own session
-//! lifecycle: create a parallel worktree session, list the existing ones, hand a
-//! prompt to the agent of a specific session, list
-//! the pull requests discovered for a session, and remove a session it no longer
-//! needs. This turns a
-//! coordinating agent into an orchestrator that can spin up isolated worktrees,
-//! delegate work into them, and tear them down again.
+//! lifecycle: create a parallel worktree session, list the existing ones, poll
+//! each session's orchestration status (agent phase + per-worktree git status),
+//! hand a prompt to the agent of a specific session, list the pull requests
+//! discovered for a session, and remove a session it no longer needs. This turns
+//! a coordinating agent into an orchestrator that can spin up isolated worktrees,
+//! delegate work into them, watch them for completion, and tear them down again.
 //!
 //! A single `session_prompt` tool delivers work to a session over two channels —
 //! the *launch queue* (delivered as the agent's opening message the next time its
@@ -41,9 +41,10 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 7] = [
+pub const TOOL_NAMES: [&str; 8] = [
     "session_create",
     "session_list",
+    "session_status",
     "session_prompt",
     "session_pr",
     "session_remove",
@@ -64,6 +65,17 @@ pub const TOOL_NAMES: [&str; 7] = [
 /// prompt reaches the backend so an oversized one is rejected as a tool error
 /// rather than written to disk.
 const MAX_PROMPT_BYTES: usize = 128 * 1024;
+
+/// The reserved `session_prompt` target that addresses the workspace's **root
+/// row** — the `⌂ root` coordinator — instead of a named session. A child
+/// session's agent reports its completion by prompting this target (push-style
+/// completion report): with the default `auto` mode the report is delivered live
+/// to the coordinator's running agent pane, or queued for its next launch when
+/// none is open. Spelled with a leading `:` so it can never be mistaken for — or
+/// shadowed by — a real session, whose name is a git branch / directory component
+/// (a leading `-` is rejected, but a `:` is legal, so the sentinel stays outside
+/// the space of names usagi itself creates).
+pub(crate) const ROOT_TARGET: &str = ":root";
 
 /// Reject a prompt argument that exceeds [`MAX_PROMPT_BYTES`], naming the tool in
 /// the error so the caller knows which argument to trim. Used by `session_prompt`,
@@ -201,9 +213,10 @@ impl SessionMcpServer {
         })))
     }
 
-    /// Deliver `prompt` to session `name` over the channel chosen by `mode`,
-    /// returning the channel actually used and the backend's confirmation. Shared
-    /// by the `session_prompt` tool and the unified server's
+    /// Deliver `prompt` to `name` over the channel chosen by `mode`, returning the
+    /// channel actually used and the backend's confirmation. `name` is either a
+    /// session name or the reserved [`ROOT_TARGET`] (the `⌂ root` coordinator).
+    /// Shared by the `session_prompt` tool and the unified server's
     /// `session_delegate_issue` (which passes [`PromptMode::Queue`], since a freshly
     /// created session has no live pane).
     pub(crate) fn deliver_prompt(
@@ -213,30 +226,58 @@ impl SessionMcpServer {
         mode: PromptMode,
     ) -> Result<(Channel, String), String> {
         check_prompt_len("session_prompt", prompt)?;
-        let target = self.find_session(name)?;
+        let target_root = self.resolve_target(name)?;
         // Resolve which channel takes the prompt. `auto` asks the backend whether
         // a live pane exists; the explicit modes force one channel.
         let channel = match mode {
             PromptMode::Queue => Channel::Queue,
             PromptMode::Live => Channel::Live,
-            PromptMode::Auto if self.backend.agent_is_live(&target.root) => Channel::Live,
+            PromptMode::Auto if self.backend.agent_is_live(&target_root) => Channel::Live,
             PromptMode::Auto => Channel::Queue,
         };
         let detail = match channel {
-            Channel::Queue => self.backend.prompt(&target.root, prompt)?,
-            Channel::Live => self.backend.send(&target.root, prompt)?,
+            Channel::Queue => self.backend.prompt(&target_root, prompt)?,
+            Channel::Live => self.backend.send(&target_root, prompt)?,
         };
         Ok((channel, detail))
     }
 
+    /// Resolve a `session_prompt` target to the worktree root its prompt is
+    /// delivered to. The reserved [`ROOT_TARGET`] maps to the workspace root (the
+    /// coordinator's `⌂ root` row, which belongs to no session), so a child can
+    /// push a completion report up to the coordinator; any other name maps to the
+    /// matching session's root and errors when no such session exists. Both the
+    /// live and launch channels are addressed purely by this worktree path (the
+    /// root row's is the workspace root itself), so no other resolution differs.
+    fn resolve_target(&self, name: &str) -> Result<PathBuf, String> {
+        if name == ROOT_TARGET {
+            Ok(self.workspace_root.clone())
+        } else {
+            Ok(self.find_session(name)?.root)
+        }
+    }
+
+    fn tool_list_status(&self) -> Result<String, String> {
+        let statuses = session::statuses(&self.workspace_root).map_err(|e| e.to_string())?;
+        Ok(to_pretty(&statuses_to_json(&statuses)))
+    }
+
     fn tool_pr(&self, arguments: Value) -> Result<String, String> {
         let args: PrArgs = parse_args(arguments)?;
-        let (root, prs) =
-            session::pr_links(&self.workspace_root, &args.name).map_err(|e| e.to_string())?;
+        let prs = session::pr_links(&self.workspace_root, &args.name).map_err(|e| e.to_string())?;
+        // A PR's state reflects the session's branch integration (usagi never
+        // queries GitHub): once the work is merged, every PR reads "merged",
+        // otherwise "open" — a PR closed without merging is not distinguishable.
+        let state = if prs.merged { "merged" } else { "open" };
         Ok(to_pretty(&json!({
             "name": args.name,
-            "root": root,
-            "pr": prs,
+            "root": prs.root,
+            "merged": prs.merged,
+            "pr": prs.prs.iter().map(|pr| json!({
+                "number": pr.number,
+                "url": pr.url,
+                "state": state,
+            })).collect::<Vec<_>>(),
         })))
     }
 
@@ -300,6 +341,7 @@ impl McpService for SessionMcpServer {
         match name {
             "session_create" => self.tool_create(arguments),
             "session_list" => self.tool_list(),
+            "session_status" => self.tool_list_status(),
             "session_prompt" => self.tool_prompt(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
@@ -417,6 +459,32 @@ fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
     )
 }
 
+/// Serialize the session statuses for `session_status`. Each session carries its
+/// agent lifecycle phase (`none` when no pane has run there) and each worktree's
+/// cached git status plus the `dirty` / `merged` booleans a coordinator polls.
+fn statuses_to_json(statuses: &[session::SessionStatus]) -> Value {
+    Value::Array(
+        statuses
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "display_name": s.display_name,
+                    "root": s.root,
+                    "agent_phase": s.agent_phase.map_or("none", |p| p.as_str()),
+                    "worktrees": s.worktrees.iter().map(|wt| json!({
+                        "path": wt.path,
+                        "branch": wt.branch,
+                        "status": wt.status.as_str(),
+                        "dirty": wt.dirty,
+                        "merged": wt.merged,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// JSON Schemas for the session tools advertised via `tools/list`.
 fn session_tool_schemas() -> Value {
     json!([
@@ -444,6 +512,23 @@ fn session_tool_schemas() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "session_status",
+            "description": "Report each session's orchestration status for a \
+                coordinating agent to poll: its agent lifecycle phase (\"ready\" / \
+                \"running\" / \"waiting\" / \"ended\", or \"none\" when no agent \
+                pane has run in it) and, per worktree, the git status (\"new\" / \
+                \"dirty\" / \"local\" / \"pushed\" / \"synced\") plus `dirty` and \
+                `merged` booleans. `merged` is true when the default branch \
+                already contains all of the worktree (status \"synced\"). \
+                Read-only and cheap — it reads the cached state.json and the \
+                agent-phase files with no git spawn, so the values are as fresh \
+                as the latest workspace sync. A coordinator watches for \
+                agent_phase \"ended\" (child finished) and `merged` (work landed) \
+                to know a session is done, then removes it and delegates the next \
+                issue.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "session_prompt",
             "description": "Deliver a prompt to a specific session's agent, so you \
                 can delegate a task to a parallel session. Work stays isolated on \
@@ -456,11 +541,15 @@ fn session_tool_schemas() -> Value {
                 which delivers live when the session has a live agent pane and \
                 queues for launch otherwise — so you need not know whether the \
                 agent is currently running. The result's `delivered_to` reports \
-                which channel took the prompt (\"live\" or \"queue\").",
+                which channel took the prompt (\"live\" or \"queue\"). Pass the \
+                reserved name \":root\" to target the workspace's root row (the \
+                coordinator running there) instead of a session: a child session's \
+                agent uses this to push a completion report up to the coordinator \
+                the moment it finishes, so the coordinator advances without polling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Target session name" },
+                    "name": { "type": "string", "description": "Target session name, or \":root\" for the workspace root row (the coordinator)" },
                     "prompt": { "type": "string", "description": "The task or question for the session's agent" },
                     "mode": {
                         "type": "string",
@@ -475,7 +564,12 @@ fn session_tool_schemas() -> Value {
             "name": "session_pr",
             "description": "Return the pull requests recorded for a specific \
                 session. These are the PR URLs harvested from that session's \
-                agent output and shown as PR badges in the TUI.",
+                agent output and shown as PR badges in the TUI. Each PR carries a \
+                `state` (\"merged\" once the session's branches are all merged \
+                into the default branch, else \"open\"), and the result's top-level \
+                `merged` reports the same signal. State is derived from the cached \
+                worktree status (usagi never queries GitHub), so a PR closed \
+                without merging is not distinguished from an open one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -722,6 +816,7 @@ mod tests {
             vec![
                 "session_create",
                 "session_list",
+                "session_status",
                 "session_prompt",
                 "session_pr",
                 "session_remove",
@@ -892,6 +987,58 @@ mod tests {
     }
 
     #[test]
+    fn prompt_targets_the_root_row_live_without_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // The coordinator's pane is live, so `:root` delivers live — and no
+        // session need exist: `:root` resolves straight to the workspace root.
+        let backend = FakeBackend::ok("reported").with_live(true);
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":":root","prompt":"issue #101 done, PR #123 opened"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["name"], ":root");
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(body["detail"], "reported");
+
+        // The report was addressed to the workspace root itself (the root row's
+        // working dir), not any `.usagi/sessions/<name>` path.
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path());
+        assert_eq!(calls[0].1, "issue #101 done, PR #123 opened");
+    }
+
+    #[test]
+    fn prompt_targets_the_root_row_and_queues_when_no_live_coordinator() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No live coordinator pane, so `auto` queues the report for the root row's
+        // next fresh agent launch — again without requiring any session.
+        let backend = FakeBackend::ok("queued").with_live(false);
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":":root","prompt":"done"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["delivered_to"], "queue");
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path());
+    }
+
+    #[test]
     fn prompt_surfaces_backend_send_errors_in_live_mode() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
@@ -1037,12 +1184,104 @@ mod tests {
             json!({
                 "name": "work",
                 "root": worktree,
+                // A freshly created session's branch is not yet merged, so every
+                // PR reads "open".
+                "merged": false,
                 "pr": [
-                    {"number": 12, "url": "https://github.com/o/r/pull/12"},
-                    {"number": 34, "url": "https://github.com/o/r/pull/34"},
+                    {"number": 12, "url": "https://github.com/o/r/pull/12", "state": "open"},
+                    {"number": 34, "url": "https://github.com/o/r/pull/34", "state": "open"},
                 ]
             })
         );
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn status_reports_agent_phase_and_worktree_status() {
+        // agent_state_store reads under the data dir, so point it at a throwaway
+        // home for the duration of the test.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        // Before any session exists the tool returns an empty array.
+        assert_eq!(
+            tool_json(&call(&server, "session_status", json!({}))),
+            json!([])
+        );
+        call(&server, "session_create", json!({"name":"work"}));
+
+        // No agent pane has run: phase reads "none"; the fresh branch reads "local".
+        let listed = tool_json(&call(&server, "session_status", json!({})));
+        let arr = listed.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "work");
+        assert_eq!(arr[0]["display_name"], Value::Null);
+        assert_eq!(arr[0]["agent_phase"], "none");
+        assert_eq!(arr[0]["worktrees"][0]["status"], "local");
+        assert_eq!(arr[0]["worktrees"][0]["dirty"], false);
+        assert_eq!(arr[0]["worktrees"][0]["merged"], false);
+        assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/work");
+
+        // A recorded phase for the session root surfaces as agent_phase.
+        let worktree = root.path().join(".usagi/sessions/work");
+        crate::infrastructure::agent_state_store::write(
+            &worktree,
+            crate::domain::agent_phase::AgentPhase::Ended,
+        )
+        .unwrap();
+        let listed = tool_json(&call(&server, "session_status", json!({})));
+        assert_eq!(listed[0]["agent_phase"], "ended");
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn status_surfaces_a_usecase_error() {
+        // A file where the `.usagi` directory should be makes the store fail,
+        // exercising the tool's error path.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".usagi"), "blocker").unwrap();
+        let server = server_at(tmp.path(), FakeBackend::ok("x"));
+        let result = call(&server, "session_status", json!({}));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn pr_reports_merged_state_once_the_branch_is_synced() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+        let worktree = root.path().join(".usagi/sessions/work");
+        pr_link_store::add(
+            &worktree,
+            &[PrLink {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".to_string(),
+            }],
+        )
+        .unwrap();
+
+        // Mark the session's only worktree synced (merged into the default branch).
+        let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
+        let mut state = store.load().unwrap().unwrap();
+        state.sessions[0].worktrees[0].status =
+            crate::domain::workspace_state::BranchStatus::Synced;
+        store.save(&state).unwrap();
+
+        let body = tool_json(&call(&server, "session_pr", json!({"name":"work"})));
+        assert_eq!(body["merged"], true);
+        assert_eq!(body["pr"][0]["state"], "merged");
+        assert_eq!(body["pr"][0]["number"], 7);
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
