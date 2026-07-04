@@ -14,8 +14,8 @@
 
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
-| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` / `diff` |
-| 在席（Focus）の右ペイン | Session（個別） | `agent` / `close` / `terminal`（Menu はコマンド名のアルファベット順に並べる） |
+| コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `terminal` / `diff` / `close`（Menu は固定の表示順 agent → terminal → diff → ai → close で並べる） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -35,9 +35,9 @@
 | `unite` | 統合(unite)ビューにワークスペースを追加・削除（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
-| `diff` | 選択中セッションの差分（既定ブランチとの差分）を右ペインに GitHub 風に表示（行番号・シンタックスハイライト・単語差分・unified/split。Workspace スコープ） |
 | `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
+| `diff` | 在席中セッションの差分（既定ブランチとの差分）を右ペインに GitHub 風に表示（行番号・シンタックスハイライト・単語差分・unified/split。Session スコープ） |
 | `close [--force]` | 在席中のセッションを削除し、完了まで他の操作が無ければ隣のセッションへ在席する（`session remove <名前>` と同じ。既定では未コミット変更があれば削除を拒否し `--force` の案内をログに出す。`--force` / `-f` で未コミット変更を破棄。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
 | `env` | Config 画面を開き、そのまま workspace-env エディタ（1Password 参照の環境変数）へ入る（Workspace スコープ） |
@@ -95,14 +95,13 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 - ファイルはワークスペースルートを基点に解決し、**ルート外へは出られません**（絶対パス・`..` での親への離脱は拒否）。
 - 読めないパスや存在しないファイルはエラーをログに出します。
 - 引数なしは `usage` をログに出します。
-- `preview diff` は [`diff`](#diff) コマンドの別名で、差分ビューを開きます（`diff.md` の表示は試みません）。
 - 巨大なファイルでも UI を止めないよう、**先頭 512 KiB まで**を読み込み、超過分は切り詰めて末尾に省略行を出します（レンダリング行数にも上限あり）。
 
 レンダリングは Markdown のサブセット（見出し・箇条書き／番号付きリスト・引用・`**強調**`／`*斜体*`／`` `コード` ``／リンク）を色付けして表示します。**フェンスドコードブロック（` ``` ` / `~~~`）は、開きフェンスの言語トークン（例 ` ```rust `）に応じてシンタックスハイライト**します（[syntect](https://github.com/trishume/syntect) によるトークン化を端末の 256 色へマッピング。`sh`／`yml`／`ts` などの別名も解決し、言語トークンが無い／未知のときはプレーン表示にフォールバック。コード行のタブはタブ幅 4 でスペース展開）。
 
 ## diff
 
-選択中セッションの**差分を右ペインに GitHub 風に表示**します（別名 `preview diff`）。**`:` で開くコマンドパレット**で実行します。サイドバーの[差分バッジ](../design/home/03-sidebar.md#差分バッジ)（`+N -M`）が示す差分そのものの全文を、次の要素つきで描きます。
+在席中セッションの**差分を右ペインに GitHub 風に表示**します。**在席（Focus）の右ペイン**（Menu の `diff` 行、または Prompt の `diff`）から実行します。サイドバーの[差分バッジ](../design/home/03-sidebar.md#差分バッジ)（`+N -M`）が示す差分そのものの全文を、次の要素つきで描きます。
 
 - **行番号ガター**（old / new）と、追加行=緑地・削除行=赤地の**行背景**。
 - **コード本体のシンタックスハイライト**（ファイル拡張子から言語を判定。[syntect](https://github.com/trishume/syntect) を右ペインのプレビューと共有）。

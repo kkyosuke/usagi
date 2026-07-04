@@ -148,12 +148,6 @@ pub(super) fn palette_key(
                         &target,
                     ))
                 }
-                // `diff` / `preview diff` opens the right-pane diff view of the
-                // highlighted session: resolve its worktree and shell out to git
-                // (the impure step), then render / store the patch (or log a
-                // failure). The git shell-out lives here; rendering and storing
-                // the result is pure state, so both outcomes are testable.
-                Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
                 // `unite add <name>`: resolve and load the named workspace, then
                 // stack it into the view (refusing a duplicate or an unknown name).
                 Effect::UniteAdd(name) => match (wiring.unite_resolve)(&name) {
@@ -189,17 +183,19 @@ pub(super) fn palette_key(
                 // stays open behind it. `None` / `Clear` likewise keep it open.
                 //
                 // `OpenTerminal` / `OpenExternalTerminal` / `OpenAgent` /
-                // `CloseSession` are session-scoped (`terminal` / `agent` /
-                // `close`): the palette is a workspace surface, so
-                // `dispatch_in_scope` refuses them before they reach here — they
-                // only fire from the 在席 prompt (see `focus_prompt_key`).
-                // Listed so the match stays exhaustive; they are unreachable here.
+                // `OpenDiff` / `CloseSession` are session-scoped (`terminal` /
+                // `agent` / `diff` / `close`): the palette is a workspace surface,
+                // so `dispatch_in_scope` refuses them before they reach here — they
+                // only fire from the 在席 menu / prompt (see `focus_prompt_key` and
+                // `run_focus_command`). Listed so the match stays exhaustive; they
+                // are unreachable here.
                 Effect::None
                 | Effect::Clear
                 | Effect::ShowText { .. }
                 | Effect::OpenTerminal
                 | Effect::OpenExternalTerminal
                 | Effect::OpenAgent(_)
+                | Effect::OpenDiff
                 | Effect::CloseSession { .. } => {}
             }
         }
@@ -1167,10 +1163,11 @@ fn focus_prompt_key(
 ) {
     match key {
         Key::Enter => {
-            // `terminal` / `agent` attach the pane; `close` removes the session
-            // and leaves 在席; `ai` (coming soon) and anything else only log,
-            // staying in Focus. The command is persisted (with its session) so
-            // per-session history survives across launches, like the palette line.
+            // `terminal` / `agent` attach the pane; `diff` opens the right-pane
+            // diff view over 在席; `close` removes the session and leaves 在席;
+            // `ai` (coming soon) and anything else only log, staying in Focus. The
+            // command is persisted (with its session) so per-session history
+            // survives across launches, like the palette line.
             let submission = state.focus_prompt_submit();
             if let Some(entry) = submission.recorded.as_ref() {
                 (wiring.persist)(entry);
@@ -1180,6 +1177,7 @@ fn focus_prompt_key(
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
                 Effect::OpenExternalTerminal => open_external_terminal(state, wiring),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
+                Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
@@ -1205,10 +1203,10 @@ fn focus_prompt_key(
     }
 }
 
-/// Run a named session command (`terminal` / `agent` / `close` / `close --force`
-/// / `ai`) from the 在席 menu: the two launch commands attach the pane (没入),
-/// `close` variants remove the session and leave 在席, and `ai` logs its
-/// coming-soon line.
+/// Run a named session command (`terminal` / `agent` / `diff` / `close` /
+/// `close --force` / `ai`) from the 在席 menu: the two launch commands attach
+/// the pane (没入), `diff` opens the right-pane diff view over 在席, `close`
+/// variants remove the session and leave 在席, and `ai` logs its coming-soon line.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1220,6 +1218,10 @@ fn run_focus_command(
         "terminal" => launch_pane(term, state, painter, wiring, false),
         // The menu's `agent` row / `a` shortcut launch the configured default.
         "agent" => launch_agent(term, state, painter, wiring, None),
+        // `diff` opens the right-pane diff view of the focused session (the same
+        // effect the 在席 prompt / palette `diff` produced): resolve its worktree
+        // and shell out to git, then render / store the patch (or log a failure).
+        "diff" => state.open_diff_result(selected_diff(state)),
         // `close` removes the focused session safely and leaves 在席.
         "close" => close_focused_session(state, wiring, false),
         // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the

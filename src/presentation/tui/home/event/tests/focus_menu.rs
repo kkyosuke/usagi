@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn focus_menu_moves_and_runs_terminal_via_enter() {
     // Switch -> focus "main" (idle, so just Focus). The menu lists its commands
-    // in the fixed order (agent, terminal, close) and highlights "agent" by
+    // in the fixed order (agent, terminal, diff, close) and highlights "agent" by
     // default; move down once to "terminal", then Enter runs it (attaches).
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
@@ -218,9 +218,9 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
 #[test]
 fn focus_menu_can_run_the_coming_soon_ai_command() {
     // With the local LLM available the menu lists, in fixed order, agent (0,
-    // default), terminal (1), ai (2), close (3). ArrowUp from the top wraps to
-    // "close"; back down to "agent"; two more land on "ai"; Enter on it just
-    // logs (no attach).
+    // default), terminal (1), diff (2), ai (3), close (4). ArrowUp from the top
+    // wraps to "close"; back down to "agent"; three more land on "ai"; Enter on it
+    // just logs (no attach).
     let mut state = sample_state();
     state.set_ai_available(true);
     let mut keys = cmd("session switch feat");
@@ -229,7 +229,8 @@ fn focus_menu_can_run_the_coming_soon_ai_command() {
     keys.push(Ok(Key::ArrowUp)); // agent wraps up to "close"
     keys.push(Ok(Key::ArrowDown)); // back to "agent"
     keys.push(Ok(Key::ArrowDown)); // agent -> terminal
-    keys.push(Ok(Key::ArrowDown)); // terminal -> ai
+    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
+    keys.push(Ok(Key::ArrowDown)); // diff -> ai
     keys.push(Ok(Key::Enter)); // run ai (coming soon)
     keys.push(Ok(Key::Escape)); // -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -854,7 +855,9 @@ fn focus_prompt_terminal_new_reports_native_terminal_errors() {
 fn focus_menu_close_picker_runs_the_selected_close_action() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
-    keys.push(Ok(Key::ArrowDown)); // agent -> close
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
+    keys.push(Ok(Key::ArrowDown)); // diff -> close
     keys.push(Ok(Key::ArrowRight)); // expand close picker (safe close selected)
     keys.push(Ok(Key::ArrowDown)); // close -> close --force
     keys.push(Ok(Key::Enter)); // run close --force -> Switch
