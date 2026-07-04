@@ -13,13 +13,13 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// A [`ConfigReload`] carrying `ui` and the local LLM left unavailable — the
-/// shape the config-close callback returns in tests that only care about the
-/// 在席 surface.
+/// A [`ConfigReload`] carrying `ui` — the shape the config-close callback returns
+/// in tests that only care about the 在席 surface.
 fn reload(ui: SessionActionUi) -> ConfigReload {
     ConfigReload {
         session_action_ui: ui,
         key_scheme: crate::domain::settings::KeyScheme::default(),
+        agent_cli: AgentCli::default(),
         ai_available: false,
     }
 }
@@ -176,6 +176,15 @@ fn noop_config(_: &Term) -> Result<Option<ConfigReload>> {
     Ok(Some(reload(SessionActionUi::Menu)))
 }
 
+/// A test `chat_ask` hook that echoes the prompt back on a ready channel, so a
+/// submitted chat line drains to a reply on the next loop pass without a model
+/// runtime. Tests that need a withheld / failed reply build their own.
+fn ready_chat_ask(prompt: String) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = tx.send(Ok(format!("echo: {prompt}")));
+    rx
+}
+
 fn noop_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
     None
 }
@@ -252,7 +261,6 @@ fn run_at(keys: Vec<io::Result<Key>>, mut state: HomeState, root: &Path) -> Resu
         root,
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -306,7 +314,6 @@ fn run_full(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         create_session,
@@ -352,6 +359,7 @@ fn run_full_external(
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -371,6 +379,7 @@ fn run_full_external(
         open_url: &mut open_url,
         open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -417,7 +426,6 @@ fn run_full_tabs(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -459,7 +467,6 @@ fn run_with_live_monitor(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         persist,
         &mut create,
@@ -508,15 +515,14 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     state
 }
 
-/// Run the loop with preset startup probe one-shots (local-LLM availability and
-/// the installed-agent list), all other callbacks no-op, quitting on the scripted
-/// keys — so the loop's drain of both probes is exercised. (The entry git-sync
-/// feeds the same `SessionsRefreshHandle` the pane-exit sync uses; its apply path
-/// is covered by `a_background_refresh_updates_the_session_list_exactly_once`.)
+/// Run the loop with a preset installed-agent startup probe, all other callbacks
+/// no-op, quitting on the scripted keys — so the loop's probe-drain path is
+/// exercised. (The entry git-sync feeds the same `SessionsRefreshHandle` the
+/// pane-exit sync uses; its apply path is covered by
+/// `a_background_refresh_updates_the_session_list_exactly_once`.)
 fn run_with_startup_probes(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
-    ai_available: &OneShot<bool>,
     installed_agents: &OneShot<Vec<AgentCli>>,
 ) -> Result<Outcome> {
     let term = Term::stdout();
@@ -536,7 +542,6 @@ fn run_with_startup_probes(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        ai_available,
         installed_agents,
         &mut persist,
         &mut create,
@@ -607,7 +612,6 @@ fn run_capturing_attached_dirs_for_inputs(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -661,7 +665,6 @@ fn run_capturing_creates_for_inputs(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -707,7 +710,6 @@ fn run_recording_rename(keys: Vec<io::Result<Key>>) -> (Vec<(String, String)>, O
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -753,7 +755,6 @@ fn run_recording_reorder(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -801,7 +802,6 @@ fn run_recording_previews(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -870,6 +870,7 @@ fn run_with_tasks(
     let mut dispatch_remove_w = |_: &Path, name: &str, force: bool, _| dispatch_remove(name, force);
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -889,6 +890,7 @@ fn run_with_tasks(
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -939,6 +941,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -958,6 +961,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -1010,6 +1014,7 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut dispatch_update = || {};
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: true,
@@ -1029,6 +1034,7 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -1075,7 +1081,6 @@ fn run_notes(
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -1168,6 +1173,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut dispatch_update = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1187,6 +1193,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,

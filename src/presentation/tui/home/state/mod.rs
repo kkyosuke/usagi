@@ -57,19 +57,22 @@ const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
 
 /// The fixed 在席 (Focus) menu display order, independent of registry order and
 /// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
-/// then `terminal`), then the read-only `diff` view, then `ai`, then the
-/// destructive `close` last. Any command
-/// not in this list sorts after these four, then alphabetically among itself.
+/// then `terminal`), then the read-only `diff` view, then the AI actions (`ai`,
+/// `chat`), then the destructive `close` last. Any command not in this list sorts
+/// after these, then in its original registry order among itself.
 fn session_menu_rank(name: &str) -> usize {
     match name {
         "agent" => 0,
         "terminal" => 1,
         "diff" => 2,
         "ai" => 3,
-        "close" => 4,
-        _ => 5,
+        "chat" => 4,
+        "close" => 5,
+        _ => 6,
     }
 }
+
+use crate::presentation::tui::chat::state::Chat;
 
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
     let mut commands = registry.commands_in_scope(CommandScope::Session);
@@ -478,7 +481,7 @@ pub struct HomeState {
     registry: CommandRegistry,
     /// Sorted Session-scope commands used by the 在席 menu. This static part is
     /// derived once from [`registry`](Self::registry); each render then only
-    /// applies the dynamic gates (`ai`, `close`, `agent`) instead of cloning and
+    /// applies the dynamic gates (`close`, `agent`) instead of cloning and
     /// sorting the registry metadata again.
     session_menu_commands: Vec<CommandInfo>,
     /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
@@ -507,16 +510,20 @@ pub struct HomeState {
     /// and as it lapses ([`super::pane_input::PREFIX_TIMEOUT`]); read by the
     /// footer ([`super::ui`]). Always `false` outside 没入 / the prefix scheme.
     prefix_pending: bool,
-    /// Whether the `ai` command is offered in the 在席 (Focus) menu: true only
-    /// when the local LLM is enabled and its model is pulled. Injected from the
-    /// effective settings (and a runtime probe) by `mod.rs`; false by default so
-    /// the command stays hidden until the model is actually usable.
-    ai_available: bool,
     /// The configured agent CLI launched by `agent` with no explicit choice (the
     /// 在席 menu's `agent` row / `a` shortcut and a bare `agent` prompt). Injected
     /// from the effective settings by `mod.rs`; its display name labels the menu's
     /// `agent` row. Defaults to [`AgentCli::Claude`].
     default_agent: AgentCli,
+    /// The configured local-LLM model name (Ollama) the 在席 `chat` overlay talks
+    /// to. Injected from the effective settings by `mod.rs`; defaults to
+    /// [`DEFAULT_LOCAL_LLM_MODEL`](crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL).
+    local_llm_model: String,
+    /// Whether the local LLM is usable (enabled and its model pulled) — gates the
+    /// `chat` row in the 在席 (Focus) menu so it only appears when a reply would
+    /// actually work. Injected from the effective settings (and a runtime probe)
+    /// by `mod.rs`; false by default.
+    ai_available: bool,
     /// The agent CLIs installed on this machine (PATH-probed), in canonical order,
     /// offered by the 在席 menu's agent picker. Injected by `mod.rs`; empty by
     /// default (tests that do not set it never expand the picker).
@@ -526,6 +533,11 @@ pub struct HomeState {
     /// terminal-pool wiring on a fresh agent spawn. `None` means "use
     /// [`default_agent`](Self::default_agent)".
     agent_choice: Option<AgentCli>,
+    /// The opening prompt the next configured-agent launch should deliver,
+    /// captured from `ai <prompt>` and consumed by the terminal-pool wiring. It is
+    /// separate from [`agent_choice`](Self::agent_choice) because `ai` always uses
+    /// the configured default CLI rather than an ad-hoc override.
+    agent_initial_prompt: Option<String>,
     /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
     /// [`Mode::Switch`].
     switch_return: ReturnMode,
@@ -781,10 +793,12 @@ impl HomeState {
             label_master: SessionLabelMaster::default(),
             key_scheme: KeyScheme::default(),
             prefix_pending: false,
-            ai_available: false,
             default_agent: AgentCli::default(),
+            local_llm_model: crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_string(),
+            ai_available: false,
             installed_agents: Vec::new(),
             agent_choice: None,
+            agent_initial_prompt: None,
             switch_return: ReturnMode::Base,
             pr_popup: None,
             overlay: Overlay::default(),
@@ -1130,12 +1144,6 @@ impl HomeState {
         self.sidebar = self.sidebar.toggled();
     }
 
-    /// Set whether the `ai` command is offered in the 在席 (Focus) menu (injected
-    /// from the effective settings and a runtime probe by `mod.rs`).
-    pub fn set_ai_available(&mut self, available: bool) {
-        self.ai_available = available;
-    }
-
     /// Inject the configured default agent CLI (its display name labels the 在席
     /// menu's `agent` row, and a bare `agent` / the `a` shortcut launch it).
     pub fn set_default_agent(&mut self, cli: AgentCli) {
@@ -1145,6 +1153,25 @@ impl HomeState {
     /// The configured default agent CLI.
     pub fn default_agent(&self) -> AgentCli {
         self.default_agent
+    }
+
+    /// Inject the configured local-LLM model name (Ollama), used when opening the
+    /// 在席 `chat` overlay. Injected at startup and re-applied when Config changes
+    /// it, so the next chat uses the current model without restarting.
+    pub fn set_local_llm_model(&mut self, model: impl Into<String>) {
+        self.local_llm_model = model.into();
+    }
+
+    /// Set whether the local LLM is usable (enabled and its model pulled), gating
+    /// the `chat` row in the 在席 menu. Injected from the effective settings and a
+    /// runtime probe by `mod.rs`.
+    pub fn set_ai_available(&mut self, available: bool) {
+        self.ai_available = available;
+    }
+
+    /// The configured local-LLM model name.
+    pub fn local_llm_model(&self) -> &str {
+        &self.local_llm_model
     }
 
     /// Inject the installed agent CLIs (PATH-probed, canonical order) the 在席
@@ -1169,6 +1196,19 @@ impl HomeState {
     /// next agent spawn should launch, or `None` to use the configured default.
     pub fn take_agent_choice(&mut self) -> Option<AgentCli> {
         self.agent_choice.take()
+    }
+
+    /// Record the opening prompt for the next configured-agent launch, set by
+    /// `ai <prompt>` just before launching and consumed by
+    /// [`take_agent_initial_prompt`](Self::take_agent_initial_prompt).
+    pub fn set_agent_initial_prompt(&mut self, prompt: String) {
+        self.agent_initial_prompt = Some(prompt);
+    }
+
+    /// Take the pending `ai <prompt>` opening prompt, leaving no prompt behind.
+    /// Returns `None` for ordinary `agent` launches.
+    pub fn take_agent_initial_prompt(&mut self) -> Option<String> {
+        self.agent_initial_prompt.take()
     }
 
     /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
@@ -1732,6 +1772,39 @@ impl HomeState {
         }
     }
 
+    // --- 在席 chat (local LLM) --------------------------------------------
+
+    /// Open the local-LLM chat overlay in the right pane, bound to the configured
+    /// local model. Replaces any other open overlay (only one is ever open).
+    pub fn open_chat(&mut self) {
+        self.overlay = Overlay::Chat(Chat::new(&self.local_llm_model));
+    }
+
+    /// The open chat overlay, if any.
+    pub fn chat(&self) -> Option<&Chat> {
+        match &self.overlay {
+            Overlay::Chat(chat) => Some(chat),
+            _ => None,
+        }
+    }
+
+    /// The open chat overlay for mutation (editing / scrolling / submitting), if
+    /// any.
+    pub fn chat_mut(&mut self) -> Option<&mut Chat> {
+        match &mut self.overlay {
+            Overlay::Chat(chat) => Some(chat),
+            _ => None,
+        }
+    }
+
+    /// Close the chat overlay (the user pressed `Esc`), returning the right pane
+    /// to the 在席 surface beneath it. A no-op unless the chat is the open overlay.
+    pub fn close_chat(&mut self) {
+        if matches!(self.overlay, Overlay::Chat(_)) {
+            self.overlay = Overlay::None;
+        }
+    }
+
     /// The lines of the most recent command's response (what the command palette
     /// shows): everything in the log from `response_start` onward.
     pub fn response_lines(&self) -> &[LogLine] {
@@ -1839,6 +1912,15 @@ impl HomeState {
 
     pub fn log(&self) -> &[LogLine] {
         &self.log
+    }
+
+    /// Test-only: register an extra command into the registry (re-deriving the
+    /// 在席 menu's static command list), so tests can exercise how the menu and
+    /// its dispatch treat a Session-scope entry the built-ins do not cover.
+    #[cfg(test)]
+    pub fn register_command(&mut self, command: Box<dyn super::command::Command>) {
+        self.registry.register(command);
+        self.session_menu_commands = sorted_session_menu_commands(&self.registry);
     }
 
     /// The current embedded-terminal snapshot, when a session is 没入 (Attached)
@@ -2785,14 +2867,12 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 在席 menu lists, in the fixed display order
-    /// `agent`, `terminal`, `ai`, `close` (see [`session_menu_rank`]). The `ai`
-    /// command is filtered out unless the local LLM is usable (enabled and its
-    /// model pulled), so it only appears when running it would actually work.
-    /// `close` is filtered out
-    /// on the root row, which belongs to no session and so cannot be closed.
-    /// `agent` always stays: a session can hold one agent pane per CLI, so
-    /// launching `agent` while one runs adds a different CLI's agent (and
-    /// re-selecting the running CLI just re-focuses its tab).
+    /// (see [`session_menu_rank`]). The prompt-taking `ai <prompt>` is kept out of
+    /// the pickable menu (it needs typed arguments; use the Prompt UI). `chat` is
+    /// filtered out unless the local LLM is usable (enabled and its model pulled),
+    /// so it only appears when a reply would actually work. `close` / `diff` are
+    /// filtered out on the root row, which belongs to no session. `agent` always
+    /// stays: a session can hold one agent pane per CLI.
     ///
     /// Resolved for the **active** row: 在席 acts on the session it focused.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
@@ -2811,16 +2891,31 @@ impl HomeState {
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
     /// Session-scope commands in the fixed display order (see
-    /// [`session_menu_rank`]), with `ai` gated on local-LLM availability and the
-    /// session-only `close` / `diff` hidden when `root` (the row belongs to no
-    /// session, so there is nothing to close or diff).
+    /// [`session_menu_rank`]): the prompt-taking `ai` is kept out of the menu,
+    /// `chat` is gated on local-LLM availability, and the session-only `close` /
+    /// `diff` are hidden when `root` (the row belongs to no session).
     fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
-            .filter(|info| info.name != "ai" || self.ai_available)
+            .filter(|info| info.name != "ai")
+            .filter(|info| info.name != "chat" || self.ai_available)
             .filter(|info| !matches!(info.name, "close" | "diff") || !root)
             .collect()
+    }
+
+    /// Whether the focused session already has a live `agent` pane — a tab the
+    /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
+    /// agents run). `ai <prompt>` uses this to skip its installed-CLI gate,
+    /// delivering the prompt to that pane (whatever CLI it runs) rather than
+    /// freshly spawning the default.
+    pub fn agent_tab_open(&self) -> bool {
+        self.terminal.tabs.as_ref().is_some_and(|strip| {
+            strip
+                .labels
+                .iter()
+                .any(|label| label == "agent" || label.starts_with("agent "))
+        })
     }
 
     /// How many live panes the focused session publishes (the leading 在席 tabs),

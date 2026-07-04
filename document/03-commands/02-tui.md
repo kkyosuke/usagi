@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` |
-| 在席（Focus）の右ペイン | Session（個別） | `agent` / `terminal` / `diff` / `close`（Menu は固定の表示順 agent → terminal → diff → ai → close で並べる） |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `chat` / `diff` / `close` / `terminal`（Menu は固定の表示順 agent → terminal → diff → chat → close で並べる。`ai <prompt>` は引数が要るので Prompt で入力、`chat` はローカル LLM が使えるときだけ Menu に出る） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -37,6 +37,8 @@
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
+| `ai <prompt>` | 設定中の既定 Agent CLI を選択中セッションの worktree で起動し、`<prompt>` を初期プロンプトとして渡す（Session スコープ。Prompt で入力する） |
+| `chat` | ローカル LLM（Ollama 経由）と対話する。`terminal` / `agent` と同じく在席の右ペインに表示（Session スコープ）。外部 Agent CLI ではなくローカルモデルに直接話しかけるため、クラウド Agent のトークンを消費しない |
 | `diff` | 在席中セッションの差分（既定ブランチとの差分）を右ペインに GitHub 風に表示（行番号・シンタックスハイライト・単語差分・unified/split。Session スコープ） |
 | `close [--force]` | 在席中のセッションを削除し、完了まで他の操作が無ければ隣のセッションへ在席する（`session remove <名前>` と同じ。既定では未コミット変更があれば削除を拒否し `--force` の案内をログに出す。`--force` / `-f` で未コミット変更を破棄。Session スコープ） |
 | `config` | 現在のワークスペースのローカル設定を編集する Config 画面を開く（Workspace スコープ） |
@@ -150,10 +152,40 @@ Codex / `codex-fugu` では、usagi が組み込む MCP サーバに `default_to
 Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume --last`）、Gemini は `gemini -r latest`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
 再開フラグは埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
 なお Codex は、キュー済みプロンプト（`session_prompt`）がある起動では再開せず、そのプロンプトで新規セッションを開始します
-（Claude / Gemini は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i <prompt>` で渡します）。
+（Claude / Gemini は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i=<prompt>` で渡します）。
+キュー済みプロンプトはキューされた時点ではなく**配送された起動時**に在席のログへ 1 行表示されるため、あとから起動した agent が
+何に取り組み始めたかを画面で確認できます。
 
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/home/04-keys.md](../design/home/04-keys.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
+
+## ai
+
+**在席の Prompt** から `ai <prompt>` と入力すると、設定中の**既定 Agent CLI**を選択中セッションの worktree で起動し、
+`<prompt>` を初期プロンプトとして渡します。起動先のディレクトリ・MCP 配線・会話再開の扱いは [`agent`](#agent) と同じです。
+
+- 動作中の agent ペインが無い場合（未起動、または CLI が終了済み）: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。プロンプトは `--` 区切り（Gemini は `-i=<prompt>`）で渡すため、`-` で始まるテキストもフラグと誤解釈されない。
+- 動作中の agent ペインがある場合: そのペインのタブへ移動し、`<prompt>` を対話入力として送る（貼り付け＋Enter。bracketed paste 対応の CLI には 1 ブロックとして貼り付く）。送り先はそのペインで動いている CLI（`agent <名前>` で起動した既定以外の CLI でも同じ）で、新規起動はしないため次項のインストール判定も行わない。
+- `<prompt>` を省くと `usage: ai <prompt>` を表示して起動しない。
+- 新規起動になる場合で、インストール済み Agent CLI の検出結果（起動時にバックグラウンドで PATH を調べる）に既定 CLI が**含まれていない**ときは、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。検出が未完了、または 1 つも見つからなかったときは判定せず起動を試みる（`agent` と同じ寛容さ）。Config で既定 CLI を変更すると、Config を閉じた時点で `ai` / `agent` に反映される。
+
+在席の **Menu** は引数を入力できないため `ai` 行を出しません。`ai` を使うワークスペースでは
+[設定](../05-settings.md#設定項目)の `session_action_ui` を `prompt` にします。
+
+## chat
+
+**在席の右ペイン**で実行します。ローカル LLM（[設定](../05-settings.md#設定項目)の `local_llm.model` が指すモデルを
+Ollama で提供）と対話します。`terminal` / `agent` の埋め込みペインと同じく**右ペインに表示**され、左のセッション一覧はそのまま残ります。
+`agent` / `ai` が外部 Agent CLI を worktree で起動するのに対し、`chat` はローカルモデルに直接話しかけるので、ちょっとした質問に
+クラウド Agent のトークンを使いません。
+
+- 引数は取りません。在席の **Menu**（`agent` / `chat` / `close` / `terminal` をアルファベット順に並べる）でカーソル＋`Enter`、
+  または Prompt に `chat` と打つと右ペインにチャットが開きます。
+- 入力欄に書いて `Enter` で送信、`↑`/`↓` で履歴をスクロール、`Esc` で在席へ戻ります（`Ctrl-C` は他モードと同じく usagi の終了確認）。
+  応答を待つ間はスピナーを表示し、入力は応答が届くまで読み取り専用になります（スクロールと `Esc` は待機中も効きます）。
+- モデル呼び出しはバックグラウンドスレッドで `ollama run` を実行し、イベントループが毎フレーム応答をポーリングするので、
+  生成が遅くても画面は固まりません。Ollama サーバーが起動していなければ自動で立ち上げ、失敗（未インストール等）は会話内に
+  エラーとして表示します。対話は 1 ターンごとにそれまでの会話を丸ごとモデルへ渡して文脈を保ちます。
 
 ## close
 

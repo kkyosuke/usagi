@@ -121,7 +121,6 @@ fn a_populated_update_handle_is_read_before_painting() {
         Path::new("/ws"),
         &monitor,
         &update,
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -241,26 +240,6 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
 }
 
 #[test]
-fn the_background_llm_probe_result_is_drained_then_the_loop_quits() {
-    // The local-LLM probe confirms availability through the one-shot; the first
-    // frame drains it (flipping the `ai` command on via `set_ai_available`), then
-    // Ctrl-C with nothing live quits.
-    let ai = OneShot::<bool>::new();
-    ai.set(true);
-    assert!(matches!(
-        run_with_startup_probes(
-            vec![Ok(Key::CtrlC)],
-            sample_state(),
-            &ai,
-            &OneShot::<Vec<AgentCli>>::new()
-        )
-        .unwrap(),
-        Outcome::Quit
-    ));
-    assert!(ai.take().is_none());
-}
-
-#[test]
 fn the_background_installed_agents_probe_result_is_drained_then_the_loop_quits() {
     // The installed-agents probe reports the agents found on this machine through
     // the one-shot; the first frame drains it (filling the picker via
@@ -268,13 +247,7 @@ fn the_background_installed_agents_probe_result_is_drained_then_the_loop_quits()
     let agents = OneShot::<Vec<AgentCli>>::new();
     agents.set(vec![AgentCli::Claude]);
     assert!(matches!(
-        run_with_startup_probes(
-            vec![Ok(Key::CtrlC)],
-            sample_state(),
-            &OneShot::<bool>::new(),
-            &agents
-        )
-        .unwrap(),
+        run_with_startup_probes(vec![Ok(Key::CtrlC)], sample_state(), &agents).unwrap(),
         Outcome::Quit
     ));
     assert!(agents.take().is_none());
