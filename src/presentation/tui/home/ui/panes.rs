@@ -17,9 +17,9 @@ use super::super::state::{
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::{
-    clip_to_width, clip_to_width_cow, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON,
-    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
-    PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
+    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL,
+    STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{
@@ -196,27 +196,39 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾ ready"), width))
-                    .dim()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾ ready"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
             ),
             AgentState::Running => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶ running"), width))
-                    .success()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶ running"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆ waiting"), width))
-                    .warning()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆ waiting"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓ done"), width))
-                    .accent()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓ done"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
             ),
         }
     }
@@ -232,27 +244,39 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾"), width))
-                    .dim()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
             ),
             AgentState::Running => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶"), width))
-                    .success()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆"), width))
-                    .warning()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓"), width))
-                    .accent()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
             ),
         }
     }
@@ -593,7 +617,11 @@ fn digits(mut n: usize) -> usize {
 /// changed lines or a longer "ago". A `0` width drops that field for the pane.
 #[derive(Clone, Copy, Default)]
 pub(super) struct DetailCols {
-    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it.
+    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it. Reserved at
+    /// [`TIME_RESERVE_WIDTH`] so the cell keeps a constant width as a session ages
+    /// across the `now` / `Nmin ago` / `Nh ago` buckets — otherwise the label's
+    /// width would wander with the clock, flipping the "drop when narrow" decision
+    /// and shifting the detail line purely with the passage of time.
     time: usize,
     /// Digit width of the `↑N` (ahead) count; 0 = no visible session is ahead.
     ahead: usize,
@@ -656,13 +684,47 @@ fn pr_width(prs: &[PrLink]) -> usize {
 /// common appear/disappear no longer moves anything.
 const PR_RESERVE_WIDTH: usize = 3;
 
+/// The freshness column is reserved at (at least) this width on every render — the
+/// display width of the widest label the [`relative_time`] format produces,
+/// `59min ago` (9 columns), which also holds every `Nh ago` / `Nd ago` up to
+/// thousands of days. Unlike the diff / commit / PR fields, which only change when
+/// the user commits or opens a PR, the freshness label's width changes on its own
+/// as the clock advances (`now` → `12min ago` → `1h ago`). Sizing the column to the
+/// live label would let that width wander between frames — flipping the "drop the
+/// freshness first when narrow" decision and shifting the whole detail line purely
+/// with the passage of time (a cumulative layout shift). Holding the slot at a
+/// constant width decouples the layout from the clock, the same anti-shift rule the
+/// PR column follows ([`PR_RESERVE_WIDTH`]).
+const TIME_RESERVE_WIDTH: usize = 9;
+
+/// Columns the `↑` / `↓` commit-divergence arrows occupy. Unlike the other
+/// detail-line glyphs (the agent icons in `U+2500..=U+25FF` and the Nerd Font PUA
+/// icons all render single-width — see [`widgets::measure_width_cjk`]), the arrows
+/// live in the Arrows block and are East Asian *Ambiguous*, which the target
+/// terminals paint **two** columns wide. Reserving and measuring them at one column
+/// (the plain-width undercount) leaves the detail line 1 column too narrow per arrow
+/// on the layout's books, so the composed row overruns `left_w` and the sidebar's
+/// [`clip_to_width_cjk`](widgets::clip_to_width_cjk) chops its right edge (the PR
+/// badge). Counting the arrows here at their painted width keeps line 2's math in
+/// step with the CJK-aware clip that line 1 already uses.
+const COMMIT_ARROW_WIDTH: usize = 2;
+
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
     /// are reserved (a pane with nothing behind spends no columns on `↓`), with a
-    /// one-space gap when both sides are present.
+    /// one-space gap when both sides are present. Each arrow is
+    /// [`COMMIT_ARROW_WIDTH`] columns (ambiguous-width, painted two wide).
     fn commits_width(self) -> usize {
-        let up = if self.ahead > 0 { 1 + self.ahead } else { 0 };
-        let down = if self.behind > 0 { 1 + self.behind } else { 0 };
+        let up = if self.ahead > 0 {
+            COMMIT_ARROW_WIDTH + self.ahead
+        } else {
+            0
+        };
+        let down = if self.behind > 0 {
+            COMMIT_ARROW_WIDTH + self.behind
+        } else {
+            0
+        };
         up + usize::from(up > 0 && down > 0) + down
     }
 
@@ -706,10 +768,9 @@ fn detail_cols(
 ) -> DetailCols {
     let mut cols = DetailCols::default();
     for (updated_at, diff, ab, pr_w) in worktrees {
-        cols.time = cols.time.max(console::measure_text_width(&relative_time(
-            now,
-            *updated_at,
-        )));
+        cols.time = cols
+            .time
+            .max(widgets::measure_width_cjk(&relative_time(now, *updated_at)));
         if let Some(diff) = diff {
             cols.added = cols.added.max(digits(diff.added));
             cols.removed = cols.removed.max(digits(diff.removed));
@@ -728,6 +789,12 @@ fn detail_cols(
     // Always hold the PR slot open (even when no visible session has a PR) so a
     // session gaining or losing its last PR never shifts the diff to its left.
     cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
+    // Hold the freshness slot at a constant width so the label growing or shrinking
+    // as a session ages (`now` → `12min ago` → `1h ago`) never changes the column —
+    // otherwise the passing clock alone would flip the trim decision below and shift
+    // the detail line. The per-session max above still wins for the (unreachable in
+    // practice) label wider than the reserve.
+    cols.time = cols.time.max(TIME_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);
@@ -743,9 +810,11 @@ fn detail_cols(
 
 /// Right-aligns the already-styled `content` within `width` display columns by
 /// left-padding with spaces, so a field seats at its column's right edge and the
-/// edges line up down the list.
+/// edges line up down the list. Width is measured with [`widgets::measure_width_cjk`]
+/// so an ambiguous-width glyph (the `↑` / `↓` arrows) is counted at the two columns
+/// the terminal paints it, matching the detail line's reserved columns.
 fn rpad(content: &str, width: usize) -> String {
-    let pad = width.saturating_sub(console::measure_text_width(content));
+    let pad = width.saturating_sub(widgets::measure_width_cjk(content));
     format!("{}{content}", " ".repeat(pad))
 }
 
@@ -777,14 +846,14 @@ fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> Str
         if ahead > 0 {
             style(format!("↑{ahead:>ahead_w$}")).accent().to_string()
         } else {
-            " ".repeat(1 + ahead_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + ahead_w)
         }
     });
     let down = (behind_w > 0).then(|| {
         if behind > 0 {
             style(format!("↓{behind:>behind_w$}")).feature().to_string()
         } else {
-            " ".repeat(1 + behind_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + behind_w)
         }
     });
     match (up, down) {
@@ -806,16 +875,20 @@ fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
         return agent.icon_label(width).unwrap_or_default();
     }
     let cluster = cells.join(" ");
-    let cluster_w = console::measure_text_width(&cluster);
+    // Measure and clip with the CJK-aware width so the `↑` / `↓` arrows in the
+    // cluster are counted at the two columns the terminal paints them — otherwise
+    // the line is built one column too narrow per arrow and the sidebar's
+    // [`clip_to_width_cjk`] chops the cluster's right edge (see [`COMMIT_ARROW_WIDTH`]).
+    let cluster_w = widgets::measure_width_cjk(&cluster);
     if cluster_w >= width {
         // No room for both: the cluster alone, clipped to the cell.
-        return clip_to_width(&cluster, width);
+        return widgets::clip_to_width_cjk(&cluster, width);
     }
     // Reserve the cluster's columns (plus a one-space gap) and clip the agent
     // label to what's left, so it is styled already-clipped (clean ANSI) rather
     // than truncated after the fact.
     let agent = agent.icon_label(width - cluster_w - 1).unwrap_or_default();
-    let pad = width - console::measure_text_width(&agent) - cluster_w;
+    let pad = width - widgets::measure_width_cjk(&agent) - cluster_w;
     format!("{agent}{}{cluster}", " ".repeat(pad))
 }
 
@@ -1557,7 +1630,7 @@ pub(super) fn left_pane(
                 done.contains(&w.path),
             );
             if let Some(label) = agent.icon_label(detail_width) {
-                max_agent_w = max_agent_w.max(console::measure_text_width(&label));
+                max_agent_w = max_agent_w.max(widgets::measure_width_cjk(&label));
             }
             (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
         })
@@ -4232,9 +4305,11 @@ mod tests {
             1,
         );
         assert!(console::strip_ansi_codes(&ahead_only).starts_with("↑ 2"));
+        // Measured as painted (the `↑` / `↓` arrows are two columns wide), the
+        // blanked-out side holds exactly the drawn side's width.
         assert_eq!(
-            console::measure_text_width(&ahead_only),
-            console::measure_text_width(&both),
+            widgets::measure_width_cjk(&ahead_only),
+            widgets::measure_width_cjk(&both),
         );
         // No behind side anywhere in the render → only the `↑` column is spent.
         let no_behind = commits_cell(
@@ -4258,9 +4333,10 @@ mod tests {
         assert_eq!(console::strip_ansi_codes(&no_ahead), "↓2");
         // Column dropped entirely → empty.
         assert_eq!(commits_cell(None, 0, 0), "");
-        // A drawn column but no measurement for this row → blanks.
+        // A drawn column but no measurement for this row → blanks holding the
+        // 2-wide arrow slot plus its one digit.
         let none = commits_cell(None, 1, 0);
-        assert_eq!(console::measure_text_width(&none), 2);
+        assert_eq!(console::measure_text_width(&none), 3);
         assert!(none.trim().is_empty());
     }
 
@@ -4274,25 +4350,25 @@ mod tests {
             removed: 2,
             pr: 4, // "#123"
         };
-        assert_eq!(full.commits_width(), 6); // (1+2) + gap + (1+1)
+        assert_eq!(full.commits_width(), 8); // (2+2) + gap + (2+1), arrows two wide
         assert_eq!(full.badge_width(), 8); // 3 + 2 + 3
-        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8 + 1 + 4); // four fields, three gaps
+        assert_eq!(full.cluster_width(), 8 + 1 + 8 + 1 + 8 + 1 + 4); // four fields, three gaps
 
         // Only an ahead side, no diff, no time: one field, no gaps, no `↓` columns.
         let ahead_only = DetailCols {
             ahead: 2,
             ..DetailCols::default()
         };
-        assert_eq!(ahead_only.commits_width(), 3);
+        assert_eq!(ahead_only.commits_width(), 4); // 2-wide arrow + 2 digits
         assert_eq!(ahead_only.badge_width(), 0);
-        assert_eq!(ahead_only.cluster_width(), 3);
+        assert_eq!(ahead_only.cluster_width(), 4);
 
         // Only a behind side (covers the `up == 0` half of the commit gap).
         let behind_only = DetailCols {
             behind: 2,
             ..DetailCols::default()
         };
-        assert_eq!(behind_only.commits_width(), 3);
+        assert_eq!(behind_only.commits_width(), 4); // 2-wide arrow + 2 digits
 
         assert_eq!(DetailCols::default().cluster_width(), 0);
     }
@@ -4398,7 +4474,7 @@ mod tests {
         assert!(roomy.ahead > 0 || roomy.behind > 0);
         assert!(roomy.added > 0);
         // Tighter: the lowest-priority time is dropped, commits + badge stay.
-        let mid = detail_cols(&data, now, 9, 25);
+        let mid = detail_cols(&data, now, 9, 30);
         assert_eq!(mid.time, 0);
         assert!(mid.ahead > 0 || mid.behind > 0);
         assert!(mid.added > 0);
