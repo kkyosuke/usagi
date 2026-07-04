@@ -309,14 +309,70 @@ impl IssueStore {
 
     /// Metadata summaries for every issue.
     ///
-    /// Uses `index.json` when it is present and parseable; otherwise it rebuilds
-    /// the index from the markdown files (self-healing on a missing or corrupt
-    /// cache).
+    /// Uses `index.json` when it is present, parseable, and **fresh** with
+    /// respect to the markdown files; otherwise it rebuilds the index from the
+    /// files (self-healing on a missing, corrupt, or stale cache).
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
-        match self.load_index()? {
+        match self.load_fresh_index()? {
             Some(index) => Ok(index.issues),
             None => self.rebuild_index(),
         }
+    }
+
+    /// Load `index.json` only when it is *fresh* relative to the markdown files,
+    /// returning `None` when it is missing, unreadable, or stale (so the caller
+    /// rebuilds from the source of truth).
+    ///
+    /// The cache is a derived local file that usagi refreshes only through its
+    /// own [`write`](Self::write) / [`remove`](Self::remove) path. Issue files
+    /// can also change *outside* usagi — a `git pull`, a branch switch, a
+    /// session branch merge, or a hand edit — which leaves the cache lagging
+    /// behind the markdown source of truth. [`max_number`](Self::max_number)
+    /// already refuses to trust the cache for exactly this reason; `summaries`
+    /// (and thus `issue list`) must be equally defensive, or it returns stale
+    /// status/metadata that [`read`](Self::read) (`issue get`) does not.
+    ///
+    /// Freshness is checked cheaply — one `stat` of the index plus the directory
+    /// listing [`issue_files`](Self::issue_files) already performs, without
+    /// reading or parsing any markdown:
+    ///
+    /// - a different count of backing files than cached entries means issues
+    ///   were added or removed on disk outside usagi;
+    /// - any issue file newer than the index means an edit landed after the last
+    ///   cache refresh.
+    ///
+    /// usagi's own [`write_locked`](Self::write_locked) writes the markdown file
+    /// *then* the index, so a normally-managed store keeps an index at least as
+    /// new as every issue file and stays on this stat-only fast path. The one
+    /// gap the mtime check cannot see is an in-place edit within the same
+    /// filesystem-timestamp tick as the last index write; such near-simultaneous
+    /// writes come only from usagi itself (which refreshes the cache as part of
+    /// the same operation), not from the external tools this guards against.
+    fn load_fresh_index(&self) -> Result<Option<IndexFile>> {
+        // Stat the cache before reading it: a cache that cannot be dated cannot
+        // be freshness-checked, so there is no point parsing it. (A missing
+        // index lands here too, skipping the read that would find it gone.)
+        let Ok(index_mtime) = fs::metadata(self.index_path()).and_then(|m| m.modified()) else {
+            return Ok(None);
+        };
+        let Some(index) = self.load_index()? else {
+            return Ok(None);
+        };
+        let files = self.issue_files()?;
+        if files.len() != index.issues.len() {
+            return Ok(None);
+        }
+        for path in &files {
+            // A file whose mtime can't be read is treated as stale so an
+            // unreadable entry forces a rebuild rather than trusting the cache.
+            let fresh = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|mtime| mtime <= index_mtime);
+            if !fresh {
+                return Ok(None);
+            }
+        }
+        Ok(Some(index))
     }
 
     /// Load `index.json`, returning `None` when it is missing or unreadable (so
@@ -418,6 +474,18 @@ mod tests {
             updated_at: ts,
             body: format!("Body for {title}."),
         }
+    }
+
+    /// Pin a file's modification time so freshness tests are independent of the
+    /// filesystem's timestamp granularity.
+    fn set_mtime(path: &Path, secs_from_epoch: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
     }
 
     #[test]
@@ -826,6 +894,96 @@ mod tests {
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
         assert_eq!(store.scan().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn summaries_rebuild_when_an_issue_file_is_newer_than_the_index() {
+        // An issue file edited outside usagi (e.g. a git pull / branch switch)
+        // leaves the cache stale. `summaries` must detect the newer file and
+        // rebuild rather than returning the cached status — the bug this fixes.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+
+        let mut edited = issue(1, "One");
+        edited.status = IssueStatus::Done;
+        let path = store.dir().join("001-one.md");
+        fs::write(&path, edited.to_markdown()).unwrap();
+
+        // The edited markdown is strictly newer than the (now stale) index.
+        set_mtime(&store.index_path(), 1_000);
+        set_mtime(&path, 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].status, IssueStatus::Done);
+    }
+
+    #[test]
+    fn summaries_trust_a_fresh_index_without_rereading_the_markdown() {
+        // When nothing changed the fast path trusts the cache verbatim. Tamper
+        // the cache so it disagrees with the markdown but keep it newer than the
+        // file: the tampered value coming back proves no rebuild happened.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+
+        let mut cached = issue(1, "One").summary();
+        cached.title = "Cached title".to_string();
+        store.write_index(&[cached]).unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].title, "Cached title");
+    }
+
+    #[test]
+    fn summaries_rebuild_when_a_file_is_added_outside_usagi() {
+        // A second issue lands on disk without going through the store, so the
+        // cache lists only #1. Even when the new file is not newer than the
+        // index, the file-count mismatch forces a rebuild.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        fs::write(
+            store.dir().join("002-two.md"),
+            issue(2, "Two").to_markdown(),
+        )
+        .unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.dir().join("002-two.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![1, 2]);
+    }
+
+    #[test]
+    fn summaries_rebuild_when_a_file_is_removed_outside_usagi() {
+        // #2's file is deleted directly while the cache still lists both. The
+        // index is newer than the remaining file, so only the count mismatch
+        // flags the staleness.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        store.write(&issue(1, "One")).unwrap();
+        store.write(&issue(2, "Two")).unwrap();
+        fs::remove_file(store.dir().join("002-two.md")).unwrap();
+
+        set_mtime(&store.dir().join("001-one.md"), 1_000);
+        set_mtime(&store.index_path(), 2_000);
+
+        let nums: Vec<u32> = store
+            .summaries()
+            .unwrap()
+            .iter()
+            .map(|s| s.number)
+            .collect();
+        assert_eq!(nums, vec![1]);
     }
 
     #[test]
