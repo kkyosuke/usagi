@@ -626,6 +626,53 @@ fn note_overlay_shows_fully_when_the_preview_is_sparse() {
 }
 
 #[test]
+fn render_frame_keeps_the_pane_divider_straight_across_commit_stat_rows() {
+    // A session's detail line carries the `↑N ↓M` commit-divergence marker. Its
+    // arrows are ambiguous-width glyphs the terminal paints one column wide, and
+    // the detail cluster reserves them at that width — so the composed left cell
+    // must measure them the same, or its `│` divider jogs left on those rows. This
+    // regression guards that the divider column is constant down every body row.
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    let mut behind = worktree(Some("focus-prompt"), false, BranchStatus::Pushed);
+    behind.diff = Some(DiffStat {
+        added: 300,
+        removed: 249,
+    });
+    behind.ahead_behind = Some(AheadBehind {
+        ahead: 1,
+        behind: 7,
+    });
+    behind.pr = vec![PrLink {
+        number: 1,
+        url: "https://github.com/o/r/pull/1".into(),
+    }];
+    let state = state_with(vec![
+        worktree(Some("main"), true, BranchStatus::Pushed),
+        behind,
+    ]);
+    let frame = render_frame(24, 120, &state);
+    // The `↑1 ↓7` marker renders in full (not clipped to an ellipsis) — the
+    // over-count that shifted the divider also truncated the cluster.
+    let joined = stripped(&frame);
+    assert!(joined.contains("↑1 ↓7"), "the commit marker is not clipped");
+    // Every body row's divider sits in the same display column.
+    let bars: Vec<usize> = frame
+        .iter()
+        .filter_map(|l| {
+            let s = console::strip_ansi_codes(l);
+            s.char_indices()
+                .find(|(_, c)| *c == '│')
+                .map(|(b, _)| console::measure_text_width(&s[..b]))
+        })
+        .collect();
+    assert!(bars.len() > 4, "the body has several divided rows");
+    assert!(
+        bars.iter().all(|c| *c == bars[0]),
+        "the `│` divider stays in one column: {bars:?}"
+    );
+}
+
+#[test]
 fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
     // Editing is a floating box at the top, so the preview/terminal underneath
     // stays visible below it (the screen never switches).
