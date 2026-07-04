@@ -139,7 +139,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 - 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/home/02-layout.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini`）と表示名（`sakana.ai`）を大文字小文字を問わず受け付ける。
 - 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
-**1 セッションが持てる agent は 1 つだけ**です。すでに agent ペインがあるセッションでは、在席の **Menu から `agent` 行を外します**（切替プレビューも同様）。Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` から `agent` を実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。
+**1 セッションが持てる agent は CLI ごとに 1 つ**です。別々の CLI（例: Claude と Codex）は同じセッションで**並行して開けます**。ただし同じ CLI を 2 つは開かず、すでにその CLI の agent ペインがあるときは Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` のいずれから実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。`agent` 行は常に Menu／切替プレビューに残ります。
 
 起動時に usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込むため、エージェントは起動直後から
 `issue_*` tool でタスクを操作できます。さらにローカル LLM が有効なら [`usagi llm-mcp`](04-llm-mcp.md) も組み込みます。

@@ -468,6 +468,7 @@ impl SessionPanes {
             .iter()
             .map(|p| PaneTab {
                 kind: p.kind,
+                cli: p.cli,
                 id: p.id,
             })
             .collect();
@@ -831,25 +832,29 @@ impl TerminalPool {
             .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()))
     }
 
-    /// Whether `dir` already holds an agent pane. A session keeps at most one
-    /// agent, so a request to add a second (在席's `agent`, or `Ctrl-G`) reads
-    /// this to jump to the existing tab instead of spawning another (see
-    /// [`activate_agent`](Self::activate_agent)).
-    pub fn has_agent_pane(&self, dir: &Path) -> bool {
-        self.sessions
-            .get(dir)
-            .is_some_and(|sp| sp.panes.iter().any(|p| matches!(p.kind, PaneKind::Agent)))
+    /// Whether `dir` already holds an agent pane running `cli`. A session keeps
+    /// at most one agent *per CLI*, so a request to add another of the same CLI
+    /// (在席's `agent`, or `Ctrl-G`) reads this to jump to the existing tab
+    /// instead of spawning a duplicate — while a *different* CLI still opens a
+    /// new agent pane alongside (see [`activate_agent_of`](Self::activate_agent_of)).
+    pub fn has_agent_pane_of(&self, dir: &Path, cli: AgentCli) -> bool {
+        self.sessions.get(dir).is_some_and(|sp| {
+            sp.panes
+                .iter()
+                .any(|p| matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli))
+        })
     }
 
-    /// Make `dir`'s agent pane the active tab, returning whether one was found.
-    /// Lets a request to add an agent reuse the existing one — a session holds
-    /// at most one agent — by activating its tab rather than spawning a second.
-    pub fn activate_agent(&mut self, dir: &Path) -> bool {
+    /// Make `dir`'s agent pane running `cli` the active tab, returning whether
+    /// one was found. Lets a request to add an agent of a CLI reuse the existing
+    /// one — a session holds at most one agent per CLI — by activating its tab
+    /// rather than spawning a duplicate.
+    pub fn activate_agent_of(&mut self, dir: &Path, cli: AgentCli) -> bool {
         match self.sessions.get_mut(dir) {
             Some(sp) => match sp
                 .panes
                 .iter()
-                .position(|p| matches!(p.kind, PaneKind::Agent))
+                .position(|p| matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli))
             {
                 Some(idx) => {
                     sp.active = idx;
