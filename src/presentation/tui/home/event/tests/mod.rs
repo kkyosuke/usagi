@@ -224,6 +224,25 @@ fn noop_persist_entry(_: &crate::domain::history::HistoryEntry) {}
 /// out for real only in production, so the tests just drop the URL.
 fn noop_open_url(_: &str) {}
 
+/// Background-pane hooks for the direct-`Wiring` loop tests that do not exercise
+/// the loading-tab flow: `start_pending_spawn` reports `Reused` (a launch falls
+/// back to a synchronous re-attach) and the pollers report nothing pending. The
+/// flow itself is covered by the dedicated `background_tab` tests, which supply
+/// capturing versions.
+fn noop_start_pending_spawn(_: &mut HomeState, _: &Path, _: bool) -> anyhow::Result<StartPending> {
+    Ok(StartPending::Reused)
+}
+
+fn noop_poll_pending_spawn(_: &Path) -> PendingPoll {
+    PendingPoll::Gone
+}
+
+fn noop_activate_pending(_: &Path) -> bool {
+    false
+}
+
+fn noop_clear_pending_spawn() {}
+
 fn no_branches() -> Vec<String> {
     Vec::new()
 }
@@ -367,6 +386,11 @@ fn run_full_external(
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -384,6 +408,10 @@ fn run_full_external(
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal,
         open_config: &mut config,
@@ -880,6 +908,11 @@ fn run_with_tasks(
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -897,6 +930,10 @@ fn run_with_tasks(
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -953,6 +990,11 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -970,6 +1012,10 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1028,6 +1074,11 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -1045,6 +1096,10 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1189,6 +1244,11 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut dispatch_update = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -1206,6 +1266,10 @@ fn unite_add_and_remove_run_through_the_palette() {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1306,6 +1370,7 @@ fn apply_autostart_logs_started_panes_and_reports_change() {
 }
 
 mod attached;
+mod background_tab;
 mod background_tasks;
 mod clicks;
 mod config_switch;

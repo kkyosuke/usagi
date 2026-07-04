@@ -1797,7 +1797,7 @@ pub(super) fn log_line(line: &LogLine, width: usize) -> String {
 /// truth for the strip's layout: [`tab_chip_ranges`] reconstructs the on-screen
 /// column of each chip from the same recipe so a click can be mapped back to its
 /// tab (没入 switches tabs on a click; see [`attached_tab_at`]).
-fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
+fn tab_strip_parts(strip: &TabStrip, loading: Option<(usize, usize)>) -> (String, String) {
     let mut chips = String::new();
     let mut marker = String::new();
     for (i, label) in strip.labels.iter().enumerate() {
@@ -1810,7 +1810,15 @@ fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
         // under a non-ASCII chip label, matching the hit test in
         // [`tab_chip_ranges`], which measures the same chip the same way.
         let width = console::measure_text_width(&text);
-        if i == strip.active {
+        // A background pane still starting shows its chip as a left-to-right
+        // loading wave (see [`loading_chip`]) rather than the resting dim / active
+        // styling — so the new tab reads as "coming up" right where it will land,
+        // without a separate indicator. It never carries the active underline: the
+        // previously active pane keeps that while the loading one starts.
+        if let Some((_, frame)) = loading.filter(|(idx, _)| *idx == i) {
+            chips.push_str(&loading_chip(&text, frame));
+            marker.push_str(&" ".repeat(width));
+        } else if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
             marker.push_str(&style("▔".repeat(width)).accent().bold().to_string());
         } else {
@@ -1819,6 +1827,31 @@ fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
         }
     }
     (chips, marker)
+}
+
+/// Render one tab chip's text as a left-to-right loading wave: the whole chip is
+/// dim with a short accent band sweeping across it, so a background pane that is
+/// still starting reads as busy. `frame` advances the band; it sweeps the chip
+/// and a short tail past the end, giving a brief all-dim beat before it re-enters
+/// from the left — a wave that flows, not a bar that fills then snaps back.
+fn loading_chip(text: &str, frame: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    // Sweep across the chip plus a few columns of tail, so the band leaves the
+    // right edge and re-enters the left with a short gap between passes. The `+ 3`
+    // keeps the period positive even for an empty chip (which sweeps to "").
+    let period = chars.len() + 3;
+    let head = frame % period;
+    let mut out = String::new();
+    for (i, c) in chars.into_iter().enumerate() {
+        let s = c.to_string();
+        // A two-column bright band trailing the sweep head.
+        if i == head || i + 1 == head {
+            out.push_str(&style(s).accent().bold().to_string());
+        } else {
+            out.push_str(&style(s).dim().to_string());
+        }
+    }
+    out
 }
 
 /// The divider drawn between the fixed-width header identity and the tab strip,
@@ -1837,12 +1870,13 @@ const HEADER_TAB_DIVIDER: &str = " │ ";
 pub(super) fn header_tab_rows(
     header: String,
     strip: Option<&TabStrip>,
+    loading: Option<(usize, usize)>,
     width: usize,
 ) -> Vec<String> {
     let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
         return vec![clip_to_width(&header, width)];
     };
-    let (chips, marker) = tab_strip_parts(strip);
+    let (chips, marker) = tab_strip_parts(strip, loading);
     let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
     // Push the marker right past the identity and the divider so it lands under
     // the chips on the row above. The identity is a fixed width, so this indent
@@ -2949,7 +2983,10 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     };
     let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    let mut lines = header_tab_rows(header, Some(&combined), width);
+    // A background pane loading in this session animates its chip here (the
+    // resolving placeholder chip is appended to the published strip by the loop; a
+    // spawned pane's chip sits at its pool index).
+    let mut lines = header_tab_rows(header, Some(&combined), state.loading_tab(), width);
 
     // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
     // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows
@@ -3304,6 +3341,9 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let mut lines = header_tab_rows(
         header,
         if live { state.terminal_tabs() } else { None },
+        // A background pane starting in this session animates its chip here (the
+        // 切替 preview is where the user waits while it loads).
+        if live { state.loading_tab() } else { None },
         width,
     );
 
@@ -3402,7 +3442,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
     // choices would show through while the spawn blocks. Return an empty pane of
     // the right height and let the overlay own the whole surface.
-    if state.loading().is_some() {
+    if state.loading().is_some() && state.terminal_tabs().is_none_or(|s| s.labels.is_empty()) {
         return vec![String::new(); rows];
     }
     // The Markdown preview, when open, takes over the right pane regardless of
@@ -3460,7 +3500,14 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             // starting hint stands in until the first screen snapshot arrives.
             let mut lines = Vec::with_capacity(rows);
             let header = active_session_header(state);
-            let mut head = header_tab_rows(header, state.terminal_tabs(), right_w);
+            let mut head = header_tab_rows(
+                header,
+                state.terminal_tabs(),
+                // A background pane loads while the user waits in the 切替 preview,
+                // not while 没入; so the attached strip carries no loading chip.
+                None,
+                right_w,
+            );
             head.resize(super::TAB_BAR_ROWS, String::new());
             lines.extend(head);
             let body = rows.saturating_sub(lines.len());

@@ -384,6 +384,11 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -401,6 +406,10 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -500,6 +509,11 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -517,6 +531,10 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -661,6 +679,14 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut save_resume = |_: &str, _: ResumeLevel| {};
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
         let mut chat_ask = ready_chat_ask;
+        let mut start_pending_spawn: fn(
+            &mut HomeState,
+            &Path,
+            bool,
+        ) -> anyhow::Result<StartPending> = noop_start_pending_spawn;
+        let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+        let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+        let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
         let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
         let mut wiring = Wiring {
             interaction_epoch: 0,
@@ -678,6 +704,10 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             evict_pool: &mut evict,
             existing_branches: &mut branches,
             open_terminal: &mut open,
+            start_pending_spawn: &mut start_pending_spawn,
+            poll_pending_spawn: &mut poll_pending_spawn,
+            activate_pending: &mut activate_pending,
+            clear_pending_spawn: &mut clear_pending_spawn,
             open_url: &mut open_url,
             open_external_terminal: &mut open_external_terminal,
             open_config: &mut config,

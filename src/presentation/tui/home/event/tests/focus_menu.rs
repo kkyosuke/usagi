@@ -610,8 +610,11 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     // Zooming out of a live pane (ToFocus) keeps the pane's own tab selected with
     // the action menu floating over its preview — and the menu, not the preview,
     // owns the keyboard there: ↓ moves its cursor (cancelling the one-shot
-    // re-attach) and Enter runs the highlighted command (a *fresh* pane,
-    // `new_pane = true`) rather than re-attaching the previewed one.
+    // re-attach) and Enter runs the highlighted command — proof the Enter drove
+    // the menu rather than being inert. On a live session `terminal` now spawns a
+    // *background* tab (through `spawn_pane_bg`); the pool-less compat harness
+    // reports "no new tab" and falls back to a re-attach, so the second `open`
+    // call arrives with `new_pane = false` like the initial one.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
         opened.borrow_mut().push(n);
@@ -634,9 +637,10 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
         run_full_tabs(keys, sample_state(), &mut open, &mut preview, &mut tab_op).unwrap(),
         Outcome::Quit
     ));
-    // The initial attach re-attaches (new_pane = false); the menu's `terminal`
-    // spawns a fresh pane (new_pane = true) — proof the Enter drove the menu.
-    assert_eq!(*opened.borrow(), vec![false, true]);
+    // Two attaches: the initial re-attach, then the menu's `terminal` — dispatched
+    // as a background tab and, in this pool-less harness, resolved to a re-attach.
+    // Both `new_pane = false`; the second proves the Enter drove the menu.
+    assert_eq!(*opened.borrow(), vec![false, false]);
 }
 
 #[test]
@@ -935,6 +939,11 @@ fn run_with_chat(
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -952,6 +961,10 @@ fn run_with_chat(
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,

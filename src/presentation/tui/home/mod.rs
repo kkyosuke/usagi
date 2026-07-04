@@ -162,6 +162,31 @@ fn resolve_pane_env(
     .unwrap_or_default()
 }
 
+/// A background pane launch in flight: the resolved launch spec plus the slot the
+/// environment-resolver thread fills. Held on the UI thread across frames (the
+/// pool spawn is not `Send`) — the per-worktree environment (`op://` secrets)
+/// resolves off-thread so the tab bar keeps animating, and once it lands the pane
+/// is spawned inactive (its tab starts loading). See `start_pending_spawn` /
+/// `poll_pending_spawn` in [`run`].
+struct PendingSpawn {
+    /// Whether it opens an agent CLI pane or a plain terminal.
+    kind: terminal::tabs::PaneKind,
+    /// The launch's agent CLI (recorded on the pane for restore / labelling).
+    cli: crate::domain::settings::AgentCli,
+    /// The worktree label for the pane's launch notification.
+    label: String,
+    /// The agent launch command for an agent pane; `None` for a plain terminal.
+    agent_command: Option<String>,
+    /// Filled by the resolver thread with the per-worktree environment; `None`
+    /// until it lands (the Resolving phase).
+    env: std::sync::Arc<std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>>,
+    /// The pool id once the pane has been spawned (Starting phase); `None` while
+    /// the environment is still resolving.
+    pane_id: Option<u64>,
+    /// The resolver thread's handle, dropped (detached) when the launch is cleared.
+    _worker: std::thread::JoinHandle<()>,
+}
+
 /// The workspace data [`run`] needs at startup, loaded from disk without a
 /// `Term`: the recorded sessions (and any load-error notice), task issues,
 /// effective settings, and command history.
@@ -1121,6 +1146,183 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             result
         };
 
+    // Spawn a new pane for `dir` in the background — the 在席 `terminal` / `agent`
+    // path when the session already shows tabs — without attaching. Mirrors the
+    // launch resolution `open_terminal` does (agent CLI choice, resume, opening
+    // prompt, per-worktree env), but pushes the pane *inactive* via
+    // `TerminalPool::add_pane_inactive` and returns its stable id so the event
+    // loop can poll it and move to it once ready. Reusing an existing agent tab
+    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
+    // returns `None` so the caller re-attaches instead of tracking a loading tab.
+    // The single background pane launch in flight (see [`PendingSpawn`]); held on
+    // the UI thread across frames and driven by the three hooks below.
+    let pending_spawn = std::cell::RefCell::new(None::<PendingSpawn>);
+
+    // Dispatch a background pane launch: resolve the launch spec on the UI thread
+    // (consuming the one-shot agent choice / opening prompt) and kick the
+    // per-worktree environment resolution off-thread, WITHOUT spawning a pane yet —
+    // so nothing blocks and no centre loader is painted. `poll_pending_spawn` spawns
+    // the pane once the environment lands. Reusing an existing agent tab opens no
+    // new pane: it activates that tab, delivers any `ai <prompt>`, and returns
+    // `Reused` so the caller re-attaches instead of tracking a loading tab.
+    let mut start_pending_spawn =
+        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
+            let choice = home.take_agent_choice();
+            let cli = choice.unwrap_or_else(|| home.default_agent());
+            let direct_prompt = if run_agent {
+                home.take_agent_initial_prompt()
+            } else {
+                None
+            };
+            let agent = crate::infrastructure::agent::agent_for(cli);
+            let resume = agent.has_resumable_session(dir);
+            let label = home
+                .list()
+                .worktrees()
+                .iter()
+                .find(|w| w.path.as_path() == dir)
+                .map(state::worktree_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string())
+                });
+            // A session holds at most one agent per CLI: a request to add one that
+            // already exists reuses its tab rather than a duplicate — so there is no
+            // new (loading) tab, and the caller just re-attaches it.
+            {
+                let mut pool = pool.borrow_mut();
+                if run_agent && pool.has_agent_pane_of(dir, cli) {
+                    pool.activate_agent_of(dir, cli);
+                    if let Some(prompt) = direct_prompt.as_deref() {
+                        if let Some(pty) = pool.active_pty(dir) {
+                            let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
+                            input.push(b'\r');
+                            pty.write(&input)?;
+                        }
+                    }
+                    return Ok(event::StartPending::Reused);
+                }
+            }
+            // A fresh spawn: deliver a prompt queued for this session (MCP
+            // `session_prompt`) when no direct `ai <prompt>` took precedence, exactly
+            // as `open_terminal` does on a fresh agent-pane spawn.
+            let queued_prompt = if run_agent && direct_prompt.is_none() {
+                crate::infrastructure::agent_prompt_store::take(dir)
+            } else {
+                None
+            };
+            if let Some(prompt) = queued_prompt.as_deref() {
+                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
+            }
+            let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            let (kind, agent_command, chip) = if run_agent {
+                (
+                    terminal::tabs::PaneKind::Agent,
+                    Some(agent.launch_command(&agent_wiring, resume, spawn_prompt)),
+                    cli.display_name().to_string(),
+                )
+            } else {
+                (
+                    terminal::tabs::PaneKind::Terminal,
+                    None,
+                    "terminal".to_string(),
+                )
+            };
+            // Resolve the per-worktree environment off the UI thread so the tab bar
+            // keeps animating and stays responsive; the pane is spawned once it lands.
+            let ws_root = crate::usecase::session::workspace_root(dir);
+            let env = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let worker_slot = env.clone();
+            let worker = std::thread::spawn(move || {
+                let resolved = crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root);
+                if let Ok(mut slot) = worker_slot.lock() {
+                    *slot = Some(resolved);
+                }
+            });
+            *pending_spawn.borrow_mut() = Some(PendingSpawn {
+                kind,
+                cli,
+                label,
+                agent_command,
+                env,
+                pane_id: None,
+                _worker: worker,
+            });
+            Ok(event::StartPending::Pending { label: chip })
+        };
+
+    // Drive the in-flight launch one frame. While its environment is still
+    // resolving, report `Resolving`; on the frame it lands, spawn the pane inactive
+    // (on this — the UI — thread, since the pool is not `Send`) and report
+    // `Starting`; then `Ready` once the pane's shell has painted, or `Gone` if the
+    // spawn failed / the pane vanished.
+    let mut poll_pending_spawn = |dir: &Path| -> event::PendingPoll {
+        let mut pending = pending_spawn.borrow_mut();
+        let Some(ps) = pending.as_mut() else {
+            return event::PendingPoll::Gone;
+        };
+        match ps.pane_id {
+            None => {
+                let resolved = ps.env.lock().ok().and_then(|mut slot| slot.take());
+                let Some(env) = resolved else {
+                    return event::PendingPoll::Resolving;
+                };
+                let mut pool = pool.borrow_mut();
+                match pool.add_pane_inactive(
+                    term,
+                    dir,
+                    ps.kind,
+                    terminal::pool::PaneLaunch {
+                        agent_command: ps.agent_command.as_deref(),
+                        cli: ps.cli,
+                        label: &ps.label,
+                        env: &env,
+                    },
+                ) {
+                    Ok(id) => {
+                        ps.pane_id = Some(id);
+                        match pool.tab_index_of(dir, id) {
+                            Some(tab) => event::PendingPoll::Starting(tab),
+                            None => event::PendingPoll::Gone,
+                        }
+                    }
+                    Err(_) => event::PendingPoll::Gone,
+                }
+            }
+            Some(id) => {
+                let pool = pool.borrow();
+                match pool.tab_index_of(dir, id) {
+                    None => event::PendingPoll::Gone,
+                    Some(tab) => {
+                        if pool.pane_ready(dir, id) {
+                            event::PendingPoll::Ready
+                        } else {
+                            event::PendingPoll::Starting(tab)
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // Make the spawned background pane the active tab (so the following re-attach
+    // drives it) and consume the launch.
+    let mut activate_pending = |dir: &Path| -> bool {
+        let id = pending_spawn.borrow_mut().take().and_then(|ps| ps.pane_id);
+        match id {
+            Some(id) => pool.borrow_mut().activate_pane_id(dir, id),
+            None => false,
+        }
+    };
+
+    // Drop the in-flight launch (user acted, or it vanished): the resolver result
+    // is discarded and no pane is spawned.
+    let mut clear_pending_spawn = || {
+        pending_spawn.borrow_mut().take();
+    };
+
     // Snapshot the selected session's live terminal for the sidebar's right-pane
     // preview (the tab-like view), or `None` when it has no running shell/agent.
     let mut preview = |dir: &Path,
@@ -1377,6 +1579,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
