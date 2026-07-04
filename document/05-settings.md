@@ -148,6 +148,10 @@
 > エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、変更後は新しい agent /
 > terminal pane を開き直してください。起動時のペイン復旧では、同じ workspace root に属する root / session worktree の
 > 復旧ペインが同じ `env` を使うため、reference の解決結果を workspace root 単位で共有し、同じ `op read` を重複実行しません。
+> 複数の reference は **binding ごとに並列**に解決するため（1 件ずつ直列に待たない）、待ち時間は個々の
+> `op read` の合計ではなく最も遅い 1 件ぶんで済みます。解決は別スレッドで走り、`op` のロック解除待ちなどで
+> 時間がかかるあいだは pane 起動画面に**ローディングうさぎ**を表示して処理中であることを示します（すぐ解決
+> できるときは何も出しません）。
 
 > **セットアップコマンド（`setup_commands`）**: `session create` でセッションを作成した直後に、そのセッション root
 > （`<workspace>/.usagi/sessions/<name>`）をカレントディレクトリとして上から順に実行する shell コマンド列です。

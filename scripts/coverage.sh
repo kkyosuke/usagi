@@ -21,6 +21,10 @@
 #       キーチェーンからのサービスアカウントトークン取得。解決ロジック自体は
 #       `SecretResolver` を注入して env_resolver/mod.rs に切り出し、計測対象に含めてある。
 #   - tui/io/term_reader\.rs  : 実端末からのキー入力（live TTY が必要）。
+#   - tui/io/loading\.rs      : 遅いブロッキング処理をワーカースレッドで走らせつつ、
+#       実端末にローディング画面をアニメ描画する実 IO（スレッド生成・アニメクロック・
+#       端末描画）。描画するフレーム自体の純ロジックは widgets::loading_screen に
+#       切り出して計測対象に含めてある。
 #   - tui/app/mod\.rs / tui/home/mod\.rs / home/terminal/pane\.rs / home/terminal/pool\.rs
 #     / tui/open/mod\.rs / tui/config/mod\.rs / tui/config/provisioning\.rs
 #     / tui/welcome/mod\.rs
@@ -39,7 +43,7 @@
 #       コンパイルされ、テストが触れるのは lib 側のシンボルだけのため、binary 側の
 #       インスタンスが常に未カバーになってしまう（二重ビルド問題）。実 IO 層として
 #       除外することで正確な計測結果を維持する。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/secret_store\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/secret_store\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/io/loading\.rs|tui/app/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
