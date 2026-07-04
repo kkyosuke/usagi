@@ -2600,28 +2600,86 @@ fn focus_session_header(state: &HomeState) -> String {
         .to_string()
 }
 
+/// The height (in rows) the 在席 (Focus) menu's command area is fixed to. The
+/// window shows this many rows whatever is expanded, so opening an inline picker
+/// scrolls its sub-rows into view rather than resizing the box. Set to the full
+/// menu's command count (agent / terminal / diff / chat / close) via `max`, so a
+/// full menu never pads and every menu shares one height; it also leaves room —
+/// after the two overflow markers — for a two-option picker (terminal / close) to
+/// show in full, so only a long agent list actually scrolls.
+const FOCUS_MENU_MIN_VISIBLE: usize = 5;
+
+/// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
+/// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
+/// stays on screen. Rows hidden past an edge are summarised with a dim `↑ N` /
+/// `↓ N` marker on the window's top / bottom row; rows that already fit are padded
+/// with blanks. Either way the result is `visible` rows, so the box keeps the same
+/// height whether or not an inline picker is expanded.
+fn focus_menu_window(rows: Vec<String>, active: usize, visible: usize) -> Vec<String> {
+    if rows.len() <= visible {
+        let mut out = rows;
+        out.resize(visible, String::new());
+        return out;
+    }
+    let total = rows.len();
+    // Reserve a marker row on each edge; the content window is what remains. The
+    // clamp keeps `active` inside that window (centring it where there is room).
+    let content = visible.saturating_sub(2).max(1);
+    let start = active.saturating_sub(content / 2).min(total - content);
+    let end = start + content;
+    let mut out = Vec::with_capacity(visible);
+    out.push(focus_menu_overflow(start, true));
+    out.extend(rows[start..end].iter().cloned());
+    out.push(focus_menu_overflow(total - end, false));
+    out
+}
+
+/// A dim overflow marker for the windowed 在席 menu: `↑ N more` (`above`) or
+/// `↓ N more` (below) when `hidden` rows sit past the window edge, or a blank row
+/// when none do — so the window keeps its fixed height at the ends of the scroll.
+fn focus_menu_overflow(hidden: usize, above: bool) -> String {
+    if hidden == 0 {
+        return String::new();
+    }
+    let arrow = if above { '↑' } else { '↓' };
+    style(format!("  {arrow} {hidden} more")).dim().to_string()
+}
+
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. Rendered as the body of the floating menu overlay modal (see
+/// and a key hint. The command rows are windowed to a fixed height
+/// ([`focus_menu_window`]) so expanding an inline picker scrolls rather than
+/// resizing the box. Rendered as the body of the floating menu overlay modal (see
 /// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
 /// identity rides the modal's title rather than a header line here.
 pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
     let close_expanded = state.focus_close_expanded();
     let commands = state.focus_menu_commands();
+
+    // Build the whole command area first — one row per command plus any expanded
+    // picker's sub-rows — tracking the index of the *active* row (the cursor, or
+    // the highlighted picker sub-row) so the window below can keep it on screen.
+    let mut rows: Vec<String> = Vec::new();
+    let mut active = 0usize;
     for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
-            lines.push(focus_agent_command_row(state, selected, width));
-            if state.focus_menu_agent_cursor().is_some() {
-                let agent_cursor = state.focus_menu_agent_cursor();
+            let agent_cursor = state.focus_menu_agent_cursor();
+            if agent_cursor.is_none() && selected {
+                active = rows.len();
+            }
+            rows.push(focus_agent_command_row(state, selected, width));
+            if agent_cursor.is_some() {
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
-                    lines.push(focus_agent_pick_row(
+                    if Some(j) == agent_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_agent_pick_row(
                         cli,
                         Some(j) == agent_cursor,
                         cli == default,
@@ -2632,19 +2690,32 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
         } else if info.name == "close" {
             // The `close` row carries a chevron affordance; when expanded the two
             // options (plain close and close --force) follow as sub-rows.
-            lines.push(focus_close_command_row(state, info, selected, width));
+            if !close_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_close_command_row(state, info, selected, width));
             if close_expanded {
                 let close_cursor = state.focus_close_cursor();
                 for j in 0..2usize {
-                    lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
+                    if Some(j) == close_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
                 }
             }
         } else if info.name == "terminal" {
-            lines.push(focus_terminal_command_row(state, selected, width));
-            if state.focus_menu_terminal_expanded() {
+            let terminal_expanded = state.focus_menu_terminal_expanded();
+            if !terminal_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_terminal_command_row(state, selected, width));
+            if terminal_expanded {
                 let terminal_cursor = state.focus_menu_terminal_cursor();
                 for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
-                    lines.push(focus_terminal_pick_row(
+                    if Some(j) == terminal_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_terminal_pick_row(
                         action,
                         Some(j) == terminal_cursor,
                         width,
@@ -2652,9 +2723,20 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                 }
             }
         } else {
-            lines.push(focus_menu_row(info, selected, width));
+            if selected {
+                active = rows.len();
+            }
+            rows.push(focus_menu_row(info, selected, width));
         }
     }
+
+    // Window the command area to a fixed height so expanding a picker scrolls its
+    // sub-rows into view rather than growing the box. The window height is the
+    // (expansion-invariant) command count, floored so there is always room for the
+    // two overflow markers plus a content row.
+    let visible = commands.len().max(FOCUS_MENU_MIN_VISIBLE);
+    let mut lines = vec![style("Run a command:").dim().to_string()];
+    lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // a row-specific expand affordance while the cursor can open one, else base.

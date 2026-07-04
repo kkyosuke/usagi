@@ -1048,8 +1048,8 @@ fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     keys.push(Ok(Key::Enter)); // open = embedded pane/tab
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker again
     keys.push(Ok(Key::ArrowDown)); // open -> new
-    keys.push(Ok(Key::Enter)); // new = native terminal, stay in Focus
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // new = native terminal, then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, sample_state(), &mut open, &mut open_external).unwrap(),
@@ -1079,8 +1079,8 @@ fn focus_prompt_terminal_new_opens_native_terminal() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // native terminal, then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1099,8 +1099,8 @@ fn focus_prompt_terminal_new_reports_native_terminal_errors() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // native terminal (errors), then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
