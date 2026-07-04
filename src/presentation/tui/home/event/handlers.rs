@@ -884,6 +884,12 @@ pub(super) fn focus_key(
                 open_pane(term, state, painter, wiring, false, false, true);
                 return Flow::Continue;
             }
+            // A menu floating over a pane tab (the zoomed-out state once another
+            // key cancelled the re-attach): `Esc` dismisses the menu, leaving the
+            // pane's preview showing — one step short of leaving 在席.
+            if state.close_focus_menu_over_pane() {
+                return Flow::Continue;
+            }
             if !state.focus_discard_new_tab() {
                 state.leave_focus();
             }
@@ -971,9 +977,10 @@ pub(super) fn focus_key(
     }
 
     // The "+ new" tab drives the action surface (a menu / prompt that launches a
-    // pane); a pane tab is a preview, so its only action is `Enter` to re-attach
-    // the selected (now-active) pane — every other key is inert there.
-    if state.focus_on_new_tab() {
+    // pane), and so does the menu floating over a pane tab after a zoom-out; a
+    // bare pane tab is a preview, so its only action is `Enter` to re-attach the
+    // selected (now-active) pane — every other key is inert there.
+    if state.focus_on_new_tab() || state.focus_menu_over_pane() {
         match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
             SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
@@ -1414,10 +1421,14 @@ fn open_pane(
         Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 在席: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
-            // pane stays alive in the pool, so re-launching re-attaches them. Arm
-            // the one-shot return-to-pane bit so an immediate `Esc` bounces back to
-            // the pane this zoom started from (没入) rather than peeling back to 切替.
+            // pane stays alive in the pool, so re-launching re-attaches them. The
+            // selector stays on the tab the zoom left — its live preview keeps
+            // showing behind the floating action menu — instead of jumping to a
+            // "+ new" chip for a tab that was never created. Arm the one-shot
+            // return-to-pane bit so an immediate `Esc` bounces back to the pane
+            // this zoom started from (没入) rather than peeling back to 切替.
             state.leave_attached();
+            state.focus_menu_over_active_pane();
             state.arm_focus_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
@@ -1428,7 +1439,10 @@ fn open_pane(
             // one (like `Ctrl-T`), so the pane never lingers in 没入 with no driver.
             match state.previous_session_row() {
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
-                None => state.leave_attached(),
+                None => {
+                    state.leave_attached();
+                    state.focus_menu_over_active_pane();
+                }
             }
         }
         Ok(PaneExit::ToSession(row)) => {

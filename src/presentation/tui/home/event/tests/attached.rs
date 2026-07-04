@@ -105,11 +105,12 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
 #[test]
 fn ctrl_t_in_the_pane_zooms_out_to_focus() {
     // Attaching to a live session; the pane returns ToFocus (Ctrl-T), so the loop
-    // leaves 没入 for 在席 (Focus) — the session's action menu — leaving the pane
-    // alive *without* re-attaching: the pane opens exactly once. ToFocus arms a
-    // one-shot return-to-pane (the next Esc would re-attach), but a deliberate key
-    // (here ↓ in the menu) cancels it, so the following Esc peels back to Switch
-    // instead (then Esc is inert; fallback Ctrl-C quits).
+    // leaves 没入 for 在席 (Focus) — the action menu floating over the pane's tab —
+    // leaving the pane alive *without* re-attaching: the pane opens exactly once.
+    // ToFocus arms a one-shot return-to-pane (the next Esc would re-attach), but a
+    // deliberate key (here ↓ in the menu) cancels it, so the following Escapes
+    // first dismiss the floating menu, then peel back to Switch (then the
+    // fallback Ctrl-C quits).
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
@@ -120,8 +121,8 @@ fn ctrl_t_in_the_pane_zooms_out_to_focus() {
     let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToFocus -> Focus (arm return)
     keys.push(Ok(Key::ArrowDown)); // a menu move cancels the one-shot return arming
-    keys.push(Ok(Key::Escape)); // Focus -> Switch (no longer armed)
-    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // dismiss the menu floating over the pane tab
+    keys.push(Ok(Key::Escape)); // Focus -> Switch; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,

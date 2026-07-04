@@ -178,8 +178,10 @@ fn an_idle_session_is_always_on_the_new_tab() {
 
 #[test]
 fn leaving_attached_lands_on_the_new_tab() {
-    // `Ctrl-T` (leave_attached) drops back to 在席 on the trailing "+ new" launch
-    // surface — the action menu over the (still-live) panes — not a pane preview.
+    // A bare `leave_attached` (the shell exited, or a quit was raised) drops back
+    // to 在席 on the trailing "+ new" launch surface — not a pane preview. The
+    // deliberate zoom-out layers `focus_menu_over_active_pane` on top (see the
+    // dedicated tests below).
     let mut state = state();
     state.enter_focus(1);
     // `leave_attached` clears the surface; the event loop republishes the strip on
@@ -188,6 +190,87 @@ fn leaving_attached_lands_on_the_new_tab() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     assert_eq!(state.mode(), Mode::Focus);
     assert!(state.focus_on_new_tab());
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn zooming_out_floats_the_menu_over_the_pane_tab() {
+    // `Ctrl-T` / `Ctrl-O a` (leave_attached + focus_menu_over_active_pane) keeps
+    // the selector on the pane the zoom left: the strip grows no "+ new" chip for
+    // a tab that was never created, the pane's live preview keeps showing, and
+    // the action menu floats over it.
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
+    assert_eq!(state.mode(), Mode::Focus);
+    assert!(!state.focus_on_new_tab());
+    assert!(state.focus_menu_over_pane());
+    assert!(state.focus_menu_overlay());
+    // Dismissing the menu (`Esc` once the re-attach arming is spent) leaves the
+    // pane previewing — one step short of leaving 在席 — and reports it was up
+    // exactly once.
+    assert!(state.close_focus_menu_over_pane());
+    assert!(!state.focus_menu_overlay());
+    assert!(!state.close_focus_menu_over_pane());
+}
+
+#[test]
+fn focus_menu_over_active_pane_is_a_no_op_for_the_prompt_ui() {
+    // Only the menu surface floats; the prompt draws inline on the "+ new" tab,
+    // so with the prompt UI configured the zoom-out keeps its "+ new" landing.
+    let mut state = state();
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert!(state.focus_on_new_tab());
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn walking_or_clicking_tabs_dismisses_the_menu_over_a_pane() {
+    // Moving the tab selector is browsing previews: the floating menu steps aside
+    // whichever way the move happens (Ctrl-N / Ctrl-P / a tab click).
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
+    assert!(state.focus_menu_over_pane());
+    state.focus_tab_next();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.focus_tab_prev();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.focus_select_pane_tab(1);
+    assert!(!state.focus_menu_over_pane());
+}
+
+#[test]
+fn attaching_or_reentering_focus_drops_the_menu_over_a_pane() {
+    // Attaching consumes the floating menu, and every fresh 在席 entry (or a bare
+    // leave_attached) resets it, so no stale menu survives a surface change.
+    let mut state = state();
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    assert!(state.focus_menu_over_pane());
+    state.show_attached();
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.enter_focus(1);
+    assert!(!state.focus_menu_over_pane());
+
+    state.focus_menu_over_active_pane();
+    state.leave_attached();
+    assert!(!state.focus_menu_over_pane());
 }
 
 #[test]

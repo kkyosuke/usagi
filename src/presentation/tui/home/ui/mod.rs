@@ -578,8 +578,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // shows only when the menu surface is the active thing on screen (see
     // [`HomeState::focus_menu_overlay`] — no loading indicator, open overlay, or
     // `:` palette is up), so it never collides with those. The session identity
-    // rides the box title; the body is the header-less menu ([`focus_menu_body`]),
-    // and [`panes::focus_pane`] leaves the pane behind it blank.
+    // rides the box title; the body is the header-less menu ([`focus_menu_body`]).
+    // On the "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank;
+    // over a pane tab (the zoomed-out-from-没入 state) the pane's live preview
+    // keeps showing behind the box, so zooming out never blanks the terminal.
     if state.focus_menu_overlay() {
         let inner = widgets::modal_inner_width(right_w, FOCUS_MENU_INNER);
         let body = focus_menu_body(state, inner);

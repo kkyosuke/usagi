@@ -412,6 +412,27 @@ fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
 }
 
 #[test]
+fn zoomed_out_menu_floats_over_the_pane_preview() {
+    // Zooming out of a live pane (`Ctrl-T` / `Ctrl-O a`) keeps the pane's own tab
+    // selected: no "+ new" chip appears for a tab that was never created, the
+    // pane's live preview keeps showing behind the floating menu, and both share
+    // the frame.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    state.leave_attached();
+    state.focus_menu_over_active_pane();
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
+    assert!(state.focus_menu_overlay());
+    let pane = stripped(&right_pane_contents(&state, 77, 12));
+    assert!(pane.contains("$ echo hi"), "the pane preview stays drawn");
+    assert!(!pane.contains("+ new"), "no chip for an uncreated tab");
+    let out = stripped(&render_frame(24, 120, &state));
+    assert!(out.contains("Run a command:"), "the menu floats over it");
+    assert!(out.contains("session: main"));
+}
+
+#[test]
 fn focus_new_tab_with_panes_shows_the_prompt_surface() {
     // The "+ new" tab honours the Prompt action UI just as the menu does — with
     // live panes its command line shows below the strip (header-less).

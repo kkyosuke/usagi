@@ -583,6 +583,14 @@ pub struct HomeState {
     /// selected" (the menu / prompt shows). It is forced on whenever the session
     /// has no live panes, so an idle session always shows the action surface.
     focus_new_tab: bool,
+    /// Whether the 在席 (Focus) action menu floats over the *selected pane tab*
+    /// rather than the trailing "+ new" tab — the state after zooming out of a
+    /// live pane (`Ctrl-T` / `Ctrl-O a`): the selector stays on the pane the
+    /// zoom left, its live preview keeps showing behind the floating menu, and
+    /// the strip never grows a "+ new" chip for a tab that was never created.
+    /// Dropped when the menu is dismissed (`Esc`), when the tab selector moves
+    /// (the user is browsing previews), or when the mode changes.
+    focus_menu_over_pane: bool,
     /// A one-shot arming bit: 在席 (Focus) was reached by zooming *out* of a live
     /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
     /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
@@ -787,6 +795,7 @@ impl HomeState {
             focus_menu: FocusMenu::default(),
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
+            focus_menu_over_pane: false,
             focus_return_attach: false,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
@@ -1765,21 +1774,27 @@ impl HomeState {
     /// [`surface_writer`](Self::surface_writer).
     pub fn show_attached(&mut self) {
         self.mode = Mode::Attached;
+        // Attaching consumes any menu still floating over a pane tab, so a later
+        // return to 在席 starts from its regular surface rather than a stale menu.
+        self.focus_menu_over_pane = false;
     }
 
     /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
     /// so drop the surface and return to the focused session's action surface.
-    /// The tab selector lands on the trailing "+ new" tab — the launch surface —
-    /// so zooming out with `Ctrl-T` opens the action menu over the live panes
-    /// (which still ride the strip). When this was a deliberate zoom-out the caller
-    /// arms [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
+    /// The tab selector lands on the trailing "+ new" tab — the launch surface.
+    /// A deliberate zoom-out (`Ctrl-T` / `Ctrl-O a`) instead keeps the pane's
+    /// own tab selected with the menu floating over its preview — the caller
+    /// follows up with [`focus_menu_over_active_pane`] — and arms
+    /// [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
     /// rather than stepping back onto its preview (see [`focus_discard_new_tab`]).
     ///
+    /// [`focus_menu_over_active_pane`]: Self::focus_menu_over_active_pane
     /// [`arm_focus_return_attach`]: Self::arm_focus_return_attach
     /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Focus;
         self.focus_new_tab = true;
+        self.focus_menu_over_pane = false;
         self.clear_terminal_surface();
         // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
         // exited on the second key; clear it so 在席 starts without one pending.
@@ -2607,6 +2622,7 @@ impl HomeState {
         self.focus_menu.reset();
         self.focus_prompt.clear();
         self.focus_new_tab = true;
+        self.focus_menu_over_pane = false;
         // A fresh 在席 entry is not the zoom-out-from-没入 path, so the one-shot
         // return-to-pane arming never carries into it.
         self.focus_return_attach = false;
@@ -2755,7 +2771,9 @@ impl HomeState {
     /// This is true only for the menu surface ([`SessionActionUi::Menu`]) — the
     /// prompt surface stays inline — and only while 在席 actually shows that
     /// surface: on the trailing "+ new" tab (which [`focus_on_new_tab`] also
-    /// reports for an idle session with no live panes).
+    /// reports for an idle session with no live panes), or floating over the
+    /// selected pane tab after a zoom-out (see
+    /// [`focus_menu_over_active_pane`](Self::focus_menu_over_active_pane)).
     ///
     /// It yields to whatever else has claimed the screen so the floating menu
     /// never fights another surface for the pane: the momentary loading indicator,
@@ -2772,10 +2790,42 @@ impl HomeState {
     pub fn focus_menu_overlay(&self) -> bool {
         self.mode == Mode::Focus
             && self.session_action_ui == SessionActionUi::Menu
-            && self.focus_on_new_tab()
+            && (self.focus_on_new_tab() || self.focus_menu_over_pane)
             && self.loading().is_none()
             && matches!(self.overlay, Overlay::None)
             && !self.command_palette_open()
+    }
+
+    /// Whether the 在席 action menu currently floats over the selected pane tab
+    /// (rather than living on the "+ new" tab) — the zoomed-out-from-没入 state
+    /// set by [`focus_menu_over_active_pane`](Self::focus_menu_over_active_pane).
+    /// Key routing reads this so the menu keeps the keyboard while a pane tab is
+    /// selected beneath it.
+    pub fn focus_menu_over_pane(&self) -> bool {
+        self.focus_menu_over_pane
+    }
+
+    /// Keep the 在席 action menu floating over the pane tab a zoom-out left
+    /// (`Ctrl-T` / `Ctrl-O a`): step the selector off the "+ new" tab
+    /// [`leave_attached`](Self::leave_attached) landed on, so the pane's own tab
+    /// stays selected — its live preview keeps showing behind the floating menu
+    /// and the strip never grows a "+ new" chip for a tab that was never
+    /// created. Only the menu surface floats; with the prompt UI configured the
+    /// prompt draws inline on the "+ new" tab, so this is then a no-op and the
+    /// zoom-out keeps its "+ new" landing.
+    pub fn focus_menu_over_active_pane(&mut self) {
+        if self.session_action_ui == SessionActionUi::Menu {
+            self.focus_new_tab = false;
+            self.focus_menu_over_pane = true;
+        }
+    }
+
+    /// Dismiss the menu floating over a pane tab, returning whether it was up.
+    /// The 在席 `Esc` handler consumes this after the one-shot re-attach bit: a
+    /// dismissed menu leaves the selected pane's preview showing, one step short
+    /// of leaving 在席.
+    pub fn close_focus_menu_over_pane(&mut self) -> bool {
+        std::mem::take(&mut self.focus_menu_over_pane)
     }
 
     /// Move 在席's tab selector to the next tab, wrapping through the live panes
@@ -2784,6 +2834,8 @@ impl HomeState {
     /// landing on a pane tab, or `None` when it lands on the "+ new" tab (or the
     /// session has no panes, leaving the selector on "+ new").
     pub fn focus_tab_next(&mut self) -> Option<usize> {
+        // Walking the strip is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;
@@ -2809,6 +2861,8 @@ impl HomeState {
     ///
     /// [`focus_tab_next`]: Self::focus_tab_next
     pub fn focus_tab_prev(&mut self) -> Option<usize> {
+        // Walking the strip is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;
@@ -2832,6 +2886,8 @@ impl HomeState {
     /// clicks; keyboard navigation uses [`focus_tab_next`](Self::focus_tab_next)
     /// / [`focus_tab_prev`](Self::focus_tab_prev).
     pub fn focus_select_pane_tab(&mut self, index: usize) -> Option<usize> {
+        // Clicking a tab is browsing previews: any floating menu steps aside.
+        self.focus_menu_over_pane = false;
         let panes = self.focus_pane_count();
         if panes == 0 {
             self.focus_new_tab = true;

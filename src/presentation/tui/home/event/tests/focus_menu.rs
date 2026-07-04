@@ -370,10 +370,10 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
     // to Focus with the panes still alive, which is where the tab strip shows.
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; open returns ToFocus -> Focus on "+ new"
-    keys.push(Ok(Key::Char(CTRL_N))); // "+ new" wraps to pane 0: To(0)
+    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_N))); // pane 0 -> pane 1: To(1)
-    keys.push(Ok(Key::Char(CTRL_P))); // pane 1 -> pane 0: To(0)
+    keys.push(Ok(Key::Char(CTRL_N))); // pane 1 (last) -> "+ new": no tab_op
+    keys.push(Ok(Key::Char(CTRL_P))); // "+ new" wraps back to pane 1: To(1)
     keys.push(Ok(Key::CtrlC)); // quit
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -408,10 +408,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(
-        *navs.borrow(),
-        vec![TabNav::To(0), TabNav::To(1), TabNav::To(0)]
-    );
+    assert_eq!(*navs.borrow(), vec![TabNav::To(1), TabNav::To(1)]);
 }
 
 #[test]
@@ -435,15 +432,15 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
     };
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on "+ new"
+    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::Char('n'))); // "+ new" wraps to pane 0: To(0)
+    keys.push(Ok(Key::Char('n'))); // pane 0 -> pane 1: To(1)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::ArrowRight)); // pane 0 -> pane 1: To(1)
+    keys.push(Ok(Key::ArrowRight)); // pane 1 (last) -> "+ new": no tab_op
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::Char('p'))); // pane 1 -> pane 0: To(0)
+    keys.push(Ok(Key::Char('p'))); // "+ new" wraps back to pane 1: To(1)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::ArrowLeft)); // pane 0 wraps to "+ new": no tab_op
+    keys.push(Ok(Key::ArrowLeft)); // pane 1 -> pane 0: To(0)
     keys.push(Ok(Key::CtrlC)); // quit
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -479,8 +476,42 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(
         *navs.borrow(),
-        vec![TabNav::To(0), TabNav::To(1), TabNav::To(0)]
+        vec![TabNav::To(1), TabNav::To(1), TabNav::To(0)]
     );
+}
+
+#[test]
+fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
+    // Zooming out of a live pane (ToFocus) keeps the pane's own tab selected with
+    // the action menu floating over its preview — and the menu, not the preview,
+    // owns the keyboard there: ↓ moves its cursor (cancelling the one-shot
+    // re-attach) and Enter runs the highlighted command (a *fresh* pane,
+    // `new_pane = true`) rather than re-attaching the previewed one.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
+        opened.borrow_mut().push(n);
+        if opened.borrow().len() == 1 {
+            Ok(PaneExit::ToFocus)
+        } else {
+            Ok(PaneExit::Closed)
+        }
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut tab_op = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0usize);
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // attach feat -> ToFocus: menu floats over the pane tab
+    keys.push(Ok(Key::ArrowDown)); // menu cursor agent -> terminal (cancels the re-attach arming)
+    keys.push(Ok(Key::Enter)); // run terminal: a fresh pane -> Closed -> 在席 on "+ new"
+    keys.push(Ok(Key::Escape)); // discard "+ new" -> the pane's preview
+    keys.push(Ok(Key::Escape)); // 在席 -> 切替
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full_tabs(keys, sample_state(), &mut open, &mut preview, &mut tab_op).unwrap(),
+        Outcome::Quit
+    ));
+    // The initial attach re-attaches (new_pane = false); the menu's `terminal`
+    // spawns a fresh pane (new_pane = true) — proof the Enter drove the menu.
+    assert_eq!(*opened.borrow(), vec![false, true]);
 }
 
 #[test]
