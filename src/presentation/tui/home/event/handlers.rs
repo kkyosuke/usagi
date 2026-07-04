@@ -890,6 +890,12 @@ pub(super) fn focus_key(
             if state.focus_menu_collapse_agent() || state.focus_menu_collapse_close() {
                 return Flow::Continue;
             }
+            // With a `/` filter live the first `Esc` peels it (restoring the full
+            // menu); only once the menu lists everything again does `Esc` step back
+            // out of 在席.
+            if state.clear_focus_menu_filter() {
+                return Flow::Continue;
+            }
             // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
             // `Ctrl-O a`), the first `Esc` returns to that pane (没入) — back to the
             // tab the zoom started from — rather than peeling back toward 切替.
@@ -1130,10 +1136,13 @@ fn focus_menu_key(
         }
         return;
     }
+    // Arrow navigation, the picker-expand affordance and `Enter` bind the same
+    // whether or not a `/` filter is live; the letter keys below split, since under
+    // a filter they are the query rather than shortcuts.
     match key {
-        Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
-        Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
-        // On the `agent` / `terminal` rows, open their inline pickers.
+        Key::ArrowUp => state.focus_menu_move_up(),
+        Key::ArrowDown => state.focus_menu_move_down(),
+        // On the `agent` / `terminal` / `close` rows, open their inline pickers.
         Key::ArrowRight | Key::Tab => {
             if state.focus_menu_agent_can_expand() {
                 state.focus_menu_expand_agent();
@@ -1148,6 +1157,17 @@ fn focus_menu_key(
                 run_focus_command(term, state, painter, command.name, wiring);
             }
         }
+        _ if state.focus_menu_filtering() => match key {
+            // Filter mode: characters narrow the list, Backspace edits the query.
+            Key::Backspace => state.focus_menu_filter_backspace(),
+            Key::Char(c) if !c.is_control() => state.push_focus_menu_filter(c),
+            _ => {}
+        },
+        // `/` narrows the list by typing (leaving command input to the Prompt UI);
+        // `j`/`k` keep the vim navigation the list always had.
+        Key::Char('/') => state.start_focus_menu_filter(),
+        Key::Char('k') => state.focus_menu_move_up(),
+        Key::Char('j') => state.focus_menu_move_down(),
         Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
         Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),
         // `Shift`+`c` is the deliberate discard shortcut: run `close --force`
@@ -1240,6 +1260,9 @@ fn run_focus_command(
     name: &str,
     wiring: &mut Wiring,
 ) {
+    // Running a command dismisses any `/` filter so the menu — whether re-shown
+    // after a `diff` / `chat` overlay closes or re-entered later — lists in full.
+    state.clear_focus_menu_filter();
     match name {
         "terminal" => launch_pane(term, state, painter, wiring, false),
         // The menu's `agent` row / `a` shortcut launch the configured default.

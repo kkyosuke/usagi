@@ -312,6 +312,36 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
 }
 
 #[test]
+fn focus_menu_filter_narrows_the_command_list_and_shows_the_query() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    // Entering filter mode swaps the "Run a command:" label for the filter bar's
+    // placeholder, leaving every command listed until something is typed.
+    state.start_focus_menu_filter();
+    let empty = stripped(&render_frame(24, 120, &state));
+    assert!(empty.contains("Filter:"));
+    assert!(empty.contains("type to filter"));
+    assert!(empty.contains("terminal"));
+    assert!(empty.contains("diff"));
+    // Typing narrows the list to command names that start with the query
+    // (case-insensitive) and echoes the query on the filter line.
+    state.push_focus_menu_filter('t');
+    let narrowed = stripped(&render_frame(24, 120, &state));
+    assert!(narrowed.contains("Filter: t"));
+    assert!(narrowed.contains("terminal"));
+    assert!(!narrowed.contains("diff"), "non-matching commands drop out");
+    // A query that matches nothing shows the placeholder, not a blank box.
+    state.push_focus_menu_filter('z');
+    let none = stripped(&render_frame(24, 120, &state));
+    assert!(none.contains("No commands match the filter."));
+    // Backspacing restores matches; clearing exits filter mode entirely.
+    state.focus_menu_filter_backspace();
+    assert!(stripped(&render_frame(24, 120, &state)).contains("terminal"));
+    assert!(state.clear_focus_menu_filter());
+    assert!(stripped(&render_frame(24, 120, &state)).contains("Run a command:"));
+}
+
+#[test]
 fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     use crate::domain::settings::AgentCli;
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
