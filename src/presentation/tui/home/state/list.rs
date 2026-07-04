@@ -113,6 +113,12 @@ pub struct WorkspaceGroup {
     /// lookups; the root belongs to no session, so its note lives on the workspace
     /// state, not in `notes`.
     root_has_note: bool,
+    /// Whether this workspace is folded shut in the sidebar. When set, only the
+    /// group's single collapsed header line is drawn and navigable — its root
+    /// entry, session rows and "+ new session" row are hidden — so a 統合(unite)
+    /// list of many workspaces can be scanned at a glance. Toggled from the root
+    /// row (`Space`); only meaningful in unite mode, where the toggle is exposed.
+    collapsed: bool,
 }
 
 impl WorkspaceGroup {
@@ -166,6 +172,7 @@ impl WorkspaceGroup {
             notes,
             label_ids,
             root_has_note: false,
+            collapsed: false,
         }
     }
 
@@ -238,11 +245,40 @@ impl WorkspaceGroup {
         self.root_has_note
     }
 
-    /// Number of selectable rows this group contributes: its root row plus every
-    /// worktree (≥ 1).
-    fn selectable_rows(&self) -> usize {
+    /// Whether this workspace is folded shut (see [`collapsed`](Self::collapsed)).
+    pub fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    /// Number of session rows this group contributes to the title count: its root
+    /// row plus every worktree (≥ 1). Independent of [`collapsed`](Self::collapsed)
+    /// — folding a workspace hides its rows but does not change how many sessions
+    /// the header reports.
+    fn session_rows(&self) -> usize {
         self.worktrees.len() + 1
     }
+
+    /// Number of *navigable* rows this group contributes to the flat cursor space.
+    /// Expanded: its root row, one per worktree, and the trailing "+ new session"
+    /// row. Collapsed: just the single folded header line.
+    fn nav_slots(&self) -> usize {
+        if self.collapsed {
+            1
+        } else {
+            self.worktrees.len() + 2
+        }
+    }
+}
+
+/// Which kind of row a flat cursor index lands on within its group: the synthetic
+/// root row, a session (the worktree at the given index), or the trailing
+/// "+ new session" affordance. A collapsed group exposes only [`RowSlot::Root`]
+/// (its folded header line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowSlot {
+    Root,
+    Worktree(usize),
+    Create,
 }
 
 /// The opened workspace(s) and their selectable rows, each group fronted by a
@@ -425,68 +461,78 @@ impl WorktreeList {
         self.groups.iter().all(|g| g.worktrees.is_empty())
     }
 
-    /// Total selectable rows across every group: each group's root row plus its
-    /// worktrees.
-    fn selectable_rows(&self) -> usize {
-        self.groups
-            .iter()
-            .map(WorkspaceGroup::selectable_rows)
-            .sum()
-    }
-
-    /// Total rows the 切替 cursor can rest on: every selectable session / root row
-    /// plus the trailing persistent **"+ new session"** row at the foot of the
-    /// list. Navigation ([`move_up`](Self::move_up) / [`move_down`](Self::move_down)
-    /// / [`focus_index`](Self::focus_index)) wraps over this range so the cursor can
-    /// land on the create row, while the session-facing accessors (`selected`,
-    /// `refs`, the title-bar [`session_count`](Self::session_count)) keep counting
-    /// only the real rows.
+    /// Total rows the 切替 cursor can rest on across every group: each expanded
+    /// group's root row, one per worktree, and its trailing **"+ new session"**
+    /// row — or, for a collapsed group, just its single folded header line.
+    /// Navigation ([`move_up`](Self::move_up) / [`move_down`](Self::move_down) /
+    /// [`focus_index`](Self::focus_index)) wraps over this range so the cursor can
+    /// land on any create row, while the title-bar [`session_count`](Self::session_count)
+    /// keeps counting only the real session rows.
     fn nav_rows(&self) -> usize {
-        self.selectable_rows() + 1
+        self.groups.iter().map(WorkspaceGroup::nav_slots).sum()
     }
 
-    /// The flat index of the persistent **"+ new session"** row — the last one the
-    /// cursor can reach, sitting just past every group's rows. It belongs to no
-    /// session (so [`selected`](Self::selected) / [`root_selected`](Self::root_selected)
-    /// stay `false`/`None` on it); activating it opens the inline create input
-    /// instead of focusing a session.
+    /// The flat index of the **"+ new session"** row at the foot of the *last*
+    /// group — the affordance a click at the very bottom of the list resolves to,
+    /// and the upper bound the session picker clamps against. Each group owns its
+    /// own create row now ([`is_create_row`](Self::is_create_row)); this names the
+    /// last one for the legacy foot-of-list callers.
     pub fn create_row(&self) -> usize {
-        self.selectable_rows()
+        self.nav_rows().saturating_sub(1)
     }
 
-    /// Whether the cursor rests on the persistent **"+ new session"** row (see
-    /// [`create_row`](Self::create_row)).
+    /// Whether the flat `row` is a group's **"+ new session"** row. It belongs to
+    /// no session (so [`selected`](Self::selected) / [`root_selected`](Self::root_selected)
+    /// stay `None`/`false` on it); activating it opens that group's inline create
+    /// input instead of focusing a session.
+    pub fn is_create_row(&self, row: usize) -> bool {
+        matches!(self.locate(row), Some((_, RowSlot::Create)))
+    }
+
+    /// Whether the cursor rests on a **"+ new session"** row (see
+    /// [`is_create_row`](Self::is_create_row)).
     pub fn create_row_selected(&self) -> bool {
-        self.selected_index == self.create_row()
+        self.is_create_row(self.selected_index)
     }
 
-    /// Number of rows listed in the left pane (every group's root row plus its
-    /// worktrees). The title bar reports this so the header count matches the rows
-    /// the user actually sees.
+    /// Number of session rows listed (every group's root row plus its worktrees).
+    /// The title bar reports this; it counts folded workspaces in full, so folding
+    /// one changes what is drawn but not the header total.
     pub fn session_count(&self) -> usize {
-        self.selectable_rows()
+        self.groups.iter().map(WorkspaceGroup::session_rows).sum()
     }
 
-    /// Resolve a flat selectable `row` to `(group index, worktree index within the
-    /// group)`, where the worktree index is `None` for that group's root row.
-    /// `None` when `row` is past the end.
-    fn locate(&self, row: usize) -> Option<(usize, Option<usize>)> {
+    /// Resolve a flat cursor `row` to its group and the kind of row it lands on
+    /// within that group (root, a worktree, or the create row). A collapsed group
+    /// contributes only its [`RowSlot::Root`] line. `None` when `row` is past the
+    /// end.
+    fn locate(&self, row: usize) -> Option<(usize, RowSlot)> {
         let mut start = 0;
-        self.groups.iter().enumerate().find_map(|(g, group)| {
-            let end = start + group.selectable_rows();
-            let found = (start..end)
-                .contains(&row)
-                .then(|| (g, (row - start).checked_sub(1)));
-            start = end;
-            found
-        })
+        for (g, group) in self.groups.iter().enumerate() {
+            let n = group.nav_slots();
+            if row < start + n {
+                let within = row - start;
+                let slot = if within == 0 {
+                    RowSlot::Root
+                } else if within <= group.worktrees.len() {
+                    RowSlot::Worktree(within - 1)
+                } else {
+                    RowSlot::Create
+                };
+                return Some((g, slot));
+            }
+            start += n;
+        }
+        None
     }
 
-    /// The worktree at a selectable `row`, or `None` when the row is a group's
-    /// root row (which belongs to no session) or past the end.
+    /// The worktree at a flat `row`, or `None` when the row is a group's root row
+    /// or create row (neither belongs to a session) or is past the end.
     fn worktree_at(&self, row: usize) -> Option<&WorktreeState> {
-        let (g, within) = self.locate(row)?;
-        self.groups[g].worktrees.get(within?)
+        match self.locate(row)? {
+            (g, RowSlot::Worktree(i)) => self.groups[g].worktrees.get(i),
+            _ => None,
+        }
     }
 
     /// The worktree at a global 0-based index across every group (root rows
@@ -529,6 +575,77 @@ impl WorktreeList {
             .unwrap_or(Path::new(""))
     }
 
+    /// Whether the group at `index` is folded shut (see
+    /// [`WorkspaceGroup::collapsed`]).
+    pub fn is_collapsed(&self, index: usize) -> bool {
+        self.groups
+            .get(index)
+            .is_some_and(WorkspaceGroup::collapsed)
+    }
+
+    /// Fold / unfold the group at `index`, returning its new collapsed state
+    /// (`false` for an out-of-range index). The cursor and active row are kept on
+    /// the same logical slot as the flat row space shrinks/grows: a cursor inside
+    /// the folded group lands on its now-single header line.
+    pub fn toggle_collapsed(&mut self, index: usize) -> bool {
+        let Some(current) = self.groups.get(index).map(WorkspaceGroup::collapsed) else {
+            return false;
+        };
+        self.set_group_collapsed(index, !current);
+        !current
+    }
+
+    /// Apply the folded state recorded by workspace name after a list rebuild (a
+    /// background re-sync builds a fresh list), so folds survive re-syncs. Names
+    /// not present default to expanded. The cursor is left at the rebuild default
+    /// (the first group's root), which is always valid.
+    pub fn set_collapsed_by_names(&mut self, names: &std::collections::HashSet<String>) {
+        for group in &mut self.groups {
+            group.collapsed = names.contains(&group.name);
+        }
+    }
+
+    /// Set the group at `index`'s folded state, re-resolving the cursor and active
+    /// row through the row-space shift so neither is stranded on a hidden slot.
+    /// Both indices are always in range, so their `(group, slot)` resolves; a slot
+    /// in the now-folded group maps onto its single header line.
+    fn set_group_collapsed(&mut self, index: usize, collapsed: bool) {
+        let sel = self.locate(self.selected_index);
+        let act = self.locate(self.active_index);
+        if let Some(group) = self.groups.get_mut(index) {
+            group.collapsed = collapsed;
+        }
+        if let Some((g, slot)) = sel {
+            self.selected_index = self.nav_index_of(g, slot);
+        }
+        if let Some((g, slot)) = act {
+            self.active_index = self.nav_index_of(g, slot);
+        }
+    }
+
+    /// The flat index of a `(group, slot)` (a valid group from [`locate`]). In a
+    /// collapsed group only the root line exists, so every slot resolves to it. A
+    /// worktree/create slot in an expanded group is clamped to the rows it has.
+    fn nav_index_of(&self, group: usize, slot: RowSlot) -> usize {
+        let start: usize = self
+            .groups
+            .iter()
+            .take(group)
+            .map(WorkspaceGroup::nav_slots)
+            .sum();
+        let g = &self.groups[group];
+        let off = if g.collapsed {
+            0
+        } else {
+            match slot {
+                RowSlot::Root => 0,
+                RowSlot::Worktree(i) => (i + 1).min(g.worktrees.len()),
+                RowSlot::Create => g.worktrees.len() + 1,
+            }
+        };
+        start + off
+    }
+
     /// Replaces the PR links of the row whose session root is `root`, returning
     /// whether the set changed.
     ///
@@ -557,12 +674,12 @@ impl WorktreeList {
 
     /// Whether the cursor is on a (any group's) root row.
     pub fn root_selected(&self) -> bool {
-        !self.create_row_selected() && matches!(self.locate(self.selected_index), Some((_, None)))
+        matches!(self.locate(self.selected_index), Some((_, RowSlot::Root)))
     }
 
     /// Whether a root row is the active one.
     pub fn root_active(&self) -> bool {
-        matches!(self.locate(self.active_index), Some((_, None)))
+        matches!(self.locate(self.active_index), Some((_, RowSlot::Root)))
     }
 
     /// Make the row under the cursor active, returning its display name (the
@@ -656,9 +773,10 @@ impl WorktreeList {
         }
     }
 
-    /// The flat row of the first worktree named `name` across all groups.
+    /// The flat row of the first *visible* worktree named `name` across all groups
+    /// (a collapsed group's worktrees have no flat row, so they are skipped).
     fn row_of_name(&self, name: &str) -> Option<usize> {
-        (0..self.selectable_rows()).find(|&row| {
+        (0..self.nav_rows()).find(|&row| {
             self.worktree_at(row)
                 .is_some_and(|w| worktree_name(w) == name)
         })
@@ -678,13 +796,16 @@ impl WorktreeList {
             if here && name == ROOT_NAME {
                 return Some(row);
             }
-            row += 1;
-            for w in &group.worktrees {
-                if here && worktree_name(w) == name {
-                    return Some(row);
+            // A folded group's worktrees have no flat row, so they cannot be jumped
+            // to — skip the scan and let the row advance by the group's single slot.
+            if !group.collapsed {
+                for (i, w) in group.worktrees.iter().enumerate() {
+                    if here && worktree_name(w) == name {
+                        return Some(row + 1 + i);
+                    }
                 }
-                row += 1;
             }
+            row += group.nav_slots();
         }
         None
     }
@@ -698,7 +819,7 @@ impl WorktreeList {
         (group < self.groups.len()).then(|| {
             self.groups[..group]
                 .iter()
-                .map(WorkspaceGroup::selectable_rows)
+                .map(WorkspaceGroup::nav_slots)
                 .sum()
         })
     }
@@ -710,6 +831,10 @@ impl WorktreeList {
     /// would pull it into whichever group lists that name first).
     pub fn row_in_group_of_name(&self, group: usize, name: &str) -> Option<usize> {
         let start = self.group_root_row(group)?;
+        // A folded group hides its worktrees, so none is navigable to restore onto.
+        if self.groups[group].collapsed {
+            return None;
+        }
         self.groups[group]
             .worktrees
             .iter()
@@ -718,23 +843,35 @@ impl WorktreeList {
     }
 
     /// The rows as command-facing [`WorktreeRef`]s (name + active flag): each
-    /// group's root row, then its worktrees, in display order.
+    /// group's root row, then its worktrees, in display order. Collapsed groups'
+    /// worktrees are still listed (commands act on them by name) but can never be
+    /// active, since the cursor cannot rest on a hidden row.
     pub fn refs(&self) -> Vec<WorktreeRef> {
-        let mut refs = Vec::with_capacity(self.selectable_rows());
-        let mut row = 0;
+        let mut refs = Vec::new();
+        let mut nav = 0;
         for group in &self.groups {
             refs.push(WorktreeRef {
                 name: ROOT_NAME.to_string(),
-                active: row == self.active_index,
+                active: nav == self.active_index,
             });
-            row += 1;
+            nav += 1;
+            if group.collapsed {
+                for w in &group.worktrees {
+                    refs.push(WorktreeRef {
+                        name: worktree_name(w).to_string(),
+                        active: false,
+                    });
+                }
+                continue;
+            }
             for w in &group.worktrees {
                 refs.push(WorktreeRef {
                     name: worktree_name(w).to_string(),
-                    active: row == self.active_index,
+                    active: nav == self.active_index,
                 });
-                row += 1;
+                nav += 1;
             }
+            nav += 1; // the group's "+ new session" row
         }
         refs
     }

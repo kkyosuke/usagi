@@ -105,12 +105,13 @@ fn add_and_remove_extra_groups_drive_unite_mode() {
 
 #[test]
 fn selected_workspace_root_and_note_follow_the_cursor_group() {
-    // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1.
+    // Flat rows (each expanded workspace owns a create row):
+    //   0 usagi root, 1 main, 2 usagi create, 3 wsB root, 4 b1, 5 wsB create.
     let mut state = united_state();
     state.switch_select(0); // primary root
     assert_eq!(state.selected_workspace_root(), PathBuf::from("/usagi"));
     assert_eq!(state.selected_root_note(), Some("primary note"));
-    state.switch_select(2); // the extra group's root
+    state.switch_select(3); // the extra group's root
     assert_eq!(state.selected_workspace_root(), PathBuf::from("/wsB"));
     assert_eq!(state.selected_root_note(), Some("b note"));
 
@@ -122,21 +123,22 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
         sessions: Vec::new(),
         issues: Vec::new(),
     }]);
-    state.switch_select(2); // wsC root (primary root 0, main 1, wsC root 2)
+    state.switch_select(3); // wsC root (usagi root 0, main 1, usagi create 2, wsC root 3)
     assert_eq!(state.selected_root_note(), None);
 }
 
 #[test]
 fn selected_workspace_name_follows_the_cursor_group() {
-    // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1.
+    // Rows (each expanded workspace owns a create row):
+    //   0 usagi root, 1 main, 2 usagi create, 3 wsB root, 4 b1, 5 wsB create.
     let mut state = united_state();
     state.switch_select(0); // primary root
     assert_eq!(state.selected_workspace_name(), "usagi");
     state.switch_select(1); // primary session
     assert_eq!(state.selected_workspace_name(), "usagi");
-    state.switch_select(2); // the extra group's root
+    state.switch_select(3); // the extra group's root
     assert_eq!(state.selected_workspace_name(), "wsB");
-    state.switch_select(3); // the extra group's session
+    state.switch_select(4); // the extra group's session
     assert_eq!(state.selected_workspace_name(), "wsB");
     // A single-workspace screen always reports the primary.
     let solo = HomeState::new("solo", Vec::new(), None);
@@ -172,6 +174,7 @@ fn issue_command_scopes_to_the_cursor_group() {
         sessions: vec![session("b1")],
         issues: vec![issue(9, "extra-task")],
     }]);
+    // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
 
     // Cursor on the primary group: `issue list` surfaces the primary's issues.
     state.switch_select(1); // primary session "main"
@@ -184,7 +187,7 @@ fn issue_command_scopes_to_the_cursor_group() {
     assert!(!modal.lines.iter().any(|l| l.text.contains("extra-task")));
 
     // Cursor in the extra group: the same command now scopes to its issues.
-    state.switch_select(3); // extra group session "b1"
+    state.switch_select(4); // extra group session "b1"
     for c in "issue".chars() {
         state.push_char(c);
     }
@@ -192,6 +195,54 @@ fn issue_command_scopes_to_the_cursor_group() {
     let modal = state.text_modal().expect("issue opens a text modal");
     assert!(modal.lines.iter().any(|l| l.text.contains("extra-task")));
     assert!(!modal.lines.iter().any(|l| l.text.contains("primary-task")));
+}
+
+#[test]
+fn toggle_selected_collapsed_folds_the_cursor_group_and_survives_a_resync() {
+    // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
+    let mut state = united_state();
+    state.switch_select(3); // wsB root
+    state.toggle_selected_collapsed();
+    assert!(state.list().is_collapsed(1));
+    // The fold is recorded by name, so a background re-sync (which rebuilds the
+    // list wholesale) keeps wsB folded.
+    state.refresh_sessions(vec![session("main")]);
+    assert!(state.list().is_collapsed(1));
+    // Toggling again unfolds it, and that also survives a re-sync.
+    state.switch_select(3); // wsB's folded header is its root slot
+    state.toggle_selected_collapsed();
+    assert!(!state.list().is_collapsed(1));
+    state.refresh_sessions(vec![session("main")]);
+    assert!(!state.list().is_collapsed(1));
+}
+
+#[test]
+fn toggle_selected_collapsed_is_a_noop_off_a_root_or_in_a_single_workspace() {
+    // Single workspace: never folds — that would hide the whole list.
+    let mut solo = HomeState::new("solo", Vec::new(), None);
+    solo.restore_sessions(vec![session("s1")]);
+    solo.switch_select(0); // root
+    solo.toggle_selected_collapsed();
+    assert!(!solo.list().is_collapsed(0));
+    // Unite, but the cursor is on a session row (not a root): no-op.
+    let mut state = united_state();
+    state.switch_select(1); // main
+    state.toggle_selected_collapsed();
+    assert!(!state.list().is_collapsed(0));
+}
+
+#[test]
+fn expand_selected_group_for_create_unfolds_before_creating() {
+    let mut state = united_state();
+    state.switch_select(3); // wsB root
+    state.toggle_selected_collapsed(); // fold wsB
+    assert!(state.list().is_collapsed(1));
+    // Creating a session into a folded workspace unfolds it first (its "+ new
+    // session" row is otherwise hidden). A no-op when already expanded.
+    state.expand_selected_group_for_create();
+    assert!(!state.list().is_collapsed(1));
+    state.expand_selected_group_for_create();
+    assert!(!state.list().is_collapsed(1));
 }
 
 #[test]
