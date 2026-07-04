@@ -197,8 +197,12 @@ fn hint_lines_list_every_command_for_a_bare_prompt() {
     let joined = stripped(&hint_lines(&state, 80));
     assert!(joined.contains("commands"));
     assert!(!joined.contains('›'));
+    // The bare prompt lists the first `HINT_MAX` workspace commands (alphabetical
+    // registry order) then folds the rest into an overflow line, so an early
+    // command shows while the tail (`session`, `unite`, …) is summarised.
     assert!(joined.contains("more"));
-    assert!(joined.contains("session"));
+    assert!(joined.contains("config"));
+    assert!(!joined.contains("session"));
 }
 
 #[test]

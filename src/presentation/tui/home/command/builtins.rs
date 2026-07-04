@@ -777,10 +777,6 @@ fn issue_line(listed: &ListedIssue) -> LogLine {
 /// a bare name is accepted: `preview README` resolves to `README.md`. Reading the
 /// file is the event loop's job, so this command only validates the argument and
 /// returns [`Effect::OpenPreview`] carrying the target.
-///
-/// `preview diff` is an alias for the [`DiffCommand`]: it opens the session's
-/// diff against the base branch in the right pane, so the surface stays
-/// discoverable from `preview` even though `diff` is the first-class command.
 pub(super) struct PreviewCommand;
 
 impl Command for PreviewCommand {
@@ -809,14 +805,6 @@ impl Command for PreviewCommand {
         if target.is_empty() {
             return CommandResult::line(LogLine::error(format!("usage: {}", self.usage())));
         }
-        // `preview diff` is an alias for the `diff` command: open the session's
-        // diff view rather than trying to preview a file named `diff.md`.
-        if target == "diff" {
-            return CommandResult {
-                lines: Vec::new(),
-                effect: Effect::OpenDiff,
-            };
-        }
         CommandResult {
             lines: Vec::new(),
             effect: Effect::OpenPreview(target.to_string()),
@@ -824,11 +812,12 @@ impl Command for PreviewCommand {
     }
 }
 
-/// `diff`: open the highlighted session's diff against the base branch in the
+/// `diff`: open the focused session's diff against the base branch in the
 /// right pane — the whole patch behind the sidebar's `+N -M` badge, scrollable
-/// like the Markdown preview. Gathering the diff (resolving the highlighted
-/// worktree and shelling out to git) is the event loop's job, so this command
-/// only requests the view via [`Effect::OpenDiff`].
+/// like the Markdown preview. A 在席 (Focus) command, so it runs against the
+/// session under the cursor from the Focus menu / prompt. Gathering the diff
+/// (resolving the highlighted worktree and shelling out to git) is the event
+/// loop's job, so this command only requests the view via [`Effect::OpenDiff`].
 pub(super) struct DiffCommand;
 
 impl Command for DiffCommand {
@@ -837,11 +826,11 @@ impl Command for DiffCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Show the highlighted session's diff against the base branch"
+        "Show the focused session's diff against the base branch"
     }
 
     fn scope(&self) -> CommandScope {
-        CommandScope::Workspace
+        CommandScope::Session
     }
 
     fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
