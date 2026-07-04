@@ -14,6 +14,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
+use crate::presentation::tui::io::{screen, signals};
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::{config, home, new, open, splash, welcome};
 use crate::usecase::project;
@@ -26,18 +27,17 @@ use crate::usecase::project;
 /// escapes a path no guard covers, so the user is never left in raw mode with a
 /// hidden cursor and live mouse reporting. It chains to the previous hook so the
 /// panic message still prints.
+///
+/// The restore bytes it writes are the shared [`screen::TERMINAL_RESTORE`]
+/// sequence — the same ones the signal handlers ([`signals`]) write on an abrupt
+/// exit — so the two Drop-less exit paths stay in lock-step.
 fn install_panic_hook() {
-    use std::io::Write as _;
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = crossterm::terminal::disable_raw_mode();
         // Leave the alternate screen; disable mouse click/drag/motion reporting
         // and bracketed paste; show the cursor.
-        let mut out = std::io::stdout();
-        let _ = out.write_all(
-            b"\x1b[?1049l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?1003l\x1b[?2004l\x1b[?25h",
-        );
-        let _ = out.flush();
+        let _ = screen::write_terminal_restore(&mut std::io::stdout());
         previous(info);
     }));
 }
@@ -47,6 +47,10 @@ fn install_panic_hook() {
 /// alternate-screen lifetime for the whole session.
 pub fn run() -> Result<()> {
     install_panic_hook();
+    // Restore the terminal on a signal that skips the RAII guards (a real SIGINT
+    // that beats `Key::CtrlC`, `kill`/SIGTERM, or a closed terminal/SIGHUP), so
+    // the shell is never left echoing mouse reports. See [`signals`].
+    signals::install();
     let term = Term::stdout();
     let storage = Storage::open_default()?;
     // Pre-fill the New form's Location field with the configured base directory.

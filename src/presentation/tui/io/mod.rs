@@ -6,6 +6,8 @@
 //! - [`screen`] — alternate-screen / raw-mode / mouse-reporting setup and the
 //!   shared frame-painting helpers.
 //! - [`term_reader`] — reading keys and byte sequences from stdin with timeouts.
+//! - [`signals`] — SIGINT/SIGTERM/SIGHUP handlers that restore the terminal on
+//!   an exit that runs no `Drop`.
 //! - [`echo`] — suppressing terminal echo for the TUI's lifetime.
 //! - [`clipboard`] — copying selected text to the system clipboard.
 //! - [`loading`] — running a slow blocking step on a worker thread while the
@@ -15,4 +17,5 @@ pub mod clipboard;
 pub mod echo;
 pub mod loading;
 pub mod screen;
+pub mod signals;
 pub mod term_reader;
