@@ -975,9 +975,12 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
         .iter()
         .map(|line| console::strip_ansi_codes(line).into_owned())
         .collect();
-    assert!(plain_lines[7].trim().is_empty());
+    // wsA's own "+ new session" row sits at the foot of its block (line 7), then
+    // the two-row gap (8-9), then wsB's header (10).
+    assert!(plain_lines[7].contains("+ new session"));
     assert!(plain_lines[8].trim().is_empty());
-    assert!(plain_lines[9].contains("▌ wsB"));
+    assert!(plain_lines[9].trim().is_empty());
+    assert!(plain_lines[10].contains("▌ wsB"));
 }
 
 #[test]
@@ -1013,9 +1016,11 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         .iter()
         .map(|line| console::strip_ansi_codes(line).into_owned())
         .collect();
-    // The unite group separator is a two-row gap between the two workspaces.
-    assert!(plain_lines[6].trim().is_empty());
+    // wsA's rail create row sits at the foot of its block (line 6), then the
+    // two-row unite gap (7-8) separates the two workspaces.
+    assert!(plain_lines[6].contains('+'));
     assert!(plain_lines[7].trim().is_empty());
+    assert!(plain_lines[8].trim().is_empty());
     assert!(!stripped(&lines).contains('━'));
 }
 
@@ -1049,6 +1054,139 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
     assert!(rendered.contains("a1")); // wsA's session
     assert!(rendered.contains("▌ wsB")); // the empty workspace still gets a header
     assert!(rendered.contains(EMPTY_MESSAGE)); // and the "no sessions" message
+}
+
+fn unite_pair() -> WorktreeList {
+    WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![worktree(Some("b1"), false, BranchStatus::Local)],
+        ),
+    ])
+}
+
+fn full_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
+    left_pane(
+        list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        40,
+        false,
+        sidebar,
+        Utc::now(),
+        None,
+    )
+}
+
+#[test]
+fn left_pane_folds_a_collapsed_workspace_to_a_single_header_line() {
+    let mut list = unite_pair();
+    list.toggle_collapsed(0); // fold wsA
+    let rendered = stripped(&full_left_pane(&list, Sidebar::Full));
+    // wsA collapses to a header carrying its session count; a1 is hidden.
+    assert!(rendered.contains("▸ wsA  (1)"));
+    assert!(!rendered.contains("a1"));
+    // wsB stays expanded and shows its session and its own create row.
+    assert!(rendered.contains("b1"));
+    assert!(rendered.contains("+ new session"));
+}
+
+#[test]
+fn rail_pane_folds_a_collapsed_workspace_to_a_marker_line() {
+    let mut list = unite_pair();
+    list.toggle_collapsed(0); // fold wsA
+    let lines = full_left_pane(&list, Sidebar::Rail);
+    let plain: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    // The folded workspace is a single ▸ marker line at the top of the rail.
+    assert!(plain[0].contains('▸'));
+    // Below the two-row gap, wsB's rail entry still shows its status glyphs.
+    assert!(plain.iter().any(|l| l.contains('○') || l.contains('●')));
+}
+
+fn switch_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
+    left_pane(
+        list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        40,
+        true, // in 切替
+        sidebar,
+        Utc::now(),
+        None,
+    )
+}
+
+#[test]
+fn a_folded_workspace_dims_when_it_is_not_the_selected_row_in_switch() {
+    let mut list = unite_pair();
+    list.toggle_collapsed(0); // fold wsA
+    list.focus_index(1); // cursor on wsB's root, so wsA's folded row is unselected
+                         // Full sidebar: the folded header still renders (dimmed) while wsB is selected.
+    let full = switch_left_pane(&list, Sidebar::Full);
+    assert!(stripped(&full).contains("▸ wsA  (1)"));
+    // Rail: the folded marker still renders (dimmed) at the top.
+    let rail = switch_left_pane(&list, Sidebar::Rail);
+    let plain0 = console::strip_ansi_codes(&rail[0]).into_owned();
+    assert!(plain0.contains('▸'));
+}
+
+#[test]
+fn sidebar_row_at_line_maps_a_folded_workspace_header_to_its_root_slot() {
+    let mut list = unite_pair();
+    list.toggle_collapsed(0); // fold wsA
+    let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
+    // wsA folded to one header line (flat 0); then the two-row gap; then wsB
+    // expanded: 3 hdr, 4-5 root(flat1), 6 div, 7-9 b1(flat2), 10 create(flat3).
+    assert_eq!(at(0), Some(0)); // wsA folded header (root slot)
+    assert_eq!(at(1), None); // gap
+    assert_eq!(at(2), None); // gap
+    assert_eq!(at(3), None); // wsB header
+    assert_eq!(at(4), Some(1)); // wsB root
+    assert_eq!(at(7), Some(2)); // b1
+    assert_eq!(at(10), Some(3)); // wsB create row
+}
+
+#[test]
+fn sidebar_scroll_walks_folded_workspaces() {
+    let mut list = WorktreeList::from_groups(vec![
+        WorkspaceGroup::new(
+            "wsA",
+            vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+        ),
+        WorkspaceGroup::new(
+            "wsB",
+            vec![
+                worktree(Some("b0"), true, BranchStatus::Pushed),
+                worktree(Some("b1"), false, BranchStatus::Local),
+            ],
+        ),
+    ]);
+    list.toggle_collapsed(0); // wsA → a single line
+                              // Folded flat rows: wsA header 0, wsB root 1, b0 2, b1 3, wsB create 4.
+                              // Selecting the folded header keeps the top pinned.
+    list.focus_index(0);
+    assert_eq!(sidebar_scroll(&list, true, 6), 0);
+    // Layout lines: wsA folded 0; gap 1-2; wsB hdr 3, root 4-5, div 6, b0 7-9,
+    // b1 10-12, create 13 → total 14. Selecting b1 (span 10-12) scrolls by 7.
+    list.focus_index(3); // b1
+    assert_eq!(sidebar_scroll(&list, true, 6), 7);
 }
 
 #[test]
@@ -1134,10 +1272,11 @@ fn sidebar_row_at_line_walks_a_single_group_layout() {
 #[test]
 fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
     // Two groups; each is headed by a name line (unite), then root (2), divider,
-    // then sessions. A two-row visual gap separates workspace blocks. Flat rows
-    // run across groups: wsA root=0, a1=1, wsB root=2, b1=3. Layout lines:
-    // 0 hdrA, 1-2 root, 3 div, 4-6 a1, 7-8 gap, 9 hdrB, 10-11 root,
-    // 12 div, 13-15 b1.
+    // sessions, and its own "+ new session" row. A two-row visual gap separates
+    // workspace blocks. Flat rows run across groups: wsA root=0, a1=1, wsA create=2,
+    // wsB root=3, b1=4, wsB create=5. Layout lines:
+    // 0 hdrA, 1-2 root, 3 div, 4-6 a1, 7 create, 8-9 gap, 10 hdrB, 11-12 root,
+    // 13 div, 14-16 b1, 17 create.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new(
             "wsA",
@@ -1153,12 +1292,14 @@ fn sidebar_row_at_line_walks_a_unite_layout_with_headers() {
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(3), None); // wsA divider
     assert_eq!(at(4), Some(1)); // a1
-    assert_eq!(at(7), None); // first gap row
-    assert_eq!(at(8), None); // second gap row
-    assert_eq!(at(9), None); // wsB header
-    assert_eq!(at(10), Some(2)); // wsB root
-    assert_eq!(at(12), None); // wsB divider
-    assert_eq!(at(13), Some(3)); // b1
+    assert_eq!(at(7), Some(2)); // wsA create row
+    assert_eq!(at(8), None); // first gap row
+    assert_eq!(at(9), None); // second gap row
+    assert_eq!(at(10), None); // wsB header
+    assert_eq!(at(11), Some(3)); // wsB root
+    assert_eq!(at(13), None); // wsB divider
+    assert_eq!(at(14), Some(4)); // b1
+    assert_eq!(at(17), Some(5)); // wsB create row
 }
 
 #[test]
@@ -1175,15 +1316,19 @@ fn sidebar_row_at_line_walks_a_unite_rail_layout_with_gaps() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
+    // Flat rows: wsA root=0(lines 0-1), div 2, a1=1(3-5), createA=2(6), gap 7-8,
+    // wsB root=3(9-10), div 11, b1=4(12-14), createB=5(15).
     let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Rail, 0);
     assert_eq!(at(0), Some(0)); // wsA root
     assert_eq!(at(2), None); // wsA divider
     assert_eq!(at(3), Some(1)); // a1
-    assert_eq!(at(6), None); // first gap row
-    assert_eq!(at(7), None); // second gap row
-    assert_eq!(at(8), Some(2)); // wsB root
-    assert_eq!(at(10), None); // wsB divider
-    assert_eq!(at(11), Some(3)); // b1
+    assert_eq!(at(6), Some(2)); // wsA create row (rail)
+    assert_eq!(at(7), None); // first gap row
+    assert_eq!(at(8), None); // second gap row
+    assert_eq!(at(9), Some(3)); // wsB root
+    assert_eq!(at(11), None); // wsB divider
+    assert_eq!(at(12), Some(4)); // b1
+    assert_eq!(at(15), Some(5)); // wsB create row (rail)
 }
 
 #[test]
@@ -1198,15 +1343,16 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
         ),
     ]);
     let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
-    // wsA: 0 hdr, 1-2 root, 3 div, 4 empty message, 5-6 gap.
+    // wsA (empty): 0 hdr, 1-2 root(flat0), 3 div, 4 empty message, 5 create(flat1),
+    //   6-7 gap. wsB: 8 hdr, 9-10 root(flat2), 11 div, 12-14 b1(flat3), 15 create.
     assert_eq!(at(1), Some(0)); // wsA root
     assert_eq!(at(4), None); // empty-workspace message
-    assert_eq!(at(5), None); // first gap row
-    assert_eq!(at(6), None); // second gap row
+    assert_eq!(at(5), Some(1)); // wsA create row (empty workspace)
+    assert_eq!(at(6), None); // first gap row
+    assert_eq!(at(7), None); // second gap row
 
-    // wsB: 7 hdr, 8-9 root, 10 div, 11-13 b1.
-    assert_eq!(at(8), Some(1)); // wsB root
-    assert_eq!(at(11), Some(2)); // b1
+    assert_eq!(at(9), Some(2)); // wsB root
+    assert_eq!(at(12), Some(3)); // b1
 }
 
 #[test]
@@ -1221,10 +1367,12 @@ fn group_inline_insert_line_includes_unite_gaps_before_later_groups() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    // Group A: header + root(2) + divider + session(3) = 7.
+    // Group A: header + root(2) + divider + session(3) + create(1) = 8 rows; its
+    // create row (the inline-input anchor) is the last line, index 7.
     assert_eq!(group_inline_insert_line(&list, 0), 7);
-    // Group B starts after the two-row gap, then has the same 7-row block.
-    assert_eq!(group_inline_insert_line(&list, 1), 16);
+    // Group B starts after the two-row gap, then has an 8-row block plus that gap
+    // (10 lines from 8..=17); its create row is the last line, index 17.
+    assert_eq!(group_inline_insert_line(&list, 1), 17);
 }
 
 #[test]
@@ -2437,12 +2585,13 @@ fn sidebar_scroll_walks_past_an_empty_workspace_group() {
             ],
         ),
     ]);
-    // Flat rows: wsA root 0, wsB root 1, b0 2, b1 3. Select b1.
-    list.focus_index(3);
-    // Group A block (header + root 2 + divider + empty 1 = 5) then group B (gap 2 +
-    // header 1 + root 2 + divider 1 + 2×3 = 12) = 17, plus the create row = 18.
-    // b1's block ends at line 17, so a 9-row pane scrolls by 8.
-    assert_eq!(sidebar_scroll(&list, true, 9), 8);
+    // Flat rows (each expanded workspace owns a create row): wsA root 0, wsA create
+    // 1, wsB root 2, b0 3, b1 4, wsB create 5. Select b1.
+    list.focus_index(4);
+    // Group A block (header 1 + root 2 + divider 1 + empty 1 + create 1 = 6), then
+    // group B (gap 2 + header 1 + root 2 + divider 1 + 2×3 + create 1 = 13) = 19.
+    // b1's block spans lines 15-17, so a 9-row pane scrolls by 9 (18 − 9).
+    assert_eq!(sidebar_scroll(&list, true, 9), 9);
 }
 
 #[test]

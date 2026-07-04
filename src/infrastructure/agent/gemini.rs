@@ -140,13 +140,14 @@ impl Agent for GeminiAgent {
             parts.push("-r".to_string());
             parts.push("latest".to_string());
         }
-        // A queued prompt rides along as `-i <prompt>` (execute it, then stay
+        // A queued prompt rides along as `-i=<prompt>` (execute it, then stay
         // interactive). It is arbitrary user text, so it is escaped for the
-        // single-quoted shell context. `-r` and `-i` are independent flags, so a
+        // single-quoted shell context, and glued to the flag with `=` so a prompt
+        // starting with `-` (e.g. `ai --help`) is read as the flag's value rather
+        // than as the next option. `-r` and `-i` are independent flags, so a
         // resumed session can still open already working on a queued prompt.
         if let Some(prompt) = initial_prompt {
-            parts.push("-i".to_string());
-            parts.push(shell_single_quote(prompt));
+            parts.push(format!("-i={}", shell_single_quote(prompt)));
         }
         parts.join(" ")
     }
@@ -244,13 +245,22 @@ mod tests {
 
     #[test]
     fn launch_command_carries_an_opening_prompt() {
-        // A queued prompt rides along as `-i <prompt>`, single-quoted for the shell.
+        // A queued prompt rides along as `-i=<prompt>`, single-quoted for the
+        // shell and glued with `=` so a dash-leading prompt stays the flag's value.
         let launch = GeminiAgent::new().launch_command(
             &Settings::default().agent_wiring("usagi"),
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, "gemini -i 'fix issue #50'");
+        assert_eq!(launch, "gemini -i='fix issue #50'");
+        // A dash-leading prompt (`ai --help`) binds to `-i` instead of being
+        // parsed as the next option.
+        let dashed = GeminiAgent::new().launch_command(
+            &Settings::default().agent_wiring("usagi"),
+            false,
+            Some("--help"),
+        );
+        assert_eq!(dashed, "gemini -i='--help'");
     }
 
     #[test]
@@ -262,7 +272,7 @@ mod tests {
             true,
             Some("keep going"),
         );
-        assert_eq!(launch, "gemini -r latest -i 'keep going'");
+        assert_eq!(launch, "gemini -r latest -i='keep going'");
     }
 
     #[test]
@@ -275,7 +285,7 @@ mod tests {
             false,
             Some("don't stop"),
         );
-        assert_eq!(launch, r"gemini -i 'don'\''t stop'");
+        assert_eq!(launch, r"gemini -i='don'\''t stop'");
     }
 
     #[test]

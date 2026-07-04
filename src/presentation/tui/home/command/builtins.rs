@@ -529,7 +529,7 @@ impl Command for AgentCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "agent [claude|codex|sakana.ai|gemini]"
+        "agent [claude|codex|codex-fugu|sakana.ai|gemini]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
@@ -559,6 +559,80 @@ impl Command for AgentCommand {
                 "unknown agent \"{name}\" (try {})",
                 self.usage()
             ))),
+        }
+    }
+}
+
+/// `ai <prompt>`: open the configured AI agent in the selected worktree and pass
+/// it an opening prompt. This is the direct "tell the session's agent to do this"
+/// command, distinct from `agent`, which only opens the agent shell, and from
+/// `chat`, which converses with the local LLM instead of launching an agent CLI.
+///
+/// The command itself only validates that a prompt was provided and returns a
+/// side effect. The event loop resolves the active worktree and configured
+/// default Agent CLI, then launches a fresh/reused agent pane with this prompt as
+/// the one-shot initial message for a fresh spawn.
+pub(super) struct AiCommand;
+
+impl Command for AiCommand {
+    fn name(&self) -> &'static str {
+        "ai"
+    }
+
+    fn description(&self) -> &'static str {
+        "Ask the configured AI agent to work on a prompt"
+    }
+
+    fn usage(&self) -> &'static str {
+        "ai <prompt>"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["ai fix the failing test", "ai explain the latest diff"]
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let prompt = args.trim();
+        if prompt.is_empty() {
+            return CommandResult::line(LogLine::error(format!("usage: {}", self.usage())));
+        }
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenAgentPrompt(prompt.to_string()),
+        }
+    }
+}
+
+/// `chat`: open the local-LLM chat screen in a session, to converse with the
+/// workspace's configured local model (served via Ollama) without leaving usagi.
+///
+/// Unlike `agent` / `ai`, which launch an external agent CLI in the worktree,
+/// this talks directly to the local model — a quick question costs no cloud-agent
+/// tokens. It takes no arguments; the command only returns the side effect the
+/// event loop turns into the dedicated chat screen.
+pub(super) struct ChatCommand;
+
+impl Command for ChatCommand {
+    fn name(&self) -> &'static str {
+        "chat"
+    }
+
+    fn description(&self) -> &'static str {
+        "Chat with the local LLM in a dedicated screen"
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Session
+    }
+
+    fn run(&self, _args: &str, _ctx: &CommandContext) -> CommandResult {
+        CommandResult {
+            lines: Vec::new(),
+            effect: Effect::OpenChat,
         }
     }
 }

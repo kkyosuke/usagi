@@ -1016,33 +1016,39 @@ fn group_block_rows(
 ) -> usize {
     let united = list.group_count() > 1;
     let gap = usize::from(united && group_index > 0) * UNITE_WORKSPACE_GAP_ROWS;
+    // A folded workspace draws a single header line in place of its whole block.
+    if list.is_collapsed(group_index) {
+        return gap + 1;
+    }
     let header = usize::from(united && with_headers);
     let body = if worktree_count == 0 {
         1
     } else {
         SESSION_ROWS * worktree_count
     };
-    gap + header + 2 + 1 + body
+    // Each expanded workspace ends with its own "+ new session" row (the final
+    // `+ 1`), so creating a session lands in the workspace it sits under.
+    gap + header + 2 + 1 + body + 1
 }
 
-/// The total body lines the sidebar draws for `list`: every group's block plus the
-/// trailing persistent "+ new session" row. `with_headers` matches the sidebar
-/// variant (full draws 統合 group headers, the rail does not). The scroll offset
-/// clamps against this so the window never runs past the list's foot.
+/// The total body lines the sidebar draws for `list`: every group's block (each
+/// expanded one already includes its own trailing "+ new session" row).
+/// `with_headers` matches the sidebar variant (full draws 統合 group headers, the
+/// rail does not). The scroll offset clamps against this so the window never runs
+/// past the list's foot.
 fn sidebar_total_lines(list: &WorktreeList, with_headers: bool) -> usize {
     list.groups()
         .iter()
         .enumerate()
         .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), with_headers))
         .sum::<usize>()
-        + 1 // the "+ new session" row at the foot
 }
 
 /// The `(start line, height)` the selected row occupies in the full-column
-/// layout: the two-row root entry, one [`SESSION_ROWS`] block per session, or the
-/// single "+ new session" row at the foot. Walks the same layout as
-/// [`sidebar_row_at_line_walk`] so the scroll offset reveals exactly the row the
-/// renderer draws as selected.
+/// layout: the single folded header line of a collapsed workspace, the two-row
+/// root entry, one [`SESSION_ROWS`] block per session, or a group's "+ new session"
+/// row. Walks the same layout as [`sidebar_row_at_line_walk`] so the scroll offset
+/// reveals exactly the row the renderer draws as selected.
 fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) {
     let united = list.group_count() > 1;
     let sel = list.selected_index();
@@ -1051,6 +1057,14 @@ fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) 
     for (g, group) in list.groups().iter().enumerate() {
         if united && g > 0 {
             cur += UNITE_WORKSPACE_GAP_ROWS;
+        }
+        if list.is_collapsed(g) {
+            if flat == sel {
+                return (cur, 1); // the folded header line (the root slot)
+            }
+            cur += 1;
+            flat += 1;
+            continue;
         }
         if with_headers && united {
             cur += 1;
@@ -1062,17 +1076,23 @@ fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) 
         flat += 1;
         if group.worktrees().is_empty() {
             cur += 1; // the empty-workspace message
-            continue;
-        }
-        for _ in group.worktrees() {
-            if flat == sel {
-                return (cur, SESSION_ROWS);
+        } else {
+            for _ in group.worktrees() {
+                if flat == sel {
+                    return (cur, SESSION_ROWS);
+                }
+                cur += SESSION_ROWS;
+                flat += 1;
             }
-            cur += SESSION_ROWS;
-            flat += 1;
         }
+        // The group's own "+ new session" row.
+        if flat == sel {
+            return (cur, 1);
+        }
+        cur += 1;
+        flat += 1;
     }
-    (cur, 1) // the "+ new session" row
+    (cur, 1)
 }
 
 /// The body-line scroll offset for a sidebar taller than its `viewport_rows`,
@@ -1189,6 +1209,20 @@ fn rail_pane(
         if united && g > 0 {
             push_unite_workspace_gap(&mut win, RAIL_WIDTH);
         }
+        // A folded workspace collapses to a single fold-marker line (its root slot),
+        // matching the full sidebar's [`collapsed_group_row`] so toggling the rail
+        // never shifts which row a workspace sits on.
+        if list.is_collapsed(g) {
+            let selected = flat_row == list.selected_index();
+            let active = flat_row == list.active_index();
+            let mut row = rail_collapsed_group_row(selected, active, in_switch);
+            if in_switch && !selected {
+                row = dim_row(&row);
+            }
+            win.push(row);
+            flat_row += 1;
+            continue;
+        }
         // The root entry is two rows (then a divider), matching the full sidebar's
         // [`root_row`]; only worktree entries carry the third resource row, so the
         // root drops the rail entry's (blank) third line.
@@ -1214,6 +1248,13 @@ fn rail_pane(
             // Mirror the full sidebar's single empty-message row so the row count
             // matches and toggling never shifts the layout.
             win.push(pad_to_width(String::new(), RAIL_WIDTH));
+            let selected = flat_row == list.selected_index();
+            let mut row = rail_create_row(selected, in_switch);
+            if in_switch && !selected {
+                row = dim_row(&row);
+            }
+            win.push(row);
+            flat_row += 1;
             continue;
         }
         for (i, w) in group.worktrees().iter().enumerate() {
@@ -1261,13 +1302,18 @@ fn rail_pane(
             win.push(resource);
             flat_row += 1;
         }
-    }
-    if !win.full() {
-        let mut row = rail_create_row(list.create_row_selected(), in_switch);
-        if in_switch && !list.create_row_selected() {
+        // The group's own "+ new session" row (rail twin), at the foot of its
+        // sessions — one per workspace in 統合(unite) mode.
+        if win.full() {
+            break;
+        }
+        let selected = flat_row == list.selected_index();
+        let mut row = rail_create_row(selected, in_switch);
+        if in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);
+        flat_row += 1;
     }
     win.into_lines()
 }
@@ -1301,6 +1347,15 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
         if united && g > 0 && line_hits_unite_workspace_gap(line, &mut cur) {
             return None;
         }
+        // A folded workspace is a single header line, the group's root slot.
+        if list.is_collapsed(g) {
+            if line == cur {
+                return Some(flat);
+            }
+            cur += 1;
+            flat += 1;
+            continue;
+        }
         // The unite group header — only the full sidebar draws it.
         if with_headers && united {
             if line == cur {
@@ -1323,18 +1378,21 @@ fn sidebar_row_at_line_walk(list: &WorktreeList, line: usize, with_headers: bool
                 return None; // the empty-workspace message
             }
             cur += 1;
-            continue;
-        }
-        for _ in group.worktrees() {
-            if line >= cur && line < cur + SESSION_ROWS {
-                return Some(flat);
+        } else {
+            for _ in group.worktrees() {
+                if line >= cur && line < cur + SESSION_ROWS {
+                    return Some(flat);
+                }
+                cur += SESSION_ROWS;
+                flat += 1;
             }
-            cur += SESSION_ROWS;
-            flat += 1;
         }
-    }
-    if line == cur {
-        return Some(list.create_row());
+        // The group's own "+ new session" row.
+        if line == cur {
+            return Some(flat);
+        }
+        cur += 1;
+        flat += 1;
     }
     None
 }
@@ -1356,21 +1414,28 @@ pub(super) fn sidebar_row_at_line_for_sidebar(
     }
 }
 
-/// The 0-based body line just past `group`'s block in the layout [`left_pane`]
-/// builds — its (optional unite) gap and header, the two-row root entry, the
-/// divider, and then either the empty-workspace message or [`SESSION_ROWS`] rows
-/// per session. 切替's inline create / rename input is spliced in here so it
-/// renders within the targeted workspace's block (after that workspace's
-/// sessions, before the next group's gap/header) rather than at the foot of the
-/// whole column — which matters in 統合(unite) mode where several workspaces
-/// stack. Walks the same layout as [`sidebar_row_at_line_for_sidebar`].
+/// The 0-based body line of `group`'s own "+ new session" row — the last line of
+/// its block. 切替's inline create input replaces this row so it renders at the
+/// foot of the targeted workspace's sessions (before the next group's gap/header)
+/// rather than at the foot of the whole column, which matters in 統合(unite) mode
+/// where several workspaces stack. The create flow expands a folded group first,
+/// so `group` is always expanded here. Walks the same layout as
+/// [`sidebar_row_at_line_for_sidebar`].
 pub(super) fn group_inline_insert_line(list: &WorktreeList, group: usize) -> usize {
-    list.groups()
+    let before: usize = list
+        .groups()
         .iter()
         .enumerate()
-        .take(group + 1)
+        .take(group)
         .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), true))
-        .sum()
+        .sum();
+    let block = list
+        .groups()
+        .get(group)
+        .map(|g| group_block_rows(list, group, g.worktrees().len(), true))
+        .unwrap_or(0);
+    // The create row is the final line of the group's block.
+    before + block.saturating_sub(1)
 }
 
 /// Builds a 統合(unite) group header: the workspace name in bold behind a left
@@ -1381,6 +1446,37 @@ fn group_header(name: &str, width: usize) -> String {
     style(clip_to_width(&format!("▌ {name}"), width))
         .bold()
         .to_string()
+}
+
+/// Builds the single line a **folded** 統合(unite) workspace draws in place of its
+/// whole block: the workspace name behind a left bar with a `▸` fold marker and a
+/// `(N)` session count, so a collapsed workspace still shows what it holds. It is
+/// the group's navigable root slot, so it carries the same gutter cursor / active
+/// bar the root entry would ([`gutter_cell`]); the caller dims it in 切替 when it
+/// is not the selected row, exactly like every other row.
+fn collapsed_group_row(
+    name: &str,
+    sessions: usize,
+    selected: bool,
+    active: bool,
+    in_switch: bool,
+    width: usize,
+) -> String {
+    let gutter = gutter_cell(selected, active, in_switch);
+    // Reserve the gutter cell + its trailing space, then clip-then-style the header
+    // text (matching [`group_header`], whose clip runs before styling).
+    let text = format!("▸ {name}  ({sessions})");
+    let head = style(clip_to_width(&text, width.saturating_sub(2))).bold();
+    format!("{gutter} {head}")
+}
+
+/// The rail twin of [`collapsed_group_row`]: the fold marker `▸` in the gutter
+/// position, keeping the folded workspace visible (and its root slot clickable) in
+/// the narrow rail, which has no room for the name or count.
+fn rail_collapsed_group_row(selected: bool, active: bool, in_switch: bool) -> String {
+    let gutter = gutter_cell(selected, active, in_switch);
+    let marker = style("▸").bold();
+    pad_to_width(format!("{gutter} {marker}"), RAIL_WIDTH)
 }
 
 /// Builds the left pane: the root entry (two lines) first, then a divider, then
@@ -1486,6 +1582,25 @@ pub(super) fn left_pane(
         if united && g > 0 {
             push_unite_workspace_gap(&mut win, left_w);
         }
+        // A folded workspace collapses to its single header line (its root slot).
+        if list.is_collapsed(g) {
+            let selected = flat_row == list.selected_index();
+            let active = flat_row == list.active_index();
+            let mut row = collapsed_group_row(
+                group.name(),
+                group.worktrees().len(),
+                selected,
+                active,
+                in_switch,
+                left_w,
+            );
+            if in_switch && !selected {
+                row = dim_row(&row);
+            }
+            win.push(row);
+            flat_row += 1;
+            continue;
+        }
         if united {
             win.push(group_header(group.name(), left_w));
         }
@@ -1512,12 +1627,20 @@ pub(super) fn left_pane(
         );
         if group.worktrees().is_empty() {
             // No sessions yet in this workspace — show the empty message under the
-            // divider.
+            // divider, then the group's own create row so a session can be started
+            // straight into this (otherwise empty) workspace.
             win.push(
                 style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
                     .dim()
                     .to_string(),
             );
+            let selected = flat_row == list.selected_index();
+            let mut row = create_row(selected, in_switch, left_w);
+            if in_switch && !selected {
+                row = dim_row(&row);
+            }
+            win.push(row);
+            flat_row += 1;
             continue;
         }
         for (i, w) in group.worktrees().iter().enumerate() {
@@ -1574,13 +1697,19 @@ pub(super) fn left_pane(
             win.push(resource);
             flat_row += 1;
         }
-    }
-    if !win.full() {
-        let mut row = create_row(list.create_row_selected(), in_switch, left_w);
-        if in_switch && !list.create_row_selected() {
+        // The group's own "+ new session" row, at the foot of its sessions, so a
+        // create lands in the workspace it sits under (統合(unite) mode stacks one
+        // per workspace instead of a single row at the whole column's foot).
+        if win.full() {
+            break;
+        }
+        let selected = flat_row == list.selected_index();
+        let mut row = create_row(selected, in_switch, left_w);
+        if in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);
+        flat_row += 1;
     }
     win.into_lines()
 }
@@ -2471,28 +2600,86 @@ fn focus_session_header(state: &HomeState) -> String {
         .to_string()
 }
 
+/// The height (in rows) the 在席 (Focus) menu's command area is fixed to. The
+/// window shows this many rows whatever is expanded, so opening an inline picker
+/// scrolls its sub-rows into view rather than resizing the box. Set to the full
+/// menu's command count (agent / terminal / diff / chat / close) via `max`, so a
+/// full menu never pads and every menu shares one height; it also leaves room —
+/// after the two overflow markers — for a two-option picker (terminal / close) to
+/// show in full, so only a long agent list actually scrolls.
+const FOCUS_MENU_MIN_VISIBLE: usize = 5;
+
+/// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
+/// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
+/// stays on screen. Rows hidden past an edge are summarised with a dim `↑ N` /
+/// `↓ N` marker on the window's top / bottom row; rows that already fit are padded
+/// with blanks. Either way the result is `visible` rows, so the box keeps the same
+/// height whether or not an inline picker is expanded.
+fn focus_menu_window(rows: Vec<String>, active: usize, visible: usize) -> Vec<String> {
+    if rows.len() <= visible {
+        let mut out = rows;
+        out.resize(visible, String::new());
+        return out;
+    }
+    let total = rows.len();
+    // Reserve a marker row on each edge; the content window is what remains. The
+    // clamp keeps `active` inside that window (centring it where there is room).
+    let content = visible.saturating_sub(2).max(1);
+    let start = active.saturating_sub(content / 2).min(total - content);
+    let end = start + content;
+    let mut out = Vec::with_capacity(visible);
+    out.push(focus_menu_overflow(start, true));
+    out.extend(rows[start..end].iter().cloned());
+    out.push(focus_menu_overflow(total - end, false));
+    out
+}
+
+/// A dim overflow marker for the windowed 在席 menu: `↑ N more` (`above`) or
+/// `↓ N more` (below) when `hidden` rows sit past the window edge, or a blank row
+/// when none do — so the window keeps its fixed height at the ends of the scroll.
+fn focus_menu_overflow(hidden: usize, above: bool) -> String {
+    if hidden == 0 {
+        return String::new();
+    }
+    let arrow = if above { '↑' } else { '↓' };
+    style(format!("  {arrow} {hidden} more")).dim().to_string()
+}
+
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. Rendered as the body of the floating menu overlay modal (see
+/// and a key hint. The command rows are windowed to a fixed height
+/// ([`focus_menu_window`]) so expanding an inline picker scrolls rather than
+/// resizing the box. Rendered as the body of the floating menu overlay modal (see
 /// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
 /// identity rides the modal's title rather than a header line here.
 pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
     let close_expanded = state.focus_close_expanded();
     let commands = state.focus_menu_commands();
+
+    // Build the whole command area first — one row per command plus any expanded
+    // picker's sub-rows — tracking the index of the *active* row (the cursor, or
+    // the highlighted picker sub-row) so the window below can keep it on screen.
+    let mut rows: Vec<String> = Vec::new();
+    let mut active = 0usize;
     for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
-            lines.push(focus_agent_command_row(state, selected, width));
-            if state.focus_menu_agent_cursor().is_some() {
-                let agent_cursor = state.focus_menu_agent_cursor();
+            let agent_cursor = state.focus_menu_agent_cursor();
+            if agent_cursor.is_none() && selected {
+                active = rows.len();
+            }
+            rows.push(focus_agent_command_row(state, selected, width));
+            if agent_cursor.is_some() {
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
-                    lines.push(focus_agent_pick_row(
+                    if Some(j) == agent_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_agent_pick_row(
                         cli,
                         Some(j) == agent_cursor,
                         cli == default,
@@ -2503,19 +2690,32 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
         } else if info.name == "close" {
             // The `close` row carries a chevron affordance; when expanded the two
             // options (plain close and close --force) follow as sub-rows.
-            lines.push(focus_close_command_row(state, info, selected, width));
+            if !close_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_close_command_row(state, info, selected, width));
             if close_expanded {
                 let close_cursor = state.focus_close_cursor();
                 for j in 0..2usize {
-                    lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
+                    if Some(j) == close_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
                 }
             }
         } else if info.name == "terminal" {
-            lines.push(focus_terminal_command_row(state, selected, width));
-            if state.focus_menu_terminal_expanded() {
+            let terminal_expanded = state.focus_menu_terminal_expanded();
+            if !terminal_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_terminal_command_row(state, selected, width));
+            if terminal_expanded {
                 let terminal_cursor = state.focus_menu_terminal_cursor();
                 for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
-                    lines.push(focus_terminal_pick_row(
+                    if Some(j) == terminal_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_terminal_pick_row(
                         action,
                         Some(j) == terminal_cursor,
                         width,
@@ -2523,9 +2723,20 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                 }
             }
         } else {
-            lines.push(focus_menu_row(info, selected, width));
+            if selected {
+                active = rows.len();
+            }
+            rows.push(focus_menu_row(info, selected, width));
         }
     }
+
+    // Window the command area to a fixed height so expanding a picker scrolls its
+    // sub-rows into view rather than growing the box. The window height is the
+    // (expansion-invariant) command count, floored so there is always room for the
+    // two overflow markers plus a content row.
+    let visible = commands.len().max(FOCUS_MENU_MIN_VISIBLE);
+    let mut lines = vec![style("Run a command:").dim().to_string()];
+    lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // a row-specific expand affordance while the cursor can open one, else base.
@@ -3043,6 +3254,12 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     if let Some(preview) = state.preview() {
         return preview_pane(preview, right_w, rows);
     }
+    // The local-LLM chat, when open, likewise takes over the right pane
+    // regardless of mode (opened from 在席's `chat`, it captures the keyboard
+    // while shown). The sidebar to its left keeps rendering as usual.
+    if let Some(chat) = state.chat() {
+        return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
+    }
     // The diff view likewise takes over the right pane (opened from the `:`
     // palette, capturing the keyboard while shown).
     if let Some(diff) = state.diff_view() {
@@ -3517,6 +3734,14 @@ fn rgb_to_ansi256(rgb: Rgb) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_row_span_falls_back_when_there_are_no_rows_to_walk() {
+        // A degenerate list with no groups has nothing to walk, so the span falls
+        // back to a single-line block pinned at the top.
+        let list = WorktreeList::from_groups(Vec::new());
+        assert_eq!(selected_row_span(&list, true), (0, 1));
+    }
 
     #[test]
     fn resource_inline_label_tinted_carries_the_figures_for_every_load_band() {

@@ -389,14 +389,16 @@ fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
         issues: Vec::new(),
     }]);
     state.enter_switch(ReturnMode::Base);
-    state.switch_select(2); // primary root, alpha, then tools' root row.
+    // Rows (each expanded group owns a create row): primary root0, alpha1, primary
+    // create2, tools root3, beta4, tools create5.
+    state.switch_select(3); // tools' root row.
     assert_eq!(state.list().selected_group(), 1);
     assert!(state.list().root_selected());
 
     // A primary-workspace re-sync landing while the user is in 切替 must not
     // resolve the ambiguous `ROOT_NAME` to the first workspace's root row.
     state.refresh_sessions(vec![session_record("alpha", 1)]);
-    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.list().selected_index(), 3);
     assert_eq!(state.list().selected_group(), 1);
     assert!(state.list().root_selected());
 }
@@ -413,7 +415,9 @@ fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate
         issues: Vec::new(),
     }]);
     state.enter_switch(ReturnMode::Base);
-    state.switch_select(3); // primary root, primary alpha, tools root, tools alpha.
+    // Rows (each expanded group owns a create row): primary root0, primary alpha1,
+    // primary create2, tools root3, tools alpha4, tools create5.
+    state.switch_select(4); // tools' alpha.
     assert_eq!(state.list().selected_group(), 1);
     assert_eq!(state.list().selected_name(), "alpha");
 
@@ -421,7 +425,7 @@ fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate
     // would jump to the primary group's alpha (row 1). The cursor should stay on
     // the extra group's alpha row.
     state.refresh_sessions(vec![session_record("alpha", 1)]);
-    assert_eq!(state.list().selected_index(), 3);
+    assert_eq!(state.list().selected_index(), 4);
     assert_eq!(state.list().selected_group(), 1);
     assert_eq!(state.list().selected_name(), "alpha");
 }

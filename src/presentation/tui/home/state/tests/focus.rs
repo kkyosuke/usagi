@@ -338,18 +338,22 @@ fn focus_tab_prev_walks_the_new_tab_then_panes() {
 }
 
 #[test]
-fn focus_menu_hides_ai_until_the_local_llm_is_available() {
+fn focus_menu_hides_prompt_taking_ai_command() {
     // Focus a session row (not the root) so `close` is offered.
     let mut state = state();
     state.enter_focus(1);
-    // By default the local LLM is unavailable, so the `ai` command is hidden.
-    // The menu lists the remaining commands in the fixed display order.
+    // `ai <prompt>` needs typed arguments, so it is always kept out of the menu.
+    // `chat` (local LLM) is gated on availability, so by default (LLM unavailable)
+    // the menu lists the pane actions and `close` in the fixed display order.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
+    assert!(!names.contains(&"ai"));
     assert_eq!(names, vec!["agent", "terminal", "diff", "close"]);
-    // Once the local LLM is usable (enabled + model pulled), `ai` appears.
+    // Once the local LLM is usable (enabled + model pulled), `chat` appears — but
+    // `ai` (prompt-taking) never does.
     state.set_ai_available(true);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["agent", "terminal", "diff", "ai", "close"]);
+    assert!(!names.contains(&"ai"));
+    assert_eq!(names, vec!["agent", "terminal", "diff", "chat", "close"]);
 }
 
 #[test]
@@ -490,6 +494,29 @@ fn focus_menu_close_picker_expands_only_on_close_row() {
     state.focus_menu_move_down();
     assert_eq!(state.focus_close_cursor(), Some(1));
     assert!(state.focus_menu_selected_close_force());
+}
+
+#[test]
+fn chat_overlay_opens_closes_and_carries_the_configured_model() {
+    let mut state = state();
+    // The injected model is read back and used when the overlay opens.
+    state.set_local_llm_model("qwen2.5-coder:3b");
+    assert_eq!(state.local_llm_model(), "qwen2.5-coder:3b");
+    // No overlay yet: both accessors report none (covers the `chat_mut` miss arm).
+    assert!(state.chat().is_none());
+    assert!(state.chat_mut().is_none());
+    // Opening binds the chat to the configured model.
+    state.enter_focus(1);
+    state.open_chat();
+    assert_eq!(state.chat().unwrap().model(), "qwen2.5-coder:3b");
+    // Mutable access edits the composed line.
+    state.chat_mut().unwrap().input_mut().insert('a');
+    assert_eq!(state.chat().unwrap().input().value(), "a");
+    // Closing clears the overlay; a second close is a no-op.
+    state.close_chat();
+    assert!(state.chat().is_none());
+    state.close_chat();
+    assert!(state.chat().is_none());
 }
 
 #[test]
@@ -709,15 +736,15 @@ fn focus_prompt_submit_on_empty_input_is_a_noop() {
 }
 
 #[test]
-fn focus_prompt_runs_the_coming_soon_ai_command() {
+fn focus_prompt_runs_the_ai_prompt_command() {
     let mut state = state();
     state.enter_focus(1);
     for c in "ai hi".chars() {
         state.focus_prompt_mut().insert(c);
     }
     let submission = state.focus_prompt_submit();
-    assert_eq!(submission.effect, Effect::None);
-    assert!(state.log().last().unwrap().text.contains("coming soon"));
+    assert_eq!(submission.effect, Effect::OpenAgentPrompt("hi".to_string()));
+    assert!(submission.recorded.is_some());
 }
 
 #[test]

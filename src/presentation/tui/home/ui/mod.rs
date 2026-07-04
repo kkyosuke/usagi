@@ -344,6 +344,82 @@ fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
     Vec::new()
 }
 
+/// The home frame with the 1Password env-resolution indicator floated in the
+/// **centre of the right pane** — the same region and multiplying-rabbit visual
+/// [`launch_loading_block`] gives the pane launch, since resolving a pane's secret
+/// env is the first step of launching it. `label` (e.g. `環境変数を解決中…`) is
+/// drawn on its own row below the rabbits so the pause reads as *what it is doing*
+/// rather than a bare animation.
+///
+/// Painted on a clock by [`resolve_pane_env`](super::super::resolve_pane_env)
+/// while the resolve runs on a worker thread (see
+/// [`run_with_loading_frames`](crate::presentation::tui::io::loading::run_with_loading_frames)),
+/// so the sidebar and tab context stay visible around it instead of a full-screen
+/// splash. `frame` advances the rabbits; the label is static text.
+pub fn env_resolve_loading_frame(
+    raw_height: usize,
+    raw_width: usize,
+    state: &HomeState,
+    frame: usize,
+    label: &str,
+) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width, state.sidebar());
+    let body_rows = body_rows_for(height);
+    let mut lines = render_frame(raw_height, raw_width, state);
+    let block = env_resolve_loading_block(frame, right_w, label);
+    widgets::overlay_region_centered(
+        &mut lines,
+        width,
+        left_w + SEP_WIDTH,
+        right_w,
+        CHROME_TOP_ROWS,
+        body_rows,
+        &block,
+    );
+    lines
+}
+
+/// The centred loading block for [`env_resolve_loading_frame`]: the multiplying
+/// rabbits ([`launch_loading_block`]) with `label` on its own dim row below,
+/// separated by a blank line. Both are centred to a common width so the caption
+/// sits under the rabbits, and `label` is clipped to `right_w` so a long label
+/// never widens the block past the pane (which would drop the whole indicator).
+fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<String> {
+    let rabbits = launch_loading_block(frame, right_w);
+    if rabbits.is_empty() {
+        return Vec::new();
+    }
+    let caption = clip_to_width(label, right_w);
+    let rabbits_w = rabbits
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    let block_w = rabbits_w.max(console::measure_text_width(&caption));
+    let mut block: Vec<String> = rabbits
+        .into_iter()
+        .map(|row| center_row(&row, block_w))
+        .collect();
+    block.push(" ".repeat(block_w));
+    block.push(center_row(
+        &console::style(caption).dim().to_string(),
+        block_w,
+    ));
+    block
+}
+
+/// Pad `row` (a possibly styled line) with spaces on both sides so it is `width`
+/// display columns wide with its content centred — the alignment
+/// [`overlay_region_centered`] needs, since it composites each block row at a
+/// fixed column and every row must therefore span the block's full width.
+fn center_row(row: &str, width: usize) -> String {
+    let row_w = console::measure_text_width(row);
+    let left = widgets::centered_padding(width, row_w);
+    let right = width.saturating_sub(left + row_w);
+    format!("{}{row}{}", " ".repeat(left), " ".repeat(right))
+}
+
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
 /// size: the body rows less the preview's one-row header. Used by the event loop
 /// to clamp and page the preview's scroll so the last line stays in view.
@@ -705,19 +781,11 @@ fn left_column(
         // The list may be scrolled when it outgrows the pane; the inline input's
         // insert positions are full-column lines, so lift them into the windowed
         // column `left_pane` returned by subtracting the same scroll offset.
-        let scroll = panes::sidebar_scroll(state.list(), true, body_rows);
         if let Some(create) = state.create() {
-            // `left_pane` always draws the persistent "+ new session" affordance at
-            // the list foot; while the input is open it *becomes* that input, so
-            // drop the affordance row first and let the input take its slot.
-            let persistent = group_inline_insert_line(
-                state.list(),
-                state.list().group_count().saturating_sub(1),
-            )
-            .checked_sub(scroll);
-            if let Some(persistent) = persistent.filter(|&p| p < left.len()) {
-                left.remove(persistent);
-            }
+            // `left_pane` draws each workspace's own persistent "+ new session"
+            // affordance; while the input is open it *becomes* the targeted
+            // workspace's affordance, so [`place_create_rows`] replaces that row.
+            let scroll = panes::sidebar_scroll(state.list(), true, body_rows);
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows, scroll);
             left.truncate(body_rows);
@@ -729,46 +797,43 @@ fn left_column(
     left
 }
 
-/// Insert `rows` into `column` at `line`, padding with blanks when the target line
-/// is below the rows currently built. This preserves the normal sidebar flow for
-/// inline inputs: they sit after the targeted workspace's list, not at the bottom
-/// of the viewport.
-fn splice_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
-    if line >= column.len() {
-        column.resize(line, String::new());
-        column.extend(rows);
-    } else {
-        column.splice(line..line, rows);
-    }
-}
-
-/// Place 切替's inline create rows inside the selected workspace block without
-/// moving the workspaces below it. In 統合(unite) mode every following workspace
-/// already has a fixed two-row gap before its header; while creating in a group
-/// that has such a follower, reuse those gap rows as the input slot instead of
-/// inserting new rows. The follower's header therefore stays on the same screen
-/// line (no CLS). The last group has no lower workspace to protect, so it keeps
-/// the single-workspace behaviour and appends the input after that group.
+/// Replace the targeted workspace's "+ new session" row with 切替's inline create
+/// input, without moving the workspaces below it. The create flow expands a folded
+/// group first, so the cursor's group always has a create row to replace. In
+/// 統合(unite) mode every following workspace has a fixed two-row gap after this
+/// group's create row; when a follower exists, overwrite the create row and reuse
+/// those gap rows for a two-line (error) input so the follower's header stays on
+/// the same screen line (no CLS). The last group has no lower workspace to protect,
+/// so it swaps its create row for the (possibly taller) input directly.
 fn place_create_rows(
     column: &mut Vec<String>,
     list: &WorktreeList,
     rows: Vec<String>,
     scroll: usize,
 ) {
-    // The create row lives at the foot of the last group, so a cursor resting on
-    // it targets that group; every other cursor targets its own group.
-    let group = if list.create_row_selected() {
-        list.group_count().saturating_sub(1)
-    } else {
-        list.selected_group()
-    };
-    // Insert positions are full-column lines; the window may be scrolled, so pull
-    // them back into the visible column the caller passed.
+    // Each group owns its create row, so the cursor's group is the target whether
+    // it rests on a session, a root, or that group's "+ new session" row.
+    let group = list.selected_group();
+    // The create row's line is a full-column line; the window may be scrolled, so
+    // pull it back into the visible column the caller passed.
     let line = group_inline_insert_line(list, group).saturating_sub(scroll);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);
     } else {
-        splice_rows(column, line, rows);
+        replace_one_with_rows(column, line, rows);
+    }
+}
+
+/// Swap the single row at `line` for `rows`, growing the column when the input is
+/// taller (used at the last group's create row, which has no follower gap below to
+/// absorb an error line). Pads with blanks when the target sits below the rows
+/// currently built.
+fn replace_one_with_rows(column: &mut Vec<String>, line: usize, rows: Vec<String>) {
+    if line >= column.len() {
+        column.resize(line, String::new());
+        column.extend(rows);
+    } else {
+        column.splice(line..line + 1, rows);
     }
 }
 

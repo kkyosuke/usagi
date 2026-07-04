@@ -22,7 +22,7 @@ mod e2e_tests;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::Term;
 
 use crate::domain::workspace::Workspace;
@@ -122,20 +122,31 @@ fn complete_or_record_panic(
 }
 
 /// Resolve the workspace's 1Password-backed secret env for a pane about to spawn,
-/// off the UI thread and with the loading rabbit animating.
+/// off the UI thread and with a loading indicator floated in the right pane.
 ///
 /// Resolving `op://` references spawns one `op read` per binding (each up to a
 /// 30s timeout); running it inline froze the launch with no feedback whenever
-/// 1Password was slow or locked. [`run_with_loading`](crate::presentation::tui::io::loading::run_with_loading)
-/// moves the work to a worker thread and animates a centred loading rabbit while
-/// it runs — a binding-free workspace resolves within the grace period and shows
-/// nothing. A worker panic degrades to an empty env rather than crashing.
-fn resolve_pane_env(term: &Term, dir: &Path) -> std::collections::BTreeMap<String, String> {
+/// 1Password was slow or locked.
+/// [`run_with_loading_frames`](crate::presentation::tui::io::loading::run_with_loading_frames)
+/// moves the work to a worker thread and, since resolving a pane's secret env is
+/// the first step of launching that pane (it happens *within the tab*), floats the
+/// same multiplying-rabbit indicator the pane launch uses in the **centre of the
+/// right pane** — [`ui::env_resolve_loading_frame`] — with `環境変数を解決中…`
+/// captioned below it, keeping the sidebar and tab context visible around it. A
+/// binding-free workspace resolves within the grace period and shows nothing; a
+/// worker panic degrades to an empty env rather than crashing.
+fn resolve_pane_env(
+    term: &Term,
+    home: &HomeState,
+    dir: &Path,
+) -> std::collections::BTreeMap<String, String> {
     let ws_root = crate::usecase::session::workspace_root(dir);
-    crate::presentation::tui::io::loading::run_with_loading(
+    crate::presentation::tui::io::loading::run_with_loading_frames(
         term,
-        "環境変数を解決中…",
         move || crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root),
+        |hop, _face, height, width| {
+            ui::env_resolve_loading_frame(height, width, home, hop, "環境変数を解決中…")
+        },
     )
     .unwrap_or_default()
 }
@@ -151,7 +162,7 @@ fn resolve_pane_env(term: &Term, dir: &Path) -> std::collections::BTreeMap<Strin
 /// of blocking the first frame on these reads. The agent-CLI PATH probe is *not*
 /// here: it shells out to each CLI (`--version`), which can outlast the animation,
 /// so [`run`] runs it on its own background thread and swaps the result in once it
-/// lands (like the local-LLM probe), keeping the first paint off the subprocesses.
+/// lands, keeping the first paint off the subprocesses.
 pub struct Preload {
     sessions: Vec<SessionRecord>,
     root_note: Option<String>,
@@ -184,8 +195,8 @@ pub fn preload(workspace: &Workspace) -> Preload {
         .unwrap_or_default();
     // The effective settings (project-local overrides on top of the global
     // default), reused for every setting the screen derives — the 在席 action
-    // surface, the sidebar's initial state, the local-LLM probe, the agent CLI /
-    // wiring, and notifications. Re-read whenever the config screen closes (see
+    // surface, the sidebar's initial state, the agent CLI / wiring, local-LLM
+    // MCP wiring, and notifications. Re-read whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
     let settings = effective_settings(&workspace.path);
     // Past commands so `history` and `↑`/`↓` recall span sessions; empty on failure.
@@ -285,6 +296,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).
     state.set_default_agent(settings.agent_cli);
+    // The local model the 在席 `chat` overlay talks to.
+    state.set_local_llm_model(settings.local_llm.model.clone());
+    // `state.ai_available` (which gates the 在席 `chat` row) stays false until the
+    // background probe below lands — mirroring the installed-agent probe — so a cold
+    // `ollama show` never delays the first paint.
     // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
     // so selecting a project lands on the session list the mascot animation glides
     // into; no explicit mode switch is needed here.
@@ -490,13 +506,12 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Whether the 在席 (Focus) menu offers the `ai` command: only when the local
-    // LLM is enabled and its model is pulled, so it appears only when running it
-    // would actually work. The probe is an `ollama show`, which can block on a
-    // cold / wedged `ollama` server, so it runs on a background thread rather than
-    // delaying the first paint: the menu omits `ai` until the probe lands, and the
-    // event loop flips it on when it does. Re-probed when the config screen closes
-    // (see `open_config`).
+    // Whether the 在席 (Focus) menu offers the `chat` command: only when the local
+    // LLM is enabled and its model is pulled, so it appears only when a reply would
+    // actually work. The probe is an `ollama show`, which can block on a cold /
+    // wedged `ollama` server, so it runs on a background thread rather than delaying
+    // the first paint: the menu omits `chat` until the probe lands, and the event
+    // loop flips it on when it does. Re-probed when the config screen closes.
     let ai_available = oneshot::OneShot::new();
     {
         let handle = ai_available.clone();
@@ -509,8 +524,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // The agents installed on this machine (which 在席's agent picker offers as
     // alternatives to the configured default). Probing them shells out to each
     // candidate CLI with `--version`, one after another, which can take longer than
-    // the open→home animation — so, like the local-LLM probe above, it runs on a
-    // background thread instead of in `preload`: the picker simply offers no
+    // the open→home animation — so it runs on a background thread instead of in
+    // `preload`: the picker simply offers no
     // alternatives until the probe lands, and the event loop swaps them in when it
     // does. Keeping it off `preload` is what stops the home screen from stalling
     // after the mascot lands while the join waits on the subprocesses.
@@ -748,8 +763,22 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // Resolve which agent CLI this launch drives: the user's 在席 choice (menu
             // picker / `agent <name>`), consumed here so it applies once, falling back
             // to the configured default. `take` clears it whether or not a fresh agent
-            // spawn follows, so a stale choice never leaks into a later launch.
-            let cli = home.take_agent_choice().unwrap_or(default_cli);
+            // spawn follows, so a stale choice never leaks into a later launch. The
+            // default is read from the state (not captured at startup) so a CLI
+            // switched in Config takes effect on the next launch without restarting.
+            let choice = home.take_agent_choice();
+            let cli = choice.unwrap_or_else(|| home.default_agent());
+            // `ai <prompt>` sets an opening prompt for this one configured-agent
+            // launch. When a fresh agent pane is spawned it is passed as the agent
+            // CLI's initial prompt; when an agent pane already exists we type it
+            // into that live pane after activating it. Ordinary `agent` launches
+            // leave this empty and still fall back to a prompt queued by MCP
+            // `session_prompt` for fresh spawns.
+            let direct_prompt = if run_agent {
+                home.take_agent_initial_prompt()
+            } else {
+                None
+            };
             let agent = crate::infrastructure::agent::agent_for(cli);
             // Build the agent command for this worktree on demand: when it already
             // has a Claude conversation, launch with `--continue` so `:agent` resumes
@@ -783,21 +812,30 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
             // spawns; `enter` spawns only when no pane is live yet; reusing an existing
             // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
-            // spawn happens it stays queued for the next launch. The agent then opens
-            // already working on that prompt.
+            // spawn happens it stays queued for the next launch. A direct `ai <prompt>`
+            // takes precedence without consuming the queued MCP prompt.
             let fresh_agent_spawn =
                 run_agent && !reuse_agent && (new_pane || !pool.has_live_pane(dir));
-            let queued_prompt = if fresh_agent_spawn {
+            let queued_prompt = if fresh_agent_spawn && direct_prompt.is_none() {
                 crate::infrastructure::agent_prompt_store::take(dir)
             } else {
                 None
             };
-            // The command for this fresh spawn carries the queued prompt; the command
-            // reused for later `Ctrl-O a` agent tabs never re-sends that one-shot
-            // prompt, so only the first launch receives it.
-            let spawn_command =
-                agent.launch_command(&agent_wiring, resume, queued_prompt.as_deref());
-            let plain_command = match queued_prompt {
+            // Announce a queued prompt when it is actually delivered: it may have
+            // been sitting in the store since long before this launch (MCP
+            // `session_prompt`, or one parked while an `ai <prompt>` took
+            // precedence), so the log makes visible why the agent opens already
+            // working on something the user did not just type.
+            if let Some(prompt) = queued_prompt.as_deref() {
+                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
+            }
+            // The command for this fresh spawn carries the opening prompt (direct
+            // `ai` first, otherwise queued MCP prompt); the command reused for later
+            // `Ctrl-O a` agent tabs never re-sends that one-shot prompt, so only the
+            // first launch receives it.
+            let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            let spawn_command = agent.launch_command(&agent_wiring, resume, spawn_prompt);
+            let plain_command = match spawn_prompt {
                 Some(_) => agent.launch_command(&agent_wiring, resume, None),
                 None => spawn_command.clone(),
             };
@@ -809,7 +847,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // launched with.
             let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
             let pane_env = if will_spawn {
-                resolve_pane_env(term, dir)
+                resolve_pane_env(term, home, dir)
             } else {
                 std::collections::BTreeMap::new()
             };
@@ -854,6 +892,18 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             env: &pane_env,
                         },
                     )?;
+                }
+                if let Some(prompt) = direct_prompt.as_deref().filter(|_| !fresh_agent_spawn) {
+                    // Deliver the `ai <prompt>` to the reused live agent pane as
+                    // pasted text plus Enter. `encode_paste` (the same encoder the
+                    // pane's real paste path uses) wraps it in bracketed-paste
+                    // markers when the agent TUI enabled them, so a prompt starting
+                    // with `/`, `!` or other key-bound characters is inserted as
+                    // one text block instead of being interpreted as keystrokes.
+                    let pty = pool.active_pty(dir).context("agent pane is not active")?;
+                    let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
+                    input.push(b'\r');
+                    pty.write(&input)?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
@@ -912,7 +962,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
                             if !pool.activate_agent_of(dir, cli) {
-                                let add_env = resolve_pane_env(term, dir);
+                                let add_env = resolve_pane_env(term, home, dir);
                                 pool.add_pane(
                                     term,
                                     dir,
@@ -1105,20 +1155,32 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let config_root = workspace.path.clone();
     let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
-            // Back to home: re-read the (possibly changed) Session Action UI, the
-            // 没入 key scheme, and local LLM availability so the 在席 surface, the
-            // pane's key handling, and the `ai` command reflect the edit without
-            // reopening the home screen.
+            // Back to home: re-read the (possibly changed) Session Action UI,
+            // 没入 key scheme, and default Agent CLI so the 在席 surface, the
+            // pane's key handling, and the next `agent` / `ai` launch reflect the
+            // edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
                 let settings = effective_settings(&config_root);
                 Ok(Some(event::ConfigReload {
                     session_action_ui: settings.session_action_ui,
                     key_scheme: settings.key_scheme,
+                    agent_cli: settings.agent_cli,
                     ai_available: local_llm_available(&settings),
                 }))
             }
             crate::presentation::tui::config::Outcome::Quit => Ok(None),
         }
+    };
+
+    // A submitted line in the 在席 `chat` overlay runs against the workspace's
+    // configured local model (resolved from the effective settings at request
+    // time, so a model change in Config takes effect on the next turn). The
+    // request runs on a detached thread and returns a receiver the event loop
+    // polls each tick, so a slow model never blocks the screen.
+    let chat_root = workspace.path.clone();
+    let mut chat_ask = move |prompt: String| {
+        let model = effective_settings(&chat_root).local_llm.model;
+        crate::presentation::tui::chat::spawn_request(model, prompt)
     };
 
     // Persist where the user is when they quit — the focused session and how
@@ -1251,6 +1313,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
@@ -1510,9 +1573,8 @@ fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
 }
 
 /// Whether the local LLM is usable right now: enabled in settings and its model
-/// already pulled into the `ollama` runtime. Gates the `ai` command in the 在席
-/// (Focus) menu so it appears only when running it would actually work. The
-/// model probe is an `ollama show`, skipped entirely when the feature is off.
+/// pulled. Gates the 在席 `chat` menu row. Probed with `ollama show` (via the
+/// system runner), so callers run it off the first-paint path.
 fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
     settings.local_llm.enabled
         && crate::usecase::local_llm::model_present(

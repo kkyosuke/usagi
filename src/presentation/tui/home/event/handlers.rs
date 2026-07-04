@@ -126,12 +126,14 @@ pub(super) fn palette_key(
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
-                    // Action UI (在席 mode's surface) or the local LLM's
-                    // availability, so apply the re-read settings — otherwise
-                    // Focus keeps rendering the old mode / `ai` visibility.
+                    // Action UI (在席 mode's surface), the pane key scheme, or the
+                    // default Agent CLI, so apply the re-read settings — otherwise
+                    // Focus / 没入 keep rendering with the old settings and
+                    // `agent` / `ai` keep launching the old CLI.
                     Some(reload) => {
                         state.set_session_action_ui(reload.session_action_ui);
                         state.set_key_scheme(reload.key_scheme);
+                        state.set_default_agent(reload.agent_cli);
                         state.set_ai_available(reload.ai_available);
                         painter.reset();
                     }
@@ -197,6 +199,8 @@ pub(super) fn palette_key(
                 | Effect::OpenTerminal
                 | Effect::OpenExternalTerminal
                 | Effect::OpenAgent(_)
+                | Effect::OpenAgentPrompt(_)
+                | Effect::OpenChat
                 | Effect::OpenDiff
                 | Effect::CloseSession { .. } => {}
             }
@@ -329,7 +333,7 @@ pub(super) fn switch_key(
             // clicking it or pressing Enter starts the inline create editor, while
             // typing a printable character starts the editor and inserts that
             // character as the first byte of the session name.
-            Key::Enter => begin_switch_create(state, wiring, None),
+            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
             Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
             // Keep keyboard escape hatches on the row: arrows still navigate away
             // (the create row carries no session, so it needs no note / tab keys),
@@ -387,21 +391,21 @@ pub(super) fn switch_key(
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
         }
-        // `a` launches an agent for the highlighted session (the 切替 analogue of
-        // 在席 menu's `agent` action). `Ctrl-A` is decoded by `console` as
-        // `Key::Home`, so accept that as an IME-safe alias: with a Japanese IME
-        // left on, bare `a` may compose into kana and never reach usagi, but the
-        // control chord still does. Inline create / rename inputs consume `Home`
-        // earlier and keep its caret meaning there.
-        Key::Char('a') | Key::Home => {
-            let row = state.list().selected_index();
-            state.enter_focus(row);
-            launch_agent(term, state, painter, wiring, None);
-        }
-        // `c` begins inline session creation.
-        Key::Char('c') => {
+        // `c` begins inline session creation. `Ctrl-A` (which `console` decodes
+        // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
+        // bare letter `c` composes into kana and never reaches usagi, but a
+        // control chord still does — mirroring the note editor's `Ctrl-E` below.
+        // It is unambiguous here, as 切替 list navigation has no caret to move
+        // (the inline create / rename inputs consume `Home` earlier and return
+        // before this match).
+        Key::Char('c') | Key::Home => {
             begin_switch_create(state, wiring, None);
         }
+        // `Space` folds / unfolds the workspace under the cursor in 統合(unite)
+        // mode, hiding its sessions behind a single header line so a long list of
+        // workspaces stays scannable. A no-op off a root row or with a single
+        // workspace shown (folding the sole workspace would hide the whole list).
+        Key::Char(' ') => state.toggle_selected_collapsed(),
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
         Key::Char('r') => {
@@ -477,6 +481,9 @@ fn apply_label_change(
 /// `+ new session` affordance was typed into directly. The branch-name snapshot is
 /// taken exactly when the editor opens so validation sees the current workspace.
 fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
+    // A folded workspace hides its "+ new session" row, so unfold the cursor's
+    // group first — the input needs that row to render into.
+    state.expand_selected_group_for_create();
     let branches = (wiring.existing_branches)();
     state.switch_begin_create(branches);
     if let Some(c) = first {
@@ -781,7 +788,7 @@ pub(super) fn focus_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
-    if row == state.list().create_row() {
+    if state.list().is_create_row(row) {
         // The create row lives in 切替: a click on it from 在席 zooms back to the
         // picker and opens the same inline input a 切替 click would.
         state.enter_switch(ReturnMode::Focus);
@@ -1081,8 +1088,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
 
 /// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
 /// command, `t` / `a` are shortcuts for `terminal` / `agent`, and `Shift`+`c`
-/// runs the deliberate discard path (`close --force`). `ai` runs its coming-soon
-/// line.
+/// runs the deliberate discard path (`close --force`).
 ///
 /// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
@@ -1165,7 +1171,8 @@ fn run_focus_close_picker(
 }
 
 /// 在席 prompt surface: edit / complete the session-scoped command line and run
-/// it on `Enter`, attaching the pane on `terminal` / `agent`.
+/// it on `Enter`, attaching the pane on `terminal` / `agent`, and launching the
+/// configured agent with an opening prompt on `ai <prompt>`.
 fn focus_prompt_key(
     term: &Term,
     state: &mut HomeState,
@@ -1175,9 +1182,10 @@ fn focus_prompt_key(
 ) {
     match key {
         Key::Enter => {
-            // `terminal` / `agent` attach the pane; `diff` opens the right-pane
-            // diff view over 在席; `close` removes the session and leaves 在席;
-            // `ai` (coming soon) and anything else only log, staying in Focus. The
+            // `terminal` / `agent` attach the pane; `ai <prompt>` attaches the
+            // configured agent and hands it that prompt; `chat` opens the local-LLM
+            // overlay; `diff` opens the right-pane diff view; `close` removes the
+            // session and leaves 在席; anything else only logs, staying in Focus. The
             // command is persisted (with its session) so per-session history
             // survives across launches, like the palette line.
             let submission = state.focus_prompt_submit();
@@ -1189,6 +1197,10 @@ fn focus_prompt_key(
                 Effect::OpenTerminal => launch_pane(term, state, painter, wiring, false),
                 Effect::OpenExternalTerminal => open_external_terminal(state, wiring),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
+                Effect::OpenAgentPrompt(prompt) => {
+                    launch_agent_with_prompt(term, state, painter, wiring, prompt)
+                }
+                Effect::OpenChat => state.open_chat(),
                 Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
@@ -1215,10 +1227,12 @@ fn focus_prompt_key(
     }
 }
 
-/// Run a named session command (`terminal` / `agent` / `diff` / `close` /
-/// `close --force` / `ai`) from the 在席 menu: the two launch commands attach
-/// the pane (没入), `diff` opens the right-pane diff view over 在席, `close`
-/// variants remove the session and leave 在席, and `ai` logs its coming-soon line.
+/// Run a named session command (`terminal` / `agent` / `diff` / `chat` /
+/// `close` / `close --force`) from the 在席 menu: the launch commands attach
+/// the pane (没入), `diff` opens the right-pane diff view over 在席, `chat` opens
+/// the local-LLM chat overlay, `close` variants remove the session and leave 在席.
+/// The prompt-taking `ai <prompt>` is kept out of the menu (typed in the Prompt
+/// UI); a command with no arm here logs its coming-soon line.
 fn run_focus_command(
     term: &Term,
     state: &mut HomeState,
@@ -1234,25 +1248,30 @@ fn run_focus_command(
         // effect the 在席 prompt / palette `diff` produced): resolve its worktree
         // and shell out to git, then render / store the patch (or log a failure).
         "diff" => state.open_diff_result(selected_diff(state)),
+        // `chat` opens the local-LLM chat overlay in the right pane.
+        "chat" => state.open_chat(),
         // `close` removes the focused session safely and leaves 在席.
         "close" => close_focused_session(state, wiring, false),
         // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
         // explicit discard path.
         "close --force" => close_focused_session(state, wiring, true),
-        // `ai` (and any future coming-soon command) just logs its line.
+        // Any future coming-soon command just logs its line.
         _ => state.log_output(format!("\"{name}\" is coming soon 󰤇")),
     }
 }
 
 /// Open a native terminal application at the focused row's directory. Unlike
-/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal, and
-/// usagi stays in 在席 so the user can continue navigating.
+/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal. Once it
+/// is launched the 在席 menu has nothing more to act on, so — like `close` — this
+/// leaves 在席 for 切替, dismissing the menu overlay rather than leaving it floating
+/// over the session it just spawned a terminal for.
 fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
     let dir = selected_dir(state, wiring.workspace_root);
     match (wiring.open_external_terminal)(&dir) {
         Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
         Err(e) => state.log_error(e),
     }
+    state.leave_focus();
 }
 
 /// Launch an agent pane, recording which CLI to spawn: `None` uses the
@@ -1275,6 +1294,40 @@ fn launch_agent(
         }
     }
     state.set_agent_choice(cli);
+    launch_pane(term, state, painter, wiring, true);
+}
+
+/// Launch the configured agent with an opening prompt from `ai <prompt>`.
+///
+/// The prompt belongs to the worktree currently focused in 在席. The terminal
+/// pool consumes it only for a fresh agent-pane spawn; when the session already
+/// has a live agent pane, it is sent directly to that pane as interactive input —
+/// whatever CLI that pane runs, so the installed-CLI gate is skipped (nothing is
+/// launched). Only a launch that would freshly spawn the configured default is
+/// refused when the PATH probe has landed and excludes it, with a Config-oriented
+/// hint rather than opening a terminal that immediately fails with
+/// `command not found`. Before the probe lands (or when it found no CLI at all)
+/// the launch proceeds, mirroring `agent`'s permissiveness for the default.
+fn launch_agent_with_prompt(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+    prompt: String,
+) {
+    let cli = state.default_agent();
+    if !state.agent_tab_open()
+        && !state.installed_agents().is_empty()
+        && !state.installed_agents().contains(&cli)
+    {
+        state.log_error(format!(
+            "Agent CLI is not configured or installed: {} (open config and choose an installed Agent CLI)",
+            cli.display_name()
+        ));
+        return;
+    }
+    state.set_agent_initial_prompt(prompt);
+    state.set_agent_choice(None);
     launch_pane(term, state, painter, wiring, true);
 }
 
@@ -1458,7 +1511,7 @@ fn open_pane(
             }
         }
         Ok(PaneExit::ToSession(row)) => {
-            if row == state.list().create_row() {
+            if state.list().is_create_row(row) {
                 // A double click on the sidebar create row in 没入: leave the pane
                 // to the picker and open the same inline create editor that 切替 /
                 // 在席 expose. ReturnMode::Attached preserves the usual `Esc`

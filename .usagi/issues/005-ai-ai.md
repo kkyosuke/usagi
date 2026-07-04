@@ -1,13 +1,13 @@
 ---
 number: 5
 title: ai コマンド（AI エージェントへの指示・対話）
-status: todo
+status: done
 priority: high
 labels: [tui]
 dependson: [2]
 related: []
 created_at: 2026-06-16T22:59:17.924160+00:00
-updated_at: 2026-06-16T22:59:17.924160+00:00
+updated_at: 2026-07-01T22:26:56.455615+00:00
 ---
 
 # `ai` コマンド（AI エージェントへの指示・対話）

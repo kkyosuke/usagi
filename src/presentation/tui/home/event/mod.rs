@@ -112,7 +112,7 @@ pub(super) enum TabMenuAction {
 
 /// The settings-derived values re-read when the config screen closes, so an
 /// edit takes effect without reopening the home screen: the 在席 (Focus)
-/// right-pane surface and whether the `ai` command is offered.
+/// right-pane surface, the 没入 key scheme, and the default Agent CLI.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigReload {
     /// The effective Session Action UI (在席 mode's surface).
@@ -120,8 +120,14 @@ pub struct ConfigReload {
     /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
     /// so the pane's key handling reflects the edit without reopening the screen.
     pub key_scheme: KeyScheme,
-    /// Whether the local LLM is usable (enabled and its model pulled), gating
-    /// the `ai` command in the 在席 menu.
+    /// The effective default Agent CLI, so `agent` / `ai` (and the 在席 menu's
+    /// `Launch <名前>` row) pick up a CLI switched in Config without restarting —
+    /// in particular, `ai`'s "open config and choose an installed Agent CLI"
+    /// refusal hint actually works in-session.
+    pub agent_cli: AgentCli,
+    /// Whether the local LLM is usable (enabled and its model pulled), gating the
+    /// `chat` row in the 在席 menu — re-read when Config closes so enabling the LLM
+    /// (or pulling its model) surfaces `chat` without restarting.
     pub ai_available: bool,
 }
 
@@ -207,6 +213,12 @@ pub(super) struct Wiring<'a> {
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
+    /// Start a local-LLM chat request, returning a receiver that yields the reply
+    /// (or an error message) once. Called when the user submits a line in the 在席
+    /// `chat` overlay; the loop polls the receiver each tick so a slow model never
+    /// blocks the screen. [`super::run`] wires it to the Ollama-backed request
+    /// against the configured model; tests return a ready receiver.
+    pub chat_ask: &'a mut dyn FnMut(String) -> std::sync::mpsc::Receiver<Result<String, String>>,
     /// Snapshot a session's live terminal for the 切替 preview, or `None` when it
     /// has no running shell — also the live/idle test the focus handlers use. The
     /// snapshot is sized to the given sidebar state (the preview widens when the
@@ -387,7 +399,42 @@ pub(super) fn event_loop(
     // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
     // set on each idle/live-frame pass.
     let mut seen_badge_version = u64::MAX;
+    // The in-flight local-LLM chat reply's channel while the 在席 `chat` overlay
+    // awaits one, or `None` when idle. Owned by the loop (it is IO) rather than the
+    // pure state, which only tracks that a reply is pending. Dropped when the
+    // overlay closes, abandoning the request harmlessly.
+    let mut chat_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>> = None;
     loop {
+        // Drain a finished chat reply into the overlay before painting so it shows
+        // this frame; drop the channel if the overlay was closed mid-request. While
+        // one is pending the spinner advances each pass (the `animate` read below
+        // keeps the loop ticking).
+        if state.chat().is_none() {
+            chat_rx = None;
+        } else if let Some(rx) = chat_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(reply) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.finish(reply);
+                    }
+                    chat_rx = None;
+                    force_paint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.advance_tick();
+                    }
+                    force_paint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.finish(Err("local LLM request failed".to_string()));
+                    }
+                    chat_rx = None;
+                    force_paint = true;
+                }
+            }
+        }
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
         // badge set together (read under a single lock) so the frame never mixes
@@ -423,9 +470,9 @@ pub(super) fn event_loop(
         // the watcher path so detached/background sessions get the same immediate
         // sidebar `#N` badges without waiting for a full git re-sync.
         let pr_links_changed = apply_pending_pr_links(&mut state, monitor);
-        // Flip the `ai` command on once the background local-LLM probe confirms it
-        // is usable (drained once); until then the 在席 menu simply omits it. Force a
-        // repaint so the change is reflected without waiting for the next keypress.
+        // Flip the local-LLM `chat` menu row on once the background probe confirms
+        // it is usable (drained once); until then the 在席 menu simply omits it.
+        // Force a repaint so the change is reflected without waiting for a keypress.
         if let Some(available) = ai_available.take() {
             state.set_ai_available(available);
             force_paint = true;
@@ -576,7 +623,10 @@ pub(super) fn event_loop(
         let animate = panel_animating
             || state.has_live_sessions()
             || state.mascot_blinking()
-            || state.mascot_reacting();
+            || state.mascot_reacting()
+            // A pending chat reply: keep ticking to poll the receiver and animate
+            // the "thinking" spinner.
+            || chat_rx.is_some();
         // How long to wait for input before re-iterating, or `None` to block until
         // it arrives. An animating frame ticks fast (`ANIM_TICK`) to advance its
         // moving parts; an otherwise-idle screen still wakes on the slower
@@ -1070,6 +1120,70 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The local-LLM chat overlay, when open, captures every key: the editing
+        // keys build the line, `↑`/`↓` scroll the transcript, `Enter` submits it
+        // (starting a request the loop then polls), and `Esc` closes it back to the
+        // 在席 surface. Scroll / close work even while a reply is in flight; typing
+        // and submitting are inert until it lands, so a turn cannot be garbled.
+        if state.chat().is_some() {
+            match key {
+                Key::Escape => state.close_chat(),
+                Key::ArrowUp => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.scroll_up();
+                    }
+                }
+                Key::ArrowDown => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.scroll_down();
+                    }
+                }
+                _ if state.chat().is_some_and(|chat| chat.is_pending()) => {}
+                Key::Enter => {
+                    if let Some(prompt) = state.chat_mut().and_then(|chat| chat.submit()) {
+                        chat_rx = Some((wiring.chat_ask)(prompt));
+                    }
+                }
+                Key::Backspace => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().backspace();
+                    }
+                }
+                Key::Del => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().delete_forward();
+                    }
+                }
+                Key::ArrowLeft => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_left();
+                    }
+                }
+                Key::ArrowRight => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_right();
+                    }
+                }
+                Key::Home => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_home();
+                    }
+                }
+                Key::End => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_end();
+                    }
+                }
+                Key::Char(c) if !c.is_control() => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().insert(c);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         // The right-pane diff view, when open, captures every key: the arrows /
         // `j`/`k` and PageUp/PageDown/Space scroll, `s` / `Tab` toggle the unified
         // and side-by-side layouts, and `Esc` / `Enter` / `q` dismiss it. It shares
@@ -1272,6 +1386,15 @@ fn click_hits_mascot(height: usize, width: usize, state: &HomeState, click: Clic
 /// The synchronous fakes are taken **by value** (as `impl FnMut`) so they are
 /// owned locals here, sharing one lifetime with the `dispatch_*` wrappers built
 /// below — which is what lets them all be bundled into a single [`Wiring`].
+/// A test `chat_ask` that echoes the prompt back on an already-ready channel, so
+/// the loop's submit → drain → reply path runs without a model runtime.
+#[cfg(test)]
+fn echo_chat_ask(prompt: String) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = tx.send(Ok(format!("echo: {prompt}")));
+    rx
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn event_loop_compat(
@@ -1281,7 +1404,6 @@ pub(crate) fn event_loop_compat(
     workspace_root: &Path,
     monitor: &MonitorHandle,
     update: &UpdateHandle,
-    ai_available: &OneShot<bool>,
     installed_agents: &OneShot<Vec<AgentCli>>,
     mut persist: impl FnMut(&str),
     mut create_session: impl FnMut(&str) -> SessionOutcome,
@@ -1379,6 +1501,11 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
+    // The chat request shells out to Ollama in `super::run`; here it echoes the
+    // prompt back on a ready channel so the loop's submit → poll → reply path runs
+    // without a model runtime. Tests that need a withheld / failed reply build a
+    // capturing `Wiring` with their own `chat_ask`.
+    let mut chat_ask = echo_chat_ask;
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     // Exercise the test-shim no-op once so coverage does not treat this helper
@@ -1410,6 +1537,7 @@ pub(crate) fn event_loop_compat(
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
@@ -1417,6 +1545,9 @@ pub(crate) fn event_loop_compat(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
     };
+    // The compat-shim tests do not exercise the local-LLM probe, so a never-filled
+    // handle keeps `ai_available` false throughout (matching an unconfigured LLM).
+    let ai_available = OneShot::<bool>::new();
     event_loop(
         term,
         reader,
@@ -1424,7 +1555,7 @@ pub(crate) fn event_loop_compat(
         monitor,
         update,
         &refresh,
-        ai_available,
+        &ai_available,
         installed_agents,
         &tasks,
         &mut wiring,

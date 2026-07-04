@@ -191,7 +191,6 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -251,7 +250,6 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -311,24 +309,26 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
 }
 
 #[test]
-fn switch_ctrl_a_launches_agent_for_the_highlighted_session() {
+fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
     // `console` decodes Ctrl-A as `Key::Home`. In the base Switch list that has
-    // no caret to move, so the key is an IME-safe alias for `a` (agent): a
-    // Japanese IME may compose bare `a`, but the control chord still reaches
-    // usagi. The action targets the currently highlighted session, matching
-    // Enter / `t` rather than falling back to the active/root row.
+    // no caret to move, so the key is an IME-safe alias for `c` (create): a
+    // Japanese IME may compose bare `c`, but the control chord still reaches
+    // usagi. Once the inline input is open, Home keeps its normal caret meaning.
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
-    keys.push(Ok(Key::ArrowDown)); // highlight "main"
-    keys.push(Ok(Key::Home)); // Ctrl-A alias -> launch agent for "main"
-    keys.push(Ok(Key::Escape)); // Focus -> Switch after the pane closes
-    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
-    let opened = RefCell::new(None);
-    let mut open = |_h: &mut HomeState, d: &Path, agent: bool, new_pane: bool| {
-        *opened.borrow_mut() = Some((d.to_path_buf(), agent, new_pane));
-        Ok(PaneExit::Closed)
+    keys.push(Ok(Key::Home)); // Ctrl-A alias -> begin create
+    keys.extend(typed("Xwip"));
+    keys.push(Ok(Key::Home)); // inside create: caret to start
+    keys.push(Ok(Key::Del)); // delete the stray X, proving Home was not re-triggering create
+    keys.push(Ok(Key::End));
+    keys.push(Ok(Key::Enter)); // confirm -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let created = RefCell::new(Vec::new());
+    let mut create = |name: &str| {
+        created.borrow_mut().push(name.to_string());
+        noop_create(name)
     };
-    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -342,10 +342,7 @@ fn switch_ctrl_a_launches_agent_for_the_highlighted_session() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(
-        *opened.borrow(),
-        Some((PathBuf::from("/r/main"), true, true))
-    );
+    assert_eq!(*created.borrow(), vec!["wip"]);
 }
 
 #[test]
@@ -533,6 +530,49 @@ fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
     assert!(
         !previews.iter().any(|d| d.ends_with(".usagi/sessions/main")),
         "main has dropped below feat, so the cursor never reaches it"
+    );
+}
+
+#[test]
+fn switch_space_folds_the_cursor_workspace_and_hides_its_sessions() {
+    // Unite: primary "usagi" [main] plus extra "wsB" [b1]. Space on wsB's root
+    // folds it, so its session b1 leaves the flat row space and the cursor never
+    // previews it, while "main" (in the still-expanded primary) is reachable.
+    let mut state = state_with_sessions(&["main"]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: vec![worktree(Some("b1"), "/wsB/b1")],
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+        issues: vec![],
+    }]);
+    // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
+    let keys = vec![
+        Ok(Key::ArrowDown), // main
+        Ok(Key::ArrowDown), // usagi create row
+        Ok(Key::ArrowDown), // wsB root
+        Ok(Key::Char(' ')), // fold wsB
+        Ok(Key::ArrowDown), // wraps over the now-shorter list, never reaching b1
+        Ok(Key::ArrowDown),
+        Ok(Key::CtrlC),
+    ];
+    let previews = run_recording_previews(keys, state, Vec::new());
+    assert!(
+        !previews.iter().any(|d| d.ends_with(".usagi/sessions/b1")),
+        "b1 sits in the folded workspace, so the cursor never previews it"
+    );
+    assert!(
+        previews.iter().any(|d| d.ends_with(".usagi/sessions/main")),
+        "main is in the expanded primary, so it is still previewed"
     );
 }
 
