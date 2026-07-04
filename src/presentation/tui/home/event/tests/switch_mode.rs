@@ -311,26 +311,24 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
 }
 
 #[test]
-fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
+fn switch_ctrl_a_launches_agent_for_the_highlighted_session() {
     // `console` decodes Ctrl-A as `Key::Home`. In the base Switch list that has
-    // no caret to move, so the key is an IME-safe alias for `c` (create): a
-    // Japanese IME may compose bare `c`, but the control chord still reaches
-    // usagi. Once the inline input is open, Home keeps its normal caret meaning.
+    // no caret to move, so the key is an IME-safe alias for `a` (agent): a
+    // Japanese IME may compose bare `a`, but the control chord still reaches
+    // usagi. The action targets the currently highlighted session, matching
+    // Enter / `t` rather than falling back to the active/root row.
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Switch
-    keys.push(Ok(Key::Home)); // Ctrl-A alias -> begin create
-    keys.extend(typed("Xwip"));
-    keys.push(Ok(Key::Home)); // inside create: caret to start
-    keys.push(Ok(Key::Del)); // delete the stray X, proving Home was not re-triggering create
-    keys.push(Ok(Key::End));
-    keys.push(Ok(Key::Enter)); // confirm -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    let created = RefCell::new(Vec::new());
-    let mut create = |name: &str| {
-        created.borrow_mut().push(name.to_string());
-        noop_create(name)
+    keys.push(Ok(Key::ArrowDown)); // highlight "main"
+    keys.push(Ok(Key::Home)); // Ctrl-A alias -> launch agent for "main"
+    keys.push(Ok(Key::Escape)); // Focus -> Switch after the pane closes
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    let opened = RefCell::new(None);
+    let mut open = |_h: &mut HomeState, d: &Path, agent: bool, new_pane: bool| {
+        *opened.borrow_mut() = Some((d.to_path_buf(), agent, new_pane));
+        Ok(PaneExit::Closed)
     };
-    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     assert!(matches!(
         run_full(
@@ -344,7 +342,10 @@ fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*created.borrow(), vec!["wip"]);
+    assert_eq!(
+        *opened.borrow(),
+        Some((PathBuf::from("/r/main"), true, true))
+    );
 }
 
 #[test]
