@@ -264,6 +264,7 @@ fn ctrl_caret_jump_back_disambiguates_same_named_sessions_across_groups() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![session("shared")],
+        issues: Vec::new(),
     }]);
     // Flat rows: 0 usagi root, 1 main, 2 shared(A), 3 wsB root, 4 shared(B).
     assert_eq!(state.list().session_count(), 5);
