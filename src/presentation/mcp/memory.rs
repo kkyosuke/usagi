@@ -1,9 +1,12 @@
 //! Memory tools for the `usagi` MCP server.
 //!
-//! These tools let an AI agent persist and recall durable facts across sessions,
-//! mirroring the `usagi memory` CLI. They are merged into the same server that
-//! exposes the issue tools (see [`super::issue`]), so a single `usagi mcp`
-//! process gives an agent both task issues and memories for one repository.
+//! These tools let an AI agent persist and recall durable facts across sessions.
+//! The surface is intentionally narrower than the `usagi memory` CLI: a single
+//! `memory_save` upsert covers both creating and (partially) updating a memory,
+//! so there is no separate update tool for the agent to choose between. They are
+//! merged into the same server that exposes the issue tools (see [`super::issue`]),
+//! so a single `usagi mcp` process gives an agent both task issues and memories
+//! for one repository.
 //!
 //! Each tool delegates to [`crate::usecase::memory`], keeping this an MCP
 //! protocol adapter over the same business logic the CLI uses.
@@ -25,7 +28,6 @@ pub fn tool_names() -> &'static [&'static str] {
         "memory_save",
         "memory_get",
         "memory_search",
-        "memory_update",
         "memory_delete",
     ]
 }
@@ -36,7 +38,6 @@ pub fn call_tool(repo: &Path, name: &str, arguments: Value) -> Result<String, St
         "memory_save" => tool_save(repo, arguments),
         "memory_get" => tool_get(repo, arguments),
         "memory_search" => tool_search(repo, arguments),
-        "memory_update" => tool_update(repo, arguments),
         "memory_delete" => tool_delete(repo, arguments),
         other => Err(format!("unknown tool: {other}")),
     }
@@ -44,17 +45,42 @@ pub fn call_tool(repo: &Path, name: &str, arguments: Value) -> Result<String, St
 
 fn tool_save(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: SaveArgs = parse_args(arguments)?;
-    let saved = memory::save(
+    // `memory_save` is the single upsert tool (it subsumes a separate update).
+    // First try a partial patch: `update` reads under its own lock and touches
+    // only the fields provided, so an existing memory's unmentioned fields (e.g.
+    // its type) are preserved when the caller updates just the body. Reusing the
+    // usecase's `update`/`save` keeps the write logic single-sourced.
+    let patched = memory::update(
         repo,
-        NewMemory {
-            name: args.name,
-            title: args.title,
+        &args.name,
+        MemoryChanges {
+            title: args.title.clone(),
             kind: args.kind,
-            related: args.related,
-            body: args.body,
+            related: args.related.clone(),
+            body: args.body.clone(),
         },
     )
     .map_err(|e| e.to_string())?;
+    let saved = match patched {
+        Some(updated) => updated,
+        // No memory by this name yet: create it. A title is required to open one.
+        None => {
+            let title = args
+                .title
+                .ok_or("`title` is required when creating a new memory")?;
+            memory::save(
+                repo,
+                NewMemory {
+                    name: args.name,
+                    title,
+                    kind: args.kind.unwrap_or_default(),
+                    related: args.related.unwrap_or_default(),
+                    body: args.body.unwrap_or_default(),
+                },
+            )
+            .map_err(|e| e.to_string())?
+        }
+    };
     Ok(to_pretty(&MemoryView::from(&saved)))
 }
 
@@ -75,15 +101,6 @@ fn tool_search(repo: &Path, arguments: Value) -> Result<String, String> {
     Ok(to_pretty(&summary_views(&items)))
 }
 
-fn tool_update(repo: &Path, arguments: Value) -> Result<String, String> {
-    let args: UpdateArgs = parse_args(arguments)?;
-    let name = args.name.clone();
-    match memory::update(repo, &name, args.changes()).map_err(|e| e.to_string())? {
-        Some(updated) => Ok(to_pretty(&MemoryView::from(&updated))),
-        None => Err(format!("no memory '{name}'")),
-    }
-}
-
 fn tool_delete(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: NameArgs = parse_args(arguments)?;
     let deleted = memory::delete(repo, &args.name).map_err(|e| e.to_string())?;
@@ -95,13 +112,17 @@ fn tool_delete(repo: &Path, arguments: Value) -> Result<String, String> {
 #[derive(Deserialize)]
 struct SaveArgs {
     name: String,
-    title: String,
+    // All content fields are optional so `memory_save` can act as a partial
+    // upsert: on an existing memory only the provided fields change, while
+    // creating a new one requires a `title` (enforced in the handler).
+    #[serde(default)]
+    title: Option<String>,
     #[serde(default, rename = "type")]
-    kind: MemoryType,
+    kind: Option<MemoryType>,
     #[serde(default)]
-    related: Vec<String>,
+    related: Option<Vec<String>>,
     #[serde(default)]
-    body: String,
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,30 +152,6 @@ struct SearchArgs {
     filter: FilterArgs,
 }
 
-#[derive(Deserialize)]
-struct UpdateArgs {
-    name: String,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default, rename = "type")]
-    kind: Option<MemoryType>,
-    #[serde(default)]
-    related: Option<Vec<String>>,
-    #[serde(default)]
-    body: Option<String>,
-}
-
-impl UpdateArgs {
-    fn changes(self) -> MemoryChanges {
-        MemoryChanges {
-            title: self.title,
-            kind: self.kind,
-            related: self.related,
-            body: self.body,
-        }
-    }
-}
-
 // --- JSON serialisation ----------------------------------------------------
 
 /// Build the JSON-output views for a list of memory summaries. The field set is
@@ -179,18 +176,21 @@ pub fn tool_schemas() -> Value {
     json!([
         {
             "name": "memory_save",
-            "description": "Save a durable fact to remember across sessions. \
-                Updates the memory in place if the name already exists. Returns it.",
+            "description": "Save a durable fact to remember across sessions (upsert). \
+                If a memory with this `name` already exists, only the fields you pass \
+                are changed and the rest are left as-is (so you can update just the \
+                body without resetting its type); otherwise a new memory is created, \
+                for which `title` is required. Returns the stored memory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Stable slug identity" },
-                    "title": { "type": "string", "description": "One-line summary" },
+                    "title": { "type": "string", "description": "One-line summary (required when creating)" },
                     "type": kind,
                     "related": related,
                     "body": { "type": "string", "description": "Markdown body of the fact" }
                 },
-                "required": ["name", "title"]
+                "required": ["name"]
             }
         },
         {
@@ -213,21 +213,6 @@ pub fn tool_schemas() -> Value {
                     "query": { "type": "string", "description": "Full-text query; omit to list all memories" },
                     "type": kind
                 }
-            }
-        },
-        {
-            "name": "memory_update",
-            "description": "Update fields of a memory. Only provided fields change.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "title": { "type": "string" },
-                    "type": kind,
-                    "related": related,
-                    "body": { "type": "string" }
-                },
-                "required": ["name"]
             }
         },
         {
