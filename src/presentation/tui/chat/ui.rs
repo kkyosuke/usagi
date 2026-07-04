@@ -102,9 +102,7 @@ fn transcript_lines(chat: &Chat, width: usize) -> Vec<String> {
             Role::Assistant => (chat.model(), Style::new().success().bold()),
         };
         lines.push(label_style.apply_to(label).to_string());
-        for wrapped in widgets::wrap_to_width(&message.text, width) {
-            lines.push(wrapped);
-        }
+        lines.extend(display_lines(&message.text, width));
         lines.push(String::new());
     }
     if chat.is_pending() {
@@ -112,6 +110,40 @@ fn transcript_lines(chat: &Chat, width: usize) -> Vec<String> {
         lines.push(style(format!("{spinner} 考え中…")).warning().to_string());
     }
     lines
+}
+
+/// Turn a message body into display rows: split on newlines (a model reply is
+/// usually multi-line), sanitise each raw line, then width-wrap it. Splitting
+/// first is essential — a raw `\n` left inside a frame line would move the cursor
+/// mid-row and corrupt the diff-painted screen. Blank source lines are preserved
+/// as blank rows so paragraph spacing survives.
+fn display_lines(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.split('\n') {
+        let clean = sanitize(raw);
+        let wrapped = widgets::wrap_to_width(&clean, width);
+        if wrapped.is_empty() {
+            out.push(String::new());
+        } else {
+            out.extend(wrapped);
+        }
+    }
+    out
+}
+
+/// Make one raw line safe to draw: drop ANSI escapes (so widths are measured on
+/// visible text only), turn tabs into a single space, and strip the remaining
+/// control characters (`\r`, other C0) that would otherwise misalign or corrupt
+/// the row. The caller has already split on `\n`, so none survive here.
+fn sanitize(line: &str) -> String {
+    console::strip_ansi_codes(line)
+        .chars()
+        .filter_map(|c| match c {
+            '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 /// The window of `lines` to show in `rows` rows, scrolled `scroll` lines up from
@@ -185,6 +217,53 @@ mod tests {
         chat.advance_tick();
         let out = pane(&chat, 40, 12);
         assert!(plain(&out).iter().any(|l| l.contains("考え中")));
+    }
+
+    #[test]
+    fn display_lines_splits_multiline_and_never_leaves_a_raw_newline() {
+        let rows = display_lines("first line\nsecond line\n\nlast", 40);
+        // Each source line becomes its own row; the blank line is preserved.
+        assert_eq!(rows, vec!["first line", "second line", "", "last"]);
+        // No row contains a raw newline (which would corrupt the frame).
+        assert!(rows.iter().all(|r| !r.contains('\n')));
+    }
+
+    #[test]
+    fn display_lines_wraps_japanese_by_display_width() {
+        // Width-8 pane, width-2 CJK glyphs: four per row.
+        let rows = display_lines("あいうえおか", 8);
+        assert!(rows.len() >= 2);
+        assert!(rows.iter().all(|r| console::measure_text_width(r) <= 8));
+        // Nothing is lost across the wrap.
+        assert_eq!(rows.concat(), "あいうえおか");
+    }
+
+    #[test]
+    fn display_lines_strips_control_chars_and_ansi() {
+        // Tabs become a space; carriage returns / other controls and ANSI escapes
+        // are dropped so widths stay honest and the row never corrupts.
+        let rows = display_lines("a\tb\r\n\x1b[31mred\x1b[0m", 40);
+        assert_eq!(rows, vec!["a b", "red"]);
+    }
+
+    #[test]
+    fn a_multiline_japanese_reply_renders_within_the_pane() {
+        let mut chat = Chat::new("m");
+        chat.input_mut().insert('q');
+        chat.submit().unwrap();
+        chat.finish(Ok(
+            "一行目です。\n二行目はもう少し長い日本語の返信です。".to_string()
+        ));
+        let out = pane(&chat, 20, 16);
+        // Every row fits the pane and carries no raw newline.
+        assert!(out.iter().all(|l| {
+            let plain = console::strip_ansi_codes(l);
+            console::measure_text_width(&plain) <= 20 && !l.contains('\n')
+        }));
+        // Both source lines are present (wrapped).
+        let text = plain(&out).join("");
+        assert!(text.contains("一行目です。"));
+        assert!(text.contains("二行目"));
     }
 
     #[test]
