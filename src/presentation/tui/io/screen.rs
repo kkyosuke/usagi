@@ -171,6 +171,32 @@ const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
 /// behaviour once the TUI exits. Reset in the reverse order of [`ENABLE_MOUSE`].
 const DISABLE_MOUSE: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 
+/// The full escape sequence that returns the host terminal to its pre-TUI state
+/// on an exit that runs no `Drop`: leave the alternate screen
+/// ([`LEAVE_ALT_SCREEN`]), disable every mouse-reporting mode ([`DISABLE_MOUSE`])
+/// and bracketed paste (`?2004l`), and show the cursor (`?25h`).
+///
+/// Held as one `const` byte slice (rather than composed at runtime) so the
+/// SIGINT / SIGTERM / SIGHUP handlers in [`super::signals`] can write it straight
+/// to the stdout fd without allocating — the only work that is async-signal-safe.
+/// [`write_terminal_restore`] writes the same bytes on the panic path
+/// (`app::install_panic_hook`), and a unit test pins them to
+/// [`LEAVE_ALT_SCREEN`] / [`DISABLE_MOUSE`] so the abrupt-exit restore never
+/// drifts from what the guard's `Drop` resets.
+pub(crate) const TERMINAL_RESTORE: &[u8] =
+    b"\x1b[?1049l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h";
+
+/// Write the terminal-restore sequence ([`TERMINAL_RESTORE`]) to `out` and flush.
+///
+/// The panic hook uses this with real stdout; taking an `impl Write` keeps the
+/// bytes assertable in a unit test (a `Term`/fd write is not capturable). The
+/// signal handlers cannot take an `impl Write` in an async-signal-safe context,
+/// so they write the same `TERMINAL_RESTORE` bytes to the raw stdout fd instead.
+pub(crate) fn write_terminal_restore(out: &mut impl io::Write) -> io::Result<()> {
+    out.write_all(TERMINAL_RESTORE)?;
+    out.flush()
+}
+
 /// RAII guard that activates the terminal alternate screen and restores it on drop.
 pub struct AlternateScreenGuard {
     term: Term,
@@ -442,6 +468,31 @@ mod tests {
             .expect("re-enters the alt screen");
         let mouse = seq.find(ENABLE_MOUSE).expect("re-enables mouse capture");
         assert!(alt < mouse);
+    }
+
+    #[test]
+    fn terminal_restore_reuses_the_leave_and_mouse_disable_sequences() {
+        // The abrupt-exit restore must undo exactly what the guard set up: it
+        // starts by leaving the alternate screen and includes the mouse-disable
+        // sequence, so it stays in step with LEAVE_ALT_SCREEN / DISABLE_MOUSE (a
+        // change to either must be reflected here). It then clears bracketed
+        // paste (?2004l) and shows the cursor (?25h).
+        let restore = std::str::from_utf8(TERMINAL_RESTORE).unwrap();
+        assert!(restore.starts_with(LEAVE_ALT_SCREEN));
+        assert!(restore.contains(DISABLE_MOUSE));
+        assert_eq!(
+            TERMINAL_RESTORE,
+            b"\x1b[?1049l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?2004l\x1b[?25h"
+        );
+    }
+
+    #[test]
+    fn write_terminal_restore_writes_the_full_sequence_and_flushes() {
+        // The panic hook shares this with the signal handlers' raw-fd write; the
+        // bytes must be exactly TERMINAL_RESTORE.
+        let mut out = Vec::new();
+        write_terminal_restore(&mut out).unwrap();
+        assert_eq!(out, TERMINAL_RESTORE);
     }
 
     #[test]
