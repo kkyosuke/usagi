@@ -385,11 +385,11 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
 }
 
 #[test]
-fn focus_menu_grows_to_fill_the_pane_then_scrolls_a_long_picker() {
+fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
     use crate::domain::settings::AgentCli;
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    // More installed agents than a short pane can hold once the picker opens.
+    // The most sub-menu-heavy picker: more installed agents than any other picker.
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![
         AgentCli::Claude,
@@ -397,22 +397,30 @@ fn focus_menu_grows_to_fill_the_pane_then_scrolls_a_long_picker() {
         AgentCli::CodexFugu,
         AgentCli::Gemini,
     ]);
-    state.focus_menu_expand_agent();
 
-    // A tall pane fits every agent row, so the picker shows in full — the window
-    // grows to fill the pane rather than clipping straight into a `N more` marker.
-    let roomy = console::strip_ansi_codes(&focus_menu_body(&state, 60, 30).join("\n")).into_owned();
+    // The collapsed menu already reserves the widest expansion's height, so opening
+    // the agent picker neither resizes the box nor clips into a `N more` marker —
+    // every agent shows in place.
+    let collapsed = focus_menu_body(&state, 60, 30);
+    state.focus_menu_expand_agent();
+    let expanded = focus_menu_body(&state, 60, 30);
+    assert_eq!(
+        collapsed.len(),
+        expanded.len(),
+        "the box height does not change when a picker opens"
+    );
+    let roomy = console::strip_ansi_codes(&expanded.join("\n")).into_owned();
     assert!(
         roomy.contains("Gemini"),
-        "a tall pane shows every agent: {roomy:?}"
+        "the widest picker shows every agent: {roomy:?}"
     );
     assert!(
         !roomy.contains("more"),
-        "a tall pane needs no scroll marker: {roomy:?}"
+        "a reserved-height box needs no scroll marker: {roomy:?}"
     );
 
-    // A short pane cannot hold them all, so the window caps its height and the
-    // overflow is summarised with a scroll marker instead.
+    // A pane too short to hold the reserved height caps the window and the overflow
+    // is summarised with a scroll marker instead.
     let cramped = focus_menu_body(&state, 60, 11);
     let joined = console::strip_ansi_codes(&cramped.join("\n")).into_owned();
     assert!(joined.contains("more"), "a short pane scrolls: {joined:?}");

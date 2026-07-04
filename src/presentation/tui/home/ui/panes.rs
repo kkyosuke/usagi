@@ -2614,13 +2614,9 @@ fn focus_session_header(state: &HomeState) -> String {
         .to_string()
 }
 
-/// The **minimum** height (in rows) the 在席 (Focus) menu's command area shows.
-/// The window never drops below this many rows whatever is expanded, so opening an
-/// inline picker scrolls its sub-rows into view rather than shrinking the box.
-/// Floored at the full menu's command count (agent / terminal / diff / chat /
-/// close) via `max`, so a full menu never pads; the actual height grows past this
-/// to fill the right pane (see [`focus_menu_visible`]) so a long agent list shows
-/// as many rows as fit before it needs to scroll.
+/// A hard floor on the 在席 (Focus) menu's command-area height, so even a tiny
+/// menu keeps a usable window. The real target is the widest expansion (see
+/// [`focus_menu_target`]); this only guards degenerate menus with fewer rows.
 const FOCUS_MENU_MIN_VISIBLE: usize = 5;
 
 /// The 在席 menu box's chrome rows around the windowed command area: the two box
@@ -2629,16 +2625,35 @@ const FOCUS_MENU_MIN_VISIBLE: usize = 5;
 /// the box would overrun the right pane.
 const FOCUS_MENU_CHROME: usize = 5;
 
-/// How many command rows the 在席 menu window shows for a pane `avail_rows` tall
-/// holding `total` command rows, given a `floor` (the collapsed command count, so
-/// the top-level menu never scrolls). It grows to fill the pane — showing every
-/// row when they all fit, so no scroll marker appears — but never below the floor
-/// (a longer list then scrolls within the window) nor past what the pane can hold
-/// after the box chrome.
-fn focus_menu_visible(total: usize, avail_rows: usize, floor: usize) -> usize {
-    let floor = floor.max(FOCUS_MENU_MIN_VISIBLE);
+/// The command-area height the 在席 menu reserves: the row count with the *most
+/// sub-menu-heavy* picker fully expanded — the command rows plus the largest
+/// picker's sub-rows. Fixing the window to this height means every picker opens in
+/// place with no `↑/↓ N more` clipping and no layout shift, whatever is expanded.
+/// Each command contributes its own picker's sub-row count when it can expand:
+/// `agent` the installed CLIs (only when more than one, so a picker actually
+/// opens), `terminal` its open/new actions, `close` its two options.
+fn focus_menu_target(state: &HomeState, commands: &[CommandInfo]) -> usize {
+    let widest_picker = commands
+        .iter()
+        .map(|info| match info.name {
+            "agent" if state.installed_agents().len() > 1 => state.installed_agents().len(),
+            "terminal" => state.focus_menu_terminal_actions().len(),
+            "close" => 2,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    commands.len() + widest_picker
+}
+
+/// How many command rows the 在席 menu window shows for a pane `avail_rows` tall,
+/// given the `target` height (the widest expansion, see [`focus_menu_target`]).
+/// It reserves the full `target` — so every picker opens without scrolling and the
+/// box never resizes as pickers open and close — capping only when the pane cannot
+/// hold it (then the window scrolls), and never below [`FOCUS_MENU_MIN_VISIBLE`].
+fn focus_menu_visible(target: usize, avail_rows: usize) -> usize {
     let max_fit = avail_rows.saturating_sub(FOCUS_MENU_CHROME);
-    total.clamp(floor, max_fit.max(floor))
+    target.min(max_fit).max(FOCUS_MENU_MIN_VISIBLE)
 }
 
 /// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
@@ -2763,12 +2778,11 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
         }
     }
 
-    // Window the command area to a height that grows to fill the right pane, so
-    // expanding a picker shows its sub-rows in place — as many as fit — rather than
-    // collapsing them into `↑/↓ N more` markers. Floored at the command count so
-    // the top-level menu never scrolls, and capped so the box never overruns the
-    // pane; only a picker taller than the pane then scrolls within the window.
-    let visible = focus_menu_visible(rows.len(), avail_rows, commands.len());
+    // Window the command area to the widest expansion's height, so every picker
+    // opens in place — its sub-rows shown, not collapsed into `↑/↓ N more` — and
+    // the box never resizes as pickers open and close. Capped to the right pane so
+    // it never overruns; only when the pane is too short does the window scroll.
+    let visible = focus_menu_visible(focus_menu_target(state, &commands), avail_rows);
     let mut lines = vec![style("Run a command:").dim().to_string()];
     lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
