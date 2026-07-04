@@ -147,6 +147,16 @@ impl PhaseReader {
         );
         phase
     }
+
+    /// Drop every cached entry whose worktree `keep` rejects. The session
+    /// watcher calls this each tick with its live sessions, so a cache entry
+    /// left behind by a removed session is released rather than accumulating —
+    /// otherwise the cache grows unbounded across a long run that creates and
+    /// removes many sessions ([`clear`] only deletes the on-disk file, not this
+    /// in-memory entry).
+    pub fn retain(&self, keep: impl Fn(&Path) -> bool) {
+        self.cache.borrow_mut().retain(|path, _| keep(path));
+    }
 }
 
 /// Forget any recorded phase for `worktree` (best-effort), so a session freshly
@@ -290,6 +300,33 @@ mod tests {
             assert_eq!(read(wt.path()), None);
             // Clearing again (nothing there) is a harmless no-op.
             clear(wt.path());
+        });
+    }
+
+    #[test]
+    fn retain_drops_cache_entries_the_predicate_rejects() {
+        with_data_dir(|_| {
+            let a = tempfile::tempdir().unwrap();
+            let b = tempfile::tempdir().unwrap();
+            write(a.path(), AgentPhase::Running).unwrap();
+            write(b.path(), AgentPhase::Waiting).unwrap();
+            let reader = PhaseReader::new();
+            // Populate the cache with both worktrees.
+            assert_eq!(reader.read(a.path()), Some(AgentPhase::Running));
+            assert_eq!(reader.read(b.path()), Some(AgentPhase::Waiting));
+
+            // Keep only `a`, dropping `b` — exercises the predicate returning
+            // both true and false. Both worktrees still read correctly after:
+            // `a` from the retained entry, `b` re-resolved from disk.
+            let keep_a = a.path().to_path_buf();
+            reader.retain(|path| path == keep_a);
+            assert_eq!(reader.read(a.path()), Some(AgentPhase::Running));
+            assert_eq!(reader.read(b.path()), Some(AgentPhase::Waiting));
+
+            // Retaining nothing empties the cache; a later read re-resolves from
+            // disk, so the value is unchanged.
+            reader.retain(|_| false);
+            assert_eq!(reader.read(a.path()), Some(AgentPhase::Running));
         });
     }
 
