@@ -81,15 +81,15 @@ impl Support {
 ///
 /// Claude, Codex, and codex-fugu receive every integration (Claude via its native
 /// flags; Codex and the codex-fugu variant via `-c` config overrides and Codex's
-/// hook system). Gemini has no
-/// inline-injection flag and no usagi-drivable hook system, so its MCP servers,
-/// phase-reporting hooks, and system prompt cannot be wired; only the plain flags
-/// it does expose — an opening prompt (`-i`), resume (`-r latest`), and the chat
-/// store usagi can clear — are supported.
+/// hook system). Gemini and Antigravity (`agy`, the Gemini CLI's successor) both
+/// lack an inline-injection flag and a usagi-drivable hook system, so their MCP
+/// servers, phase-reporting hooks, and system prompt cannot be wired; only the
+/// plain flags they expose — an opening prompt, resume, and the conversation store
+/// usagi can clear — are supported.
 pub fn support(cli: AgentCli, feature: AgentFeature) -> Support {
     match cli {
         AgentCli::Claude | AgentCli::Codex | AgentCli::CodexFugu => Support::Yes,
-        AgentCli::Gemini => match feature {
+        AgentCli::Gemini | AgentCli::Antigravity => match feature {
             AgentFeature::InitialPrompt | AgentFeature::Resume | AgentFeature::ForgetHistory => {
                 Support::Yes
             }
@@ -160,5 +160,18 @@ mod tests {
             support(AgentCli::Gemini, AgentFeature::SystemPrompt),
             Support::No
         );
+    }
+
+    #[test]
+    fn antigravity_supports_the_same_features_as_gemini() {
+        // `agy` shares Gemini's constraint (no inline injection, no hook system),
+        // so it receives exactly the feature set Gemini does.
+        for feature in AgentFeature::ALL {
+            assert_eq!(
+                support(AgentCli::Antigravity, feature),
+                support(AgentCli::Gemini, feature),
+                "antigravity should match gemini for {feature:?}"
+            );
+        }
     }
 }

@@ -205,7 +205,8 @@ fn agent_cli_field_cycles_through_each_cli() {
     config.move_down();
     config.move_down(); // select Agent CLI (after the Restore Panes row)
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
-    // Claude by default, cycling forward Claude -> Codex -> sakana.ai -> Gemini -> Claude.
+    // Claude by default, cycling forward
+    // Claude -> Codex -> sakana.ai -> Gemini -> Antigravity -> Claude.
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Codex");
@@ -213,12 +214,14 @@ fn agent_cli_field_cycles_through_each_cli() {
     assert_eq!(config.value_of(Field::AgentCli), "sakana.ai");
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AgentCli), "Antigravity");
     // Wraps back to Claude.
     assert!(config.cycle_selected(true));
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
     // And cycles backward too (wrapping to the last value).
     assert!(config.cycle_selected(false));
-    assert_eq!(config.value_of(Field::AgentCli), "Gemini");
+    assert_eq!(config.value_of(Field::AgentCli), "Antigravity");
 }
 
 #[test]
@@ -1368,7 +1371,8 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     // The first local field is selected from the start.
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
 
-    // None (follow global) -> Claude -> Codex -> CodexFugu -> Gemini -> None.
+    // None (follow global) -> Claude -> Codex -> CodexFugu -> Gemini
+    // -> Antigravity -> None.
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Claude));
     assert!(config
@@ -1381,10 +1385,18 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
     assert!(config.cycle_selected(true));
+    assert_eq!(
+        config.local().unwrap().agent_cli,
+        Some(AgentCli::Antigravity)
+    );
+    assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, None);
     // Backward from None wraps to the last value.
     assert!(config.cycle_selected(false));
-    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
+    assert_eq!(
+        config.local().unwrap().agent_cli,
+        Some(AgentCli::Antigravity)
+    );
 }
 
 #[test]

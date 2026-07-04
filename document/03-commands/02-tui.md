@@ -36,7 +36,7 @@
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
-| `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini`）を付けるとその CLI を起動する |
+| `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini` / `agy` / `antigravity`）を付けるとその CLI を起動する |
 | `ai <prompt>` | 設定中の既定 Agent CLI を選択中セッションの worktree で起動し、`<prompt>` を初期プロンプトとして渡す（Session スコープ。Prompt で入力する） |
 | `chat` | ローカル LLM（Ollama 経由）と対話する。`terminal` / `agent` と同じく在席の右ペインに表示（Session スコープ）。外部 Agent CLI ではなくローカルモデルに直接話しかけるため、クラウド Agent のトークンを消費しない |
 | `diff` | 在席中セッションの差分（既定ブランチとの差分）を右ペインに GitHub 風に表示（行番号・シンタックスハイライト・単語差分・unified/split。Session スコープ） |
@@ -56,7 +56,7 @@
 | `session create <name>` | `.usagi/sessions/<name>/` 配下に再帰的に worktree を構築してセッションを作成。完了まで他の操作が無ければ新規セッションへ自動で在席。名前を省くと[切替](../design/home/02-layout.md#切替switch既定)の左ペイン内インライン入力で作成 |
 | `session list` | セッション一覧（件数 + 各セッション名 + worktree 数）をテキストモーダルに表示 |
 | `session switch <name>` | アクティブセッションを切り替えて**在席**へ。`switch root` でルート行へ。引数なしで[切替](../design/home/02-layout.md#切替switch既定)モードを開く |
-| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript / Codex の rollout / Gemini の chats）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除。統合（unite）モードでは名前を `workspace:session`（コロン区切り・空白なし）で修飾して、ワークスペース間で重複する名前を一意に指定できる（無修飾の名前は表示中のワークスペースを先頭から探して最初に一致したものを対象にする）。一覧モーダルは表示中の全ワークスペースのセッションを `workspace: session` 形式で並べる |
+| `session remove <name> [--force]` | セッションの worktree・ブランチ・コピーに加え、その worktree の会話履歴（Claude の transcript / Codex の rollout / Gemini の chats / Antigravity の history）と Agent phase も削除。未コミット変更があれば警告し `--force` で破棄。名前を省くと一覧モーダルを開き、`Space` で選択して `Enter` で一括削除。統合（unite）モードでは名前を `workspace:session`（コロン区切り・空白なし）で修飾して、ワークスペース間で重複する名前を一意に指定できる（無修飾の名前は表示中のワークスペースを先頭から探して最初に一致したものを対象にする）。一覧モーダルは表示中の全ワークスペースのセッションを `workspace: session` 形式で並べる |
 
 セッション作成・削除時の孤児ディレクトリの掃除など、ライフサイクルの概念は
 [4. オーケストレーション](../04-orchestration.md)を参照してください。
@@ -137,22 +137,22 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 どの Agent CLI を起動するかは、引数で**そのセッションだけ**上書きできます。
 
 - 引数なし（在席 Menu の `agent` 行 / `a`、Prompt の `agent`）: 設定中の**既定 CLI**（ローカル設定で `gemini` などに変更可）を起動。
-- 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/home/02-layout.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini`）と表示名（`sakana.ai`）を大文字小文字を問わず受け付ける。
+- 名前付き（Prompt の `agent codex` / `agent sakana.ai`、または在席 Menu の[エージェントピッカー](../design/home/02-layout.md#在席のアクション-uimenu--prompt)）: 指定した CLI を起動。名前は起動コマンド名（`claude` / `codex` / `codex-fugu` / `gemini` / `agy`）と表示名（`sakana.ai` / `antigravity`）を大文字小文字を問わず受け付ける。
 - 既定 CLI 以外でかつ**インストールされていない**（PATH に無い）名前を指定するとエラーになり起動しない。未知の名前も同様に拒否する。Menu のピッカーは**インストール済みの CLI だけ**を候補に出す。
 
 **1 セッションが持てる agent は CLI ごとに 1 つ**です。別々の CLI（例: Claude と Codex）は同じセッションで**並行して開けます**。ただし同じ CLI を 2 つは開かず、すでにその CLI の agent ペインがあるときは Prompt の `agent`・`a`・没入の agent-タブ追加キー `Ctrl-O g`／`Alt-g` のいずれから実行しても 2 つ目を起動せず、**既存の agent タブへ移動**します（terminal タブは何枚でも追加できます）。`agent` 行は常に Menu／切替プレビューに残ります。
 
 起動時に usagi 自身の issue MCP サーバ（[`usagi mcp`](03-mcp.md)）を Agent CLI に組み込むため、エージェントは起動直後から
 `issue_*` tool でタスクを操作できます。さらにローカル LLM が有効なら [`usagi llm-mcp`](04-llm-mcp.md) も組み込みます。
-Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Codex（および Codex 互換の `codex-fugu`）は `-c` 設定上書き（MCP＋ライフサイクルフック）、Gemini はインライン注入フラグが無いため MCP・フック・system prompt は組み込まず、再開と初期プロンプトのみ配線）は
+Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Codex（および Codex 互換の `codex-fugu`）は `-c` 設定上書き（MCP＋ライフサイクルフック）、Gemini・Antigravity はインライン注入フラグが無いため MCP・フック・system prompt は組み込まず、再開と初期プロンプトのみ配線）は
 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md#起動と登録)を参照してください。
 Codex / `codex-fugu` では、usagi が組み込む MCP サーバに `default_tools_approval_mode = "approve"` も渡すため、MCP tool 呼び出しごとの確認は出ません（シェルコマンドの承認は `--ask-for-approval on-request` のままです）。
 
 対象 worktree に前回の会話が残っている場合は、**前回セッションの続きから**起動します（Claude は `claude --continue`、
-Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume --last`）、Gemini は `gemini -r latest`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
+Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume --last`）、Gemini は `gemini -r latest`、Antigravity は `agy -c`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、
 再開フラグは埋め込みシェルを**新規に起動するときだけ**付与されます（裏で動き続けるシェルへ再アタッチする場合は再起動しないため対象外）。
 なお Codex は、キュー済みプロンプト（`session_prompt`）がある起動では再開せず、そのプロンプトで新規セッションを開始します
-（Claude / Gemini は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i=<prompt>` で渡します）。
+（Claude / Gemini / Antigravity は再開とプロンプトを併用でき、Gemini はプロンプトを `gemini -i=<prompt>`、Antigravity は `agy -i=<prompt>` で渡します）。
 キュー済みプロンプトはキューされた時点ではなく**配送された起動時**に在席のログへ 1 行表示されるため、あとから起動した agent が
 何に取り組み始めたかを画面で確認できます。
 
@@ -164,7 +164,7 @@ Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume -
 **在席の Prompt** から `ai <prompt>` と入力すると、設定中の**既定 Agent CLI**を選択中セッションの worktree で起動し、
 `<prompt>` を初期プロンプトとして渡します。起動先のディレクトリ・MCP 配線・会話再開の扱いは [`agent`](#agent) と同じです。
 
-- 動作中の agent ペインが無い場合（未起動、または CLI が終了済み）: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。プロンプトは `--` 区切り（Gemini は `-i=<prompt>`）で渡すため、`-` で始まるテキストもフラグと誤解釈されない。
+- 動作中の agent ペインが無い場合（未起動、または CLI が終了済み）: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。プロンプトは `--` 区切り（Gemini・Antigravity は `-i=<prompt>`）で渡すため、`-` で始まるテキストもフラグと誤解釈されない。
 - 動作中の agent ペインがある場合: そのペインのタブへ移動し、`<prompt>` を対話入力として送る（貼り付け＋Enter。bracketed paste 対応の CLI には 1 ブロックとして貼り付く）。送り先はそのペインで動いている CLI（`agent <名前>` で起動した既定以外の CLI でも同じ）で、新規起動はしないため次項のインストール判定も行わない。
 - `<prompt>` を省くと `usage: ai <prompt>` を表示して起動しない。
 - 新規起動になる場合で、インストール済み Agent CLI の検出結果（起動時にバックグラウンドで PATH を調べる）に既定 CLI が**含まれていない**ときは、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。検出が未完了、または 1 つも見つからなかったときは判定せず起動を試みる（`agent` と同じ寛容さ）。Config で既定 CLI を変更すると、Config を閉じた時点で `ai` / `agent` に反映される。
