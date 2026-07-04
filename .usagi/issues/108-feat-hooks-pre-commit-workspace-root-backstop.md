@@ -1,14 +1,14 @@
 ---
 number: 108
 title: feat(hooks): pre-commit で workspace root（非セッション）チェックアウトのコミットを弾く backstop
-status: todo
+status: done
 priority: medium
 labels: [orchestration, chore]
 dependson: []
 related: []
 parent: 105
 created_at: 2026-07-04T21:46:09.751222+00:00
-updated_at: 2026-07-04T21:46:09.751222+00:00
+updated_at: 2026-07-04T23:09:04.136271+00:00
 ---
 
 ## 背景
