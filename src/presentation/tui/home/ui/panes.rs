@@ -17,9 +17,9 @@ use super::super::state::{
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::{
-    clip_to_width, clip_to_width_cow, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON,
-    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
-    PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
+    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL,
+    STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{
@@ -196,27 +196,39 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾ ready"), width))
-                    .dim()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾ ready"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
             ),
             AgentState::Running => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶ running"), width))
-                    .success()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶ running"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆ waiting"), width))
-                    .warning()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆ waiting"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓ done"), width))
-                    .accent()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓ done"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
             ),
         }
     }
@@ -232,27 +244,39 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾"), width))
-                    .dim()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
             ),
             AgentState::Running => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶"), width))
-                    .success()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆"), width))
-                    .warning()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓"), width))
-                    .accent()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
             ),
         }
     }
@@ -593,7 +617,11 @@ fn digits(mut n: usize) -> usize {
 /// changed lines or a longer "ago". A `0` width drops that field for the pane.
 #[derive(Clone, Copy, Default)]
 pub(super) struct DetailCols {
-    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it.
+    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it. Reserved at
+    /// [`TIME_RESERVE_WIDTH`] so the cell keeps a constant width as a session ages
+    /// across the `now` / `Nmin ago` / `Nh ago` buckets — otherwise the label's
+    /// width would wander with the clock, flipping the "drop when narrow" decision
+    /// and shifting the detail line purely with the passage of time.
     time: usize,
     /// Digit width of the `↑N` (ahead) count; 0 = no visible session is ahead.
     ahead: usize,
@@ -656,13 +684,47 @@ fn pr_width(prs: &[PrLink]) -> usize {
 /// common appear/disappear no longer moves anything.
 const PR_RESERVE_WIDTH: usize = 3;
 
+/// The freshness column is reserved at (at least) this width on every render — the
+/// display width of the widest label the [`relative_time`] format produces,
+/// `59min ago` (9 columns), which also holds every `Nh ago` / `Nd ago` up to
+/// thousands of days. Unlike the diff / commit / PR fields, which only change when
+/// the user commits or opens a PR, the freshness label's width changes on its own
+/// as the clock advances (`now` → `12min ago` → `1h ago`). Sizing the column to the
+/// live label would let that width wander between frames — flipping the "drop the
+/// freshness first when narrow" decision and shifting the whole detail line purely
+/// with the passage of time (a cumulative layout shift). Holding the slot at a
+/// constant width decouples the layout from the clock, the same anti-shift rule the
+/// PR column follows ([`PR_RESERVE_WIDTH`]).
+const TIME_RESERVE_WIDTH: usize = 9;
+
+/// Columns the `↑` / `↓` commit-divergence arrows occupy. Unlike the other
+/// detail-line glyphs (the agent icons in `U+2500..=U+25FF` and the Nerd Font PUA
+/// icons all render single-width — see [`widgets::measure_width_cjk`]), the arrows
+/// live in the Arrows block and are East Asian *Ambiguous*, which the target
+/// terminals paint **two** columns wide. Reserving and measuring them at one column
+/// (the plain-width undercount) leaves the detail line 1 column too narrow per arrow
+/// on the layout's books, so the composed row overruns `left_w` and the sidebar's
+/// [`clip_to_width_cjk`](widgets::clip_to_width_cjk) chops its right edge (the PR
+/// badge). Counting the arrows here at their painted width keeps line 2's math in
+/// step with the CJK-aware clip that line 1 already uses.
+const COMMIT_ARROW_WIDTH: usize = 2;
+
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
     /// are reserved (a pane with nothing behind spends no columns on `↓`), with a
-    /// one-space gap when both sides are present.
+    /// one-space gap when both sides are present. Each arrow is
+    /// [`COMMIT_ARROW_WIDTH`] columns (ambiguous-width, painted two wide).
     fn commits_width(self) -> usize {
-        let up = if self.ahead > 0 { 1 + self.ahead } else { 0 };
-        let down = if self.behind > 0 { 1 + self.behind } else { 0 };
+        let up = if self.ahead > 0 {
+            COMMIT_ARROW_WIDTH + self.ahead
+        } else {
+            0
+        };
+        let down = if self.behind > 0 {
+            COMMIT_ARROW_WIDTH + self.behind
+        } else {
+            0
+        };
         up + usize::from(up > 0 && down > 0) + down
     }
 
@@ -706,10 +768,9 @@ fn detail_cols(
 ) -> DetailCols {
     let mut cols = DetailCols::default();
     for (updated_at, diff, ab, pr_w) in worktrees {
-        cols.time = cols.time.max(console::measure_text_width(&relative_time(
-            now,
-            *updated_at,
-        )));
+        cols.time = cols
+            .time
+            .max(widgets::measure_width_cjk(&relative_time(now, *updated_at)));
         if let Some(diff) = diff {
             cols.added = cols.added.max(digits(diff.added));
             cols.removed = cols.removed.max(digits(diff.removed));
@@ -728,6 +789,12 @@ fn detail_cols(
     // Always hold the PR slot open (even when no visible session has a PR) so a
     // session gaining or losing its last PR never shifts the diff to its left.
     cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
+    // Hold the freshness slot at a constant width so the label growing or shrinking
+    // as a session ages (`now` → `12min ago` → `1h ago`) never changes the column —
+    // otherwise the passing clock alone would flip the trim decision below and shift
+    // the detail line. The per-session max above still wins for the (unreachable in
+    // practice) label wider than the reserve.
+    cols.time = cols.time.max(TIME_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);
@@ -743,9 +810,11 @@ fn detail_cols(
 
 /// Right-aligns the already-styled `content` within `width` display columns by
 /// left-padding with spaces, so a field seats at its column's right edge and the
-/// edges line up down the list.
+/// edges line up down the list. Width is measured with [`widgets::measure_width_cjk`]
+/// so an ambiguous-width glyph (the `↑` / `↓` arrows) is counted at the two columns
+/// the terminal paints it, matching the detail line's reserved columns.
 fn rpad(content: &str, width: usize) -> String {
-    let pad = width.saturating_sub(console::measure_text_width(content));
+    let pad = width.saturating_sub(widgets::measure_width_cjk(content));
     format!("{}{content}", " ".repeat(pad))
 }
 
@@ -777,14 +846,14 @@ fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> Str
         if ahead > 0 {
             style(format!("↑{ahead:>ahead_w$}")).accent().to_string()
         } else {
-            " ".repeat(1 + ahead_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + ahead_w)
         }
     });
     let down = (behind_w > 0).then(|| {
         if behind > 0 {
             style(format!("↓{behind:>behind_w$}")).feature().to_string()
         } else {
-            " ".repeat(1 + behind_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + behind_w)
         }
     });
     match (up, down) {
@@ -806,16 +875,20 @@ fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
         return agent.icon_label(width).unwrap_or_default();
     }
     let cluster = cells.join(" ");
-    let cluster_w = console::measure_text_width(&cluster);
+    // Measure and clip with the CJK-aware width so the `↑` / `↓` arrows in the
+    // cluster are counted at the two columns the terminal paints them — otherwise
+    // the line is built one column too narrow per arrow and the sidebar's
+    // [`clip_to_width_cjk`] chops the cluster's right edge (see [`COMMIT_ARROW_WIDTH`]).
+    let cluster_w = widgets::measure_width_cjk(&cluster);
     if cluster_w >= width {
         // No room for both: the cluster alone, clipped to the cell.
-        return clip_to_width(&cluster, width);
+        return widgets::clip_to_width_cjk(&cluster, width);
     }
     // Reserve the cluster's columns (plus a one-space gap) and clip the agent
     // label to what's left, so it is styled already-clipped (clean ANSI) rather
     // than truncated after the fact.
     let agent = agent.icon_label(width - cluster_w - 1).unwrap_or_default();
-    let pad = width - console::measure_text_width(&agent) - cluster_w;
+    let pad = width - widgets::measure_width_cjk(&agent) - cluster_w;
     format!("{agent}{}{cluster}", " ".repeat(pad))
 }
 
@@ -1557,7 +1630,7 @@ pub(super) fn left_pane(
                 done.contains(&w.path),
             );
             if let Some(label) = agent.icon_label(detail_width) {
-                max_agent_w = max_agent_w.max(console::measure_text_width(&label));
+                max_agent_w = max_agent_w.max(widgets::measure_width_cjk(&label));
             }
             (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
         })
@@ -2594,16 +2667,6 @@ fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String
     clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
-/// The `session: <name>` header line shown above the 在席 (Focus) action surface
-/// when the session has no live panes (an idle session, no tab strip). With live
-/// panes the identity rides the tab strip ([`active_session_header`]) instead.
-fn focus_session_header(state: &HomeState) -> String {
-    style(format!("session: {}", state.focused_session_name()))
-        .accent()
-        .bold()
-        .to_string()
-}
-
 /// A hard floor on the 在席 (Focus) menu's command-area height, so even a tiny
 /// menu keeps a usable window. The real target is the widest expansion (see
 /// [`focus_menu_target`]); this only guards degenerate menus with fewer rows.
@@ -2688,7 +2751,7 @@ fn focus_menu_overflow(hidden: usize, above: bool) -> String {
 /// height that grows to fill the `avail_rows`-tall right pane, so a long picker
 /// shows as many rows as fit before it scrolls rather than collapsing straight
 /// into `↑/↓ N more` markers. Rendered as the body of the floating menu overlay
-/// modal (see [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the
+/// modal (see [`super::render_frame`] and [`HomeState::focus_action_overlay`]); the
 /// `session:` identity rides the modal's title rather than a header line here.
 pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let cursor = state.focus_menu_cursor();
@@ -2768,52 +2831,96 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
         }
     }
 
+    // A `/` filter that matches nothing leaves the command area blank; a dim
+    // placeholder keeps the box from reading as a bug (an empty menu). Worded like
+    // the Open Project picker's "No projects match the filter." for consistency.
+    if commands.is_empty() {
+        rows.push(style("  No commands match the filter.").dim().to_string());
+    }
+
     // Window the command area to the widest expansion's height, so every picker
     // opens in place — its sub-rows shown, not collapsed into `↑/↓ N more` — and
     // the box never resizes as pickers open and close. Capped to the right pane so
     // it never overruns; only when the pane is too short does the window scroll.
     let visible = focus_menu_visible(focus_menu_target(state, &commands), avail_rows);
-    let mut lines = vec![style("Run a command:").dim().to_string()];
+    let mut lines = vec![focus_menu_filter_line(state, width)];
     lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
-    // a row-specific expand affordance while the cursor can open one, else base.
+    // the `/` filter's own keys while it is live, a row-specific expand affordance
+    // while the cursor can open one, else base.
     let hint = if close_expanded {
-        "↑↓ move   Enter run   ← back"
+        "↑↓ move   Enter run   ← back".to_string()
     } else if expanded {
-        "↑↓ move   Enter launch   ← back"
+        "↑↓ move   Enter launch   ← back".to_string()
+    } else if state.focus_menu_filtering() {
+        "↑↓ move   Enter run   ⌫ edit   Esc clear".to_string()
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+        "↑↓ move   Enter run   → pick agent   / filter   t terminal   a agent".to_string()
     } else if state.focus_menu_terminal_can_expand() {
-        "↑↓ move   Enter run   → pick terminal   t terminal   a agent"
+        "↑↓ move   Enter run   → pick terminal   / filter   t terminal   a agent".to_string()
     } else if state.focus_close_can_expand() {
-        "↑↓ move   Enter run   → expand   t terminal   a agent"
+        "↑↓ move   Enter run   → expand   / filter   t terminal   a agent".to_string()
     } else {
-        "↑↓ move   Enter run   t terminal   a agent"
+        "↑↓ move   Enter run   / filter   t terminal   a agent".to_string()
     };
     lines.push(style(hint).dim().to_string());
     lines
 }
 
+/// Rows the 在席 prompt reserves for its Session-scope hint, always filled to this
+/// height (padded with blanks) so the box keeps a **fixed height** as the hint
+/// changes while typing — no layout shift, the prompt sibling of the menu's
+/// widest-expansion window ([`focus_menu_target`]) and the palette's
+/// [`PALETTE_HINT_ROWS`](super::chrome). Sized to the tallest hint: a `usage` line
+/// plus up to [`HINT_MAX`] examples.
+const FOCUS_PROMPT_HINT_ROWS: usize = HINT_MAX + 1;
+
+/// The 在席 prompt box's chrome rows around the reserved hint block: the two box
+/// borders plus the `❯` command line and its blank spacer. The hint block is
+/// capped to `avail_rows - FOCUS_PROMPT_CHROME` so a short pane never overruns.
+const FOCUS_PROMPT_CHROME: usize = 4;
+
+/// The 在席 menu's first line: the dim `Run a command:` label normally, or — while
+/// a `/` filter is live — a `Filter: <query>` line that shows the typed text as the
+/// list narrows beneath it. Mirrors the Open Project picker's filter bar (see
+/// [`crate::presentation::tui::open`]) so the two search affordances read alike.
+fn focus_menu_filter_line(state: &HomeState, width: usize) -> String {
+    let Some(query) = state.focus_menu_filter() else {
+        return style("Run a command:").dim().to_string();
+    };
+    let label = style("Filter:").dim();
+    let value = if query.is_empty() {
+        style(" type to filter").dim().to_string()
+    } else {
+        format!(" {}", style(query).accent())
+    };
+    clip_to_width(&format!("{label}{value}"), width)
+}
+
 /// The body of the 在席 (Focus) prompt surface (no identity header): the
-/// session-scoped command line (`❯ <input>▏`) and the Session-scope hint below
-/// it. Shared by the idle-session [`focus_prompt`] and the "+ new" tab.
-fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
+/// session-scoped command line (`❯ <input>▏`) and a **fixed-height** Session-scope
+/// hint block below it, so the box never resizes as the hint changes while typing.
+/// Rendered as the body of the floating prompt overlay modal (the prompt sibling
+/// of [`focus_menu_body`]; see [`super::render_frame`] and
+/// [`HomeState::focus_action_overlay`]); the `session:` identity rides the modal's
+/// title rather than a header line here. `avail_rows` caps the reserved block so a
+/// short right pane never overruns (mirroring the menu's `avail_rows` window).
+pub(super) fn focus_prompt_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let prompt = style("❯").danger().bold();
     // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
     let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
     let value = widgets::block_caret(before, after, &Style::new().accent());
     let mut lines = vec![clip_to_width(&format!("{prompt} {value}"), width)];
     lines.push(String::new());
-    lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
-    lines
-}
-
-/// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
-/// line (`❯ <input>▏`), and the Session-scope hint below it.
-pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![focus_session_header(state), String::new()];
-    lines.extend(focus_prompt_body(state, width));
+    // Reserve a fixed number of hint rows (padded with blanks), so the box keeps
+    // one height whatever the hint is — commands, usage/examples, or none. Capped
+    // to what the pane can hold so a short pane never pushes the box past it.
+    let hint_rows = FOCUS_PROMPT_HINT_ROWS.min(avail_rows.saturating_sub(FOCUS_PROMPT_CHROME));
+    let mut hints = focus_hint_lines(state.focus_prompt_hint(), width);
+    hints.truncate(hint_rows);
+    hints.resize(hint_rows, String::new());
+    lines.extend(hints);
     lines
 }
 
@@ -2823,37 +2930,29 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
 const FOCUS_NEW_TAB_LABEL: &str = "+ new";
 
 /// A blank right pane of exactly `rows` rows — the pane behind a floating overlay
-/// that owns the surface (e.g. the 在席 menu modal), so the modal reads against an
+/// that owns the surface (the 在席 action modal), so the modal reads against an
 /// empty pane rather than stale content showing through.
 fn blank_pane(rows: usize) -> Vec<String> {
     vec![String::new(); rows]
 }
 
-/// Builds the 在席 (Focus) right pane. With no live panes it is the session's
-/// action surface — the prompt inline (its own `session:` header), or, on the
-/// menu UI, a blank pane behind the floating menu overlay modal. With live panes
-/// it gains a **tab strip**: one chip per live pane followed by a "+ new" chip
-/// while that launch surface is selected, the session identity beside it (shared
-/// with 没入), and below it either the selected pane's live preview or — on the
-/// "+ new" tab — the prompt surface (header-less; the menu again floats as an
-/// overlay rather than drawing inline). After a zoom-out the menu floats over the
-/// selected pane tab instead: the preview drawn here keeps showing behind it.
+/// Builds the 在席 (Focus) right pane. With no live panes it is a blank pane
+/// behind the session's floating action surface — the Menu or the Prompt, both
+/// composited as overlay modals by [`render_frame`] (see
+/// [`HomeState::focus_action_overlay`]). With live panes it gains a **tab strip**:
+/// one chip per live pane followed by a "+ new" chip while that launch surface is
+/// selected, the session identity beside it (shared with 没入), and below it the
+/// selected pane's live preview — on the "+ new" tab the pane stays blank because
+/// the action surface again floats as an overlay. After a zoom-out that surface
+/// floats over the selected pane tab instead: the preview drawn here keeps
+/// showing behind it.
 fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
-    // No live panes: the prompt surface fills the pane. The menu never renders
-    // inline — it floats as an overlay modal centred over the pane (composited by
-    // [`render_frame`] when [`HomeState::focus_menu_overlay`] holds), so on the
-    // menu UI the pane behind it stays blank.
+    // No live panes: the action surface (Menu or Prompt) floats as an overlay
+    // modal centred over the pane (composited by [`render_frame`] when
+    // [`HomeState::focus_action_overlay`] holds), so the pane behind it stays
+    // blank — neither surface renders inline.
     let Some(strip) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) else {
-        let lines = match state.session_action_ui() {
-            SessionActionUi::Menu => blank_pane(rows),
-            SessionActionUi::Prompt => {
-                let mut lines = focus_prompt(state, width);
-                lines.truncate(rows);
-                lines.resize(rows, String::new());
-                lines
-            }
-        };
-        return lines;
+        return blank_pane(rows);
     };
 
     // Live panes: the session's panes as tabs. The "+ new" tab is appended only
@@ -2873,19 +2972,12 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let header = active_session_header(state);
     let mut lines = header_tab_rows(header, Some(&combined), width);
 
-    if on_new {
-        // The "+ new" tab: the action surface that launches the next pane. The
-        // menu floats as an overlay modal (see [`HomeState::focus_menu_overlay`]),
-        // so on the menu UI only the tab strip shows behind it here; the prompt
-        // stays inline.
-        if state.session_action_ui() == SessionActionUi::Prompt {
-            lines.push(String::new());
-            lines.extend(focus_prompt_body(state, width));
-        }
-    } else {
-        // A pane tab: preview the pane's live screen (the snapshot taken before
-        // painting), so the selection shows what re-attaching reveals. Fall back
-        // to a label until the first snapshot is available.
+    // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
+    // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows
+    // behind it here. On a pane tab, preview the pane's live screen (the snapshot
+    // taken before painting) so the selection shows what re-attaching reveals,
+    // falling back to a label until the first snapshot is available.
+    if !on_new {
         match state.terminal_view() {
             Some(view) => {
                 let body = rows.saturating_sub(lines.len());
@@ -4232,9 +4324,11 @@ mod tests {
             1,
         );
         assert!(console::strip_ansi_codes(&ahead_only).starts_with("↑ 2"));
+        // Measured as painted (the `↑` / `↓` arrows are two columns wide), the
+        // blanked-out side holds exactly the drawn side's width.
         assert_eq!(
-            console::measure_text_width(&ahead_only),
-            console::measure_text_width(&both),
+            widgets::measure_width_cjk(&ahead_only),
+            widgets::measure_width_cjk(&both),
         );
         // No behind side anywhere in the render → only the `↑` column is spent.
         let no_behind = commits_cell(
@@ -4258,9 +4352,10 @@ mod tests {
         assert_eq!(console::strip_ansi_codes(&no_ahead), "↓2");
         // Column dropped entirely → empty.
         assert_eq!(commits_cell(None, 0, 0), "");
-        // A drawn column but no measurement for this row → blanks.
+        // A drawn column but no measurement for this row → blanks holding the
+        // 2-wide arrow slot plus its one digit.
         let none = commits_cell(None, 1, 0);
-        assert_eq!(console::measure_text_width(&none), 2);
+        assert_eq!(console::measure_text_width(&none), 3);
         assert!(none.trim().is_empty());
     }
 
@@ -4274,25 +4369,25 @@ mod tests {
             removed: 2,
             pr: 4, // "#123"
         };
-        assert_eq!(full.commits_width(), 6); // (1+2) + gap + (1+1)
+        assert_eq!(full.commits_width(), 8); // (2+2) + gap + (2+1), arrows two wide
         assert_eq!(full.badge_width(), 8); // 3 + 2 + 3
-        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8 + 1 + 4); // four fields, three gaps
+        assert_eq!(full.cluster_width(), 8 + 1 + 8 + 1 + 8 + 1 + 4); // four fields, three gaps
 
         // Only an ahead side, no diff, no time: one field, no gaps, no `↓` columns.
         let ahead_only = DetailCols {
             ahead: 2,
             ..DetailCols::default()
         };
-        assert_eq!(ahead_only.commits_width(), 3);
+        assert_eq!(ahead_only.commits_width(), 4); // 2-wide arrow + 2 digits
         assert_eq!(ahead_only.badge_width(), 0);
-        assert_eq!(ahead_only.cluster_width(), 3);
+        assert_eq!(ahead_only.cluster_width(), 4);
 
         // Only a behind side (covers the `up == 0` half of the commit gap).
         let behind_only = DetailCols {
             behind: 2,
             ..DetailCols::default()
         };
-        assert_eq!(behind_only.commits_width(), 3);
+        assert_eq!(behind_only.commits_width(), 4); // 2-wide arrow + 2 digits
 
         assert_eq!(DetailCols::default().cluster_width(), 0);
     }
@@ -4398,7 +4493,7 @@ mod tests {
         assert!(roomy.ahead > 0 || roomy.behind > 0);
         assert!(roomy.added > 0);
         // Tighter: the lowest-priority time is dropped, commits + badge stay.
-        let mid = detail_cols(&data, now, 9, 25);
+        let mid = detail_cols(&data, now, 9, 30);
         assert_eq!(mid.time, 0);
         assert!(mid.ahead > 0 || mid.behind > 0);
         assert!(mid.added > 0);
