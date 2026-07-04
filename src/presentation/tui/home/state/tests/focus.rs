@@ -15,54 +15,57 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
-fn focus_menu_overlay_holds_only_for_the_menu_surface_on_the_action_tab() {
+fn focus_action_overlay_holds_for_both_surfaces_on_the_action_tab() {
     let mut state = state(); // root, main, feature
                              // Not in 在席: nothing floats.
-    assert!(!state.focus_menu_overlay());
+    assert!(!state.focus_action_overlay());
 
     // Idle 在席 on the menu UI (the default): the menu floats as an overlay.
     state.enter_focus(1);
     assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
-    assert!(state.focus_menu_overlay());
+    assert!(state.focus_action_overlay());
 
-    // The prompt surface stays inline, so nothing floats for it.
+    // The prompt surface floats too — the setting only picks which surface the
+    // box holds, not whether it floats.
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
-    assert!(!state.focus_menu_overlay());
+    assert!(state.focus_action_overlay());
 
-    // Back on the menu UI with live panes: it floats on the "+ new" tab (the
-    // action surface) but not once the selector steps onto a pane tab.
-    state.set_session_action_ui(SessionActionUi::Menu);
-    state.enter_focus(1);
-    state.set_terminal_tabs(vec!["agent".to_string()], 0);
-    assert!(state.focus_on_new_tab());
-    assert!(state.focus_menu_overlay());
-    state.focus_tab_next(); // "+ new" -> the sole pane tab
-    assert!(!state.focus_on_new_tab());
-    assert!(!state.focus_menu_overlay());
+    // With live panes it floats on the "+ new" tab (the action surface) but not
+    // once the selector steps onto a pane tab — for both surfaces.
+    for ui in [SessionActionUi::Menu, SessionActionUi::Prompt] {
+        state.set_session_action_ui(ui);
+        state.enter_focus(1);
+        state.set_terminal_tabs(vec!["agent".to_string()], 0);
+        assert!(state.focus_on_new_tab());
+        assert!(state.focus_action_overlay());
+        state.focus_tab_next(); // "+ new" -> the sole pane tab
+        assert!(!state.focus_on_new_tab());
+        assert!(!state.focus_action_overlay());
+    }
 }
 
 #[test]
-fn focus_menu_overlay_yields_to_the_loading_indicator_open_overlays_and_palette() {
+fn focus_action_overlay_yields_to_the_loading_indicator_open_overlays_and_palette() {
     // The idle menu floats by default; each screen-owning surface suppresses it so
     // two boxes never fight for the pane.
     let mut loading = state();
     loading.enter_focus(1);
-    assert!(loading.focus_menu_overlay());
+    assert!(loading.focus_action_overlay());
     loading.step_loading("起動中…"); // a momentary launch owns the pane
-    assert!(!loading.focus_menu_overlay());
+    assert!(!loading.focus_action_overlay());
 
     // An open overlay (here a text modal a menu command dumped) captures the screen.
     let mut modal = state();
     modal.enter_focus(1);
     modal.open_text_modal("Help", vec![LogLine::output("x")], ModalSize::Normal);
-    assert!(!modal.focus_menu_overlay());
+    assert!(!modal.focus_action_overlay());
 
     // The `:` command palette likewise.
     let mut palette = state();
     palette.enter_focus(1);
     palette.open_command_palette();
-    assert!(!palette.focus_menu_overlay());
+    assert!(!palette.focus_action_overlay());
 }
 
 #[test]
@@ -180,7 +183,7 @@ fn an_idle_session_is_always_on_the_new_tab() {
 fn leaving_attached_lands_on_the_new_tab() {
     // A bare `leave_attached` (the shell exited, or a quit was raised) drops back
     // to 在席 on the trailing "+ new" launch surface — not a pane preview. The
-    // deliberate zoom-out layers `focus_menu_over_active_pane` on top (see the
+    // deliberate zoom-out layers `focus_action_over_active_pane` on top (see the
     // dedicated tests below).
     let mut state = state();
     state.enter_focus(1);
@@ -190,44 +193,76 @@ fn leaving_attached_lands_on_the_new_tab() {
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     assert_eq!(state.mode(), Mode::Focus);
     assert!(state.focus_on_new_tab());
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 }
 
 #[test]
 fn zooming_out_floats_the_menu_over_the_pane_tab() {
-    // `Ctrl-T` / `Ctrl-O a` (leave_attached + focus_menu_over_active_pane) keeps
+    // `Ctrl-T` / `Ctrl-O a` (leave_attached + focus_action_over_active_pane) keeps
     // the selector on the pane the zoom left: the strip grows no "+ new" chip for
     // a tab that was never created, the pane's live preview keeps showing, and
     // the action menu floats over it.
     let mut state = state();
     state.enter_focus(1);
     state.leave_attached();
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     assert_eq!(state.mode(), Mode::Focus);
     assert!(!state.focus_on_new_tab());
-    assert!(state.focus_menu_over_pane());
-    assert!(state.focus_menu_overlay());
+    assert!(state.focus_action_over_pane());
+    assert!(state.focus_action_overlay());
     // Dismissing the menu (`Esc` once the re-attach arming is spent) leaves the
     // pane previewing — one step short of leaving 在席 — and reports it was up
     // exactly once.
-    assert!(state.close_focus_menu_over_pane());
-    assert!(!state.focus_menu_overlay());
-    assert!(!state.close_focus_menu_over_pane());
+    assert!(state.close_focus_action_over_pane());
+    assert!(!state.focus_action_overlay());
+    assert!(!state.close_focus_action_over_pane());
 }
 
 #[test]
-fn focus_menu_over_active_pane_is_a_no_op_for_the_prompt_ui() {
-    // Only the menu surface floats; the prompt draws inline on the "+ new" tab,
-    // so with the prompt UI configured the zoom-out keeps its "+ new" landing.
+fn zooming_out_floats_the_prompt_over_the_pane_tab_too() {
+    // The prompt surface floats like the menu, so a zoom-out keeps the selector
+    // on the pane the zoom left (its preview showing behind the floating prompt)
+    // rather than jumping to a "+ new" landing.
     let mut state = state();
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     state.leave_attached();
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert!(!state.focus_on_new_tab());
+    assert!(state.focus_action_over_pane());
+    assert!(state.focus_action_overlay());
+    // And `?` / `End` stay literal edits while the prompt floats over the pane.
+    assert!(state.focus_prompt_capturing());
+}
+
+#[test]
+fn focus_prompt_capturing_tracks_the_prompt_command_line() {
+    // The `?` / `End` guards read `focus_prompt_capturing`: true only while the
+    // Prompt command line is the surface capturing keys (on the "+ new" tab or
+    // floating over a pane), false for the menu or a bare pane preview.
+    let mut state = state();
+
+    // Menu surface: never captures — `?` / `End` keep their note / cheat-sheet
+    // bindings.
+    state.enter_focus(1);
+    assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
+    assert!(!state.focus_prompt_capturing());
+
+    // Prompt on the "+ new" tab (an idle session, no panes): captures.
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
     assert!(state.focus_on_new_tab());
-    assert!(!state.focus_menu_over_pane());
+    assert!(state.focus_prompt_capturing());
+
+    // Prompt with the selector on a bare pane tab (not "+ new", not floating over
+    // it): the pane previews, so the prompt is not capturing.
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    state.focus_tab_next(); // "+ new" -> the sole pane tab
+    assert!(!state.focus_on_new_tab());
+    assert!(!state.focus_action_over_pane());
+    assert!(!state.focus_prompt_capturing());
 }
 
 #[test]
@@ -237,19 +272,19 @@ fn walking_or_clicking_tabs_dismisses_the_menu_over_a_pane() {
     let mut state = state();
     state.enter_focus(1);
     state.leave_attached();
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
-    assert!(state.focus_menu_over_pane());
+    assert!(state.focus_action_over_pane());
     state.focus_tab_next();
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.focus_tab_prev();
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.focus_select_pane_tab(1);
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 }
 
 #[test]
@@ -259,18 +294,18 @@ fn attaching_or_reentering_focus_drops_the_menu_over_a_pane() {
     let mut state = state();
     state.enter_focus(1);
     state.leave_attached();
-    state.focus_menu_over_active_pane();
-    assert!(state.focus_menu_over_pane());
+    state.focus_action_over_active_pane();
+    assert!(state.focus_action_over_pane());
     state.show_attached();
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.enter_focus(1);
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.leave_attached();
-    assert!(!state.focus_menu_over_pane());
+    assert!(!state.focus_action_over_pane());
 }
 
 #[test]

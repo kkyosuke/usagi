@@ -28,9 +28,12 @@ use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
     quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
     task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    ENV_MODAL_INNER, FOCUS_MENU_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    ENV_MODAL_INNER, FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER,
+    TEXT_MODAL_INNER,
 };
-use panes::{focus_menu_body, group_inline_insert_line, left_pane, right_pane_contents};
+use panes::{
+    focus_menu_body, focus_prompt_body, group_inline_insert_line, left_pane, right_pane_contents,
+};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use panes::{
     attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
@@ -42,7 +45,7 @@ pub(super) use panes::{pr_popup_click, PopupClick};
 
 use super::state::{HomeState, ModalSize, Mode, WorktreeList};
 use crate::domain::resource::ResourceUsage;
-use crate::domain::settings::Sidebar;
+use crate::domain::settings::{SessionActionUi, Sidebar};
 
 /// Shown below the root row when the workspace has no recorded worktrees.
 const EMPTY_MESSAGE: &str = "no sessions";
@@ -658,18 +661,27 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         );
     }
 
-    // Float the 在席 (Focus) action menu as a box centred over the **right pane**
-    // (not the whole screen), so the session sidebar stays visible around it. It
-    // shows only when the menu surface is the active thing on screen (see
-    // [`HomeState::focus_menu_overlay`] — no loading indicator, open overlay, or
-    // `:` palette is up), so it never collides with those. The session identity
-    // rides the box title; the body is the header-less menu ([`focus_menu_body`]).
-    // On the "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank;
-    // over a pane tab (the zoomed-out-from-没入 state) the pane's live preview
-    // keeps showing behind the box, so zooming out never blanks the terminal.
-    if state.focus_menu_overlay() {
-        let inner = widgets::modal_inner_width(right_w, FOCUS_MENU_INNER);
-        let body = focus_menu_body(state, inner, body_rows);
+    // Float the 在席 (Focus) action surface — the Menu or the Prompt — as a box
+    // centred over the **right pane** (not the whole screen), so the session
+    // sidebar stays visible around it. It shows only when that surface is the
+    // active thing on screen (see [`HomeState::focus_action_overlay`] — no loading
+    // indicator, open overlay, or `:` palette is up), so it never collides with
+    // those. The session identity rides the box title; the body is the header-less
+    // surface ([`focus_menu_body`] or [`focus_prompt_body`]), each sized to the
+    // pane's available rows (`body_rows`) so the box keeps a fixed height. On the
+    // "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank; over a
+    // pane tab (the zoomed-out-from-没入 state) the pane's live preview keeps
+    // showing behind the box, so zooming out never blanks the terminal.
+    if state.focus_action_overlay() {
+        let desired = match state.session_action_ui() {
+            SessionActionUi::Menu => FOCUS_MENU_INNER,
+            SessionActionUi::Prompt => FOCUS_PROMPT_INNER,
+        };
+        let inner = widgets::modal_inner_width(right_w, desired);
+        let body = match state.session_action_ui() {
+            SessionActionUi::Menu => focus_menu_body(state, inner, body_rows),
+            SessionActionUi::Prompt => focus_prompt_body(state, inner, body_rows),
+        };
         let title = format!("session: {}", state.focused_session_name());
         widgets::overlay_region_modal(
             &mut lines,
@@ -679,7 +691,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             body_start,
             body_rows,
             &title,
-            FOCUS_MENU_INNER,
+            desired,
             &body,
         );
     }

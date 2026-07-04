@@ -37,6 +37,84 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
 }
 
 #[test]
+fn focus_menu_filter_narrows_the_list_then_enter_runs_the_sole_match() {
+    // `/` enters filter mode, so the letters that follow narrow the list instead of
+    // firing the bare-letter shortcuts; once one command remains, Enter runs it.
+    // Nothing launches until Enter, proving `t` was filter input, not the shortcut.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // Switch
+    keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
+    keys.push(Ok(Key::Enter)); // focus main (idle)
+    keys.push(Ok(Key::Char('/'))); // enter filter mode
+    keys.push(Ok(Key::Char('t'))); // filter -> only "terminal" survives
+    keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/main"), false)]);
+}
+
+#[test]
+fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
+    // A live `/` filter absorbs Esc (restoring the full list) rather than leaving
+    // 在席; Backspace edits the query, Enter on a no-match is inert, and once the
+    // filter is cleared the bare-letter shortcuts (`t`) work again.
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // Switch
+    keys.push(Ok(Key::ArrowDown)); // cursor "main"
+    keys.push(Ok(Key::Enter)); // focus main (idle)
+    keys.push(Ok(Key::Char('/'))); // enter filter mode
+    keys.push(Ok(Key::ArrowLeft)); // inert while filtering (no picker to collapse)
+    keys.push(Ok(Key::Char('z'))); // no command starts with "z"
+    keys.push(Ok(Key::Char('z')));
+    keys.push(Ok(Key::Enter)); // no match -> inert (nothing opened)
+    keys.push(Ok(Key::Backspace)); // "zz" -> "z" (still no match)
+    keys.push(Ok(Key::Escape)); // clears the filter, staying in Focus
+    keys.push(Ok(Key::Char('t'))); // not filtering now -> `t` runs terminal
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    // Only the post-clear `t` shortcut launched a pane.
+    assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/main"), false)]);
+}
+
+#[test]
 fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
