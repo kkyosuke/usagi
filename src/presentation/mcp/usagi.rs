@@ -9,8 +9,8 @@
 //!
 //! Issue/memory operations and session operations have very different
 //! dependencies — the former are pure repository reads/writes, the latter needs
-//! an [`AgentBackend`] that reaches a real agent for `session_prompt`,
-//! `session_send`, and `session_remove`. Keeping the two servers separate (each independently
+//! an [`AgentBackend`] that reaches a real agent for `session_prompt` and
+//! `session_remove`. Keeping the two servers separate (each independently
 //! unit-tested) and composing them here keeps that split clean; this module only owns the
 //! merge-and-route glue. The JSON-RPC framing is shared and lives in the parent
 //! [`super`] module.
@@ -33,8 +33,7 @@ pub struct UsagiMcpServer {
 }
 
 impl UsagiMcpServer {
-    /// Build a server delegating `session_prompt`, `session_send`, and
-    /// `session_remove` to
+    /// Build a server delegating `session_prompt` and `session_remove` to
     /// `backend`.
     ///
     /// Issues and memories resolve against `worktree` (the current working tree,
@@ -102,6 +101,10 @@ mod tests {
 
         fn send(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
             Ok("sent".to_string())
+        }
+
+        fn agent_is_live(&self, _worktree: &Path) -> bool {
+            false
         }
 
         fn remove(
@@ -174,25 +177,29 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 7 issue + 6 memory + 7 session.
-        assert_eq!(names.len(), 21);
+        // 6 issue + 5 memory + 7 session.
+        assert_eq!(names.len(), 18);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
+        assert!(names.contains(&"issue_search"));
         assert!(names.contains(&"memory_save"));
         assert!(names.contains(&"session_create"));
         assert!(names.contains(&"session_list"));
         assert!(names.contains(&"session_prompt"));
-        assert!(names.contains(&"session_send"));
         assert!(names.contains(&"session_pr"));
         assert!(names.contains(&"session_remove"));
         assert!(names.contains(&"session_note_get"));
         assert!(names.contains(&"session_note_update"));
+        // The list and send tools were folded into search / session_prompt.
+        assert!(!names.contains(&"issue_list"));
+        assert!(!names.contains(&"memory_list"));
+        assert!(!names.contains(&"session_send"));
     }
 
     #[test]
     fn issue_tools_route_to_the_issue_server() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = call(&server_at(tmp.path()), "issue_list", json!({}));
+        let result = call(&server_at(tmp.path()), "issue_search", json!({}));
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "[]");
     }
@@ -200,7 +207,7 @@ mod tests {
     #[test]
     fn memory_tools_route_to_the_issue_server() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = call(&server_at(tmp.path()), "memory_list", json!({}));
+        let result = call(&server_at(tmp.path()), "memory_search", json!({}));
         assert_eq!(result["isError"], false);
         assert_eq!(result["content"][0]["text"], "[]");
     }
@@ -254,29 +261,39 @@ mod tests {
         let server = server_at(root.path());
         call(&server, "session_create", json!({"name":"work"}));
 
+        // The stub reports no live pane, so `auto` queues for launch (the `prompt`
+        // delegate), and the result reports the channel it took.
         let result = call(
             &server,
             "session_prompt",
             json!({"name":"work","prompt":"do it"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "delegated");
+        let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("delivery report");
+        assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(body["detail"], "delegated");
     }
 
     #[test]
-    fn session_send_routes_through_to_the_backend() {
+    fn session_prompt_live_mode_routes_through_to_the_backend_send() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let server = server_at(root.path());
         call(&server, "session_create", json!({"name":"work"}));
 
+        // `live` mode forces the live channel (the `send` delegate) regardless of
+        // whether a pane is detected.
         let result = call(
             &server,
-            "session_send",
-            json!({"name":"work","prompt":"do it now"}),
+            "session_prompt",
+            json!({"name":"work","prompt":"do it now","mode":"live"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "sent");
+        let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap())
+            .expect("delivery report");
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(body["detail"], "sent");
     }
 
     #[test]

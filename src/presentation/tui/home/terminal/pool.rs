@@ -91,8 +91,8 @@ struct Watched {
     /// workspace re-sync.
     pr_panes: Vec<WatchedPrPane>,
     /// Input handle for the agent pane, when this session currently has one.
-    /// The watcher drains MCP `session_send` prompts only for sessions with this
-    /// handle, so prompts sent while no agent pane is live remain queued.
+    /// The watcher drains MCP live `session_prompt` prompts only for sessions with
+    /// this handle, so prompts sent while no agent pane is live remain queued.
     agent_input: Option<PtyInputHandle>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
@@ -1336,8 +1336,8 @@ fn spawn_watcher(
     })
 }
 
-/// Drain prompts queued by the MCP `session_send` tool and type them into each
-/// session's live agent pane. Only sessions that had a live agent pane when the
+/// Drain prompts queued by the MCP live `session_prompt` tool and type them into
+/// each session's live agent pane. Only sessions that had a live agent pane when the
 /// watcher snapshotted them are passed here; sessions without one leave any
 /// queued prompts on disk for a later pane to drain. A failed PTY write leaves
 /// the remaining (undelivered) prompts requeued for a later tick and stops the

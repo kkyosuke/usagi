@@ -1,10 +1,11 @@
 //! Per-worktree queue of prompts to inject into a session's *already running*
 //! agent, drained live by the TUI while it runs.
 //!
-//! This is the live counterpart of [`super::agent_prompt_store`]. Where that
-//! store hands a prompt to the agent on its *next fresh launch* (the MCP
-//! `session_prompt` tool), this one delivers to an agent pane that is *already
-//! open*: the MCP `session_send` tool appends a prompt here, and the running home
+//! This is the live counterpart of [`super::agent_prompt_store`]. Both are fed by
+//! the MCP `session_prompt` tool, which routes to one or the other by its `mode`:
+//! where that store hands a prompt to the agent on its *next fresh launch* (the
+//! launch channel), this one delivers to an agent pane that is *already open* (the
+//! live channel). `session_prompt` appends a prompt here, and the running home
 //! screen's terminal-pool watcher drains it every tick and types it — followed by
 //! a submit — straight into that session's live agent pane (see
 //! [`crate::presentation::tui::home::terminal::pool`]). Nothing else can reach a
@@ -57,8 +58,8 @@ pub fn append(worktree: &Path, prompt: &str) -> Result<()> {
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR)?;
     // Hold the store lock across the read-modify-write so a concurrent `append`
-    // (another `session_send`) or a `take_all` (the TUI draining) cannot race and
-    // drop a queued prompt.
+    // (another live `session_prompt`) or a `take_all` (the TUI draining) cannot
+    // race and drop a queued prompt.
     let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
     // Start from the queue already stored for this worktree; a file stamped with

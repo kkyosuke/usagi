@@ -79,16 +79,12 @@ impl McpServer {
         }
     }
 
-    fn tool_list(&self, arguments: Value) -> Result<String, String> {
-        let args: FilterArgs = parse_args(arguments)?;
-        let items = issue::list(&self.repo, &args.filter()).map_err(|e| e.to_string())?;
-        Ok(to_pretty(&listed_views(&items)))
-    }
-
     fn tool_search(&self, arguments: Value) -> Result<String, String> {
         let SearchArgs { query, filter } = parse_args(arguments)?;
-        let items =
-            issue::search(&self.repo, &query, &filter.filter()).map_err(|e| e.to_string())?;
+        // An omitted `query` lists every issue: an empty needle matches all, so
+        // one code path (`search`) subsumes what a separate `list` tool would do.
+        let items = issue::search(&self.repo, query.as_deref().unwrap_or(""), &filter.filter())
+            .map_err(|e| e.to_string())?;
         Ok(to_pretty(&listed_views(&items)))
     }
 
@@ -129,7 +125,6 @@ impl McpService for McpServer {
             "issue_create" => self.tool_create(arguments),
             "issue_get" => self.tool_get(arguments),
             "issue_to_prompt" => self.tool_to_prompt(arguments),
-            "issue_list" => self.tool_list(arguments),
             "issue_search" => self.tool_search(arguments),
             "issue_update" => self.tool_update(arguments),
             "issue_delete" => self.tool_delete(arguments),
@@ -168,9 +163,8 @@ struct NumberArgs {
     number: u32,
 }
 
-/// The shared issue filter accepted by both `issue_list` and (flattened into)
-/// `issue_search`, so the filter fields and their mapping to [`IssueFilter`] are
-/// defined once.
+/// The filter fields `issue_search` accepts (flattened into its args), and their
+/// mapping to [`IssueFilter`], defined once.
 #[derive(Deserialize)]
 struct FilterArgs {
     #[serde(default)]
@@ -202,7 +196,10 @@ impl FilterArgs {
 
 #[derive(Deserialize)]
 struct SearchArgs {
-    query: String,
+    /// Absent lists every issue (an empty needle matches all); present filters by
+    /// a full-text match. Optional so the one search tool subsumes a plain list.
+    #[serde(default)]
+    query: Option<String>,
     #[serde(flatten)]
     filter: FilterArgs,
 }

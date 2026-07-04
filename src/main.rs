@@ -46,6 +46,14 @@ impl AgentBackend for CliAgentBackend {
         )
     }
 
+    fn agent_is_live(&self, worktree: &Path) -> bool {
+        // A recorded agent phase means a pane was launched in this worktree and
+        // its lifecycle hooks fired; the home screen clears it when the pane dies,
+        // so its presence tracks a live pane. `session_prompt`'s `auto` mode uses
+        // this to prefer the live channel when the session's agent is running.
+        usagi::infrastructure::agent_state_store::read(worktree).is_some()
+    }
+
     fn remove(
         &self,
         workspace_root: &Path,

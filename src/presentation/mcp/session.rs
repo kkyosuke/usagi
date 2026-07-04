@@ -3,11 +3,19 @@
 //! Where [`super::issue`] exposes a repository's issues and [`super::llm`]
 //! exposes a local model, this server lets an agent drive usagi's own session
 //! lifecycle: create a parallel worktree session, list the existing ones, hand a
-//! launch-time prompt or a live prompt to the agent of a specific session, list
+//! prompt to the agent of a specific session, list
 //! the pull requests discovered for a session, and remove a session it no longer
 //! needs. This turns a
 //! coordinating agent into an orchestrator that can spin up isolated worktrees,
 //! delegate work into them, and tear them down again.
+//!
+//! A single `session_prompt` tool delivers work to a session over two channels —
+//! the *launch queue* (delivered as the agent's opening message the next time its
+//! pane is freshly launched) and the *live queue* (typed into an already-running
+//! pane) — chosen by its `mode`. `auto` (the default) picks the live channel when
+//! a live agent pane is detected for the session and the launch queue otherwise,
+//! so a caller need not know whether the session's agent is currently running;
+//! the result reports which channel actually took the prompt.
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
@@ -33,35 +41,33 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 7] = [
     "session_create",
     "session_list",
     "session_prompt",
-    "session_send",
     "session_pr",
     "session_remove",
     "session_note_get",
     "session_note_update",
 ];
 
-/// Largest prompt (in bytes) accepted by `session_prompt` / `session_send`.
+/// Largest prompt (in bytes) accepted by `session_prompt`.
 ///
-/// Both tools take arbitrary agent-authored text and hand it to a session's
-/// agent — `session_prompt` persists it to the launch-time queue, `session_send`
-/// appends it to the live queue the TUI types into a running pane. Neither has a
-/// natural bound, so without a cap one runaway call could persist an enormous
-/// file, or make the watcher paste a multi-megabyte blob into a pane in one go.
-/// The MCP transport already refuses a request *line* over 64 MiB
-/// (`MAX_REQUEST_LINE_BYTES` in the parent module); this is a much tighter
-/// per-prompt bound
+/// The tool takes arbitrary agent-authored text and hands it to a session's
+/// agent over either channel — the launch-time queue (persisted to a file) or the
+/// live queue the TUI types into a running pane. Neither has a natural bound, so
+/// without a cap one runaway call could persist an enormous file, or make the
+/// watcher paste a multi-megabyte blob into a pane in one go. The MCP transport
+/// already refuses a request *line* over 64 MiB (`MAX_REQUEST_LINE_BYTES` in the
+/// parent module); this is a much tighter per-prompt bound
 /// that still comfortably fits any real task description, applied before the
 /// prompt reaches the backend so an oversized one is rejected as a tool error
 /// rather than written to disk.
 const MAX_PROMPT_BYTES: usize = 128 * 1024;
 
 /// Reject a prompt argument that exceeds [`MAX_PROMPT_BYTES`], naming the tool in
-/// the error so the caller knows which argument to trim. Shared by
-/// `session_prompt` and `session_send`, whose prompts flow to a session's agent.
+/// the error so the caller knows which argument to trim. Used by `session_prompt`,
+/// whose prompt flows to a session's agent over whichever channel it resolves to.
 fn check_prompt_len(tool: &str, prompt: &str) -> Result<(), String> {
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err(format!(
@@ -91,6 +97,15 @@ pub trait AgentBackend {
     /// is open, it waits there until one is.
     fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
 
+    /// Whether a live agent pane currently exists for the session rooted at
+    /// `worktree`. `session_prompt`'s `auto` mode uses this to choose between the
+    /// live channel ([`send`](Self::send)) and the launch queue
+    /// ([`prompt`](Self::prompt)). The production backend answers from the
+    /// per-worktree agent-phase file the TUI maintains (present while a pane is
+    /// alive, cleared when it dies); a wrong answer is not fatal — the live queue
+    /// simply waits for a pane if one is not actually open.
+    fn agent_is_live(&self, worktree: &Path) -> bool;
+
     /// Remove session `name` under `workspace_root`, resolving the workspace's
     /// configured agent CLI so the session's persisted conversation is discarded
     /// along with its worktrees. Without `force`, a session with uncommitted
@@ -113,14 +128,14 @@ pub struct SessionMcpServer {
     /// The name of the session the MCP process is running inside, if any.
     /// `None` when the server runs from the workspace root (not inside a session).
     current_session: Option<String>,
-    /// Delegate that actually drives a session's agent for `session_prompt` /
-    /// `session_send`.
+    /// Delegate that actually drives a session's agent for `session_prompt`
+    /// (over either delivery channel) and its live-pane detection.
     backend: Box<dyn AgentBackend>,
 }
 
 impl SessionMcpServer {
     /// Build a server operating on the workspace at `workspace_root`, delegating
-    /// `session_prompt` / `session_send` to `backend`. The `worktree` is the agent's current
+    /// `session_prompt` delivery to `backend`. The `worktree` is the agent's current
     /// working directory; when it sits under `.usagi/sessions/<name>/` the server
     /// derives the current session name from it, enabling the note self-access
     /// tools (`session_note_get` / `session_note_update`).
@@ -170,14 +185,25 @@ impl SessionMcpServer {
         let args: PromptArgs = parse_args(arguments)?;
         check_prompt_len("session_prompt", &args.prompt)?;
         let target = self.find_session(&args.name)?;
-        self.backend.prompt(&target.root, &args.prompt)
-    }
-
-    fn tool_send(&self, arguments: Value) -> Result<String, String> {
-        let args: SendArgs = parse_args(arguments)?;
-        check_prompt_len("session_send", &args.prompt)?;
-        let target = self.find_session(&args.name)?;
-        self.backend.send(&target.root, &args.prompt)
+        // Resolve which channel takes the prompt. `auto` asks the backend whether
+        // a live pane exists; the explicit modes force one channel.
+        let channel = match args.mode {
+            PromptMode::Queue => Channel::Queue,
+            PromptMode::Live => Channel::Live,
+            PromptMode::Auto if self.backend.agent_is_live(&target.root) => Channel::Live,
+            PromptMode::Auto => Channel::Queue,
+        };
+        let detail = match channel {
+            Channel::Queue => self.backend.prompt(&target.root, &args.prompt)?,
+            Channel::Live => self.backend.send(&target.root, &args.prompt)?,
+        };
+        // Report the channel that actually took the prompt, so a caller using
+        // `auto` sees whether it reached a running pane or was queued for launch.
+        Ok(to_pretty(&json!({
+            "name": args.name,
+            "delivered_to": channel.as_str(),
+            "detail": detail,
+        })))
     }
 
     fn tool_pr(&self, arguments: Value) -> Result<String, String> {
@@ -252,7 +278,6 @@ impl McpService for SessionMcpServer {
             "session_create" => self.tool_create(arguments),
             "session_list" => self.tool_list(),
             "session_prompt" => self.tool_prompt(arguments),
-            "session_send" => self.tool_send(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
             "session_note_get" => self.tool_note_get(),
@@ -273,12 +298,39 @@ struct CreateArgs {
 struct PromptArgs {
     name: String,
     prompt: String,
+    /// Which delivery channel to use; defaults to [`PromptMode::Auto`].
+    #[serde(default)]
+    mode: PromptMode,
 }
 
-#[derive(Deserialize)]
-struct SendArgs {
-    name: String,
-    prompt: String,
+/// How `session_prompt` chooses between the launch queue and the live pane.
+#[derive(Deserialize, Clone, Copy, Default, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+enum PromptMode {
+    /// Deliver live when a live pane is detected, otherwise queue for launch.
+    #[default]
+    Auto,
+    /// Always queue for the session's next fresh agent launch.
+    Queue,
+    /// Always append to the live queue for an already-running pane.
+    Live,
+}
+
+/// The channel a prompt was actually delivered over, reported back to the caller
+/// as `delivered_to`.
+#[derive(Clone, Copy)]
+enum Channel {
+    Queue,
+    Live,
+}
+
+impl Channel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Channel::Queue => "queue",
+            Channel::Live => "live",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -370,34 +422,28 @@ fn session_tool_schemas() -> Value {
         },
         {
             "name": "session_prompt",
-            "description": "Queue a prompt for the agent of a specific session. \
-                The prompt is delivered as the agent's opening message the next \
-                time that session's agent pane is freshly launched from the usagi \
-                home screen; it does not run the agent or return its response here. \
-                Work stays isolated on the session's worktree branch. Use this to \
-                delegate a task to a parallel session.",
+            "description": "Deliver a prompt to a specific session's agent, so you \
+                can delegate a task to a parallel session. Work stays isolated on \
+                the session's worktree branch. It does not run the agent or return \
+                its response here. Two delivery channels, chosen by `mode`: the \
+                launch queue delivers the prompt as the agent's opening message the \
+                next time that session's pane is freshly launched from the usagi \
+                home screen; the live queue types it into an already-running agent \
+                pane (waiting if none is open yet). `mode` defaults to `auto`, \
+                which delivers live when the session has a live agent pane and \
+                queues for launch otherwise — so you need not know whether the \
+                agent is currently running. The result's `delivered_to` reports \
+                which channel took the prompt (\"live\" or \"queue\").",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Target session name" },
-                    "prompt": { "type": "string", "description": "The task or question for the session's agent" }
-                },
-                "required": ["name", "prompt"]
-            }
-        },
-        {
-            "name": "session_send",
-            "description": "Send a prompt to the agent pane that is already \
-                running for a specific session. The prompt is appended to a live \
-                queue that the running usagi TUI drains into the existing agent \
-                pane as if the user pasted it and pressed Enter. It does not \
-                start a session or return the agent's response; if no live agent \
-                pane is open, the prompt waits until one is available.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Target session name" },
-                    "prompt": { "type": "string", "description": "The task or question to send to the live agent" }
+                    "prompt": { "type": "string", "description": "The task or question for the session's agent" },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "queue", "live"],
+                        "description": "auto (default): live if a pane is running, else queue for launch. queue: always the next fresh launch. live: always the running pane (waits if none open)."
+                    }
                 },
                 "required": ["name", "prompt"]
             }
@@ -487,6 +533,9 @@ mod tests {
         calls: CallLog,
         remove_result: Result<session::RemovalOutcome, String>,
         remove_calls: RemoveLog,
+        /// What `agent_is_live` reports, so a test can steer `auto` mode toward the
+        /// live or the launch channel. Defaults to `false` (no live pane).
+        live: bool,
     }
 
     impl FakeBackend {
@@ -501,6 +550,7 @@ mod tests {
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
+                live: false,
             }
         }
 
@@ -513,12 +563,19 @@ mod tests {
                     dirty: Vec::new(),
                 }),
                 remove_calls: Rc::new(RefCell::new(Vec::new())),
+                live: false,
             }
         }
 
         /// Script the outcome `session_remove` returns.
         fn with_remove(mut self, outcome: Result<session::RemovalOutcome, String>) -> Self {
             self.remove_result = outcome;
+            self
+        }
+
+        /// Script whether a live agent pane is detected, steering `auto` mode.
+        fn with_live(mut self, live: bool) -> Self {
+            self.live = live;
             self
         }
     }
@@ -536,6 +593,10 @@ mod tests {
                 .borrow_mut()
                 .push((worktree.to_path_buf(), prompt.to_string()));
             self.result.clone()
+        }
+
+        fn agent_is_live(&self, _worktree: &Path) -> bool {
+            self.live
         }
 
         fn remove(
@@ -639,7 +700,6 @@ mod tests {
                 "session_create",
                 "session_list",
                 "session_prompt",
-                "session_send",
                 "session_pr",
                 "session_remove",
                 "session_note_get",
@@ -728,10 +788,11 @@ mod tests {
     }
 
     #[test]
-    fn prompt_resolves_the_session_and_forwards_to_the_backend() {
+    fn auto_prompt_queues_for_launch_when_no_live_pane() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        let backend = FakeBackend::ok("done");
+        // No live pane detected, so `auto` resolves to the launch queue.
+        let backend = FakeBackend::ok("done").with_live(false);
         let calls = backend.calls.clone(); // inspect after the backend is moved in
         let server = server_at(root.path(), backend);
         call(&server, "session_create", json!({"name":"work"}));
@@ -742,7 +803,9 @@ mod tests {
             json!({"name":"work","prompt":"add a test"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "done");
+        let body = tool_json(&result);
+        assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(body["detail"], "done");
 
         // The backend was invoked once with the session's worktree root and the
         // prompt text verbatim.
@@ -753,24 +816,25 @@ mod tests {
     }
 
     #[test]
-    fn send_resolves_the_session_and_forwards_to_the_backend() {
+    fn auto_prompt_delivers_live_when_a_pane_is_detected() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        let backend = FakeBackend::ok("sent");
-        let calls = backend.calls.clone(); // inspect after the backend is moved in
+        // A live pane is detected, so `auto` resolves to the live channel.
+        let backend = FakeBackend::ok("sent").with_live(true);
+        let calls = backend.calls.clone();
         let server = server_at(root.path(), backend);
         call(&server, "session_create", json!({"name":"work"}));
 
         let result = call(
             &server,
-            "session_send",
+            "session_prompt",
             json!({"name":"work","prompt":"continue here"}),
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "sent");
+        let body = tool_json(&result);
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(body["detail"], "sent");
 
-        // The backend was invoked once with the session's worktree root and the
-        // prompt text verbatim.
         let calls = calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path().join(".usagi/sessions/work"));
@@ -778,29 +842,43 @@ mod tests {
     }
 
     #[test]
-    fn send_for_an_unknown_session_is_a_tool_error() {
+    fn explicit_mode_overrides_the_detected_pane_state() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        let server = server_at(root.path(), FakeBackend::ok("x"));
-        let result = call(
-            &server,
-            "session_send",
-            json!({"name":"ghost","prompt":"hi"}),
+        call(
+            &server_at(root.path(), FakeBackend::ok("x")),
+            "session_create",
+            json!({"name":"w"}),
         );
-        assert_eq!(result["isError"], true);
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("no such session"));
+
+        // `queue` forces the launch channel even though a pane is live…
+        let queued = call(
+            &server_at(root.path(), FakeBackend::ok("q").with_live(true)),
+            "session_prompt",
+            json!({"name":"w","prompt":"hi","mode":"queue"}),
+        );
+        assert_eq!(tool_json(&queued)["delivered_to"], "queue");
+
+        // …and `live` forces the live channel even though none is detected.
+        let live = call(
+            &server_at(root.path(), FakeBackend::ok("l").with_live(false)),
+            "session_prompt",
+            json!({"name":"w","prompt":"hi","mode":"live"}),
+        );
+        assert_eq!(tool_json(&live)["delivered_to"], "live");
     }
 
     #[test]
-    fn send_surfaces_backend_errors_as_tool_errors() {
+    fn prompt_surfaces_backend_send_errors_in_live_mode() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let server = server_at(root.path(), FakeBackend::err("agent not reachable"));
         call(&server, "session_create", json!({"name":"w"}));
-        let result = call(&server, "session_send", json!({"name":"w","prompt":"hi"}));
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"w","prompt":"hi","mode":"live"}),
+        );
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
             .as_str()
@@ -823,24 +901,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no such session"));
-    }
-
-    #[test]
-    fn send_rejects_an_oversized_prompt_before_reaching_the_backend() {
-        let root = tempfile::tempdir().unwrap();
-        init_repo(root.path());
-        let backend = FakeBackend::ok("sent");
-        let calls = backend.calls.clone();
-        let server = server_at(root.path(), backend);
-        call(&server, "session_create", json!({"name":"w"}));
-        // One byte over the cap: rejected as a tool error naming the tool and limit.
-        let huge = "x".repeat(MAX_PROMPT_BYTES + 1);
-        let result = call(&server, "session_send", json!({"name":"w","prompt":huge}));
-        assert_eq!(result["isError"], true);
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("session_send prompt is too large"), "{text}");
-        // The backend was never invoked, so nothing was queued for delivery.
-        assert!(calls.borrow().is_empty());
     }
 
     #[test]
@@ -876,7 +936,7 @@ mod tests {
         let at_limit = "x".repeat(MAX_PROMPT_BYTES);
         let result = call(
             &server,
-            "session_send",
+            "session_prompt",
             json!({"name":"w","prompt":at_limit}),
         );
         assert_eq!(result["isError"], false);
@@ -888,9 +948,10 @@ mod tests {
     fn check_prompt_len_names_the_tool_and_limit() {
         // A within-limit prompt passes; an over-limit one is rejected with a
         // message naming the tool and the byte limit (covering the helper directly).
-        assert!(check_prompt_len("session_send", "ok").is_ok());
-        let err = check_prompt_len("session_send", &"x".repeat(MAX_PROMPT_BYTES + 1)).unwrap_err();
-        assert!(err.contains("session_send prompt is too large"), "{err}");
+        assert!(check_prompt_len("session_prompt", "ok").is_ok());
+        let err =
+            check_prompt_len("session_prompt", &"x".repeat(MAX_PROMPT_BYTES + 1)).unwrap_err();
+        assert!(err.contains("session_prompt prompt is too large"), "{err}");
         assert!(err.contains(&MAX_PROMPT_BYTES.to_string()), "{err}");
     }
 
@@ -1059,8 +1120,12 @@ mod tests {
         // session_prompt requires both name and prompt.
         let result = call(&server, "session_prompt", json!({"name":"w"}));
         assert_eq!(result["isError"], true);
-        // session_send requires both name and prompt.
-        let result = call(&server, "session_send", json!({"name":"w"}));
+        // An unknown `mode` is an invalid argument, too.
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"w","prompt":"hi","mode":"bogus"}),
+        );
         assert_eq!(result["isError"], true);
         // session_pr requires a name.
         let result = call(&server, "session_pr", json!({}));
