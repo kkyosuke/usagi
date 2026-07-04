@@ -1261,14 +1261,17 @@ fn run_focus_command(
 }
 
 /// Open a native terminal application at the focused row's directory. Unlike
-/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal, and
-/// usagi stays in 在席 so the user can continue navigating.
+/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal. Once it
+/// is launched the 在席 menu has nothing more to act on, so — like `close` — this
+/// leaves 在席 for 切替, dismissing the menu overlay rather than leaving it floating
+/// over the session it just spawned a terminal for.
 fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
     let dir = selected_dir(state, wiring.workspace_root);
     match (wiring.open_external_terminal)(&dir) {
         Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
         Err(e) => state.log_error(e),
     }
+    state.leave_focus();
 }
 
 /// Launch an agent pane, recording which CLI to spawn: `None` uses the
