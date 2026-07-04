@@ -1784,12 +1784,17 @@ const HEADER_TAB_DIVIDER: &str = " │ ";
 pub(super) fn header_tab_rows(
     header: String,
     strip: Option<&TabStrip>,
+    loading_label: Option<&str>,
     width: usize,
 ) -> Vec<String> {
     let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
         return vec![widgets::clip_to_width_cjk(&header, width)];
     };
-    let (chips, marker) = tab_strip_parts(strip);
+    let (mut chips, marker) = tab_strip_parts(strip);
+    if let Some(label) = loading_label {
+        chips.push_str(&" ".repeat(TAB_CHIP_GAP));
+        chips.push_str(&style(format!("(｡･-･) {}", label)).dim().to_string());
+    }
     let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
     // Push the marker right past the identity and the divider so it lands under
     // the chips on the row above. The identity is a fixed width, so this indent
@@ -2871,7 +2876,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     };
     let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    let mut lines = header_tab_rows(header, Some(&combined), width);
+    let mut lines = header_tab_rows(header, Some(&combined), None, width);
 
     if on_new {
         // The "+ new" tab: the action surface that launches the next pane. The
@@ -3233,6 +3238,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let mut lines = header_tab_rows(
         header,
         if live { state.terminal_tabs() } else { None },
+        None,
         width,
     );
 
@@ -3331,17 +3337,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
     // choices would show through while the spawn blocks. Return an empty pane of
     // the right height and let the overlay own the whole surface.
-    if state.loading().is_some() {
-        if let Some(tabs) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) {
-            let mut lines = Vec::with_capacity(rows);
-            let header = active_session_header(state);
-            let mut head = header_tab_rows(header, Some(tabs), right_w);
-            head.resize(super::TAB_BAR_ROWS, String::new());
-            lines.extend(head);
-            let body = rows.saturating_sub(lines.len());
-            lines.extend(vec![String::new(); body]);
-            return lines;
-        }
+    if state.loading().is_some() && state.terminal_tabs().map_or(true, |s| s.labels.is_empty()) {
         return vec![String::new(); rows];
     }
     // The Markdown preview, when open, takes over the right pane regardless of
@@ -3399,7 +3395,12 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             // starting hint stands in until the first screen snapshot arrives.
             let mut lines = Vec::with_capacity(rows);
             let header = active_session_header(state);
-            let mut head = header_tab_rows(header, state.terminal_tabs(), right_w);
+            let mut head = header_tab_rows(
+                header,
+                state.terminal_tabs(),
+                state.loading().map(|l| l.label()),
+                right_w,
+            );
             head.resize(super::TAB_BAR_ROWS, String::new());
             lines.extend(head);
             let body = rows.saturating_sub(lines.len());

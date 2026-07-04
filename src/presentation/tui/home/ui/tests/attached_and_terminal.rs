@@ -308,7 +308,7 @@ fn switch_tab_marker() {
         active: 0,
     };
     // Header + chips on the top row; the active-tab underline on the row below.
-    let rows = header_tab_rows("feat".to_string(), Some(&strip), 80);
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), None, 80);
     assert_eq!(rows.len(), 2);
     let chips = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(chips.contains("feat"));
@@ -320,17 +320,17 @@ fn switch_tab_marker() {
         .contains('▔'));
 
     // A narrow pane clips both rows to its width.
-    let narrow = header_tab_rows("feat".to_string(), Some(&strip), 8);
+    let narrow = header_tab_rows("feat".to_string(), Some(&strip), None, 8);
     assert!(narrow.iter().all(|l| console::measure_text_width(l) <= 8));
 
     // No strip — or an empty one — leaves the header alone on a single row.
-    assert_eq!(header_tab_rows("feat".to_string(), None, 40).len(), 1);
+    assert_eq!(header_tab_rows("feat".to_string(), None, None, 40).len(), 1);
     let empty = TabStrip {
         labels: Vec::new(),
         active: 0,
     };
     assert_eq!(
-        header_tab_rows("feat".to_string(), Some(&empty), 40).len(),
+        header_tab_rows("feat".to_string(), Some(&empty), None, 40).len(),
         1
     );
 }
