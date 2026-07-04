@@ -66,6 +66,17 @@ pub const TOOL_NAMES: [&str; 8] = [
 /// rather than written to disk.
 const MAX_PROMPT_BYTES: usize = 128 * 1024;
 
+/// The reserved `session_prompt` target that addresses the workspace's **root
+/// row** — the `⌂ root` coordinator — instead of a named session. A child
+/// session's agent reports its completion by prompting this target (push-style
+/// completion report): with the default `auto` mode the report is delivered live
+/// to the coordinator's running agent pane, or queued for its next launch when
+/// none is open. Spelled with a leading `:` so it can never be mistaken for — or
+/// shadowed by — a real session, whose name is a git branch / directory component
+/// (a leading `-` is rejected, but a `:` is legal, so the sentinel stays outside
+/// the space of names usagi itself creates).
+pub(crate) const ROOT_TARGET: &str = ":root";
+
 /// Reject a prompt argument that exceeds [`MAX_PROMPT_BYTES`], naming the tool in
 /// the error so the caller knows which argument to trim. Used by `session_prompt`,
 /// whose prompt flows to a session's agent over whichever channel it resolves to.
@@ -202,9 +213,10 @@ impl SessionMcpServer {
         })))
     }
 
-    /// Deliver `prompt` to session `name` over the channel chosen by `mode`,
-    /// returning the channel actually used and the backend's confirmation. Shared
-    /// by the `session_prompt` tool and the unified server's
+    /// Deliver `prompt` to `name` over the channel chosen by `mode`, returning the
+    /// channel actually used and the backend's confirmation. `name` is either a
+    /// session name or the reserved [`ROOT_TARGET`] (the `⌂ root` coordinator).
+    /// Shared by the `session_prompt` tool and the unified server's
     /// `session_delegate_issue` (which passes [`PromptMode::Queue`], since a freshly
     /// created session has no live pane).
     pub(crate) fn deliver_prompt(
@@ -214,20 +226,35 @@ impl SessionMcpServer {
         mode: PromptMode,
     ) -> Result<(Channel, String), String> {
         check_prompt_len("session_prompt", prompt)?;
-        let target = self.find_session(name)?;
+        let target_root = self.resolve_target(name)?;
         // Resolve which channel takes the prompt. `auto` asks the backend whether
         // a live pane exists; the explicit modes force one channel.
         let channel = match mode {
             PromptMode::Queue => Channel::Queue,
             PromptMode::Live => Channel::Live,
-            PromptMode::Auto if self.backend.agent_is_live(&target.root) => Channel::Live,
+            PromptMode::Auto if self.backend.agent_is_live(&target_root) => Channel::Live,
             PromptMode::Auto => Channel::Queue,
         };
         let detail = match channel {
-            Channel::Queue => self.backend.prompt(&target.root, prompt)?,
-            Channel::Live => self.backend.send(&target.root, prompt)?,
+            Channel::Queue => self.backend.prompt(&target_root, prompt)?,
+            Channel::Live => self.backend.send(&target_root, prompt)?,
         };
         Ok((channel, detail))
+    }
+
+    /// Resolve a `session_prompt` target to the worktree root its prompt is
+    /// delivered to. The reserved [`ROOT_TARGET`] maps to the workspace root (the
+    /// coordinator's `⌂ root` row, which belongs to no session), so a child can
+    /// push a completion report up to the coordinator; any other name maps to the
+    /// matching session's root and errors when no such session exists. Both the
+    /// live and launch channels are addressed purely by this worktree path (the
+    /// root row's is the workspace root itself), so no other resolution differs.
+    fn resolve_target(&self, name: &str) -> Result<PathBuf, String> {
+        if name == ROOT_TARGET {
+            Ok(self.workspace_root.clone())
+        } else {
+            Ok(self.find_session(name)?.root)
+        }
     }
 
     fn tool_list_status(&self) -> Result<String, String> {
@@ -514,11 +541,15 @@ fn session_tool_schemas() -> Value {
                 which delivers live when the session has a live agent pane and \
                 queues for launch otherwise — so you need not know whether the \
                 agent is currently running. The result's `delivered_to` reports \
-                which channel took the prompt (\"live\" or \"queue\").",
+                which channel took the prompt (\"live\" or \"queue\"). Pass the \
+                reserved name \":root\" to target the workspace's root row (the \
+                coordinator running there) instead of a session: a child session's \
+                agent uses this to push a completion report up to the coordinator \
+                the moment it finishes, so the coordinator advances without polling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Target session name" },
+                    "name": { "type": "string", "description": "Target session name, or \":root\" for the workspace root row (the coordinator)" },
                     "prompt": { "type": "string", "description": "The task or question for the session's agent" },
                     "mode": {
                         "type": "string",
@@ -953,6 +984,58 @@ mod tests {
             json!({"name":"w","prompt":"hi","mode":"live"}),
         );
         assert_eq!(tool_json(&live)["delivered_to"], "live");
+    }
+
+    #[test]
+    fn prompt_targets_the_root_row_live_without_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // The coordinator's pane is live, so `:root` delivers live — and no
+        // session need exist: `:root` resolves straight to the workspace root.
+        let backend = FakeBackend::ok("reported").with_live(true);
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":":root","prompt":"issue #101 done, PR #123 opened"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["name"], ":root");
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(body["detail"], "reported");
+
+        // The report was addressed to the workspace root itself (the root row's
+        // working dir), not any `.usagi/sessions/<name>` path.
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path());
+        assert_eq!(calls[0].1, "issue #101 done, PR #123 opened");
+    }
+
+    #[test]
+    fn prompt_targets_the_root_row_and_queues_when_no_live_coordinator() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // No live coordinator pane, so `auto` queues the report for the root row's
+        // next fresh agent launch — again without requiring any session.
+        let backend = FakeBackend::ok("queued").with_live(false);
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":":root","prompt":"done"}),
+        );
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["delivered_to"], "queue");
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, root.path());
     }
 
     #[test]
