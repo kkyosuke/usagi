@@ -869,15 +869,20 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
     assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
     assert!(big_detail.contains("+140 -88"));
     assert!(big_detail.contains("12min ago"));
-    // The diff `+` lands in the same display column on both rows regardless of how
-    // many changed lines each carries — the point of the fixed columns.
-    let col_of =
-        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
+    // The diff `+` lands in the same painted column on both rows regardless of how
+    // many changed lines each carries — the point of the fixed columns. Measured
+    // CJK-aware (ambiguous glyphs = two columns), since that is the width the detail
+    // line is laid out and the terminal paints it in.
+    let col_of = |s: &str, ch: char| {
+        crate::presentation::tui::widgets::measure_width_cjk(
+            &s[..s.find(ch).expect("char present")],
+        )
+    };
     assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
     // Both detail lines fill the same width, so the cluster's right edge lines up.
     assert_eq!(
-        console::measure_text_width(&small_detail),
-        console::measure_text_width(&big_detail)
+        crate::presentation::tui::widgets::measure_width_cjk(&small_detail),
+        crate::presentation::tui::widgets::measure_width_cjk(&big_detail)
     );
 }
 
@@ -900,12 +905,12 @@ fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages()
         let lines = left_pane(
             &list_with(vec![w.clone()]),
             &agent, // live
-            &agent, // running — the widest agent label, `▶ running`
+            &agent, // running — the `▶` agent icon
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
-            24,
+            18,
             5,
             false,
             Sidebar::Full,
@@ -923,8 +928,8 @@ fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages()
         "the freshness field must not appear/disappear as the session ages:\n\
          young={young:?}\naged={aged:?}"
     );
-    // The running agent's label keeps the same room at both ages.
-    assert!(young.contains("running") && aged.contains("running"));
+    // The running agent's icon keeps the same room at both ages.
+    assert!(young.contains('▶') && aged.contains('▶'));
 }
 
 #[test]
@@ -2060,6 +2065,59 @@ fn rail_sidebar_marks_the_switch_cursor() {
     assert!(console::strip_ansi_codes(&on_session[3]).contains('󰤇'));
     assert!(console::strip_ansi_codes(&on_session[4]).contains('▎'));
     assert!(console::strip_ansi_codes(&on_session[5]).contains('▎'));
+}
+
+#[test]
+fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    // The `↑` / `↓` commit arrows are ambiguous-width — the terminal paints them two
+    // columns wide. If the detail line is laid out counting them as one, the row is
+    // built wider than it measures, so the sidebar's CJK-aware clip chops its right
+    // edge (the PR badge) and the layout looks broken. The row's painted width must
+    // stay within the pane.
+    let mut w = worktree(Some("pr"), false, BranchStatus::Pushed);
+    w.path = PathBuf::from("/repo/pr");
+    w.ahead_behind = Some(AheadBehind {
+        ahead: 1,
+        behind: 4,
+    });
+    w.diff = Some(DiffStat {
+        added: 71,
+        removed: 1,
+    });
+    w.pr = vec![PrLink {
+        number: 1,
+        url: "https://github.com/o/r/pull/1".into(),
+    }];
+    let left_w = 34usize;
+    let lines = left_pane(
+        &list_with(vec![w]),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        left_w,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let detail = console::strip_ansi_codes(&lines[4]);
+    // Measured as the terminal paints it (arrows = two columns), the row fits the
+    // pane — nothing bleeds into the right pane or gets clipped away.
+    assert!(
+        crate::presentation::tui::widgets::measure_width_cjk(&detail) <= left_w,
+        "detail line overruns the {left_w}-column sidebar: {detail:?}"
+    );
+    // Both the arrows and the PR badge survive intact.
+    assert!(
+        detail.contains("↑1 ↓4"),
+        "commit arrows dropped: {detail:?}"
+    );
+    assert!(detail.contains(PR_ICON), "PR badge chopped off: {detail:?}");
 }
 
 #[test]
