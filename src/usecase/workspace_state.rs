@@ -54,22 +54,14 @@ pub fn sync(cwd: &Path) -> Result<WorkspaceState> {
     let _lock = store.lock()?;
     let mut state = store.load()?.unwrap_or_default();
     for session in &mut state.sessions {
-        // The PRs printed in a session's live terminal panes are harvested
-        // out-of-band into the PR-link store, keyed by the session root (the dir
-        // the agent/shell runs in). Read them once per session and carry them on
-        // the session's first worktree, so the sidebar's per-session aggregate
-        // ([`session_row`]) surfaces them; the git refresh above never sets a PR,
-        // so this both shows them and persists them into state.json — the badges
-        // then survive a restart even though a command may print each URL once.
-        //
-        // [`session_row`]: crate::presentation::tui::home::state
-        let prs = pr_link_store::get(&session.root);
-        for (idx, wt) in session.worktrees.iter_mut().enumerate() {
+        for wt in &mut session.worktrees {
             if let Some(updated) = refreshed.get(&wt.path) {
                 *wt = updated.clone();
             }
-            wt.pr = if idx == 0 { prs.clone() } else { Vec::new() };
         }
+        // The git refresh above never sets a PR, so fold the harvested PR links
+        // onto the session and persist them into state.json below.
+        fold_pr_links(session);
     }
     state.updated_at = Utc::now();
     store.save(&state)?;
@@ -124,6 +116,37 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
     WorkspaceStore::new(root).load()
 }
 
+/// Merge a session's harvested PR links onto its first worktree so every path that
+/// builds the sidebar surfaces the same `#<number>` badges.
+///
+/// The PRs printed in a session's live terminal panes are harvested out-of-band
+/// into the [`pr_link_store`], keyed by the session root (the dir the agent/shell
+/// runs in). Merging that store onto `wt.pr` here (deduped by URL) — rather than
+/// waiting for a slow re-sync to fold it in — is what lets **every** read path show
+/// the badges immediately: [`sync`] persists the result, and the git-free
+/// [`recorded_sessions`] / [`recorded_sessions_for_display`] surface it on first
+/// paint and on every mtime-driven refresh, so a session's badge reads the same in
+/// 切替 (Switch) as when its pane is attached. The merge is **additive**: an empty
+/// store leaves the caller's own `wt.pr` (state.json's persisted badges) untouched
+/// rather than wiping it — so a reader that trusts state.json (e.g. the workspace
+/// overview's PR count) keeps working. In [`sync`] the preceding git refresh has
+/// already reset every `wt.pr` to empty, so there the merge reproduces the old
+/// "store wins" result and persists it. The aggregate lands on the first worktree
+/// because the sidebar's per-session row ([`session_row`]) folds every worktree's
+/// PRs into one badge.
+///
+/// [`session_row`]: crate::presentation::tui::home::state
+fn fold_pr_links(session: &mut SessionRecord) {
+    let stored = pr_link_store::get(&session.root);
+    if let Some(first) = session.worktrees.first_mut() {
+        for pr in stored {
+            if !first.pr.iter().any(|p| p.url == pr.url) {
+                first.pr.push(pr);
+            }
+        }
+    }
+}
+
 /// The sessions recorded in `<root>/.usagi/state.json` for the home screen's
 /// immediate, git-free first paint, plus a notice when the state could not be
 /// read.
@@ -133,10 +156,15 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
 /// in the background afterwards (see the caller and [`sync`]). Read by the raw
 /// `root` (a non-git multi-repo root has no `primary_worktree`), so no git is
 /// touched here. This keeps the "recorded sessions, else empty-with-notice"
-/// load policy in the usecase rather than the presentation layer.
+/// load policy in the usecase rather than the presentation layer. Each session's
+/// `#<number>` PR badges are re-derived from the [`pr_link_store`] ([`fold_pr_links`]
+/// — a cheap file read, not git), so the badges show on the very first paint.
 pub fn recorded_sessions_for_display(root: &Path) -> (Vec<SessionRecord>, Option<String>) {
     match WorkspaceStore::new(root).load() {
-        Ok(Some(state)) => (state.sessions, None),
+        Ok(Some(mut state)) => {
+            state.sessions.iter_mut().for_each(fold_pr_links);
+            (state.sessions, None)
+        }
         Ok(None) => (Vec::new(), None),
         Err(e) => (Vec::new(), Some(format!("Failed to load sessions: {e}"))),
     }
@@ -147,10 +175,17 @@ pub fn recorded_sessions_for_display(root: &Path) -> (Vec<SessionRecord>, Option
 ///
 /// Used for the home screen's post-terminal refresh, where `None` means "leave
 /// the list as it is" — distinct from [`recorded_sessions_for_display`], which
-/// surfaces a load error as a notice on first entry.
+/// surfaces a load error as a notice on first entry. Like that path, it re-derives
+/// each session's `#<number>` PR badges from the [`pr_link_store`]
+/// ([`fold_pr_links`]), so a mtime-driven refresh keeps the badges rather than
+/// wiping them back to whatever `state.json` last persisted.
 pub fn recorded_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     match WorkspaceStore::new(root).load() {
-        Ok(state) => state.map(|s| s.sessions),
+        Ok(state) => state.map(|s| {
+            let mut sessions = s.sessions;
+            sessions.iter_mut().for_each(fold_pr_links);
+            sessions
+        }),
         // Unlike `recorded_sessions_for_display`, this refresh path has no notice
         // channel to surface a load failure on, so without recording it the error
         // would vanish entirely. Route it to the daily log before falling back to
@@ -618,6 +653,75 @@ mod tests {
         let (sessions, notice) = recorded_sessions_for_display(dir.path());
         assert!(sessions.is_empty());
         assert!(notice.unwrap().contains("Failed to load sessions"));
+    }
+
+    #[test]
+    fn recorded_read_paths_merge_in_the_pr_links_from_the_store() {
+        use crate::domain::workspace_state::{BranchStatus, PrLink, WorktreeState};
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+
+        // The PR-link store lives under the data dir, so pin it to a temp home.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".usagi/sessions/wip");
+        let second = dir.path().join(".usagi/sessions/wip-lib");
+        // One PR already persisted in state.json, one only in the store.
+        let known = PrLink {
+            number: 7,
+            url: "https://github.com/KKyosuke/usagi/pull/7".to_string(),
+        };
+        let fresh = PrLink {
+            number: 8,
+            url: "https://github.com/KKyosuke/usagi/pull/8".to_string(),
+        };
+        let wt = |path: &Path, pr: Vec<PrLink>| WorktreeState {
+            branch: Some("wip".to_string()),
+            path: path.to_path_buf(),
+            head: "abc123".to_string(),
+            primary: false,
+            upstream: None,
+            status: BranchStatus::default(),
+            diff: None,
+            ahead_behind: None,
+            pr,
+            updated_at: Utc::now(),
+        };
+
+        let store = WorkspaceStore::new(dir.path());
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            name: "wip".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            root: root.clone(),
+            worktrees: vec![wt(&root, vec![known.clone()]), wt(&second, Vec::new())],
+            created_at: Utc::now(),
+            last_active: None,
+        });
+        store.save(&state).unwrap();
+
+        // The store carries the already-known PR again plus a freshly scanned one.
+        pr_link_store::add(&root, &[known.clone(), fresh.clone()]).unwrap();
+
+        // Both git-free read paths merge the store onto the first worktree — the
+        // fresh PR appears, the known one is not duplicated, later worktrees stay
+        // empty — so the sidebar shows the badge without waiting for a sync.
+        let recorded = recorded_sessions(dir.path()).unwrap();
+        assert_eq!(
+            recorded[0].worktrees[0].pr,
+            vec![known.clone(), fresh.clone()]
+        );
+        assert!(recorded[0].worktrees[1].pr.is_empty());
+        let (display, notice) = recorded_sessions_for_display(dir.path());
+        assert_eq!(display[0].worktrees[0].pr, vec![known, fresh]);
+        assert!(display[0].worktrees[1].pr.is_empty());
+        assert!(notice.is_none());
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     /// Re-derive a branch's lifecycle status the way [`inspect_worktree`] does:

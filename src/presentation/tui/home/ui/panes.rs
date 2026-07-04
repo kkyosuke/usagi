@@ -604,8 +604,8 @@ pub(super) struct DetailCols {
     added: usize,
     removed: usize,
     /// Display width of the `<icon> <count>` PR badge (the glyph, a space, and the
-    /// widest count's digits); 0 = no visible session has a PR, so the column is
-    /// dropped.
+    /// widest count's digits). Reserved at [`PR_RESERVE_WIDTH`] even when no visible
+    /// session has a PR, so the column never collapses and shifts the diff beside it.
     pr: usize,
 }
 
@@ -622,8 +622,9 @@ pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 /// the badges line up down the list. Folding several PRs into one count keeps the
 /// detail line from being crowded out by a long `#442 #447 …` run (the full list is
 /// one badge click away; see [`pr_popup_placement`]). A row with no PR fills the
-/// same width with blanks, holding the column. `width` is 0 (and the cell omitted)
-/// when no visible session carries a PR.
+/// same width with blanks, holding the column — which stays reserved
+/// ([`PR_RESERVE_WIDTH`]) even when no visible session has a PR, so the column never
+/// collapses and shifts the diff beside it.
 fn pr_cell(prs: &[PrLink], width: usize) -> String {
     if prs.is_empty() {
         return " ".repeat(width);
@@ -645,6 +646,16 @@ fn pr_width(prs: &[PrLink]) -> usize {
     // icon (1 column) + space + the count's digits.
     2 + digits(prs.len())
 }
+
+/// The PR column is reserved at (at least) this width on every render — the glyph,
+/// a space, and a single-digit count — even when no visible session currently
+/// carries a PR. Holding the slot open keeps the `+N -M` diff (and the freshness /
+/// commit fields to its left) from shifting right when a session gains or loses its
+/// last PR: reserving space for content that may appear is the sidebar's standing
+/// rule against layout shift (the note and status columns do the same), and the PR
+/// badge follows it. A wider count (two+ digits) still grows the column, but the
+/// common appear/disappear no longer moves anything.
+const PR_RESERVE_WIDTH: usize = 3;
 
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
@@ -715,6 +726,9 @@ fn detail_cols(
         // The widest `<icon> <count>` PR badge across the visible sessions.
         cols.pr = cols.pr.max(*pr_w);
     }
+    // Always hold the PR slot open (even when no visible session has a PR) so a
+    // session gaining or losing its last PR never shifts the diff to its left.
+    cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);
@@ -4280,6 +4294,33 @@ mod tests {
             cols.time,
             console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
         );
+    }
+
+    #[test]
+    fn detail_cols_reserves_the_pr_slot_even_with_no_pr() {
+        let now = DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // No visible session carries a PR, yet the column holds its reserved width
+        // so a session gaining or losing its last PR never shifts the diff beside it.
+        let none = detail_cols(
+            &[(
+                at(now, 3),
+                Some(DiffStat {
+                    added: 1,
+                    removed: 2,
+                }),
+                None,
+                0,
+            )],
+            now,
+            9,
+            60,
+        );
+        assert_eq!(none.pr, PR_RESERVE_WIDTH);
+        // A single-PR badge is exactly the reserve width, so appearing shifts nothing.
+        let one = detail_cols(&[(at(now, 3), None, None, pr_width(&[pr(7)]))], now, 9, 60);
+        assert_eq!(one.pr, PR_RESERVE_WIDTH);
     }
 
     #[test]
