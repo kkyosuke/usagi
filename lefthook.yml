@@ -5,6 +5,8 @@
 #   lefthook install
 #
 # ルール:
+#   - workspace root (= .usagi/sessions/ 配下でないチェックアウト) からの実装コミットを拒否する backstop。
+#                 「変更は必ず session」を守るための安価な最終防壁 (一次防壁は MCP 書き込み拒否 / guard-workspace)。
 #   - ブランチ名: main または <type>/<説明>  (type: feat|fix|docs|refactor|perf|test|build|ci|chore)
 #                 ※ usagi のセッション worktree (.usagi/sessions/<name>/) はブランチ名が usagi/<name> になるため対象外
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
@@ -16,6 +18,28 @@
 pre-commit:
   parallel: true
   commands:
+    guard-root:
+      run: |
+        # backstop: 「変更は必ず session」を守る安価な最終防壁。
+        # 一次防壁は MCP 書き込み拒否 (#106) と guard-workspace root モード (#107) だが、
+        # フックが差し込まれない経路 (人手のコミット・別ツール) での root コミットは素通しするため、
+        # ここでも workspace root (= .usagi/sessions/ 配下でない) からのコミットを拒否する。
+        toplevel=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
+        # session worktree (.usagi/sessions/<name>/) のコミットは従来どおり通す。
+        case "$toplevel" in
+          */.usagi/sessions/*) exit 0 ;;
+        esac
+        # usagi 管理ワークスペース (root に .usagi/ を持つ) 以外は対象外。
+        # usagi をライブラリとして使うだけの一般リポジトリの root コミットまでは妨げない。
+        if [ ! -d "$toplevel/.usagi" ]; then
+          exit 0
+        fi
+        echo "✗ workspace root で直接コミットしようとしています" >&2
+        echo "  usagi では変更は必ず session (.usagi/sessions/<name>/) 内で行います。" >&2
+        echo "  root/コーディネータは issue の定義・delegate のみを行い、実装コミットはしません。" >&2
+        echo "  → session を作成 (usagi session create / MCP session_create) し、その worktree でコミットしてください。" >&2
+        echo "  緊急時のみ: LEFTHOOK=0 git commit ... または --no-verify (原則使わない)" >&2
+        exit 1
     branch-name:
       run: |
         branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)
