@@ -36,6 +36,7 @@ fn test_diagnose_reports_all_subsystems() {
             "Codex",
             "sakana.ai",
             "Gemini",
+            "Antigravity",
             "notifications",
             "nerd font",
             "config"

@@ -45,7 +45,7 @@ export PATH="$PATH:$HOME/.usagi/bin"   # 案内に従って PATH を通す
 [README#Installation](../README.md#installation) を参照してください。導入後、依存ツールの状態を確認できます。
 
 ```bash
-usagi doctor   # git / bash / Agent CLI（claude・codex・sakana.ai・gemini）/ 通知 / 設定ストレージの健全性を ok / warn / missing で表示
+usagi doctor   # git / bash / Agent CLI（claude・codex・sakana.ai・gemini・antigravity）/ 通知 / 設定ストレージの健全性を ok / warn / missing で表示
 ```
 
 `usagi doctor` の詳細は [03-commands/01-cli.md#usagi-doctor](03-commands/01-cli.md#usagi-doctor) を参照。

@@ -7,6 +7,7 @@
 //! [`AgentWiring`](crate::domain::agent::AgentWiring) policy and is tested in its
 //! own module.
 
+mod antigravity;
 mod claude;
 mod codex;
 mod gemini;
@@ -14,6 +15,7 @@ mod util;
 
 use std::sync::Arc;
 
+pub use antigravity::AntigravityAgent;
 pub use claude::ClaudeAgent;
 pub use codex::CodexAgent;
 pub use gemini::GeminiAgent;
@@ -57,6 +59,7 @@ pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
         AgentCli::Codex => Arc::new(CodexAgent::new()),
         AgentCli::CodexFugu => Arc::new(CodexAgent::fugu()),
         AgentCli::Gemini => Arc::new(GeminiAgent::new()),
+        AgentCli::Antigravity => Arc::new(AntigravityAgent::new()),
     }
 }
 
@@ -113,6 +116,18 @@ mod tests {
         assert_eq!(
             agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
             "gemini"
+        );
+    }
+
+    #[test]
+    fn agent_for_antigravity_launches_plain() {
+        // Antigravity (`agy`) has no inline-injection flag, so like Gemini it
+        // launches plain — the MCP/hooks wiring is not rendered.
+        let agent = agent_for(AgentCli::Antigravity);
+        assert_eq!(agent.program(), "agy");
+        assert_eq!(
+            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
+            "agy"
         );
     }
 }

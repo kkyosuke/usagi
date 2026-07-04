@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 /// The CLIs shown as columns, left to right: every [`AgentCli`] in canonical
 /// order, labelled by its display name (the domain's single source of truth).
-const COLUMNS: [AgentCli; 4] = AgentCli::ALL;
+const COLUMNS: [AgentCli; 5] = AgentCli::ALL;
 
 /// Entry point for `usagi feature`: print the support matrix.
 pub fn run() -> anyhow::Result<()> {
@@ -56,7 +56,7 @@ fn render() -> Vec<String> {
     lines.push(String::new());
     lines.push("凡例: yes = usagi が配線 / no = CLI 制約により非対応".to_string());
     lines.push(
-        "注: Gemini は MCP・フック・system prompt のインライン注入経路が無いため非対応\
+        "注: Gemini・Antigravity は MCP・フック・system prompt のインライン注入経路が無いため非対応\
          （状態はターミナルベルで推定する）。"
             .to_string(),
     );
