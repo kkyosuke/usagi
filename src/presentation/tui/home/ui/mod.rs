@@ -20,7 +20,9 @@ pub mod content;
 mod panes;
 
 use crate::presentation::tui::widgets;
-use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
+use crate::presentation::tui::widgets::{
+    clip_to_width, clip_to_width_cjk, clip_to_width_cow, pad_to_width_cjk,
+};
 
 use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
@@ -483,8 +485,15 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // forbids. The left cell is clipped then padded so the `│` divider stays
         // pinned to column `left_w`; the right cell is clipped to `right_w`. At
         // normal widths both already fit, so these clips are no-ops.
+        //
+        // The left cell measures by the terminal's East Asian width (`_cjk`):
+        // its session rows reserve their fields at that width (see [`panes::name_cell`]),
+        // so a name carrying ambiguous-width characters keeps the divider pinned
+        // to `left_w` rather than the plain-width padding trailing extra spaces
+        // past it. The right cell is embedded-terminal / preview text whose own
+        // grid is plain-width, so it keeps the plain clip.
         let cell = left_rows.next().unwrap_or_default();
-        let mut line = pad_to_width(clip_to_width(&cell, left_w), left_w);
+        let mut line = pad_to_width_cjk(clip_to_width_cjk(&cell, left_w), left_w);
         line.push_str(SEP);
         let right_cell = right_rows.next().unwrap_or_default();
         // The right cell fits its pane at normal widths (the clip is a no-op),
