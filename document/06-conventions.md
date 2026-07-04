@@ -125,9 +125,18 @@ cargo clippy --all-targets -- -D warnings  # Lint（警告はエラー扱い）
 
 | フック | 内容 |
 |---|---|
-| pre-commit | ブランチ名チェック / staged な `.rs` を `cargo fmt` |
+| pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
 | pre-push | `cargo clippy -- -D warnings`（全件テスト・カバレッジ 100% 確認は時間がかかりすぎるため走らせず、Coverage CI に委ねる） |
+
+### workspace root コミットの拒否（backstop）
+
+pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 配下でない）で実装コミットしようとすると拒否**する。「変更は必ず session 内で行う」という運用（[04-orchestration.md](04-orchestration.md)）を守るための安価な最終防壁で、拒否時は session を作成してその worktree でコミットするよう案内する。
+
+- 判定はブランチ名チェックの免除と同じく「worktree パスが `.usagi/sessions/` 配下か」で行う。`.usagi/sessions/<name>/` 配下の worktree のコミットは通す。
+- 誤検知を避けるため、対象は root に `.usagi/` を持つ usagi 管理ワークスペースに限る。usagi をライブラリとして使うだけの一般リポジトリの root コミットは妨げない。
+- これは backstop であり、一次防壁は MCP 書き込み拒否と guard-workspace（Agent 経由の repo 変更を止める）。ローカル hook は迂回可能なため、`main` 側のブランチ保護（[enforce-pr-base.yml](#cigithub-actions)）と併せて多層で守る。
+- 緊急脱出は従来どおり `LEFTHOOK=0 git commit ...` / `--no-verify`（原則使わない）。
 
 ## CI（GitHub Actions）
 
