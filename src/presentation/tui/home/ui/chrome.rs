@@ -770,6 +770,12 @@ pub(super) const TEXT_MODAL_INNER: usize = 60;
 /// so a narrow pane still fits the box.
 pub(super) const FOCUS_MENU_INNER: usize = 60;
 
+/// Inner (content) width of the floating 在席 (Focus) prompt overlay modal — the
+/// session-scoped command line and its `usage` / `examples` hints. Matched to
+/// [`FOCUS_MENU_INNER`] so the two action surfaces float at the same size, and
+/// clamped to the right pane by [`widgets::modal_inner_width`] like the menu.
+pub(super) const FOCUS_PROMPT_INNER: usize = 60;
+
 /// Builds the body of the text modal: a scrollable window over a text-dumping
 /// command's output (`man` / `history` / `session list`), coloured by line kind,
 /// with `↑`/`↓` more-counts and the dismiss hint below.

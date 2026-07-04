@@ -285,7 +285,7 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
     // Menu (the default) floats as an overlay modal over the frame: it is not
     // drawn inline in the right pane, and its title carries the identity while its
     // body lists the session commands.
-    assert!(state.focus_menu_overlay());
+    assert!(state.focus_action_overlay());
     assert!(
         !stripped(&right_pane_contents(&state, 77, 12)).contains("Run a command:"),
         "the menu is not drawn inline in the right pane"
@@ -296,19 +296,54 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
     assert!(menu.contains("agent"));
     assert!(menu.contains('›'));
 
-    // Prompt shows a typed command line with the session-scope hint, inline in the
-    // right pane — only the menu surface floats as an overlay.
+    // Prompt floats as an overlay modal too: its typed command line and the
+    // session-scope hint ride the floating box (title `session: main`), not the
+    // inline right pane.
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "ter".chars() {
         state.focus_prompt_mut().insert(c);
     }
-    assert!(!state.focus_menu_overlay());
-    let prompt = stripped(&right_pane_contents(&state, 40, 12));
+    assert!(state.focus_action_overlay());
+    assert!(
+        !stripped(&right_pane_contents(&state, 77, 12)).contains("❯ ter"),
+        "the prompt is not drawn inline in the right pane"
+    );
+    let prompt = stripped(&render_frame(24, 120, &state));
     assert!(prompt.contains("session: main"));
     assert!(prompt.contains("❯ ter"));
     // The session-scope hint lists terminal as a match.
     assert!(prompt.contains("terminal"));
+}
+
+#[test]
+fn focus_menu_filter_narrows_the_command_list_and_shows_the_query() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    // Entering filter mode swaps the "Run a command:" label for the filter bar's
+    // placeholder, leaving every command listed until something is typed.
+    state.start_focus_menu_filter();
+    let empty = stripped(&render_frame(24, 120, &state));
+    assert!(empty.contains("Filter:"));
+    assert!(empty.contains("type to filter"));
+    assert!(empty.contains("terminal"));
+    assert!(empty.contains("diff"));
+    // Typing narrows the list to command names that start with the query
+    // (case-insensitive) and echoes the query on the filter line.
+    state.push_focus_menu_filter('t');
+    let narrowed = stripped(&render_frame(24, 120, &state));
+    assert!(narrowed.contains("Filter: t"));
+    assert!(narrowed.contains("terminal"));
+    assert!(!narrowed.contains("diff"), "non-matching commands drop out");
+    // A query that matches nothing shows the placeholder, not a blank box.
+    state.push_focus_menu_filter('z');
+    let none = stripped(&render_frame(24, 120, &state));
+    assert!(none.contains("No commands match the filter."));
+    // Backspacing restores matches; clearing exits filter mode entirely.
+    state.focus_menu_filter_backspace();
+    assert!(stripped(&render_frame(24, 120, &state)).contains("terminal"));
+    assert!(state.clear_focus_menu_filter());
+    assert!(stripped(&render_frame(24, 120, &state)).contains("Run a command:"));
 }
 
 #[test]
@@ -469,7 +504,7 @@ fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
     );
     // The floating menu modal carries the command surface, composited over the
     // frame; the pane preview still does not show.
-    assert!(state.focus_menu_overlay());
+    assert!(state.focus_action_overlay());
     let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("+ new"));
     assert!(out.contains("Run a command:"));
@@ -485,10 +520,10 @@ fn zoomed_out_menu_floats_over_the_pane_preview() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
     state.leave_attached();
-    state.focus_menu_over_active_pane();
+    state.focus_action_over_active_pane();
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
-    assert!(state.focus_menu_overlay());
+    assert!(state.focus_action_overlay());
     let pane = stripped(&right_pane_contents(&state, 77, 12));
     assert!(pane.contains("$ echo hi"), "the pane preview stays drawn");
     assert!(!pane.contains("+ new"), "no chip for an uncreated tab");
@@ -498,9 +533,10 @@ fn zoomed_out_menu_floats_over_the_pane_preview() {
 }
 
 #[test]
-fn focus_new_tab_with_panes_shows_the_prompt_surface() {
+fn focus_new_tab_with_panes_floats_the_prompt_surface() {
     // The "+ new" tab honours the Prompt action UI just as the menu does — with
-    // live panes its command line shows below the strip (header-less).
+    // live panes the tab strip stays inline while the command line floats as an
+    // overlay modal over it, rather than drawing below the strip.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
@@ -508,8 +544,13 @@ fn focus_new_tab_with_panes_shows_the_prompt_surface() {
     for c in "ter".chars() {
         state.focus_prompt_mut().insert(c);
     }
-    let out = stripped(&right_pane_contents(&state, 100, 12));
+    assert!(state.focus_action_overlay());
+    let pane = stripped(&right_pane_contents(&state, 100, 12));
+    assert!(pane.contains("+ new"), "the tab strip stays inline");
+    assert!(!pane.contains("❯ ter"), "the prompt is not inline");
+    let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("+ new"));
+    assert!(out.contains("session: main"));
     assert!(out.contains("❯ ter"));
 }
 
@@ -544,13 +585,14 @@ fn focus_pane_tab_falls_back_to_a_hint_until_the_first_snapshot() {
 
 #[test]
 fn focus_prompt_shows_usage_for_arguments() {
+    // The prompt floats as an overlay modal, so its usage hint rides the frame.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "terminal ".chars() {
         state.focus_prompt_mut().insert(c);
     }
-    let prompt = stripped(&right_pane_contents(&state, 60, 12));
+    let prompt = stripped(&render_frame(24, 120, &state));
     assert!(prompt.contains("usage"));
     assert!(prompt.contains("terminal"));
 }
@@ -564,9 +606,8 @@ fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
     for c in "zzz".chars() {
         state.focus_prompt_mut().insert(c);
     }
-    // The header, blank, and prompt lines are present, but no hint rows follow.
-    let rows = right_pane_contents(&state, 60, 12);
-    let text = stripped(&rows);
+    // The prompt line rides the floating modal, but no hint rows follow it.
+    let text = stripped(&render_frame(24, 120, &state));
     assert!(text.contains("❯ zzz"));
     // An unknown word yields `Hint::None`, so neither a usage line nor example
     // rows are drawn below the prompt.

@@ -9,9 +9,14 @@
 //!
 //! What Gemini *does* expose as plain CLI flags, usagi wires in:
 //!
-//! - **Opening prompt** — a queued `session_prompt` rides along as
-//!   `gemini -i <prompt>` (execute the prompt, then stay interactive), so the
-//!   session opens already working on it.
+//! - **Session worktree note** — because Gemini has no system-prompt flag, the note
+//!   that tells the agent it is already inside a usagi worktree (work in place, do
+//!   not create another worktree or touch the parent repo) can't ride in out of
+//!   band the way it does for Claude/Codex. It leads the opening prompt instead, so
+//!   every Gemini launch — with or without a queued prompt — carries it.
+//! - **Opening prompt** — a queued `session_prompt` follows the worktree note in
+//!   that same `gemini -i <prompt>` (execute the prompt, then stay interactive), so
+//!   the session opens already working on it.
 //! - **Resume** — when a worktree has a prior Gemini conversation, the launch
 //!   resumes the latest one with `gemini -r latest` (Gemini scopes "latest" to the
 //!   current directory). usagi finds that prior conversation by scanning Gemini's
@@ -140,15 +145,15 @@ impl Agent for GeminiAgent {
             parts.push("-r".to_string());
             parts.push("latest".to_string());
         }
-        // A queued prompt rides along as `-i=<prompt>` (execute it, then stay
-        // interactive). It is arbitrary user text, so it is escaped for the
-        // single-quoted shell context, and glued to the flag with `=` so a prompt
-        // starting with `-` (e.g. `ai --help`) is read as the flag's value rather
-        // than as the next option. `-r` and `-i` are independent flags, so a
-        // resumed session can still open already working on a queued prompt.
-        if let Some(prompt) = initial_prompt {
-            parts.push(format!("-i={}", shell_single_quote(prompt)));
-        }
+        // The opening prompt always rides along as `-i=<prompt>` (execute it, then
+        // stay interactive): Gemini has no system-prompt flag, so the session
+        // worktree note leads it, with any queued prompt after a blank line. It is
+        // escaped for the single-quoted shell context, and glued to the flag with
+        // `=` so a prompt starting with `-` (e.g. `ai --help`) is read as the flag's
+        // value rather than as the next option. `-r` and `-i` are independent flags,
+        // so a resumed session still gets the note and can open on a queued prompt.
+        let opening = super::session_opening_prompt(initial_prompt);
+        parts.push(format!("-i={}", shell_single_quote(&opening)));
         parts.join(" ")
     }
 
@@ -159,12 +164,17 @@ impl Agent for GeminiAgent {
         // so a headless Gemini run cannot drive usagi's MCP tools and works with
         // git and the filesystem alone; only the model (when pinned) is wired. No
         // interactive person is present, so `--yolo` auto-approves every tool call
-        // (Gemini's bypass flag) to let it act without prompting. The prompt is
-        // arbitrary text, so it is escaped for the single-quoted shell context.
+        // (Gemini's bypass flag) to let it act without prompting. As in the
+        // interactive launch, the session worktree note leads the prompt (there is
+        // no system-prompt flag to carry it), so a headless run also stays confined
+        // to its worktree; the combined text is escaped for the single-quoted shell
+        // context.
         let mut parts = vec!["gemini".to_string(), "--yolo".to_string()];
         parts.extend(model_flag_parts(wiring));
         parts.push("-p".to_string());
-        parts.push(shell_single_quote(prompt));
+        parts.push(shell_single_quote(&super::session_opening_prompt(Some(
+            prompt,
+        ))));
         parts.join(" ")
     }
 
@@ -185,6 +195,10 @@ mod tests {
     use crate::domain::settings::Settings;
     use std::fs;
 
+    /// The session worktree note that leads every Gemini opening prompt (`-i` / `-p`)
+    /// because Gemini has no system-prompt flag to carry it out of band.
+    const NOTE: &str = super::super::SESSION_WORKTREE_PROMPT;
+
     /// Create a Gemini project directory under `root` whose `.project_root` marker
     /// names `project_root`, optionally seeding a `chats/<name>.json` transcript.
     fn write_project(root: &Path, label: &str, project_root: &str, chat: Option<&str>) -> PathBuf {
@@ -200,19 +214,22 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_is_plain_without_resume_or_prompt() {
+    fn launch_command_leads_with_the_worktree_note_and_ignores_wiring() {
         let agent = GeminiAgent::new();
         assert_eq!(agent.program(), "gemini");
-        // The wiring is ignored — plain `gemini` whether or not the local LLM is on.
+        // With no queued prompt, the launch is not bare `gemini`: the session
+        // worktree note still rides in as the opening prompt so Gemini knows it is
+        // already in a worktree. The MCP/local-LLM wiring is ignored either way.
+        let expected = format!("gemini -i='{NOTE}'");
         assert_eq!(
             agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
-            "gemini"
+            expected
         );
         let mut settings = Settings::default();
         settings.local_llm.enabled = true;
         assert_eq!(
             agent.launch_command(&settings.agent_wiring("usagi"), false, None),
-            "gemini"
+            expected
         );
     }
 
@@ -223,36 +240,42 @@ mod tests {
         let plain = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
         assert!(!plain.contains("-m "), "{plain}");
 
-        // With a model set, both the interactive and headless launches carry `-m`.
+        // With a model set, both the interactive and headless launches carry `-m`,
+        // ahead of the note-led opening prompt.
         let mut w = Settings::default().agent_wiring("usagi");
         w.model = Some("gemini-2.5-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
-        assert_eq!(launch, "gemini -m 'gemini-2.5-pro'");
+        assert_eq!(launch, format!("gemini -m 'gemini-2.5-pro' -i='{NOTE}'"));
         let headless = agent.headless_command(&w, "clean up");
-        assert_eq!(headless, "gemini --yolo -m 'gemini-2.5-pro' -p 'clean up'");
+        assert_eq!(
+            headless,
+            format!("gemini --yolo -m 'gemini-2.5-pro' -p '{NOTE}\n\nclean up'")
+        );
     }
 
     #[test]
     fn launch_command_resumes_with_the_latest_flag() {
-        // Resuming continues the latest conversation for the directory.
+        // Resuming continues the latest conversation for the directory; the worktree
+        // note still leads the opening prompt (it rides in every launch).
         let launch = GeminiAgent::new().launch_command(
             &Settings::default().agent_wiring("usagi"),
             true,
             None,
         );
-        assert_eq!(launch, "gemini -r latest");
+        assert_eq!(launch, format!("gemini -r latest -i='{NOTE}'"));
     }
 
     #[test]
     fn launch_command_carries_an_opening_prompt() {
-        // A queued prompt rides along as `-i=<prompt>`, single-quoted for the
-        // shell and glued with `=` so a dash-leading prompt stays the flag's value.
+        // A queued prompt follows the worktree note in `-i=<prompt>`, single-quoted
+        // for the shell and glued with `=` so a dash-leading prompt stays the flag's
+        // value.
         let launch = GeminiAgent::new().launch_command(
             &Settings::default().agent_wiring("usagi"),
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, "gemini -i='fix issue #50'");
+        assert_eq!(launch, format!("gemini -i='{NOTE}\n\nfix issue #50'"));
         // A dash-leading prompt (`ai --help`) binds to `-i` instead of being
         // parsed as the next option.
         let dashed = GeminiAgent::new().launch_command(
@@ -260,55 +283,66 @@ mod tests {
             false,
             Some("--help"),
         );
-        assert_eq!(dashed, "gemini -i='--help'");
+        assert_eq!(dashed, format!("gemini -i='{NOTE}\n\n--help'"));
     }
 
     #[test]
     fn launch_command_combines_resume_and_prompt() {
         // `-r` and `-i` are independent, so a resumed session can open already
-        // working on a queued prompt.
+        // working on a queued prompt (after the worktree note).
         let launch = GeminiAgent::new().launch_command(
             &Settings::default().agent_wiring("usagi"),
             true,
             Some("keep going"),
         );
-        assert_eq!(launch, "gemini -r latest -i='keep going'");
+        assert_eq!(
+            launch,
+            format!("gemini -r latest -i='{NOTE}\n\nkeep going'")
+        );
     }
 
     #[test]
     fn launch_command_escapes_single_quotes_in_a_prompt() {
         // Arbitrary user prompt text may contain single quotes, which would
         // otherwise break out of the shell argument; each is rendered as the POSIX
-        // `'\''` idiom so Gemini receives the prompt verbatim.
+        // `'\''` idiom so Gemini receives the prompt verbatim. The note (quote-free)
+        // still leads it.
         let launch = GeminiAgent::new().launch_command(
             &Settings::default().agent_wiring("usagi"),
             false,
             Some("don't stop"),
         );
-        assert_eq!(launch, r"gemini -i='don'\''t stop'");
+        let escaped_prompt = r"don'\''t stop";
+        assert_eq!(launch, format!("gemini -i='{NOTE}\n\n{escaped_prompt}'"));
     }
 
     #[test]
     fn headless_command_runs_print_mode_with_auto_approval() {
         // The headless command runs Gemini non-interactively (`-p <prompt>`) with
         // `--yolo` auto-approving every tool call, so the background agent acts
-        // without prompting. The wiring is not rendered (Gemini has no inline flag
-        // for it), so the line carries no MCP config.
+        // without prompting. The worktree note leads the prompt (no system-prompt
+        // flag carries it), so the run stays in its worktree. The wiring is not
+        // rendered (Gemini has no inline flag for it), so no MCP config.
         let launch = GeminiAgent::new()
             .headless_command(&Settings::default().agent_wiring("usagi"), "clean up");
-        assert_eq!(launch, "gemini --yolo -p 'clean up'");
+        assert_eq!(launch, format!("gemini --yolo -p '{NOTE}\n\nclean up'"));
         assert!(!launch.contains("mcp"));
     }
 
     #[test]
     fn headless_command_escapes_single_quotes_in_the_prompt() {
         // Arbitrary prompt text may contain single quotes; each is rendered as the
-        // POSIX `'\''` idiom so Gemini receives the prompt verbatim.
+        // POSIX `'\''` idiom so Gemini receives the prompt verbatim. The note
+        // (quote-free) still leads it.
         let launch = GeminiAgent::new().headless_command(
             &Settings::default().agent_wiring("usagi"),
             "don't delete 'main'",
         );
-        assert_eq!(launch, r"gemini --yolo -p 'don'\''t delete '\''main'\'''");
+        let escaped_prompt = r"don'\''t delete '\''main'\''";
+        assert_eq!(
+            launch,
+            format!("gemini --yolo -p '{NOTE}\n\n{escaped_prompt}'")
+        );
     }
 
     #[test]
