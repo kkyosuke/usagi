@@ -384,6 +384,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -410,6 +411,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     let outcome = event_loop(
         &term,
@@ -498,6 +500,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -524,6 +527,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     let outcome = event_loop(
         &term,
@@ -657,6 +661,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut save_resume = |_: &str, _: ResumeLevel| {};
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
         let mut chat_ask = ready_chat_ask;
+        let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
         let mut wiring = Wiring {
             interaction_epoch: 0,
             watch_sessions: false,
@@ -683,6 +688,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             tab_action: &mut tab_action,
             save_resume: &mut save_resume,
             save_last_active: &mut save_last_active,
+            autostart_queued: &mut autostart_queued,
         };
         assert!(matches!(
             event_loop(

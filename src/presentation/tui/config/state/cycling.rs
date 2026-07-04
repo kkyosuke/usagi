@@ -71,6 +71,11 @@ impl Config {
                 self.settings.restore_panes_enabled = !self.settings.restore_panes_enabled;
                 true
             }
+            Field::AutostartQueued => {
+                // A boolean toggle: direction is irrelevant, it always flips.
+                self.settings.autostart_queued_prompts = !self.settings.autostart_queued_prompts;
+                true
+            }
             Field::AgentCli => {
                 // Only cycle through installed agents (the current value is always
                 // kept selectable), so an uninstalled CLI is never offered.
@@ -150,6 +155,15 @@ impl Config {
                 let local = self.local_edit_mut();
                 local.settings.restore_panes_enabled = cycle_optional(
                     local.settings.restore_panes_enabled,
+                    &[true, false],
+                    forward,
+                );
+                true
+            }
+            LocalField::AutostartQueued => {
+                let local = self.local_edit_mut();
+                local.settings.autostart_queued_prompts = cycle_optional(
+                    local.settings.autostart_queued_prompts,
                     &[true, false],
                     forward,
                 );

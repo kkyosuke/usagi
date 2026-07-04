@@ -36,6 +36,7 @@
 | クローン先ベース | `workspace_root` | string? | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の ON/OFF |
 | ペイン復旧 | `restore_panes_enabled` | bool | `true` | 起動時に各セッションの前回開いていたペイン（agent / terminal）をバックグラウンドで復旧し、終了時にいたセッションとエンゲージメント段階（切替 / 在席 / 没入）へ復帰する。agent は会話の続きから再開する（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
+| キュー済みプロンプトの自動起動 | `autostart_queued_prompts` | bool | `true` | ホーム画面が、ライブペインを持たないセッションに[起動時キュー](03-commands/03-mcp.md#session_prompt-の挙動)されたプロンプト（MCP `session_delegate_issue` / `session_prompt`）を検知したら、そのセッションの agent ペインをバックグラウンドで自動起動し、キュー済みプロンプトを最初のメッセージとして着手させる。人がペインを開かなくても子エージェントが走り出す。`false` にすると従来どおり「次にペインをフレッシュ起動したときに消費」へ戻る（[4. オーケストレーション#キュー済みプロンプトの自動起動](04-orchestration.md#キュー済みプロンプトの自動起動)） |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`）。`codex_fugu` は Codex 互換 CLI で `codex-fugu` を起動する。`antigravity` は Gemini CLI の後継で `agy` を起動する |
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
@@ -117,6 +118,7 @@
 | Agent CLI | `agent_cli` | enum? | グローバル設定にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool? | グローバル設定にフォールバック |
 | ペイン復旧 | `restore_panes_enabled` | bool? | グローバル設定にフォールバック |
+| キュー済みプロンプトの自動起動 | `autostart_queued_prompts` | bool? | グローバル設定にフォールバック |
 | デフォルトブランチ | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto） |
 | デフォルトブランチ基点 | `default_branch_source` | enum? | 既定（`remote`） |
 | ローカル LLM 有効化 | `local_llm_enabled` | bool? | グローバル設定（`local_llm.enabled`）にフォールバック |

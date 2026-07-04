@@ -169,6 +169,7 @@ mod tests {
             agent_cli: Some(AgentCli::Gemini),
             notifications_enabled: Some(false),
             restore_panes_enabled: Some(false),
+            autostart_queued_prompts: Some(false),
             default_branch_source: Some(BranchSource::Local),
             default_branch: Some("develop".to_string()),
             local_llm_enabled: Some(true),
