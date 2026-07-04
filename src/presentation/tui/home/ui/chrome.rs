@@ -298,13 +298,20 @@ pub(super) fn input_line(state: &HomeState) -> String {
 
 /// The command palette line as `❯ <text>` with the caret drawn at the editing
 /// position (the byte offset from [`HomeState::cursor`]), so ←/→/Home/End move a
-/// visible caret through the text instead of always sitting at the end.
+/// visible caret through the text instead of always sitting at the end. In
+/// 統合(unite) mode a dimmed `[<workspace>]` scope tag leads the line so it is
+/// clear which workspace a scoped command (`config` / `issue`) acts on.
 fn command_input_content(state: &HomeState) -> String {
     let prompt = style("❯").danger().bold();
     let input = state.input();
     let (before, after) = input.split_at(state.cursor());
     let value = widgets::block_caret(before, after, &Style::new().accent());
-    format!("{prompt} {value}")
+    if state.is_united() {
+        let scope = style(format!("[{}]", state.selected_workspace_name())).dim();
+        format!("{prompt} {scope} {value}")
+    } else {
+        format!("{prompt} {value}")
+    }
 }
 
 /// Inner (content) width of the command palette box, before the borders and the
@@ -424,6 +431,15 @@ fn fit_help(width: usize, help: &str) -> String {
 /// is trimmed to the terminal width by [`fit_help`] (dropping the lowest-priority
 /// trailing keys with a `…`) so it never overruns the row.
 pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
+    // In 統合(unite) mode the cursor group's workspace scopes the scoped commands
+    // (`c` / `r` / `config` / `issue`), so name it inside the mode tag — which
+    // `fit_help` always keeps (it is the leading segment) — so the user sees which
+    // workspace the keys act on. Empty (no tag suffix) in single-workspace mode.
+    let scope = if state.is_united() {
+        format!(" · {}", state.selected_workspace_name())
+    } else {
+        String::new()
+    };
     // The note editor / preview / command palette each capture the keyboard while
     // open (the note and preview are drawn in the right pane, so the screen never
     // switches), so their controls take over the footer regardless of the
@@ -434,7 +450,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     } else if state.preview().is_some() {
         "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close".to_string()
     } else if state.command_palette_open() {
-        "[command]  Tab: complete / ↑↓: history / Enter: run / Esc: close".to_string()
+        format!("[command{scope}]  Tab: complete / ↑↓: history / Enter: run / Esc: close")
     } else {
         match state.mode() {
         Mode::Switch => {
@@ -445,7 +461,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
+                "[switch{scope}]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
             )
         }
         // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
@@ -458,11 +474,11 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                     .to_string()
             }
             KeyScheme::Prefix => format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o switch / g agent … / Ctrl-^: last / : commands / ? keys / Esc: switch",
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o switch / g agent … / Ctrl-^: last / : commands / ? keys / Esc: switch",
                 state.focused_session_name()
             ),
             KeyScheme::Alt => format!(
-                "[session: {}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: switch",
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: switch",
                 state.focused_session_name()
             ),
         },

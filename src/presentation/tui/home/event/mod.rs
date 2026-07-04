@@ -1111,7 +1111,7 @@ pub(super) fn event_loop(
         // bindings and `Esc` cancels — either way returning to the Overview. The
         // editing keys edit the multi-line buffer.
         if state.env_editor().is_some() {
-            env_editor_key(&mut state, key, wiring);
+            env_editor_key(&mut state, key);
             continue;
         }
 

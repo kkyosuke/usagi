@@ -58,6 +58,7 @@ fn render_frame_removal_modal_prefixes_rows_in_unite_mode() {
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     state.open_remove_modal(false);
 

@@ -96,6 +96,11 @@ pub struct GroupSource {
     pub root_note: Option<String>,
     /// The workspace's recorded sessions (from its `state.json`).
     pub sessions: Vec<SessionRecord>,
+    /// The workspace's task issues (from its `.usagi/issues/`), so the `issue`
+    /// command lists / shows the issues of whichever group the cursor is in.
+    /// Loaded once when the group is built (like [`sessions`](Self::sessions)),
+    /// never re-synced.
+    pub issues: Vec<Issue>,
 }
 
 /// The outcome of submitting the command line: the side effect to act on, plus
@@ -1267,24 +1272,51 @@ impl HomeState {
             .collect()
     }
 
-    /// The workspace root the cursor's group operates in — the primary's root when
-    /// the cursor is in the first group, otherwise the matching extra group's root.
-    /// `session` commands (create / remove / rename / note) run against this so a
-    /// new session lands in the workspace the user is pointing at.
-    pub fn selected_workspace_root(&self) -> PathBuf {
-        let selected_group = if self.list.create_row_selected() {
+    /// The group index the cursor points at, treating the trailing `+ new`
+    /// create row as belonging to the last group (the workspace it creates into).
+    /// `0` is the primary; `i + 1` indexes [`extra_groups`](Self::extra_groups).
+    /// The shared basis for every "cursor's group" accessor below.
+    fn cursor_group(&self) -> usize {
+        if self.list.create_row_selected() {
             self.list.group_count().saturating_sub(1)
         } else {
             self.list.selected_group()
-        };
-        // The root now lives on each group's value type, so resolve it straight
-        // from the cursor's group rather than juggling the primary field and the
-        // extra-group sources in parallel. `selected_group()` is always valid.
+        }
+    }
+
+    /// The workspace root the cursor's group operates in — the primary's root when
+    /// the cursor is in the first group, otherwise the matching extra group's root.
+    /// `session` commands (create / remove / rename / note) and the `config` (env)
+    /// editor run against this so they act on the workspace the user is pointing at.
+    /// The root now lives on each group's value type, so resolve it straight from
+    /// the cursor's group; `cursor_group()` is always a valid group index.
+    pub fn selected_workspace_root(&self) -> PathBuf {
         self.list
             .groups()
-            .get(selected_group)
+            .get(self.cursor_group())
             .map(|g| g.root_path().to_path_buf())
             .unwrap_or_default()
+    }
+
+    /// The display name of the cursor's group — the primary workspace's name, or
+    /// the matching extra (unite) group's. Shown in the footer / command palette so
+    /// it is clear which workspace a scoped command (`c` / `r` / `config` /
+    /// `issue`) acts on in 統合(unite) mode.
+    pub fn selected_workspace_name(&self) -> &str {
+        match self.cursor_group().checked_sub(1) {
+            None => self.list.workspace_name(),
+            Some(i) => &self.extra_groups[i].name,
+        }
+    }
+
+    /// The task issues of the cursor's group — the primary workspace's, or the
+    /// matching extra (unite) group's — so the `issue` command lists / shows the
+    /// issues of the workspace the cursor is pointing at, not always the primary.
+    fn selected_group_issues(&self) -> &[Issue] {
+        match self.cursor_group().checked_sub(1) {
+            None => &self.issues,
+            Some(i) => &self.extra_groups[i].issues,
+        }
     }
 
     /// The root-row note of the cursor's group (the primary's, or the matching
@@ -3351,7 +3383,7 @@ impl HomeState {
             scope,
             &self.history_entries,
             &self.list.refs(),
-            &self.issues,
+            self.selected_group_issues(),
         );
         let success = !result.lines.iter().any(|line| line.kind == LineKind::Error);
         self.cmdline.push_history(entry.to_string());

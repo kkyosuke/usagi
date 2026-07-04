@@ -386,6 +386,7 @@ fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
         root_path: PathBuf::from("/tools"),
         root_note: None,
         sessions: vec![session_record("beta", 1)],
+        issues: Vec::new(),
     }]);
     state.enter_switch(ReturnMode::Base);
     state.switch_select(2); // primary root, alpha, then tools' root row.
@@ -409,6 +410,7 @@ fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate
         root_path: PathBuf::from("/tools"),
         root_note: None,
         sessions: vec![session_record("alpha", 1)],
+        issues: Vec::new(),
     }]);
     state.enter_switch(ReturnMode::Base);
     state.switch_select(3); // primary root, primary alpha, tools root, tools alpha.
@@ -455,6 +457,7 @@ fn open_remove_modal_lists_all_united_sessions_with_workspace_prefixes() {
         root_path: "/repo/tools".into(),
         root_note: None,
         sessions: vec![session_record("alpha", 1), session_record("beta", 1)],
+        issues: Vec::new(),
     }]);
 
     state.open_remove_modal(false);

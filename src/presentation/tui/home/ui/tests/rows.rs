@@ -1245,6 +1245,7 @@ fn row_select_click_works_in_unite_mode() {
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     // Body line 4 (header 0, root 1-2, divider 3, session 4) is the primary's
     // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
@@ -1284,6 +1285,7 @@ fn unite_with_prs() -> HomeState {
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     state
 }
@@ -1322,6 +1324,7 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 15), Some(0));
 }
@@ -2147,6 +2150,7 @@ fn pr_popup_placement_is_none_when_empty_or_too_narrow() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: Vec::new(),
+        issues: Vec::new(),
     }]);
     empty.set_pr_popup(Some(0));
     assert!(pr_popup_placement(&empty, 24, 120).is_none());

@@ -249,11 +249,18 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 let (sessions, _) =
                     crate::usecase::workspace_state::recorded_sessions_for_display(&w.path);
                 let root_note = crate::usecase::workspace_state::recorded_root_note(&w.path);
+                // The extra workspace's own task issues, so the `issue` command
+                // scopes to whichever group the cursor is in (like the primary's,
+                // loaded by `preload`). Empty on a read failure.
+                let issues = crate::infrastructure::issue_store::IssueStore::new(&w.path)
+                    .scan()
+                    .unwrap_or_default();
                 state::GroupSource {
                     name: w.name.clone(),
                     root_path: w.path.clone(),
                     root_note,
                     sessions,
+                    issues,
                 }
             })
             .collect();
@@ -1176,11 +1183,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let (sessions, _) =
             crate::usecase::workspace_state::recorded_sessions_for_display(&ws.path);
         let root_note = crate::usecase::workspace_state::recorded_root_note(&ws.path);
+        // The workspace's task issues so `issue` scopes to it once the cursor is
+        // in this group (mirrors how the primary's issues are loaded).
+        let issues = crate::infrastructure::issue_store::IssueStore::new(&ws.path)
+            .scan()
+            .unwrap_or_default();
         Ok(state::GroupSource {
             name: ws.name,
             root_path: ws.path,
             root_note,
             sessions,
+            issues,
         })
     };
 
