@@ -1146,11 +1146,29 @@ impl TerminalPool {
 
 impl Drop for TerminalPool {
     fn drop(&mut self) {
-        // Stop the watcher and wait for it, then the owned PTYs drop and kill
-        // their shells.
+        // Stop the watcher and wait for it before touching the shells (it walks
+        // no PTY state, but joining it first keeps the teardown ordering plain).
         self.stop.store(true, Ordering::SeqCst);
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
+        }
+        // Tear the live shells down concurrently instead of letting the `sessions`
+        // map drop them one by one. Each [`PtySession`]'s `Drop` bounds itself to
+        // ~2s (kill → reap → reader-join sharing one deadline) for the pathological
+        // case where a descendant escaped the process group; dropping panes in
+        // sequence would stack that bound per pane, so quitting a workspace with
+        // several open panes could freeze the UI for many seconds. Handing each
+        // pane to its own thread caps the whole teardown at a single pane's bound
+        // no matter how many are open — and in the common case every group dies in
+        // parallel, so the reaps all return at once. `PtySession` is `Send` and
+        // owns everything it touches, so each moved pane is self-contained.
+        let handles: Vec<_> = std::mem::take(&mut self.sessions)
+            .into_values()
+            .flat_map(|session| session.panes)
+            .map(|pane| std::thread::spawn(move || drop(pane)))
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 }
