@@ -108,7 +108,7 @@ usecase/issue, usecase/memory, usecase/session … create/get/search/update/dele
 infrastructure/{issue_store, memory_store} … <repo>/.usagi/{issues,memory}/ の markdown + index.json
 （テスト時）FakeBackend / （本番）CliAgentBackend
   └─ session_prompt → mode(auto) が agent phase を見て振り分け
-       ├─ queue → agent-prompts/ へキュー（TUI が起動時に消費）
+       ├─ queue → agent-prompts/ へキュー（TUI がフレッシュ起動時に消費／設定 ON なら稼働中に自動 spawn）
        └─ live  → agent-live-prompts/ へキュー（起動中 TUI が live pane へ注入）
 ```
 
@@ -196,7 +196,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 | チャネル | キュー先 | 配送タイミング |
 |---|---|---|
-| 起動時キュー（queue） | [`agent-prompts/`](../data/01-global.md#agent-prompts) | ホーム画面がそのセッションのエージェントペインを**次にフレッシュ起動するとき**に、エージェントの**最初のメッセージ**として渡す |
+| 起動時キュー（queue） | [`agent-prompts/`](../data/01-global.md#agent-prompts) | ホーム画面がそのセッションのエージェントペインを**次にフレッシュ起動するとき**に、エージェントの**最初のメッセージ**として渡す。設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が有効なら、TUI 稼働中はホーム画面がキューを検知してペインを**バックグラウンドで自動 spawn** し、人が開くのを待たない（[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)） |
 | ライブキュー（live） | [`agent-live-prompts/`](../data/01-global.md#agent-live-prompts) | **すでに起動中のエージェントペイン**へ、動作中の TUI の監視スレッドが「貼り付け → Enter」で流し込む |
 
 どちらを使うかは `mode` 引数で決めます（省略時 `auto`）。
@@ -214,7 +214,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   **エージェントペインを新規 spawn する**ときに 1 回だけ消費されます（再アタッチや 2 枚目のエージェントタブには
   再送されません）。フレッシュ起動が起きるまではキューに残ります。引き渡し方はエージェント CLI 依存で、Claude は
   起動時の位置引数（`claude … '<prompt>'`）として受け取り、対話モードのままそのプロンプトに着手します。Gemini は
-  この経路を持たないため素起動します。
+  この経路を持たないため素起動します。設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が
+  有効なら、この「フレッシュ起動」を人が起こすのを待たず、TUI がキューを検知してバックグラウンドで自動的に行います
+  （[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)）。OFF にすると従来どおり人がペインを開くまで消費されません。
 - **ライブキュー**のプロンプトは、対象セッションに live agent ペインがある場合 TUI の監視 tick（約 200 ms 間隔）で
   配送されます。複数回送ったプロンプトは追記順に、各 1 回だけ配送されます。配送は「取り出し → 書き込み」の順で
   行い、PTY への書き込みが失敗したプロンプト（および同じ tick でそれ以降にあった未配送分）はライブキューの
@@ -235,6 +237,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 - 新規作成したセッションには live なエージェントペインが存在しないため、配送は常に**起動時キュー**（`queue`）です。
   返り値の `delivered_to` も常に `"queue"` になります。
+- 設定 [`autostart_queued_prompts`](../05-settings.md#設定項目)（既定 ON）が有効で TUI が稼働していれば、委譲した
+  セッションの agent ペインは人が開かなくても**バックグラウンドで自動起動**され、キュー済みプロンプトに着手します
+  （[4. オーケストレーション#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)）。OFF なら次に人がそのペインをフレッシュ起動するまでキューで待ちます。
 - **新しいロジックは足していません**。既存の 3 tool（`issue_to_prompt` / `session_create` / `session_prompt`）を
   合成サーバ（`usagi.rs`）が順に呼ぶだけなので、採番・検証・キューなどの挙動は primitive と完全に一致します。
 - primitive はそのまま残っています。**プロンプトを手で調整したい**、**既存セッションに載せたい**、**live 送信したい**

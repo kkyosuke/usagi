@@ -541,6 +541,15 @@ pub struct Settings {
     /// terminal) on startup, re-spawning them in the background — an agent picks
     /// its conversation back up where it left off. On unless the user disables it.
     pub restore_panes_enabled: bool,
+    /// Whether the home screen automatically launches a session's agent pane in
+    /// the background as soon as it detects a prompt queued for that session (via
+    /// MCP `session_prompt` / `session_delegate_issue`), handing the queued prompt
+    /// to the agent as its first message — so a delegated issue starts being
+    /// worked without a human opening the pane. The pane is spawned but not
+    /// attached; its lifecycle hooks still move the sidebar badge. On unless the
+    /// user disables it; when off, a queued prompt waits to be consumed by the
+    /// next fresh launch of that session's agent pane as before.
+    pub autostart_queued_prompts: bool,
     /// Which agent CLI usagi drives.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: AgentCli,
@@ -606,6 +615,9 @@ impl Default for Settings {
             notifications_enabled: true,
             // Restoring open panes is opt-out: on unless the user disables it.
             restore_panes_enabled: true,
+            // Auto-starting queued prompts is opt-out: on unless disabled, so a
+            // delegated issue begins work without a human opening the pane.
+            autostart_queued_prompts: true,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
             key_scheme: KeyScheme::default(),
@@ -694,6 +706,9 @@ impl Settings {
         if let Some(restore_panes_enabled) = local.restore_panes_enabled {
             self.restore_panes_enabled = restore_panes_enabled;
         }
+        if let Some(autostart_queued_prompts) = local.autostart_queued_prompts {
+            self.autostart_queued_prompts = autostart_queued_prompts;
+        }
         if let Some(local_llm_enabled) = local.local_llm_enabled {
             self.local_llm.enabled = local_llm_enabled;
         }
@@ -760,6 +775,9 @@ pub struct LocalSettings {
     /// Override whether this project's session panes are restored on startup.
     /// `None` defers to the global setting.
     pub restore_panes_enabled: Option<bool>,
+    /// Override whether queued prompts are auto-started for this project's
+    /// sessions. `None` defers to the global setting.
+    pub autostart_queued_prompts: Option<bool>,
     /// Which ref new session worktrees branch from in this repository. `None`
     /// defers to the default ([`BranchSource::Remote`]). An unrecognised stored
     /// value degrades to `None`.
@@ -811,6 +829,7 @@ impl LocalSettings {
         self.agent_cli.is_none()
             && self.notifications_enabled.is_none()
             && self.restore_panes_enabled.is_none()
+            && self.autostart_queued_prompts.is_none()
             && self.default_branch_source.is_none()
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
@@ -1100,6 +1119,30 @@ mod tests {
     }
 
     #[test]
+    fn autostart_queued_prompts_defaults_on() {
+        // Auto-starting queued prompts is opt-out, so a fresh install has it on.
+        assert!(Settings::default().autostart_queued_prompts);
+    }
+
+    #[test]
+    fn with_local_overrides_autostart_queued_prompts_when_set() {
+        // The global default auto-starts queued prompts; a local override turns it
+        // off for just this project.
+        let global = Settings::default();
+        assert!(global.autostart_queued_prompts);
+        let local = LocalSettings {
+            autostart_queued_prompts: Some(false),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert!(!effective.autostart_queued_prompts);
+        // Unrelated fields keep their global value.
+        assert!(effective.restore_panes_enabled);
+    }
+
+    #[test]
     fn with_local_is_a_no_op_when_empty() {
         let global = Settings::default();
         assert_eq!(global.clone().with_local(&LocalSettings::default()), global);
@@ -1133,6 +1176,12 @@ mod tests {
         // As does the restore-panes toggle.
         assert!(!LocalSettings {
             restore_panes_enabled: Some(false),
+            ..Default::default()
+        }
+        .is_empty());
+        // As does the autostart-queued-prompts toggle.
+        assert!(!LocalSettings {
+            autostart_queued_prompts: Some(false),
             ..Default::default()
         }
         .is_empty());

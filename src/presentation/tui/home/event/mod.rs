@@ -242,6 +242,15 @@ pub(super) struct Wiring<'a> {
     /// restart. Called alongside [`save_resume`](Self::save_resume) on a confirmed
     /// quit. [`super::run`] merges them into `state.json`; tests no-op.
     pub save_last_active: &'a mut dyn FnMut(&[SessionLastActive]),
+    /// Auto-start any queued prompt whose session has no live pane, spawning that
+    /// session's agent pane in the background (not attached) with the queued
+    /// prompt as its first message. Called each idle tick so a prompt queued while
+    /// the screen runs — an MCP `session_delegate_issue` / `session_prompt` — is
+    /// picked up without a human opening the pane. Returns one log line per pane it
+    /// started (empty when the feature is off or nothing was queued), which the
+    /// loop appends to the command log. [`super::run`] wires the real pool spawn
+    /// (gated by the `autostart_queued_prompts` setting); tests pass a fake.
+    pub autostart_queued: &'a mut dyn FnMut(&HomeState) -> Vec<String>,
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -361,6 +370,23 @@ fn bump_interaction_epoch(wiring: &mut Wiring) {
     wiring.interaction_epoch = wiring.interaction_epoch.saturating_add(1);
 }
 
+/// Auto-start any session with a queued prompt but no live pane, logging one line
+/// per pane started. Returns whether anything was started, so the loop forces a
+/// repaint (a background spawn changes no key state the skip-paint check would
+/// otherwise notice, and its new badge should show at once). Passed only the
+/// autostart hook — not the whole [`Wiring`] — so it is exercised directly.
+fn apply_autostart(
+    state: &mut HomeState,
+    autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
+) -> bool {
+    let lines = autostart(state);
+    let started = !lines.is_empty();
+    for line in lines {
+        state.log_output(line);
+    }
+    started
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn event_loop(
     term: &Term,
@@ -470,6 +496,12 @@ pub(super) fn event_loop(
         // the watcher path so detached/background sessions get the same immediate
         // sidebar `#N` badges without waiting for a full git re-sync.
         let pr_links_changed = apply_pending_pr_links(&mut state, monitor);
+        // Pick up any prompt queued for a pane-less session (an MCP
+        // `session_delegate_issue` / `session_prompt` made while this screen runs)
+        // and start its agent pane in the background — no human opens it. A started
+        // pane logs a line and forces a repaint so its new sidebar badge shows at
+        // once. A no-op when the feature is off or nothing is queued.
+        force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
         // Flip the local-LLM `chat` menu row on once the background probe confirms
         // it is usable (drained once); until then the 在席 menu simply omits it.
         // Force a repaint so the change is reflected without waiting for a keypress.
@@ -1477,6 +1509,10 @@ pub(crate) fn event_loop_compat(
     // quit in these loop tests does not touch the store.
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    // Auto-starting queued prompts spawns real panes in `super::run`; here it never
+    // starts anything, so the compat-shim loop tests do not touch the pool or the
+    // prompt store. The apply path is covered directly in `apply_autostart` tests.
+    let mut autostart_queued = |_: &HomeState| Vec::<String>::new();
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -1544,6 +1580,7 @@ pub(crate) fn event_loop_compat(
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     // The compat-shim tests do not exercise the local-LLM probe, so a never-filled
     // handle keeps `ai_available` false throughout (matching an unconfigured LLM).

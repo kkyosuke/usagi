@@ -41,6 +41,8 @@ pub enum Field {
     Notifications,
     /// Whether each session's open panes are restored on startup.
     RestorePanes,
+    /// Whether a prompt queued for a pane-less session auto-starts its agent.
+    AutostartQueued,
     AgentCli,
     /// How 在席 (Focus) mode presents a session's runnable commands.
     SessionActionUi,
@@ -60,11 +62,12 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 11] = [
+    pub const ALL: [Field; 12] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::RestorePanes,
+        Field::AutostartQueued,
         Field::AgentCli,
         Field::SessionActionUi,
         Field::KeyScheme,
@@ -81,6 +84,7 @@ impl Field {
             Field::DefaultWorkspace => "Default Workspace",
             Field::Notifications => "Notifications",
             Field::RestorePanes => "Restore Panes",
+            Field::AutostartQueued => "Autostart Queued Prompts",
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
             Field::KeyScheme => "Terminal Keys",
@@ -100,6 +104,8 @@ pub enum LocalField {
     Notifications,
     /// Whether each session's open panes are restored on startup.
     RestorePanes,
+    /// Whether a prompt queued for a pane-less session auto-starts its agent.
+    AutostartQueued,
     /// Which branch new session worktrees are cut from (the detected default, or
     /// a specific branch).
     DefaultBranch,
@@ -117,10 +123,11 @@ pub enum LocalField {
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 8] = [
+    pub const ALL: [LocalField; 9] = [
         LocalField::AgentCli,
         LocalField::Notifications,
         LocalField::RestorePanes,
+        LocalField::AutostartQueued,
         LocalField::DefaultBranch,
         LocalField::BranchSource,
         LocalField::SetupCommands,
@@ -134,6 +141,7 @@ impl LocalField {
             LocalField::AgentCli => "Agent CLI",
             LocalField::Notifications => "Notifications",
             LocalField::RestorePanes => "Restore Panes",
+            LocalField::AutostartQueued => "Autostart Queued Prompts",
             LocalField::DefaultBranch => "Default Branch",
             LocalField::BranchSource => "Branch Source",
             LocalField::SetupCommands => "Setup Commands",
@@ -551,6 +559,9 @@ impl Config {
             Field::RestorePanes => {
                 self.settings.restore_panes_enabled != self.baseline.restore_panes_enabled
             }
+            Field::AutostartQueued => {
+                self.settings.autostart_queued_prompts != self.baseline.autostart_queued_prompts
+            }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
             Field::SessionActionUi => {
                 self.settings.session_action_ui != self.baseline.session_action_ui
@@ -577,6 +588,9 @@ impl Config {
             }
             LocalField::RestorePanes => {
                 local.settings.restore_panes_enabled != local.baseline.restore_panes_enabled
+            }
+            LocalField::AutostartQueued => {
+                local.settings.autostart_queued_prompts != local.baseline.autostart_queued_prompts
             }
             LocalField::DefaultBranch => {
                 local.settings.default_branch != local.baseline.default_branch
@@ -631,6 +645,7 @@ impl Config {
                 .unwrap_or_else(|| "(none)".to_string()),
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::RestorePanes => on_off(self.settings.restore_panes_enabled).to_string(),
+            Field::AutostartQueued => on_off(self.settings.autostart_queued_prompts).to_string(),
             Field::AgentCli => self.settings.agent_cli.display_name().to_string(),
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
@@ -686,6 +701,13 @@ impl Config {
             },
             LocalField::RestorePanes => match local.settings.restore_panes_enabled {
                 None => format!("Global ({})", on_off(self.settings.restore_panes_enabled)),
+                Some(on) => format!("Override: {}", on_off(on)),
+            },
+            LocalField::AutostartQueued => match local.settings.autostart_queued_prompts {
+                None => format!(
+                    "Global ({})",
+                    on_off(self.settings.autostart_queued_prompts)
+                ),
                 Some(on) => format!("Override: {}", on_off(on)),
             },
             // The default branch has no global counterpart: an unset value uses

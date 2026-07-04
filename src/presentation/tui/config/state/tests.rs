@@ -27,17 +27,22 @@ fn field_labels_are_distinct() {
     assert_eq!(Field::LocalLlmModel.label(), "Local LLM Model");
     assert_eq!(Field::EnvVars.label(), "Env Vars");
     assert_eq!(Field::RestorePanes.label(), "Restore Panes");
+    assert_eq!(Field::AutostartQueued.label(), "Autostart Queued Prompts");
     assert_eq!(Field::MascotAnimation.label(), "Mascot Animation");
-    assert_eq!(Field::ALL.len(), 11);
+    assert_eq!(Field::ALL.len(), 12);
     assert_eq!(LocalField::AgentCli.label(), "Agent CLI");
     assert_eq!(LocalField::Notifications.label(), "Notifications");
     assert_eq!(LocalField::RestorePanes.label(), "Restore Panes");
+    assert_eq!(
+        LocalField::AutostartQueued.label(),
+        "Autostart Queued Prompts"
+    );
     assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
     assert_eq!(LocalField::EnvVars.label(), "Env Vars");
     assert_eq!(LocalField::SessionLabels.label(), "Session Labels");
-    assert_eq!(LocalField::ALL.len(), 8);
+    assert_eq!(LocalField::ALL.len(), 9);
 }
 
 #[test]
@@ -72,6 +77,8 @@ fn move_down_advances_through_fields_then_the_save_button_and_wraps() {
     assert_eq!(config.selected_field(), Some(Field::Notifications));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::RestorePanes));
+    config.move_down();
+    assert_eq!(config.selected_field(), Some(Field::AutostartQueued));
     config.move_down();
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
     config.move_down();
@@ -132,6 +139,8 @@ fn move_up_wraps_to_the_save_button() {
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
     config.move_up();
+    assert_eq!(config.selected_field(), Some(Field::AutostartQueued));
+    config.move_up();
     assert_eq!(config.selected_field(), Some(Field::RestorePanes));
     config.move_up();
     assert_eq!(config.selected_field(), Some(Field::Notifications));
@@ -178,6 +187,24 @@ fn restore_panes_field_toggles_and_reports_its_value() {
 }
 
 #[test]
+fn autostart_queued_field_toggles_and_reports_its_value() {
+    let mut config = config_with_workspaces(&[]);
+    select_global(&mut config, Field::AutostartQueued);
+    // On by default.
+    assert_eq!(config.value_of(Field::AutostartQueued), "On");
+    assert!(!config.is_changed(Field::AutostartQueued));
+    // Toggling flips it off (direction is irrelevant for a boolean) and marks it
+    // changed from the saved baseline.
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.value_of(Field::AutostartQueued), "Off");
+    assert!(!config.settings().autostart_queued_prompts);
+    assert!(config.is_changed(Field::AutostartQueued));
+    // Toggling backward flips it back on.
+    assert!(config.cycle_selected(false));
+    assert_eq!(config.value_of(Field::AutostartQueued), "On");
+}
+
+#[test]
 fn mascot_animation_field_toggles_and_reports_its_value() {
     let mut config = config_with_workspaces(&[]);
     while config.selected_field() != Some(Field::MascotAnimation) {
@@ -203,7 +230,8 @@ fn agent_cli_field_cycles_through_each_cli() {
     config.move_down();
     config.move_down();
     config.move_down();
-    config.move_down(); // select Agent CLI (after the Restore Panes row)
+    config.move_down();
+    config.move_down(); // select Agent CLI (after the Restore Panes + Autostart rows)
     assert_eq!(config.selected_field(), Some(Field::AgentCli));
     // Claude by default, cycling forward
     // Claude -> Codex -> sakana.ai -> Gemini -> Antigravity -> Claude.
@@ -233,7 +261,8 @@ fn agent_cli_field_cycles_only_through_installed_agents() {
     config.move_down();
     config.move_down();
     config.move_down();
-    config.move_down(); // select Agent CLI (after the Restore Panes row)
+    config.move_down();
+    config.move_down(); // select Agent CLI (after the Restore Panes + Autostart rows)
     assert_eq!(config.value_of(Field::AgentCli), "Claude");
     // Claude -> sakana.ai -> Claude (Codex and Gemini are not offered).
     assert!(config.cycle_selected(true));
@@ -256,7 +285,8 @@ fn agent_cli_field_keeps_the_saved_value_selectable_when_uninstalled() {
     config.move_down();
     config.move_down();
     config.move_down();
-    config.move_down(); // select Agent CLI (after the Restore Panes row)
+    config.move_down();
+    config.move_down(); // select Agent CLI (after the Restore Panes + Autostart rows)
                         // Untouched, the saved (uninstalled) value is still displayed.
     assert_eq!(config.value_of(Field::AgentCli), "Gemini");
     // Cycling moves to the installed Codex. Once the user deliberately leaves the
@@ -466,33 +496,35 @@ fn rows_render_global_field_values() {
     assert_eq!(rows[0].value, "System");
     assert_eq!(rows[3].label, "Restore Panes");
     assert_eq!(rows[3].value, "On");
-    assert_eq!(rows[4].label, "Agent CLI");
-    assert_eq!(rows[4].value, "Claude");
-    assert_eq!(rows[5].label, "Session Action UI");
-    assert_eq!(rows[5].value, "Menu");
+    assert_eq!(rows[4].label, "Autostart Queued Prompts");
+    assert_eq!(rows[4].value, "On");
+    assert_eq!(rows[5].label, "Agent CLI");
+    assert_eq!(rows[5].value, "Claude");
+    assert_eq!(rows[6].label, "Session Action UI");
+    assert_eq!(rows[6].value, "Menu");
     // The 没入 key scheme defaults to the Ctrl-O prefix.
-    assert_eq!(rows[6].label, "Terminal Keys");
-    assert_eq!(rows[6].value, "Ctrl-O prefix");
-    assert_eq!(rows[7].label, "Mascot Animation");
-    assert_eq!(rows[7].value, "On");
+    assert_eq!(rows[7].label, "Terminal Keys");
+    assert_eq!(rows[7].value, "Ctrl-O prefix");
+    assert_eq!(rows[8].label, "Mascot Animation");
+    assert_eq!(rows[8].value, "On");
     // The runtime is not yet installed: the Local LLM row offers "Install" and
     // the model row is inert (shown as "—") until the runtime is present.
-    assert_eq!(rows[8].label, "Local LLM");
-    assert_eq!(rows[8].value, "Install");
-    assert!(rows[8].action);
-    assert_eq!(rows[9].label, "Local LLM Model");
-    assert_eq!(rows[9].value, "—");
-    assert!(rows[9].disabled);
-    assert_eq!(rows[10].label, "Env Vars");
-    assert_eq!(rows[10].value, "Edit (none)");
-    assert!(rows[10].action);
-    assert!(!rows[10].disabled);
+    assert_eq!(rows[9].label, "Local LLM");
+    assert_eq!(rows[9].value, "Install");
+    assert!(rows[9].action);
+    assert_eq!(rows[10].label, "Local LLM Model");
+    assert_eq!(rows[10].value, "—");
+    assert!(rows[10].disabled);
+    assert_eq!(rows[11].label, "Env Vars");
+    assert_eq!(rows[11].value, "Edit (none)");
+    assert!(rows[11].action);
+    assert!(!rows[11].disabled);
     // The shipped-skill feature row follows the fixed fields: a plain on/off
     // chooser, on by default and neither an action nor disabled.
-    assert_eq!(rows[11].label, "PR Skills");
-    assert_eq!(rows[11].value, "On");
-    assert!(!rows[11].action);
-    assert!(!rows[11].disabled);
+    assert_eq!(rows[12].label, "PR Skills");
+    assert_eq!(rows[12].value, "On");
+    assert!(!rows[12].action);
+    assert!(!rows[12].disabled);
     assert!(rows.iter().all(|r| !r.changed));
 }
 
@@ -792,35 +824,36 @@ fn local_config_with_branches(branches: &[&str]) -> Config {
 fn local_scope_shows_only_the_local_override_rows() {
     let config = local_config();
     assert!(config.local().is_some());
-    // The local scope shows the eight override rows, then the shipped-skill
+    // The local scope shows the nine override rows, then the shipped-skill
     // feature row(s) — no global fixed fields.
-    assert_eq!(config.field_count(), 8 + SkillFeature::ALL.len());
-    assert_eq!(config.save_index(), 8 + SkillFeature::ALL.len());
+    assert_eq!(config.field_count(), 9 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 9 + SkillFeature::ALL.len());
     // The cursor starts on the first local field, not a global one.
     assert_eq!(config.selected_field(), None);
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
     let rows = config.rows();
-    assert_eq!(rows.len(), 8 + SkillFeature::ALL.len());
+    assert_eq!(rows.len(), 9 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Agent CLI");
     assert_eq!(rows[1].label, "Notifications");
     assert_eq!(rows[2].label, "Restore Panes");
-    assert_eq!(rows[3].label, "Default Branch");
-    assert_eq!(rows[4].label, "Branch Source");
-    assert_eq!(rows[5].label, "Setup Commands");
-    assert!(rows[5].action);
-    assert_eq!(rows[5].value, "Edit (none)");
-    assert_eq!(rows[6].label, "Env Vars");
+    assert_eq!(rows[3].label, "Autostart Queued Prompts");
+    assert_eq!(rows[4].label, "Default Branch");
+    assert_eq!(rows[5].label, "Branch Source");
+    assert_eq!(rows[6].label, "Setup Commands");
     assert!(rows[6].action);
     assert_eq!(rows[6].value, "Edit (none)");
+    assert_eq!(rows[7].label, "Env Vars");
+    assert!(rows[7].action);
+    assert_eq!(rows[7].value, "Edit (none)");
     // The session-label override is an action row too; unset it defers to the
     // effective global master (the default 5-label kanban set).
-    assert_eq!(rows[7].label, "Session Labels");
-    assert!(rows[7].action);
-    assert_eq!(rows[7].value, "Edit (global: 5 labels)");
+    assert_eq!(rows[8].label, "Session Labels");
+    assert!(rows[8].action);
+    assert_eq!(rows[8].value, "Edit (global: 5 labels)");
     // The skill feature row falls back to the global value (on) when unset.
-    assert_eq!(rows[8].label, "PR Skills");
-    assert!(rows[8].value.contains("Global"));
-    assert!(rows[8].value.contains("On"));
+    assert_eq!(rows[9].label, "PR Skills");
+    assert!(rows[9].value.contains("Global"));
+    assert!(rows[9].value.contains("On"));
     // Unset overrides display the value they fall back to.
     assert!(rows[0].value.contains("Global"));
     assert!(rows[0].value.contains("Claude"));
@@ -829,12 +862,15 @@ fn local_scope_shows_only_the_local_override_rows() {
     // The restore-panes override also falls back to the global value (On).
     assert!(rows[2].value.contains("Global"));
     assert!(rows[2].value.contains("On"));
+    // The autostart-queued override also falls back to the global value (On).
+    assert!(rows[3].value.contains("Global"));
+    assert!(rows[3].value.contains("On"));
     // The default branch has no global counterpart: unset means "auto".
-    assert!(rows[3].value.contains("Default"));
-    assert!(rows[3].value.contains("auto"));
-    // The branch source likewise shows its default (Remote).
     assert!(rows[4].value.contains("Default"));
-    assert!(rows[4].value.contains("Remote"));
+    assert!(rows[4].value.contains("auto"));
+    // The branch source likewise shows its default (Remote).
+    assert!(rows[5].value.contains("Default"));
+    assert!(rows[5].value.contains("Remote"));
 }
 
 #[test]
@@ -852,6 +888,11 @@ fn local_fields_are_selectable_then_the_save_button() {
     assert_eq!(
         config.selected_local_field(),
         Some(LocalField::RestorePanes)
+    );
+    config.move_down();
+    assert_eq!(
+        config.selected_local_field(),
+        Some(LocalField::AutostartQueued)
     );
     config.move_down();
     assert_eq!(
@@ -1011,7 +1052,7 @@ fn setup_commands_row_opens_a_multiline_editor_and_applies_trimmed_commands() {
         "Edit (2 commands)"
     );
     assert!(config.is_dirty());
-    assert!(config.rows()[5].changed);
+    assert!(config.rows()[6].changed);
 }
 
 #[test]
@@ -1073,7 +1114,7 @@ fn env_vars_row_opens_a_multiline_editor_and_applies_valid_bindings() {
     assert!(!config.local().unwrap().env.contains_key("1BAD"));
     assert_eq!(config.value_of_local(LocalField::EnvVars), "Edit (1 var)");
     assert!(config.is_dirty());
-    assert!(config.rows()[6].changed);
+    assert!(config.rows()[7].changed);
 }
 
 #[test]
@@ -1255,7 +1296,7 @@ fn session_labels_row_opens_an_editor_and_applies_a_sanitized_override() {
         "Edit (2 labels)"
     );
     assert!(config.is_dirty());
-    assert!(config.rows()[7].changed);
+    assert!(config.rows()[8].changed);
 }
 
 #[test]
@@ -1454,6 +1495,29 @@ fn cycling_a_local_restore_panes_override_walks_global_on_off() {
 }
 
 #[test]
+fn cycling_a_local_autostart_queued_override_walks_global_on_off() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::AutostartQueued);
+    // Unset shows the global value it falls back to.
+    assert!(config
+        .value_of_local(LocalField::AutostartQueued)
+        .contains("Global"));
+    // None (follow global) -> On -> Off -> None.
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().autostart_queued_prompts, Some(true));
+    assert!(config
+        .value_of_local(LocalField::AutostartQueued)
+        .contains("Override"));
+    assert!(config.cycle_selected(true));
+    assert_eq!(
+        config.local().unwrap().autostart_queued_prompts,
+        Some(false)
+    );
+    assert!(config.cycle_selected(true));
+    assert_eq!(config.local().unwrap().autostart_queued_prompts, None);
+}
+
+#[test]
 fn editing_a_local_override_marks_the_config_dirty_and_mark_saved_clears_it() {
     let mut config = local_config();
     // The first local field (Agent CLI) is under the cursor from the start.
@@ -1587,12 +1651,16 @@ fn local_field_labels_are_distinct() {
     assert_eq!(LocalField::AgentCli.label(), "Agent CLI");
     assert_eq!(LocalField::Notifications.label(), "Notifications");
     assert_eq!(LocalField::RestorePanes.label(), "Restore Panes");
+    assert_eq!(
+        LocalField::AutostartQueued.label(),
+        "Autostart Queued Prompts"
+    );
     assert_eq!(LocalField::DefaultBranch.label(), "Default Branch");
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
     assert_eq!(LocalField::EnvVars.label(), "Env Vars");
     assert_eq!(LocalField::SessionLabels.label(), "Session Labels");
-    assert_eq!(LocalField::ALL.len(), 8);
+    assert_eq!(LocalField::ALL.len(), 9);
 }
 
 #[test]
