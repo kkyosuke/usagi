@@ -44,8 +44,18 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 ```bash
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test
 ```
+
+- **テストは全件を回さない**。全件 `cargo test` や `cargo llvm-cov`（＝カバレッジ計測）は時間がかかりすぎるため、開発中の反復では**自分が変更した箇所のテストだけ**を絞って回す。
+
+  ```bash
+  # 変更したモジュール・関数に対応するテストだけを指定して回す
+  cargo test <module_path>          # 例: cargo test presentation::tui::sidebar
+  cargo test <test_name>            # 例: cargo test test_render_absence_menu
+  cargo test -p <crate>             # 対象クレートだけ
+  ```
+
+  - 全件テスト・カバレッジ 100% の確認は **pre-push フック（`cargo llvm-cov`）と CI が担う**（[06-conventions.md#品質チェック](../document/06-conventions.md#品質チェックコミットpush-前に必須)）。ローカルで全件を手動実行して待つ必要はない。
 
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
 
