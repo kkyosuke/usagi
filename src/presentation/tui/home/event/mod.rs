@@ -349,13 +349,13 @@ fn click_selects_session(state: &HomeState) -> bool {
 }
 
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
-    match refresh.take() {
-        Some(sessions) => {
-            state.refresh_sessions(sessions);
-            true
-        }
-        None => false,
+    let pending = refresh.take_all();
+    let mut changed = false;
+    for (root, sessions) in pending {
+        state.refresh_sessions_for(&root, sessions);
+        changed = true;
     }
+    changed
 }
 
 fn apply_pending_pr_links(state: &mut HomeState, monitor: &MonitorHandle) -> bool {
