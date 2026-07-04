@@ -157,23 +157,31 @@ impl SessionMcpServer {
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
         let args: CreateArgs = parse_args(arguments)?;
-        // The MCP server runs headless, so a creation failure would otherwise
-        // only travel back to the calling agent and never reach a log file.
-        // Record the full chain — matching the TUI's `session create "<name>"
-        // failed: ...` wording — before surfacing the short message to the
-        // client, so failures stay inspectable in `<data dir>/logs/`.
-        let created = session::create(&self.workspace_root, &args.name).map_err(|e| {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "mcp session_create \"{}\" failed: {e:#}",
-                args.name
-            ));
-            e.to_string()
-        })?;
+        let created = self.create_session(&args.name)?;
         Ok(to_pretty(&json!({
             "name": created.name,
             "root": created.root,
             "worktrees": created.worktrees,
         })))
+    }
+
+    /// Create the session named `name`, returning it as the typed
+    /// [`session::CreatedSession`]. Shared by the `session_create` tool and the
+    /// unified server's `session_delegate_issue`, so the composite can create a
+    /// session without parsing the tool's serialized output back out.
+    ///
+    /// The MCP server runs headless, so a creation failure would otherwise only
+    /// travel back to the calling agent and never reach a log file. The full chain
+    /// — matching the TUI's `session create "<name>" failed: ...` wording — is
+    /// recorded before the short message is surfaced to the client, so failures
+    /// stay inspectable in `<data dir>/logs/`.
+    pub(crate) fn create_session(&self, name: &str) -> Result<session::CreatedSession, String> {
+        session::create(&self.workspace_root, name).map_err(|e| {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "mcp session_create \"{name}\" failed: {e:#}"
+            ));
+            e.to_string()
+        })
     }
 
     fn tool_list(&self) -> Result<String, String> {
@@ -183,20 +191,7 @@ impl SessionMcpServer {
 
     fn tool_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: PromptArgs = parse_args(arguments)?;
-        check_prompt_len("session_prompt", &args.prompt)?;
-        let target = self.find_session(&args.name)?;
-        // Resolve which channel takes the prompt. `auto` asks the backend whether
-        // a live pane exists; the explicit modes force one channel.
-        let channel = match args.mode {
-            PromptMode::Queue => Channel::Queue,
-            PromptMode::Live => Channel::Live,
-            PromptMode::Auto if self.backend.agent_is_live(&target.root) => Channel::Live,
-            PromptMode::Auto => Channel::Queue,
-        };
-        let detail = match channel {
-            Channel::Queue => self.backend.prompt(&target.root, &args.prompt)?,
-            Channel::Live => self.backend.send(&target.root, &args.prompt)?,
-        };
+        let (channel, detail) = self.deliver_prompt(&args.name, &args.prompt, args.mode)?;
         // Report the channel that actually took the prompt, so a caller using
         // `auto` sees whether it reached a running pane or was queued for launch.
         Ok(to_pretty(&json!({
@@ -204,6 +199,34 @@ impl SessionMcpServer {
             "delivered_to": channel.as_str(),
             "detail": detail,
         })))
+    }
+
+    /// Deliver `prompt` to session `name` over the channel chosen by `mode`,
+    /// returning the channel actually used and the backend's confirmation. Shared
+    /// by the `session_prompt` tool and the unified server's
+    /// `session_delegate_issue` (which passes [`PromptMode::Queue`], since a freshly
+    /// created session has no live pane).
+    pub(crate) fn deliver_prompt(
+        &self,
+        name: &str,
+        prompt: &str,
+        mode: PromptMode,
+    ) -> Result<(Channel, String), String> {
+        check_prompt_len("session_prompt", prompt)?;
+        let target = self.find_session(name)?;
+        // Resolve which channel takes the prompt. `auto` asks the backend whether
+        // a live pane exists; the explicit modes force one channel.
+        let channel = match mode {
+            PromptMode::Queue => Channel::Queue,
+            PromptMode::Live => Channel::Live,
+            PromptMode::Auto if self.backend.agent_is_live(&target.root) => Channel::Live,
+            PromptMode::Auto => Channel::Queue,
+        };
+        let detail = match channel {
+            Channel::Queue => self.backend.prompt(&target.root, prompt)?,
+            Channel::Live => self.backend.send(&target.root, prompt)?,
+        };
+        Ok((channel, detail))
     }
 
     fn tool_pr(&self, arguments: Value) -> Result<String, String> {
@@ -306,7 +329,7 @@ struct PromptArgs {
 /// How `session_prompt` chooses between the launch queue and the live pane.
 #[derive(Deserialize, Clone, Copy, Default, PartialEq, Debug)]
 #[serde(rename_all = "lowercase")]
-enum PromptMode {
+pub(crate) enum PromptMode {
     /// Deliver live when a live pane is detected, otherwise queue for launch.
     #[default]
     Auto,
@@ -319,13 +342,13 @@ enum PromptMode {
 /// The channel a prompt was actually delivered over, reported back to the caller
 /// as `delivered_to`.
 #[derive(Clone, Copy)]
-enum Channel {
+pub(crate) enum Channel {
     Queue,
     Live,
 }
 
 impl Channel {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Channel::Queue => "queue",
             Channel::Live => "live",

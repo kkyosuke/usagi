@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::issue::McpServer as IssueServer;
-use super::session::{AgentBackend, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS};
+use super::session::{AgentBackend, PromptMode, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS};
 use super::McpService;
 
 /// The composite-only orchestration tool this server adds on top of the merged
@@ -68,43 +68,31 @@ impl UsagiMcpServer {
     /// need to tweak the prompt or target an existing session.
     fn tool_delegate_issue(&self, arguments: Value) -> Result<String, String> {
         let args: DelegateIssueArgs = super::parse_args(arguments)?;
+        // Drive the sub-servers through their typed helpers (not their serialized
+        // tool output), so the orchestration reuses their logic without parsing
+        // JSON text back out. Each step surfaces the sub-server's own error.
+        //
         // 1. Render the issue as a ready-to-run prompt (errors if it is missing).
-        let rendered = self
-            .issue
-            .call_tool("issue_to_prompt", json!({ "number": args.number }))?;
-        let rendered: Value = serde_json::from_str(&rendered)
-            .map_err(|e| format!("could not read rendered issue prompt: {e}"))?;
-        let prompt = rendered["prompt"]
-            .as_str()
-            .ok_or("rendered issue prompt is missing its `prompt` field")?;
-        let title = rendered["title"].as_str().unwrap_or_default().to_string();
-
+        let rendered = self.issue.render_prompt(args.number)?;
         // 2. Create a fresh session for the issue (default name: issue-<number>).
         //    A duplicate name surfaces the session server's own error.
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
-        let created = self
-            .session
-            .call_tool("session_create", json!({ "name": name }))?;
-        let created: Value = serde_json::from_str(&created)
-            .map_err(|e| format!("could not read created session: {e}"))?;
-
-        // 3. Queue the prompt for that session's first agent launch. A freshly
-        //    created session has no live pane, so the launch channel (queue) is
-        //    always the right one here.
-        self.session.call_tool(
-            "session_prompt",
-            json!({ "name": name, "prompt": prompt, "mode": "queue" }),
-        )?;
+        let created = self.session.create_session(&name)?;
+        // 3. Deliver the prompt. A freshly created session has no live pane, so the
+        //    launch queue is always the right channel here.
+        let (channel, _detail) =
+            self.session
+                .deliver_prompt(&name, &rendered.prompt, PromptMode::Queue)?;
 
         Ok(super::to_pretty(&json!({
-            "issue": args.number,
-            "title": title,
-            "session": name,
-            "root": created.get("root").cloned().unwrap_or(Value::Null),
-            "worktrees": created.get("worktrees").cloned().unwrap_or(Value::Null),
-            "delivered_to": "queue",
+            "issue": rendered.number,
+            "title": rendered.title,
+            "session": created.name,
+            "root": created.root,
+            "worktrees": created.worktrees,
+            "delivered_to": channel.as_str(),
         })))
     }
 }

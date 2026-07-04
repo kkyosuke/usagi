@@ -45,12 +45,22 @@ pub fn call_tool(repo: &Path, name: &str, arguments: Value) -> Result<String, St
 
 fn tool_save(repo: &Path, arguments: Value) -> Result<String, String> {
     let args: SaveArgs = parse_args(arguments)?;
-    // `memory_save` is the single upsert tool (it subsumes a separate update).
-    // First try a partial patch: `update` reads under its own lock and touches
-    // only the fields provided, so an existing memory's unmentioned fields (e.g.
-    // its type) are preserved when the caller updates just the body. Reusing the
-    // usecase's `update`/`save` keeps the write logic single-sourced.
-    let patched = memory::update(
+    // Map every failure (store error or the missing-title error below) to a
+    // tool-facing string in one place, so the upsert body itself stays free of
+    // per-call error closures.
+    save_upsert(repo, args)
+        .map(|saved| to_pretty(&MemoryView::from(&saved)))
+        .map_err(|e| e.to_string())
+}
+
+/// The upsert behind `memory_save`: partially patch an existing memory (leaving
+/// unmentioned fields as-is) or create a new one (which requires a `title`).
+///
+/// It reuses the usecase's `update` (partial patch) and `save` (create) so the
+/// write logic stays single-sourced; `update` returning `None` is the "does not
+/// exist yet" signal that routes to creation.
+fn save_upsert(repo: &Path, args: SaveArgs) -> anyhow::Result<crate::domain::memory::Memory> {
+    if let Some(updated) = memory::update(
         repo,
         &args.name,
         MemoryChanges {
@@ -59,29 +69,23 @@ fn tool_save(repo: &Path, arguments: Value) -> Result<String, String> {
             related: args.related.clone(),
             body: args.body.clone(),
         },
+    )? {
+        return Ok(updated);
+    }
+    // No memory by this name yet: create it. A title is required to open one.
+    let title = args
+        .title
+        .ok_or_else(|| anyhow::anyhow!("`title` is required when creating a new memory"))?;
+    memory::save(
+        repo,
+        NewMemory {
+            name: args.name,
+            title,
+            kind: args.kind.unwrap_or_default(),
+            related: args.related.unwrap_or_default(),
+            body: args.body.unwrap_or_default(),
+        },
     )
-    .map_err(|e| e.to_string())?;
-    let saved = match patched {
-        Some(updated) => updated,
-        // No memory by this name yet: create it. A title is required to open one.
-        None => {
-            let title = args
-                .title
-                .ok_or("`title` is required when creating a new memory")?;
-            memory::save(
-                repo,
-                NewMemory {
-                    name: args.name,
-                    title,
-                    kind: args.kind.unwrap_or_default(),
-                    related: args.related.unwrap_or_default(),
-                    body: args.body.unwrap_or_default(),
-                },
-            )
-            .map_err(|e| e.to_string())?
-        }
-    };
-    Ok(to_pretty(&MemoryView::from(&saved)))
 }
 
 fn tool_get(repo: &Path, arguments: Value) -> Result<String, String> {
