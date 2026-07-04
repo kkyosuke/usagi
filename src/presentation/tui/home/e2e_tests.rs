@@ -91,7 +91,10 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     let landing = plain(&render_frame(ROWS, COLS, &state));
     assert!(landing.contains("usagi"), "title bar names the workspace");
     assert!(landing.contains("main") && landing.contains("feat"));
-    assert!(landing.contains("running"), "the live agent is surfaced");
+    assert!(
+        landing.contains('▶'),
+        "the live agent is surfaced (icon only)"
+    );
     assert!(landing.contains("switch"), "footer reports Switch");
     assert!(
         landing.contains("Pick a session"),

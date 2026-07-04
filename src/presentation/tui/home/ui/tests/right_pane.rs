@@ -604,6 +604,20 @@ fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
     assert!(header.contains("1 agent") && header.contains("2 terminal"));
     // The terminal follows below the reserved tab-strip rows.
     assert!(rows[super::TAB_BAR_ROWS].contains("$ echo hi"));
+
+    // A completed agent keeps the same header placement but reports `done` (done
+    // wins over a stale running flag from the monitor snapshot).
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/run")].into(),
+        running: [PathBuf::from("/repo/run")].into(),
+        done: [PathBuf::from("/repo/run")].into(),
+        ..Default::default()
+    });
+    let done_header =
+        console::strip_ansi_codes(&right_pane_contents(&state, 80, 8)[0]).into_owned();
+    assert!(done_header.contains("feat") && done_header.contains("local"));
+    assert!(done_header.contains("done"));
+    assert!(!done_header.contains("running"));
 }
 
 #[test]
