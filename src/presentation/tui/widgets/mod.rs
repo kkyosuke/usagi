@@ -15,11 +15,11 @@ pub mod text_area;
 pub mod text_input;
 
 pub use rabbit::{
-    done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, multiplying_rabbits,
-    rabbit_height, rabbit_lines, rabbit_lines_at, rabbit_width, running_rabbit,
-    running_rabbit_width, workspace_rabbit, workspace_rabbit_rail, workspace_rabbit_rail_width,
-    workspace_rabbit_reaction, workspace_rabbit_speaking, workspace_rabbit_width, MascotReaction,
-    RabbitMood,
+    done_rabbit, farewell_lines, loading_rabbit, loading_rabbit_timed, loading_screen,
+    multiplying_rabbits, rabbit_height, rabbit_lines, rabbit_lines_at, rabbit_width,
+    running_rabbit, running_rabbit_width, workspace_rabbit, workspace_rabbit_rail,
+    workspace_rabbit_rail_width, workspace_rabbit_reaction, workspace_rabbit_speaking,
+    workspace_rabbit_width, MascotReaction, RabbitMood,
 };
 
 use crate::presentation::theme::{self, Palette};
