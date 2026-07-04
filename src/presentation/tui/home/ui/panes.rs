@@ -593,7 +593,11 @@ fn digits(mut n: usize) -> usize {
 /// changed lines or a longer "ago". A `0` width drops that field for the pane.
 #[derive(Clone, Copy, Default)]
 pub(super) struct DetailCols {
-    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it.
+    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it. Reserved at
+    /// [`TIME_RESERVE_WIDTH`] so the cell keeps a constant width as a session ages
+    /// across the `now` / `Nmin ago` / `Nh ago` buckets — otherwise the label's
+    /// width would wander with the clock, flipping the "drop when narrow" decision
+    /// and shifting the detail line purely with the passage of time.
     time: usize,
     /// Digit width of the `↑N` (ahead) count; 0 = no visible session is ahead.
     ahead: usize,
@@ -655,6 +659,19 @@ fn pr_width(prs: &[PrLink]) -> usize {
 /// badge follows it. A wider count (two+ digits) still grows the column, but the
 /// common appear/disappear no longer moves anything.
 const PR_RESERVE_WIDTH: usize = 3;
+
+/// The freshness column is reserved at (at least) this width on every render — the
+/// display width of the widest label the [`relative_time`] format produces,
+/// `59min ago` (9 columns), which also holds every `Nh ago` / `Nd ago` up to
+/// thousands of days. Unlike the diff / commit / PR fields, which only change when
+/// the user commits or opens a PR, the freshness label's width changes on its own
+/// as the clock advances (`now` → `12min ago` → `1h ago`). Sizing the column to the
+/// live label would let that width wander between frames — flipping the "drop the
+/// freshness first when narrow" decision and shifting the whole detail line purely
+/// with the passage of time (a cumulative layout shift). Holding the slot at a
+/// constant width decouples the layout from the clock, the same anti-shift rule the
+/// PR column follows ([`PR_RESERVE_WIDTH`]).
+const TIME_RESERVE_WIDTH: usize = 9;
 
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
@@ -728,6 +745,12 @@ fn detail_cols(
     // Always hold the PR slot open (even when no visible session has a PR) so a
     // session gaining or losing its last PR never shifts the diff to its left.
     cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
+    // Hold the freshness slot at a constant width so the label growing or shrinking
+    // as a session ages (`now` → `12min ago` → `1h ago`) never changes the column —
+    // otherwise the passing clock alone would flip the trim decision below and shift
+    // the detail line. The per-session max above still wins for the (unreachable in
+    // practice) label wider than the reserve.
+    cols.time = cols.time.max(TIME_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);

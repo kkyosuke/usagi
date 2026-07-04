@@ -882,6 +882,52 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
 }
 
 #[test]
+fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages() {
+    // A single running session in a pane just wide enough that the freshness label
+    // sits at the trim boundary: when its width is sized to the live label, the
+    // young `now` (3 cols) fits but the aged `12min ago` (9 cols) tips the cluster
+    // over and drops the field — the detail line jumping purely because the clock
+    // advanced. Reserving a constant width for the column decouples the decision
+    // from the clock, so the same layout renders at every age.
+    let base = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut w = worktree(Some("feature"), false, BranchStatus::Local);
+    w.path = PathBuf::from("/repo/feature");
+    w.updated_at = base;
+    let agent = HashSet::from([PathBuf::from("/repo/feature")]);
+    let render_at = |now| {
+        let lines = left_pane(
+            &list_with(vec![w.clone()]),
+            &agent, // live
+            &agent, // running — the widest agent label, `▶ running`
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
+            24,
+            5,
+            false,
+            Sidebar::Full,
+            now,
+            None,
+        );
+        console::strip_ansi_codes(&lines[4]).into_owned()
+    };
+    let young = render_at(base + chrono::Duration::seconds(30)); // `now`
+    let aged = render_at(base + chrono::Duration::minutes(12)); // `12min ago`
+    let shows_freshness = |detail: &str| detail.contains("ago") || detail.contains("now");
+    assert_eq!(
+        shows_freshness(&young),
+        shows_freshness(&aged),
+        "the freshness field must not appear/disappear as the session ages:\n\
+         young={young:?}\naged={aged:?}"
+    );
+    // The running agent's label keeps the same room at both ages.
+    assert!(young.contains("running") && aged.contains("running"));
+}
+
+#[test]
 fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
     let list = list_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
