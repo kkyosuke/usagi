@@ -28,18 +28,33 @@ const MAX_OP_STDERR_BYTES: usize = 4 * 1024;
 /// and reference but never the resolved secret.
 pub fn resolve_workspace_env(workspace_root: &Path) -> BTreeMap<String, String> {
     let settings = crate::usecase::settings::effective_for(workspace_root).unwrap_or_default();
-    resolve_env(&settings, &OpCliResolver)
+    let resolver = OpCliResolver {
+        service_account_token: service_account_token(),
+    };
+    resolve_env(&settings, &resolver)
 }
 
-struct OpCliResolver;
+/// The 1Password service account token stored by `usagi op login`, if any.
+///
+/// Best-effort: when it is absent (or the keychain cannot be read) `op read`
+/// falls back to whatever ambient authentication `op` already has (an `op signin`
+/// session or an externally provided `OP_SERVICE_ACCOUNT_TOKEN`).
+fn service_account_token() -> Option<String> {
+    use crate::infrastructure::secret_store::{SystemSecretStore, OP_SERVICE_ACCOUNT_TOKEN_KEY};
+    SystemSecretStore.get(OP_SERVICE_ACCOUNT_TOKEN_KEY)
+}
+
+struct OpCliResolver {
+    service_account_token: Option<String>,
+}
 
 impl SecretResolver for OpCliResolver {
     fn read(&self, reference: &str) -> Result<String, String> {
-        op_read(reference)
+        op_read(reference, self.service_account_token.as_deref())
     }
 }
 
-fn op_read(reference: &str) -> Result<String, String> {
+fn op_read(reference: &str, service_account_token: Option<&str>) -> Result<String, String> {
     let mut command = Command::new("op");
     command
         .arg("read")
@@ -48,6 +63,11 @@ fn op_read(reference: &str) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Supplied through the environment, not a CLI argument, so the token never
+    // appears in process listings.
+    if let Some(token) = service_account_token {
+        command.env("OP_SERVICE_ACCOUNT_TOKEN", token);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to start op: {e}"))?;

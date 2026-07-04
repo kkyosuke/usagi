@@ -289,6 +289,11 @@ enum Commands {
         #[command(subcommand)]
         command: usagi::presentation::cli::memory::MemoryCommand,
     },
+    /// Store the 1Password credential used to resolve workspace `op://` env vars
+    Op {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::op::OpCommand,
+    },
     /// Run the local LLM MCP server over stdio (for AI agents to offload work)
     ///
     /// Hidden from the CLI: launched by AI agents, not invoked by hand.
@@ -369,6 +374,19 @@ fn main() -> anyhow::Result<()> {
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
+        Commands::Op { command } => {
+            let mut stdout = std::io::stdout();
+            usagi::presentation::cli::op::run(
+                command,
+                &usagi::infrastructure::secret_store::SystemSecretStore,
+                Some(Box::new(|| {
+                    console::Term::stderr()
+                        .read_secure_line()
+                        .map_err(Into::into)
+                })),
+                &mut stdout,
+            )
+        }
         Commands::LlmMcp { model } => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
@@ -422,6 +440,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Init { .. } => Some("init"),
         Commands::Issue { .. } => Some("issue"),
         Commands::Memory { .. } => Some("memory"),
+        Commands::Op { .. } => Some("op"),
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
         Commands::Update { .. } => Some("update"),
