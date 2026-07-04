@@ -168,6 +168,48 @@ fn workspace_root_for_session_honours_the_workspace_qualifier() {
 }
 
 #[test]
+fn group_value_type_carries_each_workspace_root() {
+    use std::path::Path;
+    // The root now lives on the `WorkspaceGroup` value type: the primary's is the
+    // injected root, each extra group's is its own, and they survive a re-sync.
+    let state = united_state();
+    assert_eq!(state.list().groups()[0].root_path(), Path::new("/usagi"));
+    assert_eq!(state.list().groups()[1].root_path(), Path::new("/wsB"));
+    // The legacy single-workspace accessor delegates to the primary group.
+    assert_eq!(state.root_path(), Path::new("/usagi"));
+}
+
+#[test]
+fn ctrl_caret_jump_back_disambiguates_same_named_sessions_across_groups() {
+    // Two workspaces each hold a session named "shared"; the Ctrl-^ jump-back
+    // must return to the exact one left, not the first same-named match.
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main"), session("shared")]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![session("shared")],
+    }]);
+    // Flat rows: 0 usagi root, 1 main, 2 shared(A), 3 wsB root, 4 shared(B).
+    assert_eq!(state.list().session_count(), 5);
+    assert_eq!(state.list().refs().len(), 5);
+
+    // Focus wsB's "shared" (row 4), then focus the primary's "main" (row 1), so the
+    // row left behind is wsB's "shared".
+    state.enter_focus(4);
+    state.enter_focus(1);
+    // Ctrl-^ returns to wsB's "shared" at row 4 — not the primary's at row 2 that a
+    // bare-name lookup would return first.
+    assert_eq!(state.previous_session_row(), Some(4));
+
+    // A background re-sync of the primary keeps the qualified jump target intact.
+    state.refresh_sessions(vec![session("main"), session("shared")]);
+    assert_eq!(state.previous_session_row(), Some(4));
+}
+
+#[test]
 fn removable_session_names_qualify_in_unite_mode() {
     // Single-workspace mode offers plain session names.
     let mut state = HomeState::new("usagi", Vec::new(), None);
