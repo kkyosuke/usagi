@@ -29,6 +29,7 @@ fn set_extra_groups_stacks_other_workspaces_below_the_primary() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![session("b1")],
+        issues: Vec::new(),
     }]);
     assert!(state.is_united());
     assert_eq!(state.list().group_count(), 2);
@@ -58,6 +59,7 @@ fn united_state() -> HomeState {
         root_path: PathBuf::from("/wsB"),
         root_note: Some("b note".to_string()),
         sessions: vec![session("b1")],
+        issues: Vec::new(),
     }]);
     state
 }
@@ -74,6 +76,7 @@ fn add_and_remove_extra_groups_drive_unite_mode() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![session("b1")],
+        issues: Vec::new(),
     };
     // Adding a workspace enters unite mode.
     assert!(state.add_extra_group(wsb()));
@@ -88,6 +91,7 @@ fn add_and_remove_extra_groups_drive_unite_mode() {
         root_path: PathBuf::from("/usagi"),
         root_note: None,
         sessions: Vec::new(),
+        issues: Vec::new(),
     }));
     assert_eq!(state.list().group_count(), 2);
 
@@ -116,9 +120,78 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
         root_path: PathBuf::from("/wsC"),
         root_note: None,
         sessions: Vec::new(),
+        issues: Vec::new(),
     }]);
     state.switch_select(2); // wsC root (primary root 0, main 1, wsC root 2)
     assert_eq!(state.selected_root_note(), None);
+}
+
+#[test]
+fn selected_workspace_name_follows_the_cursor_group() {
+    // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1.
+    let mut state = united_state();
+    state.switch_select(0); // primary root
+    assert_eq!(state.selected_workspace_name(), "usagi");
+    state.switch_select(1); // primary session
+    assert_eq!(state.selected_workspace_name(), "usagi");
+    state.switch_select(2); // the extra group's root
+    assert_eq!(state.selected_workspace_name(), "wsB");
+    state.switch_select(3); // the extra group's session
+    assert_eq!(state.selected_workspace_name(), "wsB");
+    // A single-workspace screen always reports the primary.
+    let solo = HomeState::new("solo", Vec::new(), None);
+    assert_eq!(solo.selected_workspace_name(), "solo");
+}
+
+#[test]
+fn issue_command_scopes_to_the_cursor_group() {
+    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
+    let ts = Utc::now();
+    let issue = |number: u32, title: &str| Issue {
+        number,
+        title: title.to_string(),
+        status: IssueStatus::Todo,
+        priority: IssuePriority::Medium,
+        labels: vec![],
+        dependson: vec![],
+        related: vec![],
+        parent: None,
+        milestone: None,
+        created_at: ts,
+        updated_at: ts,
+        body: String::new(),
+    };
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/usagi");
+    state.restore_sessions(vec![session("main")]);
+    state.set_issues(vec![issue(1, "primary-task")]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![session("b1")],
+        issues: vec![issue(9, "extra-task")],
+    }]);
+
+    // Cursor on the primary group: `issue list` surfaces the primary's issues.
+    state.switch_select(1); // primary session "main"
+    for c in "issue".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    let modal = state.text_modal().expect("issue opens a text modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("primary-task")));
+    assert!(!modal.lines.iter().any(|l| l.text.contains("extra-task")));
+
+    // Cursor in the extra group: the same command now scopes to its issues.
+    state.switch_select(3); // extra group session "b1"
+    for c in "issue".chars() {
+        state.push_char(c);
+    }
+    state.submit();
+    let modal = state.text_modal().expect("issue opens a text modal");
+    assert!(modal.lines.iter().any(|l| l.text.contains("extra-task")));
+    assert!(!modal.lines.iter().any(|l| l.text.contains("primary-task")));
 }
 
 #[test]

@@ -229,7 +229,12 @@ fn run(keys: Vec<io::Result<Key>>, state: HomeState) -> Result<Outcome> {
 
 /// Run the loop with all-default callbacks but a real `workspace_root`, so the
 /// `preview` command's file read resolves against an on-disk directory.
-fn run_at(keys: Vec<io::Result<Key>>, state: HomeState, root: &Path) -> Result<Outcome> {
+fn run_at(keys: Vec<io::Result<Key>>, mut state: HomeState, root: &Path) -> Result<Outcome> {
+    // In production the primary workspace's root path and the wiring's
+    // `workspace_root` are the same directory, so mirror that here: the env editor
+    // (and other cursor-group-scoped commands) resolve their target from the
+    // state's root path, which must match `root` for the on-disk assertions.
+    state.set_root_path(root);
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -1128,6 +1133,7 @@ fn unite_add_and_remove_run_through_the_palette() {
                 root_path: PathBuf::from("/wsB"),
                 root_note: None,
                 sessions: Vec::new(),
+                issues: Vec::new(),
             })
         } else {
             Err(format!("no workspace named \"{name}\""))
@@ -1218,6 +1224,7 @@ fn selected_dir_roots_at_the_cursor_groups_workspace() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: Vec::new(),
+        issues: Vec::new(),
     }]);
     // The primary group's root row uses the screen's base workspace root.
     state.switch_select(0);

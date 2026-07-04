@@ -455,6 +455,7 @@ fn open_remove_modal_lists_all_united_sessions_with_workspace_prefixes() {
         root_path: "/repo/tools".into(),
         root_note: None,
         sessions: vec![session_record("alpha", 1), session_record("beta", 1)],
+        issues: Vec::new(),
     }]);
 
     state.open_remove_modal(false);

@@ -172,9 +172,11 @@ pub(super) fn palette_key(
                 // `env`: open the workspace-env editor as an overlay *over* the
                 // palette (the palette stayed open — `OpenEnvEditor` does not
                 // close it), so saving / cancelling returns to the Overview. Seed
-                // it from the workspace's current bindings.
+                // it from the cursor group's workspace bindings (統合/unite mode
+                // edits whichever workspace the cursor is in, not just the primary).
                 Effect::OpenEnvEditor => {
-                    let env = crate::usecase::settings::load_local(wiring.workspace_root)
+                    let root = state.selected_workspace_root();
+                    let env = crate::usecase::settings::load_local(&root)
                         .unwrap_or_default()
                         .env;
                     state.open_env_editor(env);
@@ -610,20 +612,23 @@ pub(super) fn note_editor_key(
 /// overrides), and closes back to the Overview; `Esc` cancels; every other key
 /// edits the multi-line `NAME=op://…` buffer in place. Saving touches the
 /// settings file, so this is a handler rather than inline in the loop.
-pub(super) fn env_editor_key(state: &mut HomeState, key: Key, wiring: &mut Wiring) {
+pub(super) fn env_editor_key(state: &mut HomeState, key: Key) {
     // Only entered while the env editor is open (the loop guards on
     // `env_editor().is_some()`), so the accessors below always resolve.
     match key {
         // `Ctrl-S` saves the bindings and returns to the palette.
         Key::Char(CTRL_S) => {
+            // The cursor cannot move while the editor captures the keyboard, so
+            // this resolves to the same workspace the editor was seeded from
+            // (統合/unite mode: the cursor group's workspace, not just the primary).
+            let root = state.selected_workspace_root();
             let env = state
                 .confirm_env_editor()
                 .expect("env editor open while editing");
-            let root = wiring.workspace_root;
             // Read-modify-write so the workspace's other local overrides survive.
-            let mut settings = crate::usecase::settings::load_local(root).unwrap_or_default();
+            let mut settings = crate::usecase::settings::load_local(&root).unwrap_or_default();
             settings.env = env;
-            match crate::usecase::settings::save_local(root, &settings) {
+            match crate::usecase::settings::save_local(&root, &settings) {
                 Ok(()) => state.log_output("Saved workspace env 󰤇".to_string()),
                 Err(e) => state.log_error(format!("Failed to save env: {e}")),
             }

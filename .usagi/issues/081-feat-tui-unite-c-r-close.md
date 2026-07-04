@@ -1,14 +1,14 @@
 ---
 number: 81
 title: feat(tui): uniteスコープ解決 — c/r/close・コマンドパレットをカーソルグループ基準に
-status: in-progress
+status: done
 priority: medium
 labels: [feat, tui]
 dependson: [80]
 related: []
 parent: 77
 created_at: 2026-06-28T00:08:28.759963+00:00
-updated_at: 2026-06-28T02:36:29.764529+00:00
+updated_at: 2026-07-04T05:15:42.533230+00:00
 ---
 
 親 #77 のフェーズ4。ワークスペーススコープのコマンドを統合対応に。
