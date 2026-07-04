@@ -224,6 +224,12 @@ impl Agent for ClaudeAgent {
         // most recent conversation in the worktree; placed right after the program
         // name so it reads like a plain `claude -c` with usagi's wiring appended.
         let resume_flag = if resume { "--continue " } else { "" };
+        // An explicit model rides in as Claude's `--model`; absent, Claude uses its
+        // own configured default. Escaped like every other wiring value.
+        let model_flag = match wiring.model.as_deref() {
+            Some(model) => format!("--model {} ", shell_single_quote(model)),
+            None => String::new(),
+        };
         // A queued prompt rides along as Claude's positional query, so the agent
         // opens interactively already working on it. Placed last so it is the
         // trailing argument.
@@ -235,7 +241,7 @@ impl Agent for ClaudeAgent {
         let system_prompt = shell_single_quote(&system_prompt);
         let hooks = shell_single_quote(&hooks);
         format!(
-            "claude {resume_flag}--mcp-config {mcp_config} \
+            "claude {resume_flag}{model_flag}--mcp-config {mcp_config} \
              --append-system-prompt {system_prompt} \
              --settings {hooks}{prompt_arg}"
         )
@@ -252,7 +258,13 @@ impl Agent for ClaudeAgent {
         let mcp_config = mcp_config_json(wiring.local_llm_model.as_deref(), &wiring.usagi_bin);
         let mcp_config = shell_single_quote(&mcp_config);
         let prompt = shell_single_quote(prompt);
-        format!("claude -p {prompt} --dangerously-skip-permissions --mcp-config {mcp_config}")
+        let model_flag = match wiring.model.as_deref() {
+            Some(model) => format!("--model {} ", shell_single_quote(model)),
+            None => String::new(),
+        };
+        format!(
+            "claude -p {prompt} {model_flag}--dangerously-skip-permissions --mcp-config {mcp_config}"
+        )
     }
 
     fn has_resumable_session(&self, dir: &Path) -> bool {
@@ -321,7 +333,25 @@ mod tests {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
+            model: None,
         }
+    }
+
+    #[test]
+    fn launch_command_renders_the_model_flag_only_when_a_model_is_set() {
+        // Default (no model): Claude is launched without `--model`, on its own
+        // configured default.
+        let plain = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!plain.contains("--model"), "{plain}");
+
+        // With a model set on the wiring, it rides in as Claude's `--model`, and
+        // headless launches carry it too.
+        let mut w = wiring("usagi", None);
+        w.model = Some("opus".to_string());
+        let launch = ClaudeAgent::new().launch_command(&w, false, None);
+        assert!(launch.contains("--model 'opus'"), "{launch}");
+        let headless = ClaudeAgent::new().headless_command(&w, "clean up");
+        assert!(headless.contains("--model 'opus'"), "{headless}");
     }
 
     #[test]

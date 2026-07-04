@@ -696,6 +696,11 @@ impl Settings {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: self.local_llm.enabled.then(|| self.local_llm.model.clone()),
+            // No agent-model source yet: launch each CLI on its configured
+            // default. The adapters render `wiring.model` when it is `Some`, so
+            // wiring a model in later (a setting or a launch-time argument) is a
+            // change here alone.
+            model: None,
         }
     }
 }
@@ -1226,6 +1231,9 @@ mod tests {
         let off = settings.agent_wiring("/opt/usagi/bin/usagi");
         assert_eq!(off.usagi_bin, "/opt/usagi/bin/usagi");
         assert_eq!(off.local_llm_model, None);
+        // No agent-model source yet: the wiring leaves the agent CLI on its own
+        // default. The adapters render this when it is `Some`.
+        assert_eq!(off.model, None);
 
         // Enabled: the configured model rides along for the adapter to wire in.
         settings.local_llm.enabled = true;
