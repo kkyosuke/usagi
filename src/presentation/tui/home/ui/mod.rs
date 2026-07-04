@@ -627,13 +627,24 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // right of the divider) rather than tucked into the top-right corner, so
         // the multiplying usagi read as "this pane is coming up" right where the
         // new terminal / agent is about to paint.
+        let (start, rows) = if state
+            .terminal_tabs()
+            .map_or(false, |s| !s.labels.is_empty())
+        {
+            (
+                body_start + TAB_BAR_ROWS,
+                body_rows.saturating_sub(TAB_BAR_ROWS),
+            )
+        } else {
+            (body_start, body_rows)
+        };
         widgets::overlay_region_centered(
             &mut lines,
             width,
             left_w + SEP_WIDTH,
             right_w,
-            body_start,
-            body_rows,
+            start,
+            rows,
             &loading_block,
         );
     } else if !state.tasks().is_empty() {

@@ -3332,6 +3332,16 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // choices would show through while the spawn blocks. Return an empty pane of
     // the right height and let the overlay own the whole surface.
     if state.loading().is_some() {
+        if let Some(tabs) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) {
+            let mut lines = Vec::with_capacity(rows);
+            let header = active_session_header(state);
+            let mut head = header_tab_rows(header, Some(tabs), right_w);
+            head.resize(super::TAB_BAR_ROWS, String::new());
+            lines.extend(head);
+            let body = rows.saturating_sub(lines.len());
+            lines.extend(vec![String::new(); body]);
+            return lines;
+        }
         return vec![String::new(); rows];
     }
     // The Markdown preview, when open, takes over the right pane regardless of
