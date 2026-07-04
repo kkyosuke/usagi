@@ -29,6 +29,19 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `usagi op login` stores the 1Password service account token in the OS-native
+# secret store via the cross-platform `keyring` crate: Apple Keychain on macOS,
+# the Windows Credential Manager on Windows, and the Linux kernel keyutils store
+# on Linux (no libdbus/libsecret system dependency).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["linux-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
 [dev-dependencies]
 tempfile = "3"
 portable-pty = "0.9.0"
