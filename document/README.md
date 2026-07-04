@@ -29,6 +29,15 @@
 | 4 | [design/04-config.md](design/04-config.md) | 設定画面（Config） |
 | 5 | [design/home/README.md](design/home/README.md) | ホーム画面（Home） |
 
+### 設計提案 — [proposals/](proposals/README.md)
+
+未実装の運用モデル・機構の設計判断を記録する（正本 spec とは分離。詳細は [proposals/README.md](proposals/README.md)）。
+
+| # | ドキュメント | 内容 |
+|---|---|---|
+| — | [proposals/README.md](proposals/README.md) | 設計提案の位置づけと一覧 |
+| 1 | [proposals/01-root-orchestration.md](proposals/01-root-orchestration.md) | 自律オーケストレーション運用モデル（root＝オーケストレーション専任・変更は必ず session） |
+
 ### データ永続化 — [data/](data/README.md)
 
 | # | ドキュメント | 層 |
