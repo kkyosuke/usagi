@@ -857,8 +857,7 @@ fn focus_menu_close_picker_runs_the_selected_close_action() {
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // expand close picker (safe close selected)
     keys.push(Ok(Key::ArrowDown)); // close -> close --force
-    keys.push(Ok(Key::Enter)); // close --force -> confirmation modal
-    keys.push(Ok(Key::Char('y'))); // confirm the discard -> Switch
+    keys.push(Ok(Key::Enter)); // run close --force -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }

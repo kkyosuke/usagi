@@ -719,28 +719,6 @@ pub(super) fn quit_confirm_frame(raw_height: usize, raw_width: usize, live: usiz
     widgets::render_modal(raw_height, raw_width, "Quit usagi?", INNER, &body)
 }
 
-/// Builds the centred `close --force` confirmation modal. It names the session
-/// whose uncommitted work will be discarded, so the destructive delete is a
-/// deliberate `y` rather than a single stray keystroke.
-pub(super) fn close_confirm_frame(raw_height: usize, raw_width: usize, name: &str) -> Vec<String> {
-    // Wide enough for the longest fixed body line ("Discard uncommitted changes and
-    // delete it?" = 43 columns) plus room for a long session name on its own line.
-    const INNER: usize = 46;
-    // Clip the name before styling so the `Session "…"` line always fits INNER
-    // (the wrapper is 10 columns), rather than relying on a mid-SGR box clip.
-    let name = widgets::clip_to_width(name, INNER - 10);
-    let body = vec![
-        style(format!("Session \"{name}\"")).dim().to_string(),
-        String::new(),
-        style("Discard uncommitted changes and delete it?").to_string(),
-        String::new(),
-        style("y / Enter: discard   n / Esc: cancel")
-            .dim()
-            .to_string(),
-    ];
-    widgets::render_modal(raw_height, raw_width, "Close (force)", INNER, &body)
-}
-
 /// Builds the centred update-confirmation modal, raised by clicking the sidebar
 /// mascot while it announces an available release. `latest` is the version that
 /// would be installed; confirming re-runs the install script to replace the

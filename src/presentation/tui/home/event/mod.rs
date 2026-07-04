@@ -315,7 +315,6 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
 fn click_selects_session(state: &HomeState) -> bool {
     matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
-        && state.close_confirm().is_none()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
@@ -865,23 +864,6 @@ pub(super) fn event_loop(
             continue;
         }
 
-        // The `close --force` confirmation captures every key while open: `y` /
-        // `Enter` discards the focused session's uncommitted work and deletes it;
-        // `n` / `Esc` (and the quit chords, which only cancel here) drop the
-        // pending close and leave the session untouched.
-        if state.close_confirm().is_some() {
-            match key {
-                Key::Char('y') | Key::Char('Y') | Key::Enter => {
-                    handlers::confirm_focus_close(&mut state, wiring);
-                }
-                Key::Char('n') | Key::Char('N') | Key::Escape | Key::CtrlC | Key::Char(CTRL_Q) => {
-                    state.take_close_confirm();
-                }
-                _ => {}
-            }
-            continue;
-        }
-
         // `Ctrl-C` closes the app from anywhere on the home screen. Quitting
         // would drop any session whose shell / agent is still running, so when
         // one is live we raise the quit-confirmation modal first instead of
@@ -1244,7 +1226,6 @@ fn mascot_clickable(state: &HomeState) -> bool {
     matches!(state.mode(), Mode::Switch | Mode::Focus)
         && !state.quit_confirm()
         && !state.update_confirm()
-        && state.close_confirm().is_none()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()

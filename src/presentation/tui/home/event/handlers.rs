@@ -1054,29 +1054,6 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
         state.log_error("the root row is the workspace and cannot be closed");
         return;
     }
-    // `close --force` discards uncommitted work, so it never fires on a single
-    // keystroke: raise the confirmation modal and dispatch only once confirmed
-    // (see [`confirm_focus_close`]). The safe `close` dispatches immediately —
-    // the usecase refuses it when the worktree is dirty.
-    if force {
-        state.open_close_confirm(name);
-        return;
-    }
-    dispatch_session_close(state, wiring, name, false);
-}
-
-/// Confirm the pending `close --force`: discard the focused session's uncommitted
-/// work and delete it. Called from the confirmation modal's `y` / `Enter`; a
-/// no-op when nothing is pending.
-pub(super) fn confirm_focus_close(state: &mut HomeState, wiring: &mut Wiring) {
-    if let Some(name) = state.take_close_confirm() {
-        dispatch_session_close(state, wiring, name, true);
-    }
-}
-
-/// Dispatch the background removal for `name` and yield 在席 to the base 切替.
-/// Shared by the immediate safe `close` and the confirmed `close --force`.
-fn dispatch_session_close(state: &mut HomeState, wiring: &mut Wiring, name: String, force: bool) {
     let root = state.workspace_root_for_session(None, &name);
     state.set_op_target(root.clone());
     let focus = state
