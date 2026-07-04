@@ -3,8 +3,9 @@ use super::*;
 #[test]
 fn focus_menu_moves_and_runs_terminal_via_enter() {
     // Switch -> focus "main" (idle, so just Focus). The menu lists its commands
-    // in the fixed order (agent, terminal, diff, close) and highlights "agent" by
-    // default; move down once to "terminal", then Enter runs it (attaches).
+    // in alphabetical order (agent, close, diff, terminal) and highlights "agent"
+    // by default; move down to "terminal" (the last row), then Enter runs it
+    // (attaches).
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push((d.to_path_buf(), a));
@@ -16,7 +17,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     keys.push(Ok(Key::Enter)); // Switch
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
-    keys.push(Ok(Key::Char('j'))); // agent -> terminal
+    keys.push(Ok(Key::Char('k'))); // agent wraps up to "terminal" (the last row)
     keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -248,10 +249,11 @@ impl crate::presentation::tui::home::command::Command for MenuOnlyTestCommand {
 #[test]
 fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
     // A Session-scope command registered without a `run_focus_command` arm appears
-    // in the 在席 menu (ranked last), but Enter on it must not silently launch the
-    // default agent — the catch-all just logs and stays put. With the local LLM
-    // unavailable the menu lists agent (0), terminal (1), diff (2), close (3), zzz
-    // (4); ArrowUp from the default "agent" wraps straight onto "zzz".
+    // in the 在席 menu (sorted alphabetically, so `zzz` lands last), but Enter on
+    // it must not silently launch the default agent — the catch-all just logs and
+    // stays put. With the local LLM unavailable the menu lists agent (0), close
+    // (1), diff (2), terminal (3), zzz (4); ArrowUp from the default "agent" wraps
+    // straight onto "zzz".
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -545,7 +547,7 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     let mut tab_op = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0usize);
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat -> ToFocus: menu floats over the pane tab
-    keys.push(Ok(Key::ArrowDown)); // menu cursor agent -> terminal (cancels the re-attach arming)
+    keys.push(Ok(Key::ArrowUp)); // menu cursor agent wraps up to terminal (cancels the re-attach arming)
     keys.push(Ok(Key::Enter)); // run terminal: a fresh pane -> Closed -> 在席 on "+ new"
     keys.push(Ok(Key::Escape)); // discard "+ new" -> the pane's preview
     keys.push(Ok(Key::Escape)); // 在席 -> 切替
@@ -1043,13 +1045,13 @@ fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     };
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
-    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to terminal (the last row)
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker, default open
     keys.push(Ok(Key::Enter)); // open = embedded pane/tab
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker again
     keys.push(Ok(Key::ArrowDown)); // open -> new
-    keys.push(Ok(Key::Enter)); // new = native terminal, stay in Focus
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // new = native terminal, then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, sample_state(), &mut open, &mut open_external).unwrap(),
@@ -1079,8 +1081,8 @@ fn focus_prompt_terminal_new_opens_native_terminal() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // native terminal, then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1099,8 +1101,8 @@ fn focus_prompt_terminal_new_reports_native_terminal_errors() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // native terminal (errors), then leaves 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // Switch -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1112,9 +1114,7 @@ fn focus_prompt_terminal_new_reports_native_terminal_errors() {
 fn focus_menu_close_picker_runs_the_selected_close_action() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
-    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
-    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
-    keys.push(Ok(Key::ArrowDown)); // diff -> close
+    keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // expand close picker (safe close selected)
     keys.push(Ok(Key::ArrowDown)); // close -> close --force
     keys.push(Ok(Key::Enter)); // run close --force -> Switch

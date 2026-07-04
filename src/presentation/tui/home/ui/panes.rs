@@ -603,8 +603,8 @@ pub(super) struct DetailCols {
     added: usize,
     removed: usize,
     /// Display width of the `<icon> <count>` PR badge (the glyph, a space, and the
-    /// widest count's digits); 0 = no visible session has a PR, so the column is
-    /// dropped.
+    /// widest count's digits). Reserved at [`PR_RESERVE_WIDTH`] even when no visible
+    /// session has a PR, so the column never collapses and shifts the diff beside it.
     pr: usize,
 }
 
@@ -621,8 +621,9 @@ pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
 /// the badges line up down the list. Folding several PRs into one count keeps the
 /// detail line from being crowded out by a long `#442 #447 …` run (the full list is
 /// one badge click away; see [`pr_popup_placement`]). A row with no PR fills the
-/// same width with blanks, holding the column. `width` is 0 (and the cell omitted)
-/// when no visible session carries a PR.
+/// same width with blanks, holding the column — which stays reserved
+/// ([`PR_RESERVE_WIDTH`]) even when no visible session has a PR, so the column never
+/// collapses and shifts the diff beside it.
 fn pr_cell(prs: &[PrLink], width: usize) -> String {
     if prs.is_empty() {
         return " ".repeat(width);
@@ -644,6 +645,16 @@ fn pr_width(prs: &[PrLink]) -> usize {
     // icon (1 column) + space + the count's digits.
     2 + digits(prs.len())
 }
+
+/// The PR column is reserved at (at least) this width on every render — the glyph,
+/// a space, and a single-digit count — even when no visible session currently
+/// carries a PR. Holding the slot open keeps the `+N -M` diff (and the freshness /
+/// commit fields to its left) from shifting right when a session gains or loses its
+/// last PR: reserving space for content that may appear is the sidebar's standing
+/// rule against layout shift (the note and status columns do the same), and the PR
+/// badge follows it. A wider count (two+ digits) still grows the column, but the
+/// common appear/disappear no longer moves anything.
+const PR_RESERVE_WIDTH: usize = 3;
 
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
@@ -714,6 +725,9 @@ fn detail_cols(
         // The widest `<icon> <count>` PR badge across the visible sessions.
         cols.pr = cols.pr.max(*pr_w);
     }
+    // Always hold the PR slot open (even when no visible session has a PR) so a
+    // session gaining or losing its last PR never shifts the diff to its left.
+    cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);
@@ -2590,28 +2604,86 @@ fn focus_session_header(state: &HomeState) -> String {
         .to_string()
 }
 
+/// The height (in rows) the 在席 (Focus) menu's command area is fixed to. The
+/// window shows this many rows whatever is expanded, so opening an inline picker
+/// scrolls its sub-rows into view rather than resizing the box. Set to the full
+/// menu's command count (agent / terminal / diff / chat / close) via `max`, so a
+/// full menu never pads and every menu shares one height; it also leaves room —
+/// after the two overflow markers — for a two-option picker (terminal / close) to
+/// show in full, so only a long agent list actually scrolls.
+const FOCUS_MENU_MIN_VISIBLE: usize = 5;
+
+/// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
+/// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
+/// stays on screen. Rows hidden past an edge are summarised with a dim `↑ N` /
+/// `↓ N` marker on the window's top / bottom row; rows that already fit are padded
+/// with blanks. Either way the result is `visible` rows, so the box keeps the same
+/// height whether or not an inline picker is expanded.
+fn focus_menu_window(rows: Vec<String>, active: usize, visible: usize) -> Vec<String> {
+    if rows.len() <= visible {
+        let mut out = rows;
+        out.resize(visible, String::new());
+        return out;
+    }
+    let total = rows.len();
+    // Reserve a marker row on each edge; the content window is what remains. The
+    // clamp keeps `active` inside that window (centring it where there is room).
+    let content = visible.saturating_sub(2).max(1);
+    let start = active.saturating_sub(content / 2).min(total - content);
+    let end = start + content;
+    let mut out = Vec::with_capacity(visible);
+    out.push(focus_menu_overflow(start, true));
+    out.extend(rows[start..end].iter().cloned());
+    out.push(focus_menu_overflow(total - end, false));
+    out
+}
+
+/// A dim overflow marker for the windowed 在席 menu: `↑ N more` (`above`) or
+/// `↓ N more` (below) when `hidden` rows sit past the window edge, or a blank row
+/// when none do — so the window keeps its fixed height at the ends of the scroll.
+fn focus_menu_overflow(hidden: usize, above: bool) -> String {
+    if hidden == 0 {
+        return String::new();
+    }
+    let arrow = if above { '↑' } else { '↓' };
+    style(format!("  {arrow} {hidden} more")).dim().to_string()
+}
+
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. Rendered as the body of the floating menu overlay modal (see
+/// and a key hint. The command rows are windowed to a fixed height
+/// ([`focus_menu_window`]) so expanding an inline picker scrolls rather than
+/// resizing the box. Rendered as the body of the floating menu overlay modal (see
 /// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
 /// identity rides the modal's title rather than a header line here.
 pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
     let close_expanded = state.focus_close_expanded();
     let commands = state.focus_menu_commands();
+
+    // Build the whole command area first — one row per command plus any expanded
+    // picker's sub-rows — tracking the index of the *active* row (the cursor, or
+    // the highlighted picker sub-row) so the window below can keep it on screen.
+    let mut rows: Vec<String> = Vec::new();
+    let mut active = 0usize;
     for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
-            lines.push(focus_agent_command_row(state, selected, width));
-            if state.focus_menu_agent_cursor().is_some() {
-                let agent_cursor = state.focus_menu_agent_cursor();
+            let agent_cursor = state.focus_menu_agent_cursor();
+            if agent_cursor.is_none() && selected {
+                active = rows.len();
+            }
+            rows.push(focus_agent_command_row(state, selected, width));
+            if agent_cursor.is_some() {
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
-                    lines.push(focus_agent_pick_row(
+                    if Some(j) == agent_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_agent_pick_row(
                         cli,
                         Some(j) == agent_cursor,
                         cli == default,
@@ -2622,19 +2694,32 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
         } else if info.name == "close" {
             // The `close` row carries a chevron affordance; when expanded the two
             // options (plain close and close --force) follow as sub-rows.
-            lines.push(focus_close_command_row(state, info, selected, width));
+            if !close_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_close_command_row(state, info, selected, width));
             if close_expanded {
                 let close_cursor = state.focus_close_cursor();
                 for j in 0..2usize {
-                    lines.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
+                    if Some(j) == close_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
                 }
             }
         } else if info.name == "terminal" {
-            lines.push(focus_terminal_command_row(state, selected, width));
-            if state.focus_menu_terminal_expanded() {
+            let terminal_expanded = state.focus_menu_terminal_expanded();
+            if !terminal_expanded && selected {
+                active = rows.len();
+            }
+            rows.push(focus_terminal_command_row(state, selected, width));
+            if terminal_expanded {
                 let terminal_cursor = state.focus_menu_terminal_cursor();
                 for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
-                    lines.push(focus_terminal_pick_row(
+                    if Some(j) == terminal_cursor {
+                        active = rows.len();
+                    }
+                    rows.push(focus_terminal_pick_row(
                         action,
                         Some(j) == terminal_cursor,
                         width,
@@ -2642,9 +2727,20 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
                 }
             }
         } else {
-            lines.push(focus_menu_row(info, selected, width));
+            if selected {
+                active = rows.len();
+            }
+            rows.push(focus_menu_row(info, selected, width));
         }
     }
+
+    // Window the command area to a fixed height so expanding a picker scrolls its
+    // sub-rows into view rather than growing the box. The window height is the
+    // (expansion-invariant) command count, floored so there is always room for the
+    // two overflow markers plus a content row.
+    let visible = commands.len().max(FOCUS_MENU_MIN_VISIBLE);
+    let mut lines = vec![style("Run a command:").dim().to_string()];
+    lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // a row-specific expand affordance while the cursor can open one, else base.
@@ -4167,6 +4263,33 @@ mod tests {
             cols.time,
             console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
         );
+    }
+
+    #[test]
+    fn detail_cols_reserves_the_pr_slot_even_with_no_pr() {
+        let now = DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // No visible session carries a PR, yet the column holds its reserved width
+        // so a session gaining or losing its last PR never shifts the diff beside it.
+        let none = detail_cols(
+            &[(
+                at(now, 3),
+                Some(DiffStat {
+                    added: 1,
+                    removed: 2,
+                }),
+                None,
+                0,
+            )],
+            now,
+            9,
+            60,
+        );
+        assert_eq!(none.pr, PR_RESERVE_WIDTH);
+        // A single-PR badge is exactly the reserve width, so appearing shifts nothing.
+        let one = detail_cols(&[(at(now, 3), None, None, pr_width(&[pr(7)]))], now, 9, 60);
+        assert_eq!(one.pr, PR_RESERVE_WIDTH);
     }
 
     #[test]

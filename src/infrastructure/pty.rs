@@ -264,7 +264,15 @@ impl PtySession {
         let generation = Arc::new(AtomicU64::new(0));
 
         let reader_thread = {
-            let parser = Arc::clone(&parser);
+            // A *weak* handle, so this thread never keeps the parser (a large
+            // scrollback grid) alive on its own. If a descendant escapes the
+            // process group and holds the slave fd open, the `read` below never
+            // sees EOF and `Drop` detaches this thread rather than hang the UI;
+            // capturing `Weak` means the session's last strong ref still frees
+            // the grid the moment the session drops, instead of the grid living
+            // as long as the orphaned thread stays blocked (a memory leak that
+            // grew with every closed session).
+            let parser = Arc::downgrade(&parser);
             let alive = Arc::clone(&alive);
             let generation = Arc::clone(&generation);
             std::thread::Builder::new()
@@ -303,14 +311,22 @@ impl PtySession {
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                if let Ok(mut parser) = parser.lock() {
-                                    parser.process(&buf[..n]);
+                            Ok(n) => match parser.upgrade() {
+                                // Session still live: parse the output into its grid.
+                                Some(parser) => {
+                                    if let Ok(mut parser) = parser.lock() {
+                                        parser.process(&buf[..n]);
+                                    }
+                                    // Announce the new output so a waiting render
+                                    // loop redraws it without waiting out its idle
+                                    // timer.
+                                    generation.fetch_add(1, Ordering::SeqCst);
                                 }
-                                // Announce the new output so a waiting render loop
-                                // redraws it without waiting out its idle timer.
-                                generation.fetch_add(1, Ordering::SeqCst);
-                            }
+                                // The session was dropped while we were blocked in
+                                // `read`: its grid is already freed, so there is
+                                // nowhere to put this output. Stop the thread.
+                                None => break,
+                            },
                         }
                     }
                 })

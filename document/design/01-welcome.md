@@ -110,5 +110,13 @@
 これらの端末復帰（代替スクリーンの解除・マウスレポートと代替スクロールモードの復帰・カーソルの
 復帰）は `AlternateScreenGuard`（RAII ガード）により、早期 return やパニック時でも保証されます。
 
+`Drop` を経由しないプロセス終了（`Key::CtrlC` に化ける前に届いた本物の SIGINT、`kill` による
+SIGTERM、端末・SSH を閉じたときの SIGHUP）では RAII ガードが走りません。これを補うため、TUI 起動時に
+SIGINT / SIGTERM / SIGHUP のハンドラを登録し、同じ復元シーケンス（代替スクリーンの解除・マウスレポートの
+無効化・カーソル復帰）を stdout へ書き出し raw モードを戻してから、既定の終了挙動へ進みます。これにより
+usagi 終了後にシェルへマウスレポート（`^[[<btn;x;yM`）が流れ込む不具合を防ぎます。ハンドラ内の処理は
+async-signal-safe な最小限（生 fd への `write` と `tcsetattr`）に限られます。復元バイト列は panic ハンドラと
+共通の定義を用い、両経路が同じ列を書き出します。
+
 > 描画ロジックは `src/presentation/tui/welcome/`（メニュー定義 `menu.rs`・描画 `ui.rs`・
 > イベントループ `event.rs`）に実装されています。

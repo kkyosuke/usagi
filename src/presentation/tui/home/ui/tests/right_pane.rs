@@ -345,8 +345,8 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     let off_close = stripped(&render_frame(24, 120, &state));
     assert!(off_close.contains("  Close the focused session"));
     assert!(off_close.contains("  Open a shell"));
-    // Fixed order: agent is first and close is last; move up once (wraps) to close.
-    state.focus_menu_move_up();
+    // Alphabetical order: agent is first and close is second; move down once to close.
+    state.focus_menu_move_down();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
     let on_close = stripped(&render_frame(24, 120, &state));
     assert!(on_close.contains('▸'));
@@ -369,7 +369,7 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
 fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    state.focus_menu_move_down(); // fixed order: agent -> terminal
+    state.focus_menu_move_up(); // alphabetical order: agent wraps up to terminal (last)
     let base = stripped(&render_frame(24, 120, &state));
     assert!(base.contains("terminal"));
     assert!(base.contains('▸'));
@@ -382,6 +382,42 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
     assert!(expanded.contains("(default)"));
     assert!(expanded.contains("new terminal"));
     assert!(expanded.contains("Enter launch"));
+}
+
+#[test]
+fn focus_menu_keeps_a_fixed_height_and_scrolls_a_long_picker() {
+    use crate::domain::settings::AgentCli;
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_focus(1);
+    // More installed agents than the window can hold once the picker opens, so
+    // expanding must scroll rather than grow the box.
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![
+        AgentCli::Claude,
+        AgentCli::Codex,
+        AgentCli::CodexFugu,
+        AgentCli::Gemini,
+    ]);
+    let collapsed = focus_menu_body(&state, 60);
+    state.focus_menu_expand_agent();
+    let expanded = focus_menu_body(&state, 60);
+    // The body is the same height expanded or not — the box never resizes.
+    assert_eq!(collapsed.len(), expanded.len());
+    // The overflow past the fixed window is summarised with a scroll marker.
+    let joined = console::strip_ansi_codes(&expanded.join("\n")).into_owned();
+    assert!(joined.contains("more"), "a long picker scrolls: {joined:?}");
+    // Moving the picker cursor down scrolls the hidden agents into view without
+    // changing the body height.
+    for _ in 0..3 {
+        state.focus_menu_move_down();
+    }
+    let scrolled = focus_menu_body(&state, 60);
+    assert_eq!(scrolled.len(), collapsed.len());
+    let joined = console::strip_ansi_codes(&scrolled.join("\n")).into_owned();
+    assert!(
+        joined.contains("Gemini"),
+        "the last agent scrolls in: {joined:?}"
+    );
 }
 
 #[test]

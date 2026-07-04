@@ -122,20 +122,31 @@ fn complete_or_record_panic(
 }
 
 /// Resolve the workspace's 1Password-backed secret env for a pane about to spawn,
-/// off the UI thread and with the loading rabbit animating.
+/// off the UI thread and with a loading indicator floated in the right pane.
 ///
 /// Resolving `op://` references spawns one `op read` per binding (each up to a
 /// 30s timeout); running it inline froze the launch with no feedback whenever
-/// 1Password was slow or locked. [`run_with_loading`](crate::presentation::tui::io::loading::run_with_loading)
-/// moves the work to a worker thread and animates a centred loading rabbit while
-/// it runs — a binding-free workspace resolves within the grace period and shows
-/// nothing. A worker panic degrades to an empty env rather than crashing.
-fn resolve_pane_env(term: &Term, dir: &Path) -> std::collections::BTreeMap<String, String> {
+/// 1Password was slow or locked.
+/// [`run_with_loading_frames`](crate::presentation::tui::io::loading::run_with_loading_frames)
+/// moves the work to a worker thread and, since resolving a pane's secret env is
+/// the first step of launching that pane (it happens *within the tab*), floats the
+/// same multiplying-rabbit indicator the pane launch uses in the **centre of the
+/// right pane** — [`ui::env_resolve_loading_frame`] — with `環境変数を解決中…`
+/// captioned below it, keeping the sidebar and tab context visible around it. A
+/// binding-free workspace resolves within the grace period and shows nothing; a
+/// worker panic degrades to an empty env rather than crashing.
+fn resolve_pane_env(
+    term: &Term,
+    home: &HomeState,
+    dir: &Path,
+) -> std::collections::BTreeMap<String, String> {
     let ws_root = crate::usecase::session::workspace_root(dir);
-    crate::presentation::tui::io::loading::run_with_loading(
+    crate::presentation::tui::io::loading::run_with_loading_frames(
         term,
-        "環境変数を解決中…",
         move || crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root),
+        |hop, _face, height, width| {
+            ui::env_resolve_loading_frame(height, width, home, hop, "環境変数を解決中…")
+        },
     )
     .unwrap_or_default()
 }
@@ -836,7 +847,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // launched with.
             let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
             let pane_env = if will_spawn {
-                resolve_pane_env(term, dir)
+                resolve_pane_env(term, home, dir)
             } else {
                 std::collections::BTreeMap::new()
             };
@@ -951,7 +962,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
                             if !pool.activate_agent_of(dir, cli) {
-                                let add_env = resolve_pane_env(term, dir);
+                                let add_env = resolve_pane_env(term, home, dir);
                                 pool.add_pane(
                                     term,
                                     dir,
