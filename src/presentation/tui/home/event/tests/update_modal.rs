@@ -69,6 +69,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut unite_resolve = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -95,6 +96,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
 
     let mut state = sample_state();

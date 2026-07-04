@@ -24,7 +24,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::json_file;
-use crate::infrastructure::store_lock::StoreLock;
+use crate::infrastructure::store_lock::{self, StoreLock};
 use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the queued-prompt files live under.
@@ -107,6 +107,34 @@ pub fn clear(worktree: &Path) {
     }
 }
 
+/// Whether any prompt is currently queued for *some* worktree — a cheap
+/// directory listing, so the home screen's autostart pass can skip the
+/// per-session lookup entirely on the common tick where nothing is queued.
+///
+/// This is deliberately coarse: it does not read or validate the files (a
+/// [`take`] still confirms each queued prompt belongs to the worktree it is
+/// keyed under). It only reports whether the queue directory holds anything
+/// besides the shared [`StoreLock`] file, so a `false` lets the caller return
+/// without hashing every session's worktree path. A missing directory (nothing
+/// ever queued) reads as empty.
+pub fn any_queued() -> bool {
+    // A missing / unresolvable data dir (or an unreadable directory) means nothing
+    // is queued; both failures collapse to an empty iterator rather than an early
+    // return, so the common empty case is one cheap listing.
+    dir(PROMPT_SUBDIR)
+        .ok()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            // The store lock lives alongside the prompt files; it is not a queued
+            // prompt, so a directory holding only the lock reads as empty.
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_str() != Some(store_lock::LOCK_FILE_NAME)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +201,23 @@ mod tests {
             assert_eq!(take(wt.path()), None);
             // Clearing again (nothing queued) is a harmless no-op.
             clear(wt.path());
+        });
+    }
+
+    #[test]
+    fn any_queued_reports_whether_a_prompt_is_waiting() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // No directory / no files yet: nothing is queued.
+            assert!(!any_queued());
+            // Queue one prompt: now something is waiting.
+            set(wt.path(), "implement issue #98").unwrap();
+            assert!(any_queued());
+            // The store lock created alongside it does not count as a prompt, so
+            // taking the only queued prompt leaves the directory reading as empty.
+            assert_eq!(take(wt.path()), Some("implement issue #98".to_string()));
+            assert!(StoreLock::path(&dir(PROMPT_SUBDIR).unwrap()).exists());
+            assert!(!any_queued());
         });
     }
 

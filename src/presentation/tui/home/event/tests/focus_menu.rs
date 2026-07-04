@@ -935,6 +935,7 @@ fn run_with_chat(
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
+    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -961,6 +962,7 @@ fn run_with_chat(
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        autostart_queued: &mut autostart_queued,
     };
     // A pre-filled probe result so the loop's `ai_available` drain runs (the menu
     // gate flips on); the chat tests reach the overlay via the prompt regardless.
