@@ -344,6 +344,82 @@ fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
     Vec::new()
 }
 
+/// The home frame with the 1Password env-resolution indicator floated in the
+/// **centre of the right pane** — the same region and multiplying-rabbit visual
+/// [`launch_loading_block`] gives the pane launch, since resolving a pane's secret
+/// env is the first step of launching it. `label` (e.g. `環境変数を解決中…`) is
+/// drawn on its own row below the rabbits so the pause reads as *what it is doing*
+/// rather than a bare animation.
+///
+/// Painted on a clock by [`resolve_pane_env`](super::super::resolve_pane_env)
+/// while the resolve runs on a worker thread (see
+/// [`run_with_loading_frames`](crate::presentation::tui::io::loading::run_with_loading_frames)),
+/// so the sidebar and tab context stay visible around it instead of a full-screen
+/// splash. `frame` advances the rabbits; the label is static text.
+pub fn env_resolve_loading_frame(
+    raw_height: usize,
+    raw_width: usize,
+    state: &HomeState,
+    frame: usize,
+    label: &str,
+) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width, state.sidebar());
+    let body_rows = body_rows_for(height);
+    let mut lines = render_frame(raw_height, raw_width, state);
+    let block = env_resolve_loading_block(frame, right_w, label);
+    widgets::overlay_region_centered(
+        &mut lines,
+        width,
+        left_w + SEP_WIDTH,
+        right_w,
+        CHROME_TOP_ROWS,
+        body_rows,
+        &block,
+    );
+    lines
+}
+
+/// The centred loading block for [`env_resolve_loading_frame`]: the multiplying
+/// rabbits ([`launch_loading_block`]) with `label` on its own dim row below,
+/// separated by a blank line. Both are centred to a common width so the caption
+/// sits under the rabbits, and `label` is clipped to `right_w` so a long label
+/// never widens the block past the pane (which would drop the whole indicator).
+fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<String> {
+    let rabbits = launch_loading_block(frame, right_w);
+    if rabbits.is_empty() {
+        return Vec::new();
+    }
+    let caption = clip_to_width(label, right_w);
+    let rabbits_w = rabbits
+        .iter()
+        .map(|row| console::measure_text_width(row))
+        .max()
+        .unwrap_or(0);
+    let block_w = rabbits_w.max(console::measure_text_width(&caption));
+    let mut block: Vec<String> = rabbits
+        .into_iter()
+        .map(|row| center_row(&row, block_w))
+        .collect();
+    block.push(" ".repeat(block_w));
+    block.push(center_row(
+        &console::style(caption).dim().to_string(),
+        block_w,
+    ));
+    block
+}
+
+/// Pad `row` (a possibly styled line) with spaces on both sides so it is `width`
+/// display columns wide with its content centred — the alignment
+/// [`overlay_region_centered`] needs, since it composites each block row at a
+/// fixed column and every row must therefore span the block's full width.
+fn center_row(row: &str, width: usize) -> String {
+    let row_w = console::measure_text_width(row);
+    let left = widgets::centered_padding(width, row_w);
+    let right = width.saturating_sub(left + row_w);
+    format!("{}{row}{}", " ".repeat(left), " ".repeat(right))
+}
+
 /// How many Markdown lines the right-pane preview shows at once for a raw terminal
 /// size: the body rows less the preview's one-row header. Used by the event loop
 /// to clamp and page the preview's scroll so the last line stays in view.
