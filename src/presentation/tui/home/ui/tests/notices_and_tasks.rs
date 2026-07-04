@@ -386,3 +386,88 @@ fn run2_loading_is_skipped_when_the_terminal_is_too_narrow() {
     let joined = stripped(&render_frame(24, 10, &state));
     assert!(!joined.contains("(｡･-･)"));
 }
+
+#[test]
+fn env_resolve_loading_floats_over_the_right_pane_with_a_caption_below() {
+    // Resolving a pane's 1Password env happens *within* the tab, so its indicator
+    // is the pane-launch rabbits floated in the right pane — with the `環境変数を
+    // 解決中…` caption on its own row below them, not a full-screen splash.
+    let state = state_with(Vec::new());
+    let frame = env_resolve_loading_frame(24, 100, &state, 0, "環境変数を解決中…");
+    let plain: Vec<String> = frame
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    let joined = plain.join("\n");
+    assert!(
+        joined.contains("(｡･-･)"),
+        "the launch rabbits are floated in"
+    );
+    assert!(joined.contains("環境変数を解決中…"), "the caption is shown");
+
+    let rabbit_row = plain
+        .iter()
+        .position(|line| line.contains("(｡･-･)"))
+        .expect("rabbits are rendered");
+    let caption_row = plain
+        .iter()
+        .position(|line| line.contains("環境変数を解決中…"))
+        .expect("the caption is rendered");
+    assert!(
+        caption_row > rabbit_row,
+        "the caption sits below the rabbits"
+    );
+
+    // Centred in the right pane: the block starts past the divider and its first
+    // rabbit lands left of the pane midpoint (the multiplying row spans several).
+    let (_, width) = widgets::normalize_size(24, 100);
+    let (left_w, right_w) = layout(width, state.sidebar());
+    let pane_start = left_w + SEP_WIDTH;
+    let col = console::measure_text_width(
+        plain[rabbit_row]
+            .split("(｡･-･)")
+            .next()
+            .expect("split always yields a prefix"),
+    );
+    assert!(col >= pane_start);
+    assert!(col < pane_start + right_w / 2);
+}
+
+#[test]
+fn env_resolve_loading_is_skipped_when_the_pane_is_too_narrow() {
+    // Too narrow for even one rabbit: the whole indicator is dropped rather than
+    // clobbering the chrome, so the caption never shows on its own either.
+    let state = state_with(Vec::new());
+    let joined = stripped(&env_resolve_loading_frame(
+        24,
+        10,
+        &state,
+        0,
+        "環境変数を解決中…",
+    ));
+    assert!(!joined.contains("(｡･-･)"));
+    assert!(!joined.contains("環境変数を解決中…"));
+}
+
+#[test]
+fn env_resolve_loading_clips_a_long_caption_to_the_pane() {
+    // A caption wider than the pane is clipped with an ellipsis instead of
+    // widening the block past the pane (which would drop the whole indicator).
+    let state = state_with(Vec::new());
+    let long = "とても長い環境変数".repeat(20);
+    let frame = env_resolve_loading_frame(24, 100, &state, 0, &long);
+    let plain: Vec<String> = frame
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+
+    // The rabbits survive: the block was not dropped, which proves the (now
+    // clipped) caption did not widen it past the pane — an over-wide block is
+    // skipped whole, rabbits and all.
+    let caption_row = plain
+        .iter()
+        .position(|line| line.contains("とても長い環境変数"))
+        .expect("the clipped caption is rendered");
+    assert!(plain.join("\n").contains("(｡･-･)"), "the rabbits survive");
+    assert!(plain[caption_row].contains('…'), "the caption is clipped");
+}
