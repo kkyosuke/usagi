@@ -135,7 +135,10 @@ fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
         None => " ".repeat(inner),
         Some(def) => {
             let text = format!("{} {}", def.glyph(), def.name);
-            let padded = pad_to_width(clip_to_width(&text, inner), inner);
+            // Measure by the terminal's East Asian width (ambiguous = 2) so a
+            // label name carrying such characters does not overrun the column and
+            // push the note / status fields right (see [`name_cell`]).
+            let padded = widgets::pad_to_width_cjk(widgets::clip_to_width_cjk(&text, inner), inner);
             label_style(def.color).apply_to(padded).to_string()
         }
     };
@@ -154,7 +157,7 @@ fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
         .flat_map(|g| {
             (0..g.worktrees().len()).filter_map(|i| g.row_label_id(i).and_then(|id| master.get(id)))
         })
-        .map(|def| console::measure_text_width(&format!("{} {}", def.glyph(), def.name)))
+        .map(|def| widgets::measure_width_cjk(&format!("{} {}", def.glyph(), def.name)))
         .max()
         .unwrap_or(0)
         .min(LABEL_COL_MAX);
@@ -323,12 +326,15 @@ fn session_gutter_cell(selected: bool, active: bool, in_switch: bool, row: usize
 /// The branch / root name cell: clipped and padded to `width`, cyan, and bold
 /// when the row is active or under the cursor.
 fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
-    // Pad by *display* width, not char count: `format!("{:<width$}")` counts
-    // `char`s, so a full-width (CJK) branch / session name — the app's own UI is
-    // Japanese — would be padded to `width` chars (≈2×`width` columns), overrun
-    // the cell, and shove the status column sideways. `pad_to_width` measures
-    // display columns, matching the rest of the layout.
-    let padded = pad_to_width(clip_to_width(text, width), width);
+    // Pad by *display* width, not char count, and by the width an East Asian
+    // terminal actually paints: `format!("{:<width$}")` counts `char`s, so a
+    // full-width (CJK) name — the app's own UI is Japanese — would overrun the
+    // cell. Plain `pad_to_width` fixes that but still undercounts *ambiguous*-width
+    // characters (`→ ① ※ ★` …) as one column, so a name carrying them renders
+    // wider than reserved and shoves the status field sideways. The `_cjk` helpers
+    // count ambiguous characters as two (Nerd Font / box glyphs stay one), matching
+    // the terminal, so the status column stays put whatever the name contains.
+    let padded = widgets::pad_to_width_cjk(widgets::clip_to_width_cjk(text, width), width);
     if emphasised {
         style(padded).accent().bold().to_string()
     } else {
@@ -1613,10 +1619,11 @@ fn tab_strip_parts(strip: &TabStrip) -> (String, String) {
             marker.push_str(&" ".repeat(TAB_CHIP_GAP));
         }
         let text = tab_chip_text(i, label);
-        // Display width (not char count) so the underline marker stays aligned
-        // under a non-ASCII chip label, matching the hit test in
-        // [`tab_chip_ranges`], which measures the same chip the same way.
-        let width = console::measure_text_width(&text);
+        // Display width (not char count), by the terminal's East Asian width, so
+        // the underline marker stays aligned under a non-ASCII chip label,
+        // matching the hit test in [`tab_chip_ranges`], which measures the same
+        // chip the same way.
+        let width = widgets::measure_width_cjk(&text);
         if i == strip.active {
             chips.push_str(&style(&text).reverse().bold().to_string());
             marker.push_str(&style("▔".repeat(width)).accent().bold().to_string());
@@ -1647,7 +1654,7 @@ pub(super) fn header_tab_rows(
     width: usize,
 ) -> Vec<String> {
     let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
-        return vec![clip_to_width(&header, width)];
+        return vec![widgets::clip_to_width_cjk(&header, width)];
     };
     let (chips, marker) = tab_strip_parts(strip);
     let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
@@ -1656,8 +1663,8 @@ pub(super) fn header_tab_rows(
     // is the same for every session.
     let indent = tab_strip_indent(&header);
     vec![
-        clip_to_width(&format!("{header}{divider}{chips}"), width),
-        clip_to_width(&format!("{}{marker}", " ".repeat(indent)), width),
+        widgets::clip_to_width_cjk(&format!("{header}{divider}{chips}"), width),
+        widgets::clip_to_width_cjk(&format!("{}{marker}", " ".repeat(indent)), width),
     ]
 }
 
@@ -1677,7 +1684,7 @@ fn tab_chip_text(index: usize, label: &str) -> String {
 /// indent [`header_tab_rows`] lays the chips at, so [`tab_chip_ranges`] places
 /// them where they are actually drawn.
 fn tab_strip_indent(header: &str) -> usize {
-    console::measure_text_width(header) + HEADER_TAB_DIVIDER.chars().count()
+    widgets::measure_width_cjk(header) + HEADER_TAB_DIVIDER.chars().count()
 }
 
 /// The column range each tab chip occupies on the strip, measured from the right
@@ -1692,7 +1699,7 @@ fn tab_chip_ranges(header: &str, strip: &TabStrip) -> Vec<std::ops::Range<usize>
         if i > 0 {
             col += TAB_CHIP_GAP;
         }
-        let width = console::measure_text_width(&tab_chip_text(i, label));
+        let width = widgets::measure_width_cjk(&tab_chip_text(i, label));
         ranges.push(col..col + width);
         col += width;
     }
@@ -2234,8 +2241,12 @@ const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
 /// is padded to a constant width so the block is the same size for every session.
 /// Shared by 切替 (Switch) and 没入 (Attached) so both carry the same identity.
 fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String>) -> String {
-    let name = pad_to_width(
-        style(clip_to_width(name, HEADER_NAME_COL))
+    // Measure by the terminal's East Asian width (ambiguous = 2, matching
+    // [`name_cell`]) so a name carrying such characters keeps the identity block a
+    // constant width instead of pushing the status / agent fields — and the tab
+    // strip laid beside it — sideways.
+    let name = widgets::pad_to_width_cjk(
+        style(widgets::clip_to_width_cjk(name, HEADER_NAME_COL))
             .accent()
             .bold()
             .to_string(),
@@ -2243,14 +2254,14 @@ fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String
     );
     let detail = match status {
         Some(status) => {
-            let status = pad_to_width(status_label(status), STATUS_COL);
-            let agent = pad_to_width(agent.unwrap_or_default(), HEADER_AGENT_COL);
+            let status = widgets::pad_to_width_cjk(status_label(status), STATUS_COL);
+            let agent = widgets::pad_to_width_cjk(agent.unwrap_or_default(), HEADER_AGENT_COL);
             format!("{status}  {agent}")
         }
         // The root row carries no git status / agent, only its note — clipped to
         // the same detail width so the identity block stays a constant size.
-        None => pad_to_width(
-            style(clip_to_width(ROOT_DETAIL, HEADER_DETAIL_COL))
+        None => widgets::pad_to_width_cjk(
+            style(widgets::clip_to_width_cjk(ROOT_DETAIL, HEADER_DETAIL_COL))
                 .dim()
                 .to_string(),
             HEADER_DETAIL_COL,
@@ -3628,7 +3639,9 @@ mod tests {
     fn label_cell_clips_a_long_name_to_the_column() {
         let def = label_def("x", "A very long status name", LabelColor::Gray, None);
         let cell = label_cell(Some(&def), 8);
-        assert_eq!(console::measure_text_width(&cell), 8);
+        // Measured by the terminal's East Asian width (the cell is padded with the
+        // `_cjk` helpers); the trailing ellipsis is itself two columns wide there.
+        assert_eq!(widgets::measure_width_cjk(&cell), 8);
     }
 
     #[test]
@@ -3758,22 +3771,45 @@ mod tests {
 
     #[test]
     fn name_cell_pads_by_display_width_not_char_count() {
-        // A full-width (CJK) name must fill its cell by *display* columns, not
-        // char count: `あ機能` is 3 chars but 6 display columns, so padding to a
-        // width-8 cell adds 2 columns (not 5 chars), and the cell measures exactly
-        // 8 — the SGR style escapes have zero display width. The old
-        // `format!("{:<8}")` padded by chars and overran the cell to 11 columns,
-        // shoving the status column sideways (the app's own UI is Japanese).
+        // Measured by the terminal's East Asian width, which is what the cell is
+        // now padded to. A full-width (CJK) name fills its cell by *display*
+        // columns, not char count: `あ機能` is 3 chars but 6 display columns, so
+        // padding to a width-8 cell adds 2 columns (not 5 chars) and the cell
+        // measures exactly 8 — SGR escapes have zero display width. The old
+        // `format!("{:<8}")` padded by chars and overran the cell to 11 columns.
         assert_eq!(
-            console::measure_text_width(&name_cell("あ機能", 8, false)),
+            widgets::measure_width_cjk(&name_cell("あ機能", 8, false)),
             8
         );
         // ASCII is unchanged: a short name still pads out to the full width.
-        assert_eq!(console::measure_text_width(&name_cell("main", 8, true)), 8);
+        assert_eq!(widgets::measure_width_cjk(&name_cell("main", 8, true)), 8);
         // A name already wider than the cell is clipped back to the width.
         assert_eq!(
-            console::measure_text_width(&name_cell("あ機能拡張作業", 8, false)),
+            widgets::measure_width_cjk(&name_cell("あ機能拡張作業", 8, false)),
             8
+        );
+    }
+
+    #[test]
+    fn name_cell_reserves_its_width_for_ambiguous_characters() {
+        // The regression this fix targets: a name carrying East Asian *Ambiguous*
+        // characters (`→ ① ※`), which the terminal paints two columns wide, must
+        // still fill exactly its cell so the status field that follows does not
+        // shift. `console::measure_text_width` undercounts these as one column, so
+        // the cell is sized and measured by [`widgets::measure_width_cjk`] instead.
+        for name in ["feat→x", "review①", "対応※", "→→→→"] {
+            assert_eq!(
+                widgets::measure_width_cjk(&name_cell(name, 10, false)),
+                10,
+                "cell for {name:?} should reserve exactly its width"
+            );
+        }
+        // Two names of equal *rendered* width — one all-ASCII, one carrying an
+        // ambiguous glyph — produce the same cell width, so the status column that
+        // butts against the cell lands in the same place for both.
+        assert_eq!(
+            widgets::measure_width_cjk(&name_cell("feat→", 10, false)),
+            widgets::measure_width_cjk(&name_cell("featx", 10, false)),
         );
     }
 
