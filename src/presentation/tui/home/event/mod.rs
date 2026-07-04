@@ -137,6 +137,35 @@ pub(super) type SessionLastActive = (String, DateTime<Utc>);
 
 type RemoveDispatch<'a> = dyn FnMut(&Path, &str, bool, Option<super::tasks::AutoFocus>) + 'a;
 
+/// The outcome of dispatching a background pane launch (see
+/// [`Wiring::start_pending_spawn`]).
+pub(super) enum StartPending {
+    /// The launch reused an existing agent tab: no new (loading) tab — the caller
+    /// re-attaches it directly.
+    Reused,
+    /// A new background launch is in flight. `label` is the placeholder chip shown
+    /// at the strip's end while its environment resolves (before a pool pane exists).
+    Pending { label: String },
+}
+
+/// A single frame's poll of the in-flight background launch (see
+/// [`Wiring::poll_pending_spawn`]).
+pub(super) enum PendingPoll {
+    /// The launch's environment is still resolving off-thread; no pool pane yet.
+    Resolving,
+    /// The pane has spawned and is starting; carries its current tab index so the
+    /// loading chip animates on the right chip.
+    Starting(usize),
+    /// The pane's shell has painted — ready to move to.
+    Ready,
+    /// The launch is gone (its spawn failed, or the pane vanished): drop it.
+    Gone,
+}
+
+/// Dispatch a background pane launch. See [`Wiring::start_pending_spawn`].
+pub(super) type StartPendingFn<'a> =
+    dyn FnMut(&mut HomeState, &Path, bool) -> Result<StartPending> + 'a;
+
 /// The workspace root and the impure callbacks the home event loop and its key
 /// handlers drive, bundled so they thread one value instead of a dozen separate
 /// closures. [`super::run`] builds this against the real terminal, shell pool,
@@ -201,6 +230,27 @@ pub(super) struct Wiring<'a> {
     /// Embed a live shell in the right pane (没入) and drive it: the first `bool`
     /// is `agent` vs plain `terminal`, the second `new_pane` vs re-attach.
     pub open_terminal: &'a mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    /// Dispatch a new pane launch for the given session in the background — the 在席
+    /// `terminal` / `agent` path when the session already shows tabs. `bool` is
+    /// `agent` vs plain `terminal`. It resolves the launch and kicks the
+    /// environment resolution off-thread **without** making a pane active, so the
+    /// current pane stays put and a loading tab appears; the loop then drives it via
+    /// [`Self::poll_pending_spawn`] / [`Self::activate_pending`]. Returns
+    /// [`StartPending::Reused`] when it reused an existing agent tab (no loading
+    /// tab — re-attach directly), else [`StartPending::Pending`] with the
+    /// placeholder chip label.
+    pub start_pending_spawn: &'a mut StartPendingFn<'a>,
+    /// Poll the in-flight background launch each frame: resolving / starting (with
+    /// its tab index) / ready / gone. On the frame its environment lands this
+    /// spawns the pane inactive into the pool (both spawn and pool access must run
+    /// on this — the loop — thread, since the pool is not `Send`).
+    pub poll_pending_spawn: &'a mut dyn FnMut(&Path) -> PendingPoll,
+    /// Make the spawned background pane the active tab so the following re-attach
+    /// drives it, and consume the launch. Returns whether a pane was activated.
+    pub activate_pending: &'a mut dyn FnMut(&Path) -> bool,
+    /// Drop the in-flight background launch (user acted, or it vanished): its
+    /// environment-resolver result is discarded and no pane is spawned.
+    pub clear_pending_spawn: &'a mut dyn FnMut(),
     /// Open `url` in the platform's default browser — the side effect behind
     /// clicking a `#<number>` in a session's pinned PR popup. [`super::run`] wires
     /// the real launcher (the same detached spawn the immersive pane uses); tests
@@ -581,14 +631,68 @@ pub(super) fn event_loop(
         // focused session has a live snapshot. Folded into one `if let` (rather
         // than a guard `if` wrapping an inner `if let`) so the whole refresh is a
         // single covered branch.
-        if let Some((dir, view)) = drive_now
-            .then(|| selected_dir(&state, workspace_root))
-            .and_then(|dir| (wiring.preview)(&dir, state.sidebar()).map(|view| (dir, view)))
-        {
-            let (labels, active) = (wiring.tab_op)(&dir, None);
+        if let Some(dir) = drive_now.then(|| selected_dir(&state, workspace_root)) {
+            let view = (wiring.preview)(&dir, state.sidebar());
+            let (mut labels, active) = (wiring.tab_op)(&dir, None);
+            // A background launch whose environment is still resolving has no pool
+            // pane yet, so append a synthetic placeholder chip at the strip's end
+            // (like the `+ new` chip) and animate it there — this is what shows the
+            // loading in the tab bar while `op://` secrets resolve off-thread.
+            if let Some(label) = state
+                .pending_pane()
+                .filter(|p| p.dir() == dir)
+                .and_then(|p| p.placeholder())
+                .map(str::to_string)
+            {
+                labels.push(label);
+                state.advance_pending_pane(labels.len() - 1, true);
+            }
             let mut surface = state.surface_writer(SurfaceOwner::Preview);
-            surface.set_view(view);
+            if let Some(v) = view {
+                surface.set_view(v);
+            }
             surface.set_tabs(labels, active);
+        }
+        // A background pane (在席's `terminal` / `agent` on a session that already
+        // showed tabs) loads its tab in the strip. Poll it each frame: animate its
+        // chip and, once its shell has started painting, move to it (没入) — but only
+        // while the user has not acted since it was dispatched. Any interaction
+        // cancels the move, leaving a spawned tab as an ordinary background pane the
+        // user reaches through the strip (or dropping a still-resolving launch).
+        // Fields are copied out first so the tracker can be cleared without holding
+        // the read borrow.
+        if let Some((dir, idle)) = state.pending_pane().map(|p| {
+            (
+                p.dir().to_path_buf(),
+                p.interaction_epoch() == wiring.interaction_epoch,
+            )
+        }) {
+            if !idle {
+                state.clear_pending_pane();
+                (wiring.clear_pending_spawn)();
+            } else {
+                match (wiring.poll_pending_spawn)(&dir) {
+                    // Environment still resolving: the placeholder chip is animated
+                    // by the publish above; nothing to do here.
+                    PendingPoll::Resolving => {}
+                    // Spawned and starting: animate the real chip at its tab index.
+                    PendingPoll::Starting(tab) => state.advance_pending_pane(tab, false),
+                    // Ready: move to the now-active tab (没入). This blocks in the pane
+                    // until the user leaves it, exactly like a launch from the menu;
+                    // the loop resumes when it returns.
+                    PendingPoll::Ready => {
+                        state.clear_pending_pane();
+                        (wiring.activate_pending)(&dir);
+                        handlers::reattach_pane(term, &mut state, &mut painter, wiring);
+                        force_paint = true;
+                    }
+                    // The launch is gone (spawn failed / pane vanished): drop it.
+                    PendingPoll::Gone => {
+                        state.clear_pending_pane();
+                        (wiring.clear_pending_spawn)();
+                    }
+                }
+            }
         }
         // The task panel and the install rabbit animate on the clock, so a frame
         // showing either must repaint even when nothing else moved.
@@ -613,6 +717,8 @@ pub(super) fn event_loop(
         let skip_paint = state.mode() == Mode::Switch
             && state.terminal_view().is_none()
             && !state.command_palette_open()
+            // A loading tab animates on the clock, so its frames must not be skipped.
+            && state.pending_pane().is_none()
             && !force_paint
             && !completed_any
             && !refreshed
@@ -658,7 +764,10 @@ pub(super) fn event_loop(
             || state.mascot_reacting()
             // A pending chat reply: keep ticking to poll the receiver and animate
             // the "thinking" spinner.
-            || chat_rx.is_some();
+            || chat_rx.is_some()
+            // A background pane loading its tab: keep ticking to poll it ready and
+            // animate its chip.
+            || state.pending_pane().is_some();
         // How long to wait for input before re-iterating, or `None` to block until
         // it arrives. An animating frame ticks fast (`ANIM_TICK`) to advance its
         // moving parts; an otherwise-idle screen still wakes on the slower
@@ -1543,6 +1652,18 @@ pub(crate) fn event_loop_compat(
     // capturing `Wiring` with their own `chat_ask`.
     let mut chat_ask = echo_chat_ask;
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
+    // The background-pane hooks need a real pool, which the compat-shim tests do
+    // not have: the default fakes report "no new tab / nothing pending", so a
+    // launch here falls back to a synchronous re-attach (through `open_terminal`).
+    // The full background flow — spawn a loading tab, poll it ready, move to it —
+    // is covered by the dedicated `background_tab` tests that build a capturing
+    // `Wiring`.
+    let mut start_pending_spawn = |_: &mut HomeState, _: &Path, _: bool| {
+        Ok::<StartPending, anyhow::Error>(StartPending::Reused)
+    };
+    let mut poll_pending_spawn = |_: &Path| PendingPoll::Gone;
+    let mut activate_pending = |_: &Path| false;
+    let mut clear_pending_spawn = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     // Exercise the test-shim no-op once so coverage does not treat this helper
     // closure as an uncovered function. The production tab-action path is covered
@@ -1550,6 +1671,13 @@ pub(crate) fn event_loop_compat(
     let mut dummy = HomeState::new("", Vec::new(), None);
     tab_action(&mut dummy, Path::new(""), 0, TabMenuAction::Close);
     let _ = open_external_terminal(Path::new(""));
+    // Exercise the background-pane no-op shims once so coverage does not flag
+    // these helper closures as uncovered; the real flow is covered by the
+    // capturing-`Wiring` background-tab tests.
+    let _ = start_pending_spawn(&mut dummy, Path::new(""), false);
+    let _ = poll_pending_spawn(Path::new(""));
+    let _ = activate_pending(Path::new(""));
+    clear_pending_spawn();
     // The compat-shim tests hand in a `FnMut(&str)` persist (they only assert on
     // the recorded command text); adapt it to the production entry-shaped hook so
     // the loop's `Wiring` stays uniform.
@@ -1570,6 +1698,10 @@ pub(crate) fn event_loop_compat(
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,

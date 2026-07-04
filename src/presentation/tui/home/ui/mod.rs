@@ -620,23 +620,20 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // loading / background-task label, so the left-bottom usagi explains what is
     // happening even when the header is visually busy.
     if let Some(loading) = state.loading() {
-        let loading_block = launch_loading_block(loading.frame(), right_w);
-        // The transient terminal / agent launch indicator is deliberate and
-        // short-lived, so it shows even over a live pane. It uses the same
-        // multiplying-rabbit visual as `usagi run 2` and is floated in the
-        // **centre of the right pane** (the rows below the header, the columns
-        // right of the divider) rather than tucked into the top-right corner, so
-        // the multiplying usagi read as "this pane is coming up" right where the
-        // new terminal / agent is about to paint.
-        widgets::overlay_region_centered(
-            &mut lines,
-            width,
-            left_w + SEP_WIDTH,
-            right_w,
-            body_start,
-            body_rows,
-            &loading_block,
-        );
+        // Tabs carry their own inline loading indicator (see [`panes::header_tab_rows`]),
+        // so we only draw the big centred overlay if there are no tabs.
+        if state.terminal_tabs().is_none_or(|s| s.labels.is_empty()) {
+            let loading_block = launch_loading_block(loading.frame(), right_w);
+            widgets::overlay_region_centered(
+                &mut lines,
+                width,
+                left_w + SEP_WIDTH,
+                right_w,
+                body_start,
+                body_rows,
+                &loading_block,
+            );
+        }
     } else if !state.tasks().is_empty() {
         // Background session work (create / remove) running off the event-loop
         // thread. It rides the two header rows (row 0 the title bar, row 1 the

@@ -188,7 +188,12 @@ fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
     // The installed-CLI gate guards only a *fresh spawn* of the configured
     // default. When the session already shows a live `agent` tab, `ai <prompt>`
     // delivers the prompt to that pane (whatever CLI it runs) and launches
-    // nothing new — so an uninstalled default must not refuse the send.
+    // nothing new — so an uninstalled default must not refuse the send. On a live
+    // session the launch is dispatched through `spawn_pane_bg`; the pool-less
+    // compat harness reports "reused/none" and falls back to a re-attach (the
+    // prompt delivery to the reused pane is exercised by the background-tab
+    // tests). The observable here is that the gate did *not* refuse: a second
+    // `open` call happens at all.
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());
     let mut open = |h: &mut HomeState, _d: &Path, a: bool, n: bool| {
@@ -221,11 +226,17 @@ fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
         run_full_tabs(keys, state, &mut open, &mut preview, &mut tabs).unwrap(),
         Outcome::Quit
     ));
+    // Two `open` calls: the initial re-attach, then the gate-skipped `ai` launch
+    // resolved to a re-attach by the pool-less harness — proof the gate did not
+    // refuse the send. (In production `spawn_pane_bg` consumes the opening prompt
+    // and delivers it to the reused agent pane; the pool-less noop leaves it on
+    // state, so the re-attach's `open` still observes it here — the delivery path
+    // itself is covered by the background-tab tests.)
     assert_eq!(
         *opened.borrow(),
         vec![
             (false, false, None),
-            (true, true, Some("fix it".to_string()))
+            (false, false, Some("fix it".to_string()))
         ]
     );
 }

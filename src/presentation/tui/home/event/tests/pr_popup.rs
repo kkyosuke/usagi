@@ -89,6 +89,11 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
+        noop_start_pending_spawn;
+    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
+    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
+    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
@@ -106,6 +111,10 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        start_pending_spawn: &mut start_pending_spawn,
+        poll_pending_spawn: &mut poll_pending_spawn,
+        activate_pending: &mut activate_pending,
+        clear_pending_spawn: &mut clear_pending_spawn,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,

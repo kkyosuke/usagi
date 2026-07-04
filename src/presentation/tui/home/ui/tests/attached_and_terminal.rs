@@ -308,7 +308,7 @@ fn switch_tab_marker() {
         active: 0,
     };
     // Header + chips on the top row; the active-tab underline on the row below.
-    let rows = header_tab_rows("feat".to_string(), Some(&strip), 80);
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), None, 80);
     assert_eq!(rows.len(), 2);
     let chips = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(chips.contains("feat"));
@@ -320,18 +320,45 @@ fn switch_tab_marker() {
         .contains('▔'));
 
     // A narrow pane clips both rows to its width.
-    let narrow = header_tab_rows("feat".to_string(), Some(&strip), 8);
+    let narrow = header_tab_rows("feat".to_string(), Some(&strip), None, 8);
     assert!(narrow.iter().all(|l| console::measure_text_width(l) <= 8));
 
     // No strip — or an empty one — leaves the header alone on a single row.
-    assert_eq!(header_tab_rows("feat".to_string(), None, 40).len(), 1);
+    assert_eq!(header_tab_rows("feat".to_string(), None, None, 40).len(), 1);
     let empty = TabStrip {
         labels: Vec::new(),
         active: 0,
     };
     assert_eq!(
-        header_tab_rows("feat".to_string(), Some(&empty), 40).len(),
+        header_tab_rows("feat".to_string(), Some(&empty), None, 40).len(),
         1
+    );
+}
+
+#[test]
+fn header_tab_rows_animate_a_loading_chip_without_the_active_marker() {
+    use super::super::super::terminal::tabs::TabStrip;
+    let strip = TabStrip {
+        labels: vec!["agent".to_string(), "terminal".to_string()],
+        active: 0,
+    };
+    // The second chip is loading (a background pane starting); styling is stripped
+    // in tests, so the chip text is unchanged — the animation is a colour sweep.
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), Some((1, 1)), 80);
+    assert_eq!(rows.len(), 2);
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(chips.contains("1 agent") && chips.contains("2 terminal"));
+    // The loading chip carries no active underline; the active (first) chip still
+    // does, and the loading (second) chip's columns stay blank on the marker row.
+    let marker = console::strip_ansi_codes(&rows[1]).into_owned();
+    assert!(marker.contains('▔'), "the active chip is still underlined");
+
+    // Advancing the frame keeps the same chip text (only the sweep position moves).
+    let later = header_tab_rows("feat".to_string(), Some(&strip), Some((1, 5)), 80);
+    assert_eq!(
+        console::strip_ansi_codes(&later[0]).into_owned(),
+        chips,
+        "the frame changes styling, not the chip text"
     );
 }
 

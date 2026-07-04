@@ -84,4 +84,5 @@ mod focus;
 mod homestate;
 mod labels;
 mod note_editor;
+mod pending_pane;
 mod worktree_list;
