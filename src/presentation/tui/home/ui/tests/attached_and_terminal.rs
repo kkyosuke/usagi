@@ -336,6 +336,33 @@ fn switch_tab_marker() {
 }
 
 #[test]
+fn header_tab_rows_animate_a_loading_chip_without_the_active_marker() {
+    use super::super::super::terminal::tabs::TabStrip;
+    let strip = TabStrip {
+        labels: vec!["agent".to_string(), "terminal".to_string()],
+        active: 0,
+    };
+    // The second chip is loading (a background pane starting); styling is stripped
+    // in tests, so the chip text is unchanged — the animation is a colour sweep.
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), Some((1, 1)), 80);
+    assert_eq!(rows.len(), 2);
+    let chips = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(chips.contains("1 agent") && chips.contains("2 terminal"));
+    // The loading chip carries no active underline; the active (first) chip still
+    // does, and the loading (second) chip's columns stay blank on the marker row.
+    let marker = console::strip_ansi_codes(&rows[1]).into_owned();
+    assert!(marker.contains('▔'), "the active chip is still underlined");
+
+    // Advancing the frame keeps the same chip text (only the sweep position moves).
+    let later = header_tab_rows("feat".to_string(), Some(&strip), Some((1, 5)), 80);
+    assert_eq!(
+        console::strip_ansi_codes(&later[0]).into_owned(),
+        chips,
+        "the frame changes styling, not the chip text"
+    );
+}
+
+#[test]
 fn focus_menu_row_marks_the_cursor() {
     let info = CommandInfo {
         name: "terminal",

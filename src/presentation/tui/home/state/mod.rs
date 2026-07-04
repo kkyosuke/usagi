@@ -166,6 +166,51 @@ impl LoadingIndicator {
     }
 }
 
+/// A pane spawned in the background — 在席's `terminal` / `agent` chosen on a
+/// session that already shows tabs — whose tab is loading in the strip. Unlike
+/// the blocking [`LoadingIndicator`] (which owns the whole right pane while the
+/// *first* pane starts), this keeps the current pane on screen: the new tab
+/// appears immediately and animates in place while its shell starts. The event
+/// loop polls it each frame and, once the pane is ready, moves to it (没入) —
+/// but only if the user has not acted since it was dispatched
+/// (`interaction_epoch` unchanged), the same auto-focus rule background session
+/// create / close already use. Any interaction before it is ready cancels the
+/// move and leaves the new tab as an ordinary background pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPane {
+    /// The session (worktree) the pane was spawned in.
+    dir: PathBuf,
+    /// The pool's stable id for the spawned pane, so the poll tracks exactly it
+    /// even as tabs are added / closed around it.
+    pane_id: u64,
+    /// The interaction counter captured at dispatch; the move happens only while
+    /// it still matches [`Wiring`](super::event)'s live counter.
+    interaction_epoch: u64,
+    /// The animation tick for the loading chip, advanced on each poll.
+    frame: usize,
+    /// The chip's current tab index, refreshed from the pool each poll (a
+    /// concurrent close can shift it). `None` until the first poll resolves it —
+    /// the renderer only animates a chip once its index is known.
+    tab: Option<usize>,
+}
+
+impl PendingPane {
+    /// The session the loading pane belongs to.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The pool's stable id for the loading pane.
+    pub fn pane_id(&self) -> u64 {
+        self.pane_id
+    }
+
+    /// The interaction counter captured when the pane was dispatched.
+    pub fn interaction_epoch(&self) -> u64 {
+        self.interaction_epoch
+    }
+}
+
 /// The embedded-terminal surface shown in the home screen's right pane: the
 /// screen `view` snapshot and the `tabs` strip above it.
 ///
@@ -655,6 +700,11 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the right
     /// pane shows the launch loader.
     loading: Option<LoadingIndicator>,
+    /// A pane launched in the background (在席's `terminal` / `agent` on a session
+    /// that already shows tabs) whose tab is loading in the strip. While `Some`
+    /// the event loop polls it each frame, animating its chip and — once ready —
+    /// moving to it unless the user acted meanwhile. See [`PendingPane`].
+    pending_pane: Option<PendingPane>,
     /// The rows of the background-task panel (session create / remove running off
     /// the event-loop thread), refreshed each frame from the shared task handle.
     /// While non-empty the top-right corner stacks them instead of the update
@@ -819,6 +869,7 @@ impl HomeState {
             history_entries: Vec::new(),
             update: None,
             loading: None,
+            pending_pane: None,
             tasks: Vec::new(),
             root_note: None,
             extra_groups: Vec::new(),
@@ -2192,6 +2243,52 @@ impl HomeState {
     /// launch loader is shown only while this is `Some`.
     pub fn loading(&self) -> Option<&LoadingIndicator> {
         self.loading.as_ref()
+    }
+
+    /// Begin tracking a background pane whose tab loads in the strip: `dir` /
+    /// `pane_id` identify the spawned pane, `agent` records its kind, and
+    /// `interaction_epoch` is the counter captured at dispatch (the move to the
+    /// new tab happens only while it stays unchanged). The chip starts un-placed
+    /// (`tab: None`) and un-animated (`frame: 0`) until the first poll.
+    pub fn begin_pending_pane(&mut self, dir: PathBuf, pane_id: u64, interaction_epoch: u64) {
+        self.pending_pane = Some(PendingPane {
+            dir,
+            pane_id,
+            interaction_epoch,
+            frame: 0,
+            tab: None,
+        });
+    }
+
+    /// Advance the pending pane's loading animation one tick and refresh the tab
+    /// index its chip sits at (from the pool, which the caller has just polled).
+    /// A no-op when nothing is pending.
+    pub fn step_pending_pane(&mut self, tab: usize) {
+        if let Some(p) = self.pending_pane.as_mut() {
+            p.frame += 1;
+            p.tab = Some(tab);
+        }
+    }
+
+    /// Stop tracking the background pane — because it became ready and was
+    /// attached, the user acted (cancelling the move), or its shell vanished.
+    /// Returns the dropped tracker so the caller can read what it was.
+    pub fn clear_pending_pane(&mut self) -> Option<PendingPane> {
+        self.pending_pane.take()
+    }
+
+    /// The background pane currently loading in the strip, when one is tracked.
+    pub fn pending_pane(&self) -> Option<&PendingPane> {
+        self.pending_pane.as_ref()
+    }
+
+    /// The `(tab index, animation frame)` of the loading chip, once its index is
+    /// resolved — the renderer animates exactly this chip in the tab strip.
+    /// `None` when nothing is pending (or its index is not yet known).
+    pub fn loading_tab(&self) -> Option<(usize, usize)> {
+        self.pending_pane
+            .as_ref()
+            .and_then(|p| p.tab.map(|tab| (tab, p.frame)))
     }
 
     /// Swap in the current background-task rows (session create / remove running

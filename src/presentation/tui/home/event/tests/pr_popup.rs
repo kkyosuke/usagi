@@ -89,6 +89,10 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -105,6 +109,9 @@ fn run_pr_clicks(inputs: Vec<io::Result<Input>>, state: HomeState) -> (Vec<Strin
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,

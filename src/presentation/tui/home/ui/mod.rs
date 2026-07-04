@@ -624,7 +624,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if let Some(loading) = state.loading() {
         // Tabs carry their own inline loading indicator (see [`panes::header_tab_rows`]),
         // so we only draw the big centred overlay if there are no tabs.
-        if state.terminal_tabs().map_or(true, |s| s.labels.is_empty()) {
+        if state.terminal_tabs().is_none_or(|s| s.labels.is_empty()) {
             let loading_block = launch_loading_block(loading.frame(), right_w);
             widgets::overlay_region_centered(
                 &mut lines,

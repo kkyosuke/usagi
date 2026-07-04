@@ -1070,6 +1070,100 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             result
         };
 
+    // Spawn a new pane for `dir` in the background — the 在席 `terminal` / `agent`
+    // path when the session already shows tabs — without attaching. Mirrors the
+    // launch resolution `open_terminal` does (agent CLI choice, resume, opening
+    // prompt, per-worktree env), but pushes the pane *inactive* via
+    // `TerminalPool::add_pane_inactive` and returns its stable id so the event
+    // loop can poll it and move to it once ready. Reusing an existing agent tab
+    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
+    // returns `None` so the caller re-attaches instead of tracking a loading tab.
+    let mut spawn_pane_bg =
+        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<Option<u64>> {
+            let choice = home.take_agent_choice();
+            let cli = choice.unwrap_or_else(|| home.default_agent());
+            let direct_prompt = if run_agent {
+                home.take_agent_initial_prompt()
+            } else {
+                None
+            };
+            let agent = crate::infrastructure::agent::agent_for(cli);
+            let resume = agent.has_resumable_session(dir);
+            let label = home
+                .list()
+                .worktrees()
+                .iter()
+                .find(|w| w.path.as_path() == dir)
+                .map(state::worktree_name)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    dir.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| dir.display().to_string())
+                });
+            let mut pool = pool.borrow_mut();
+            // A session holds at most one agent per CLI: a request to add one that
+            // already exists reuses its tab rather than a duplicate — so there is no
+            // new (loading) tab, and the caller just re-attaches it.
+            if run_agent && pool.has_agent_pane_of(dir, cli) {
+                pool.activate_agent_of(dir, cli);
+                if let Some(prompt) = direct_prompt.as_deref() {
+                    if let Some(pty) = pool.active_pty(dir) {
+                        let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
+                        input.push(b'\r');
+                        pty.write(&input)?;
+                    }
+                }
+                return Ok(None);
+            }
+            // A fresh spawn: deliver a prompt queued for this session (MCP
+            // `session_prompt`) when no direct `ai <prompt>` took precedence, exactly
+            // as `open_terminal` does on a fresh agent-pane spawn.
+            let queued_prompt = if run_agent && direct_prompt.is_none() {
+                crate::infrastructure::agent_prompt_store::take(dir)
+            } else {
+                None
+            };
+            if let Some(prompt) = queued_prompt.as_deref() {
+                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
+            }
+            let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            let spawn_command = agent.launch_command(&agent_wiring, resume, spawn_prompt);
+            let initial = Some(spawn_command.as_str());
+            let pane_env = resolve_pane_env(term, home, dir);
+            let kind = if run_agent {
+                terminal::tabs::PaneKind::Agent
+            } else {
+                terminal::tabs::PaneKind::Terminal
+            };
+            let id = pool.add_pane_inactive(
+                term,
+                dir,
+                kind,
+                terminal::pool::PaneLaunch {
+                    agent_command: initial,
+                    cli,
+                    label: &label,
+                    env: &pane_env,
+                },
+            )?;
+            Ok(Some(id))
+        };
+
+    // Poll a background pane by its stable id for the loading strip: its current
+    // tab index and whether its shell has started painting, or `None` once it has
+    // gone (closed / session emptied) so the loop drops the tracker.
+    let mut poll_pending = |dir: &Path, id: u64| -> Option<(usize, bool)> {
+        let pool = pool.borrow();
+        let tab = pool.tab_index_of(dir, id)?;
+        Some((tab, pool.pane_ready(dir, id)))
+    };
+
+    // Make the background pane with the given stable id the active tab, so the
+    // following re-attach drives it.
+    let mut activate_pane =
+        |dir: &Path, id: u64| -> bool { pool.borrow_mut().activate_pane_id(dir, id) };
+
     // Snapshot the selected session's live terminal for the sidebar's right-pane
     // preview (the tab-like view), or `None` when it has no running shell/agent.
     let mut preview = |dir: &Path,
@@ -1310,6 +1404,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,

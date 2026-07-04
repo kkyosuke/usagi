@@ -1362,7 +1362,45 @@ fn launch_pane(
     wiring: &mut Wiring,
     agent: bool,
 ) {
-    open_pane(term, state, painter, wiring, agent, true, false);
+    let dir = selected_dir(state, wiring.workspace_root);
+    // A session with no live pane yet has no tab strip to load into, so spawn its
+    // first pane the blocking way — the centred launch rabbit owns the whole pane
+    // while the PTY starts — and attach it directly, as before.
+    if (wiring.preview)(&dir, state.sidebar()).is_none() {
+        open_pane(term, state, painter, wiring, agent, true, false);
+        return;
+    }
+    // The session already shows tabs: add the pane in the background so its tab
+    // appears in the strip and animates while its shell starts, instead of
+    // blocking on the spawn. The event loop moves to it once ready — unless the
+    // user acts first (see [`HomeState::begin_pending_pane`]). Reusing an existing
+    // agent tab opens no new pane, so attach it right away instead.
+    match (wiring.spawn_pane_bg)(state, &dir, agent) {
+        Ok(Some(id)) => {
+            let epoch = wiring.interaction_epoch;
+            state.begin_pending_pane(dir, id, epoch);
+            // Zoom out to 切替 on the same session to watch the tab load: its
+            // preview shows the current pane with the new tab animating above it,
+            // and any keypress there cancels the auto-move (it bumps the epoch).
+            state.enter_switch(ReturnMode::Focus);
+        }
+        Ok(None) => reattach_pane(term, state, painter, wiring),
+        Err(e) => state.log_error(format!("failed to launch: {e}")),
+    }
+}
+
+/// Re-attach (没入) the focused session's active pane, skipping the launch loader
+/// (the pane is already live). Used when a background launch reused an existing
+/// tab (no new pane to load), and by the event loop when a loading tab becomes
+/// ready and the user has not acted — the pool has just made that pane active, so
+/// this drives it.
+pub(super) fn reattach_pane(
+    term: &Term,
+    state: &mut HomeState,
+    painter: &mut FramePainter,
+    wiring: &mut Wiring,
+) {
+    open_pane(term, state, painter, wiring, false, false, true);
 }
 
 /// Number of paint calls required to keep a transient loader visible for at

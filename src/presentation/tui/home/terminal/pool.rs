@@ -657,6 +657,81 @@ impl TerminalPool {
         Ok(())
     }
 
+    /// Spawn a new pane of `kind` for `dir` **without** making it active — the
+    /// background-tab path (在席's `terminal` / `agent` when the session already
+    /// shows tabs). The new tab appears in the strip while the previously active
+    /// pane stays attached; the caller switches to it (via [`activate_pane_id`])
+    /// only once it is ready and the user has not acted in the meantime. Returns
+    /// the new pane's stable id so the caller can track / activate exactly this
+    /// pane. An agent pane sends `agent_command` once on spawn; a terminal pane
+    /// opens a plain shell.
+    ///
+    /// [`activate_pane_id`]: Self::activate_pane_id
+    pub fn add_pane_inactive(
+        &mut self,
+        term: &Term,
+        dir: &Path,
+        kind: PaneKind,
+        launch: PaneLaunch<'_>,
+    ) -> Result<u64> {
+        let pane = self.spawn_pane(term, dir, kind, launch)?;
+        let id = pane.id;
+        let sp = self
+            .sessions
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| SessionPanes::new(Vec::new(), 0));
+        sp.panes.push(pane);
+        // Deliberately leave `active` where it is (unlike `add_pane`): the new
+        // pane loads in the background while the current tab stays attached.
+        sp.rebuild_tab_labels();
+        self.refresh_watched(dir, launch.label);
+        Ok(id)
+    }
+
+    /// Make the pane with stable `id` the active tab for `dir`, returning whether
+    /// a pane with that id was found. The background-tab counterpart to
+    /// [`add_pane_inactive`]: once the loading pane is ready (and the user has not
+    /// acted) the caller activates it, then re-attaches the now-active pane.
+    pub fn activate_pane_id(&mut self, dir: &Path, id: u64) -> bool {
+        match self.sessions.get_mut(dir) {
+            Some(sp) => match sp.panes.iter().position(|p| p.id == id) {
+                Some(idx) => {
+                    sp.active = idx;
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        }
+    }
+
+    /// The 0-based tab index of the pane with stable `id`, or `None` when no pane
+    /// in `dir` carries it any more (it closed, or the session emptied). The
+    /// renderer uses it to draw the loading animation on the right chip while a
+    /// background pane starts, and the loop uses `None` to drop a pending tab that
+    /// vanished before it was ready.
+    pub fn tab_index_of(&self, dir: &Path, id: u64) -> Option<usize> {
+        self.sessions
+            .get(dir)?
+            .panes
+            .iter()
+            .position(|p| p.id == id)
+    }
+
+    /// Whether the background pane with stable `id` has started painting — its
+    /// shell produced at least one screen update (`generation > 0`) or has already
+    /// exited (so a shell that dies on spawn stops the wait rather than hanging).
+    /// `false` for a missing pane; the caller pairs this with [`tab_index_of`] to
+    /// tell "still starting" from "gone".
+    ///
+    /// [`tab_index_of`]: Self::tab_index_of
+    pub fn pane_ready(&self, dir: &Path, id: u64) -> bool {
+        self.sessions
+            .get(dir)
+            .and_then(|sp| sp.panes.iter().find(|p| p.id == id))
+            .is_some_and(|p| p.pty.generation() > 0 || !p.pty.is_alive())
+    }
+
     /// Set `dir`'s active tab directly (clamped to the pane count), for restoring
     /// the tab that was active when the session's panes were last persisted. A
     /// no-op for a session with no panes.

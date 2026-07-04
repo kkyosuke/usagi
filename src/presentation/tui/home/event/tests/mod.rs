@@ -217,6 +217,22 @@ fn noop_persist_entry(_: &crate::domain::history::HistoryEntry) {}
 /// out for real only in production, so the tests just drop the URL.
 fn noop_open_url(_: &str) {}
 
+/// Background-pane hooks for the direct-`Wiring` loop tests that do not exercise
+/// the loading-tab flow: report "no new tab / nothing pending / no such pane" so
+/// a launch falls back to a synchronous re-attach. The flow itself is covered by
+/// the dedicated `background_tab` tests, which supply capturing versions.
+fn noop_spawn_pane_bg(_: &mut HomeState, _: &Path, _: bool) -> anyhow::Result<Option<u64>> {
+    Ok(None)
+}
+
+fn noop_poll_pending(_: &Path, _: u64) -> Option<(usize, bool)> {
+    None
+}
+
+fn noop_activate_pane(_: &Path, _: u64) -> bool {
+    false
+}
+
 fn no_branches() -> Vec<String> {
     Vec::new()
 }
@@ -360,6 +376,10 @@ fn run_full_external(
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -376,6 +396,9 @@ fn run_full_external(
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal,
         open_config: &mut config,
@@ -871,6 +894,10 @@ fn run_with_tasks(
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -887,6 +914,9 @@ fn run_with_tasks(
         evict_pool: &mut evict_pool,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -942,6 +972,10 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -958,6 +992,9 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1015,6 +1052,10 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: true,
@@ -1031,6 +1072,9 @@ fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1174,6 +1218,10 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut dispatch_update = || {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1190,6 +1238,9 @@ fn unite_add_and_remove_run_through_the_palette() {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -1266,6 +1317,7 @@ fn pending_pr_link_updates_refresh_sidebar_rows() {
 }
 
 mod attached;
+mod background_tab;
 mod background_tasks;
 mod clicks;
 mod config_switch;

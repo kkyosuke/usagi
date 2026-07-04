@@ -137,6 +137,15 @@ pub(super) type SessionLastActive = (String, DateTime<Utc>);
 
 type RemoveDispatch<'a> = dyn FnMut(&Path, &str, bool, Option<super::tasks::AutoFocus>) + 'a;
 
+/// Spawn a background pane and return its stable id (`Some`), or `None` when the
+/// launch reused an existing tab. See [`Wiring::spawn_pane_bg`].
+pub(super) type SpawnPaneBg<'a> =
+    dyn FnMut(&mut HomeState, &Path, bool) -> Result<Option<u64>> + 'a;
+
+/// Poll a background pane by stable id: `Some((tab_index, ready))`, or `None`
+/// once it has vanished. See [`Wiring::poll_pending`].
+pub(super) type PollPending<'a> = dyn FnMut(&Path, u64) -> Option<(usize, bool)> + 'a;
+
 /// The workspace root and the impure callbacks the home event loop and its key
 /// handlers drive, bundled so they thread one value instead of a dozen separate
 /// closures. [`super::run`] builds this against the real terminal, shell pool,
@@ -201,6 +210,22 @@ pub(super) struct Wiring<'a> {
     /// Embed a live shell in the right pane (没入) and drive it: the first `bool`
     /// is `agent` vs plain `terminal`, the second `new_pane` vs re-attach.
     pub open_terminal: &'a mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
+    /// Spawn a new pane for the given session in the background — the 在席
+    /// `terminal` / `agent` path when the session already shows tabs — **without**
+    /// making it active: the new tab appears in the strip and starts loading while
+    /// the current pane stays put. `bool` is `agent` vs plain `terminal`. Returns
+    /// the new pane's stable id (`Some`) so the loop can poll it, or `None` when
+    /// the launch reused an existing agent tab (no new pane) and the caller should
+    /// just re-attach. The loop pairs this with [`Self::poll_pending`] /
+    /// [`Self::activate_pane`] to move to the tab once it is ready.
+    pub spawn_pane_bg: &'a mut SpawnPaneBg<'a>,
+    /// Poll a background pane by its stable id: `Some((tab_index, ready))` while it
+    /// still exists (`ready` once its shell has painted), or `None` once it has
+    /// vanished (closed, or the session emptied) so the loop drops the tracker.
+    pub poll_pending: &'a mut PollPending<'a>,
+    /// Make the background pane with the given stable id the active tab, so the
+    /// following re-attach drives it. Returns whether a pane with that id was found.
+    pub activate_pane: &'a mut dyn FnMut(&Path, u64) -> bool,
     /// Open `url` in the platform's default browser — the side effect behind
     /// clicking a `#<number>` in a session's pinned PR popup. [`super::run`] wires
     /// the real launcher (the same detached spawn the immersive pane uses); tests
@@ -558,6 +583,44 @@ pub(super) fn event_loop(
             }
             surface.set_tabs(labels, active);
         }
+        // A background pane (在席's `terminal` / `agent` on a session that already
+        // showed tabs) loads its tab in the strip. Poll it each frame: animate its
+        // chip and, once its shell has started painting, move to it (没入) — but only
+        // while the user has not acted since it was dispatched. Any interaction
+        // cancels the move, leaving the new tab as an ordinary background pane the
+        // user reaches through the strip. Fields are copied out first so the tracker
+        // can be cleared / stepped without holding the read borrow.
+        if let Some((dir, id, idle)) = state.pending_pane().map(|p| {
+            (
+                p.dir().to_path_buf(),
+                p.pane_id(),
+                p.interaction_epoch() == wiring.interaction_epoch,
+            )
+        }) {
+            if !idle {
+                state.clear_pending_pane();
+            } else {
+                match (wiring.poll_pending)(&dir, id) {
+                    // The pane vanished before it was ready (closed, or the session
+                    // emptied): stop tracking it.
+                    None => {
+                        state.clear_pending_pane();
+                    }
+                    Some((tab, ready)) => {
+                        state.step_pending_pane(tab);
+                        if ready {
+                            state.clear_pending_pane();
+                            (wiring.activate_pane)(&dir, id);
+                            // Move to the now-active tab (没入). This blocks in the
+                            // pane until the user leaves it, exactly like a launch
+                            // from the menu; the loop resumes when it returns.
+                            handlers::reattach_pane(term, &mut state, &mut painter, wiring);
+                            force_paint = true;
+                        }
+                    }
+                }
+            }
+        }
         // The task panel and the install rabbit animate on the clock, so a frame
         // showing either must repaint even when nothing else moved.
         let now = Instant::now();
@@ -581,6 +644,8 @@ pub(super) fn event_loop(
         let skip_paint = state.mode() == Mode::Switch
             && state.terminal_view().is_none()
             && !state.command_palette_open()
+            // A loading tab animates on the clock, so its frames must not be skipped.
+            && state.pending_pane().is_none()
             && !force_paint
             && !completed_any
             && !refreshed
@@ -626,7 +691,10 @@ pub(super) fn event_loop(
             || state.mascot_reacting()
             // A pending chat reply: keep ticking to poll the receiver and animate
             // the "thinking" spinner.
-            || chat_rx.is_some();
+            || chat_rx.is_some()
+            // A background pane loading its tab: keep ticking to poll it ready and
+            // animate its chip.
+            || state.pending_pane().is_some();
         // How long to wait for input before re-iterating, or `None` to block until
         // it arrives. An animating frame ticks fast (`ANIM_TICK`) to advance its
         // moving parts; an otherwise-idle screen still wakes on the slower
@@ -1507,6 +1575,16 @@ pub(crate) fn event_loop_compat(
     // capturing `Wiring` with their own `chat_ask`.
     let mut chat_ask = echo_chat_ask;
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
+    // The background-pane hooks need a real pool, which the compat-shim tests do
+    // not have: the default fakes report "no new tab / nothing pending", so a
+    // launch here falls back to a synchronous re-attach (through `open_terminal`).
+    // The full background flow — spawn a loading tab, poll it ready, move to it —
+    // is covered by the dedicated `background_tab` tests that build a capturing
+    // `Wiring`.
+    let mut spawn_pane_bg =
+        |_: &mut HomeState, _: &Path, _: bool| Ok::<Option<u64>, anyhow::Error>(None);
+    let mut poll_pending = |_: &Path, _: u64| None::<(usize, bool)>;
+    let mut activate_pane = |_: &Path, _: u64| false;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     // Exercise the test-shim no-op once so coverage does not treat this helper
     // closure as an uncovered function. The production tab-action path is covered
@@ -1514,6 +1592,12 @@ pub(crate) fn event_loop_compat(
     let mut dummy = HomeState::new("", Vec::new(), None);
     tab_action(&mut dummy, Path::new(""), 0, TabMenuAction::Close);
     let _ = open_external_terminal(Path::new(""));
+    // Exercise the background-pane no-op shims once so coverage does not flag
+    // these helper closures as uncovered; the real flow is covered by the
+    // capturing-`Wiring` background-tab tests.
+    let _ = spawn_pane_bg(&mut dummy, Path::new(""), false);
+    let _ = poll_pending(Path::new(""), 0);
+    let _ = activate_pane(Path::new(""), 0);
     // The compat-shim tests hand in a `FnMut(&str)` persist (they only assert on
     // the recorded command text); adapt it to the production entry-shaped hook so
     // the loop's `Wiring` stays uniform.
@@ -1534,6 +1618,9 @@ pub(crate) fn event_loop_compat(
         evict_pool: &mut evict_pool,
         existing_branches: &mut existing_branches,
         open_terminal: &mut open_terminal,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut open_config,

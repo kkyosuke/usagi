@@ -384,6 +384,10 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -400,6 +404,9 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -498,6 +505,10 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut chat_ask = ready_chat_ask;
+    let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+        noop_spawn_pane_bg;
+    let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+    let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -514,6 +525,9 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         evict_pool: &mut evict,
         existing_branches: &mut branches,
         open_terminal: &mut open,
+        spawn_pane_bg: &mut spawn_pane_bg,
+        poll_pending: &mut poll_pending,
+        activate_pane: &mut activate_pane,
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
@@ -657,6 +671,10 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
         let mut save_resume = |_: &str, _: ResumeLevel| {};
         let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
         let mut chat_ask = ready_chat_ask;
+        let mut spawn_pane_bg: fn(&mut HomeState, &Path, bool) -> anyhow::Result<Option<u64>> =
+            noop_spawn_pane_bg;
+        let mut poll_pending: fn(&Path, u64) -> Option<(usize, bool)> = noop_poll_pending;
+        let mut activate_pane: fn(&Path, u64) -> bool = noop_activate_pane;
         let mut wiring = Wiring {
             interaction_epoch: 0,
             watch_sessions: false,
@@ -673,6 +691,9 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             evict_pool: &mut evict,
             existing_branches: &mut branches,
             open_terminal: &mut open,
+            spawn_pane_bg: &mut spawn_pane_bg,
+            poll_pending: &mut poll_pending,
+            activate_pane: &mut activate_pane,
             open_url: &mut open_url,
             open_external_terminal: &mut open_external_terminal,
             open_config: &mut config,
