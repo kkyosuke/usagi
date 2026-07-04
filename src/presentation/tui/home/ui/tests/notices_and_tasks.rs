@@ -307,7 +307,8 @@ fn run2_loading_blanks_the_focus_action_menu() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
 
-    let idle = stripped(&right_pane_contents(&state, 60, 12));
+    // The idle 在席 menu floats as an overlay modal composited over the frame.
+    let idle = stripped(&render_frame(24, 100, &state));
     assert!(idle.contains("Run a command:"));
     assert!(idle.contains("Open a shell"));
 

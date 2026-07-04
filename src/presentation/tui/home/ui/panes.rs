@@ -2462,8 +2462,10 @@ fn focus_session_header(state: &HomeState) -> String {
 
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. Shared by the idle-session [`focus_menu`] and the "+ new" tab.
-fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
+/// and a key hint. Rendered as the body of the floating menu overlay modal (see
+/// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
+/// identity rides the modal's title rather than a header line here.
+pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     let mut lines = vec![style("Run a command:").dim().to_string()];
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
@@ -2547,14 +2549,6 @@ fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
     lines
 }
 
-/// Builds the 在席 (Focus) menu: a short header, one row per Session-scope
-/// command (`›` cursor on the highlighted one), and a key hint.
-pub(super) fn focus_menu(state: &HomeState, width: usize) -> Vec<String> {
-    let mut lines = vec![focus_session_header(state), String::new()];
-    lines.extend(focus_menu_body(state, width));
-    lines
-}
-
 /// Builds the 在席 (Focus) prompt surface: a header, the session-scoped command
 /// line (`❯ <input>▏`), and the Session-scope hint below it.
 pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
@@ -2568,22 +2562,35 @@ pub(super) fn focus_prompt(state: &HomeState, width: usize) -> Vec<String> {
 /// width in `chars`) lands exactly under it, as it does for the pane labels.
 const FOCUS_NEW_TAB_LABEL: &str = "+ new";
 
+/// A blank right pane of exactly `rows` rows — the pane behind a floating overlay
+/// that owns the surface (e.g. the 在席 menu modal), so the modal reads against an
+/// empty pane rather than stale content showing through.
+fn blank_pane(rows: usize) -> Vec<String> {
+    vec![String::new(); rows]
+}
+
 /// Builds the 在席 (Focus) right pane. With no live panes it is the session's
-/// action surface alone — the menu or prompt with its own `session:` header,
-/// exactly as before. With live panes it gains a **tab strip**: one chip per live
-/// pane followed by a "+ new" chip, the session identity beside it (shared with
-/// 没入), and below it either the selected pane's live preview or — on the "+ new"
-/// tab — the action surface (header-less, the identity already rides the strip).
+/// action surface — the prompt inline (its own `session:` header), or, on the
+/// menu UI, a blank pane behind the floating menu overlay modal. With live panes
+/// it gains a **tab strip**: one chip per live pane followed by a "+ new" chip,
+/// the session identity beside it (shared with 没入), and below it either the
+/// selected pane's live preview or — on the "+ new" tab — the prompt surface
+/// (header-less; the menu again floats as an overlay rather than drawing inline).
 fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
-    // No live panes: the action surface fills the pane, just as it did before
-    // tabs existed (its own `session:` header, no strip).
+    // No live panes: the prompt surface fills the pane. The menu never renders
+    // inline — it floats as an overlay modal centred over the pane (composited by
+    // [`render_frame`] when [`HomeState::focus_menu_overlay`] holds), so on the
+    // menu UI the pane behind it stays blank.
     let Some(strip) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) else {
-        let mut lines = match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu(state, width),
-            SessionActionUi::Prompt => focus_prompt(state, width),
+        let lines = match state.session_action_ui() {
+            SessionActionUi::Menu => blank_pane(rows),
+            SessionActionUi::Prompt => {
+                let mut lines = focus_prompt(state, width);
+                lines.truncate(rows);
+                lines.resize(rows, String::new());
+                lines
+            }
         };
-        lines.truncate(rows);
-        lines.resize(rows, String::new());
         return lines;
     };
 
@@ -2605,11 +2612,13 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut lines = header_tab_rows(header, Some(&combined), width);
 
     if on_new {
-        // The "+ new" tab: the action surface that launches the next pane.
-        lines.push(String::new());
-        match state.session_action_ui() {
-            SessionActionUi::Menu => lines.extend(focus_menu_body(state, width)),
-            SessionActionUi::Prompt => lines.extend(focus_prompt_body(state, width)),
+        // The "+ new" tab: the action surface that launches the next pane. The
+        // menu floats as an overlay modal (see [`HomeState::focus_menu_overlay`]),
+        // so on the menu UI only the tab strip shows behind it here; the prompt
+        // stays inline.
+        if state.session_action_ui() == SessionActionUi::Prompt {
+            lines.push(String::new());
+            lines.extend(focus_prompt_body(state, width));
         }
     } else {
         // A pane tab: preview the pane's live screen (the snapshot taken before

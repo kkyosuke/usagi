@@ -2748,6 +2748,36 @@ impl HomeState {
         self.focus_new_tab || self.focus_pane_count() == 0
     }
 
+    /// Whether the 在席 (Focus) action **menu** is currently presented as a
+    /// floating overlay modal (centred over the right pane) rather than inline in
+    /// the pane.
+    ///
+    /// This is true only for the menu surface ([`SessionActionUi::Menu`]) — the
+    /// prompt surface stays inline — and only while 在席 actually shows that
+    /// surface: on the trailing "+ new" tab (which [`focus_on_new_tab`] also
+    /// reports for an idle session with no live panes).
+    ///
+    /// It yields to whatever else has claimed the screen so the floating menu
+    /// never fights another surface for the pane: the momentary loading indicator,
+    /// and any open overlay ([`Overlay`] — the note editor, a text modal a menu
+    /// command opened, the Markdown preview / diff view, …) or the `:` command
+    /// palette, each of which captures the keyboard and draws its own box.
+    ///
+    /// The renderer floats the menu when this holds and [`focus_pane`] leaves the
+    /// pane behind it clear, so the two read the one predicate and never disagree
+    /// on where the menu is drawn.
+    ///
+    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
+    /// [`focus_pane`]: super::ui::panes
+    pub fn focus_menu_overlay(&self) -> bool {
+        self.mode == Mode::Focus
+            && self.session_action_ui == SessionActionUi::Menu
+            && self.focus_on_new_tab()
+            && self.loading().is_none()
+            && matches!(self.overlay, Overlay::None)
+            && !self.command_palette_open()
+    }
+
     /// Move 在席's tab selector to the next tab, wrapping through the live panes
     /// and the trailing "+ new" tab (`[pane 0 … pane n-1, + new]`). Returns the
     /// pane index to make active (for the caller to apply to the terminal pool) on

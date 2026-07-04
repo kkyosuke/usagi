@@ -60,7 +60,7 @@
 
 ### 在席のキー操作（Focus）
 
-右ペインのアクション UI（[Menu / Prompt](02-layout.md#在席のアクション-uimenu--prompt)）で選択中セッションのコマンドを操作します。
+アクション UI（[Menu / Prompt](02-layout.md#在席のアクション-uimenu--prompt)）で選択中セッションのコマンドを操作します（**Menu は右ペイン中央に浮かぶ[オーバーレイモーダル](05-overlays.md#在席のアクションメニューオーバーレイ)**、Prompt は右ペインにインライン。キー操作は置き場所によらず同じ）。
 キー操作は設定 [`session_action_ui`](../../05-settings.md#設定項目) で変わります。
 
 | キー | 動作 |
