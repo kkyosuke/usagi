@@ -354,6 +354,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -373,6 +374,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -454,7 +456,6 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
             Path::new("/ws"),
             &monitor,
             &UpdateHandle::new(),
-            &OneShot::<bool>::new(),
             &OneShot::<Vec<AgentCli>>::new(),
             &mut persist,
             &mut create,
@@ -575,6 +576,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut chat_ask = ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -594,6 +596,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         open_url: &mut open_url,
         open_external_terminal: &mut open_external_terminal,
         open_config: &mut config,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -649,7 +652,6 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -702,7 +704,6 @@ fn close_typed_on_the_root_in_focus_is_refused() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -771,7 +772,6 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -839,7 +839,6 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -905,7 +904,6 @@ fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -969,7 +967,6 @@ fn focus_menu_close_picker_enter_runs_plain_close() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -1031,7 +1028,6 @@ fn focus_menu_close_picker_enter_on_force_runs_force_close() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -1086,7 +1082,6 @@ fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(Str
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -1165,7 +1160,6 @@ fn session_remove_without_a_name_opens_the_modal_and_bulk_removes() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,

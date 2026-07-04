@@ -74,6 +74,46 @@ fn returning_from_config_refreshes_the_session_action_ui() {
 }
 
 #[test]
+fn returning_from_config_reapplies_the_default_agent_cli() {
+    // The config screen switched the default Agent CLI; on returning to home the
+    // state must adopt it so the next `agent` / `ai` launch (and the 在席 menu's
+    // `Launch <名前>` row) reflect the edit without restarting — in particular,
+    // `ai`'s "open config and choose an installed Agent CLI" hint only works if
+    // this re-apply happens. The launch callback observes the live state's
+    // default, proving the reload reached it.
+    let mut config = |_: &Term| {
+        Ok(Some(ConfigReload {
+            session_action_ui: SessionActionUi::Prompt,
+            key_scheme: crate::domain::settings::KeyScheme::default(),
+            agent_cli: AgentCli::Gemini,
+            ai_available: false,
+        }))
+    };
+    let seen = RefCell::new(None);
+    let mut open = |state: &mut HomeState, _: &Path, _: bool, _: bool| {
+        *seen.borrow_mut() = Some(state.default_agent());
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut keys = cmd("config");
+    keys.push(Ok(Key::Enter)); // open config -> returns Gemini as default -> back
+    keys.push(Ok(Key::Enter)); // focus root (idle) -> 在席 prompt
+    keys.extend(typed("agent")); // bare `agent` launches the (new) default
+    keys.push(Ok(Key::Enter)); // attach, observing the re-applied default
+    run_full(
+        keys,
+        sample_state(), // starts with AgentCli::default()
+        &mut open,
+        &mut create,
+        &mut preview,
+        &mut config,
+    )
+    .unwrap();
+    assert_eq!(seen.into_inner(), Some(AgentCli::Gemini));
+}
+
+#[test]
 fn config_failure_is_propagated() {
     let mut keys = cmd("config");
     keys.push(Ok(Key::Enter));
@@ -192,7 +232,6 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,

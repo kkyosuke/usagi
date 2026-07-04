@@ -215,26 +215,72 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Claude))]);
 }
 
+/// A zero-argument Session-scope command with no `run_focus_command` arm, for
+/// proving the menu's dispatch fails loudly instead of falling back to an agent
+/// launch.
+struct MenuOnlyTestCommand;
+
+impl crate::presentation::tui::home::command::Command for MenuOnlyTestCommand {
+    fn name(&self) -> &'static str {
+        "zzz"
+    }
+
+    fn description(&self) -> &'static str {
+        "test-only zero-argument command"
+    }
+
+    fn scope(&self) -> crate::presentation::tui::home::command::CommandScope {
+        crate::presentation::tui::home::command::CommandScope::Session
+    }
+
+    fn run(
+        &self,
+        _args: &str,
+        _ctx: &crate::presentation::tui::home::command::CommandContext,
+    ) -> crate::presentation::tui::home::command::CommandResult {
+        crate::presentation::tui::home::command::CommandResult {
+            lines: Vec::new(),
+            effect: crate::presentation::tui::home::command::Effect::None,
+        }
+    }
+}
+
 #[test]
-fn focus_menu_can_run_the_coming_soon_ai_command() {
-    // With the local LLM available the menu lists, in fixed order, agent (0,
-    // default), terminal (1), diff (2), ai (3), close (4). ArrowUp from the top
-    // wraps to "close"; back down to "agent"; three more land on "ai"; Enter on it
-    // just logs (no attach).
+fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
+    // A Session-scope command registered without a `run_focus_command` arm appears
+    // in the 在席 menu (ranked last), but Enter on it must not silently launch the
+    // default agent — the catch-all just logs and stays put. With the local LLM
+    // unavailable the menu lists agent (0), terminal (1), diff (2), close (3), zzz
+    // (4); ArrowUp from the default "agent" wraps straight onto "zzz".
+    let opened = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push(a);
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut state = sample_state();
-    state.set_ai_available(true);
+    state.register_command(Box::new(MenuOnlyTestCommand));
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus ("agent" highlighted by default)
-    keys.push(Ok(Key::Home)); // ignored in the menu
-    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "close"
-    keys.push(Ok(Key::ArrowDown)); // back to "agent"
-    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
-    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
-    keys.push(Ok(Key::ArrowDown)); // diff -> ai
-    keys.push(Ok(Key::Enter)); // run ai (coming soon)
+    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Home)); // ignored in the menu (the key fallthrough arm)
+    keys.push(Ok(Key::ArrowUp)); // agent wraps up to "zzz"
+    keys.push(Ok(Key::Enter)); // run zzz -> catch-all logs, no launch
     keys.push(Ok(Key::Escape)); // -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
-    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    assert!(opened.borrow().is_empty());
 }
 
 #[test]
@@ -392,7 +438,6 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -458,7 +503,6 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -619,7 +663,6 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -685,7 +728,6 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -757,7 +799,6 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
-        &OneShot::<bool>::new(),
         &OneShot::<Vec<AgentCli>>::new(),
         &mut persist,
         &mut create,
@@ -777,6 +818,191 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
     // The `Esc` opened nothing (it stayed in Focus); the trailing `Enter`
     // re-attached the pane it stepped onto, both with `new_pane = false`.
     assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
+}
+
+/// Drive the loop with a capturing `chat_ask` hook, so the tests can control the
+/// local-LLM reply (ready / withheld / disconnected) and exercise the right-pane
+/// chat overlay. After the scripted keys drain, [`ScriptedReader`] falls back to
+/// `Ctrl-C`, quitting.
+fn run_with_chat(
+    keys: Vec<io::Result<Key>>,
+    state: HomeState,
+    chat_ask: &mut dyn FnMut(String) -> std::sync::mpsc::Receiver<Result<String, String>>,
+) -> Outcome {
+    let term = Term::stdout();
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let tasks = TaskHandle::new();
+    let update = UpdateHandle::new();
+    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
+    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
+    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
+    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
+    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
+    let mut evict = |_: &Path| {};
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
+    let mut close: fn(&mut HomeState, &Path) = noop_close;
+    let mut save_resume = |_: &str, _: ResumeLevel| {};
+    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
+    let mut open_url: fn(&str) = noop_open_url;
+    let mut dispatch_update = || {};
+    let mut unite_resolve = no_unite_resolve;
+    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
+    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
+    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
+    let mut wiring = Wiring {
+        interaction_epoch: 0,
+        watch_sessions: false,
+        workspace_root: Path::new("/ws"),
+        persist: &mut persist,
+        dispatch_create: &mut dispatch_create,
+        rename_display: &mut rename,
+        set_note: &mut set_note_fake,
+        set_label: &mut set_label_fake,
+        reorder_session: &mut reorder_fake,
+        dispatch_remove: &mut dispatch_remove,
+        unite_resolve: &mut unite_resolve,
+        dispatch_update: &mut dispatch_update,
+        evict_pool: &mut evict,
+        existing_branches: &mut branches,
+        open_terminal: &mut open,
+        open_url: &mut open_url,
+        open_external_terminal: &mut open_external_terminal,
+        open_config: &mut config,
+        chat_ask,
+        preview: &mut preview,
+        tab_op: &mut tab_op,
+        close_tab: &mut close,
+        tab_action: &mut tab_action,
+        save_resume: &mut save_resume,
+        save_last_active: &mut save_last_active,
+    };
+    // A pre-filled probe result so the loop's `ai_available` drain runs (the menu
+    // gate flips on); the chat tests reach the overlay via the prompt regardless.
+    let ai_available = OneShot::new();
+    ai_available.set(true);
+    event_loop(
+        &term,
+        &mut reader,
+        state,
+        &monitor,
+        &update,
+        &SessionsRefreshHandle::new(),
+        &ai_available,
+        &OneShot::<Vec<AgentCli>>::new(),
+        &tasks,
+        &mut wiring,
+    )
+    .unwrap()
+}
+
+/// A `sample_state` focused on `feat` with the local LLM marked usable, so the
+/// 在席 menu offers the `chat` row.
+fn chat_ready_state() -> HomeState {
+    let mut state = sample_state();
+    state.set_ai_available(true);
+    state
+}
+
+#[test]
+fn focus_menu_chat_row_opens_the_chat_overlay() {
+    // With the local LLM available, the menu lists agent, terminal, diff, chat,
+    // close; three ArrowDowns land on `chat` and Enter opens the right-pane chat
+    // overlay (sidebar stays). Esc closes it back to Focus.
+    let mut ask = ready_chat_ask;
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (menu)
+    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
+    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
+    keys.push(Ok(Key::ArrowDown)); // diff -> chat
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, chat_ready_state(), &mut ask);
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
+fn focus_prompt_chat_opens_and_converses() {
+    // Typing `chat` in the 在席 prompt opens the overlay (regardless of the menu
+    // gate); typing a line + Enter submits it, the echoed reply drains on the next
+    // pass, and Esc closes it. Routed through the default wiring so the compat
+    // `chat_ask` echo is exercised end to end.
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.extend(typed("chat"));
+    keys.push(Ok(Key::Enter)); // run `chat` -> overlay
+    keys.extend(typed("hi"));
+    keys.push(Ok(Key::Enter)); // submit -> echoed reply
+    keys.push(Ok(Key::ArrowUp)); // a pass so the reply drains (and a scroll)
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, prompt_state()).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn chat_overlay_editing_pending_guard_and_close_mid_request() {
+    // Exercise the overlay's editing keys, a blank Enter (no request), then a real
+    // submit against a *withheld* reply: the spinner ticks (Empty poll), keys are
+    // inert while pending (except scroll), and Esc closes it mid-request (dropping
+    // the receiver). A Tab covers the catch-all key arm. The overlay is reached via
+    // the prompt (`chat`), which is not gated on local-LLM availability.
+    let mut senders = Vec::new();
+    let mut ask = |_: String| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        senders.push(tx); // keep the sender alive so the receiver reads Empty
+        rx
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.extend(typed("chat"));
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.push(Ok(Key::Enter)); // blank line: no request
+    keys.extend(typed("ab"));
+    keys.push(Ok(Key::ArrowLeft));
+    keys.push(Ok(Key::Backspace));
+    keys.push(Ok(Key::ArrowRight));
+    keys.push(Ok(Key::Del));
+    keys.push(Ok(Key::Home));
+    keys.push(Ok(Key::End));
+    keys.push(Ok(Key::Tab)); // catch-all key arm
+    keys.push(Ok(Key::Char('q')));
+    keys.push(Ok(Key::Enter)); // submit -> withheld reply (stays pending)
+    keys.push(Ok(Key::Char('x'))); // ignored while pending
+    keys.push(Ok(Key::ArrowUp)); // scroll up works while pending
+    keys.push(Ok(Key::ArrowDown)); // scroll down works while pending
+    keys.push(Ok(Key::Escape)); // close mid-request -> Focus (receiver dropped)
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, prompt_state(), &mut ask);
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
+fn chat_overlay_reports_a_failed_request() {
+    // A disconnected channel (the worker dropped its sender before sending) is
+    // surfaced as a failed reply in the transcript on the next poll.
+    let mut ask = |_: String| {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        drop(tx);
+        rx
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.extend(typed("chat"));
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.extend(typed("q"));
+    keys.push(Ok(Key::Enter)); // submit -> disconnected reply
+    keys.push(Ok(Key::ArrowUp)); // a pass so the failure drains
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, prompt_state(), &mut ask);
+    assert!(matches!(outcome, Outcome::Quit));
 }
 
 #[test]

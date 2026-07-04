@@ -1,13 +1,13 @@
 //! A cloneable one-shot slot a background startup probe fills and the event loop
 //! drains exactly once.
 //!
-//! The home screen kicks off slow startup work — probing whether the local LLM
-//! is usable (an `ollama show`) and re-syncing the worktree statuses from git —
-//! on background threads so neither delays the first paint. Each thread writes
-//! its result here once; the event loop [`take`](OneShot::take)s it on a later
-//! frame and applies it, so the screen opens immediately and updates in place
-//! when the result lands. Mirrors [`UpdateHandle`](super::update::UpdateHandle),
-//! generalised over the payload type.
+//! The home screen kicks off slow startup work — probing installed Agent CLIs and
+//! re-syncing the worktree statuses from git — on background threads so neither
+//! delays the first paint. Each thread writes its result here once; the event loop
+//! [`take`](OneShot::take)s it on a later frame and applies it, so the screen
+//! opens immediately and updates in place when the result lands. Mirrors
+//! [`UpdateHandle`](super::update::UpdateHandle), generalised over the payload
+//! type.
 
 use std::sync::{Arc, Mutex};
 

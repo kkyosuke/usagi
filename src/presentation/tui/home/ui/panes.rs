@@ -3043,6 +3043,12 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     if let Some(preview) = state.preview() {
         return preview_pane(preview, right_w, rows);
     }
+    // The local-LLM chat, when open, likewise takes over the right pane
+    // regardless of mode (opened from 在席's `chat`, it captures the keyboard
+    // while shown). The sidebar to its left keeps rendering as usual.
+    if let Some(chat) = state.chat() {
+        return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
+    }
     // The diff view likewise takes over the right pane (opened from the `:`
     // palette, capturing the keyboard while shown).
     if let Some(diff) = state.diff_view() {
