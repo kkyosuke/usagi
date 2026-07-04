@@ -127,13 +127,14 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 7 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 8 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
 │          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  │
 │          Setup Commands  Edit (2 commands)            │  │
-│          Env Vars        Edit (1 var)                 │  ┘
+│          Env Vars        Edit (1 var)                 │  │
+│          Session Labels  Edit (global: 5 labels)      │  ┘
 │          PR Skills       < Global (On) >              │  ← 同梱スキル機能の上書き（機能ごとに 1 行）
 │                                                       │
 │                           [ Save ]                    │  ← Save ボタン
@@ -151,6 +152,7 @@
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
 | Env Vars | pane 起動時に 1Password から解決して注入する workspace 固有の環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。グローバル Env Vars へ追加し、同名は workspace 側が優先される |
+| Session Labels | 切替のステータスラベルマスタ（`session_labels`）のこのワークスペースでの上書き | 未上書きは `Edit (global: N labels)`（グローバルの実効値に追従）、上書き時は `Edit (N labels)`、空上書き時は `Edit (off)`。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -171,6 +173,13 @@
   reference だけで、解決した secret 本体は保存しません。同じ binding は、コマンドパレットの
   [`env`](../03-commands/02-tui.md#env) を実行して開く[オーバーレイエディタ](home/05-overlays.md#workspace-env-エディタ)からも
   編集できます（そちらは Config 画面へ遷移せず Overview 上で完結します）。
+- Session Labels も action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 件の
+  `id | name | color | icon` を入力します（`color` 省略で `gray`、`icon` 省略で既定ビュレット。`name` に区切りの
+  `|` は使えません）。`Ctrl-S` で反映するとき、`id` か `name` が空の行は破棄し、重複 `id` は最初の 1 件だけ残します
+  （[`session_labels`](../05-settings.md#ステータスラベルsession_labels) の読み取り時と同じ整形）。エディタはグローバルの
+  マスタ（または既存の上書き）で初期化され、内容がグローバルと同一のまま保存すると**上書きを作らずグローバルに追従**、
+  全行を空にして保存すると**このプロジェクトで機能休止**（空の上書き）になります。切替での付け方は
+  [../05-settings.md#ステータスラベルsession_labels](../05-settings.md#ステータスラベルsession_labels) を参照。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します
   （削除はしません）。
