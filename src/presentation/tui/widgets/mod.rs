@@ -107,6 +107,12 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
 /// - **U+2500–U+25FF** — box-drawing, block-element and geometric-shape glyphs
 ///   (`─ │ ╭ █ ● ◐ ○ ◇ ◆ ▶`). Terminals draw these narrow so TUI borders and the
 ///   sidebar's shape icons line up, and Nerd Fonts render them single-width too.
+/// - **U+2191 / U+2193 (`↑` `↓`)** — the sidebar detail line's commit-divergence
+///   marker (`↑N ↓M`). The detail cluster reserves these fields at *plain* width
+///   (one column per arrow, matching what usagi's terminals paint), so measuring
+///   the arrows as wide (2) here would over-count the composed left cell, clip it,
+///   and land the pane's `│` divider a column short — a zig-zag down the list.
+///   Counting them single-width keeps the divider straight, whichever session row.
 ///
 /// Every *other* ambiguous character (arrows `→`, enclosed alphanumerics `①`,
 /// CJK symbols `※ ★` …) is drawn two columns wide, which is exactly where
@@ -114,7 +120,7 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
 fn renders_single_width(ch: char) -> bool {
     matches!(
         ch as u32,
-        0x2500..=0x25FF | 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD
+        0x2191 | 0x2193 | 0x2500..=0x25FF | 0xE000..=0xF8FF | 0xF_0000..=0xF_FFFD | 0x10_0000..=0x10_FFFD
     )
 }
 
@@ -1812,7 +1818,12 @@ mod tests {
         assert_eq!(glyph_width('●'), 1); // U+25CF kind dot
         assert_eq!(glyph_width('\u{f00c}'), 1); // BMP PUA (git status icon)
         assert_eq!(glyph_width('\u{f0907}'), 1); // supplementary PUA (selected glyph)
-                                                 // An unassigned / zero-width code point contributes nothing.
+                                                 // The commit-divergence arrows are single-width: the detail line reserves
+                                                 // their `↑N ↓M` field at plain width, so counting them wide here would clip
+                                                 // the composed left cell and jog the `│` divider left on those rows.
+        assert_eq!(glyph_width('↑'), 1); // U+2191
+        assert_eq!(glyph_width('↓'), 1); // U+2193
+                                         // An unassigned / zero-width code point contributes nothing.
         assert_eq!(glyph_width('\u{200b}'), 0); // zero-width space
     }
 
