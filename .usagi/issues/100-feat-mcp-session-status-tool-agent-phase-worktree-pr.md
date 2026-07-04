@@ -1,13 +1,13 @@
 ---
 number: 100
 title: feat(mcp): session_status tool — agent phase・worktree 状態・PR 状態を公開しコーディネータが完了検知できるようにする
-status: todo
+status: done
 priority: high
 labels: [orchestration, mcp]
 dependson: []
 related: []
 created_at: 2026-07-04T05:09:42.602913+00:00
-updated_at: 2026-07-04T05:09:42.602913+00:00
+updated_at: 2026-07-04T13:39:26.926813+00:00
 ---
 
 ## 背景
