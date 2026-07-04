@@ -86,13 +86,16 @@ fn clip_to_width_keeps_ansi_escapes_without_counting_them() {
     // none without a TTY) carries sequences of zero display width: the clip
     // measures only the visible text and copies the escapes verbatim, so the
     // result keeps the colour, stays exactly the budget wide, and keeps "he" —
-    // the escapes never eat into the three-column budget.
+    // the escapes never eat into the three-column budget. Because it carried a
+    // style across the cut, the tail is closed with a reset (after the ellipsis)
+    // so the colour cannot bleed into what follows.
     let styled = "\x1b[31mhello\x1b[0m";
     let clipped = clip_to_width(styled, 3);
     assert_eq!(console::measure_text_width(&clipped), 3);
     assert!(clipped.starts_with("\x1b[31m"));
     assert!(clipped.contains("he"));
-    assert!(clipped.ends_with('…'));
+    assert!(clipped.ends_with("\x1b[0m"));
+    assert!(clipped.contains('…'));
 }
 
 #[test]

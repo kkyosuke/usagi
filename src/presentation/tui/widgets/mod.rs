@@ -58,6 +58,15 @@ pub fn clip_to_width(text: &str, max: usize) -> String {
 /// needs no clipping costs no allocation. Callers that must own the result use
 /// [`clip_to_width`]; callers that only `Display` it (e.g. `style(…)`) take the
 /// [`Cow`](std::borrow::Cow) and avoid the copy.
+///
+/// When the cut carries over any SGR escape, the clipped text is closed with a
+/// [`RESET`] so the colour (or a `reverse`/background span, e.g. the caret cell
+/// [`block_caret`] draws) does not bleed into whatever is butted up after it —
+/// the padding and right border [`boxed`] appends, or the next `markdown_row`.
+/// This matches the sibling cuts [`slice_from_width`] / [`overlay_block`], which
+/// already reset. Without it a full-width (CJK) line clipped mid-caret leaves the
+/// box's padding and right `│` painted in reverse video, so the frame reads as
+/// broken.
 pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if console::measure_text_width(text) <= max {
@@ -70,6 +79,9 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
     let budget = max - 1;
     let mut out = String::with_capacity(text.len());
     let mut width = 0usize;
+    // Whether any SGR escape was carried across the cut, so the tail must be
+    // closed with a [`RESET`] lest its colour bleed past the clip.
+    let mut carried_escape = false;
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
         if ch == ESC {
@@ -79,6 +91,7 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
             // and parameter bytes through to (and including) the final byte
             // (`0x40..=0x7e`, excluding the `[` introducer itself).
             out.push(ch);
+            carried_escape = true;
             for c in chars.by_ref() {
                 out.push(c);
                 if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
@@ -95,6 +108,11 @@ pub fn clip_to_width_cow(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
         out.push(ch);
     }
     out.push('…');
+    // Close any style the cut left open so it does not bleed into the padding,
+    // border, or row butted up after the clip.
+    if carried_escape {
+        out.push_str(RESET);
+    }
     Cow::Owned(out)
 }
 
@@ -1456,6 +1474,47 @@ mod tests {
         // signals the unsaved edit, and it applies whether focused or not.
         assert!(chooser("Gemini", true, true).contains("Gemini"));
         assert!(chooser("Gemini", false, true).contains("Gemini"));
+    }
+
+    #[test]
+    fn clip_to_width_closes_a_style_the_cut_left_open() {
+        // A styled line cut mid-span must be closed with a RESET so its colour —
+        // or a reverse/background span — does not bleed into what is butted up
+        // after it (the padding and right border `boxed` appends).
+        let styled = Style::new()
+            .force_styling(true)
+            .red()
+            .apply_to("hello world")
+            .to_string();
+        let clipped = clip_to_width(&styled, 6);
+        assert!(clipped.ends_with(RESET), "clip must reset: {clipped:?}");
+        // Plain (unstyled) text carries no escape, so no stray reset is appended.
+        let plain = clip_to_width("hello world", 6);
+        assert!(!plain.contains(RESET));
+        assert!(plain.ends_with('…'));
+    }
+
+    #[test]
+    fn boxed_does_not_bleed_a_clipped_caret_span_onto_its_border() {
+        // A full-width (CJK) input with a reverse-video caret, clipped to the box:
+        // the reverse must not carry past the clip onto the padding and right `│`,
+        // so once `boxed` closes the row the border reads as a plain frame.
+        let base = Style::new().force_styling(true).accent();
+        let line = block_caret("あいうえおかきくけこ", "さしすせそ", &base);
+        let boxed = boxed("t", 12, &[line]);
+        // Every row stays the same display width — the clip never shifts the frame.
+        let width = console::measure_text_width(&boxed[0]);
+        for row in &boxed {
+            assert_eq!(console::measure_text_width(row), width, "row: {row:?}");
+        }
+        // The content row's tail (padding + right border) carries no open SGR: the
+        // last escape in it is a reset, not the reverse/colour the caret opened.
+        let content = &boxed[1];
+        let last_esc = content.rfind(ESC).expect("row carries styling");
+        assert!(
+            content[last_esc..].starts_with(RESET),
+            "border tail must be reset, not bled style: {content:?}",
+        );
     }
 
     #[test]
