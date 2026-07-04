@@ -57,15 +57,17 @@ const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
 
 /// The fixed 在席 (Focus) menu display order, independent of registry order and
 /// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
-/// then `terminal`), then `ai`, then the destructive `close` last. Any command
+/// then `terminal`), then the read-only `diff` view, then `ai`, then the
+/// destructive `close` last. Any command
 /// not in this list sorts after these four, then alphabetically among itself.
 fn session_menu_rank(name: &str) -> usize {
     match name {
         "agent" => 0,
         "terminal" => 1,
-        "ai" => 2,
-        "close" => 3,
-        _ => 4,
+        "diff" => 2,
+        "ai" => 3,
+        "close" => 4,
+        _ => 5,
     }
 }
 
@@ -2716,14 +2718,15 @@ impl HomeState {
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
     /// Session-scope commands in the fixed display order (see
-    /// [`session_menu_rank`]), with `ai` gated on local-LLM availability and
-    /// `close` hidden when `root` (the row belongs to no session).
+    /// [`session_menu_rank`]), with `ai` gated on local-LLM availability and the
+    /// session-only `close` / `diff` hidden when `root` (the row belongs to no
+    /// session, so there is nothing to close or diff).
     fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
             .filter(|info| info.name != "ai" || self.ai_available)
-            .filter(|info| info.name != "close" || !root)
+            .filter(|info| !matches!(info.name, "close" | "diff") || !root)
             .collect()
     }
 

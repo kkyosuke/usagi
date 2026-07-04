@@ -883,6 +883,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(!has(&workspace, "terminal"));
     assert!(!has(&workspace, "agent"));
     assert!(!has(&workspace, "ai"));
+    assert!(!has(&workspace, "diff"));
 
     // The 在席 (Focus) prompt offers the session-specific commands and the
     // shared utilities, but never the workspace ones — the two surfaces are
@@ -892,6 +893,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(has(&session, "agent"));
     assert!(has(&session, "ai"));
     assert!(has(&session, "close"));
+    assert!(has(&session, "diff"));
     assert!(has(&session, "man")); // a shared utility
     assert!(!has(&session, "session"));
     assert!(!has(&session, "config"));
@@ -969,7 +971,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(session, vec!["agent", "ai", "close", "terminal"]);
+    assert_eq!(session, vec!["agent", "ai", "close", "diff", "terminal"]);
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)
@@ -1176,11 +1178,22 @@ fn diff_requests_opening_the_diff_view() {
 }
 
 #[test]
-fn preview_diff_is_an_alias_for_the_diff_view() {
-    // `preview diff` opens the diff view rather than trying to preview `diff.md`.
+fn diff_is_a_session_command() {
+    // `diff` operates the focused session (the 在席 surface), so it is offered in
+    // the session scope and refused from the workspace `:` palette.
+    let session = suggested_names(CommandScope::Session);
+    assert!(session.iter().any(|n| n == "diff"));
+    let workspace = suggested_names(CommandScope::Workspace);
+    assert!(!workspace.iter().any(|n| n == "diff"));
+}
+
+#[test]
+fn preview_does_not_treat_diff_as_a_special_argument() {
+    // `diff` is its own 在席 command now, so `preview diff` just previews a file
+    // named `diff` (resolved to `diff.md`) rather than opening the diff view.
     let result = registry().dispatch("preview diff", &[], &[]);
     assert!(result.lines.is_empty());
-    assert_eq!(result.effect, Effect::OpenDiff);
+    assert_eq!(result.effect, Effect::OpenPreview("diff".to_string()));
 }
 
 #[test]

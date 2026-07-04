@@ -106,11 +106,12 @@ pub enum Effect {
     /// `preview <path|name>`). The string is the requested target; the event loop
     /// resolves and reads it (under the workspace root) and renders it.
     OpenPreview(String),
-    /// Open the right-pane diff view of the highlighted session (the user ran
-    /// `diff`, or the reserved `preview diff`): the session worktree's cumulative
-    /// diff against the base branch. The event loop resolves the highlighted
-    /// worktree, shells out to git, and renders the patch — like [`OpenPreview`],
-    /// it takes over the right pane, so it closes the palette.
+    /// Open the right-pane diff view of the focused session (the user ran the
+    /// 在席 `diff` command): the session worktree's cumulative diff against the
+    /// base branch. The event loop resolves the highlighted worktree, shells out
+    /// to git, and renders the patch — like [`OpenPreview`], it takes over the
+    /// right pane. Session-scoped, so it fires from the 在席 menu / prompt, not
+    /// the workspace palette.
     OpenDiff,
     /// Stack another registered workspace into the 統合(unite) view (the user ran
     /// `unite add <workspace>`). The event loop resolves the name to a workspace,

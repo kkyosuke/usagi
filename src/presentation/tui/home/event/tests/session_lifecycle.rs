@@ -528,7 +528,8 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
     keys.push(Ok(Key::ArrowDown)); // agent -> terminal
-    keys.push(Ok(Key::ArrowDown)); // terminal -> close (last)
+    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
+    keys.push(Ok(Key::ArrowDown)); // diff -> close (last)
     keys.push(Ok(Key::Enter)); // dispatch close, but leave the task running
     keys.push(Ok(Key::ArrowUp)); // another Switch operation before completion lands
     keys.push(Ok(Key::Char('c'))); // still Switch: begin inline create
