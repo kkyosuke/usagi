@@ -245,20 +245,17 @@ fn focus_menu_hides_close_on_the_root_row() {
 }
 
 #[test]
-fn focus_menu_hides_agent_when_an_agent_pane_is_already_open() {
+fn focus_menu_keeps_agent_when_an_agent_pane_is_already_open() {
     // Focus a session row so `close` is offered too.
     let mut state = state();
     state.enter_focus(1);
     // No live panes yet: `agent` is offered.
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["agent", "terminal", "close"]);
-    // Once the session publishes a live `agent` pane, the launch command is hidden
-    // (its agent is already running); the rest keep the fixed display order.
-    state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
-    let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
-    assert_eq!(names, vec!["terminal", "close"]);
-    // A session whose only live panes are plain terminals keeps offering `agent`.
-    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
+    // A session holds one agent per CLI, so `agent` stays offered even once a live
+    // agent pane is published — launching it adds a different CLI's agent (and
+    // re-selecting the running CLI just re-focuses its tab).
+    state.set_terminal_tabs(vec!["Claude".to_string(), "terminal".to_string()], 0);
     let names: Vec<&str> = state.focus_menu_commands().iter().map(|i| i.name).collect();
     assert_eq!(names, vec!["agent", "terminal", "close"]);
 }
