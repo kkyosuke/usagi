@@ -1,14 +1,14 @@
 ---
 number: 106
 title: feat(mcp): workspace root で issue/memory の書き込み系 tool を拒否する（root ガードレール）
-status: in-progress
+status: done
 priority: high
 labels: [orchestration, mcp]
 dependson: []
 related: [104]
 parent: 105
 created_at: 2026-07-04T21:45:25.474322+00:00
-updated_at: 2026-07-04T23:06:02.106795+00:00
+updated_at: 2026-07-04T23:17:44.834721+00:00
 ---
 
 ## 背景
