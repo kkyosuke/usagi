@@ -1,13 +1,13 @@
 ---
 number: 60
 title: refactor(presentation): CLI/MCP の JSON 整形を SSoT 化し mcp 共通ヘルパを統合する
-status: todo
+status: done
 priority: medium
 labels: [refactor, cli, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:16:42.363888+00:00
-updated_at: 2026-06-19T22:16:42.363888+00:00
+updated_at: 2026-07-04T00:14:10.648130+00:00
 ---
 
 ## 背景

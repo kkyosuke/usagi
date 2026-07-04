@@ -67,7 +67,7 @@
 | 左メニュー | `Menu` 見出しと Open / New / Config / Quit の 4 項目。各行は「カーソル + ラベル(10桁左詰め) + キー(5桁右詰め)」 | 見出し：緑太字。選択行：`>` 赤太字／ラベル シアン太字／キー 黄色。非選択行：素のテキスト |
 | Divider | 左メニューと Recent の間の縦線。左メニュー・divider・Recent をひとつのブロックとして左右中央寄せする | 淡色（dim） |
 | Recent | 最近使ったワークスペースを最大 3 件。`workspace::overviews` の並び（最終利用日時の新しい順）から先頭 3 件をカード表示し、上から `1` / `2` / `3` で直接開く。カード本文は `◷` 最終利用からの経過時間、`⎇` セッション数、`#` PR 数、`●` open issue 数を表示する。3 件未満の空き枠は `—` と `No recent workspace` のカード | 見出し：緑太字。数字：黄太字。カード枠・本文：淡色（dim） |
-| 通知行 | メニュー操作の結果メッセージ（例: New 完了後の `Opened "repo" 󰤇`）。未表示時は何も描画しない | 黄色 |
+| 通知行 | メニュー操作の結果メッセージ（例: 作成失敗時の `Could not create project: <理由>`、Recent 読み込み失敗時の `Failed to load recent projects: <理由>`）。未表示時は何も描画しない | 黄色 |
 | フッター | バージョンと操作ヘルプ `v<version> \| ↑↓: move / Enter or letter: select / 1-3: recent / q: quit` | 淡色（dim） |
 
 ## メニュー項目

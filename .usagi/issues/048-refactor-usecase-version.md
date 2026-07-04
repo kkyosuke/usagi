@@ -1,13 +1,13 @@
 ---
 number: 48
 title: refactor(usecase): 設定セッターと永続化 version ラッパのボイラープレートを削減する
-status: todo
+status: done
 priority: low
 labels: [refactor, infra]
 dependson: []
 related: []
 created_at: 2026-06-18T22:41:44.308440+00:00
-updated_at: 2026-06-18T22:41:44.308440+00:00
+updated_at: 2026-07-04T00:15:28.307360+00:00
 ---
 
 ## 背景

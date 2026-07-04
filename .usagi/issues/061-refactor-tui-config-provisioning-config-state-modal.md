@@ -1,13 +1,13 @@
 ---
 number: 61
 title: refactor(tui-config): provisioning ロジックの退避と config/state modal 分離
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:16:55.778677+00:00
-updated_at: 2026-06-19T22:16:55.778677+00:00
+updated_at: 2026-07-04T00:14:12.463192+00:00
 ---
 
 ## 背景
