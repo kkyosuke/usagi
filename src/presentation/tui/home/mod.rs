@@ -746,11 +746,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 });
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
-            // A session holds at most one agent: a request to add an agent pane
-            // (在席's `agent`, or `Ctrl-G` routed through `new_pane`) when one already
-            // exists reuses it — activating its tab below — rather than spawning a
-            // second. This also keeps the queued prompt unconsumed (no fresh spawn).
-            let reuse_agent = run_agent && new_pane && pool.has_agent_pane(dir);
+            // A session holds at most one agent *per CLI*: a request to add an agent
+            // pane (在席's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
+            // that already has a pane reuses it — activating its tab below — rather
+            // than spawning a duplicate. A *different* CLI still spawns its own agent
+            // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
+            // spawn).
+            let reuse_agent = run_agent && new_pane && pool.has_agent_pane_of(dir, cli);
             // Deliver a prompt queued for this session (via MCP `session_prompt`) only
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
             // spawns; `enter` spawns only when no pane is live yet; reusing an existing
@@ -798,7 +800,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 // re-attach the session's active pane (spawning the first when the
                 // session is new).
                 if reuse_agent {
-                    pool.activate_agent(dir);
+                    pool.activate_agent_of(dir, cli);
                 } else if new_pane {
                     let kind = if run_agent {
                         terminal::tabs::PaneKind::Agent
@@ -878,12 +880,14 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // action from the session's menu, leaving every pane alive in
                         // the pool (like `Ctrl-O`, but one level shallower).
                         terminal::pane::PaneStep::ToFocus => return Ok(PaneExit::ToFocus),
-                        // `Ctrl-G`: a session holds at most one agent — jump to the
-                        // existing agent tab when present, else add one (then loop, so
-                        // the next iteration drives it and republishes the tab strip
-                        // without leaving 没入).
+                        // `Ctrl-G`: a session holds at most one agent per CLI — jump
+                        // to this CLI's existing agent tab when present, else add one
+                        // (then loop, so the next iteration drives it and republishes
+                        // the tab strip without leaving 没入). `cli` is the launch CLI
+                        // resolved for this session drive (the 在席 choice or the
+                        // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
-                            if !pool.activate_agent(dir) {
+                            if !pool.activate_agent_of(dir, cli) {
                                 let add_env =
                                     crate::infrastructure::env_resolver::resolve_workspace_env(
                                         &crate::usecase::session::workspace_root(dir),
