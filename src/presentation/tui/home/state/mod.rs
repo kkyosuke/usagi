@@ -2901,17 +2901,7 @@ impl HomeState {
         self.menu_commands_for_root(self.list.root_active())
     }
 
-    /// The same Session-scope command list as [`focus_menu_commands`], but
-    /// resolved for the row under the **cursor** rather than the active row. The
-    /// 切替 (Switch) preview shows what *selecting* the highlighted row reveals,
-    /// so its `close` visibility must follow that row — otherwise a session row
-    /// previewed while the root row is active would hide `close` (and vice
-    /// versa), showing the active row's menu instead of the highlighted one's.
-    pub fn preview_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_selected())
-    }
-
-    /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
+    /// Shared body of [`focus_menu_commands`]: the
     /// Session-scope commands in alphabetical order (see
     /// [`sorted_session_menu_commands`]): the prompt-taking `ai` is kept out of the menu,
     /// `chat` is gated on local-LLM availability, and the session-only `close` /

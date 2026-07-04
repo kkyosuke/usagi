@@ -34,9 +34,12 @@ fn rabbit_feet_cell(term: &Term) -> (u16, u16) {
     let state = sample_state();
     let (h, w) = term.size();
     let frame = ui::render_frame(h as usize, w as usize, &state);
+    // The idle right pane rests a mascot too (sharing the feet art), so scan from
+    // the bottom for the sidebar mascot — the lower of the two.
     let (row, line) = frame
         .iter()
         .enumerate()
+        .rev()
         .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
         .expect("the rabbit's feet are drawn");
     let col = console::strip_ansi_codes(line)
