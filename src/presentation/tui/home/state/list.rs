@@ -600,6 +600,34 @@ impl WorktreeList {
         })
     }
 
+    /// The flat row of the `group`'s synthetic root row, or `None` when the group
+    /// index is out of range. Each 統合(unite) group owns its own root row, so this
+    /// restores the cursor onto a *specific* group's root across a rebuild — the
+    /// plain [`ROOT_NAME`] lookup ([`row_of_name`](Self::row_of_name)) always
+    /// resolves to the first group and cannot tell the extra groups' roots apart.
+    pub fn group_root_row(&self, group: usize) -> Option<usize> {
+        (group < self.groups.len()).then(|| {
+            self.groups[..group]
+                .iter()
+                .map(WorkspaceGroup::selectable_rows)
+                .sum()
+        })
+    }
+
+    /// The flat row of the first worktree named `name` **within** `group`, or
+    /// `None` when that group has no such worktree. Restoring the cursor inside the
+    /// same 統合(unite) group keeps it put when another workspace happens to carry a
+    /// session with the same branch name (a plain [`row_of_name`](Self::row_of_name)
+    /// would pull it into whichever group lists that name first).
+    pub fn row_in_group_of_name(&self, group: usize, name: &str) -> Option<usize> {
+        let start = self.group_root_row(group)?;
+        self.groups[group]
+            .worktrees
+            .iter()
+            .position(|w| worktree_name(w) == name)
+            .map(|within| start + 1 + within)
+    }
+
     /// The rows as command-facing [`WorktreeRef`]s (name + active flag): each
     /// group's root row, then its worktrees, in display order.
     pub fn refs(&self) -> Vec<WorktreeRef> {
@@ -627,6 +655,15 @@ impl WorktreeList {
     /// chosen session.
     pub fn focus_index(&mut self, row: usize) {
         self.selected_index = row.min(self.nav_rows().saturating_sub(1));
+    }
+
+    /// Move the *active* row directly to a flat selectable `row`, clamped to the
+    /// rows that exist. Complements [`focus_index`](Self::focus_index) (which moves
+    /// the cursor) so a rebuild can restore the active row by its resolved flat
+    /// index without disturbing the `Ctrl-^` jump memory the name-based
+    /// [`activate_by_name`](Self::activate_by_name) would.
+    pub fn activate_index(&mut self, row: usize) {
+        self.active_index = row.min(self.nav_rows().saturating_sub(1));
     }
 
     /// Move the cursor up one row, wrapping from the top to the bottom.
