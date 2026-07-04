@@ -345,6 +345,86 @@ fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
 }
 
 #[test]
+fn refresh_sessions_keeps_the_switch_cursor_on_the_create_row() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(state.list().create_row());
+    assert!(state.list().create_row_selected());
+
+    // The persistent "+ new session" row is not a session name, so preserving
+    // only by selected_name() would collapse it to ROOT_NAME. Keep the cursor on
+    // the affordance while background refreshes replace the real rows above it.
+    state.refresh_sessions(vec![
+        session_record("alpha", 1),
+        session_record("beta", 1),
+        session_record("gamma", 1),
+    ]);
+    assert!(state.list().create_row_selected());
+}
+
+#[test]
+fn refresh_sessions_normalizes_a_corrupt_active_create_row_to_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.enter_switch(ReturnMode::Base);
+    // The active row is command-facing and should never point at the create
+    // affordance, but older/corrupt state must be normalized safely if it does.
+    state.list.activate_index(state.list.create_row());
+
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().active_index(), 0);
+    assert_eq!(state.list().active_name(), ROOT_NAME);
+}
+
+#[test]
+fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("beta", 1)],
+    }]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(2); // primary root, alpha, then tools' root row.
+    assert_eq!(state.list().selected_group(), 1);
+    assert!(state.list().root_selected());
+
+    // A primary-workspace re-sync landing while the user is in 切替 must not
+    // resolve the ambiguous `ROOT_NAME` to the first workspace's root row.
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().selected_index(), 2);
+    assert_eq!(state.list().selected_group(), 1);
+    assert!(state.list().root_selected());
+}
+
+#[test]
+fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate_names() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("alpha", 1)],
+    }]);
+    state.enter_switch(ReturnMode::Base);
+    state.switch_select(3); // primary root, primary alpha, tools root, tools alpha.
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "alpha");
+
+    // The branch name is present in both workspaces; preserving only by name
+    // would jump to the primary group's alpha (row 1). The cursor should stay on
+    // the extra group's alpha row.
+    state.refresh_sessions(vec![session_record("alpha", 1)]);
+    assert_eq!(state.list().selected_index(), 3);
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "alpha");
+}
+
+#[test]
 fn open_remove_modal_lists_the_session_names() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
