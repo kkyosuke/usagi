@@ -516,6 +516,16 @@ fn is_create_row_is_false_past_the_end_of_the_list() {
 }
 
 #[test]
+fn row_in_group_of_name_yields_none_for_a_folded_group() {
+    let mut list = united(); // wsA=[a1, a2], wsB=[b1]
+                             // Expanded: the session resolves to its row within the group.
+    assert_eq!(list.row_in_group_of_name(0, "a2"), Some(2));
+    // Folded: wsA's worktrees have no navigable row, so there is none to land on.
+    list.toggle_collapsed(0);
+    assert_eq!(list.row_in_group_of_name(0, "a2"), None);
+}
+
+#[test]
 fn refs_list_collapsed_groups_worktrees_but_never_marks_them_active() {
     let mut list = united();
     list.focus_index(5); // b1
