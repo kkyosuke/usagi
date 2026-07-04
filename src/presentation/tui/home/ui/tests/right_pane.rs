@@ -345,8 +345,8 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     let off_close = stripped(&render_frame(24, 120, &state));
     assert!(off_close.contains("  Close the focused session"));
     assert!(off_close.contains("  Open a shell"));
-    // Fixed order: agent is first and close is last; move up once (wraps) to close.
-    state.focus_menu_move_up();
+    // Alphabetical order: agent is first and close is second; move down once to close.
+    state.focus_menu_move_down();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
     let on_close = stripped(&render_frame(24, 120, &state));
     assert!(on_close.contains('▸'));
@@ -369,7 +369,7 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
 fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    state.focus_menu_move_down(); // fixed order: agent -> terminal
+    state.focus_menu_move_up(); // alphabetical order: agent wraps up to terminal (last)
     let base = stripped(&render_frame(24, 120, &state));
     assert!(base.contains("terminal"));
     assert!(base.contains('▸'));
