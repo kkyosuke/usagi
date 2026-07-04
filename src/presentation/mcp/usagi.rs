@@ -15,7 +15,7 @@
 //! merge-and-route glue. The JSON-RPC framing is shared and lives in the parent
 //! [`super`] module.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,6 +28,33 @@ use super::McpService;
 /// issue/memory and session surfaces (see [`UsagiMcpServer::tool_delegate_issue`]).
 const DELEGATE_ISSUE_TOOL: &str = "session_delegate_issue";
 
+/// Issue/memory tools that write to the repository's `.usagi/` store. When the
+/// server runs from the workspace root (`worktree == workspace_root`) these are
+/// refused, so the root can never dirty the git-tracked repo — the technical
+/// enforcement of "root does not modify the tracked repository" (principle 2).
+/// Read/format tools (`issue_get` / `issue_search` / `issue_to_prompt` /
+/// `memory_get` / `memory_search`) and every `session_*` tool stay allowed, as
+/// they are what a coordinator needs and do not touch the tracked store.
+const ROOT_FORBIDDEN_TOOLS: [&str; 5] = [
+    "issue_create",
+    "issue_update",
+    "issue_delete",
+    "memory_save",
+    "memory_delete",
+];
+
+/// Whether two paths name the same directory, comparing canonicalized forms (so a
+/// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
+/// to a plain comparison when a path cannot be canonicalized (e.g. it does not yet
+/// exist).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 /// A JSON-RPC server exposing the full `usagi` tool surface (issue + memory +
 /// session) for one workspace.
 pub struct UsagiMcpServer {
@@ -35,6 +62,10 @@ pub struct UsagiMcpServer {
     issue: IssueServer,
     /// Session orchestration tools for the workspace.
     session: SessionMcpServer,
+    /// True when the process runs from the workspace root (`worktree` and
+    /// `workspace_root` coincide). In that case the write-guardrail refuses the
+    /// repo-mutating issue/memory tools (see [`ROOT_FORBIDDEN_TOOLS`]).
+    at_workspace_root: bool,
 }
 
 impl UsagiMcpServer {
@@ -46,9 +77,11 @@ impl UsagiMcpServer {
     /// orchestration resolves against `workspace_root` (the whole workspace).
     /// When the process runs from the workspace root the two paths coincide.
     pub fn new(worktree: PathBuf, workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
+        let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
             session: SessionMcpServer::new(workspace_root, &worktree, backend),
+            at_workspace_root,
         }
     }
 
@@ -148,6 +181,18 @@ impl McpService for UsagiMcpServer {
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        // Root guardrail: at the workspace root the repo is git-tracked, so refuse
+        // the issue/memory write tools before routing. This keeps a coordinator
+        // running `usagi mcp` at the root from dirtying the tracked store — those
+        // writes belong on a session's own branch.
+        if self.at_workspace_root && ROOT_FORBIDDEN_TOOLS.contains(&name) {
+            return Err(format!(
+                "{name} is refused at the workspace root: it would modify the \
+                 git-tracked repository. Run issue/memory writes from inside a \
+                 session worktree (create or open one with session_create / \
+                 session_delegate_issue) so the change rides that session's branch."
+            ));
+        }
         // The composite owns `session_delegate_issue` (it spans both sub-servers);
         // session tools go to the session server; everything else (issue, memory,
         // and unknown-tool errors) is handled by the issue server.
@@ -207,6 +252,18 @@ mod tests {
             root.to_path_buf(),
             Box::new(StubBackend),
         )
+    }
+
+    /// Build a session-mode server: the worktree is distinct from the workspace
+    /// root, so the process is *not* at the root and the write-guardrail does not
+    /// apply (issue/memory writes are allowed). Mirrors a real session, whose
+    /// worktree lives under `.usagi/sessions/<name>`.
+    fn session_server_at(root: &Path) -> (UsagiMcpServer, PathBuf) {
+        let worktree = root.join(".usagi").join("sessions").join("work");
+        fs::create_dir_all(&worktree).unwrap();
+        let server =
+            UsagiMcpServer::new(worktree.clone(), root.to_path_buf(), Box::new(StubBackend));
+        (server, worktree)
     }
 
     /// Initialise a throwaway git repo with one commit on `main`.
@@ -417,12 +474,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let server = server_at(root.path());
-        // An issue to delegate.
-        call(
-            &server,
-            "issue_create",
-            json!({"title":"Add doctor","body":"Diagnose the env."}),
-        );
+        // An issue to delegate. Seed it straight through the issue sub-server: at
+        // the workspace root the composite refuses issue_create, but a coordinator
+        // still delegates issues that already exist in the tracked store.
+        server
+            .issue
+            .call_tool(
+                "issue_create",
+                json!({"title":"Add doctor","body":"Diagnose the env."}),
+            )
+            .unwrap();
 
         let result = call(&server, "session_delegate_issue", json!({"number":1}));
         assert_eq!(result["isError"], false);
@@ -452,7 +513,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         let server = server_at(root.path());
-        call(&server, "issue_create", json!({"title":"task"}));
+        // Seed through the sub-server (the composite refuses issue_create at root).
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"task"}))
+            .unwrap();
 
         let result = call(
             &server,
@@ -463,6 +528,86 @@ mod tests {
         let body: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["session"], "my-work");
+    }
+
+    #[test]
+    fn root_refuses_the_issue_and_memory_write_tools() {
+        // At the workspace root (worktree == workspace_root) every repo-mutating
+        // issue/memory tool is refused with the "run it from a session" guidance,
+        // regardless of arguments — the guardrail fires before the tool runs.
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_at(tmp.path());
+        for tool in ROOT_FORBIDDEN_TOOLS {
+            let result = call(&server, tool, json!({}));
+            assert_eq!(result["isError"], true, "{tool} must be refused at root");
+            let text = result["content"][0]["text"].as_str().unwrap();
+            // The message is the guardrail's, not a downstream arg/parse error.
+            assert!(text.contains("workspace root"), "{tool}: {text}");
+            assert!(text.contains("session"), "{tool}: {text}");
+        }
+    }
+
+    #[test]
+    fn root_still_allows_read_format_and_session_tools() {
+        // The read/format issue+memory tools and all session tools stay usable at
+        // the root — a coordinator polls and delegates from there.
+        let tmp = tempfile::tempdir().unwrap();
+        let server = server_at(tmp.path());
+        // Seed one issue + memory straight through the sub-server (the composite
+        // refuses these writes at root) so the read tools have data to return.
+        server
+            .issue
+            .call_tool("issue_create", json!({"title": "seed"}))
+            .unwrap();
+        server
+            .issue
+            .call_tool(
+                "memory_save",
+                json!({"name":"m","title":"m","body":"b","type":"project"}),
+            )
+            .unwrap();
+
+        for (tool, args) in [
+            ("issue_search", json!({})),
+            ("issue_get", json!({"number": 1})),
+            ("issue_to_prompt", json!({"number": 1})),
+            ("memory_search", json!({})),
+            ("memory_get", json!({"name": "m"})),
+            ("session_list", json!({})),
+            ("session_status", json!({})),
+        ] {
+            let result = call(&server, tool, args);
+            assert_eq!(result["isError"], false, "{tool} must be allowed at root");
+        }
+    }
+
+    #[test]
+    fn session_allows_every_issue_and_memory_write_tool() {
+        // In a session worktree (worktree != workspace_root) the guardrail is off,
+        // so the full create → update → delete and save → delete lifecycles run —
+        // proving no regression for the common case.
+        let tmp = tempfile::tempdir().unwrap();
+        let (server, _worktree) = session_server_at(tmp.path());
+
+        let created = call(&server, "issue_create", json!({"title": "task"}));
+        assert_eq!(created["isError"], false);
+        let updated = call(
+            &server,
+            "issue_update",
+            json!({"number": 1, "status": "in-progress"}),
+        );
+        assert_eq!(updated["isError"], false);
+        let deleted = call(&server, "issue_delete", json!({"number": 1}));
+        assert_eq!(deleted["isError"], false);
+
+        let saved = call(
+            &server,
+            "memory_save",
+            json!({"name":"m","title":"m","body":"b","type":"project"}),
+        );
+        assert_eq!(saved["isError"], false);
+        let removed = call(&server, "memory_delete", json!({"name": "m"}));
+        assert_eq!(removed["isError"], false);
     }
 
     #[test]
