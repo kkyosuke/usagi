@@ -11,8 +11,8 @@ fn save(repo: &Path, name: &str, title: &str) -> String {
 }
 
 #[test]
-fn tool_names_and_schemas_cover_the_six_tools() {
-    assert_eq!(tool_names().len(), 6);
+fn tool_names_and_schemas_cover_the_five_tools() {
+    assert_eq!(tool_names().len(), 5);
     let schemas = tool_schemas();
     let names: Vec<&str> = schemas
         .as_array()
@@ -44,16 +44,23 @@ fn get_returns_null_when_absent() {
 }
 
 #[test]
-fn list_and_search_return_summaries() {
+fn search_lists_all_without_a_query_and_filters_with_one() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     save(repo, "deploy", "Deploy steps");
 
-    let listed = call_tool(repo, "memory_list", json!({ "type": "project" })).unwrap();
+    // Omitting `query` lists every memory (optionally filtered by type) — the
+    // behaviour a separate `memory_list` tool used to provide.
+    let listed = call_tool(repo, "memory_search", json!({ "type": "project" })).unwrap();
     assert!(listed.contains("\"file\": \"deploy.md\""));
 
+    // A `query` narrows to a full-text match.
     let found = call_tool(repo, "memory_search", json!({ "query": "deploy" })).unwrap();
     assert!(found.contains("\"name\": \"deploy\""));
+
+    // A query that matches nothing yields an empty list.
+    let none = call_tool(repo, "memory_search", json!({ "query": "zzz" })).unwrap();
+    assert_eq!(none, "[]");
 }
 
 #[test]
@@ -115,7 +122,7 @@ fn store_errors_surface_as_tool_errors() {
     for (name, args) in [
         ("memory_save", json!({ "name": "n", "title": "t" })),
         ("memory_get", json!({ "name": "n" })),
-        ("memory_list", json!({})),
+        ("memory_search", json!({})),
         ("memory_search", json!({ "query": "q" })),
         ("memory_update", json!({ "name": "n", "title": "t" })),
         ("memory_delete", json!({ "name": "n" })),

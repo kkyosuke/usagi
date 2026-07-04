@@ -24,7 +24,6 @@ pub fn tool_names() -> &'static [&'static str] {
     &[
         "memory_save",
         "memory_get",
-        "memory_list",
         "memory_search",
         "memory_update",
         "memory_delete",
@@ -36,7 +35,6 @@ pub fn call_tool(repo: &Path, name: &str, arguments: Value) -> Result<String, St
     match name {
         "memory_save" => tool_save(repo, arguments),
         "memory_get" => tool_get(repo, arguments),
-        "memory_list" => tool_list(repo, arguments),
         "memory_search" => tool_search(repo, arguments),
         "memory_update" => tool_update(repo, arguments),
         "memory_delete" => tool_delete(repo, arguments),
@@ -68,15 +66,12 @@ fn tool_get(repo: &Path, arguments: Value) -> Result<String, String> {
     }
 }
 
-fn tool_list(repo: &Path, arguments: Value) -> Result<String, String> {
-    let args: FilterArgs = parse_args(arguments)?;
-    let items = memory::list(repo, &args.filter()).map_err(|e| e.to_string())?;
-    Ok(to_pretty(&summary_views(&items)))
-}
-
 fn tool_search(repo: &Path, arguments: Value) -> Result<String, String> {
     let SearchArgs { query, filter } = parse_args(arguments)?;
-    let items = memory::search(repo, &query, &filter.filter()).map_err(|e| e.to_string())?;
+    // An omitted `query` lists every memory: an empty needle matches all, so one
+    // code path (`search`) subsumes what a separate `list` tool would do.
+    let items = memory::search(repo, query.as_deref().unwrap_or(""), &filter.filter())
+        .map_err(|e| e.to_string())?;
     Ok(to_pretty(&summary_views(&items)))
 }
 
@@ -128,7 +123,10 @@ impl FilterArgs {
 
 #[derive(Deserialize)]
 struct SearchArgs {
-    query: String,
+    /// Absent lists every memory (an empty needle matches all); present filters by
+    /// a full-text match. Optional so the one search tool subsumes a plain list.
+    #[serde(default)]
+    query: Option<String>,
     #[serde(flatten)]
     filter: FilterArgs,
 }
@@ -205,24 +203,16 @@ pub fn tool_schemas() -> Value {
             }
         },
         {
-            "name": "memory_list",
-            "description": "List memories (newest first), optionally filtered by type.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "type": kind }
-            }
-        },
-        {
             "name": "memory_search",
-            "description": "Full-text search memory names, titles and bodies \
-                (case-insensitive).",
+            "description": "List memories (newest first). Give `query` to full-text \
+                search names, titles and bodies (case-insensitive); omit it to list \
+                every memory. Optionally filtered by type.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string" },
+                    "query": { "type": "string", "description": "Full-text query; omit to list all memories" },
                     "type": kind
-                },
-                "required": ["query"]
+                }
             }
         },
         {
