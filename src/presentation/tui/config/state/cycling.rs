@@ -126,7 +126,7 @@ impl Config {
             LocalField::DefaultBranch => self.cycle_default_branch(forward),
             // Action rows open an editor rather than cycling a value in place, so
             // ←/→ have nothing to change.
-            LocalField::SetupCommands | LocalField::EnvVars => false,
+            LocalField::SetupCommands | LocalField::EnvVars | LocalField::SessionLabels => false,
             LocalField::AgentCli => {
                 // The override cycles "follow global" then each installed agent;
                 // an already-set override is kept selectable even if uninstalled.

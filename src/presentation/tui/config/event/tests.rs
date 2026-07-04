@@ -301,6 +301,7 @@ fn saving_a_local_override_passes_it_to_save() {
         Ok(Key::ArrowDown),  // Branch Source
         Ok(Key::ArrowDown),  // Setup Commands
         Ok(Key::ArrowDown),  // Env Vars
+        Ok(Key::ArrowDown),  // Session Labels
         Ok(Key::ArrowDown),  // PR Skills
         Ok(Key::ArrowDown),  // Save button
         Ok(Key::Enter),      // save
@@ -358,6 +359,7 @@ fn setup_commands_modal_applies_to_local_settings_before_save() {
         Ok(Key::ArrowDown),
         Ok(Key::Char('\u{0013}')), // Ctrl-S applies the modal buffer
         Ok(Key::ArrowDown),        // Env Vars
+        Ok(Key::ArrowDown),        // Session Labels
         Ok(Key::ArrowDown),        // PR Skills
         Ok(Key::ArrowDown),        // Save
         Ok(Key::Enter),
@@ -488,6 +490,7 @@ fn env_vars_modal_applies_to_local_settings_before_save() {
         Ok(Key::ArrowUp),
         Ok(Key::ArrowDown),
         Ok(Key::Char('\u{0013}')), // Ctrl-S applies the modal buffer
+        Ok(Key::ArrowDown),        // Session Labels
         Ok(Key::ArrowDown),        // PR Skills
         Ok(Key::ArrowDown),        // Save
         Ok(Key::Enter),
@@ -566,6 +569,151 @@ fn env_vars_modal_can_be_cancelled_and_can_quit() {
     assert!(captured.into_inner().is_none());
 
     let mut keys = to_env();
+    keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
+    let mut reader = ScriptedReader::new(keys);
+    let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new()),
+            &mut save,
+            &mut install,
+            &mut pull,
+            None,
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn session_labels_modal_applies_to_local_settings_before_save() {
+    let term = Term::stdout();
+    let config = Config::workspace(Settings::default(), LocalSettings::default(), Vec::new());
+    let keys = vec![
+        Ok(Key::ArrowDown), // Notifications
+        Ok(Key::ArrowDown), // Restore Panes
+        Ok(Key::ArrowDown), // Default Branch
+        Ok(Key::ArrowDown), // Branch Source
+        Ok(Key::ArrowDown), // Setup Commands
+        Ok(Key::ArrowDown), // Env Vars
+        Ok(Key::ArrowDown), // Session Labels
+        Ok(Key::Enter),     // open editor (seeded with the 5 default labels)
+        Ok(Key::Tab),       // an unhandled key inside the editor is ignored
+        Ok(Key::ArrowDown), // walk down to the last seeded line
+        Ok(Key::ArrowDown),
+        Ok(Key::ArrowDown),
+        Ok(Key::ArrowDown),
+        Ok(Key::End),
+        Ok(Key::Enter), // append a new label line
+        Ok(Key::Char('u')),
+        Ok(Key::Char('r')),
+        Ok(Key::Char('g')),
+        Ok(Key::Char('e')),
+        Ok(Key::Char('n')),
+        Ok(Key::Char('t')),
+        Ok(Key::Char(' ')),
+        Ok(Key::Char('|')),
+        Ok(Key::Char(' ')),
+        Ok(Key::Char('U')),
+        Ok(Key::Char('r')),
+        Ok(Key::Char('g')),
+        Ok(Key::Char(' ')),
+        Ok(Key::Char('|')),
+        Ok(Key::Char(' ')),
+        Ok(Key::Char('r')),
+        Ok(Key::Char('e')),
+        Ok(Key::Char('d')),
+        Ok(Key::Char('Z')),
+        Ok(Key::Backspace), // drop the trailing Z
+        Ok(Key::ArrowLeft),
+        Ok(Key::ArrowRight),
+        Ok(Key::Home),
+        Ok(Key::Del), // drop the leading char of the new line's id
+        Ok(Key::ArrowUp),
+        Ok(Key::Char('\u{0013}')), // Ctrl-S applies the modal buffer
+        Ok(Key::ArrowDown),        // PR Skills
+        Ok(Key::ArrowDown),        // Save
+        Ok(Key::Enter),
+        Ok(Key::Escape),
+    ];
+
+    let mut reader = ScriptedReader::new(keys);
+    let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
+    let mut save = |_: &Settings, local: Option<&LocalSettings>| {
+        *captured.borrow_mut() = local.cloned();
+        Ok(())
+    };
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    let outcome = event_loop(
+        &term,
+        &mut reader,
+        config,
+        &mut save,
+        &mut install,
+        &mut pull,
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Back));
+    let local = captured.into_inner().expect("save received local settings");
+    let master = local.session_labels.expect("override stored");
+    // The five defaults plus the appended label (its "Urg" name intact after the
+    // Backspace/Del edits).
+    assert_eq!(master.labels().len(), 6);
+    assert!(master.labels().iter().any(|l| l.name == "Urg"));
+}
+
+#[test]
+fn session_labels_modal_can_be_cancelled_and_can_quit() {
+    let term = Term::stdout();
+    let to_labels = || {
+        vec![
+            Ok(Key::ArrowDown), // Notifications
+            Ok(Key::ArrowDown), // Restore Panes
+            Ok(Key::ArrowDown), // Default Branch
+            Ok(Key::ArrowDown), // Branch Source
+            Ok(Key::ArrowDown), // Setup Commands
+            Ok(Key::ArrowDown), // Env Vars
+            Ok(Key::ArrowDown), // Session Labels
+        ]
+    };
+
+    let mut keys = to_labels();
+    keys.extend([
+        Ok(Key::Char(' ')), // open editor with Space
+        Ok(Key::Char('x')),
+        Ok(Key::Escape), // cancel editor
+        Ok(Key::Escape), // leave config
+    ]);
+    let mut reader = ScriptedReader::new(keys);
+    let captured: RefCell<Option<LocalSettings>> = RefCell::new(None);
+    let mut save = |_: &Settings, local: Option<&LocalSettings>| {
+        *captured.borrow_mut() = local.cloned();
+        Ok(())
+    };
+    let mut install: fn(&str) -> Result<()> = ok_install;
+    let mut pull: fn(&str) -> Result<()> = ok_pull;
+    assert!(matches!(
+        event_loop(
+            &term,
+            &mut reader,
+            Config::workspace(Settings::default(), LocalSettings::default(), Vec::new()),
+            &mut save,
+            &mut install,
+            &mut pull,
+            None,
+        )
+        .unwrap(),
+        Outcome::Back
+    ));
+    // Cancelling leaves no override, so nothing was dirty to save.
+    assert!(captured.into_inner().is_none());
+
+    let mut keys = to_labels();
     keys.extend([Ok(Key::Enter), Ok(Key::CtrlC)]);
     let mut reader = ScriptedReader::new(keys);
     let mut save: fn(&Settings, Option<&LocalSettings>) -> Result<()> = noop_save;

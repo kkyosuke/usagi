@@ -309,6 +309,35 @@ impl LabelColor {
         LabelColor::Magenta,
         LabelColor::Cyan,
     ];
+
+    /// The lowercase token used for this colour in the config-screen label editor
+    /// and in `settings.json` (matching the serde `snake_case` naming).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LabelColor::Gray => "gray",
+            LabelColor::Red => "red",
+            LabelColor::Green => "green",
+            LabelColor::Yellow => "yellow",
+            LabelColor::Blue => "blue",
+            LabelColor::Magenta => "magenta",
+            LabelColor::Cyan => "cyan",
+        }
+    }
+
+    /// Parse a colour token (case-insensitive), falling back to the neutral
+    /// [`Gray`](Self::Gray) default for an empty or unrecognised value — the same
+    /// degradation the serde loader applies to a stored colour.
+    pub fn parse(token: &str) -> LabelColor {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "red" => LabelColor::Red,
+            "green" => LabelColor::Green,
+            "yellow" => LabelColor::Yellow,
+            "blue" => LabelColor::Blue,
+            "magenta" => LabelColor::Magenta,
+            "cyan" => LabelColor::Cyan,
+            _ => LabelColor::Gray,
+        }
+    }
 }
 
 /// The glyph a session label falls back to when its [`SessionLabelDef::icon`] is
@@ -876,6 +905,64 @@ pub fn format_env_bindings(env: &SecretEnv) -> String {
         .join("\n")
 }
 
+/// The field separator in the session-label editor buffer: one label per line as
+/// `id | name | color | icon`. Parsing trims each field, so the exact spacing
+/// around the bar is not significant; a label's `name` therefore cannot itself
+/// contain a `|`.
+const LABEL_FIELD_SEP: char = '|';
+
+/// Parse a session-label editor buffer — one `id | name | color | icon` line per
+/// label — into a [`SessionLabelMaster`]. The `color` field is optional (an
+/// empty or unrecognised token degrades to [`LabelColor::Gray`]) and so is `icon`
+/// (blank leaves the default bullet). Blank lines are skipped, and the result is
+/// [`sanitized`](SessionLabelMaster::sanitized) so a line with a blank id or name
+/// is dropped and a duplicate id keeps only its first definition — exactly the
+/// coercion a hand-edited `settings.json` receives at load. Shared by the config
+/// screen's label editor.
+pub fn parse_session_labels(text: &str) -> SessionLabelMaster {
+    let labels = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut fields = line.split(LABEL_FIELD_SEP);
+            let id = fields.next().unwrap_or_default().trim().to_string();
+            let name = fields.next().unwrap_or_default().trim().to_string();
+            let color = fields.next().map(LabelColor::parse).unwrap_or_default();
+            let icon = fields
+                .next()
+                .map(str::trim)
+                .filter(|glyph| !glyph.is_empty())
+                .map(str::to_string);
+            SessionLabelDef {
+                id,
+                name,
+                color,
+                icon,
+            }
+        })
+        .collect();
+    SessionLabelMaster { labels }.sanitized()
+}
+
+/// Render a [`SessionLabelMaster`] back into the editor buffer form
+/// ([`parse_session_labels`]'s inverse): one `id | name | color | icon` line per
+/// label, in master order. The trailing `icon` field is omitted when unset, so
+/// the line ends at the colour.
+pub fn format_session_labels(master: &SessionLabelMaster) -> String {
+    master
+        .labels()
+        .iter()
+        .map(|label| {
+            let head = format!("{} | {} | {}", label.id, label.name, label.color.as_str());
+            match label.icon.as_deref().map(str::trim) {
+                Some(icon) if !icon.is_empty() => format!("{head} | {icon}"),
+                _ => head,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1094,6 +1181,94 @@ mod tests {
         assert!(is_valid_env_name("_TOKEN_1"));
         assert!(!is_valid_env_name("1TOKEN"));
         assert!(!is_valid_env_name("BAD-NAME"));
+    }
+
+    #[test]
+    fn label_color_parse_is_case_insensitive_and_falls_back_to_gray() {
+        assert_eq!(LabelColor::parse("Red"), LabelColor::Red);
+        assert_eq!(LabelColor::parse("  MAGENTA "), LabelColor::Magenta);
+        assert_eq!(LabelColor::parse("cyan"), LabelColor::Cyan);
+        // Unknown / blank tokens degrade to the neutral default.
+        assert_eq!(LabelColor::parse("puce"), LabelColor::Gray);
+        assert_eq!(LabelColor::parse(""), LabelColor::Gray);
+    }
+
+    #[test]
+    fn label_color_as_str_round_trips_through_parse_for_every_variant() {
+        for color in LabelColor::ALL {
+            assert_eq!(LabelColor::parse(color.as_str()), color);
+        }
+    }
+
+    #[test]
+    fn parse_session_labels_reads_fields_and_defaults_optional_ones() {
+        let master = parse_session_labels(
+            "todo | To Do | gray | ○\n\
+             doing | In Progress | blue\n\
+             plain | Plain",
+        );
+        let labels = master.labels();
+        assert_eq!(labels.len(), 3);
+
+        assert_eq!(labels[0].id, "todo");
+        assert_eq!(labels[0].name, "To Do");
+        assert_eq!(labels[0].color, LabelColor::Gray);
+        assert_eq!(labels[0].icon.as_deref(), Some("○"));
+
+        // No icon field: the icon stays unset (falls back to the default bullet).
+        assert_eq!(labels[1].id, "doing");
+        assert_eq!(labels[1].color, LabelColor::Blue);
+        assert_eq!(labels[1].icon, None);
+
+        // Neither colour nor icon: colour degrades to gray, icon unset.
+        assert_eq!(labels[2].id, "plain");
+        assert_eq!(labels[2].color, LabelColor::Gray);
+        assert_eq!(labels[2].icon, None);
+    }
+
+    #[test]
+    fn parse_session_labels_skips_blanks_and_sanitizes_blank_ids_and_duplicates() {
+        let master = parse_session_labels(
+            "\n   \n\
+             todo | First\n\
+             | Missing Id\n\
+             blankname |    | red\n\
+             todo | Duplicate Id | green",
+        );
+        let labels = master.labels();
+        // Only the first `todo` survives; the blank-id and blank-name lines drop.
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].id, "todo");
+        assert_eq!(labels[0].name, "First");
+    }
+
+    #[test]
+    fn format_session_labels_is_the_inverse_and_omits_the_unset_icon() {
+        let master = SessionLabelMaster {
+            labels: vec![
+                SessionLabelDef {
+                    id: "todo".to_string(),
+                    name: "To Do".to_string(),
+                    color: LabelColor::Gray,
+                    icon: Some("○".to_string()),
+                },
+                SessionLabelDef {
+                    id: "doing".to_string(),
+                    name: "Doing".to_string(),
+                    color: LabelColor::Blue,
+                    icon: None,
+                },
+            ],
+        };
+        let text = format_session_labels(&master);
+        assert_eq!(text, "todo | To Do | gray | ○\ndoing | Doing | blue");
+        // Round-trips back to the same master.
+        assert_eq!(parse_session_labels(&text), master);
+        // The empty master renders as an empty buffer.
+        assert_eq!(
+            format_session_labels(&SessionLabelMaster { labels: vec![] }),
+            ""
+        );
     }
 
     #[test]

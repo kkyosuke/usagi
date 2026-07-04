@@ -182,6 +182,33 @@ pub fn event_loop(
             continue;
         }
 
+        // The session-label editor captures every key, the same way the setup /
+        // env editors do: Enter inserts a new label line, Ctrl-S applies the
+        // buffer into the in-memory local override (still requiring the main Save
+        // button to persist), and Esc cancels.
+        if config.session_labels_modal().is_some() {
+            match key {
+                Key::Char('\u{0013}') => {
+                    config.apply_session_labels_modal();
+                    notice = None;
+                }
+                Key::Enter => config.session_labels_modal_newline(),
+                Key::Backspace => config.session_labels_modal_backspace(),
+                Key::Del => config.session_labels_modal_delete_forward(),
+                Key::ArrowLeft => config.session_labels_modal_cursor_left(),
+                Key::ArrowRight => config.session_labels_modal_cursor_right(),
+                Key::ArrowUp => config.session_labels_modal_cursor_up(),
+                Key::ArrowDown => config.session_labels_modal_cursor_down(),
+                Key::Home => config.session_labels_modal_cursor_home(),
+                Key::End => config.session_labels_modal_cursor_end(),
+                Key::Char(c) => config.session_labels_modal_insert(c),
+                Key::Escape => config.close_session_labels_modal(),
+                Key::CtrlC => return Ok(Outcome::Quit),
+                _ => {}
+            }
+            continue;
+        }
+
         match key {
             Key::ArrowUp | Key::Char('k') => {
                 config.move_up();
@@ -206,6 +233,7 @@ pub fn event_loop(
                 config.open_model_modal();
                 config.open_setup_modal();
                 config.open_env_modal();
+                config.open_session_labels_modal();
                 notice = None;
             }
             Key::Enter => {
@@ -227,6 +255,9 @@ pub fn event_loop(
                 } else if config.env_row_active() {
                     config.open_env_modal();
                     notice = None;
+                } else if config.session_labels_row_active() {
+                    config.open_session_labels_modal();
+                    notice = None;
                 } else {
                     notice = activate_field(&mut config, true);
                 }
@@ -243,7 +274,11 @@ pub fn event_loop(
 /// and the active model row have no value to cycle (both are driven by their
 /// modals), so arrows are a no-op there; otherwise the field's value is cycled.
 fn activate_field(config: &mut Config, forward: bool) -> Option<String> {
-    if config.local_llm_needs_install() || config.model_row_active() || config.env_row_active() {
+    if config.local_llm_needs_install()
+        || config.model_row_active()
+        || config.env_row_active()
+        || config.session_labels_row_active()
+    {
         None
     } else {
         change_field(config, forward)
