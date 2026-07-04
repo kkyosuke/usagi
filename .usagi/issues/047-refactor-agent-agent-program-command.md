@@ -1,13 +1,13 @@
 ---
 number: 47
 title: refactor(agent): Agent アダプタの二重間接と program/command の重複を解消する
-status: todo
+status: done
 priority: low
 labels: [refactor, agent]
 dependson: []
 related: []
 created_at: 2026-06-18T22:41:24.980332+00:00
-updated_at: 2026-06-18T22:41:24.980332+00:00
+updated_at: 2026-07-04T00:15:26.138721+00:00
 ---
 
 ## 背景

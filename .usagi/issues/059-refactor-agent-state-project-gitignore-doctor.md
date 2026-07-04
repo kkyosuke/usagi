@@ -1,13 +1,13 @@
 ---
 number: 59
 title: refactor: 層責務の漏れを是正（agent_state 遷移ポリシー・project .gitignore 編集・doctor 生プロセス）
-status: todo
+status: done
 priority: medium
 labels: [refactor, core, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:16:31.906344+00:00
-updated_at: 2026-06-19T22:16:31.906344+00:00
+updated_at: 2026-07-04T00:14:08.367740+00:00
 ---
 
 ## 背景
