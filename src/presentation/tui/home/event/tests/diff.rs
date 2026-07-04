@@ -113,7 +113,7 @@ fn selected_diff_fails_when_the_base_ref_is_unresolvable() {
 fn diff_command_opens_the_diff_view_from_the_focus_menu_for_a_real_repo() {
     // Driving the 在席 (Focus) `diff` command end-to-end over a real repo opens the
     // scrollable diff view: focus the session, move the menu cursor onto `diff`
-    // (agent → terminal → diff), and run it. The arrows scroll it and Esc dismisses
+    // (agent → close → diff), and run it. The arrows scroll it and Esc dismisses
     // it back to 在席, then out to 切替 (Ctrl-C quits).
     let dir = tempfile::tempdir().unwrap();
     let work = repo_with_feature_diff(dir.path());
@@ -122,8 +122,8 @@ fn diff_command_opens_the_diff_view_from_the_focus_menu_for_a_real_repo() {
     let mut keys = vec![
         Ok(Key::ArrowDown), // cursor root -> the feature session
         Ok(Key::Enter),     // focus it (idle -> Focus menu, "agent" highlighted)
-        Ok(Key::ArrowDown), // agent -> terminal
-        Ok(Key::ArrowDown), // terminal -> diff
+        Ok(Key::ArrowDown), // agent -> close
+        Ok(Key::ArrowDown), // close -> diff
         Ok(Key::Enter),     // run `diff` -> gathers the patch, opens the pane
     ];
     keys.push(Ok(Key::ArrowDown)); // scroll down a line
