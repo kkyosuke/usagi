@@ -92,6 +92,10 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
             "Select a session row / focus it (like Enter)",
         ),
         key_row("K / J", "Reorder the selected session"),
+        key_row(
+            "Space",
+            "Fold / unfold the workspace (unite mode, on a root row)",
+        ),
         key_row("s", "Sort sessions waiting for input (◆) to the top"),
         key_row("←→ / h l", "Move between the session's tabs"),
         key_row("Ctrl-P / Ctrl-N", "Move between the session's tabs"),

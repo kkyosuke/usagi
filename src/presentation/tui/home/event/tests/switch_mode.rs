@@ -535,6 +535,49 @@ fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
 }
 
 #[test]
+fn switch_space_folds_the_cursor_workspace_and_hides_its_sessions() {
+    // Unite: primary "usagi" [main] plus extra "wsB" [b1]. Space on wsB's root
+    // folds it, so its session b1 leaves the flat row space and the cursor never
+    // previews it, while "main" (in the still-expanded primary) is reachable.
+    let mut state = state_with_sessions(&["main"]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: vec![worktree(Some("b1"), "/wsB/b1")],
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+        issues: vec![],
+    }]);
+    // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
+    let keys = vec![
+        Ok(Key::ArrowDown), // main
+        Ok(Key::ArrowDown), // usagi create row
+        Ok(Key::ArrowDown), // wsB root
+        Ok(Key::Char(' ')), // fold wsB
+        Ok(Key::ArrowDown), // wraps over the now-shorter list, never reaching b1
+        Ok(Key::ArrowDown),
+        Ok(Key::CtrlC),
+    ];
+    let previews = run_recording_previews(keys, state, Vec::new());
+    assert!(
+        !previews.iter().any(|d| d.ends_with(".usagi/sessions/b1")),
+        "b1 sits in the folded workspace, so the cursor never previews it"
+    );
+    assert!(
+        previews.iter().any(|d| d.ends_with(".usagi/sessions/main")),
+        "main is in the expanded primary, so it is still previewed"
+    );
+}
+
+#[test]
 fn cheatsheet_opens_from_the_base_switch_and_dismisses() {
     // `?` at the base 切替 opens the keybinding cheat sheet (a scrollable text
     // modal); the arrows / j/k scroll it and Esc dismisses it (back to Switch,

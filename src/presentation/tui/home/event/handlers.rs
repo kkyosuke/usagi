@@ -406,6 +406,11 @@ pub(super) fn switch_key(
         Key::Char('c') => {
             begin_switch_create(state, wiring, None);
         }
+        // `Space` folds / unfolds the workspace under the cursor in 統合(unite)
+        // mode, hiding its sessions behind a single header line so a long list of
+        // workspaces stays scannable. A no-op off a root row or with a single
+        // workspace shown (folding the sole workspace would hide the whole list).
+        Key::Char(' ') => state.toggle_selected_collapsed(),
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
         Key::Char('r') => {
@@ -481,6 +486,9 @@ fn apply_label_change(
 /// `+ new session` affordance was typed into directly. The branch-name snapshot is
 /// taken exactly when the editor opens so validation sees the current workspace.
 fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
+    // A folded workspace hides its "+ new session" row, so unfold the cursor's
+    // group first — the input needs that row to render into.
+    state.expand_selected_group_for_create();
     let branches = (wiring.existing_branches)();
     state.switch_begin_create(branches);
     if let Some(c) = first {
@@ -785,7 +793,7 @@ pub(super) fn focus_click(
     now: Instant,
     last_click: &mut Option<(usize, Instant)>,
 ) {
-    if row == state.list().create_row() {
+    if state.list().is_create_row(row) {
         // The create row lives in 切替: a click on it from 在席 zooms back to the
         // picker and opens the same inline input a 切替 click would.
         state.enter_switch(ReturnMode::Focus);
@@ -1505,7 +1513,7 @@ fn open_pane(
             }
         }
         Ok(PaneExit::ToSession(row)) => {
-            if row == state.list().create_row() {
+            if state.list().is_create_row(row) {
                 // A double click on the sidebar create row in 没入: leave the pane
                 // to the picker and open the same inline create editor that 切替 /
                 // 在席 expose. ReturnMode::Attached preserves the usual `Esc`
