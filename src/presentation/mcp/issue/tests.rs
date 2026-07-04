@@ -51,8 +51,8 @@ fn tools_list_returns_issue_and_memory_tools() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     );
     let tools = res["result"]["tools"].as_array().unwrap();
-    // Six issue tools followed by five memory tools.
-    assert_eq!(tools.len(), 11);
+    // Six issue tools followed by four memory tools.
+    assert_eq!(tools.len(), 10);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"issue_create"));
     assert!(names.contains(&"issue_to_prompt"));
@@ -60,9 +60,11 @@ fn tools_list_returns_issue_and_memory_tools() {
     assert!(names.contains(&"issue_delete"));
     assert!(names.contains(&"memory_save"));
     assert!(names.contains(&"memory_delete"));
-    // The separate list tools were folded into search (query optional).
+    // The separate list tools were folded into search (query optional), and the
+    // memory update tool into memory_save (upsert).
     assert!(!names.contains(&"issue_list"));
     assert!(!names.contains(&"memory_list"));
+    assert!(!names.contains(&"memory_update"));
 }
 
 #[test]
