@@ -101,9 +101,9 @@
 
 - **開く** — **切替（Switch）／在席（Focus）の両方**から `:` で開けます。没入（Attached）はキーがシェルへ
   流れるため対象外です（まず `Ctrl-O o`（既定）で切替へ抜けてから `:`）。
-- **実行できるコマンド** — `session` / `unite` / `config` / `env` / `issue` / `man` / `history` / `preview` / `diff` / `terminal` / `agent` /
-  `close` / `doctor` / `quit` / `clear` など、ワークスペース全体（[コマンドスコープ](#コマンドスコープ)の Workspace ＋共通）の
-  コマンドを実行します。構文と役割は [../03-commands/02-tui.md](../../03-commands/02-tui.md) が正本です。
+- **実行できるコマンド** — `agent` / `ai` / `clear` / `close` / `config` / `diff` / `doctor` / `env` / `history` / `issue` /
+  `man` / `preview` / `quit` / `session` / `terminal` / `unite` など、ワークスペース全体（[コマンドスコープ](#コマンドスコープ)の Workspace ＋共通）の
+  コマンドを実行します（一覧・ヒントはコマンド名のアルファベット順で並びます）。構文と役割は [../03-commands/02-tui.md](../../03-commands/02-tui.md) が正本です。
 - **表示** — 入力欄 `❯ …`、入力中のコマンドに応じた[候補・ヒント](02-layout.md#入力候補ヒントコマンドライン)（コマンド一覧の絞り込み、または
   引数入力中の `usage` / `examples`）、直近に実行したコマンドの結果を重ねて表示します。`man` / `history` /
   `session list`（セッションあり）など**テキストを読むコマンドは、テキストモーダルをパレットの上にさらに重ねて**開きます。
