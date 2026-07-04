@@ -1,14 +1,14 @@
 ---
 number: 78
 title: feat(tui): unite基盤 — WorktreeList/HomeState をグループ対応データモデルへ一般化
-status: in-progress
+status: done
 priority: medium
 labels: [feat, tui, refactor]
 dependson: []
 related: []
 parent: 77
 created_at: 2026-06-28T00:08:09.516046+00:00
-updated_at: 2026-06-28T00:09:06.696040+00:00
+updated_at: 2026-07-04T05:52:16.094627+00:00
 ---
 
 統合(unite)モードの基盤（親 #77 のフェーズ1）。
