@@ -15,6 +15,57 @@ fn enter_focus_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
+fn focus_menu_overlay_holds_only_for_the_menu_surface_on_the_action_tab() {
+    let mut state = state(); // root, main, feature
+                             // Not in 在席: nothing floats.
+    assert!(!state.focus_menu_overlay());
+
+    // Idle 在席 on the menu UI (the default): the menu floats as an overlay.
+    state.enter_focus(1);
+    assert_eq!(state.session_action_ui(), SessionActionUi::Menu);
+    assert!(state.focus_menu_overlay());
+
+    // The prompt surface stays inline, so nothing floats for it.
+    state.set_session_action_ui(SessionActionUi::Prompt);
+    state.enter_focus(1);
+    assert!(!state.focus_menu_overlay());
+
+    // Back on the menu UI with live panes: it floats on the "+ new" tab (the
+    // action surface) but not once the selector steps onto a pane tab.
+    state.set_session_action_ui(SessionActionUi::Menu);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert!(state.focus_on_new_tab());
+    assert!(state.focus_menu_overlay());
+    state.focus_tab_next(); // "+ new" -> the sole pane tab
+    assert!(!state.focus_on_new_tab());
+    assert!(!state.focus_menu_overlay());
+}
+
+#[test]
+fn focus_menu_overlay_yields_to_the_loading_indicator_open_overlays_and_palette() {
+    // The idle menu floats by default; each screen-owning surface suppresses it so
+    // two boxes never fight for the pane.
+    let mut loading = state();
+    loading.enter_focus(1);
+    assert!(loading.focus_menu_overlay());
+    loading.step_loading("起動中…"); // a momentary launch owns the pane
+    assert!(!loading.focus_menu_overlay());
+
+    // An open overlay (here a text modal a menu command dumped) captures the screen.
+    let mut modal = state();
+    modal.enter_focus(1);
+    modal.open_text_modal("Help", vec![LogLine::output("x")], ModalSize::Normal);
+    assert!(!modal.focus_menu_overlay());
+
+    // The `:` command palette likewise.
+    let mut palette = state();
+    palette.enter_focus(1);
+    palette.open_command_palette();
+    assert!(!palette.focus_menu_overlay());
+}
+
+#[test]
 fn previous_session_row_tracks_the_last_focused_session() {
     let mut state = state(); // root, main, feature
                              // Nothing to jump back to before a second session is focused.
