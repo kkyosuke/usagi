@@ -1,13 +1,13 @@
 ---
 number: 58
 title: refactor(domain): settings からエージェント起動コマンド生成ロジックを外層へ退避
-status: todo
+status: done
 priority: medium
 labels: [refactor, core, review]
 dependson: []
 related: []
 created_at: 2026-06-19T22:16:22.422682+00:00
-updated_at: 2026-06-19T22:16:22.422682+00:00
+updated_at: 2026-07-04T00:14:05.196263+00:00
 ---
 
 ## 背景

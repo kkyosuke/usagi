@@ -1,13 +1,13 @@
 ---
 number: 44
 title: refactor(tui): ホーム画面の attach フロー集約とデッドパラメータ・コールバック整理
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui]
 dependson: []
 related: []
 created_at: 2026-06-18T22:40:31.332638+00:00
-updated_at: 2026-06-18T22:40:31.332638+00:00
+updated_at: 2026-07-04T00:15:20.278553+00:00
 ---
 
 ## 背景

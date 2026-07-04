@@ -1,13 +1,13 @@
 ---
 number: 49
 title: refactor(session): セッション操作の二重実装を解消する（破棄・inspect・dirty 判定）
-status: todo
+status: done
 priority: medium
 labels: [refactor, session]
 dependson: []
 related: []
 created_at: 2026-06-18T22:40:11.804658+00:00
-updated_at: 2026-06-18T22:40:11.804658+00:00
+updated_at: 2026-07-04T00:15:30.541142+00:00
 ---
 
 ## 背景
