@@ -667,10 +667,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // active thing on screen (see [`HomeState::focus_action_overlay`] — no loading
     // indicator, open overlay, or `:` palette is up), so it never collides with
     // those. The session identity rides the box title; the body is the header-less
-    // surface ([`focus_menu_body`] or [`focus_prompt_body`]). On the "+ new" tab
-    // [`panes::focus_pane`] leaves the pane behind it blank; over a pane tab (the
-    // zoomed-out-from-没入 state) the pane's live preview keeps showing behind the
-    // box, so zooming out never blanks the terminal.
+    // surface ([`focus_menu_body`] or [`focus_prompt_body`]), each sized to the
+    // pane's available rows (`body_rows`) so the box keeps a fixed height. On the
+    // "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank; over a
+    // pane tab (the zoomed-out-from-没入 state) the pane's live preview keeps
+    // showing behind the box, so zooming out never blanks the terminal.
     if state.focus_action_overlay() {
         let desired = match state.session_action_ui() {
             SessionActionUi::Menu => FOCUS_MENU_INNER,
@@ -678,8 +679,8 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         };
         let inner = widgets::modal_inner_width(right_w, desired);
         let body = match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu_body(state, inner),
-            SessionActionUi::Prompt => focus_prompt_body(state, inner),
+            SessionActionUi::Menu => focus_menu_body(state, inner, body_rows),
+            SessionActionUi::Prompt => focus_prompt_body(state, inner, body_rows),
         };
         let title = format!("session: {}", state.focused_session_name());
         widgets::overlay_region_modal(

@@ -17,9 +17,9 @@ use super::super::state::{
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::{
-    clip_to_width, clip_to_width_cow, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON,
-    EMPTY_MESSAGE, HINT_INDENT, HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON,
-    PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
+    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, HINT_INDENT,
+    HINT_MAX, LOCAL_ICON, NAME_PREFIX, NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL,
+    STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{
@@ -55,48 +55,13 @@ fn status_style(status: BranchStatus) -> Style {
     }
 }
 
-/// The colour-coded `<icon> <word>` label for a branch's lifecycle status. The
-/// icon gives an at-a-glance read; the word keeps it legible without a Nerd
-/// Font and disambiguates the colour.
+/// The colour-coded `<icon> <word>` label for a branch's lifecycle status, shown
+/// in the right-pane header ([`preview_header`]). The icon gives an at-a-glance
+/// read; the word keeps it legible without a Nerd Font and disambiguates the
+/// colour.
 pub(super) fn status_label(status: BranchStatus) -> String {
     let text = format!("{} {}", status_icon(status), status.as_str());
     status_style(status).apply_to(text).to_string()
-}
-
-/// Whether a branch lifecycle status is shown as a sidebar badge. `New` (freshly
-/// cut, no work yet) and `Dirty` (uncommitted work in progress) are deliberately
-/// **not** badged — they add noise without telling the user anything they don't
-/// already know — so only the settled states (`Local` / `Pushed` / `Synced`) get
-/// a badge on both the full sidebar and the rail.
-fn status_has_badge(status: BranchStatus) -> bool {
-    !matches!(status, BranchStatus::New | BranchStatus::Dirty)
-}
-
-/// The single colour-coded git-status glyph shown on the collapsed rail (the icon
-/// from [`status_label`] without the word), in the same colour — or a blank for an
-/// unbadged status (`New` / `Dirty`; see [`status_has_badge`]).
-fn rail_status_glyph(status: BranchStatus) -> String {
-    if !status_has_badge(status) {
-        return " ".to_string();
-    }
-    status_style(status)
-        .apply_to(status_icon(status))
-        .to_string()
-}
-
-/// The line-1 right-edge status field: the colour-coded `<icon> <word>` label
-/// right-aligned within [`STATUS_COL`] columns, or all blanks when there is no
-/// badge — the root row (`None`) or an unbadged status (`New` / `Dirty`; see
-/// [`status_has_badge`]).
-pub(super) fn status_cell(status: Option<BranchStatus>) -> String {
-    match status {
-        Some(status) if status_has_badge(status) => {
-            let label = status_label(status);
-            let pad = STATUS_COL.saturating_sub(console::measure_text_width(&label));
-            format!("{}{label}", " ".repeat(pad))
-        }
-        _ => " ".repeat(STATUS_COL),
-    }
 }
 
 /// The largest column width the manual-status label cell may claim on the full
@@ -122,7 +87,7 @@ fn label_style(color: LabelColor) -> Style {
 
 /// The manual-status label column on a full-sidebar row: a leading space
 /// separator then the colour-coded `<glyph> <name>` for `label`, clipped/padded
-/// to fill `col` columns so the note / status fields stay aligned down the list.
+/// to fill `col` columns so the right-edge note field stays aligned down the list.
 /// An unset row (or `col == 0`, when no visible session carries a label) fills
 /// the same width with blanks, holding the column.
 fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
@@ -137,7 +102,7 @@ fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
             let text = format!("{} {}", def.glyph(), def.name);
             // Measure by the terminal's East Asian width (ambiguous = 2) so a
             // label name carrying such characters does not overrun the column and
-            // push the note / status fields right (see [`name_cell`]).
+            // push the right-edge note field right (see [`name_cell`]).
             let padded = widgets::pad_to_width_cjk(widgets::clip_to_width_cjk(&text, inner), inner);
             label_style(def.color).apply_to(padded).to_string()
         }
@@ -231,27 +196,87 @@ impl AgentState {
         match self {
             AgentState::Absent => None,
             AgentState::Ready => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ☾ ready"), width))
-                    .dim()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾ ready"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
             ),
             AgentState::Running => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ▶ running"), width))
-                    .success()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶ running"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
             ),
             AgentState::Waiting => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ◆ waiting"), width))
-                    .warning()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆ waiting"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
             ),
             AgentState::Done => Some(
-                style(clip_to_width_cow(&format!("{AGENT_ICON} ✓ done"), width))
-                    .accent()
-                    .bold()
-                    .to_string(),
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓ done"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
+            ),
+        }
+    }
+
+    /// The full-sidebar detail-line label as **icons only**: the
+    /// [AI-agent glyph](AGENT_ICON) then the phase icon, with the spelled-out word
+    /// dropped — `<robot> ☾` (dim), `<robot> ▶` (green), `<robot> ◆` (yellow), or
+    /// `<robot> ✓` (cyan) — clipped to `width`, or `None` when absent. Unlike
+    /// [`detail`](Self::detail) (which keeps the word for the roomier right-pane
+    /// header), the sidebar row shows only the glyphs so the state reads at a glance
+    /// without spending columns on the label.
+    fn icon_label(self, width: usize) -> Option<String> {
+        match self {
+            AgentState::Absent => None,
+            AgentState::Ready => Some(
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ☾"),
+                    width,
+                ))
+                .dim()
+                .to_string(),
+            ),
+            AgentState::Running => Some(
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ▶"),
+                    width,
+                ))
+                .success()
+                .bold()
+                .to_string(),
+            ),
+            AgentState::Waiting => Some(
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ◆"),
+                    width,
+                ))
+                .warning()
+                .bold()
+                .to_string(),
+            ),
+            AgentState::Done => Some(
+                style(widgets::clip_to_width_cjk(
+                    &format!("{AGENT_ICON} ✓"),
+                    width,
+                ))
+                .accent()
+                .bold()
+                .to_string(),
             ),
         }
     }
@@ -331,9 +356,10 @@ fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     // full-width (CJK) name — the app's own UI is Japanese — would overrun the
     // cell. Plain `pad_to_width` fixes that but still undercounts *ambiguous*-width
     // characters (`→ ① ※ ★` …) as one column, so a name carrying them renders
-    // wider than reserved and shoves the status field sideways. The `_cjk` helpers
-    // count ambiguous characters as two (Nerd Font / box glyphs stay one), matching
-    // the terminal, so the status column stays put whatever the name contains.
+    // wider than reserved and shoves the following fixed fields sideways. The
+    // `_cjk` helpers count ambiguous characters as two (Nerd Font / box glyphs
+    // stay one), matching the terminal, so the row columns stay put whatever the
+    // name contains.
     let padded = widgets::pad_to_width_cjk(widgets::clip_to_width_cjk(text, width), width);
     if emphasised {
         style(padded).accent().bold().to_string()
@@ -357,8 +383,8 @@ fn detail_line(gutter: &str, detail: String) -> String {
 const CPU_LABEL_WIDTH: usize = 4;
 
 /// Nerd Font glyphs labelling the CPU and memory figures on the resource line,
-/// in place of spelling out `CPU` / `MEM` — the same icon-led style the git
-/// status field uses. They need a patched [Nerd Font](https://www.nerdfonts.com/)
+/// in place of spelling out `CPU` / `MEM` — the same icon-led style the fixed
+/// header/status labels use. They need a patched [Nerd Font](https://www.nerdfonts.com/)
 /// to render; without one the terminal shows a fallback box, but the number
 /// beside each glyph still carries the meaning.
 const CPU_ICON: char = '\u{f2db}'; // nf-fa-microchip — processor use
@@ -451,11 +477,10 @@ fn resource_line(
     detail_line(&session_gutter_cell(selected, active, in_switch, 2), detail)
 }
 
-/// The line-1 cell between the session name and the right-edge git status: a
-/// yellow [`NOTE_ICON`] when the session carries a note, else blank. Three
-/// display columns wide either way (a leading and trailing space frame the
-/// glyph) so the status field stays aligned whether or not a note is present —
-/// it reuses the column the old active marker left blank.
+/// The line-1 memo cell at the row's right edge: a yellow [`NOTE_ICON`] when the
+/// session carries a note, else blank. Three display columns wide either way (a
+/// leading and trailing space frame the glyph) so the rows line up whether or not
+/// a note is present — it reuses the column the old active marker left blank.
 fn note_cell(has_note: bool) -> String {
     if has_note {
         format!(" {} ", style(NOTE_ICON).warning())
@@ -468,10 +493,10 @@ fn note_cell(has_note: bool) -> String {
 /// session's `󰤇` / `▎` stack, falling back to a green `▎` accent bar down the
 /// active worktree's lines when the session is not selected; line 1 then has the freshness ("heat") kind dot
 /// (`●`/`◐`/`○`, fading by time since the session was last touched, measured
-/// against `now`), the branch name, a memo marker (`NOTE_ICON`, when `has_note`),
-/// and the git `status` at the right edge. Line 2 is indented under the name and,
-/// when an agent is in use, carries its icon + label (`☾ ready` / `▶ running` /
-/// `◆ waiting` / `✓ done`).
+/// against `now`), the branch name, and a memo marker (`NOTE_ICON`, when
+/// `has_note`) at the right edge. Line 2 is indented under the name and, when an
+/// agent is in use, carries its icons (`<robot> ☾` / `<robot> ▶` / `<robot> ◆` /
+/// `<robot> ✓`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
@@ -505,7 +530,7 @@ pub(super) fn worktree_row(
         // fields sat (dropped while editing) so a longer name has room to type.
         let (before, after) = value.split_at(cursor);
         let field = widgets::block_caret(before, after, &Style::new().accent().bold());
-        let field_width = name_width + label_col + ACTIVE_COL + 1 + STATUS_COL;
+        let field_width = name_width + label_col + ACTIVE_COL + 1;
         format!("{gutter} {kind} {}", clip_to_width(&field, field_width))
     } else {
         // The session's sidebar label (its custom display name, or the branch when
@@ -516,18 +541,16 @@ pub(super) fn worktree_row(
             label
         };
         let branch = name_cell(name, name_width, active || selected);
-        let status = status_cell(Some(worktree.status));
         // The manual-status label sits between the branch name and the memo marker
         // in its own fixed-width column (blank when this row has none, dropped
         // entirely when no visible session carries a label — `label_col == 0`), so
-        // the note and git-status fields stay aligned down the list.
+        // the note field stays aligned down the list.
         let status_tag = label_cell(status_label, label_col);
-        // Three columns sit between the name and the right-edge status (the old
-        // active-marker cell, now home to the memo marker — the active bar lives in
-        // the gutter). The cell is a constant width whether or not a note is
-        // present, so the status field never shifts.
+        // Three columns at the row's right edge (the old active-marker cell, now
+        // home to the memo marker — the active bar lives in the gutter). The cell is
+        // a constant width whether or not a note is present.
         let note = note_cell(has_note);
-        format!("{gutter} {kind} {branch}{status_tag}{note}{status}")
+        format!("{gutter} {kind} {branch}{status_tag}{note}")
     };
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
@@ -594,7 +617,11 @@ fn digits(mut n: usize) -> usize {
 /// changed lines or a longer "ago". A `0` width drops that field for the pane.
 #[derive(Clone, Copy, Default)]
 pub(super) struct DetailCols {
-    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it.
+    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it. Reserved at
+    /// [`TIME_RESERVE_WIDTH`] so the cell keeps a constant width as a session ages
+    /// across the `now` / `Nmin ago` / `Nh ago` buckets — otherwise the label's
+    /// width would wander with the clock, flipping the "drop when narrow" decision
+    /// and shifting the detail line purely with the passage of time.
     time: usize,
     /// Digit width of the `↑N` (ahead) count; 0 = no visible session is ahead.
     ahead: usize,
@@ -610,8 +637,8 @@ pub(super) struct DetailCols {
 }
 
 /// Nerd Font glyph leading the pull-request badge — a git pull-request icon in
-/// place of spelling out `PR`, the same icon-led style the git status and resource
-/// fields use. Needs a patched [Nerd Font](https://www.nerdfonts.com/) to render;
+/// place of spelling out `PR`, the same icon-led style the header/status and
+/// resource fields use. Needs a patched [Nerd Font](https://www.nerdfonts.com/) to render;
 /// without one the terminal shows a fallback box, but the count beside it still
 /// carries the meaning.
 pub(super) const PR_ICON: char = '\u{ea64}'; // nf-cod-git_pull_request
@@ -657,13 +684,47 @@ fn pr_width(prs: &[PrLink]) -> usize {
 /// common appear/disappear no longer moves anything.
 const PR_RESERVE_WIDTH: usize = 3;
 
+/// The freshness column is reserved at (at least) this width on every render — the
+/// display width of the widest label the [`relative_time`] format produces,
+/// `59min ago` (9 columns), which also holds every `Nh ago` / `Nd ago` up to
+/// thousands of days. Unlike the diff / commit / PR fields, which only change when
+/// the user commits or opens a PR, the freshness label's width changes on its own
+/// as the clock advances (`now` → `12min ago` → `1h ago`). Sizing the column to the
+/// live label would let that width wander between frames — flipping the "drop the
+/// freshness first when narrow" decision and shifting the whole detail line purely
+/// with the passage of time (a cumulative layout shift). Holding the slot at a
+/// constant width decouples the layout from the clock, the same anti-shift rule the
+/// PR column follows ([`PR_RESERVE_WIDTH`]).
+const TIME_RESERVE_WIDTH: usize = 9;
+
+/// Columns the `↑` / `↓` commit-divergence arrows occupy. Unlike the other
+/// detail-line glyphs (the agent icons in `U+2500..=U+25FF` and the Nerd Font PUA
+/// icons all render single-width — see [`widgets::measure_width_cjk`]), the arrows
+/// live in the Arrows block and are East Asian *Ambiguous*, which the target
+/// terminals paint **two** columns wide. Reserving and measuring them at one column
+/// (the plain-width undercount) leaves the detail line 1 column too narrow per arrow
+/// on the layout's books, so the composed row overruns `left_w` and the sidebar's
+/// [`clip_to_width_cjk`](widgets::clip_to_width_cjk) chops its right edge (the PR
+/// badge). Counting the arrows here at their painted width keeps line 2's math in
+/// step with the CJK-aware clip that line 1 already uses.
+const COMMIT_ARROW_WIDTH: usize = 2;
+
 impl DetailCols {
     /// Width of the `↑N ↓M` commit cell — only the sides some visible session uses
     /// are reserved (a pane with nothing behind spends no columns on `↓`), with a
-    /// one-space gap when both sides are present.
+    /// one-space gap when both sides are present. Each arrow is
+    /// [`COMMIT_ARROW_WIDTH`] columns (ambiguous-width, painted two wide).
     fn commits_width(self) -> usize {
-        let up = if self.ahead > 0 { 1 + self.ahead } else { 0 };
-        let down = if self.behind > 0 { 1 + self.behind } else { 0 };
+        let up = if self.ahead > 0 {
+            COMMIT_ARROW_WIDTH + self.ahead
+        } else {
+            0
+        };
+        let down = if self.behind > 0 {
+            COMMIT_ARROW_WIDTH + self.behind
+        } else {
+            0
+        };
         up + usize::from(up > 0 && down > 0) + down
     }
 
@@ -707,10 +768,9 @@ fn detail_cols(
 ) -> DetailCols {
     let mut cols = DetailCols::default();
     for (updated_at, diff, ab, pr_w) in worktrees {
-        cols.time = cols.time.max(console::measure_text_width(&relative_time(
-            now,
-            *updated_at,
-        )));
+        cols.time = cols
+            .time
+            .max(widgets::measure_width_cjk(&relative_time(now, *updated_at)));
         if let Some(diff) = diff {
             cols.added = cols.added.max(digits(diff.added));
             cols.removed = cols.removed.max(digits(diff.removed));
@@ -729,6 +789,12 @@ fn detail_cols(
     // Always hold the PR slot open (even when no visible session has a PR) so a
     // session gaining or losing its last PR never shifts the diff to its left.
     cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
+    // Hold the freshness slot at a constant width so the label growing or shrinking
+    // as a session ages (`now` → `12min ago` → `1h ago`) never changes the column —
+    // otherwise the passing clock alone would flip the trim decision below and shift
+    // the detail line. The per-session max above still wins for the (unreachable in
+    // practice) label wider than the reserve.
+    cols.time = cols.time.max(TIME_RESERVE_WIDTH);
     // Trim low-priority columns (time, then commits) until the cluster fits beside
     // the widest agent label; the badge is always kept (it clips the agent first).
     let gap = usize::from(max_agent_w > 0);
@@ -744,9 +810,11 @@ fn detail_cols(
 
 /// Right-aligns the already-styled `content` within `width` display columns by
 /// left-padding with spaces, so a field seats at its column's right edge and the
-/// edges line up down the list.
+/// edges line up down the list. Width is measured with [`widgets::measure_width_cjk`]
+/// so an ambiguous-width glyph (the `↑` / `↓` arrows) is counted at the two columns
+/// the terminal paints it, matching the detail line's reserved columns.
 fn rpad(content: &str, width: usize) -> String {
-    let pad = width.saturating_sub(console::measure_text_width(content));
+    let pad = width.saturating_sub(widgets::measure_width_cjk(content));
     format!("{}{content}", " ".repeat(pad))
 }
 
@@ -778,14 +846,14 @@ fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> Str
         if ahead > 0 {
             style(format!("↑{ahead:>ahead_w$}")).accent().to_string()
         } else {
-            " ".repeat(1 + ahead_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + ahead_w)
         }
     });
     let down = (behind_w > 0).then(|| {
         if behind > 0 {
             style(format!("↓{behind:>behind_w$}")).feature().to_string()
         } else {
-            " ".repeat(1 + behind_w)
+            " ".repeat(COMMIT_ARROW_WIDTH + behind_w)
         }
     });
     match (up, down) {
@@ -804,28 +872,31 @@ fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: usize) -> Str
 /// cluster alone overflows it is clipped to the cell.
 fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
     if cells.is_empty() {
-        return agent.detail(width).unwrap_or_default();
+        return agent.icon_label(width).unwrap_or_default();
     }
     let cluster = cells.join(" ");
-    let cluster_w = console::measure_text_width(&cluster);
+    // Measure and clip with the CJK-aware width so the `↑` / `↓` arrows in the
+    // cluster are counted at the two columns the terminal paints them — otherwise
+    // the line is built one column too narrow per arrow and the sidebar's
+    // [`clip_to_width_cjk`] chops the cluster's right edge (see [`COMMIT_ARROW_WIDTH`]).
+    let cluster_w = widgets::measure_width_cjk(&cluster);
     if cluster_w >= width {
         // No room for both: the cluster alone, clipped to the cell.
-        return clip_to_width(&cluster, width);
+        return widgets::clip_to_width_cjk(&cluster, width);
     }
     // Reserve the cluster's columns (plus a one-space gap) and clip the agent
     // label to what's left, so it is styled already-clipped (clean ANSI) rather
     // than truncated after the fact.
-    let agent = agent.detail(width - cluster_w - 1).unwrap_or_default();
-    let pad = width - console::measure_text_width(&agent) - cluster_w;
+    let agent = agent.icon_label(width - cluster_w - 1).unwrap_or_default();
+    let pad = width - widgets::measure_width_cjk(&agent) - cluster_w;
     format!("{agent}{}{cluster}", " ".repeat(pad))
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
 /// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
-/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, a memo
-/// marker (`NOTE_ICON`, when `has_note`) — the root carries its own note, like a
-/// session — and a blank status field (the root has no git status). Line 2
-/// carries a `workspace root` detail.
+/// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
+/// memo marker (`NOTE_ICON`, when `has_note`) — the root carries its own note,
+/// like a session. Line 2 carries a `workspace root` detail.
 pub(super) fn root_row(
     name_width: usize,
     label_col: usize,
@@ -837,16 +908,15 @@ pub(super) fn root_row(
 ) -> (String, String) {
     let kind = root_glyph();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
-    let status = status_cell(None);
     let gutter = gutter_cell(selected, active, in_switch);
     // The root belongs to no session, so it carries no manual-status label — but it
-    // reserves the same (blank) label column as the sessions below, so the note /
-    // status fields stay aligned.
+    // reserves the same (blank) label column as the sessions below, so the memo
+    // field stays aligned.
     let status_tag = label_cell(None, label_col);
-    // The same constant-width memo cell a worktree row uses, so the (blank) status
-    // field stays aligned with the sessions below whether or not a note is present.
+    // The same constant-width memo cell a worktree row uses, so the rows line up
+    // with the sessions below whether or not a note is present.
     let note = note_cell(has_note);
-    let line1 = format!("{gutter} {kind} {name}{status_tag}{note}{status}");
+    let line1 = format!("{gutter} {kind} {name}{status_tag}{note}");
 
     // Only the active bar reaches line 2; the cursor stays a point on line 1.
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
@@ -914,15 +984,15 @@ fn root_glyph() -> String {
 /// keeps the row's height without the number:
 ///
 /// ```text
-/// ▎ <kind> <git>     row 1: identity dot (⌂/●/○) + git-status glyph
-/// ▎       <agent>    row 2: agent-state glyph (▶/◆/☾/✓), under the git column
+/// ▎ <kind>           row 1: identity dot (⌂/●/○)
+/// ▎ <label> <agent>  row 2: manual-status glyph + agent-state glyph (▶/◆/☾/✓)
 /// ▎                  row 3: blank (the full sidebar's resource line has no rail twin)
 /// ```
 ///
-/// `git` is blank on the root (no git status); `agent` is blank when no agent is
-/// in use. The active `▎` bar runs down all three rows; a selected session uses
-/// the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps the
-/// compact `>` cursor in 切替.
+/// `label` / `agent` are blank when the session carries no manual-status label /
+/// no live agent. The active `▎` bar runs down all three rows; a selected session
+/// uses the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps
+/// the compact `>` cursor in 切替.
 #[allow(clippy::too_many_arguments)]
 fn rail_entry(
     selected: bool,
@@ -930,7 +1000,6 @@ fn rail_entry(
     active: bool,
     in_switch: bool,
     kind: &str,
-    git: Option<&str>,
     label: Option<&str>,
     agent: Option<&str>,
 ) -> (String, String, String) {
@@ -949,14 +1018,10 @@ fn rail_entry(
     } else {
         gutter_cell(false, active, in_switch)
     };
-    // Columns: gutter @0, kind @2, git/agent @4 — so the agent glyph sits under
-    // the git glyph and the column under the kind dot stays blank.
-    let top = pad_to_width(
-        format!("{gutter} {kind} {}", git.unwrap_or(" ")),
-        RAIL_WIDTH,
-    );
+    // Columns: gutter @0, kind @2 — the kind dot alone on row 1.
+    let top = pad_to_width(format!("{gutter} {kind}"), RAIL_WIDTH);
     // Row 2: the manual-status glyph sits at column 2 (under the kind dot, blank
-    // when the session has no label) and the agent glyph at column 4 (under git).
+    // when the session has no label) and the agent glyph at column 4.
     let detail = pad_to_width(
         format!(
             "{detail_gutter} {} {}",
@@ -1192,8 +1257,8 @@ impl LineWindow {
 /// list share the exact same row layout and toggling between them only changes
 /// the width. The active session keeps its green `▎` gutter bar (down both rows)
 /// and, in 切替, the `>` cursor and the dimming of the other entries, so the rail
-/// still shows which session is selected, its git state, and what its agent is
-/// doing without spelling out their names.
+/// still shows which session is selected and what its agent is doing without
+/// spelling out their names.
 #[allow(clippy::too_many_arguments)]
 fn rail_pane(
     list: &WorktreeList,
@@ -1248,7 +1313,6 @@ fn rail_pane(
             &root,
             None,
             None,
-            None,
         );
         if in_switch && flat_row != list.selected_index() {
             root_top = dim_row(&root_top);
@@ -1287,7 +1351,6 @@ fn rail_pane(
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
             let kind = kind_dot(heat_of(w.updated_at, now));
-            let git = rail_status_glyph(w.status);
             let label = rail_label_glyph(group.row_label_id(i).and_then(|id| label_master.get(id)));
             let agent = AgentState::from_flags(
                 live.contains(&w.path),
@@ -1302,7 +1365,6 @@ fn rail_pane(
                 active,
                 in_switch,
                 &kind,
-                Some(&git),
                 label.as_deref(),
                 agent.as_deref(),
             );
@@ -1498,10 +1560,11 @@ fn rail_collapsed_group_row(selected: bool, active: bool, in_switch: bool) -> St
 /// line, and a CPU / memory line (`CPU 0%  MEM 0MB` when unsampled, so the entry
 /// is a fixed height and the list never reflows) — or the empty message when none
 /// are recorded, trimmed to the available `rows`. `live` holds
-/// the worktree paths with an embedded session (a live-but-idle one shows
-/// `☾ ready`), `running` the ones working a turn (`▶ running`), `waiting` the
-/// ones whose agent awaits input (`◆ waiting`), and `done` the finished ones
-/// (`✓ done`); precedence is done > waiting > running > ready. When `in_switch`
+/// the worktree paths with an embedded session (a live-but-idle one shows the
+/// sidebar icons `<robot> ☾`), `running` the ones working a turn (`<robot> ▶`),
+/// `waiting` the ones whose agent awaits input (`<robot> ◆`), and `done` the
+/// finished ones (`<robot> ✓`); precedence is done > waiting > running > ready.
+/// When `in_switch`
 /// is set (in 切替), the keyboard is on the list: the selected row shows a `>`
 /// cursor and every other row is faded so the highlighted session reads first.
 ///
@@ -1546,9 +1609,9 @@ pub(super) fn left_pane(
     // labels line up; `0` (no visible session carries a label) drops it, leaving
     // the sidebar exactly as it was before the feature.
     let label_col = label_col_width(list, label_master);
-    // Line 1: prefix + name + the manual-status label column + the (now-blank)
-    // active-marker cell + a space + the right-edge status field.
-    let name_width = left_w.saturating_sub(NAME_PREFIX + label_col + ACTIVE_COL + 1 + STATUS_COL);
+    // Line 1: prefix + name + the manual-status label column + the right-edge memo
+    // cell (the old active-marker cell + a space).
+    let name_width = left_w.saturating_sub(NAME_PREFIX + label_col + ACTIVE_COL + 1);
     // Line 2: indented under the branch name, then the detail text.
     let detail_width = left_w.saturating_sub(NAME_PREFIX);
     // Size the detail line's right-cluster columns once across every group's
@@ -1566,8 +1629,8 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
-            if let Some(label) = agent.detail(detail_width) {
-                max_agent_w = max_agent_w.max(console::measure_text_width(&label));
+            if let Some(label) = agent.icon_label(detail_width) {
+                max_agent_w = max_agent_w.max(widgets::measure_width_cjk(&label));
             }
             (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
         })
@@ -2604,14 +2667,47 @@ fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String
     clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
-/// The height (in rows) the 在席 (Focus) menu's command area is fixed to. The
-/// window shows this many rows whatever is expanded, so opening an inline picker
-/// scrolls its sub-rows into view rather than resizing the box. Set to the full
-/// menu's command count (agent / terminal / diff / chat / close) via `max`, so a
-/// full menu never pads and every menu shares one height; it also leaves room —
-/// after the two overflow markers — for a two-option picker (terminal / close) to
-/// show in full, so only a long agent list actually scrolls.
+/// A hard floor on the 在席 (Focus) menu's command-area height, so even a tiny
+/// menu keeps a usable window. The real target is the widest expansion (see
+/// [`focus_menu_target`]); this only guards degenerate menus with fewer rows.
 const FOCUS_MENU_MIN_VISIBLE: usize = 5;
+
+/// The 在席 menu box's chrome rows around the windowed command area: the two box
+/// borders plus the `Run a command:` label, the blank spacer, and the key hint.
+/// The command window may take up to `avail_rows - FOCUS_MENU_CHROME` rows before
+/// the box would overrun the right pane.
+const FOCUS_MENU_CHROME: usize = 5;
+
+/// The command-area height the 在席 menu reserves: the row count with the *most
+/// sub-menu-heavy* picker fully expanded — the command rows plus the largest
+/// picker's sub-rows. Fixing the window to this height means every picker opens in
+/// place with no `↑/↓ N more` clipping and no layout shift, whatever is expanded.
+/// Each command contributes its own picker's sub-row count when it can expand:
+/// `agent` the installed CLIs (only when more than one, so a picker actually
+/// opens), `terminal` its open/new actions, `close` its two options.
+fn focus_menu_target(state: &HomeState, commands: &[CommandInfo]) -> usize {
+    let widest_picker = commands
+        .iter()
+        .map(|info| match info.name {
+            "agent" if state.installed_agents().len() > 1 => state.installed_agents().len(),
+            "terminal" => state.focus_menu_terminal_actions().len(),
+            "close" => 2,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    commands.len() + widest_picker
+}
+
+/// How many command rows the 在席 menu window shows for a pane `avail_rows` tall,
+/// given the `target` height (the widest expansion, see [`focus_menu_target`]).
+/// It reserves the full `target` — so every picker opens without scrolling and the
+/// box never resizes as pickers open and close — capping only when the pane cannot
+/// hold it (then the window scrolls), and never below [`FOCUS_MENU_MIN_VISIBLE`].
+fn focus_menu_visible(target: usize, avail_rows: usize) -> usize {
+    let max_fit = avail_rows.saturating_sub(FOCUS_MENU_CHROME);
+    target.min(max_fit).max(FOCUS_MENU_MIN_VISIBLE)
+}
 
 /// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
 /// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
@@ -2651,12 +2747,13 @@ fn focus_menu_overflow(hidden: usize, above: bool) -> String {
 
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. The command rows are windowed to a fixed height
-/// ([`focus_menu_window`]) so expanding an inline picker scrolls rather than
-/// resizing the box. Rendered as the body of the floating menu overlay modal (see
-/// [`super::render_frame`] and [`HomeState::focus_action_overlay`]); the `session:`
-/// identity rides the modal's title rather than a header line here.
-pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
+/// and a key hint. The command rows are windowed ([`focus_menu_window`]) to a
+/// height that grows to fill the `avail_rows`-tall right pane, so a long picker
+/// shows as many rows as fit before it scrolls rather than collapsing straight
+/// into `↑/↓ N more` markers. Rendered as the body of the floating menu overlay
+/// modal (see [`super::render_frame`] and [`HomeState::focus_action_overlay`]); the
+/// `session:` identity rides the modal's title rather than a header line here.
+pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
     let close_expanded = state.focus_close_expanded();
@@ -2734,11 +2831,11 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
         }
     }
 
-    // Window the command area to a fixed height so expanding a picker scrolls its
-    // sub-rows into view rather than growing the box. The window height is the
-    // (expansion-invariant) command count, floored so there is always room for the
-    // two overflow markers plus a content row.
-    let visible = commands.len().max(FOCUS_MENU_MIN_VISIBLE);
+    // Window the command area to the widest expansion's height, so every picker
+    // opens in place — its sub-rows shown, not collapsed into `↑/↓ N more` — and
+    // the box never resizes as pickers open and close. Capped to the right pane so
+    // it never overruns; only when the pane is too short does the window scroll.
+    let visible = focus_menu_visible(focus_menu_target(state, &commands), avail_rows);
     let mut lines = vec![style("Run a command:").dim().to_string()];
     lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
@@ -2761,20 +2858,42 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
     lines
 }
 
+/// Rows the 在席 prompt reserves for its Session-scope hint, always filled to this
+/// height (padded with blanks) so the box keeps a **fixed height** as the hint
+/// changes while typing — no layout shift, the prompt sibling of the menu's
+/// widest-expansion window ([`focus_menu_target`]) and the palette's
+/// [`PALETTE_HINT_ROWS`](super::chrome). Sized to the tallest hint: a `usage` line
+/// plus up to [`HINT_MAX`] examples.
+const FOCUS_PROMPT_HINT_ROWS: usize = HINT_MAX + 1;
+
+/// The 在席 prompt box's chrome rows around the reserved hint block: the two box
+/// borders plus the `❯` command line and its blank spacer. The hint block is
+/// capped to `avail_rows - FOCUS_PROMPT_CHROME` so a short pane never overruns.
+const FOCUS_PROMPT_CHROME: usize = 4;
+
 /// The body of the 在席 (Focus) prompt surface (no identity header): the
-/// session-scoped command line (`❯ <input>▏`) and the Session-scope hint below
-/// it. Rendered as the body of the floating prompt overlay modal (the prompt
-/// sibling of [`focus_menu_body`]; see [`super::render_frame`] and
-/// [`HomeState::focus_action_overlay`]); the `session:` identity rides the
-/// modal's title rather than a header line here.
-pub(super) fn focus_prompt_body(state: &HomeState, width: usize) -> Vec<String> {
+/// session-scoped command line (`❯ <input>▏`) and a **fixed-height** Session-scope
+/// hint block below it, so the box never resizes as the hint changes while typing.
+/// Rendered as the body of the floating prompt overlay modal (the prompt sibling
+/// of [`focus_menu_body`]; see [`super::render_frame`] and
+/// [`HomeState::focus_action_overlay`]); the `session:` identity rides the modal's
+/// title rather than a header line here. `avail_rows` caps the reserved block so a
+/// short right pane never overruns (mirroring the menu's `avail_rows` window).
+pub(super) fn focus_prompt_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let prompt = style("❯").danger().bold();
     // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
     let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
     let value = widgets::block_caret(before, after, &Style::new().accent());
     let mut lines = vec![clip_to_width(&format!("{prompt} {value}"), width)];
     lines.push(String::new());
-    lines.extend(focus_hint_lines(state.focus_prompt_hint(), width));
+    // Reserve a fixed number of hint rows (padded with blanks), so the box keeps
+    // one height whatever the hint is — commands, usage/examples, or none. Capped
+    // to what the pane can hold so a short pane never pushes the box past it.
+    let hint_rows = FOCUS_PROMPT_HINT_ROWS.min(avail_rows.saturating_sub(FOCUS_PROMPT_CHROME));
+    let mut hints = focus_hint_lines(state.focus_prompt_hint(), width);
+    hints.truncate(hint_rows);
+    hints.resize(hint_rows, String::new());
+    lines.extend(hints);
     lines
 }
 
@@ -3090,14 +3209,58 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
     None
 }
 
+/// Witty English one-liners rested beneath the idle mascot in the 切替 preview
+/// (and [`idle_quip`] picks one per session). They stand in for the 在席 menu's
+/// choices — which selecting reveals only as a floating modal, never inline — so
+/// the preview says "nothing is running here yet" without promising a surface that
+/// never appears. Each nods to the usagi and to `Enter` as the way in.
+const IDLE_QUIPS: [&str; 6] = [
+    "Quiet as a sleeping bunny — press Enter to begin.",
+    "This burrow is empty. Hop in with Enter.",
+    "No tabs stirring yet. Enter starts one.",
+    "A fresh warren awaits. Enter to dig in.",
+    "Nothing running here. Enter wakes it up.",
+    "Still and cozy — press Enter to get going.",
+];
+
+/// The [`IDLE_QUIPS`] line for the highlighted row, chosen by its name so the quip
+/// stays stable per session (and differs between them). The root row keys off
+/// [`ROOT_NAME`]; a detached session off [`DETACHED`].
+fn idle_quip(state: &HomeState) -> &'static str {
+    let name = match state.list().selected() {
+        Some(w) => w.branch.as_deref().unwrap_or(DETACHED),
+        None => ROOT_NAME,
+    };
+    let seed: usize = name.bytes().map(usize::from).sum();
+    IDLE_QUIPS[seed % IDLE_QUIPS.len()]
+}
+
+/// The idle-session body: the mascot ([`widgets::rabbit_lines`]) centred in the
+/// middle of a `width`×`rows` region with `quip` on a dim row below it. The block
+/// (mascot + blank + caption) is centred both horizontally — each row already is —
+/// and vertically, so the usagi sits in the centre of the pane whatever its
+/// height. Always returns exactly `rows` rows so the pane stays full-height.
+fn idle_rabbit_body(quip: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut block = widgets::rabbit_lines(width);
+    block.push(String::new());
+    block.push(widgets::dim_line(width, quip));
+    let top = rows.saturating_sub(block.len()) / 2;
+    let mut lines = vec![String::new(); top];
+    lines.extend(block);
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
+    lines
+}
+
 /// The 切替 (Switch) right pane: a **preview of the screen that selecting the
 /// session under the cursor will open**, so the choice is informed by what comes
 /// next. A live session (an embedded shell / agent already running) previews the
-/// live-terminal re-attach; a session with no live shell previews its 在席 action
-/// menu. The header line carries the session's status and agent state. The key
-/// hints live in the footer, so the preview uses the pane's full height. The
-/// highlighted session's note is drawn over the top by [`note_overlay`] (not
-/// inline), so it never pushes this preview around.
+/// live-terminal re-attach; an idle session with no live pane rests the mascot
+/// with a light quip ([`idle_rabbit_body`]) on the menu UI, or previews its inline
+/// prompt on the prompt UI. The header line carries the session's status and agent
+/// state. The key hints live in the footer, so the preview uses the pane's full
+/// height. The highlighted session's note is drawn over the top by [`note_overlay`]
+/// (not inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     if state.list().create_row_selected() {
         let mut lines = vec![
@@ -3154,26 +3317,30 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
         }
     } else {
-        // Selecting opens 在席 on this session: preview its action surface, which
-        // mirrors the configured Session Action UI — a command menu or a prompt —
-        // so the preview matches what focusing actually reveals. A blank row keeps
-        // the header clear of the surface below it.
-        lines.push(String::new());
+        // An idle session (no live pane, so no tab) has no screen to mirror.
+        // Selecting opens 在席's action surface, which differs by Session Action
+        // UI, so the preview matches each:
         match state.session_action_ui() {
+            // The menu floats as an overlay *modal* over a blank pane — nothing is
+            // drawn inline. Previewing its choices here would promise an inline
+            // surface that never appears, so rest the mascot in the middle of the
+            // pane with a light English quip instead: the preview reads as "nothing
+            // is running yet — Enter to hop in" with no mismatch.
             SessionActionUi::Menu => {
-                lines.push(style("Run a command:").dim().to_string());
-                for (i, info) in state.preview_menu_commands().iter().enumerate() {
-                    lines.push(focus_menu_row(info, i == 0, width));
-                }
+                let body = body_rows.saturating_sub(lines.len());
+                lines.extend(idle_rabbit_body(idle_quip(state), width, body));
             }
+            // The prompt focuses *inline* (its own `session:` prompt), so previewing
+            // that prompt here matches what selecting reveals.
             SessionActionUi::Prompt => {
+                lines.push(String::new());
                 let prompt = style("❯").danger().bold();
                 let value = widgets::block_caret("", "", &Style::new().accent());
                 lines.push(clip_to_width(&format!("{prompt} {value}"), width));
+                lines.push(String::new());
+                lines.push(style("Enter で開く").dim().to_string());
             }
         }
-        lines.push(String::new());
-        lines.push(style("Enter で開く").dim().to_string());
     }
 
     // Trim the body to its budget and pad up so the pane is always full-height.
@@ -3784,27 +3951,6 @@ mod tests {
     }
 
     #[test]
-    fn rail_status_glyph_badges_settled_states_and_blanks_new_and_dirty() {
-        // `New` / `Dirty` are unbadged: a single blank so the rail's git column is
-        // empty for a fresh or work-in-progress branch.
-        assert_eq!(rail_status_glyph(BranchStatus::New), " ");
-        assert_eq!(rail_status_glyph(BranchStatus::Dirty), " ");
-        // The settled states still show their coloured glyph.
-        for status in [
-            BranchStatus::Local,
-            BranchStatus::Pushed,
-            BranchStatus::Synced,
-        ] {
-            let glyph = console::strip_ansi_codes(&rail_status_glyph(status)).into_owned();
-            assert_eq!(glyph, status_icon(status).to_string());
-        }
-        // The predicate itself: only new/dirty are unbadged.
-        assert!(!status_has_badge(BranchStatus::New));
-        assert!(!status_has_badge(BranchStatus::Dirty));
-        assert!(status_has_badge(BranchStatus::Synced));
-    }
-
-    #[test]
     fn label_style_maps_every_colour_to_its_palette_role() {
         // Each colour renders through the semantic palette; cover all arms and pin
         // the mapping to the concrete ANSI colour it should resolve to.
@@ -3912,7 +4058,7 @@ mod tests {
     #[test]
     fn root_row_reserves_the_label_column_without_drawing_a_label() {
         // The root carries no label, but with a label column active its blank cell
-        // keeps the note / status fields aligned with the sessions below.
+        // keeps the right-edge note field aligned with the sessions below.
         let (with_col, _) = root_row(10, 8, 20, false, false, false, false);
         let (without_col, _) = root_row(10, 0, 20, false, false, false, false);
         assert_eq!(
@@ -4003,9 +4149,9 @@ mod tests {
     fn name_cell_reserves_its_width_for_ambiguous_characters() {
         // The regression this fix targets: a name carrying East Asian *Ambiguous*
         // characters (`→ ① ※`), which the terminal paints two columns wide, must
-        // still fill exactly its cell so the status field that follows does not
-        // shift. `console::measure_text_width` undercounts these as one column, so
-        // the cell is sized and measured by [`widgets::measure_width_cjk`] instead.
+        // still fill exactly its cell so the following fixed fields do not shift.
+        // `console::measure_text_width` undercounts these as one column, so the
+        // cell is sized and measured by [`widgets::measure_width_cjk`] instead.
         for name in ["feat→x", "review①", "対応※", "→→→→"] {
             assert_eq!(
                 widgets::measure_width_cjk(&name_cell(name, 10, false)),
@@ -4014,8 +4160,8 @@ mod tests {
             );
         }
         // Two names of equal *rendered* width — one all-ASCII, one carrying an
-        // ambiguous glyph — produce the same cell width, so the status column that
-        // butts against the cell lands in the same place for both.
+        // ambiguous glyph — produce the same cell width, so the fields that butt
+        // against the cell land in the same place for both.
         assert_eq!(
             widgets::measure_width_cjk(&name_cell("feat→", 10, false)),
             widgets::measure_width_cjk(&name_cell("featx", 10, false)),
@@ -4151,9 +4297,11 @@ mod tests {
             1,
         );
         assert!(console::strip_ansi_codes(&ahead_only).starts_with("↑ 2"));
+        // Measured as painted (the `↑` / `↓` arrows are two columns wide), the
+        // blanked-out side holds exactly the drawn side's width.
         assert_eq!(
-            console::measure_text_width(&ahead_only),
-            console::measure_text_width(&both),
+            widgets::measure_width_cjk(&ahead_only),
+            widgets::measure_width_cjk(&both),
         );
         // No behind side anywhere in the render → only the `↑` column is spent.
         let no_behind = commits_cell(
@@ -4177,9 +4325,10 @@ mod tests {
         assert_eq!(console::strip_ansi_codes(&no_ahead), "↓2");
         // Column dropped entirely → empty.
         assert_eq!(commits_cell(None, 0, 0), "");
-        // A drawn column but no measurement for this row → blanks.
+        // A drawn column but no measurement for this row → blanks holding the
+        // 2-wide arrow slot plus its one digit.
         let none = commits_cell(None, 1, 0);
-        assert_eq!(console::measure_text_width(&none), 2);
+        assert_eq!(console::measure_text_width(&none), 3);
         assert!(none.trim().is_empty());
     }
 
@@ -4193,25 +4342,25 @@ mod tests {
             removed: 2,
             pr: 4, // "#123"
         };
-        assert_eq!(full.commits_width(), 6); // (1+2) + gap + (1+1)
+        assert_eq!(full.commits_width(), 8); // (2+2) + gap + (2+1), arrows two wide
         assert_eq!(full.badge_width(), 8); // 3 + 2 + 3
-        assert_eq!(full.cluster_width(), 8 + 1 + 6 + 1 + 8 + 1 + 4); // four fields, three gaps
+        assert_eq!(full.cluster_width(), 8 + 1 + 8 + 1 + 8 + 1 + 4); // four fields, three gaps
 
         // Only an ahead side, no diff, no time: one field, no gaps, no `↓` columns.
         let ahead_only = DetailCols {
             ahead: 2,
             ..DetailCols::default()
         };
-        assert_eq!(ahead_only.commits_width(), 3);
+        assert_eq!(ahead_only.commits_width(), 4); // 2-wide arrow + 2 digits
         assert_eq!(ahead_only.badge_width(), 0);
-        assert_eq!(ahead_only.cluster_width(), 3);
+        assert_eq!(ahead_only.cluster_width(), 4);
 
         // Only a behind side (covers the `up == 0` half of the commit gap).
         let behind_only = DetailCols {
             behind: 2,
             ..DetailCols::default()
         };
-        assert_eq!(behind_only.commits_width(), 3);
+        assert_eq!(behind_only.commits_width(), 4); // 2-wide arrow + 2 digits
 
         assert_eq!(DetailCols::default().cluster_width(), 0);
     }
@@ -4317,7 +4466,7 @@ mod tests {
         assert!(roomy.ahead > 0 || roomy.behind > 0);
         assert!(roomy.added > 0);
         // Tighter: the lowest-priority time is dropped, commits + badge stay.
-        let mid = detail_cols(&data, now, 9, 25);
+        let mid = detail_cols(&data, now, 9, 30);
         assert_eq!(mid.time, 0);
         assert!(mid.ahead > 0 || mid.behind > 0);
         assert!(mid.added > 0);
@@ -4344,7 +4493,9 @@ mod tests {
         let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 24);
         assert_eq!(console::measure_text_width(&line), 24);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
+        // Icon only: the AI glyph + phase icon, no spelled-out word.
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
+        assert!(!plain.contains("running"));
         assert!(plain.ends_with("+124 -18"));
 
         // With no agent the cluster still rides the right edge.
@@ -4355,12 +4506,12 @@ mod tests {
 
     #[test]
     fn detail_content_falls_back_to_the_agent_or_clips_a_cramped_cluster() {
-        // No cells → just the agent label (blank when absent).
+        // No cells → just the agent icons (blank when absent, no spelled-out word).
         assert_eq!(detail_content(AgentState::Absent, &[], 20), "");
-        assert!(
-            console::strip_ansi_codes(&detail_content(AgentState::Running, &[], 20))
-                .contains("running")
-        );
+        let running = detail_content(AgentState::Running, &[], 20);
+        let running = console::strip_ansi_codes(&running);
+        assert!(running.contains('▶'));
+        assert!(!running.contains("running"));
         // Cluster alone wider than the cell → clipped to the cell.
         let badge = diff_cell(
             Some(DiffStat {
@@ -4396,7 +4547,7 @@ mod tests {
         let cells = vec![time, commits, badge];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
         assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
     }
@@ -4517,7 +4668,7 @@ mod tests {
         let cells = vec![badge, cell];
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
-        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶ running")));
+        assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
         assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
         assert!(plain.ends_with(format!("{PR_ICON} 2").as_str()));
     }

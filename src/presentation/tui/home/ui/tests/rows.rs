@@ -383,8 +383,8 @@ fn worktree_row_shows_a_memo_marker_only_when_the_session_has_a_note() {
     .0;
     assert!(with_note.contains(NOTE_ICON));
     assert!(!without_note.contains(NOTE_ICON));
-    // The marker is purely additive to line 1: its presence must not shift the
-    // right-edge status column, so both variants render the same display width.
+    // The marker is purely additive to line 1: its presence must not shift the row,
+    // so both variants render the same display width.
     assert_eq!(
         console::measure_text_width(&console::strip_ansi_codes(&with_note)),
         console::measure_text_width(&console::strip_ansi_codes(&without_note)),
@@ -484,7 +484,7 @@ fn worktree_row_marks_the_active_worktree_with_a_gutter_bar_on_both_lines() {
 
 #[test]
 fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
-    // A live session that has not begun a turn yet is idle: `☾ ready`.
+    // A live session that has not begun a turn yet is idle: `☾` (word dropped).
     let (_, ready_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
@@ -504,10 +504,11 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         false,
         None,
     );
+    // Icon only: the phase glyph shows, the spelled-out word does not.
     assert!(ready_detail.contains('☾'));
-    assert!(ready_detail.contains("ready"));
+    assert!(!ready_detail.contains("ready"));
 
-    // Working a turn: `▶ running`.
+    // Working a turn: `▶` (word dropped).
     let (_, running_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
@@ -528,9 +529,9 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         None,
     );
     assert!(running_detail.contains('▶'));
-    assert!(running_detail.contains("running"));
+    assert!(!running_detail.contains("running"));
 
-    // Awaiting input wins over running: `◆ waiting`.
+    // Awaiting input wins over running: `◆` (word dropped).
     let (_, waiting_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
@@ -552,9 +553,9 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     );
     assert!(waiting_detail.contains('◆'));
     assert!(!waiting_detail.contains('▶'));
-    assert!(waiting_detail.contains("waiting"));
+    assert!(!waiting_detail.contains("waiting"));
 
-    // A finished agent shows `✓ done`, taking precedence over running.
+    // A finished agent shows `✓` (word dropped), taking precedence over running.
     let (_, done_detail) = worktree_row(
         &worktree(Some("feature"), false, BranchStatus::Local),
         "",
@@ -575,7 +576,7 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
         None,
     );
     assert!(done_detail.contains('✓'));
-    assert!(done_detail.contains("done"));
+    assert!(!done_detail.contains("done"));
     assert!(!done_detail.contains('▶'));
 
     // No live session: the detail line carries no agent state.
@@ -601,29 +602,9 @@ fn worktree_row_shows_the_agent_state_through_its_lifecycle() {
     assert!(!absent_detail.contains('▶'));
     assert!(!absent_detail.contains('◆'));
     assert!(!absent_detail.contains('☾'));
-    assert!(absent_top.contains("local"));
-}
-
-#[test]
-fn status_cell_right_aligns_the_status_and_blanks_the_root() {
-    let pushed = console::strip_ansi_codes(&status_cell(Some(BranchStatus::Pushed))).into_owned();
-    assert_eq!(console::measure_text_width(&pushed), STATUS_COL);
-    assert!(pushed.ends_with("pushed"));
-    // The icon leads the word inside the field.
-    assert!(pushed.contains(PUSHED_ICON));
-    // "local" (icon + space + 5 cols = 7) is right-aligned within the 8-col
-    // field, so a single lead space precedes the icon.
-    let local = console::strip_ansi_codes(&status_cell(Some(BranchStatus::Local))).into_owned();
-    assert_eq!(local, format!(" {LOCAL_ICON} local"));
-    // The root has no status: an all-blank field of the same width.
-    assert_eq!(status_cell(None), " ".repeat(STATUS_COL));
-    // `New` (freshly cut) and `Dirty` (work in progress) are unbadged — the field
-    // is all blanks, the same as the root, so a fresh/dirty branch shows nothing.
-    assert_eq!(status_cell(Some(BranchStatus::New)), " ".repeat(STATUS_COL));
-    assert_eq!(
-        status_cell(Some(BranchStatus::Dirty)),
-        " ".repeat(STATUS_COL)
-    );
+    // The git status word no longer rides line 1; the branch name still does.
+    assert!(!absent_top.contains("local"));
+    assert!(absent_top.contains("feature"));
 }
 
 #[test]
@@ -883,20 +864,72 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
     // Detail lines: small at index 4, big at index 7 (each entry spans three rows).
     let small_detail = console::strip_ansi_codes(&lines[4]);
     let big_detail = console::strip_ansi_codes(&lines[7]);
-    assert!(small_detail.contains("☾ ready")); // the live agent's label
+    assert!(small_detail.contains('☾')); // the live agent's icon (word dropped)
+    assert!(!small_detail.contains("ready"));
     assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
     assert!(big_detail.contains("+140 -88"));
     assert!(big_detail.contains("12min ago"));
-    // The diff `+` lands in the same display column on both rows regardless of how
-    // many changed lines each carries — the point of the fixed columns.
-    let col_of =
-        |s: &str, ch: char| console::measure_text_width(&s[..s.find(ch).expect("char present")]);
+    // The diff `+` lands in the same painted column on both rows regardless of how
+    // many changed lines each carries — the point of the fixed columns. Measured
+    // CJK-aware (ambiguous glyphs = two columns), since that is the width the detail
+    // line is laid out and the terminal paints it in.
+    let col_of = |s: &str, ch: char| {
+        crate::presentation::tui::widgets::measure_width_cjk(
+            &s[..s.find(ch).expect("char present")],
+        )
+    };
     assert_eq!(col_of(&small_detail, '+'), col_of(&big_detail, '+'));
     // Both detail lines fill the same width, so the cluster's right edge lines up.
     assert_eq!(
-        console::measure_text_width(&small_detail),
-        console::measure_text_width(&big_detail)
+        crate::presentation::tui::widgets::measure_width_cjk(&small_detail),
+        crate::presentation::tui::widgets::measure_width_cjk(&big_detail)
     );
+}
+
+#[test]
+fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages() {
+    // A single running session in a pane just wide enough that the freshness label
+    // sits at the trim boundary: when its width is sized to the live label, the
+    // young `now` (3 cols) fits but the aged `12min ago` (9 cols) tips the cluster
+    // over and drops the field — the detail line jumping purely because the clock
+    // advanced. Reserving a constant width for the column decouples the decision
+    // from the clock, so the same layout renders at every age.
+    let base = chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut w = worktree(Some("feature"), false, BranchStatus::Local);
+    w.path = PathBuf::from("/repo/feature");
+    w.updated_at = base;
+    let agent = HashSet::from([PathBuf::from("/repo/feature")]);
+    let render_at = |now| {
+        let lines = left_pane(
+            &list_with(vec![w.clone()]),
+            &agent, // live
+            &agent, // running — the `▶` agent icon
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
+            18,
+            5,
+            false,
+            Sidebar::Full,
+            now,
+            None,
+        );
+        console::strip_ansi_codes(&lines[4]).into_owned()
+    };
+    let young = render_at(base + chrono::Duration::seconds(30)); // `now`
+    let aged = render_at(base + chrono::Duration::minutes(12)); // `12min ago`
+    let shows_freshness = |detail: &str| detail.contains("ago") || detail.contains("now");
+    assert_eq!(
+        shows_freshness(&young),
+        shows_freshness(&aged),
+        "the freshness field must not appear/disappear as the session ages:\n\
+         young={young:?}\naged={aged:?}"
+    );
+    // The running agent's icon keeps the same room at both ages.
+    assert!(young.contains('▶') && aged.contains('▶'));
 }
 
 #[test]
@@ -1573,7 +1606,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     let path: HashSet<PathBuf> = [PathBuf::from("/repo/wt")].into_iter().collect();
     let empty = HashSet::new();
     // Rows: 0/1 root, 2 divider, 3 worktree identity, 4 worktree detail.
-    // Live but no turn yet: `☾ ready`.
+    // Live but no turn yet: `☾` (word dropped).
     let ready = left_pane(
         &list,
         &path,
@@ -1590,8 +1623,8 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         None,
     );
     assert!(ready[4].contains('☾'));
-    assert!(ready[4].contains("ready"));
-    // Working a turn: `▶ running`.
+    assert!(!ready[4].contains("ready"));
+    // Working a turn: `▶` (word dropped).
     let running = left_pane(
         &list,
         &path,
@@ -1608,8 +1641,8 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         None,
     );
     assert!(running[4].contains('▶'));
-    assert!(running[4].contains("running"));
-    // Awaiting input wins over running: `◆ waiting`.
+    assert!(!running[4].contains("running"));
+    // Awaiting input wins over running: `◆` (word dropped).
     let waiting = left_pane(
         &list,
         &path,
@@ -1646,7 +1679,9 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
     assert!(!absent[4].contains('▶'));
     assert!(!absent[4].contains('◆'));
     assert!(!absent[4].contains('☾'));
-    assert!(absent[3].contains("local"));
+    // Line 1 carries the branch name but no longer the git status word.
+    assert!(absent[3].contains("feature"));
+    assert!(!absent[3].contains("local"));
 }
 
 #[test]
@@ -1680,7 +1715,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         Utc::now(),
         None,
     );
-    assert!(with_usage[4].contains("running"));
+    assert!(with_usage[4].contains('▶'));
     // The resource line is icon-led (the CPU / memory glyphs in place of the words),
     // so it carries the figures but not the words `CPU` / `MEM`.
     let resource = console::strip_ansi_codes(&with_usage[5]);
@@ -1706,7 +1741,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         Utc::now(),
         None,
     );
-    assert!(without[4].contains("running"));
+    assert!(without[4].contains('▶'));
     let idle_resource = console::strip_ansi_codes(&without[5]);
     assert!(idle_resource.contains("0%"));
     assert!(idle_resource.contains("0MB"));
@@ -1855,15 +1890,13 @@ fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
     // No names and no numbers on the rail.
     assert!(!plain.iter().any(|l| l.contains("feature")));
     assert!(!plain.iter().any(|l| l.chars().any(|c| c.is_ascii_digit())));
-    // Root glyph on row 1, divider, then each worktree's kind dot + git-status
-    // glyph share row 1 (the 2×2 grid's top half).
+    // Root glyph on row 1, divider, then each worktree's kind dot on row 1 (the
+    // git-status glyph no longer rides the rail).
     assert!(plain[0].contains('⌂'));
     assert!(plain[2].contains('─'));
     assert!(plain[3].contains('●')); // fresh heat dot (main, just touched)
-    assert!(plain[3].contains(PUSHED_ICON)); // main's git status
     assert!(plain[6].contains('●')); // fresh heat dot (feature, just touched)
-    assert!(plain[6].contains(LOCAL_ICON)); // feature's git status
-                                            // A space separates the gutter from the glyph, and every row fills the rail.
+                                     // A space separates the gutter from the glyph, and every row fills the rail.
     assert!(plain[3].starts_with("  ●") || plain[3].starts_with(" ●"));
     assert!(lines
         .iter()
@@ -1991,7 +2024,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
         console::strip_ansi_codes(&lines[4]).into_owned()
     };
     // The rail's detail glyph follows the same lifecycle as the full sidebar's
-    // agent label: ready ☾, running ▶, waiting ◆, done ✓.
+    // agent phase: ready ☾, running ▶, waiting ◆, done ✓.
     assert!(glyph(&p, &e, &e, &e).contains('☾'));
     assert!(glyph(&p, &p, &e, &e).contains('▶'));
     assert!(glyph(&p, &p, &p, &e).contains('◆'));
@@ -2032,6 +2065,59 @@ fn rail_sidebar_marks_the_switch_cursor() {
     assert!(console::strip_ansi_codes(&on_session[3]).contains('󰤇'));
     assert!(console::strip_ansi_codes(&on_session[4]).contains('▎'));
     assert!(console::strip_ansi_codes(&on_session[5]).contains('▎'));
+}
+
+#[test]
+fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
+    use crate::domain::workspace_state::{AheadBehind, DiffStat};
+    // The `↑` / `↓` commit arrows are ambiguous-width — the terminal paints them two
+    // columns wide. If the detail line is laid out counting them as one, the row is
+    // built wider than it measures, so the sidebar's CJK-aware clip chops its right
+    // edge (the PR badge) and the layout looks broken. The row's painted width must
+    // stay within the pane.
+    let mut w = worktree(Some("pr"), false, BranchStatus::Pushed);
+    w.path = PathBuf::from("/repo/pr");
+    w.ahead_behind = Some(AheadBehind {
+        ahead: 1,
+        behind: 4,
+    });
+    w.diff = Some(DiffStat {
+        added: 71,
+        removed: 1,
+    });
+    w.pr = vec![PrLink {
+        number: 1,
+        url: "https://github.com/o/r/pull/1".into(),
+    }];
+    let left_w = 34usize;
+    let lines = left_pane(
+        &list_with(vec![w]),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        left_w,
+        6,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let detail = console::strip_ansi_codes(&lines[4]);
+    // Measured as the terminal paints it (arrows = two columns), the row fits the
+    // pane — nothing bleeds into the right pane or gets clipped away.
+    assert!(
+        crate::presentation::tui::widgets::measure_width_cjk(&detail) <= left_w,
+        "detail line overruns the {left_w}-column sidebar: {detail:?}"
+    );
+    // Both the arrows and the PR badge survive intact.
+    assert!(
+        detail.contains("↑1 ↓4"),
+        "commit arrows dropped: {detail:?}"
+    );
+    assert!(detail.contains(PR_ICON), "PR badge chopped off: {detail:?}");
 }
 
 #[test]

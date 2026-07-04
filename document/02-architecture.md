@@ -106,7 +106,7 @@ src/
 │   ├── agent_prompt_store.rs   # worktree 別に session_prompt のプロンプトをキュー/取り出し（~/.usagi/agent-prompts/）
 │   ├── agent_live_prompt_store.rs # worktree 別に session_prompt(live) の live プロンプトを追記/取り出し（~/.usagi/agent-live-prompts/）
 │   ├── pr_link_store.rs        # worktree 別に検出した PR 群（PrLink のリスト）を URL 単位で重複排除しつつ蓄積/読み出し（~/.usagi/pr-links/）。sync が state.json の pr へ畳み込む
-│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線）・session_system_prompt 共有・agent_for
+│   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線 / Antigravity(agy, Gemini CLI 後継)も同様にインライン注入不可で resume(-c)/初期プロンプト(-i)/forget(history.jsonl)のみ配線）・session_system_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
@@ -177,7 +177,7 @@ src/
 | 疑似ターミナル | `portable-pty` + `vt100` | 埋め込みターミナルの起動と画面状態の解釈 |
 | シンタックスハイライト | `syntect`（`fancy-regex` バックエンド・`onig` 不使用） | Markdown プレビューのコードブロックを言語別にトークン化。RGB を端末 256 色へマッピングして描画 |
 | Git 操作 | システムの `git` コマンド | 読み取り専用検査 + worktree 追加（**git2 は不使用**） |
-| AI 連携 | Agent CLI（`claude` / `codex` / `codex-fugu` / `gemini` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
+| AI 連携 | Agent CLI（`claude` / `codex` / `codex-fugu` / `gemini` / `agy` など）+ `ollama` サブプロセス | エージェント起動・ローカル LLM 委譲（専用クレートは持たず外部プロセスを起動） |
 | 通知 | `notify-rust` | 入力待ち時のデスクトップ通知 |
 | プロセス計測 | `sysinfo`（`system` フィーチャのみ） | 各セッションのプロセスツリーの CPU・メモリ使用量の計測（ホーム画面のリソース表示） |
 | 並列処理 | `rayon` | issue 一覧読み込みなどの並列化 |

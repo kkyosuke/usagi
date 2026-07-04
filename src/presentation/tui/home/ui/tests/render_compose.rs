@@ -36,9 +36,12 @@ fn mascot_hit_rect_covers_where_the_rabbit_is_drawn() {
     // Locate the rabbit's feet row in the rendered frame and assert it (and the
     // body two rows up) falls inside the click rectangle — so the hit-test lands
     // exactly where the rabbit was painted, not on hand-computed coordinates.
+    // The idle right pane rests a mascot too (sharing the feet art), so scan from
+    // the bottom for the sidebar mascot — the lower of the two.
     let (feet_row, line) = frame
         .iter()
         .enumerate()
+        .rev()
         .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
         .expect("the rabbit's feet are drawn");
     let feet_col = console::strip_ansi_codes(line)
@@ -86,9 +89,12 @@ fn mascot_hit_rect_targets_the_rabbit_below_the_update_bubble() {
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     let frame = render_frame(24, 100, &state);
     let rect = mascot_hit_rect(24, 100, &state).expect("the speaking mascot is shown");
+    // The idle right pane rests a mascot too (sharing the feet art), so scan from
+    // the bottom for the sidebar mascot — the lower of the two.
     let (feet_row, _) = frame
         .iter()
         .enumerate()
+        .rev()
         .find(|(_, l)| console::strip_ansi_codes(l).contains("o(_(\")(\")"))
         .expect("the rabbit's feet are drawn");
     // The feet are on the rabbit (clickable); the bubble well above it is not.
@@ -131,10 +137,9 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     // the blank separator row below the mode ladder.
     let frame = render_frame(26, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    // The sidebar shows the agent state as icons only (no spelled-out word).
     assert!(joined.contains('▶'));
-    assert!(joined.contains("running"));
     assert!(joined.contains('◆'));
-    assert!(joined.contains("waiting"));
 }
 
 #[test]
@@ -628,9 +633,9 @@ fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
     assert!(state.switch_begin_note());
     let pane = stripped(&right_pane_contents(&state, 40, 16));
     assert!(pane.contains("─ note"), "the editor box shows");
-    // The idle session's action-menu preview still shows below the box.
+    // The idle session's resting mascot still shows behind the box.
     assert!(
-        pane.contains("Enter で開く"),
+        pane.contains("(='-')"),
         "the preview behind the box is still visible"
     );
 }

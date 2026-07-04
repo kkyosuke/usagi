@@ -435,40 +435,6 @@ fn focus_menu_keeps_agent_when_an_agent_pane_is_already_open() {
 }
 
 #[test]
-fn preview_menu_commands_follow_the_cursor_not_the_active_row() {
-    // The 切替 preview shows what *selecting* the highlighted row reveals, so its
-    // command list (and `close` visibility) must track the cursor, independent of
-    // whichever row happens to be active.
-    let mut state = state();
-
-    // Active row is the root, cursor moved onto a session row: the preview is the
-    // session's, so `close` is offered even though the active row cannot close.
-    state.enter_focus(0);
-    state.switch_move_down();
-    assert!(state.list().root_active());
-    assert!(!state.list().root_selected());
-    let names: Vec<&str> = state
-        .preview_menu_commands()
-        .iter()
-        .map(|i| i.name)
-        .collect();
-    assert_eq!(names, vec!["agent", "close", "diff", "terminal"]);
-
-    // Active row is a session, cursor moved back onto the root row: the preview is
-    // the root's, so `close` is hidden even though the active session could close.
-    state.enter_focus(1);
-    state.switch_move_up();
-    assert!(!state.list().root_active());
-    assert!(state.list().root_selected());
-    let names: Vec<&str> = state
-        .preview_menu_commands()
-        .iter()
-        .map(|i| i.name)
-        .collect();
-    assert_eq!(names, vec!["agent", "terminal"]);
-}
-
-#[test]
 fn focus_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_focus(1);

@@ -77,7 +77,7 @@
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Restore Panes | 起動時に各セッションのペイン（agent / terminal）を復旧（agent は会話を再開） | `On` ⇄ `Off` をトグル（[04-orchestration.md#ペインの復旧](../04-orchestration.md#ペインの復旧)） |
-| Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
+| Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` → `Antigravity` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu`、`Antigravity` は `agy` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
 | Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[home/02-layout.md](home/02-layout.md#在席のアクション-uimenu--prompt)） |
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
@@ -145,7 +145,7 @@
 
 | 項目 | 値 | 循環する選択肢 |
 |---|---|---|
-| Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → インストール済みの agent を `Override: Claude` → `Override: Codex` → `Override: sakana.ai` → `Override: Gemini` の順に循環（未インストールは出さない。既存の上書き値が未インストールでも選択肢に残す） |
+| Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → インストール済みの agent を `Override: Claude` → `Override: Codex` → `Override: sakana.ai` → `Override: Gemini` → `Override: Antigravity` の順に循環（未インストールは出さない。既存の上書き値が未インストールでも選択肢に残す） |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Restore Panes | このワークスペースのペイン復旧 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
