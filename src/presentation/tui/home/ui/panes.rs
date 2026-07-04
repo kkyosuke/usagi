@@ -131,6 +131,9 @@ fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
     if !any_labelled {
         return 0;
     }
+    // A labelled row resolves through the master, so it is non-empty here and the
+    // widest label always has a real width (a glyph plus a space, at least). Reserve
+    // to it, capped at [`LABEL_COL_MAX`], plus one separating space.
     let widest = master
         .labels()
         .iter()
@@ -138,11 +141,7 @@ fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
         .max()
         .unwrap_or(0)
         .min(LABEL_COL_MAX);
-    if widest == 0 {
-        0
-    } else {
-        widest + 1
-    }
+    widest + 1
 }
 
 /// The single colour-coded glyph for a session's manual-status label on the
