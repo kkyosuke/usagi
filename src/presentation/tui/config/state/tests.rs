@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::settings::LOCAL_LLM_MODELS;
+use crate::domain::settings::{LabelColor, SessionLabelDef, SessionLabelMaster, LOCAL_LLM_MODELS};
 
 fn config_with_workspaces(names: &[&str]) -> Config {
     Config::new(
@@ -36,7 +36,8 @@ fn field_labels_are_distinct() {
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
     assert_eq!(LocalField::EnvVars.label(), "Env Vars");
-    assert_eq!(LocalField::ALL.len(), 7);
+    assert_eq!(LocalField::SessionLabels.label(), "Session Labels");
+    assert_eq!(LocalField::ALL.len(), 8);
 }
 
 #[test]
@@ -788,15 +789,15 @@ fn local_config_with_branches(branches: &[&str]) -> Config {
 fn local_scope_shows_only_the_local_override_rows() {
     let config = local_config();
     assert!(config.local().is_some());
-    // The local scope shows the seven override rows, then the shipped-skill
+    // The local scope shows the eight override rows, then the shipped-skill
     // feature row(s) — no global fixed fields.
-    assert_eq!(config.field_count(), 7 + SkillFeature::ALL.len());
-    assert_eq!(config.save_index(), 7 + SkillFeature::ALL.len());
+    assert_eq!(config.field_count(), 8 + SkillFeature::ALL.len());
+    assert_eq!(config.save_index(), 8 + SkillFeature::ALL.len());
     // The cursor starts on the first local field, not a global one.
     assert_eq!(config.selected_field(), None);
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
     let rows = config.rows();
-    assert_eq!(rows.len(), 7 + SkillFeature::ALL.len());
+    assert_eq!(rows.len(), 8 + SkillFeature::ALL.len());
     assert_eq!(rows[0].label, "Agent CLI");
     assert_eq!(rows[1].label, "Notifications");
     assert_eq!(rows[2].label, "Restore Panes");
@@ -808,10 +809,15 @@ fn local_scope_shows_only_the_local_override_rows() {
     assert_eq!(rows[6].label, "Env Vars");
     assert!(rows[6].action);
     assert_eq!(rows[6].value, "Edit (none)");
+    // The session-label override is an action row too; unset it defers to the
+    // effective global master (the default 5-label kanban set).
+    assert_eq!(rows[7].label, "Session Labels");
+    assert!(rows[7].action);
+    assert_eq!(rows[7].value, "Edit (global: 5 labels)");
     // The skill feature row falls back to the global value (on) when unset.
-    assert_eq!(rows[7].label, "PR Skills");
-    assert!(rows[7].value.contains("Global"));
-    assert!(rows[7].value.contains("On"));
+    assert_eq!(rows[8].label, "PR Skills");
+    assert!(rows[8].value.contains("Global"));
+    assert!(rows[8].value.contains("On"));
     // Unset overrides display the value they fall back to.
     assert!(rows[0].value.contains("Global"));
     assert!(rows[0].value.contains("Claude"));
@@ -861,6 +867,11 @@ fn local_fields_are_selectable_then_the_save_button() {
     );
     config.move_down();
     assert_eq!(config.selected_local_field(), Some(LocalField::EnvVars));
+    config.move_down();
+    assert_eq!(
+        config.selected_local_field(),
+        Some(LocalField::SessionLabels)
+    );
     // Below the fixed local fields sits the shipped-skill feature row, then Save.
     config.move_down();
     assert_eq!(config.selected_local_field(), None);
@@ -1135,6 +1146,209 @@ fn apply_env_modal_is_a_noop_when_no_modal_is_open() {
     assert!(config.local().unwrap().env.is_empty());
 }
 
+// --- session labels ------------------------------------------------------
+
+/// A label def with no icon, for terse test masters.
+fn label_def(id: &str, name: &str, color: LabelColor) -> SessionLabelDef {
+    SessionLabelDef {
+        id: id.to_string(),
+        name: name.to_string(),
+        color,
+        icon: None,
+    }
+}
+
+#[test]
+fn session_labels_row_is_an_action_that_defers_to_global_when_unset() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SessionLabels);
+    assert!(config.session_labels_row_active());
+    // An action row: ←/→ have nothing to cycle.
+    assert!(!config.cycle_selected(true));
+    // Unset defers to the effective global master (the default 5-label set).
+    assert_eq!(
+        config.value_of_local(LocalField::SessionLabels),
+        "Edit (global: 5 labels)"
+    );
+    assert!(config.rows()[7].action);
+}
+
+#[test]
+fn session_labels_editor_seeds_from_the_global_master_when_unset() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SessionLabels);
+    config.open_session_labels_modal();
+    // Seeded from the default global master, one `id | name | color | icon` line
+    // per label.
+    let lines = config.session_labels_modal().unwrap().lines();
+    assert_eq!(lines.len(), 5);
+    assert_eq!(lines[0], "todo | Todo | gray | ○");
+    // A non-empty buffer opens with the caret at the end of the last line.
+    assert_eq!(config.session_labels_modal().unwrap().cursor().0, 4);
+}
+
+#[test]
+fn session_labels_editor_seeds_from_an_existing_override() {
+    let mut config = local_config();
+    config.local.as_mut().unwrap().settings.session_labels = Some(SessionLabelMaster {
+        labels: vec![label_def("wip", "WIP", LabelColor::Blue)],
+    });
+    assert_eq!(
+        config.value_of_local(LocalField::SessionLabels),
+        "Edit (1 label)"
+    );
+
+    select_local(&mut config, LocalField::SessionLabels);
+    config.open_session_labels_modal();
+    assert_eq!(
+        config.session_labels_modal().unwrap().lines(),
+        &["wip | WIP | blue".to_string()]
+    );
+}
+
+#[test]
+fn session_labels_row_opens_an_editor_and_applies_a_sanitized_override() {
+    let mut config = local_config();
+    // Seed a single-label override so the editor opens on a short buffer.
+    config.local.as_mut().unwrap().settings.session_labels = Some(SessionLabelMaster {
+        labels: vec![label_def("todo", "Todo", LabelColor::Gray)],
+    });
+    config.local.as_mut().unwrap().baseline.session_labels =
+        config.local().unwrap().session_labels.clone();
+
+    select_local(&mut config, LocalField::SessionLabels);
+    config.open_session_labels_modal();
+
+    // Exercise every editing / caret method: append a second label line.
+    config.session_labels_modal_cursor_end();
+    config.session_labels_modal_newline();
+    for c in "review | Reviewing | magentaX".chars() {
+        config.session_labels_modal_insert(c);
+    }
+    config.session_labels_modal_cursor_home();
+    config.session_labels_modal_cursor_right();
+    config.session_labels_modal_cursor_left();
+    config.session_labels_modal_cursor_up();
+    config.session_labels_modal_cursor_down();
+    config.session_labels_modal_cursor_end();
+    config.session_labels_modal_backspace(); // drop the trailing X on "magentaX"
+    config.session_labels_modal_delete_forward(); // no-op at end of buffer
+
+    config.apply_session_labels_modal();
+
+    assert!(config.session_labels_modal().is_none());
+    let master = config
+        .local()
+        .unwrap()
+        .session_labels
+        .as_ref()
+        .expect("override stored");
+    assert_eq!(master.labels().len(), 2);
+    assert_eq!(master.labels()[1].id, "review");
+    assert_eq!(master.labels()[1].name, "Reviewing");
+    assert_eq!(master.labels()[1].color, LabelColor::Magenta);
+    assert_eq!(
+        config.value_of_local(LocalField::SessionLabels),
+        "Edit (2 labels)"
+    );
+    assert!(config.is_dirty());
+    assert!(config.rows()[7].changed);
+}
+
+#[test]
+fn applying_labels_identical_to_the_global_master_defers_to_global() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SessionLabels);
+    // The editor is seeded from the global master; saving it untouched must not
+    // create an override — it stays "follow global" (None).
+    config.open_session_labels_modal();
+    config.apply_session_labels_modal();
+
+    assert!(config.local().unwrap().session_labels.is_none());
+    assert!(!config.is_dirty());
+}
+
+#[test]
+fn clearing_the_labels_editor_turns_the_feature_off_for_the_project() {
+    let mut config = local_config();
+    // A single-label override, so the editor opens on one short line.
+    config.local.as_mut().unwrap().settings.session_labels = Some(SessionLabelMaster {
+        labels: vec![label_def("wip", "WIP", LabelColor::Blue)],
+    });
+    select_local(&mut config, LocalField::SessionLabels);
+    config.open_session_labels_modal();
+    // Clear the buffer, then apply: an empty (but Some) override turns the
+    // manual-status feature off for this project — distinct from the non-empty
+    // global set, so it is stored rather than folded to None. The caret opens at
+    // the end of the one line; a bounded run of backspaces empties it (extra
+    // presses at the start are a safe no-op).
+    config.session_labels_modal_cursor_end();
+    for _ in 0..64 {
+        config.session_labels_modal_backspace();
+    }
+    assert!(config
+        .session_labels_modal()
+        .unwrap()
+        .lines()
+        .iter()
+        .all(String::is_empty));
+    config.apply_session_labels_modal();
+
+    let master = config
+        .local()
+        .unwrap()
+        .session_labels
+        .as_ref()
+        .expect("empty override stored");
+    assert!(master.is_empty());
+    assert_eq!(
+        config.value_of_local(LocalField::SessionLabels),
+        "Edit (off)"
+    );
+}
+
+#[test]
+fn global_master_off_shows_off_in_the_deferring_row() {
+    let global = Settings {
+        session_labels: SessionLabelMaster { labels: vec![] },
+        ..Default::default()
+    };
+    let config = Config::workspace(global, LocalSettings::default(), Vec::new());
+    assert_eq!(
+        config.value_of_local(LocalField::SessionLabels),
+        "Edit (global: off)"
+    );
+}
+
+#[test]
+fn closing_session_labels_modal_discards_the_buffer() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::SessionLabels);
+    config.open_session_labels_modal();
+    config.session_labels_modal_insert('X');
+    config.close_session_labels_modal();
+
+    assert!(config.session_labels_modal().is_none());
+    assert!(config.local().unwrap().session_labels.is_none());
+    assert!(!config.is_dirty());
+}
+
+#[test]
+fn open_session_labels_modal_is_a_noop_off_the_row() {
+    let mut config = local_config();
+    select_local(&mut config, LocalField::EnvVars);
+    config.open_session_labels_modal();
+    assert!(config.session_labels_modal().is_none());
+}
+
+#[test]
+fn apply_session_labels_modal_is_a_noop_when_no_modal_is_open() {
+    let mut config = local_config();
+    config.apply_session_labels_modal();
+    assert!(config.session_labels_modal().is_none());
+    assert!(config.local().unwrap().session_labels.is_none());
+}
+
 #[test]
 fn an_unknown_default_branch_resets_to_the_first_choice() {
     let mut config = local_config_with_branches(&["develop", "main"]);
@@ -1365,7 +1579,8 @@ fn local_field_labels_are_distinct() {
     assert_eq!(LocalField::BranchSource.label(), "Branch Source");
     assert_eq!(LocalField::SetupCommands.label(), "Setup Commands");
     assert_eq!(LocalField::EnvVars.label(), "Env Vars");
-    assert_eq!(LocalField::ALL.len(), 7);
+    assert_eq!(LocalField::SessionLabels.label(), "Session Labels");
+    assert_eq!(LocalField::ALL.len(), 8);
 }
 
 #[test]

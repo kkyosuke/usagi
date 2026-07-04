@@ -16,7 +16,9 @@ use crate::domain::settings::{
 };
 
 mod modal;
-pub use modal::{EnvModal, InstallModal, ModelModal, ModelRow, SetupCommandsModal};
+pub use modal::{
+    EnvModal, InstallModal, ModelModal, ModelRow, SessionLabelsModal, SetupCommandsModal,
+};
 
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
@@ -108,11 +110,14 @@ pub enum LocalField {
     /// Environment variables resolved from 1Password references and injected into
     /// panes launched in this workspace.
     EnvVars,
+    /// The manual-status label master (切替's `Tab` / digit keys) for this
+    /// project, replacing the global set wholesale when overridden.
+    SessionLabels,
 }
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 7] = [
+    pub const ALL: [LocalField; 8] = [
         LocalField::AgentCli,
         LocalField::Notifications,
         LocalField::RestorePanes,
@@ -120,6 +125,7 @@ impl LocalField {
         LocalField::BranchSource,
         LocalField::SetupCommands,
         LocalField::EnvVars,
+        LocalField::SessionLabels,
     ];
 
     /// The label shown beside the field's value.
@@ -132,6 +138,7 @@ impl LocalField {
             LocalField::BranchSource => "Branch Source",
             LocalField::SetupCommands => "Setup Commands",
             LocalField::EnvVars => "Env Vars",
+            LocalField::SessionLabels => "Session Labels",
         }
     }
 }
@@ -222,6 +229,9 @@ pub struct Config {
     /// The open workspace-env editor, when the workspace-local Env Vars row is
     /// being edited. While set it captures all keys.
     env_modal: Option<EnvModal>,
+    /// The open session-label editor, when the workspace-local Session Labels row
+    /// is being edited. While set it captures all keys.
+    session_labels_modal: Option<SessionLabelsModal>,
     /// The provisioning launched in the background and not yet reflected into the
     /// screen, if any. The install runs off-thread (see the global install task),
     /// so when it finishes this records what to apply: the runtime became present,
@@ -264,6 +274,7 @@ impl Config {
             model_modal: None,
             setup_modal: None,
             env_modal: None,
+            session_labels_modal: None,
             pending_install: None,
             scope: Scope::Global,
             selected_index: 0,
@@ -294,6 +305,7 @@ impl Config {
             model_modal: None,
             setup_modal: None,
             env_modal: None,
+            session_labels_modal: None,
             pending_install: None,
             scope: Scope::Local,
             selected_index: 0,
@@ -375,6 +387,12 @@ impl Config {
     pub fn env_row_active(&self) -> bool {
         matches!(self.selected_field(), Some(Field::EnvVars))
             || matches!(self.selected_local_field(), Some(LocalField::EnvVars))
+    }
+
+    /// Whether the focused row is the workspace-local Session Labels action row —
+    /// the row that, when activated, opens the label editor.
+    pub fn session_labels_row_active(&self) -> bool {
+        matches!(self.selected_local_field(), Some(LocalField::SessionLabels))
     }
 
     /// Adopt `model` as the one in use (an edit, saved with the rest). Used when
@@ -570,6 +588,9 @@ impl Config {
                 local.settings.setup_commands != local.baseline.setup_commands
             }
             LocalField::EnvVars => local.settings.env != local.baseline.env,
+            LocalField::SessionLabels => {
+                local.settings.session_labels != local.baseline.session_labels
+            }
         }
     }
 
@@ -698,6 +719,16 @@ impl Config {
                     n => format!("Edit ({n} vars)"),
                 }
             }
+            // Unset defers to the effective global master (shown as its count, or
+            // "off" when the global set is itself empty); a set override shows its
+            // own label count, or "off" when the project turns the feature off.
+            LocalField::SessionLabels => match &local.settings.session_labels {
+                None => format!(
+                    "Edit (global: {})",
+                    labels_summary(&self.settings.session_labels)
+                ),
+                Some(master) => format!("Edit ({})", labels_summary(master)),
+            },
         }
     }
 
@@ -767,7 +798,10 @@ impl Config {
                     label: field.label(),
                     value: self.value_of_local(field),
                     changed: self.is_local_changed(field),
-                    action: matches!(field, LocalField::SetupCommands | LocalField::EnvVars),
+                    action: matches!(
+                        field,
+                        LocalField::SetupCommands | LocalField::EnvVars | LocalField::SessionLabels
+                    ),
                     disabled: false,
                 })
                 .collect(),
@@ -793,6 +827,17 @@ fn theme_label(theme: Theme) -> &'static str {
         Theme::Light => "Light",
         Theme::Dark => "Dark",
         Theme::System => "System",
+    }
+}
+
+/// A short summary of a session-label master for a row value: the label count
+/// (`"1 label"` / `"N labels"`), or `"off"` when the set is empty (the
+/// manual-status feature is dormant).
+fn labels_summary(master: &crate::domain::settings::SessionLabelMaster) -> String {
+    match master.len() {
+        0 => "off".to_string(),
+        1 => "1 label".to_string(),
+        n => format!("{n} labels"),
     }
 }
 
