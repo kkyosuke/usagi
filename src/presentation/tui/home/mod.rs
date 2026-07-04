@@ -234,6 +234,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).
     state.set_default_agent(settings.agent_cli);
+    // The local model the 在席 `chat` overlay talks to.
+    state.set_local_llm_model(settings.local_llm.model.clone());
     // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
     // so selecting a project lands on the session list the mascot animation glides
     // into; no explicit mode switch is needed here.
@@ -1008,15 +1010,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Opening `chat` (在席's `chat` command / menu row) hands off to the local-LLM
-    // chat screen, talking to the workspace's configured local model (resolved
-    // from the effective settings each time it opens, so a model change in config
-    // takes effect without reopening home). It owns the terminal until dismissed;
-    // the event loop repaints over it on return.
+    // A submitted line in the 在席 `chat` overlay runs against the workspace's
+    // configured local model (resolved from the effective settings at request
+    // time, so a model change in Config takes effect on the next turn). The
+    // request runs on a detached thread and returns a receiver the event loop
+    // polls each tick, so a slow model never blocks the screen.
     let chat_root = workspace.path.clone();
-    let mut open_chat = |t: &Term| -> Result<()> {
+    let mut chat_ask = move |prompt: String| {
         let model = effective_settings(&chat_root).local_llm.model;
-        crate::presentation::tui::chat::run(t, &model)
+        crate::presentation::tui::chat::spawn_request(model, prompt)
     };
 
     // Persist where the user is when they quit — the focused session and how
@@ -1121,7 +1123,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
         open_config: &mut open_config,
-        open_chat: &mut open_chat,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,

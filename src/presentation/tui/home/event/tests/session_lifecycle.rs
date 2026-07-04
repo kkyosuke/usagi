@@ -347,7 +347,8 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat: fn(&Term) -> Result<()> = noop_chat;
+    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
+        ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -364,7 +365,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
-        open_chat: &mut chat,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -559,7 +560,8 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut save_resume = |_: &str, _: ResumeLevel| {};
     let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat: fn(&Term) -> Result<()> = noop_chat;
+    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
+        ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -576,7 +578,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
-        open_chat: &mut chat,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,

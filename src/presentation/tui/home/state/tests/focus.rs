@@ -288,6 +288,29 @@ fn focus_menu_cursor_moves_and_wraps_and_selects() {
 }
 
 #[test]
+fn chat_overlay_opens_closes_and_carries_the_configured_model() {
+    let mut state = state();
+    // The injected model is read back and used when the overlay opens.
+    state.set_local_llm_model("qwen2.5-coder:3b");
+    assert_eq!(state.local_llm_model(), "qwen2.5-coder:3b");
+    // No overlay yet: both accessors report none (covers the `chat_mut` miss arm).
+    assert!(state.chat().is_none());
+    assert!(state.chat_mut().is_none());
+    // Opening binds the chat to the configured model.
+    state.enter_focus(1);
+    state.open_chat();
+    assert_eq!(state.chat().unwrap().model(), "qwen2.5-coder:3b");
+    // Mutable access edits the composed line.
+    state.chat_mut().unwrap().input_mut().insert('a');
+    assert_eq!(state.chat().unwrap().input().value(), "a");
+    // Closing clears the overlay; a second close is a no-op.
+    state.close_chat();
+    assert!(state.chat().is_none());
+    state.close_chat();
+    assert!(state.chat().is_none());
+}
+
+#[test]
 fn agent_choice_round_trips_and_is_consumed_once() {
     use crate::domain::settings::AgentCli;
     let mut state = state();

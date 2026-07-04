@@ -49,6 +49,8 @@ pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 use list::session_row;
 use modal::{FocusMenu, Overlay};
 
+use crate::presentation::tui::chat::state::Chat;
+
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
     let mut commands = registry.commands_in_scope(CommandScope::Session);
     commands.sort_by(|a, b| a.name.cmp(b.name));
@@ -479,6 +481,10 @@ pub struct HomeState {
     /// from the effective settings by `mod.rs`; its display name labels the menu's
     /// `agent` row. Defaults to [`AgentCli::Claude`].
     default_agent: AgentCli,
+    /// The configured local-LLM model name (Ollama) the 在席 `chat` overlay talks
+    /// to. Injected from the effective settings by `mod.rs`; defaults to
+    /// [`DEFAULT_LOCAL_LLM_MODEL`](crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL).
+    local_llm_model: String,
     /// The agent CLIs installed on this machine (PATH-probed), in canonical order,
     /// offered by the 在席 menu's agent picker. Injected by `mod.rs`; empty by
     /// default (tests that do not set it never expand the picker).
@@ -748,6 +754,7 @@ impl HomeState {
             key_scheme: KeyScheme::default(),
             prefix_pending: false,
             default_agent: AgentCli::default(),
+            local_llm_model: crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL.to_string(),
             installed_agents: Vec::new(),
             agent_choice: None,
             agent_initial_prompt: None,
@@ -1007,6 +1014,18 @@ impl HomeState {
     /// The configured default agent CLI.
     pub fn default_agent(&self) -> AgentCli {
         self.default_agent
+    }
+
+    /// Inject the configured local-LLM model name (Ollama), used when opening the
+    /// 在席 `chat` overlay. Injected at startup and re-applied when Config changes
+    /// it, so the next chat uses the current model without restarting.
+    pub fn set_local_llm_model(&mut self, model: impl Into<String>) {
+        self.local_llm_model = model.into();
+    }
+
+    /// The configured local-LLM model name.
+    pub fn local_llm_model(&self) -> &str {
+        &self.local_llm_model
     }
 
     /// Inject the installed agent CLIs (PATH-probed, canonical order) the 在席
@@ -1444,6 +1463,39 @@ impl HomeState {
         if let Overlay::Preview(preview) = &mut self.overlay {
             let max = preview.lines.len().saturating_sub(visible);
             preview.scroll = (preview.scroll + 1).min(max);
+        }
+    }
+
+    // --- 在席 chat (local LLM) --------------------------------------------
+
+    /// Open the local-LLM chat overlay in the right pane, bound to the configured
+    /// local model. Replaces any other open overlay (only one is ever open).
+    pub fn open_chat(&mut self) {
+        self.overlay = Overlay::Chat(Chat::new(&self.local_llm_model));
+    }
+
+    /// The open chat overlay, if any.
+    pub fn chat(&self) -> Option<&Chat> {
+        match &self.overlay {
+            Overlay::Chat(chat) => Some(chat),
+            _ => None,
+        }
+    }
+
+    /// The open chat overlay for mutation (editing / scrolling / submitting), if
+    /// any.
+    pub fn chat_mut(&mut self) -> Option<&mut Chat> {
+        match &mut self.overlay {
+            Overlay::Chat(chat) => Some(chat),
+            _ => None,
+        }
+    }
+
+    /// Close the chat overlay (the user pressed `Esc`), returning the right pane
+    /// to the 在席 surface beneath it. A no-op unless the chat is the open overlay.
+    pub fn close_chat(&mut self) {
+        if matches!(self.overlay, Overlay::Chat(_)) {
+            self.overlay = Overlay::None;
         }
     }
 

@@ -1,6 +1,8 @@
-//! Pure rendering for the local-LLM chat screen: turn a [`Chat`] into a full
-//! terminal frame (a `Vec<String>`, one entry per row). No terminal IO happens
-//! here, so every layout branch is unit-tested.
+//! Pure rendering for the local-LLM chat, drawn into the home screen's **right
+//! pane** (the same rectangle the embedded terminal / agent use). [`pane`]
+//! returns exactly `rows` lines, each clipped to `width`, so the home renderer
+//! can drop it straight into the pane. No terminal IO happens here, so every
+//! layout branch is unit-tested.
 
 use console::{style, Style};
 
@@ -9,53 +11,57 @@ use crate::presentation::tui::widgets::{self, block_caret};
 
 use super::state::{Chat, Role};
 
-/// Rows the header occupies at the top of the frame (title + blank).
-const HEADER_ROWS: usize = 2;
-/// Rows the footer occupies at the bottom (blank + input + hint).
-const FOOTER_ROWS: usize = 3;
+/// Rows the header occupies at the top of the pane (the model title).
+const HEADER_ROWS: usize = 1;
+/// Rows the footer occupies at the bottom (the input line + the key hint).
+const FOOTER_ROWS: usize = 2;
 
 /// The prompt glyph before the composed line.
 const PROMPT: &str = "❯";
 
-/// Render the whole chat screen to `raw_height` × `raw_width` rows. `tick`
-/// advances the "thinking" spinner while a reply is in flight.
-pub fn render_frame(raw_height: usize, raw_width: usize, chat: &Chat, tick: usize) -> Vec<String> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // A one-column left margin keeps text off the very edge; the content wraps
-    // within the remaining width.
-    let content_width = width.saturating_sub(2).max(1);
-
-    let transcript = transcript_lines(chat, content_width, tick);
-    // The transcript fills whatever is left between the header and the footer.
-    let body_rows = height.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
-    let visible = window(&transcript, body_rows, chat.scroll());
-
-    let mut lines = Vec::with_capacity(height);
+/// Render the chat into a `width` × `rows` right-pane rectangle. The transcript
+/// fills the space between the one-row header and the two-row footer (input +
+/// hint); a "thinking" spinner (advanced via [`Chat::advance_tick`]) shows while
+/// a reply is in flight.
+pub fn pane(chat: &Chat, width: usize, rows: usize) -> Vec<String> {
+    let mut lines = Vec::with_capacity(rows);
     lines.push(header_line(chat.model(), width));
-    lines.push(String::new());
+
+    let body_rows = rows.saturating_sub(HEADER_ROWS + FOOTER_ROWS);
+    let transcript = transcript_lines(chat, width);
+    let visible = window(&transcript, body_rows, chat.scroll());
     for row in 0..body_rows {
         match visible.get(row) {
-            Some(line) => lines.push(format!(" {line}")),
+            Some(line) => lines.push(line.clone()),
             None => lines.push(String::new()),
         }
     }
-    lines.push(String::new());
-    lines.push(input_line(chat));
-    lines.push(hint_line());
-    // Clip every row to the terminal width so a long header / footer (or a
-    // wide-glyph body row) can never overrun its column and corrupt the frame on
-    // a narrow terminal. `clip_to_width` is ANSI-aware, so styling survives.
+
+    // Only draw the footer if the pane has room for it (a very short pane keeps
+    // just the header + whatever transcript rows fit).
+    if rows >= HEADER_ROWS + FOOTER_ROWS {
+        lines.push(input_line(chat));
+        lines.push(hint_line());
+    }
+
+    // Exactly `rows` lines: pad a short pane (a tiny one with no room for the
+    // footer) and clamp an over-full one.
+    lines.resize(rows, String::new());
+    // Clip every row to the pane width so a long header / footer or a wide-glyph
+    // body row never overruns its column. `clip_to_width` is ANSI-aware.
     for line in &mut lines {
         *line = widgets::clip_to_width(line, width);
     }
     lines
 }
 
-/// The title row: the mascot, the app, and the bound model name.
+/// The title row: the mascot and the bound model name.
 fn header_line(model: &str, width: usize) -> String {
-    let title = format!("🐇 usagi chat · {model}");
-    let title = widgets::clip_to_width(&title, width);
-    style(title).accent().bold().to_string()
+    let title = format!("🐇 chat · {model}");
+    style(widgets::clip_to_width(&title, width))
+        .accent()
+        .bold()
+        .to_string()
 }
 
 /// The composed-input row: a danger-coloured prompt glyph and the line with a
@@ -72,7 +78,7 @@ fn input_line(chat: &Chat) -> String {
 
 /// The footer key hint.
 fn hint_line() -> String {
-    style("Enter 送信   ↑↓ スクロール   Esc 戻る")
+    style("Enter 送信  ↑↓ スクロール  Esc 戻る")
         .dim()
         .to_string()
 }
@@ -80,7 +86,7 @@ fn hint_line() -> String {
 /// The transcript as styled, width-wrapped rows: each message gets a coloured
 /// role label followed by its wrapped body and a blank separator. While a reply
 /// is in flight a spinner line is appended; an empty transcript shows a hint.
-fn transcript_lines(chat: &Chat, width: usize, tick: usize) -> Vec<String> {
+fn transcript_lines(chat: &Chat, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if chat.messages().is_empty() && !chat.is_pending() {
         lines.push(
@@ -102,7 +108,7 @@ fn transcript_lines(chat: &Chat, width: usize, tick: usize) -> Vec<String> {
         lines.push(String::new());
     }
     if chat.is_pending() {
-        let spinner = widgets::spinner_char(tick);
+        let spinner = widgets::spinner_char(chat.tick());
         lines.push(style(format!("{spinner} 考え中…")).warning().to_string());
     }
     lines
@@ -126,7 +132,7 @@ fn window(lines: &[String], rows: usize, scroll: usize) -> &[String] {
 mod tests {
     use super::*;
 
-    /// The plain (ANSI-stripped) text of a rendered frame, for readable
+    /// The plain (ANSI-stripped) text of a rendered pane, for readable
     /// assertions that ignore styling.
     fn plain(lines: &[String]) -> Vec<String> {
         lines
@@ -138,12 +144,12 @@ mod tests {
     #[test]
     fn empty_chat_shows_the_header_prompt_and_a_starter_hint() {
         let chat = Chat::new("qwen2.5-coder:7b");
-        let frame = render_frame(12, 40, &chat, 0);
-        let text = plain(&frame);
-        // The frame is exactly the terminal height.
-        assert_eq!(frame.len(), 12);
+        let out = pane(&chat, 40, 12);
+        let text = plain(&out);
+        // The pane is exactly `rows` lines.
+        assert_eq!(out.len(), 12);
         // Header names the model.
-        assert!(text[0].contains("usagi chat"));
+        assert!(text[0].contains("chat"));
         assert!(text[0].contains("qwen2.5-coder:7b"));
         // The starter hint sits in the transcript body.
         assert!(text.iter().any(|l| l.contains("話しかけて")));
@@ -160,15 +166,13 @@ mod tests {
         }
         chat.submit().unwrap();
         chat.finish(Ok("a fairly long reply that must wrap".to_string()));
-        let frame = render_frame(20, 16, &chat, 0);
-        let text = plain(&frame);
-        // Both role labels are shown.
+        let out = pane(&chat, 16, 20);
+        let text = plain(&out);
         assert!(text.iter().any(|l| l.contains("You")));
         assert!(text.iter().any(|l| l.trim() == "ai"));
-        // The user message body is present.
         assert!(text.iter().any(|l| l.contains("hi")));
-        // The reply wrapped across multiple rows (no row exceeds the width).
-        assert!(frame
+        // Every row fits the pane width (the reply wrapped).
+        assert!(out
             .iter()
             .all(|l| console::measure_text_width(&console::strip_ansi_codes(l)) <= 16));
     }
@@ -178,30 +182,24 @@ mod tests {
         let mut chat = Chat::new("m");
         chat.input_mut().insert('q');
         chat.submit().unwrap();
-        let frame = render_frame(12, 40, &chat, 3);
-        let text = plain(&frame);
-        assert!(text.iter().any(|l| l.contains("考え中")));
+        chat.advance_tick();
+        let out = pane(&chat, 40, 12);
+        assert!(plain(&out).iter().any(|l| l.contains("考え中")));
     }
 
     #[test]
     fn window_tails_the_transcript_and_clamps_scroll() {
         let lines: Vec<String> = (0..10).map(|i| i.to_string()).collect();
-        // Pinned to the bottom: the last three lines.
         assert_eq!(window(&lines, 3, 0), &["7", "8", "9"]);
-        // Scrolled up two: the window moves back by two.
         assert_eq!(window(&lines, 3, 2), &["5", "6", "7"]);
-        // Scrolling past the top clamps to the first `rows` lines.
         assert_eq!(window(&lines, 3, 999), &["0", "1", "2"]);
-        // Everything fits: the whole slice is returned.
         assert_eq!(window(&lines, 20, 0), lines.as_slice());
-        // Zero rows yields nothing.
         assert!(window(&lines, 0, 0).is_empty());
     }
 
     #[test]
     fn scrolled_view_shows_older_messages() {
         let mut chat = Chat::new("m");
-        // Build a transcript taller than a short body.
         for turn in 0..5 {
             for c in format!("q{turn}").chars() {
                 chat.input_mut().insert(c);
@@ -209,20 +207,22 @@ mod tests {
             chat.submit().unwrap();
             chat.finish(Ok(format!("a{turn}")));
         }
-        // Scroll up far enough to reveal the very first turn.
         for _ in 0..40 {
             chat.scroll_up();
         }
-        let frame = render_frame(10, 40, &chat, 0);
-        let text = plain(&frame);
-        assert!(text.iter().any(|l| l.contains("q0")));
+        let out = pane(&chat, 40, 10);
+        assert!(plain(&out).iter().any(|l| l.contains("q0")));
     }
 
     #[test]
-    fn a_zero_size_terminal_falls_back_without_panicking() {
-        // Non-interactive environments report 0×0; the frame still renders.
+    fn a_tiny_pane_keeps_the_header_without_a_footer() {
+        // Too short for the footer: only the header (and any transcript rows that
+        // fit) are drawn, still exactly `rows` lines.
         let chat = Chat::new("m");
-        let frame = render_frame(0, 0, &chat, 0);
-        assert_eq!(frame.len(), 24);
+        let out = pane(&chat, 20, 2);
+        assert_eq!(out.len(), 2);
+        assert!(plain(&out)[0].contains("chat"));
+        // No input prompt row in a footerless pane.
+        assert!(!plain(&out).iter().any(|l| l.contains(PROMPT)));
     }
 }

@@ -791,14 +791,14 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
     assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
 }
 
-/// Drive the loop with a capturing `open_chat` hook, so the tests can assert the
-/// chat screen was reached (and exercise its error path) without taking over a
-/// real terminal. After the scripted keys drain, [`ScriptedReader`] falls back to
+/// Drive the loop with a capturing `chat_ask` hook, so the tests can control the
+/// local-LLM reply (ready / withheld / disconnected) and exercise the right-pane
+/// chat overlay. After the scripted keys drain, [`ScriptedReader`] falls back to
 /// `Ctrl-C`, quitting.
 fn run_with_chat(
     keys: Vec<io::Result<Key>>,
     state: HomeState,
-    open_chat: &mut dyn FnMut(&Term) -> Result<()>,
+    chat_ask: &mut dyn FnMut(String) -> std::sync::mpsc::Receiver<Result<String, String>>,
 ) -> Outcome {
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -840,7 +840,7 @@ fn run_with_chat(
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
-        open_chat,
+        chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,
@@ -863,67 +863,92 @@ fn run_with_chat(
 }
 
 #[test]
-fn focus_menu_chat_row_reaches_the_default_wiring_hook() {
-    // Selecting `chat` from the menu reaches the `open_chat` hook through the
-    // default wiring (a no-op in the loop tests) and returns to Focus, from which
-    // Esc steps out to Switch.
+fn focus_menu_chat_row_opens_the_chat_overlay_and_converses() {
+    // Selecting `chat` from the menu opens the right-pane chat overlay (sidebar
+    // stays); typing + Enter submits, the (echoed) reply drains on the next pass,
+    // and Esc closes it back to Focus. Routed through the default wiring so the
+    // compat `chat_ask` echo is exercised end to end.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Focus feat (menu)
     keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::Enter)); // open chat (no-op) -> back to Focus
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.extend(typed("hi"));
+    keys.push(Ok(Key::Enter)); // submit -> chat_ask (echo, ready)
+    keys.push(Ok(Key::ArrowUp)); // a pass so the reply drains (and a scroll)
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_menu_chat_row_opens_the_chat_screen() {
-    // The 在席 menu lists `chat` (agent, chat, close, terminal); ArrowDown lands on
-    // it and Enter hands off to the chat screen, then returns to Focus.
-    let count = std::cell::Cell::new(0u32);
-    let mut open_chat = |_: &Term| {
-        count.set(count.get() + 1);
-        Ok(())
-    };
-    let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (menu, "agent" default)
-    keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::Enter)); // open the chat screen -> back to Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    let outcome = run_with_chat(keys, sample_state(), &mut open_chat);
-    assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(count.get(), 1, "the menu's chat row opened the chat screen");
-}
-
-#[test]
-fn focus_prompt_chat_opens_the_chat_screen() {
-    // Typing `chat` in the 在席 prompt dispatches the same open-chat effect.
-    let count = std::cell::Cell::new(0u32);
-    let mut open_chat = |_: &Term| {
-        count.set(count.get() + 1);
-        Ok(())
-    };
+fn focus_prompt_chat_opens_the_chat_overlay() {
+    // Typing `chat` in the 在席 prompt opens the same overlay.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
     keys.extend(typed("chat"));
-    keys.push(Ok(Key::Enter)); // run `chat` -> chat screen -> back to Focus
+    keys.push(Ok(Key::Enter)); // run `chat` -> overlay
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
     keys.push(Ok(Key::Escape)); // Focus -> Switch
-    let outcome = run_with_chat(keys, prompt_state(), &mut open_chat);
-    assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(count.get(), 1, "the prompt's `chat` opened the chat screen");
+    keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
+    assert!(matches!(run(keys, prompt_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_menu_chat_logs_a_failure_without_leaving_focus() {
-    // A chat screen that fails to run is reported in the results band, not
-    // propagated — Focus survives it (the following Esc still steps out to Switch).
-    let mut open_chat = |_: &Term| Err(anyhow::anyhow!("no model"));
+fn chat_overlay_editing_pending_guard_and_close_mid_request() {
+    // Exercise the overlay's editing keys, a blank Enter (no request), then a real
+    // submit against a *withheld* reply: the spinner ticks (Empty poll), keys are
+    // inert while pending (except scroll), and Esc closes it mid-request (dropping
+    // the receiver). A Tab covers the catch-all key arm.
+    let mut senders = Vec::new();
+    let mut chat_ask = |_: String| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        senders.push(tx); // keep the sender alive so the receiver reads Empty
+        rx
+    };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Focus feat (menu)
     keys.push(Ok(Key::ArrowDown)); // agent -> chat
-    keys.push(Ok(Key::Enter)); // open chat -> errors -> logged, stays in Focus
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.push(Ok(Key::Enter)); // blank line: no request
+    keys.extend(typed("ab"));
+    keys.push(Ok(Key::ArrowLeft));
+    keys.push(Ok(Key::Backspace));
+    keys.push(Ok(Key::ArrowRight));
+    keys.push(Ok(Key::Del));
+    keys.push(Ok(Key::Home));
+    keys.push(Ok(Key::End));
+    keys.push(Ok(Key::Tab)); // catch-all key arm
+    keys.push(Ok(Key::Char('q')));
+    keys.push(Ok(Key::Enter)); // submit -> withheld reply (stays pending)
+    keys.push(Ok(Key::Char('x'))); // ignored while pending
+    keys.push(Ok(Key::ArrowUp)); // scroll up works while pending
+    keys.push(Ok(Key::ArrowDown)); // scroll down works while pending
+    keys.push(Ok(Key::Escape)); // close mid-request -> Focus (receiver dropped)
     keys.push(Ok(Key::Escape)); // Focus -> Switch
-    let outcome = run_with_chat(keys, sample_state(), &mut open_chat);
+    let outcome = run_with_chat(keys, sample_state(), &mut chat_ask);
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
+fn chat_overlay_reports_a_failed_request() {
+    // A disconnected channel (the worker dropped its sender before sending) is
+    // surfaced as a failed reply in the transcript on the next poll.
+    let mut chat_ask = |_: String| {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        drop(tx);
+        rx
+    };
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat (menu)
+    keys.push(Ok(Key::ArrowDown)); // agent -> chat
+    keys.push(Ok(Key::Enter)); // open the chat overlay
+    keys.extend(typed("q"));
+    keys.push(Ok(Key::Enter)); // submit -> disconnected reply
+    keys.push(Ok(Key::ArrowUp)); // a pass so the failure drains
+    keys.push(Ok(Key::Escape)); // close chat -> Focus
+    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    let outcome = run_with_chat(keys, sample_state(), &mut chat_ask);
     assert!(matches!(outcome, Outcome::Quit));
 }
 

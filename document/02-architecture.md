@@ -130,7 +130,7 @@ src/
         ├── open/               # プロジェクト選択画面（state / ui / event）
         ├── new/                # 新規プロジェクト画面（state（mod=FormState・型 / validate=検証） / ui / event）
         ├── config/             # 設定画面（state（mod=Config・型定義 / cycling=値巡回ロジック） / ui / event）
-        ├── chat/               # ローカル LLM チャット画面（mod=Ollama 子プロセス配線 / state=会話状態 / ui / event）
+        ├── chat/               # ローカル LLM チャット（在席の右ペインに描画。mod=Ollama 子プロセスの request 配線 / state=会話状態 / ui=右ペイン描画。オーバーレイ・キー・応答ポーリングは home のイベントループが駆動）
         ├── home/               # ホーム画面（state（mod=HomeState / list・mode・log・modal（サブモード型: create/rename 入力・remove モーダル・focus メニュー、および HomeState が持つ Overlays 集約）に分割） / ui（mod=render_frame・panes・chrome・content=コマンド出力整形 に分割） / event（mod=loop・handlers に分割） / command（mod=語彙・builtins・registry に分割） / terminal（埋め込み端末: view / pane / pool（常駐＋phase/ベル監視・通知）/ tabs / selection / link に分割））
         └── widgets/            # 共通 widget（mod / picker / dir_picker / text_input=キャレット編集付き 1 行入力 / text_area=複数行入力（セッションメモ） / rabbit=うさぎアニメの絵柄）
 ```

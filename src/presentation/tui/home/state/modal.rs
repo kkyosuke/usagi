@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::LogLine;
+use crate::presentation::tui::chat::state::Chat;
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -45,6 +46,11 @@ pub(super) enum Overlay {
     Text(TextModal),
     /// The right-pane Markdown preview.
     Preview(Preview),
+    /// The right-pane local-LLM chat surface (在席's `chat`). Like
+    /// [`Preview`](Self::Preview) it takes over the right pane and captures the
+    /// keyboard while open, but it is interactive: the conversation state lives
+    /// here while the event loop drives the (async) model request.
+    Chat(Chat),
     /// The session-note editor modal.
     Note(NoteEditor),
 }

@@ -66,7 +66,8 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
     let mut dispatch_update = || count.set(count.get() + 1);
     let mut unite_resolve = no_unite_resolve;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat: fn(&Term) -> Result<()> = noop_chat;
+    let mut chat_ask: fn(String) -> std::sync::mpsc::Receiver<Result<String, String>> =
+        ready_chat_ask;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         workspace_root: Path::new("/ws"),
@@ -83,7 +84,7 @@ fn run_update(keys: Vec<Key>) -> (Outcome, u32) {
         open_terminal: &mut open,
         open_url: &mut open_url,
         open_config: &mut config,
-        open_chat: &mut chat,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close,

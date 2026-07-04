@@ -1,59 +1,42 @@
-//! Local-LLM chat screen.
+//! Local-LLM chat.
 //!
-//! A dedicated screen for conversing with the workspace's configured local LLM
-//! (served through Ollama), reached from 在席 (Focus) — the `chat` command / menu
-//! row. Unlike `agent` / `ai`, which launch an external agent CLI in the
-//! worktree, this talks directly to the local model, so a quick question never
-//! spends cloud-agent tokens.
+//! A chat with the workspace's configured local LLM (served through Ollama),
+//! shown in 在席's **right pane** — the same rectangle the embedded terminal /
+//! agent use — so it reads like the other per-session surfaces. The conversation
+//! state ([`state`]) and rendering ([`ui`]) are pure and unit-tested; the home
+//! event loop owns the overlay, keyboard, and reply polling.
 //!
-//! This module is the thin composition root: it wires the real terminal reader
-//! and the `ollama`-backed request into the pure event loop ([`event`]). The
-//! model call shells out to `ollama run`, so — like the other screen entry
-//! points ([`super::config`] / [`super::home`]) — this file is excluded from
-//! coverage; the conversation state ([`state`]), rendering ([`ui`]), and the loop
-//! itself ([`event`]) are all unit-tested.
+//! This module also carries the one impure piece: [`spawn_request`], which runs
+//! `ollama run` on a detached thread and hands back a receiver the loop polls.
+//! Because it shells out, this file is excluded from coverage (like the other
+//! screen composition roots); the logic that can be tested lives in [`state`] /
+//! [`ui`] and in the home event loop's chat handling.
 
-mod event;
-mod state;
-mod ui;
+pub mod state;
+pub mod ui;
 
 use std::sync::mpsc::{self, Receiver};
 
-use anyhow::Result;
-use console::Term;
-
-use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::local_llm;
 
-use state::Chat;
-
-/// Run the chat screen against `term`, talking to Ollama `model`, until the user
-/// leaves it. Assumes the alternate screen is already active (owned by the
-/// caller, which repaints over this screen on return).
-pub fn run(term: &Term, model: &str) -> Result<()> {
-    let mut reader = TermKeyReader::new(term.clone());
-    let request_model = model.to_string();
-    // Each submitted turn runs the model on its own thread so a slow generation
-    // never blocks the screen; the loop polls the returned receiver and keeps the
-    // spinner moving. The thread is detached — leaving the screen mid-generation
-    // simply drops the receiver, and the orphaned `ollama` call finishes on its
-    // own without holding anything up.
-    let mut ask = move |prompt: String| -> Receiver<Result<String, String>> {
-        let (tx, rx) = mpsc::channel();
-        let model = request_model.clone();
-        std::thread::spawn(move || {
-            let _ = tx.send(ollama_ask(&model, &prompt));
-        });
-        rx
-    };
-    event::event_loop(term, &mut reader, Chat::new(model), &mut ask)
+/// Start a model request for `prompt` against Ollama `model`, returning a
+/// receiver that yields the completion (`Ok`) or an error message to show in its
+/// place (`Err`) exactly once. The request runs on a detached thread so a slow
+/// generation never blocks the UI; the home loop polls the receiver each tick and
+/// drops it (abandoning the thread harmlessly) if the chat is closed first.
+pub fn spawn_request(model: String, prompt: String) -> Receiver<Result<String, String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(ollama_ask(&model, &prompt));
+    });
+    rx
 }
 
 /// Run one completion against `ollama run <model>`, feeding `prompt` as its
 /// argument and returning the trimmed stdout. The Ollama server is brought up
 /// first (a Homebrew install starts none on its own), and a non-zero exit is
-/// surfaced as an error string the screen shows in the transcript.
+/// surfaced as an error string the chat shows in the transcript.
 fn ollama_ask(model: &str, prompt: &str) -> Result<String, String> {
     local_llm::ensure_server_started(&SystemRunner)?;
     let output = std::process::Command::new("ollama")

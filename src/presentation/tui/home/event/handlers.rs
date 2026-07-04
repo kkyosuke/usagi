@@ -1064,7 +1064,7 @@ fn focus_prompt_key(
                 Effect::OpenAgentPrompt(prompt) => {
                     launch_agent_with_prompt(term, state, painter, wiring, prompt)
                 }
-                Effect::OpenChat => open_chat_screen(term, state, painter, wiring),
+                Effect::OpenChat => state.open_chat(),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
@@ -1111,32 +1111,13 @@ fn run_focus_command(
         "close --force" => close_focused_session(state, wiring, true),
         // The menu's `agent` row / `a` shortcut launch the configured default.
         "agent" => launch_agent(term, state, painter, wiring, None),
-        // `chat` opens the local-LLM chat screen (converse with the local model).
-        "chat" => open_chat_screen(term, state, painter, wiring),
+        // `chat` opens the local-LLM chat overlay in the right pane.
+        "chat" => state.open_chat(),
         // Fail loudly for anything else: a Session-scope command registered
         // without an arm here must not silently launch an agent (or anything
         // side-effectful) when picked from the menu.
         _ => state.log_error(format!("\"{name}\" cannot be run from the menu")),
     }
-}
-
-/// Hand off to the local-LLM chat screen and repaint home over it on return.
-///
-/// The chat screen owns the terminal until the user leaves it (`Esc`); it runs
-/// its own draw loop and model requests, so this just invokes the injected hook
-/// and forces a full repaint afterwards (like `open_config`). A failure to run
-/// the screen is surfaced in the results band rather than propagated, so a chat
-/// mishap never tears down 在席.
-fn open_chat_screen(
-    term: &Term,
-    state: &mut HomeState,
-    painter: &mut FramePainter,
-    wiring: &mut Wiring,
-) {
-    if let Err(e) = (wiring.open_chat)(term) {
-        state.log_error(format!("chat failed: {e}"));
-    }
-    painter.reset();
 }
 
 /// Launch an agent pane, recording which CLI to spawn: `None` uses the

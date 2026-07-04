@@ -39,7 +39,7 @@ pub struct Message {
 /// The chat screen's state: which model it talks to, the transcript so far, the
 /// input line being composed, whether a reply is in flight, and how far the
 /// transcript is scrolled back from the newest message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chat {
     /// The Ollama model name the conversation runs against (shown in the header).
     model: String,
@@ -54,6 +54,9 @@ pub struct Chat {
     /// view to the latest message. Clamped by the renderer against the real line
     /// count, so the state need not know the viewport height.
     scroll: usize,
+    /// The "thinking" spinner frame, advanced by the event loop while a reply is
+    /// in flight so the renderer animates without owning a clock.
+    tick: usize,
 }
 
 impl Chat {
@@ -65,7 +68,19 @@ impl Chat {
             input: TextInput::new(),
             pending: false,
             scroll: 0,
+            tick: 0,
         }
+    }
+
+    /// The current "thinking" spinner frame (advanced by the event loop).
+    pub fn tick(&self) -> usize {
+        self.tick
+    }
+
+    /// Advance the spinner one frame — called on each animation tick while a
+    /// reply is in flight.
+    pub fn advance_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     /// The model name the conversation runs against.
@@ -301,6 +316,15 @@ mod tests {
         assert_eq!(chat.scroll(), 2);
         chat.scroll_down();
         assert_eq!(chat.scroll(), 1);
+    }
+
+    #[test]
+    fn advance_tick_steps_the_spinner_frame() {
+        let mut chat = Chat::new("m");
+        assert_eq!(chat.tick(), 0);
+        chat.advance_tick();
+        chat.advance_tick();
+        assert_eq!(chat.tick(), 2);
     }
 
     #[test]

@@ -186,11 +186,12 @@ pub(super) struct Wiring<'a> {
     /// Open the settings screen, re-reading the affected settings on return
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
-    /// Open the local-LLM chat screen, returning when the user leaves it. Like
-    /// [`open_config`](Self::open_config) it owns the terminal until dismissed;
-    /// [`super::run`] wires it to the chat screen against the workspace's
-    /// configured local model, tests pass a no-op.
-    pub open_chat: &'a mut dyn FnMut(&Term) -> Result<()>,
+    /// Start a local-LLM chat request, returning a receiver that yields the reply
+    /// (or an error message) once. Called when the user submits a line in the 在席
+    /// `chat` overlay; the loop polls the receiver each tick so a slow model never
+    /// blocks the screen. [`super::run`] wires it to the Ollama-backed request
+    /// against the configured model; tests return a ready receiver.
+    pub chat_ask: &'a mut dyn FnMut(String) -> std::sync::mpsc::Receiver<Result<String, String>>,
     /// Snapshot a session's live terminal for the 切替 preview, or `None` when it
     /// has no running shell — also the live/idle test the focus handlers use. The
     /// snapshot is sized to the given sidebar state (the preview widens when the
@@ -361,7 +362,42 @@ pub(super) fn event_loop(
     // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
     // set on each idle/live-frame pass.
     let mut seen_badge_version = u64::MAX;
+    // The in-flight local-LLM chat reply's channel while the 在席 `chat` overlay
+    // awaits one, or `None` when idle. Owned by the loop (it is IO) rather than the
+    // pure state, which only tracks that a reply is pending. Dropped when the
+    // overlay closes, abandoning the request harmlessly.
+    let mut chat_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>> = None;
     loop {
+        // Drain a finished chat reply into the overlay before painting so it shows
+        // this frame; drop the channel if the overlay was closed mid-request. While
+        // one is pending the spinner advances each pass (the `animate` read below
+        // keeps the loop ticking).
+        if state.chat().is_none() {
+            chat_rx = None;
+        } else if let Some(rx) = chat_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(reply) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.finish(reply);
+                    }
+                    chat_rx = None;
+                    force_paint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.advance_tick();
+                    }
+                    force_paint = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.finish(Err("local LLM request failed".to_string()));
+                    }
+                    chat_rx = None;
+                    force_paint = true;
+                }
+            }
+        }
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
         // badge set together (read under a single lock) so the frame never mixes
@@ -535,7 +571,10 @@ pub(super) fn event_loop(
         let animate = panel_animating
             || state.has_live_sessions()
             || state.mascot_blinking()
-            || state.mascot_reacting();
+            || state.mascot_reacting()
+            // A pending chat reply: keep ticking to poll the receiver and animate
+            // the "thinking" spinner.
+            || chat_rx.is_some();
         let input = if animate {
             match reader.read_input_timeout(install_task::ANIM_TICK) {
                 Ok(Some(input)) => input,
@@ -1011,6 +1050,70 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The local-LLM chat overlay, when open, captures every key: the editing
+        // keys build the line, `↑`/`↓` scroll the transcript, `Enter` submits it
+        // (starting a request the loop then polls), and `Esc` closes it back to the
+        // 在席 surface. Scroll / close work even while a reply is in flight; typing
+        // and submitting are inert until it lands, so a turn cannot be garbled.
+        if state.chat().is_some() {
+            match key {
+                Key::Escape => state.close_chat(),
+                Key::ArrowUp => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.scroll_up();
+                    }
+                }
+                Key::ArrowDown => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.scroll_down();
+                    }
+                }
+                _ if state.chat().is_some_and(|chat| chat.is_pending()) => {}
+                Key::Enter => {
+                    if let Some(prompt) = state.chat_mut().and_then(|chat| chat.submit()) {
+                        chat_rx = Some((wiring.chat_ask)(prompt));
+                    }
+                }
+                Key::Backspace => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().backspace();
+                    }
+                }
+                Key::Del => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().delete_forward();
+                    }
+                }
+                Key::ArrowLeft => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_left();
+                    }
+                }
+                Key::ArrowRight => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_right();
+                    }
+                }
+                Key::Home => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_home();
+                    }
+                }
+                Key::End => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().move_end();
+                    }
+                }
+                Key::Char(c) if !c.is_control() => {
+                    if let Some(chat) = state.chat_mut() {
+                        chat.input_mut().insert(c);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         // The session-note editor, when open, captures every key: `Ctrl-S` saves,
         // `Esc` cancels, `Enter` inserts a newline, and the editing keys edit the
         // multi-line buffer. It is driven through a handler (not inline like the
@@ -1157,6 +1260,15 @@ fn click_hits_mascot(height: usize, width: usize, state: &HomeState, click: Clic
 /// The synchronous fakes are taken **by value** (as `impl FnMut`) so they are
 /// owned locals here, sharing one lifetime with the `dispatch_*` wrappers built
 /// below — which is what lets them all be bundled into a single [`Wiring`].
+/// A test `chat_ask` that echoes the prompt back on an already-ready channel, so
+/// the loop's submit → drain → reply path runs without a model runtime.
+#[cfg(test)]
+fn echo_chat_ask(prompt: String) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = tx.send(Ok(format!("echo: {prompt}")));
+    rx
+}
+
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn event_loop_compat(
@@ -1254,11 +1366,11 @@ pub(crate) fn event_loop_compat(
     // never shell out; the open path itself is covered by the dedicated popup tests
     // that build a capturing `Wiring`.
     let mut open_url = |_: &str| {};
-    // Opening the chat screen is real terminal IO wired in `super::run`; here it
-    // is a no-op, so the compat-shim loop tests never take over the terminal. The
-    // dispatch path is covered by the focus-handler tests that build a capturing
-    // `Wiring`.
-    let mut open_chat = |_: &Term| Ok(());
+    // The chat request shells out to Ollama in `super::run`; here it echoes the
+    // prompt back on a ready channel so the loop's submit → poll → reply path runs
+    // without a model runtime. Tests that need a withheld / failed reply build a
+    // capturing `Wiring` with their own `chat_ask`.
+    let mut chat_ask = echo_chat_ask;
     let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
     // Exercise the test-shim no-op once so coverage does not treat this helper
     // closure as an uncovered function. The production tab-action path is covered
@@ -1281,7 +1393,7 @@ pub(crate) fn event_loop_compat(
         open_terminal: &mut open_terminal,
         open_url: &mut open_url,
         open_config: &mut open_config,
-        open_chat: &mut open_chat,
+        chat_ask: &mut chat_ask,
         preview: &mut preview,
         tab_op: &mut tab_op,
         close_tab: &mut close_tab,
