@@ -1223,7 +1223,8 @@ fn unite_add_and_remove_run_through_the_palette() {
 #[test]
 fn selected_dir_roots_at_the_cursor_groups_workspace() {
     // A united home: primary "primary" (root only) plus an empty extra group "wsB".
-    // Flat rows: 0 = primary root, 1 = wsB root.
+    // Each expanded workspace owns a create row, so the flat rows are:
+    //   0 = primary root, 1 = primary create, 2 = wsB root, 3 = wsB create.
     let mut state = HomeState::new("primary", Vec::new(), None);
     state.set_root_path("/primary");
     state.set_extra_groups(vec![GroupSource {
@@ -1240,7 +1241,7 @@ fn selected_dir_roots_at_the_cursor_groups_workspace() {
         PathBuf::from("/primary")
     );
     // An extra group's root row roots at that group's own workspace.
-    state.switch_select(1);
+    state.switch_select(2);
     assert_eq!(
         selected_dir(&state, Path::new("/primary")),
         PathBuf::from("/wsB")

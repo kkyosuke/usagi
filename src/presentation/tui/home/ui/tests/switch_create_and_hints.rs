@@ -114,16 +114,31 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
         .unwrap();
 
     assert_eq!(after, before, "lower workspace header must not shift");
-    assert!(plain[after - 2].contains("+ new: wip"));
+    // The input replaces the primary workspace's own "+ new session" row (the last
+    // line of its block), which sits three lines above wsB's header: the input row,
+    // then the two-row unite gap.
+    assert!(plain[after - 3].contains("+ new: wip"));
 }
 
 #[test]
-fn splice_rows_inserts_inside_an_existing_column_without_replacing_rows() {
-    let mut column = vec!["a".to_string(), "d".to_string()];
+fn replace_one_with_rows_swaps_a_single_row_for_a_taller_input_in_place() {
+    // The last group's create row (one line) is swapped for a two-line error input,
+    // growing the column by one without disturbing the rows above it.
+    let mut column = vec!["a".to_string(), "+ new session".to_string()];
 
-    splice_rows(&mut column, 1, vec!["b".to_string(), "c".to_string()]);
+    replace_one_with_rows(&mut column, 1, vec!["b".to_string(), "c".to_string()]);
 
-    assert_eq!(column, ["a", "b", "c", "d"]);
+    assert_eq!(column, ["a", "b", "c"]);
+}
+
+#[test]
+fn replace_one_with_rows_pads_when_the_target_line_is_below_the_built_rows() {
+    // A create row scrolled just past the built window: pad up to it, then append.
+    let mut column = vec!["a".to_string()];
+
+    replace_one_with_rows(&mut column, 3, vec!["x".to_string()]);
+
+    assert_eq!(column, ["a", "", "", "x"]);
 }
 
 #[test]

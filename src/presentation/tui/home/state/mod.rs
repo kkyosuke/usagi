@@ -695,6 +695,13 @@ pub struct HomeState {
     /// the handlers from the cursor's group just before dispatching and cleared as
     /// the result lands.
     op_target: Option<PathBuf>,
+    /// The workspace names the user has folded shut in 統合(unite) mode, by name so
+    /// the folds survive a list rebuild (a background re-sync drops and rebuilds the
+    /// groups). Re-applied to the fresh list on every
+    /// [`rebuild_list`](Self::rebuild_list); empty in single-workspace mode (the
+    /// fold toggle is only exposed with several workspaces). In-memory only — folds
+    /// reset when usagi restarts.
+    collapsed_workspaces: HashSet<String>,
     /// Whether the sidebar mascot reacts to interaction — injected from the
     /// effective settings by `mod.rs`. While `false` the mascot never blinks and
     /// the Working rabbit never pumps its paw, so it stays a perfectly still
@@ -826,6 +833,7 @@ impl HomeState {
             root_note: None,
             extra_groups: Vec::new(),
             op_target: None,
+            collapsed_workspaces: HashSet::new(),
             // The mascot reacts by default; `mod.rs` overrides it from the
             // effective settings, and tests get a lively mascot without setup.
             mascot_animation_enabled: true,
@@ -1312,16 +1320,13 @@ impl HomeState {
             .collect()
     }
 
-    /// The group index the cursor points at, treating the trailing `+ new`
-    /// create row as belonging to the last group (the workspace it creates into).
+    /// The group index the cursor points at. Each 統合(unite) group now owns its
+    /// own `+ new session` row, so the cursor's group is correct whether it rests
+    /// on a session, a root, or a create row — no last-group special case needed.
     /// `0` is the primary; `i + 1` indexes [`extra_groups`](Self::extra_groups).
     /// The shared basis for every "cursor's group" accessor below.
     fn cursor_group(&self) -> usize {
-        if self.list.create_row_selected() {
-            self.list.group_count().saturating_sub(1)
-        } else {
-            self.list.selected_group()
-        }
+        self.list.selected_group()
     }
 
     /// The workspace root the cursor's group operates in — the primary's root when
@@ -1356,6 +1361,36 @@ impl HomeState {
         match self.cursor_group().checked_sub(1) {
             None => &self.issues,
             Some(i) => &self.extra_groups[i].issues,
+        }
+    }
+
+    /// Fold / unfold the workspace the cursor sits in (統合(unite) mode), recording
+    /// it by name so the fold survives a background re-sync's list rebuild. A no-op
+    /// unless the cursor is on a group's root row and more than one workspace is
+    /// shown — folding the sole workspace would hide the whole list.
+    pub fn toggle_selected_collapsed(&mut self) {
+        if self.list.group_count() < 2 || !self.list.root_selected() {
+            return;
+        }
+        let group = self.list.selected_group();
+        let name = self.list.groups()[group].name().to_string();
+        if self.list.toggle_collapsed(group) {
+            self.collapsed_workspaces.insert(name);
+        } else {
+            self.collapsed_workspaces.remove(&name);
+        }
+    }
+
+    /// Unfold the workspace the cursor sits in if it is folded, so a session can be
+    /// created into it (a folded group hides its "+ new session" row). Clears the
+    /// recorded fold so a background re-sync does not re-fold it. Called just before
+    /// opening the inline create input; a no-op when the group is already expanded.
+    pub fn expand_selected_group_for_create(&mut self) {
+        let group = self.list.selected_group();
+        if self.list.is_collapsed(group) {
+            let name = self.list.groups()[group].name().to_string();
+            self.list.toggle_collapsed(group);
+            self.collapsed_workspaces.remove(&name);
         }
     }
 
@@ -1538,6 +1573,9 @@ impl HomeState {
                 group.root_note.is_some(),
             ));
         }
+        // Re-apply the user's folds by workspace name so a background re-sync (which
+        // rebuilds the list wholesale) does not silently unfold every workspace.
+        list.set_collapsed_by_names(&self.collapsed_workspaces);
         self.list = list;
     }
 
