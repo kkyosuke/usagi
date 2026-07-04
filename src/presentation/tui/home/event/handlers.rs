@@ -903,10 +903,11 @@ pub(super) fn focus_key(
                 open_pane(term, state, painter, wiring, false, false, true);
                 return Flow::Continue;
             }
-            // A menu floating over a pane tab (the zoomed-out state once another
-            // key cancelled the re-attach): `Esc` dismisses the menu, leaving the
-            // pane's preview showing — one step short of leaving 在席.
-            if state.close_focus_menu_over_pane() {
+            // An action surface (menu / prompt) floating over a pane tab (the
+            // zoomed-out state once another key cancelled the re-attach): `Esc`
+            // dismisses it, leaving the pane's preview showing — one step short of
+            // leaving 在席.
+            if state.close_focus_action_over_pane() {
                 return Flow::Continue;
             }
             if !state.focus_discard_new_tab() {
@@ -952,21 +953,16 @@ pub(super) fn focus_key(
             state.open_focused_note(false);
             return Flow::Continue;
         }
-        Key::End
-            if !(state.focus_on_new_tab()
-                && state.session_action_ui() == SessionActionUi::Prompt) =>
-        {
+        Key::End if !state.focus_prompt_capturing() => {
             state.open_focused_note(false);
             return Flow::Continue;
         }
         // `?` opens the keybinding cheat sheet. Guarded like `End` above: on every
         // surface but the typed Prompt it opens the sheet, while in the Prompt's
         // command line `?` stays a literal character (so a session-scoped command
-        // can contain it).
-        Key::Char('?')
-            if !(state.focus_on_new_tab()
-                && state.session_action_ui() == SessionActionUi::Prompt) =>
-        {
+        // can contain it) — whether that command line is on the "+ new" tab or
+        // floating over a pane after a zoom-out.
+        Key::Char('?') if !state.focus_prompt_capturing() => {
             state.open_text_modal(
                 "Keys",
                 ui::content::cheatsheet(state.key_scheme()),
@@ -996,10 +992,10 @@ pub(super) fn focus_key(
     }
 
     // The "+ new" tab drives the action surface (a menu / prompt that launches a
-    // pane), and so does the menu floating over a pane tab after a zoom-out; a
+    // pane), and so does that surface floating over a pane tab after a zoom-out; a
     // bare pane tab is a preview, so its only action is `Enter` to re-attach the
     // selected (now-active) pane — every other key is inert there.
-    if state.focus_on_new_tab() || state.focus_menu_over_pane() {
+    if state.focus_on_new_tab() || state.focus_action_over_pane() {
         match state.session_action_ui() {
             SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
             SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
@@ -1511,12 +1507,12 @@ fn open_pane(
             // where the user picks the next action (terminal / agent / …). Every
             // pane stays alive in the pool, so re-launching re-attaches them. The
             // selector stays on the tab the zoom left — its live preview keeps
-            // showing behind the floating action menu — instead of jumping to a
+            // showing behind the floating action surface — instead of jumping to a
             // "+ new" chip for a tab that was never created. Arm the one-shot
             // return-to-pane bit so an immediate `Esc` bounces back to the pane
             // this zoom started from (没入) rather than peeling back to 切替.
             state.leave_attached();
-            state.focus_menu_over_active_pane();
+            state.focus_action_over_active_pane();
             state.arm_focus_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
@@ -1529,7 +1525,7 @@ fn open_pane(
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
                 None => {
                     state.leave_attached();
-                    state.focus_menu_over_active_pane();
+                    state.focus_action_over_active_pane();
                 }
             }
         }
