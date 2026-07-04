@@ -779,7 +779,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
     // on the session's detail line (index 4).
     let detail = console::strip_ansi_codes(&lines[4]);
     assert!(
-        detail.contains("5min ago"),
+        detail.contains("5m ago"),
         "{detail:?} missing the relative time"
     );
 }
@@ -868,7 +868,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
     assert!(!small_detail.contains("ready"));
     assert!(small_detail.contains("+  5 - 3")); // counts padded to the wide columns
     assert!(big_detail.contains("+140 -88"));
-    assert!(big_detail.contains("12min ago"));
+    assert!(big_detail.contains("12m ago"));
     // The diff `+` lands in the same painted column on both rows regardless of how
     // many changed lines each carries — the point of the fixed columns. Measured
     // CJK-aware (ambiguous glyphs = two columns), since that is the width the detail
@@ -887,7 +887,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
 fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages() {
     // A single running session in a pane just wide enough that the freshness label
     // sits at the trim boundary: when its width is sized to the live label, the
-    // young `now` (3 cols) fits but the aged `12min ago` (9 cols) tips the cluster
+    // young `now` (3 cols) fits but the aged `12m ago` (7 cols) tips the cluster
     // over and drops the field — the detail line jumping purely because the clock
     // advanced. Reserving a constant width for the column decouples the decision
     // from the clock, so the same layout renders at every age.
@@ -917,7 +917,7 @@ fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages()
         console::strip_ansi_codes(&lines[4]).into_owned()
     };
     let young = render_at(base + chrono::Duration::seconds(30)); // `now`
-    let aged = render_at(base + chrono::Duration::minutes(12)); // `12min ago`
+    let aged = render_at(base + chrono::Duration::minutes(12)); // `12m ago`
     let shows_freshness = |detail: &str| detail.contains("ago") || detail.contains("now");
     assert_eq!(
         shows_freshness(&young),

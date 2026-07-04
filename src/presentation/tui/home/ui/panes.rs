@@ -110,18 +110,30 @@ fn label_cell(label: Option<&SessionLabelDef>, col: usize) -> String {
     format!(" {body}")
 }
 
-/// The width the manual-status label column claims across the visible sessions:
-/// the widest resolved `<glyph> <name>` (capped at [`LABEL_COL_MAX`]) plus one
+/// The width the manual-status label column claims: the widest resolved
+/// `<glyph> <name>` **in the master** (capped at [`LABEL_COL_MAX`]) plus one
 /// separating space, or `0` when no visible session carries a label — in which
 /// case the column is dropped and the sidebar is byte-for-byte what it was before
-/// the feature. Mirrors how [`detail_cols`] sizes the detail cluster.
+/// the feature.
+///
+/// The reserve is sized to the widest label the user *could* pick, not the widest
+/// currently *shown*: cycling a session's label with `Tab` / the digit keys swaps
+/// between defs of different lengths (`○ Todo` ↔ `▸ Doing` ↔ `✕ Blocked`), and
+/// sizing to the visible set would resize the column — and shift every row's name
+/// and label glyph — on each toggle. Holding the column at the master's widest
+/// decouples its width from which label is applied, so only adding/removing the
+/// first label moves anything (the same anti-shift rule the freshness and PR
+/// columns follow; see [`TIME_RESERVE_WIDTH`] / [`PR_RESERVE_WIDTH`]).
 fn label_col_width(list: &WorktreeList, master: &SessionLabelMaster) -> usize {
-    let widest = list
-        .groups()
+    let any_labelled = list.groups().iter().any(|g| {
+        (0..g.worktrees().len()).any(|i| g.row_label_id(i).and_then(|id| master.get(id)).is_some())
+    });
+    if !any_labelled {
+        return 0;
+    }
+    let widest = master
+        .labels()
         .iter()
-        .flat_map(|g| {
-            (0..g.worktrees().len()).filter_map(|i| g.row_label_id(i).and_then(|id| master.get(id)))
-        })
         .map(|def| console::measure_text_width(&format!("{} {}", def.glyph(), def.name)))
         .max()
         .unwrap_or(0)
@@ -526,7 +538,7 @@ pub(super) fn worktree_row(
     };
 
     // Line 2 spells out the agent state with its icon (blank when absent) on the
-    // left, and a right-aligned cluster of the freshness label (`Nmin ago`), the
+    // left, and a right-aligned cluster of the freshness label (`Nm ago`), the
     // commit-divergence marker (`↑N ↓M`), the `+N -M` diff badge, and the
     // `<icon> <count>` PR badge. Each field sits in a fixed-width column sized once per render (`cols`),
     // so a session's time, commits, diff, and PR always land in the same place no
@@ -553,15 +565,17 @@ pub(super) fn worktree_row(
 }
 
 /// A compact, dimmed freshness label for how long ago `then` was relative to
-/// `now`: `now` under a minute, then `Nmin ago` / `Nh ago` / `Nd ago`. A `then`
+/// `now`: `now` under a minute, then `Nm ago` / `Nh ago` / `Nd ago`. A `then`
 /// in the future (clock skew) clamps to `now`. Shown on line 2 so a glance
-/// tells the stale sessions from the freshly-touched ones.
+/// tells the stale sessions from the freshly-touched ones. The minute unit is
+/// abbreviated to a single `m` (not `min`) to keep the column narrow and spend
+/// the freed width on the rest of the detail line.
 fn relative_time(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     let secs = (now - then).num_seconds().max(0);
     let label = if secs < 60 {
         "now".to_string()
     } else if secs < 3600 {
-        format!("{}min ago", secs / 60)
+        format!("{}m ago", secs / 60)
     } else if secs < 86_400 {
         format!("{}h ago", secs / 3600)
     } else {
@@ -589,9 +603,9 @@ fn digits(mut n: usize) -> usize {
 /// changed lines or a longer "ago". A `0` width drops that field for the pane.
 #[derive(Clone, Copy, Default)]
 pub(super) struct DetailCols {
-    /// Display width of the freshness (`Nmin ago`) cell; 0 drops it. Reserved at
+    /// Display width of the freshness (`Nm ago`) cell; 0 drops it. Reserved at
     /// [`TIME_RESERVE_WIDTH`] so the cell keeps a constant width as a session ages
-    /// across the `now` / `Nmin ago` / `Nh ago` buckets — otherwise the label's
+    /// across the `now` / `Nm ago` / `Nh ago` buckets — otherwise the label's
     /// width would wander with the clock, flipping the "drop when narrow" decision
     /// and shifting the detail line purely with the passage of time.
     time: usize,
@@ -658,16 +672,16 @@ const PR_RESERVE_WIDTH: usize = 3;
 
 /// The freshness column is reserved at (at least) this width on every render — the
 /// display width of the widest label the [`relative_time`] format produces,
-/// `59min ago` (9 columns), which also holds every `Nh ago` / `Nd ago` up to
+/// `59m ago` (7 columns), which also holds every `Nh ago` / `Nd ago` up to
 /// thousands of days. Unlike the diff / commit / PR fields, which only change when
 /// the user commits or opens a PR, the freshness label's width changes on its own
-/// as the clock advances (`now` → `12min ago` → `1h ago`). Sizing the column to the
+/// as the clock advances (`now` → `12m ago` → `1h ago`). Sizing the column to the
 /// live label would let that width wander between frames — flipping the "drop the
 /// freshness first when narrow" decision and shifting the whole detail line purely
 /// with the passage of time (a cumulative layout shift). Holding the slot at a
 /// constant width decouples the layout from the clock, the same anti-shift rule the
 /// PR column follows ([`PR_RESERVE_WIDTH`]).
-const TIME_RESERVE_WIDTH: usize = 9;
+const TIME_RESERVE_WIDTH: usize = 7;
 
 /// Columns the `↑` / `↓` commit-divergence arrows occupy: one each. The arrows are
 /// East Asian *Ambiguous*, which usagi's terminals paint one column wide — the
@@ -759,7 +773,7 @@ fn detail_cols(
     // session gaining or losing its last PR never shifts the diff to its left.
     cols.pr = cols.pr.max(PR_RESERVE_WIDTH);
     // Hold the freshness slot at a constant width so the label growing or shrinking
-    // as a session ages (`now` → `12min ago` → `1h ago`) never changes the column —
+    // as a session ages (`now` → `12m ago` → `1h ago`) never changes the column —
     // otherwise the passing clock alone would flip the trim decision below and shift
     // the detail line. The per-session max above still wins for the (unreachable in
     // practice) label wider than the reserve.
@@ -3992,24 +4006,42 @@ mod tests {
     }
 
     #[test]
-    fn label_col_width_sizes_to_the_widest_visible_label_and_caps_it() {
+    fn label_col_width_sizes_to_the_widest_master_label_not_the_visible_one() {
+        // Two short labels: the column is sized to the wider of the two in the
+        // master, regardless of which one a session actually shows.
         let master = SessionLabelMaster {
             labels: vec![
                 label_def("todo", "Todo", LabelColor::Gray, Some("○")),
-                label_def("long", "Averylonglabelname", LabelColor::Gray, Some("◇")),
+                label_def("blocked", "Blocked", LabelColor::Gray, Some("✕")),
             ],
         };
         // No labels assigned → the column is dropped (0), leaving the sidebar as it
         // was before the feature.
         let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
         assert_eq!(label_col_width(&list, &master), 0);
-        // A short label → its `<glyph> <name>` width plus a separating space.
+        // The narrow `todo` is shown, but the column reserves the master's widest
+        // (`✕ Blocked`) + a separating space, so cycling to `blocked` will not
+        // resize the column and shift the row.
+        let widest = "✕ Blocked".chars().count() + 1;
         list.set_label_ids(vec![Some("todo".to_string())]);
-        assert_eq!(
-            label_col_width(&list, &master),
-            "○ Todo".chars().count() + 1
-        );
-        // A label longer than the cap is clamped to LABEL_COL_MAX (+1 separator).
+        assert_eq!(label_col_width(&list, &master), widest);
+        // Cycling to the wider label keeps the same column width — no shift.
+        list.set_label_ids(vec![Some("blocked".to_string())]);
+        assert_eq!(label_col_width(&list, &master), widest);
+    }
+
+    #[test]
+    fn label_col_width_caps_a_long_master_label() {
+        // A master label longer than the cap clamps to LABEL_COL_MAX (+1 separator).
+        let master = SessionLabelMaster {
+            labels: vec![label_def(
+                "long",
+                "Averylonglabelname",
+                LabelColor::Gray,
+                Some("◇"),
+            )],
+        };
+        let mut list = WorktreeList::new("ws", vec![wt("main", "/r/main")]);
         list.set_label_ids(vec![Some("long".to_string())]);
         assert_eq!(label_col_width(&list, &master), LABEL_COL_MAX + 1);
     }
@@ -4401,7 +4433,7 @@ mod tests {
         assert_eq!(cols.pr, 3); // "<icon> 2" — both sessions fold to one badge
         assert_eq!(
             cols.time,
-            console::measure_text_width(&relative_time(now, at(now, 12))) // "12min ago"
+            console::measure_text_width(&relative_time(now, at(now, 12))) // "12m ago"
         );
     }
 
@@ -4517,7 +4549,7 @@ mod tests {
 
     #[test]
     fn detail_content_joins_the_cells_in_order_with_single_space_gaps() {
-        let time = rpad(&style("3min ago").dim().to_string(), 8);
+        let time = rpad(&style("3m ago").dim().to_string(), 6);
         let commits = commits_cell(
             Some(AheadBehind {
                 ahead: 2,
@@ -4538,7 +4570,7 @@ mod tests {
         let line = detail_content(AgentState::Running, &cells, 40);
         let plain = console::strip_ansi_codes(&line);
         assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
-        assert!(plain.contains("3min ago ↑2 ↓1 +1 -2"));
+        assert!(plain.contains("3m ago ↑2 ↓1 +1 -2"));
         assert!(plain.ends_with("+1 -2"));
     }
 
@@ -4552,7 +4584,7 @@ mod tests {
                 .into_owned()
         };
         assert_eq!(ago(5), "now"); // under a minute
-        assert_eq!(ago(180), "3min ago"); // minutes
+        assert_eq!(ago(180), "3m ago"); // minutes
         assert_eq!(ago(7200), "2h ago"); // hours
         assert_eq!(ago(2 * 86_400), "2d ago"); // days
                                                // A future timestamp (clock skew) clamps to "now".
