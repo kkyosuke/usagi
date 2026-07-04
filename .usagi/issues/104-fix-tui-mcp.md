@@ -1,13 +1,13 @@
 ---
 number: 104
 title: fix(tui): MCP で作成した新規セッションがサイドバーに即反映されないことがある
-status: todo
+status: done
 priority: high
 labels: [tui, orchestration]
 dependson: []
 related: [100]
 created_at: 2026-07-04T13:25:09.114976+00:00
-updated_at: 2026-07-04T21:24:10.626941+00:00
+updated_at: 2026-07-04T21:38:30.986718+00:00
 ---
 
 ## 背景
