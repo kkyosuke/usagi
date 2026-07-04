@@ -11,7 +11,8 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。`usagi issue list` / `usagi issue show <番号>`（CLI）や MCP ツール（`issue_list` / `issue_search` / `issue_get`）で一覧・参照する。
 
 - 各 issue のメタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
-- 着手したら `status` を `in-progress`、完了したら `done` に更新する（`usagi issue update <番号> --status ...` または MCP `issue_update`）。
+- 着手したら `status` を `in-progress`、完了したら `done` に更新する（`usagi issue update <番号> --status ...` または MCP `issue_update`）。**`status` の更新は必ずその issue を担当する session の worktree 内で行う**。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される（共有され、履歴も残る）。
+- **`main`（リポジトリルート）では issue の `status` を書き換えない**。root/コーディネータが `main` で `status` を触ると、その差分が並行する session の PR と分岐・衝突する。ある issue の `status` を書くのは常にその session の枝だけ、という「書き手の一本化」で衝突を防ぐ。`main` で root が行うのは issue の**定義**（作成・本文編集）のコミットと delegate だけで、`status`（in-progress / done）には触れない。
 - worktree 名・ブランチ名は対象 issue の内容に合わせると対応がわかりやすい。
 
 ### 1. 隔離された作業環境を用意する
