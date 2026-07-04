@@ -25,6 +25,15 @@ pub struct McpServer {
     repo: PathBuf,
 }
 
+/// An issue rendered as a ready-to-run agent prompt (see
+/// [`McpServer::render_prompt`]): the issue's number and title plus the prompt
+/// text fed to a session's agent.
+pub(crate) struct RenderedPrompt {
+    pub number: u32,
+    pub title: String,
+    pub prompt: String,
+}
+
 impl McpServer {
     /// Build a server operating on the repository at `repo`.
     pub fn new(repo: impl AsRef<Path>) -> Self {
@@ -69,13 +78,27 @@ impl McpServer {
 
     fn tool_to_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: NumberArgs = parse_args(arguments)?;
-        match issue::get(&self.repo, args.number).map_err(|e| e.to_string())? {
-            Some(issue) => Ok(to_pretty(&json!({
-                "number": issue.number,
-                "title": issue.title,
-                "prompt": issue::to_prompt(&issue),
-            }))),
-            None => Err(format!("no issue #{}", args.number)),
+        let rendered = self.render_prompt(args.number)?;
+        Ok(to_pretty(&json!({
+            "number": rendered.number,
+            "title": rendered.title,
+            "prompt": rendered.prompt,
+        })))
+    }
+
+    /// Render issue `number` as a ready-to-run agent prompt, returning it as typed
+    /// fields (not JSON text). Shared by the `issue_to_prompt` tool and the unified
+    /// server's `session_delegate_issue`, so the composite can delegate an issue
+    /// without parsing this tool's serialized output back out. Errors if the issue
+    /// does not exist.
+    pub(crate) fn render_prompt(&self, number: u32) -> Result<RenderedPrompt, String> {
+        match issue::get(&self.repo, number).map_err(|e| e.to_string())? {
+            Some(issue) => Ok(RenderedPrompt {
+                number: issue.number,
+                title: issue.title.clone(),
+                prompt: issue::to_prompt(&issue),
+            }),
+            None => Err(format!("no issue #{number}")),
         }
     }
 
