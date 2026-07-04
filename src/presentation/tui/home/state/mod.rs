@@ -654,12 +654,6 @@ pub struct HomeState {
     /// While non-empty the top-right corner stacks them instead of the update
     /// notice, so the user sees in-flight work without the screen freezing.
     tasks: Vec<TaskRow>,
-    /// The workspace root path — the directory the root row (`⌂ root`) operates
-    /// in. The list's worktrees carry their own paths, but the root row has
-    /// none, so this is stored separately to recognise the root's live embedded
-    /// session (keyed by this path in `live` / `running` / …). Injected by
-    /// `mod.rs`; empty until set (tests that never preview the root leave it so).
-    root_path: PathBuf,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
     /// sidebar reads it for the root row's memo marker; the 切替 preview and the
@@ -810,7 +804,6 @@ impl HomeState {
             update: None,
             loading: None,
             tasks: Vec::new(),
-            root_path: PathBuf::new(),
             root_note: None,
             extra_groups: Vec::new(),
             op_target: None,
@@ -853,16 +846,19 @@ impl HomeState {
     /// Record the workspace root path so the root row (`⌂ root`) can be matched
     /// against the live / running / waiting / done path sets — its embedded
     /// session is keyed by this path, exactly as a worktree row is keyed by its
-    /// own. Injected by `mod.rs` at construction.
+    /// own. Injected by `mod.rs` at construction. The value now lives on the
+    /// primary [`WorkspaceGroup`] value type, so this delegates to the list's first
+    /// group (and [`rebuild_list`](Self::rebuild_list) carries it across rebuilds).
     pub fn set_root_path(&mut self, root: impl Into<PathBuf>) {
-        self.root_path = root.into();
+        self.list.set_root_path(root);
     }
 
-    /// The workspace root path the root row operates in (see [`set_root_path`]).
+    /// The workspace root path the root row operates in (see [`set_root_path`]),
+    /// read from the primary [`WorkspaceGroup`] value type.
     ///
     /// [`set_root_path`]: Self::set_root_path
     pub fn root_path(&self) -> &Path {
-        &self.root_path
+        self.list.root_path()
     }
 
     /// Set which right-pane action surface 在席 (Focus) presents (injected from
@@ -1237,7 +1233,7 @@ impl HomeState {
     /// — the primary, or an extra group with the same root — so adding twice does
     /// not duplicate it.
     pub fn add_extra_group(&mut self, group: GroupSource) -> bool {
-        if group.root_path == self.root_path
+        if group.root_path.as_path() == self.root_path()
             || self
                 .extra_groups
                 .iter()
@@ -1281,12 +1277,14 @@ impl HomeState {
         } else {
             self.list.selected_group()
         };
-        // `selected_group()` is always a valid group index, so group 0 is the
-        // primary and `i = g - 1` indexes the extra (unite) workspaces in step.
-        match selected_group.checked_sub(1) {
-            None => self.root_path.clone(),
-            Some(i) => self.extra_groups[i].root_path.clone(),
-        }
+        // The root now lives on each group's value type, so resolve it straight
+        // from the cursor's group rather than juggling the primary field and the
+        // extra-group sources in parallel. `selected_group()` is always valid.
+        self.list
+            .groups()
+            .get(selected_group)
+            .map(|g| g.root_path().to_path_buf())
+            .unwrap_or_default()
     }
 
     /// The root-row note of the cursor's group (the primary's, or the matching
@@ -1309,20 +1307,20 @@ impl HomeState {
         // unknown qualifier falls through to name-only resolution.
         if let Some(workspace) = workspace {
             if workspace == self.list.workspace_name() {
-                return self.root_path.clone();
+                return self.root_path().to_path_buf();
             }
             if let Some(group) = self.extra_groups.iter().find(|g| g.name == workspace) {
                 return group.root_path.clone();
             }
         }
         if self.sessions.iter().any(|s| s.name == name) {
-            return self.root_path.clone();
+            return self.root_path().to_path_buf();
         }
         self.extra_groups
             .iter()
             .find(|g| g.sessions.iter().any(|s| s.name == name))
             .map(|g| g.root_path.clone())
-            .unwrap_or_else(|| self.root_path.clone())
+            .unwrap_or_else(|| self.root_path().to_path_buf())
     }
 
     /// Record the workspace a `session` operation is about to act on (the cursor's
@@ -1386,9 +1384,9 @@ impl HomeState {
             RowAnchor::Root(self.list.active_group())
         };
         // The fresh list drops the `Ctrl-^` jump target, so carry it across the
-        // rebuild by name (it is re-validated lazily, so a session that vanished
-        // in this sync simply yields no jump).
-        let previous = self.list.previous_active_name().map(str::to_string);
+        // rebuild by its `(root, name)` identity (re-validated lazily, so a session
+        // that vanished in this sync simply yields no jump).
+        let previous = self.list.previous_active().cloned();
         self.rebuild_list();
         // Restore by the row's identity *within its workspace group*. In 統合
         // (unite) mode every workspace contributes a synthetic root row named
@@ -1422,6 +1420,10 @@ impl HomeState {
     /// order, or waiting-first when [`sort_waiting`](Self::sort_waiting) is on.
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
+        // The primary workspace root lives on the first group's value type; carry
+        // it across the rebuild (which replaces the list wholesale), exactly as the
+        // workspace name is carried above.
+        let root_path = self.list.root_path().to_path_buf();
         let order = self.display_order();
         let rows = order
             .iter()
@@ -1448,6 +1450,7 @@ impl HomeState {
             .map(|&i| self.sessions[i].label_id.clone())
             .collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
+        list.set_root_path(root_path);
         list.set_notes(notes);
         list.set_label_ids(label_ids);
         // The root row's note lives on the workspace state (it belongs to no
@@ -1458,6 +1461,7 @@ impl HomeState {
         for group in &self.extra_groups {
             list.add_group(WorkspaceGroup::from_sessions(
                 &group.name,
+                group.root_path.clone(),
                 &group.sessions,
                 group.root_note.is_some(),
             ));
@@ -3477,7 +3481,11 @@ impl HomeState {
             .sessions
             .iter()
             .map(|session| {
-                RemoveEntry::new(session.name.clone(), self.root_path.clone(), primary_label)
+                RemoveEntry::new(
+                    session.name.clone(),
+                    self.root_path().to_path_buf(),
+                    primary_label,
+                )
             })
             .collect();
 

@@ -183,12 +183,18 @@ fn previous_row_is_none_once_the_recorded_session_no_longer_exists() {
     list.activate_selected(); // previous = root
     list.move_down(); // cursor on "fix"
     list.activate_selected(); // previous = "feature"
-    assert_eq!(list.previous_active_name(), Some("feature"));
+    assert_eq!(
+        list.previous_active(),
+        Some(&(PathBuf::new(), "feature".to_string()))
+    );
     assert_eq!(list.previous_row(), Some(2));
-    // Carry the name onto a list that no longer has "feature".
+    // Carry the identity onto a list that no longer has "feature".
     let mut rebuilt = WorktreeList::new("usagi", vec![worktree("main"), worktree("fix")]);
-    rebuilt.set_previous_active(list.previous_active_name().map(str::to_string));
-    assert_eq!(rebuilt.previous_active_name(), Some("feature"));
+    rebuilt.set_previous_active(list.previous_active().cloned());
+    assert_eq!(
+        rebuilt.previous_active(),
+        Some(&(PathBuf::new(), "feature".to_string()))
+    );
     assert_eq!(rebuilt.previous_row(), None);
 }
 
@@ -341,6 +347,48 @@ fn name_lookups_find_the_first_match_across_groups() {
     assert!(!list.activate_by_name("nope"));
 }
 
+/// Two groups, each holding a worktree named "shared", with distinct workspace
+/// roots. Flat rows: 0 wsA.root, 1 a1, 2 shared(A), 3 wsB.root, 4 shared(B).
+fn united_with_shared_names() -> WorktreeList {
+    let mut a = WorkspaceGroup::new("wsA", vec![worktree("a1"), worktree("shared")]);
+    a.set_root_path("/wsA");
+    let mut b = WorkspaceGroup::new("wsB", vec![worktree("shared")]);
+    b.set_root_path("/wsB");
+    WorktreeList::from_groups(vec![a, b])
+}
+
+#[test]
+fn ctrl_caret_jump_back_is_qualified_by_the_group_root() {
+    let mut list = united_with_shared_names();
+    // Leave wsB's "shared" (row 4) behind for wsA's "a1" (row 1): the jump-back
+    // target is wsB's "shared" at row 4 — not wsA's same-named "shared" at row 2,
+    // which a name-only lookup would wrongly return first.
+    list.focus_index(4);
+    list.activate_selected();
+    list.focus_index(1);
+    list.activate_selected();
+    assert_eq!(
+        list.previous_active(),
+        Some(&(std::path::PathBuf::from("/wsB"), "shared".to_string()))
+    );
+    assert_eq!(list.previous_row(), Some(4));
+    // The identity survives a carry across a rebuild that keeps both "shared" rows.
+    let mut rebuilt = united_with_shared_names();
+    rebuilt.set_previous_active(list.previous_active().cloned());
+    assert_eq!(rebuilt.previous_row(), Some(4));
+}
+
+#[test]
+fn united_totals_count_every_groups_root_and_worktrees() {
+    let list = united_with_shared_names();
+    // Two roots + three worktrees.
+    assert_eq!(list.session_count(), 5);
+    let refs = list.refs();
+    assert_eq!(refs.len(), 5);
+    let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["root", "a1", "shared", "root", "shared"]);
+}
+
 #[test]
 fn refs_list_every_groups_root_then_its_worktrees() {
     let mut list = united();
@@ -383,6 +431,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
     };
     let group = WorkspaceGroup::from_sessions(
         "wsB",
+        "/wsB",
         &[
             session("main", None, None),
             session("feat", Some("Feature"), Some("a note")),
@@ -390,6 +439,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
         true,
     );
     assert_eq!(group.name(), "wsB");
+    assert_eq!(group.root_path(), std::path::Path::new("/wsB"));
     assert_eq!(group.worktrees().len(), 2);
     assert_eq!(group.worktrees()[0].branch.as_deref(), Some("main"));
     assert_eq!(group.display_label(1), "Feature"); // display-name override

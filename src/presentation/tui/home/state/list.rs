@@ -14,7 +14,7 @@
 //! on. The cursor (`selected_index`) and the command target (`active_index`) are
 //! indices into that flat space.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::domain::workspace_state::{
     AheadBehind, BranchStatus, DiffStat, PrLink, SessionRecord, WorktreeState,
@@ -83,6 +83,14 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
 #[derive(Debug, Clone)]
 pub struct WorkspaceGroup {
     name: String,
+    /// The workspace root directory — the `⌂ root` row's working dir, and the
+    /// target `session` commands run against when the cursor is in this group. It
+    /// is the group's identity across the flat row space: a `(root_path, name)`
+    /// pair addresses one session unambiguously even when another group holds a
+    /// session of the same name. Empty until injected (a single-workspace list
+    /// seeds it through [`WorktreeList::set_root_path`]); the extra 統合(unite)
+    /// groups carry it from their [`from_sessions`](Self::from_sessions) build.
+    root_path: PathBuf,
     worktrees: Vec<WorktreeState>,
     /// Sidebar label overrides, aligned 1:1 with `worktrees`: `labels[i]` is the
     /// custom display name for `worktrees[i]`, or `None` to show its branch. The
@@ -117,12 +125,14 @@ impl WorkspaceGroup {
     /// Build a group's rows from a workspace's recorded sessions — the same
     /// collapse [`HomeState::rebuild_list`] does for the primary workspace: one row
     /// per session via [`session_row`], carrying each session's display-name label
-    /// and note marker, plus whether the workspace root itself carries a note.
-    /// Used by the orchestrator to build the extra 統合(unite) groups.
+    /// and note marker, the workspace `root_path`, plus whether the workspace root
+    /// itself carries a note. Used by the orchestrator to build the extra
+    /// 統合(unite) groups.
     ///
     /// [`HomeState::rebuild_list`]: super::HomeState
     pub fn from_sessions(
         name: impl Into<String>,
+        root_path: impl Into<PathBuf>,
         sessions: &[SessionRecord],
         root_has_note: bool,
     ) -> Self {
@@ -131,6 +141,7 @@ impl WorkspaceGroup {
         let notes = sessions.iter().map(|s| s.note.is_some()).collect();
         let label_ids = sessions.iter().map(|s| s.label_id.clone()).collect();
         let mut group = Self::with_labels(name, rows, labels);
+        group.set_root_path(root_path);
         group.set_notes(notes);
         group.set_label_ids(label_ids);
         group.set_root_note_marker(root_has_note);
@@ -149,6 +160,7 @@ impl WorkspaceGroup {
         let label_ids = vec![None; worktrees.len()];
         Self {
             name: name.into(),
+            root_path: PathBuf::new(),
             worktrees,
             labels,
             notes,
@@ -160,6 +172,19 @@ impl WorkspaceGroup {
     /// The workspace name shown in this group's header / title bar.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The workspace root directory this group operates in (see
+    /// [`root_path`](Self::root_path)).
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// Record this group's workspace root directory (the primary group is seeded
+    /// through [`WorktreeList::set_root_path`]; extra groups carry it from
+    /// [`from_sessions`](Self::from_sessions)).
+    pub fn set_root_path(&mut self, root_path: impl Into<PathBuf>) {
+        self.root_path = root_path.into();
     }
 
     /// The group's session rows (one per session, root row excluded).
@@ -239,15 +264,17 @@ pub struct WorktreeList {
     groups: Vec<WorkspaceGroup>,
     selected_index: usize,
     active_index: usize,
-    /// The display name of the session that was active *before* the current one,
-    /// or `None` until the active row has moved off its initial spot. It is the
-    /// target `Ctrl-^` jumps back to (vim's `Ctrl-^` / tmux's `last-window`):
-    /// recorded by [`activate_selected`](Self::activate_selected) whenever the
-    /// active row changes to a *different* session, and resolved back to a current
-    /// row by [`previous_row`](Self::previous_row). Stored as a name, not an index,
-    /// so a list rebuild (a background re-sync) keeps it pointing at the same
-    /// session — and drops it when that session is gone.
-    previous_active: Option<String>,
+    /// The `(workspace root, session name)` of the row that was active *before* the
+    /// current one, or `None` until the active row has moved off its initial spot.
+    /// It is the target `Ctrl-^` jumps back to (vim's `Ctrl-^` / tmux's
+    /// `last-window`): recorded by [`activate_selected`](Self::activate_selected)
+    /// whenever the active row changes to a *different* row, and resolved back to a
+    /// current row by [`previous_row`](Self::previous_row). Qualified by the group's
+    /// root path — not the bare name — so a same-named session in another
+    /// 統合(unite) group is never mistaken for it. Stored by identity, not index, so
+    /// a list rebuild (a background re-sync) keeps it pointing at the same session —
+    /// and drops it when that session is gone.
+    previous_active: Option<(PathBuf, String)>,
 }
 
 impl WorktreeList {
@@ -309,6 +336,27 @@ impl WorktreeList {
 
     pub fn workspace_name(&self) -> &str {
         self.first().map(WorkspaceGroup::name).unwrap_or("")
+    }
+
+    /// The primary (first group's) workspace root directory — what the legacy
+    /// single-workspace [`HomeState::root_path`] delegates to.
+    ///
+    /// [`HomeState::root_path`]: super::HomeState::root_path
+    pub fn root_path(&self) -> &Path {
+        self.first()
+            .map(WorkspaceGroup::root_path)
+            .unwrap_or(Path::new(""))
+    }
+
+    /// Record the primary (first group's) workspace root directory — what
+    /// [`HomeState::set_root_path`] delegates to. A no-op on the (never-occurring)
+    /// empty list.
+    ///
+    /// [`HomeState::set_root_path`]: super::HomeState::set_root_path
+    pub fn set_root_path(&mut self, root_path: impl Into<PathBuf>) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_root_path(root_path);
+        }
     }
 
     pub fn worktrees(&self) -> &[WorktreeState] {
@@ -470,6 +518,17 @@ impl WorktreeList {
         self.locate(self.active_index).map(|(g, _)| g).unwrap_or(0)
     }
 
+    /// The workspace root of the group the active row sits in — the group side of
+    /// the `(root, name)` identity [`activate_selected`](Self::activate_selected)
+    /// records for the `Ctrl-^` jump-back, so it survives a rebuild that reorders
+    /// or drops groups. Empty when the active index is somehow out of range.
+    fn active_group_root(&self) -> &Path {
+        self.groups
+            .get(self.active_group())
+            .map(WorkspaceGroup::root_path)
+            .unwrap_or(Path::new(""))
+    }
+
     /// Replaces the PR links of the row whose session root is `root`, returning
     /// whether the set changed.
     ///
@@ -515,37 +574,42 @@ impl WorktreeList {
     /// untouched (so a no-op focus does not erase where to jump back to).
     pub fn activate_selected(&mut self) -> &str {
         if self.selected_index != self.active_index {
-            self.previous_active = Some(self.active_name().to_string());
+            // Record the row being *left* by its `(root, name)` identity, so the
+            // jump-back target is the exact session — not a same-named one in a
+            // different 統合(unite) group.
+            self.previous_active = Some((
+                self.active_group_root().to_path_buf(),
+                self.active_name().to_string(),
+            ));
         }
         self.active_index = self.selected_index;
         self.active_name()
     }
 
-    /// The name of the previously active session, for carrying the `Ctrl-^` jump
-    /// target across a list rebuild (a background re-sync drops the list and
-    /// builds a fresh one). Paired with [`set_previous_active`](Self::set_previous_active).
-    pub fn previous_active_name(&self) -> Option<&str> {
-        self.previous_active.as_deref()
+    /// The previously active row's `(workspace root, session name)` identity, for
+    /// carrying the `Ctrl-^` jump target across a list rebuild (a background
+    /// re-sync drops the list and builds a fresh one). Paired with
+    /// [`set_previous_active`](Self::set_previous_active).
+    pub fn previous_active(&self) -> Option<&(PathBuf, String)> {
+        self.previous_active.as_ref()
     }
 
-    /// Restore the previously active session after a rebuild, so the `Ctrl-^`
-    /// jump survives a background re-sync. The name is validated lazily by
+    /// Restore the previously active row's identity after a rebuild, so the
+    /// `Ctrl-^` jump survives a background re-sync. It is validated lazily by
     /// [`previous_row`](Self::previous_row), so one that no longer matches simply
     /// yields no jump rather than an error.
-    pub fn set_previous_active(&mut self, name: Option<String>) {
-        self.previous_active = name;
+    pub fn set_previous_active(&mut self, previous: Option<(PathBuf, String)>) {
+        self.previous_active = previous;
     }
 
     /// The flat row the previously active session now sits at (a group's root row
     /// for [`ROOT_NAME`]), or `None` when no previous session has been recorded
-    /// yet or it has since been removed from the list. Resolved by name so a list
-    /// rebuild keeps it pointing at the same session — the target `Ctrl-^` focuses.
+    /// yet or it has since been removed from the list. Resolved by `(root, name)`
+    /// so a list rebuild keeps it pointing at the same session — the target
+    /// `Ctrl-^` focuses — even when another group holds a same-named session.
     pub fn previous_row(&self) -> Option<usize> {
-        let name = self.previous_active.as_deref()?;
-        (0..self.selectable_rows()).find(|&row| match self.worktree_at(row) {
-            Some(w) => worktree_name(w) == name,
-            None => name == ROOT_NAME,
-        })
+        let (root, name) = self.previous_active.as_ref()?;
+        self.row_of_qualified(root, name)
     }
 
     /// The display name of the active row: its branch, or [`ROOT_NAME`] for a
@@ -598,6 +662,31 @@ impl WorktreeList {
             self.worktree_at(row)
                 .is_some_and(|w| worktree_name(w) == name)
         })
+    }
+
+    /// The flat row of the session named `name` in the group rooted at `root` — a
+    /// group's root row for [`ROOT_NAME`], otherwise its matching worktree.
+    /// Qualified by the group's root path so a same-named session in another
+    /// 統合(unite) group is never matched. Backs the `Ctrl-^` jump-back
+    /// ([`previous_row`](Self::previous_row)), whose target is carried by its stable
+    /// `(root, name)` identity. `None` when no group has that root, or it has no
+    /// such session.
+    fn row_of_qualified(&self, root: &Path, name: &str) -> Option<usize> {
+        let mut row = 0;
+        for group in &self.groups {
+            let here = group.root_path() == root;
+            if here && name == ROOT_NAME {
+                return Some(row);
+            }
+            row += 1;
+            for w in &group.worktrees {
+                if here && worktree_name(w) == name {
+                    return Some(row);
+                }
+                row += 1;
+            }
+        }
+        None
     }
 
     /// The flat row of the `group`'s synthetic root row, or `None` when the group
