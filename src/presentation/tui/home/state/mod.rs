@@ -1448,6 +1448,26 @@ impl HomeState {
         self.rebuild_list_keep_cursor();
     }
 
+    /// Swap in a freshly re-synced set of sessions for the workspace rooted at
+    /// `root`, routing them to the matching sidebar group: the primary workspace
+    /// or one of the 統合(unite) groups. Like [`refresh_sessions`](Self::refresh_sessions)
+    /// it keeps the cursor and active row on the same session names.
+    ///
+    /// Used by the background `state.json` watcher, which republishes each
+    /// workspace's recorded sessions keyed by its root (an agent's MCP
+    /// `session_create` / `session_delegate_issue`, another window, or the CLI may
+    /// have written any of them). A `root` matching no displayed workspace — one
+    /// dropped from unite mode after the refresh was queued — is ignored rather
+    /// than misfiled onto the primary.
+    pub fn refresh_sessions_for(&mut self, root: &Path, sessions: Vec<SessionRecord>) {
+        if root == self.root_path() {
+            self.refresh_sessions(sessions);
+        } else if let Some(i) = self.extra_groups.iter().position(|g| g.root_path == root) {
+            self.extra_groups[i].sessions = sessions;
+            self.rebuild_list_keep_cursor();
+        }
+    }
+
     /// Rebuild the worktree pane while keeping the cursor, active row, and `Ctrl-^`
     /// jump target on the same sessions by name. Used whenever the rows are rebuilt
     /// under the user (a background re-sync, a manual reorder, the waiting-first
