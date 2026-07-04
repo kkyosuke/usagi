@@ -1857,16 +1857,28 @@ const HEADER_TAB_DIVIDER: &str = " │ ";
 pub(super) fn header_tab_rows(
     header: String,
     strip: Option<&TabStrip>,
-    loading_label: Option<&str>,
+    loading: Option<(usize, &str)>,
     width: usize,
 ) -> Vec<String> {
     let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
         return vec![widgets::clip_to_width_cjk(&header, width)];
     };
     let (mut chips, marker) = tab_strip_parts(strip);
-    if let Some(label) = loading_label {
+    if let Some((frame, label)) = loading {
         chips.push_str(&" ".repeat(TAB_CHIP_GAP));
-        chips.push_str(&style(format!("(｡･-･) {}", label)).dim().to_string());
+        let spinner = widgets::spinner_char(frame);
+        let text = format!("{} (｡･-･) {}", spinner, label);
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let filled_count = (frame / 2) % (len + 5);
+        for (i, c) in chars.into_iter().enumerate() {
+            let s = c.to_string();
+            if i < filled_count {
+                chips.push_str(&style(s).accent().bold().to_string());
+            } else {
+                chips.push_str(&style(s).dim().to_string());
+            }
+        }
     }
     let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
     // Push the marker right past the identity and the divider so it lands under
@@ -2975,7 +2987,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     };
     let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    let mut lines = header_tab_rows(header, Some(&combined), None, width);
+    let mut lines = header_tab_rows(header, Some(&combined), None::<(usize, &str)>, width);
 
     // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
     // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows
@@ -3330,7 +3342,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let mut lines = header_tab_rows(
         header,
         if live { state.terminal_tabs() } else { None },
-        None,
+        None::<(usize, &str)>,
         width,
     );
 
@@ -3490,7 +3502,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             let mut head = header_tab_rows(
                 header,
                 state.terminal_tabs(),
-                state.loading().map(|l| l.label()),
+                state.loading().map(|l| (l.frame(), l.label())),
                 right_w,
             );
             head.resize(super::TAB_BAR_ROWS, String::new());

@@ -549,13 +549,13 @@ pub(super) fn event_loop(
         // focused session has a live snapshot. Folded into one `if let` (rather
         // than a guard `if` wrapping an inner `if let`) so the whole refresh is a
         // single covered branch.
-        if let Some((dir, view)) = drive_now
-            .then(|| selected_dir(&state, workspace_root))
-            .and_then(|dir| (wiring.preview)(&dir, state.sidebar()).map(|view| (dir, view)))
-        {
+        if let Some(dir) = drive_now.then(|| selected_dir(&state, workspace_root)) {
+            let view = (wiring.preview)(&dir, state.sidebar());
             let (labels, active) = (wiring.tab_op)(&dir, None);
             let mut surface = state.surface_writer(SurfaceOwner::Preview);
-            surface.set_view(view);
+            if let Some(v) = view {
+                surface.set_view(v);
+            }
             surface.set_tabs(labels, active);
         }
         // The task panel and the install rabbit animate on the clock, so a frame
