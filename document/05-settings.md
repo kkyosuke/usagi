@@ -141,8 +141,10 @@
 > ある場合は workspace 側が優先されます。`agent` / `terminal` の embedded pane を新規起動するとき、usagi が
 > マージ後の reference を `op read --no-newline <ref>` で解決し、子プロセス環境へ注入します。例:
 > `{ "GH_TOKEN": "op://Private/GitHub/token" }`。値は secret 本体ではなく 1Password reference だけを保存し、
-> 解決した secret は起動コマンド行には載せません。`op` の認証は、既存の `op signin` セッションや外部から渡した
-> `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みに従います。解決に失敗した変数は注入せず、
+> 解決した secret は起動コマンド行には載せません。`op` の認証は、`usagi op login`
+> で保存したサービスアカウントトークン（あれば `OP_SERVICE_ACCOUNT_TOKEN` として `op read` に渡します）、
+> または既存の `op signin` セッションや外部から渡した `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の
+> 通常の仕組みに従います（[`usagi op login`](03-commands/01-cli.md#usagi-op)）。解決に失敗した変数は注入せず、
 > エラーログに記録して pane 起動は継続します。既に起動済みの pane には反映されないため、変更後は新しい agent /
 > terminal pane を開き直してください。起動時のペイン復旧では、同じ workspace root に属する root / session worktree の
 > 復旧ペインが同じ `env` を使うため、reference の解決結果を workspace root 単位で共有し、同じ `op read` を重複実行しません。
