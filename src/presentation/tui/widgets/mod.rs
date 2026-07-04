@@ -867,6 +867,42 @@ pub fn overlay_modal(
     overlay_centered(base, width, &boxed(title, inner, body));
 }
 
+/// Composites a titled modal box centred inside a rectangular **region** of
+/// `base`, the region-scoped sibling of [`overlay_modal`]: it wraps `body` in a
+/// [`boxed`] frame and overlays it with [`overlay_region_centered`], so the box
+/// floats within one pane (e.g. the right pane) while the columns outside the
+/// region — the sidebar — stay visible around it.
+///
+/// `region_left` / `region_width` bound the columns and `region_top` /
+/// `region_height` the rows the box is centred within. `inner_width` is clamped
+/// to the region (not the whole screen), so a body built with
+/// [`modal_inner_width`]`(region_width, inner_width)` lines its rows up inside the
+/// box. The box is skipped when it cannot fit the region (see
+/// [`overlay_region_centered`]).
+#[allow(clippy::too_many_arguments)]
+pub fn overlay_region_modal(
+    base: &mut [String],
+    width: usize,
+    region_left: usize,
+    region_width: usize,
+    region_top: usize,
+    region_height: usize,
+    title: &str,
+    inner_width: usize,
+    body: &[String],
+) {
+    let inner = modal_inner_width(region_width, inner_width);
+    overlay_region_centered(
+        base,
+        width,
+        region_left,
+        region_width,
+        region_top,
+        region_height,
+        &boxed(title, inner, body),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,6 +1286,45 @@ mod tests {
         let second = console::strip_ansi_codes(&base[3]).into_owned();
         assert_eq!(&first[9..11], "XX");
         assert_eq!(&second[9..11], "YY");
+    }
+
+    #[test]
+    fn overlay_region_modal_boxes_the_body_and_floats_it_within_the_region() {
+        // A titled box floats centred inside the right-hand region (cols 10..30 of
+        // a 30-wide frame), leaving the columns to its left — the "sidebar" — intact.
+        let mut base = vec![".".repeat(30); 8];
+        overlay_region_modal(
+            &mut base,
+            30,
+            10, // region_left
+            20, // region_width
+            1,  // region_top
+            6,  // region_height
+            "T",
+            8, // inner_width
+            &["hi".to_string()],
+        );
+        let joined = console::strip_ansi_codes(&base.join("\n")).into_owned();
+        // The body and the box frame (with its embedded title) both landed.
+        assert!(joined.contains("hi"));
+        assert!(joined.contains("┌─ T"));
+        assert!(joined.contains('└'));
+        // Every row keeps its leading sidebar columns (cols 0..10) untouched.
+        for row in &base {
+            let plain = console::strip_ansi_codes(row).into_owned();
+            assert_eq!(&plain[..10], "..........");
+        }
+    }
+
+    #[test]
+    fn overlay_region_modal_clamps_the_inner_width_to_the_region() {
+        // A desired inner width wider than the region is clamped so the box still
+        // fits inside it (rather than being skipped for overrunning).
+        let mut base = vec![" ".repeat(30); 6];
+        overlay_region_modal(&mut base, 30, 10, 16, 0, 6, "", 999, &["x".to_string()]);
+        let joined = console::strip_ansi_codes(&base.join("\n")).into_owned();
+        assert!(joined.contains('┌'));
+        assert!(joined.contains('x'));
     }
 
     #[test]

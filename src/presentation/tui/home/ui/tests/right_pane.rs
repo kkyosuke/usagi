@@ -272,19 +272,28 @@ fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
 fn right_pane_shows_the_focus_menu_or_prompt() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    // Menu (the default) lists the session commands.
-    let menu = stripped(&right_pane_contents(&state, 40, 12));
+    // Menu (the default) floats as an overlay modal over the frame: it is not
+    // drawn inline in the right pane, and its title carries the identity while its
+    // body lists the session commands.
+    assert!(state.focus_menu_overlay());
+    assert!(
+        !stripped(&right_pane_contents(&state, 77, 12)).contains("Run a command:"),
+        "the menu is not drawn inline in the right pane"
+    );
+    let menu = stripped(&render_frame(24, 120, &state));
     assert!(menu.contains("session: main"));
     assert!(menu.contains("terminal"));
     assert!(menu.contains("agent"));
     assert!(menu.contains('›'));
 
-    // Prompt shows a typed command line with the session-scope hint.
+    // Prompt shows a typed command line with the session-scope hint, inline in the
+    // right pane — only the menu surface floats as an overlay.
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_focus(1);
     for c in "ter".chars() {
         state.focus_prompt_mut().insert(c);
     }
+    assert!(!state.focus_menu_overlay());
     let prompt = stripped(&right_pane_contents(&state, 40, 12));
     assert!(prompt.contains("session: main"));
     assert!(prompt.contains("❯ ter"));
@@ -300,7 +309,7 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
     // The agent row always names the default CLI a plain launch uses.
-    let base = stripped(&right_pane_contents(&state, 50, 16));
+    let base = stripped(&render_frame(24, 120, &state));
     assert!(base.contains("Launch Claude"));
     // The expand affordance (▸ / "→ pick agent") shows while the agent row is the
     // highlighted one — and the fixed order highlights `agent` on entry.
@@ -308,7 +317,7 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     assert!(base.contains("→ pick agent"));
     // Moving off the agent row hides the affordance.
     state.focus_menu_move_down(); // agent -> terminal
-    let off_agent = stripped(&right_pane_contents(&state, 50, 16));
+    let off_agent = stripped(&render_frame(24, 120, &state));
     assert!(off_agent.contains("Launch Claude"));
     assert!(off_agent.contains("  Launch Claude"));
     assert!(!off_agent.contains("→ pick agent"));
@@ -316,7 +325,7 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     state.focus_menu_move_up(); // terminal -> agent
                                 // Expanding lists every installed agent (default tagged) and swaps the hint.
     state.focus_menu_expand_agent();
-    let expanded = stripped(&right_pane_contents(&state, 50, 16));
+    let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("Codex"));
     assert!(expanded.contains("(default)"));
@@ -330,18 +339,18 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     // On entry the cursor is on `agent`, so `close` (and `terminal`) reserve the
     // 2-column chevron slot with blanks — their descriptions never shift as the
     // cursor moves on/off them (no CLS), like the `agent` row.
-    let off_close = stripped(&right_pane_contents(&state, 60, 18));
+    let off_close = stripped(&render_frame(24, 120, &state));
     assert!(off_close.contains("  Close the focused session"));
     assert!(off_close.contains("  Open a shell"));
     // Fixed order: agent is first and close is last; move up once (wraps) to close.
     state.focus_menu_move_up();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
-    let on_close = stripped(&right_pane_contents(&state, 60, 18));
+    let on_close = stripped(&render_frame(24, 120, &state));
     assert!(on_close.contains('▸'));
     assert!(on_close.contains("→ expand"));
     // Expanding shows the two sub-rows (plain close and --force) and swaps the hint.
     state.focus_menu_expand_close();
-    let expanded = stripped(&right_pane_contents(&state, 60, 18));
+    let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("close --force"));
     assert!(expanded.contains("(safe)"));
@@ -349,7 +358,7 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     assert!(expanded.contains("Enter run"));
     // Collapsing hides the sub-rows.
     state.focus_menu_collapse_close();
-    let collapsed = stripped(&right_pane_contents(&state, 60, 18));
+    let collapsed = stripped(&render_frame(24, 120, &state));
     assert!(!collapsed.contains("close --force"));
 }
 
@@ -358,12 +367,12 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
     state.focus_menu_move_down(); // fixed order: agent -> terminal
-    let base = stripped(&right_pane_contents(&state, 56, 16));
+    let base = stripped(&render_frame(24, 120, &state));
     assert!(base.contains("terminal"));
     assert!(base.contains('▸'));
     assert!(base.contains("→ pick terminal"));
     state.focus_menu_expand_terminal();
-    let expanded = stripped(&right_pane_contents(&state, 56, 16));
+    let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("open"));
     assert!(expanded.contains("new"));
@@ -375,19 +384,29 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
 #[test]
 fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
     // With live panes published, 在席 gains a tab strip — one chip per pane plus a
-    // trailing "+ new" tab. On the "+ new" tab (the default on entry) the action
-    // surface shows below, not a pane preview.
+    // trailing "+ new" tab. On the "+ new" tab (the default on entry) the pane
+    // preview does not show; the menu action surface floats as an overlay modal
+    // over the frame while the tab strip stays inline behind it.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
-    // A wide pane so the whole strip (identity + chips + "+ new") fits unclipped.
-    let out = stripped(&right_pane_contents(&state, 100, 12));
-    // The identity rides the strip row alongside the pane chips and the "+ new" tab.
-    assert!(out.contains("main"));
-    assert!(out.contains("agent"));
+    // The tab strip stays inline in the right pane (identity + chips + "+ new"),
+    // but the menu itself no longer draws there — it floats as an overlay.
+    let pane = stripped(&right_pane_contents(&state, 77, 12));
+    assert!(pane.contains("main"));
+    assert!(pane.contains("agent"));
+    assert!(pane.contains("+ new"));
+    assert!(!pane.contains("Run a command:"), "the menu is not inline");
+    assert!(
+        !pane.contains("$ echo hi"),
+        "no pane preview on the + new tab"
+    );
+    // The floating menu modal carries the command surface, composited over the
+    // frame; the pane preview still does not show.
+    assert!(state.focus_menu_overlay());
+    let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("+ new"));
-    // On the "+ new" tab the action surface shows; the pane preview does not.
     assert!(out.contains("Run a command:"));
     assert!(!out.contains("$ echo hi"));
 }
