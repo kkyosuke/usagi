@@ -55,7 +55,7 @@ cargo clippy --all-targets -- -D warnings
   cargo test -p <crate>             # 対象クレートだけ
   ```
 
-  - 全件テスト・カバレッジ 100% の確認は **pre-push フック（`cargo llvm-cov`）と CI が担う**（[06-conventions.md#品質チェック](../document/06-conventions.md#品質チェックコミットpush-前に必須)）。ローカルで全件を手動実行して待つ必要はない。
+  - 全件テスト・カバレッジ 100% の確認は **CI（Coverage CI）が担う**（[06-conventions.md#品質チェック](../document/06-conventions.md#品質チェックコミットpush-前に必須)）。pre-push フックでも走らせない（clippy のみ）。ローカルで全件を手動実行して待つ必要はない。
 
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
 

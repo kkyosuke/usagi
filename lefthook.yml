@@ -9,8 +9,9 @@
 #                 ※ usagi のセッション worktree (.usagi/sessions/<name>/) はブランチ名が usagi/<name> になるため対象外
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
 #   - コミット時に staged な .rs ファイルを自動フォーマット
-#   - push 時に clippy とテストカバレッジ100%を確認 (Coverage CI と同条件)
-#     ※ カバレッジ計測 (cargo llvm-cov) はテストも実行するため、push 時のテスト実行を兼ねる
+#   - push 時に clippy を確認
+#     ※ 全件テスト・カバレッジ100%は時間がかかりすぎるため pre-push では走らせない。
+#       テスト・カバレッジ100%の確認は Coverage CI (.github/workflows/coverage.yml) が担う。
 
 pre-commit:
   parallel: true
@@ -63,9 +64,6 @@ pre-push:
   commands:
     clippy:
       run: cargo clippy --all-targets -- -D warnings
-    coverage:
-      # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
-      # cargo llvm-cov がテストも実行するため、別途 cargo test は走らせない。
-      run: |
-        . ./scripts/coverage.sh
-        coverage_enforce
+      # 全件テスト・カバレッジ100% (cargo llvm-cov) は時間がかかりすぎるため pre-push では走らせない。
+      # その確認は Coverage CI (.github/workflows/coverage.yml) に委ねる。
+      # 開発中の反復では変更箇所のテストだけを絞って回す (.agents/workflow.md ステップ2)。
