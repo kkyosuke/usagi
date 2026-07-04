@@ -2572,10 +2572,12 @@ fn blank_pane(rows: usize) -> Vec<String> {
 /// Builds the 在席 (Focus) right pane. With no live panes it is the session's
 /// action surface — the prompt inline (its own `session:` header), or, on the
 /// menu UI, a blank pane behind the floating menu overlay modal. With live panes
-/// it gains a **tab strip**: one chip per live pane followed by a "+ new" chip,
-/// the session identity beside it (shared with 没入), and below it either the
-/// selected pane's live preview or — on the "+ new" tab — the prompt surface
-/// (header-less; the menu again floats as an overlay rather than drawing inline).
+/// it gains a **tab strip**: one chip per live pane followed by a "+ new" chip
+/// while that launch surface is selected, the session identity beside it (shared
+/// with 没入), and below it either the selected pane's live preview or — on the
+/// "+ new" tab — the prompt surface (header-less; the menu again floats as an
+/// overlay rather than drawing inline). After a zoom-out the menu floats over the
+/// selected pane tab instead: the preview drawn here keeps showing behind it.
 fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     // No live panes: the prompt surface fills the pane. The menu never renders
     // inline — it floats as an overlay modal centred over the pane (composited by

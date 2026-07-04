@@ -71,7 +71,8 @@ pub enum PaneExit {
     /// pane, so the user drops straight back into the live terminal.
     OpenNote,
     /// The user pressed `Ctrl-T`: zoom out to 在席 (Focus) — the session's action
-    /// menu — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
+    /// menu, floating over the tab the zoom left so its live preview keeps
+    /// showing — leaving every pane alive in the pool. Unlike [`Self::Closed`] no
     /// pane is closed; the panes stay live just as [`Self::ToSwitch`] keeps them.
     ToFocus,
     /// The user pressed `Ctrl-^`: leave the pane to jump straight to the
