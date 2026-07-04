@@ -105,6 +105,16 @@ impl GeminiAgent {
     }
 }
 
+/// Gemini's own model flag (`-m <model>`) when the wiring pins one, else empty.
+/// The model name is escaped for the single-quoted shell context. Shared by the
+/// interactive and headless launches.
+fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
+    match wiring.model.as_deref() {
+        Some(model) => vec!["-m".to_string(), shell_single_quote(model)],
+        None => Vec::new(),
+    }
+}
+
 impl Agent for GeminiAgent {
     fn program(&self) -> &'static str {
         // The program name lives once in the domain (`AgentCli::command`); the
@@ -114,14 +124,17 @@ impl Agent for GeminiAgent {
 
     fn launch_command(
         &self,
-        _wiring: &AgentWiring,
+        wiring: &AgentWiring,
         resume: bool,
         initial_prompt: Option<&str>,
     ) -> String {
-        // The wiring (MCP servers, hooks, system prompt) is intentionally not
-        // rendered: Gemini has no inline flag for it. Only resume and the opening
-        // prompt are wired, via plain flags.
+        // The MCP/hooks wiring is intentionally not rendered: Gemini has no inline
+        // flag for it. Only the model (when pinned), resume, and the opening prompt
+        // are wired, via plain flags.
         let mut parts = vec!["gemini".to_string()];
+        // An explicit model rides in as Gemini's `-m`; absent, Gemini uses its own
+        // configured default.
+        parts.extend(model_flag_parts(wiring));
         // `-r latest` continues the most recent conversation for this directory.
         if resume {
             parts.push("-r".to_string());
@@ -138,17 +151,20 @@ impl Agent for GeminiAgent {
         parts.join(" ")
     }
 
-    fn headless_command(&self, _wiring: &AgentWiring, prompt: &str) -> String {
+    fn headless_command(&self, wiring: &AgentWiring, prompt: &str) -> String {
         // Gemini's headless mode is `gemini -p <prompt>` (run the prompt
-        // non-interactively and exit). As with the interactive launch, the wiring
-        // (MCP servers / hooks) is not rendered — Gemini exposes no inline flag
-        // for it, so a headless Gemini run cannot drive usagi's MCP tools and
-        // works with git and the filesystem alone. No interactive person is
-        // present, so `--yolo` auto-approves every tool call (Gemini's bypass flag)
-        // to let it act without prompting. The prompt is arbitrary text, so it is
-        // escaped for the single-quoted shell context.
-        let prompt = shell_single_quote(prompt);
-        format!("gemini --yolo -p {prompt}")
+        // non-interactively and exit). As with the interactive launch, the
+        // MCP/hooks wiring is not rendered — Gemini exposes no inline flag for it,
+        // so a headless Gemini run cannot drive usagi's MCP tools and works with
+        // git and the filesystem alone; only the model (when pinned) is wired. No
+        // interactive person is present, so `--yolo` auto-approves every tool call
+        // (Gemini's bypass flag) to let it act without prompting. The prompt is
+        // arbitrary text, so it is escaped for the single-quoted shell context.
+        let mut parts = vec!["gemini".to_string(), "--yolo".to_string()];
+        parts.extend(model_flag_parts(wiring));
+        parts.push("-p".to_string());
+        parts.push(shell_single_quote(prompt));
+        parts.join(" ")
     }
 
     fn has_resumable_session(&self, dir: &Path) -> bool {
@@ -197,6 +213,22 @@ mod tests {
             agent.launch_command(&settings.agent_wiring("usagi"), false, None),
             "gemini"
         );
+    }
+
+    #[test]
+    fn launch_and_headless_render_the_model_flag_only_when_set() {
+        let agent = GeminiAgent::new();
+        // Default (no model): no `-m`, so Gemini uses its own default.
+        let plain = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        assert!(!plain.contains("-m "), "{plain}");
+
+        // With a model set, both the interactive and headless launches carry `-m`.
+        let mut w = Settings::default().agent_wiring("usagi");
+        w.model = Some("gemini-2.5-pro".to_string());
+        let launch = agent.launch_command(&w, false, None);
+        assert_eq!(launch, "gemini -m 'gemini-2.5-pro'");
+        let headless = agent.headless_command(&w, "clean up");
+        assert_eq!(headless, "gemini --yolo -m 'gemini-2.5-pro' -p 'clean up'");
     }
 
     #[test]

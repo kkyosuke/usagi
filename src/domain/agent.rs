@@ -92,4 +92,14 @@ pub struct AgentWiring {
     /// The local-LLM model to expose for offloading light work, or `None` when
     /// the local LLM is disabled.
     pub local_llm_model: Option<String>,
+    /// The model the launched agent CLI itself should run — rendered as that
+    /// CLI's own model flag by the adapter (`--model` for Claude, `-m` for
+    /// Codex / Gemini) — or `None` to let the CLI use its configured default.
+    ///
+    /// This is the injection point for choosing an agent's model; the adapters
+    /// already render it. It is currently always `None`
+    /// ([`Settings::agent_wiring`](crate::domain::settings::Settings::agent_wiring)
+    /// leaves it unset), so usagi launches each CLI on its own default until a
+    /// model source (a setting or a launch-time argument) fills it in.
+    pub model: Option<String>,
 }

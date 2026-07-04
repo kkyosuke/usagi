@@ -144,6 +144,16 @@ fn hook_override(usagi_bin: &str, event: &str, phase: &str) -> String {
 
 /// The `-c` config overrides shared by every Codex launch (fresh or resumed): the
 /// usagi MCP server(s), the system-prompt instruction, and the lifecycle hooks.
+/// Codex's own model flag (`-m <model>`) when the wiring pins one, else empty.
+/// The model name is escaped for the single-quoted shell context. Shared by the
+/// interactive and headless launches.
+fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
+    match wiring.model.as_deref() {
+        Some(model) => vec!["-m".to_string(), shell_single_quote(model)],
+        None => Vec::new(),
+    }
+}
+
 fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
     let bin = &wiring.usagi_bin;
     let local_llm_model = wiring.local_llm_model.as_deref();
@@ -329,6 +339,9 @@ impl Agent for CodexAgent {
                 "on-request".to_string(),
             ]
         };
+        // An explicit model rides in as Codex's `-m`; absent, Codex uses its own
+        // configured default.
+        parts.extend(model_flag_parts(wiring));
         parts.extend(overrides);
         // A queued prompt rides along as Codex's trailing positional query (only
         // on the fresh path, where it is unambiguous). It is arbitrary user text,
@@ -357,6 +370,7 @@ impl Agent for CodexAgent {
             "exec".to_string(),
             "--dangerously-bypass-approvals-and-sandbox".to_string(),
         ];
+        parts.extend(model_flag_parts(wiring));
         parts.extend(mcp_server_overrides("usagi", bin, &["mcp"]));
         if let Some(model) = wiring.local_llm_model.as_deref() {
             parts.extend(mcp_server_overrides(
@@ -394,7 +408,23 @@ mod tests {
         AgentWiring {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
+            model: None,
         }
+    }
+
+    #[test]
+    fn launch_and_headless_render_the_model_flag_only_when_set() {
+        // Default (no model): no `-m` flag, so Codex uses its own default.
+        let plain = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(!plain.contains(" -m "), "{plain}");
+
+        // With a model set, both the interactive and headless launches carry `-m`.
+        let mut w = wiring("usagi", None);
+        w.model = Some("gpt-5-codex".to_string());
+        let launch = CodexAgent::new().launch_command(&w, false, None);
+        assert!(launch.contains("-m 'gpt-5-codex'"), "{launch}");
+        let headless = CodexAgent::new().headless_command(&w, "clean up");
+        assert!(headless.contains("-m 'gpt-5-codex'"), "{headless}");
     }
 
     /// Write a rollout transcript whose opening `session_meta` line records `cwd`,
