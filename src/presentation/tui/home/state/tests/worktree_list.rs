@@ -358,23 +358,6 @@ fn united_with_shared_names() -> WorktreeList {
 }
 
 #[test]
-fn qualified_lookups_target_the_right_group_for_a_shared_name() {
-    use std::path::Path;
-    let mut list = united_with_shared_names();
-    // The two roots tell the same-named "shared" rows apart.
-    assert!(list.select_qualified(Path::new("/wsB"), "shared"));
-    assert_eq!(list.selected_index(), 4);
-    assert!(list.select_qualified(Path::new("/wsA"), "shared"));
-    assert_eq!(list.selected_index(), 2);
-    // ROOT_NAME lands on that group's own root row, not the first group's.
-    assert!(list.activate_qualified(Path::new("/wsB"), ROOT_NAME));
-    assert_eq!(list.active_index(), 3);
-    // A root with no matching group, or a name absent in the named group, misses.
-    assert!(!list.select_qualified(Path::new("/nope"), "shared"));
-    assert!(!list.activate_qualified(Path::new("/wsB"), "a1"));
-}
-
-#[test]
 fn ctrl_caret_jump_back_is_qualified_by_the_group_root() {
     let mut list = united_with_shared_names();
     // Leave wsB's "shared" (row 4) behind for wsA's "a1" (row 1): the jump-back

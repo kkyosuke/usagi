@@ -748,6 +748,12 @@ pub(super) fn update_confirm_frame(
 /// space of padding [`widgets::boxed`] adds on each side.
 pub(super) const TEXT_MODAL_INNER: usize = 60;
 
+/// Inner (content) width of the floating 在席 (Focus) menu overlay modal, sized
+/// to hold the widest key hint (`↑↓ move   Enter run   → pick terminal   …`)
+/// without clipping. Clamped to the right pane by [`widgets::modal_inner_width`]
+/// so a narrow pane still fits the box.
+pub(super) const FOCUS_MENU_INNER: usize = 60;
+
 /// Builds the body of the text modal: a scrollable window over a text-dumping
 /// command's output (`man` / `history` / `session list`), coloured by line kind,
 /// with `↑`/`↓` more-counts and the dismiss hint below.

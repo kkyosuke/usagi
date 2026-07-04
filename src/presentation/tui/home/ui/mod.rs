@@ -26,9 +26,9 @@ use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
     quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
     task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    ENV_MODAL_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    ENV_MODAL_INNER, FOCUS_MENU_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
-use panes::{group_inline_insert_line, left_pane, right_pane_contents};
+use panes::{focus_menu_body, group_inline_insert_line, left_pane, right_pane_contents};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use panes::{
     attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
@@ -570,6 +570,30 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             0,
             width,
             &waiting_notice(state.waiting_paths().len()),
+        );
+    }
+
+    // Float the 在席 (Focus) action menu as a box centred over the **right pane**
+    // (not the whole screen), so the session sidebar stays visible around it. It
+    // shows only when the menu surface is the active thing on screen (see
+    // [`HomeState::focus_menu_overlay`] — no loading indicator, open overlay, or
+    // `:` palette is up), so it never collides with those. The session identity
+    // rides the box title; the body is the header-less menu ([`focus_menu_body`]),
+    // and [`panes::focus_pane`] leaves the pane behind it blank.
+    if state.focus_menu_overlay() {
+        let inner = widgets::modal_inner_width(right_w, FOCUS_MENU_INNER);
+        let body = focus_menu_body(state, inner);
+        let title = format!("session: {}", state.focused_session_name());
+        widgets::overlay_region_modal(
+            &mut lines,
+            width,
+            left_w + SEP_WIDTH,
+            right_w,
+            body_start,
+            body_rows,
+            &title,
+            FOCUS_MENU_INNER,
+            &body,
         );
     }
 

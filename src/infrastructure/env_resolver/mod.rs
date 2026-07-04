@@ -24,11 +24,30 @@ use crate::domain::settings::Settings;
 /// Resolve `settings.env` through `resolver`. Public so the behaviour is covered
 /// without shelling out to the real `op` CLI.
 pub fn resolve_env(settings: &Settings, resolver: &dyn SecretResolver) -> BTreeMap<String, String> {
+    collect_resolved(settings.env().map(|(name, reference)| {
+        let outcome = resolver.read(reference);
+        (name.to_string(), reference.to_string(), outcome)
+    }))
+}
+
+/// Fold already-resolved secret outcomes into an environment map, logging (and
+/// dropping) the ones that failed. Each item is `(name, reference, outcome)`: a
+/// successful `outcome` is inserted under `name`, a failure is recorded to the
+/// error log with the variable's name and reference — never the resolved secret.
+///
+/// Split out from [`resolve_env`] so the real `op` CLI layer can resolve the
+/// bindings **in parallel** (one subprocess per reference) and still funnel the
+/// results through this one place, keeping the insert/log policy identical to the
+/// sequential path.
+pub fn collect_resolved<I>(results: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (String, String, Result<String, String>)>,
+{
     let mut env = BTreeMap::new();
-    for (name, reference) in settings.env() {
-        match resolver.read(reference) {
+    for (name, reference, outcome) in results {
+        match outcome {
             Ok(value) => {
-                env.insert(name.to_string(), value);
+                env.insert(name, value);
             }
             Err(error) => crate::infrastructure::error_log::ErrorLog::record(&format!(
                 "failed to resolve workspace env {name} from {reference}: {error}"

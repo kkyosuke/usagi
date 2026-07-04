@@ -15,9 +15,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use console::Term;
 
-use crate::domain::settings::{LocalSettings, Settings, LOCAL_LLM_MODELS};
+use crate::domain::settings::{AgentCli, LocalSettings, Settings, LOCAL_LLM_MODELS};
 use crate::infrastructure::git;
 use crate::infrastructure::storage::Storage;
+use crate::presentation::tui::io::loading::run_with_loading;
 use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::usecase::doctor::SystemRunner;
 use crate::usecase::{agent, local_llm, settings, workspace};
@@ -47,12 +48,25 @@ pub fn run(term: &Term) -> Result<Outcome> {
 pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
     let storage = Storage::open_default()?;
 
+    // Everything the screen needs from external subprocesses — the installed
+    // agent CLIs, the repository's branches, and the local LLM presence — is
+    // probed on a worker thread while the loading rabbit animates, so opening the
+    // screen no longer freezes on those `--version` / `git` / `ollama` spawns
+    // (see [`probe`]). Fast work (well under the loading grace period) shows
+    // nothing; only a slow probe surfaces the rabbit. A panicked probe thread
+    // falls back to empty results rather than crashing the screen.
+    let probe_root = repo_root.clone();
+    let probes = run_with_loading(term, "設定を読み込み中…", move || {
+        probe(probe_root.as_deref())
+    })
+    .unwrap_or_default();
+
     let (mut config, notice) = match load(&storage, repo_root.as_deref()) {
         Ok((settings, workspaces, local)) => {
             let config = match (repo_root.as_ref(), local) {
-                (Some(root), Some(local)) => {
+                (Some(_root), Some(local)) => {
                     // Offer the repository's branches as Default Branch choices.
-                    Config::workspace(settings, local, git::list_branches(root))
+                    Config::workspace(settings, local, probes.branches)
                 }
                 _ => Config::new(settings, workspaces),
             };
@@ -64,28 +78,18 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         ),
     };
 
-    // Probe which agent CLIs are installed so the Agent CLI selector only offers
-    // agents the user can actually launch. Both scopes render that selector (the
-    // global setting and the per-project override), so this runs unconditionally.
-    config.set_available_agent_clis(agent::available_clis(&SystemRunner));
+    // The Agent CLI selector only offers agents the user can actually launch.
+    // Both scopes render it (the global setting and the per-project override), so
+    // this is set unconditionally.
+    config.set_available_agent_clis(probes.clis);
 
-    // Probe whether the local LLM runtime and selected model are already
-    // present, so the Local LLM row opens as an "Install" action or an on/off
-    // toggle accordingly. Only the global scope renders that row
-    // (`LocalField::ALL` has no Local LLM field), so skip the two `ollama`
-    // subprocess probes when editing a workspace's local overrides.
-    if repo_root.is_none() {
-        let runner = SystemRunner;
-        if local_llm::ollama_installed(&runner) {
-            config.set_ollama_installed(true);
-            config.set_installed_models(
-                LOCAL_LLM_MODELS
-                    .iter()
-                    .filter(|model| local_llm::model_present(&runner, model))
-                    .map(|model| model.to_string())
-                    .collect(),
-            );
-        }
+    // The Local LLM row opens as an "Install" action or an on/off toggle
+    // depending on whether the runtime and selected model are present. Only the
+    // global scope renders that row, so [`probe`] leaves these empty for a
+    // workspace scope and the row stays hidden.
+    if probes.ollama_installed {
+        config.set_ollama_installed(true);
+        config.set_installed_models(probes.installed_models);
     }
 
     let mut reader = TermKeyReader::new(term.clone());
@@ -122,6 +126,70 @@ pub fn run_in(term: &Term, repo_root: Option<PathBuf>) -> Result<Outcome> {
         &mut pull_model,
         notice,
     )
+}
+
+/// The results of the config screen's external-subprocess probes, gathered off
+/// the UI thread by [`probe`].
+#[derive(Default)]
+struct Probes {
+    /// Agent CLIs found on the PATH, in [`AgentCli::ALL`] order.
+    clis: Vec<AgentCli>,
+    /// The repository's branches (Default Branch choices); empty in the global
+    /// scope, which has no repository.
+    branches: Vec<String>,
+    /// Whether the `ollama` runtime is installed; always `false` in a workspace
+    /// scope, which does not render the Local LLM row.
+    ollama_installed: bool,
+    /// Which [`LOCAL_LLM_MODELS`] are already pulled locally.
+    installed_models: Vec<String>,
+}
+
+/// Run the three independent, subprocess-backed probes the config screen needs
+/// concurrently, so the wait is the slowest single probe rather than their sum.
+///
+/// - the installed agent CLIs (`<cmd> --version` per [`AgentCli::ALL`]),
+/// - the repository's branches (`git`), only meaningful in a workspace scope,
+/// - the local LLM presence (`ollama` runtime + each [`LOCAL_LLM_MODELS`]),
+///   only rendered in the global scope (`repo_root` is `None`).
+///
+/// [`SystemRunner`] is a zero-sized unit struct, so each scoped thread simply
+/// constructs its own. A panicked thread degrades to that probe's default
+/// (empty / `false`) rather than aborting the launch.
+fn probe(repo_root: Option<&std::path::Path>) -> Probes {
+    std::thread::scope(|scope| {
+        let clis = scope.spawn(|| agent::available_clis(&SystemRunner));
+        let branches = scope.spawn(move || match repo_root {
+            Some(root) => git::list_branches(root),
+            None => Vec::new(),
+        });
+        let llm = scope.spawn(move || {
+            // Only the global scope renders the Local LLM row, so skip the two
+            // `ollama` probes entirely when editing a workspace's overrides.
+            if repo_root.is_some() {
+                return (false, Vec::new());
+            }
+            let runner = SystemRunner;
+            if !local_llm::ollama_installed(&runner) {
+                return (false, Vec::new());
+            }
+            let models = LOCAL_LLM_MODELS
+                .iter()
+                .filter(|model| local_llm::model_present(&runner, model))
+                .map(|model| model.to_string())
+                .collect();
+            (true, models)
+        });
+
+        let clis = clis.join().unwrap_or_default();
+        let branches = branches.join().unwrap_or_default();
+        let (ollama_installed, installed_models) = llm.join().unwrap_or((false, Vec::new()));
+        Probes {
+            clis,
+            branches,
+            ollama_installed,
+            installed_models,
+        }
+    })
 }
 
 /// Loads the global settings, the registered workspace names the

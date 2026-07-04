@@ -22,15 +22,14 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
-    /// A registry with every built-in command, in display order. The not-yet
-    /// implemented feature commands (`ai`, `doctor`) are present as discoverable
-    /// "coming soon" placeholders; `session` and `terminal` are fully implemented.
+    /// A registry with every built-in command, in display order (alphabetical by
+    /// command name), so the `:` palette hints and `man`'s listing read in a
+    /// predictable order. The not-yet implemented feature commands (`ai`,
+    /// `doctor`) are present as discoverable "coming soon" placeholders; the rest
+    /// are fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
-                Box::new(SessionCommand),
-                Box::new(UniteCommand),
-                Box::new(TerminalCommand),
                 Box::new(AgentCommand),
                 Box::new(ComingSoonCommand {
                     name: "ai",
@@ -39,13 +38,10 @@ impl CommandRegistry {
                     examples: &["ai fix the failing test"],
                     scope: CommandScope::Session,
                 }),
+                Box::new(ClearCommand),
                 Box::new(CloseCommand),
                 Box::new(ConfigCommand),
-                Box::new(EnvCommand),
-                Box::new(IssueCommand),
-                Box::new(PreviewCommand),
                 Box::new(DiffCommand),
-                Box::new(HistoryCommand),
                 Box::new(ComingSoonCommand {
                     name: "doctor",
                     description: "Check that required tools are installed",
@@ -53,9 +49,15 @@ impl CommandRegistry {
                     examples: &[],
                     scope: CommandScope::Workspace,
                 }),
+                Box::new(EnvCommand),
+                Box::new(HistoryCommand),
+                Box::new(IssueCommand),
                 Box::new(ManCommand),
-                Box::new(ClearCommand),
+                Box::new(PreviewCommand),
                 Box::new(QuitCommand),
+                Box::new(SessionCommand),
+                Box::new(TerminalCommand),
+                Box::new(UniteCommand),
             ],
         }
     }

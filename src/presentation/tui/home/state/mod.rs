@@ -1346,27 +1346,59 @@ impl HomeState {
     /// sort toggling on/off, or a session entering/leaving the waiting set) so the
     /// rows can be replaced wholesale without yanking the cursor back to the root.
     fn rebuild_list_keep_cursor(&mut self) {
-        // Carry the cursor and active row by their `(root, name)` identity, not the
-        // bare name, so a 統合(unite) rebuild never lands them on a same-named
-        // session in a different group.
-        let selected = (
-            self.list.selected_group_root().to_path_buf(),
-            self.list.selected_name().to_string(),
-        );
-        let active = (
-            self.list.active_group_root().to_path_buf(),
-            self.list.active_name().to_string(),
-        );
+        enum RowAnchor {
+            Create,
+            Root(usize),
+            Session { group: usize, name: String },
+        }
+
+        let selected = if self.list.create_row_selected() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.selected() {
+            RowAnchor::Session {
+                group: self.list.selected_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.selected_group())
+        };
+        let active = if self.list.active_index() == self.list.create_row() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.active() {
+            RowAnchor::Session {
+                group: self.list.active_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.active_group())
+        };
         // The fresh list drops the `Ctrl-^` jump target, so carry it across the
-        // rebuild by identity (it is re-validated lazily, so a session that
-        // vanished in this sync simply yields no jump).
+        // rebuild by its `(root, name)` identity (re-validated lazily, so a session
+        // that vanished in this sync simply yields no jump).
         let previous = self.list.previous_active().cloned();
         self.rebuild_list();
-        // Restore the cursor (`select_qualified` moves both cursor and active onto
-        // the row; it is a no-op for a vanished session, leaving the rebuilt
-        // default on the root), then correct the active row.
-        self.list.select_qualified(&selected.0, &selected.1);
-        self.list.activate_qualified(&active.0, &active.1);
+        // Restore by the row's identity *within its workspace group*. In 統合
+        // (unite) mode every workspace contributes a synthetic root row named
+        // `ROOT_NAME`, and several workspaces may also share a branch name; using
+        // the old name-only lookup would resolve those ambiguous rows to the first
+        // group and snap 切替 back to the top when a background refresh landed.
+        let resolve = |list: &WorktreeList, anchor: &RowAnchor| match anchor {
+            RowAnchor::Create => list.create_row(),
+            RowAnchor::Root(group) => list.group_root_row(*group).unwrap_or(0),
+            RowAnchor::Session { group, name } => list
+                .row_in_group_of_name(*group, name)
+                .or_else(|| list.group_root_row(*group))
+                .unwrap_or(0),
+        };
+        self.list.focus_index(resolve(&self.list, &selected));
+        // The active row is command-facing, so keep it on a real selectable row;
+        // if a corrupt/old state ever had it on the create affordance, normalize
+        // it to the primary root while rebuilding.
+        let active_row = match active {
+            RowAnchor::Create => 0,
+            ref anchor => resolve(&self.list, anchor),
+        };
+        self.list.activate_index(active_row);
         self.list.set_previous_active(previous);
     }
 
@@ -2759,6 +2791,36 @@ impl HomeState {
     /// "+ new" tab is then the only one.
     pub fn focus_on_new_tab(&self) -> bool {
         self.focus_new_tab || self.focus_pane_count() == 0
+    }
+
+    /// Whether the 在席 (Focus) action **menu** is currently presented as a
+    /// floating overlay modal (centred over the right pane) rather than inline in
+    /// the pane.
+    ///
+    /// This is true only for the menu surface ([`SessionActionUi::Menu`]) — the
+    /// prompt surface stays inline — and only while 在席 actually shows that
+    /// surface: on the trailing "+ new" tab (which [`focus_on_new_tab`] also
+    /// reports for an idle session with no live panes).
+    ///
+    /// It yields to whatever else has claimed the screen so the floating menu
+    /// never fights another surface for the pane: the momentary loading indicator,
+    /// and any open overlay ([`Overlay`] — the note editor, a text modal a menu
+    /// command opened, the Markdown preview / diff view, …) or the `:` command
+    /// palette, each of which captures the keyboard and draws its own box.
+    ///
+    /// The renderer floats the menu when this holds and [`focus_pane`] leaves the
+    /// pane behind it clear, so the two read the one predicate and never disagree
+    /// on where the menu is drawn.
+    ///
+    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
+    /// [`focus_pane`]: super::ui::panes
+    pub fn focus_menu_overlay(&self) -> bool {
+        self.mode == Mode::Focus
+            && self.session_action_ui == SessionActionUi::Menu
+            && self.focus_on_new_tab()
+            && self.loading().is_none()
+            && matches!(self.overlay, Overlay::None)
+            && !self.command_palette_open()
     }
 
     /// Move 在席's tab selector to the next tab, wrapping through the live panes

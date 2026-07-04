@@ -969,7 +969,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(session, vec!["terminal", "agent", "ai", "close"]);
+    assert_eq!(session, vec!["agent", "ai", "close", "terminal"]);
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)

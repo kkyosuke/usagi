@@ -518,24 +518,15 @@ impl WorktreeList {
         self.locate(self.active_index).map(|(g, _)| g).unwrap_or(0)
     }
 
-    /// The workspace root of the group the given `g` index names (empty when out
-    /// of range). Backs the `(root, name)` qualification of the cursor / active /
-    /// jump-back identities so a rebuild resolves them to the right group.
-    fn group_root(&self, g: usize) -> &Path {
+    /// The workspace root of the group the active row sits in — the group side of
+    /// the `(root, name)` identity [`activate_selected`](Self::activate_selected)
+    /// records for the `Ctrl-^` jump-back, so it survives a rebuild that reorders
+    /// or drops groups. Empty when the active index is somehow out of range.
+    fn active_group_root(&self) -> &Path {
         self.groups
-            .get(g)
+            .get(self.active_group())
             .map(WorkspaceGroup::root_path)
             .unwrap_or(Path::new(""))
-    }
-
-    /// The workspace root of the group the cursor currently sits in.
-    pub fn selected_group_root(&self) -> &Path {
-        self.group_root(self.selected_group())
-    }
-
-    /// The workspace root of the group the active row sits in.
-    pub fn active_group_root(&self) -> &Path {
-        self.group_root(self.active_group())
     }
 
     /// Replaces the PR links of the row whose session root is `root`, returning
@@ -676,8 +667,10 @@ impl WorktreeList {
     /// The flat row of the session named `name` in the group rooted at `root` — a
     /// group's root row for [`ROOT_NAME`], otherwise its matching worktree.
     /// Qualified by the group's root path so a same-named session in another
-    /// 統合(unite) group is never matched. `None` when no group has that root, or
-    /// it has no such session.
+    /// 統合(unite) group is never matched. Backs the `Ctrl-^` jump-back
+    /// ([`previous_row`](Self::previous_row)), whose target is carried by its stable
+    /// `(root, name)` identity. `None` when no group has that root, or it has no
+    /// such session.
     fn row_of_qualified(&self, root: &Path, name: &str) -> Option<usize> {
         let mut row = 0;
         for group in &self.groups {
@@ -696,34 +689,32 @@ impl WorktreeList {
         None
     }
 
-    /// Make the row identified by `(root, name)` active, returning whether one
-    /// matched — the `(root, name)`-qualified counterpart of
-    /// [`activate_by_name`](Self::activate_by_name), used to carry the active row
-    /// across a rebuild without confusing a same-named session in another group.
-    pub fn activate_qualified(&mut self, root: &Path, name: &str) -> bool {
-        match self.row_of_qualified(root, name) {
-            Some(row) => {
-                self.active_index = row;
-                true
-            }
-            None => false,
-        }
+    /// The flat row of the `group`'s synthetic root row, or `None` when the group
+    /// index is out of range. Each 統合(unite) group owns its own root row, so this
+    /// restores the cursor onto a *specific* group's root across a rebuild — the
+    /// plain [`ROOT_NAME`] lookup ([`row_of_name`](Self::row_of_name)) always
+    /// resolves to the first group and cannot tell the extra groups' roots apart.
+    pub fn group_root_row(&self, group: usize) -> Option<usize> {
+        (group < self.groups.len()).then(|| {
+            self.groups[..group]
+                .iter()
+                .map(WorkspaceGroup::selectable_rows)
+                .sum()
+        })
     }
 
-    /// Move both the cursor and the active row onto the row identified by
-    /// `(root, name)`, returning whether one matched — the `(root, name)`-qualified
-    /// counterpart of [`select_by_name`](Self::select_by_name), used to carry the
-    /// cursor across a rebuild without confusing a same-named session in another
-    /// group. [`ROOT_NAME`] lands on that group's root row.
-    pub fn select_qualified(&mut self, root: &Path, name: &str) -> bool {
-        match self.row_of_qualified(root, name) {
-            Some(row) => {
-                self.selected_index = row;
-                self.active_index = row;
-                true
-            }
-            None => false,
-        }
+    /// The flat row of the first worktree named `name` **within** `group`, or
+    /// `None` when that group has no such worktree. Restoring the cursor inside the
+    /// same 統合(unite) group keeps it put when another workspace happens to carry a
+    /// session with the same branch name (a plain [`row_of_name`](Self::row_of_name)
+    /// would pull it into whichever group lists that name first).
+    pub fn row_in_group_of_name(&self, group: usize, name: &str) -> Option<usize> {
+        let start = self.group_root_row(group)?;
+        self.groups[group]
+            .worktrees
+            .iter()
+            .position(|w| worktree_name(w) == name)
+            .map(|within| start + 1 + within)
     }
 
     /// The rows as command-facing [`WorktreeRef`]s (name + active flag): each
@@ -753,6 +744,15 @@ impl WorktreeList {
     /// chosen session.
     pub fn focus_index(&mut self, row: usize) {
         self.selected_index = row.min(self.nav_rows().saturating_sub(1));
+    }
+
+    /// Move the *active* row directly to a flat selectable `row`, clamped to the
+    /// rows that exist. Complements [`focus_index`](Self::focus_index) (which moves
+    /// the cursor) so a rebuild can restore the active row by its resolved flat
+    /// index without disturbing the `Ctrl-^` jump memory the name-based
+    /// [`activate_by_name`](Self::activate_by_name) would.
+    pub fn activate_index(&mut self, row: usize) {
+        self.active_index = row.min(self.nav_rows().saturating_sub(1));
     }
 
     /// Move the cursor up one row, wrapping from the top to the bottom.
