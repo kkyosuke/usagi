@@ -1,13 +1,13 @@
 ---
 number: 101
 title: feat(orchestration): root エージェントへの push 型完了報告 — 子セッションの完了をコーディネータへ通知する
-status: in-progress
+status: done
 priority: high
 labels: [orchestration]
 dependson: []
 related: [100]
 created_at: 2026-07-04T05:09:58.100705+00:00
-updated_at: 2026-07-04T21:31:50.931682+00:00
+updated_at: 2026-07-04T21:40:56.020735+00:00
 ---
 
 ## 背景
