@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括 / Overview。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` |
-| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `chat` / `diff` / `close` / `terminal`（Menu は固定の表示順 agent → terminal → diff → chat → close で並べる。`ai <prompt>` は引数が要るので Prompt で入力、`chat` はローカル LLM が使えるときだけ Menu に出る） |
+| 在席（Focus）の右ペイン | Session（個別） | `agent` / `ai` / `chat` / `close` / `diff` / `terminal`（Menu はコマンド名のアルファベット順 agent → chat → close → diff → terminal で並べる。`ai <prompt>` は引数が要るので Prompt で入力、`chat` はローカル LLM が使えるときだけ Menu に出る） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、切替（Switch）・在席（Focus）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。

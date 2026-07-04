@@ -55,30 +55,14 @@ use modal::{FocusMenu, FocusSubmenu, Overlay};
 /// terminal application in the same directory.
 const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
 
-/// The fixed 在席 (Focus) menu display order, independent of registry order and
-/// (unlike before) not alphabetical: the pane-launch actions first (`agent`,
-/// then `terminal`), then the read-only `diff` view, then the AI actions (`ai`,
-/// `chat`), then the destructive `close` last. Any command not in this list sorts
-/// after these, then in its original registry order among itself.
-fn session_menu_rank(name: &str) -> usize {
-    match name {
-        "agent" => 0,
-        "terminal" => 1,
-        "diff" => 2,
-        "ai" => 3,
-        "chat" => 4,
-        "close" => 5,
-        _ => 6,
-    }
-}
-
 use crate::presentation::tui::chat::state::Chat;
 
+/// The 在席 (Focus) menu commands in alphabetical order by name, independent of
+/// registry order, so the menu is predictable regardless of how the registry is
+/// built.
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
     let mut commands = registry.commands_in_scope(CommandScope::Session);
-    // A stable sort keeps any commands past the known four (all rank 4) in their
-    // original registry order rather than needing a secondary key.
-    commands.sort_by_key(|info| session_menu_rank(info.name));
+    commands.sort_by(|a, b| a.name.cmp(b.name));
     commands
 }
 
@@ -2904,8 +2888,8 @@ impl HomeState {
         self.enter_switch(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in the fixed display order
-    /// (see [`session_menu_rank`]). The prompt-taking `ai <prompt>` is kept out of
+    /// The Session-scope commands the 在席 menu lists, in alphabetical order
+    /// (see [`sorted_session_menu_commands`]). The prompt-taking `ai <prompt>` is kept out of
     /// the pickable menu (it needs typed arguments; use the Prompt UI). `chat` is
     /// filtered out unless the local LLM is usable (enabled and its model pulled),
     /// so it only appears when a reply would actually work. `close` / `diff` are
@@ -2928,8 +2912,8 @@ impl HomeState {
     }
 
     /// Shared body of [`focus_menu_commands`] / [`preview_menu_commands`]: the
-    /// Session-scope commands in the fixed display order (see
-    /// [`session_menu_rank`]): the prompt-taking `ai` is kept out of the menu,
+    /// Session-scope commands in alphabetical order (see
+    /// [`sorted_session_menu_commands`]): the prompt-taking `ai` is kept out of the menu,
     /// `chat` is gated on local-LLM availability, and the session-only `close` /
     /// `diff` are hidden when `root` (the row belongs to no session).
     fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
