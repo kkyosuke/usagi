@@ -3144,14 +3144,58 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
     None
 }
 
+/// Witty English one-liners rested beneath the idle mascot in the 切替 preview
+/// (and [`idle_quip`] picks one per session). They stand in for the 在席 menu's
+/// choices — which selecting reveals only as a floating modal, never inline — so
+/// the preview says "nothing is running here yet" without promising a surface that
+/// never appears. Each nods to the usagi and to `Enter` as the way in.
+const IDLE_QUIPS: [&str; 6] = [
+    "Quiet as a sleeping bunny — press Enter to begin.",
+    "This burrow is empty. Hop in with Enter.",
+    "No tabs stirring yet. Enter starts one.",
+    "A fresh warren awaits. Enter to dig in.",
+    "Nothing running here. Enter wakes it up.",
+    "Still and cozy — press Enter to get going.",
+];
+
+/// The [`IDLE_QUIPS`] line for the highlighted row, chosen by its name so the quip
+/// stays stable per session (and differs between them). The root row keys off
+/// [`ROOT_NAME`]; a detached session off [`DETACHED`].
+fn idle_quip(state: &HomeState) -> &'static str {
+    let name = match state.list().selected() {
+        Some(w) => w.branch.as_deref().unwrap_or(DETACHED),
+        None => ROOT_NAME,
+    };
+    let seed: usize = name.bytes().map(usize::from).sum();
+    IDLE_QUIPS[seed % IDLE_QUIPS.len()]
+}
+
+/// The idle-session body: the mascot ([`widgets::rabbit_lines`]) centred in the
+/// middle of a `width`×`rows` region with `quip` on a dim row below it. The block
+/// (mascot + blank + caption) is centred both horizontally — each row already is —
+/// and vertically, so the usagi sits in the centre of the pane whatever its
+/// height. Always returns exactly `rows` rows so the pane stays full-height.
+fn idle_rabbit_body(quip: &str, width: usize, rows: usize) -> Vec<String> {
+    let mut block = widgets::rabbit_lines(width);
+    block.push(String::new());
+    block.push(widgets::dim_line(width, quip));
+    let top = rows.saturating_sub(block.len()) / 2;
+    let mut lines = vec![String::new(); top];
+    lines.extend(block);
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
+    lines
+}
+
 /// The 切替 (Switch) right pane: a **preview of the screen that selecting the
 /// session under the cursor will open**, so the choice is informed by what comes
 /// next. A live session (an embedded shell / agent already running) previews the
-/// live-terminal re-attach; a session with no live shell previews its 在席 action
-/// menu. The header line carries the session's status and agent state. The key
-/// hints live in the footer, so the preview uses the pane's full height. The
-/// highlighted session's note is drawn over the top by [`note_overlay`] (not
-/// inline), so it never pushes this preview around.
+/// live-terminal re-attach; an idle session with no live pane rests the mascot
+/// with a light quip ([`idle_rabbit_body`]) on the menu UI, or previews its inline
+/// prompt on the prompt UI. The header line carries the session's status and agent
+/// state. The key hints live in the footer, so the preview uses the pane's full
+/// height. The highlighted session's note is drawn over the top by [`note_overlay`]
+/// (not inline), so it never pushes this preview around.
 pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     if state.list().create_row_selected() {
         let mut lines = vec![
@@ -3208,26 +3252,30 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
             }
         }
     } else {
-        // Selecting opens 在席 on this session: preview its action surface, which
-        // mirrors the configured Session Action UI — a command menu or a prompt —
-        // so the preview matches what focusing actually reveals. A blank row keeps
-        // the header clear of the surface below it.
-        lines.push(String::new());
+        // An idle session (no live pane, so no tab) has no screen to mirror.
+        // Selecting opens 在席's action surface, which differs by Session Action
+        // UI, so the preview matches each:
         match state.session_action_ui() {
+            // The menu floats as an overlay *modal* over a blank pane — nothing is
+            // drawn inline. Previewing its choices here would promise an inline
+            // surface that never appears, so rest the mascot in the middle of the
+            // pane with a light English quip instead: the preview reads as "nothing
+            // is running yet — Enter to hop in" with no mismatch.
             SessionActionUi::Menu => {
-                lines.push(style("Run a command:").dim().to_string());
-                for (i, info) in state.preview_menu_commands().iter().enumerate() {
-                    lines.push(focus_menu_row(info, i == 0, width));
-                }
+                let body = body_rows.saturating_sub(lines.len());
+                lines.extend(idle_rabbit_body(idle_quip(state), width, body));
             }
+            // The prompt focuses *inline* (its own `session:` prompt), so previewing
+            // that prompt here matches what selecting reveals.
             SessionActionUi::Prompt => {
+                lines.push(String::new());
                 let prompt = style("❯").danger().bold();
                 let value = widgets::block_caret("", "", &Style::new().accent());
                 lines.push(clip_to_width(&format!("{prompt} {value}"), width));
+                lines.push(String::new());
+                lines.push(style("Enter で開く").dim().to_string());
             }
         }
-        lines.push(String::new());
-        lines.push(style("Enter で開く").dim().to_string());
     }
 
     // Trim the body to its budget and pad up so the pane is always full-height.
