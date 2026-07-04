@@ -99,14 +99,17 @@ fn agent_check_reports_presence_as_ok_or_warn() {
 fn agent_checks_cover_every_agent_in_canonical_order() {
     let runner = FakeRunner::new(vec![], Ok(true));
     let names: Vec<_> = agent_checks(&runner).into_iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["Claude", "Codex", "sakana.ai", "Gemini"]);
+    assert_eq!(
+        names,
+        vec!["Claude", "Codex", "sakana.ai", "Gemini", "Antigravity"]
+    );
 }
 
 #[test]
 fn diagnose_covers_tools_agents_notifications_and_config() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let storage = Storage::new(dir.path().join("usagi"));
-    // The local LLM is off by default, so its checks are not appended. The four
+    // The local LLM is off by default, so its checks are not appended. The five
     // agent presence checks sit between the required tools and notifications.
     let names: Vec<_> = diagnose(&storage).into_iter().map(|c| c.name).collect();
     assert_eq!(
@@ -118,6 +121,7 @@ fn diagnose_covers_tools_agents_notifications_and_config() {
             "Codex",
             "sakana.ai",
             "Gemini",
+            "Antigravity",
             "notifications",
             "nerd font",
             "config"
@@ -142,6 +146,7 @@ fn diagnose_skips_local_llm_when_settings_cannot_be_read() {
             "Codex",
             "sakana.ai",
             "Gemini",
+            "Antigravity",
             "notifications",
             "nerd font",
             "config"

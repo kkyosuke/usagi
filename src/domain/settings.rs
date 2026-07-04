@@ -31,6 +31,11 @@ pub enum AgentCli {
     CodexFugu,
     /// Google's Gemini CLI.
     Gemini,
+    /// Google's Antigravity CLI, invoked as `agy` (the successor to the Gemini
+    /// CLI). Like Gemini it exposes no inline flag for usagi's MCP servers, hooks,
+    /// or a system-prompt addendum — only plain flags (opening prompt, resume,
+    /// model), so usagi wires the same feature set as Gemini.
+    Antigravity,
 }
 
 /// How the **在席 (Focus)** mode presents a session's runnable commands in the
@@ -151,11 +156,12 @@ impl Default for LocalLlm {
 impl AgentCli {
     /// Every agent CLI variant, in the canonical order menus, the config-screen
     /// selector, and the `usagi feature` table list them.
-    pub const ALL: [AgentCli; 4] = [
+    pub const ALL: [AgentCli; 5] = [
         AgentCli::Claude,
         AgentCli::Codex,
         AgentCli::CodexFugu,
         AgentCli::Gemini,
+        AgentCli::Antigravity,
     ];
 
     /// The shell command (program name) usagi launches for this agent — the
@@ -171,6 +177,7 @@ impl AgentCli {
             AgentCli::Codex => "codex",
             AgentCli::CodexFugu => "codex-fugu",
             AgentCli::Gemini => "gemini",
+            AgentCli::Antigravity => "agy",
         }
     }
 
@@ -185,6 +192,7 @@ impl AgentCli {
             AgentCli::Codex => "Codex",
             AgentCli::CodexFugu => "sakana.ai",
             AgentCli::Gemini => "Gemini",
+            AgentCli::Antigravity => "Antigravity",
         }
     }
 
@@ -1334,6 +1342,7 @@ mod tests {
         assert_eq!(AgentCli::Codex.command(), "codex");
         assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
+        assert_eq!(AgentCli::Antigravity.command(), "agy");
     }
 
     #[test]
@@ -1345,7 +1354,8 @@ mod tests {
                 AgentCli::Claude,
                 AgentCli::Codex,
                 AgentCli::CodexFugu,
-                AgentCli::Gemini
+                AgentCli::Gemini,
+                AgentCli::Antigravity
             ]
         );
         // Each has a non-empty display name; the codex-fugu variant shows as
@@ -1357,6 +1367,8 @@ mod tests {
         assert_eq!(AgentCli::Codex.display_name(), "Codex");
         assert_eq!(AgentCli::CodexFugu.display_name(), "sakana.ai");
         assert_eq!(AgentCli::Gemini.display_name(), "Gemini");
+        // Antigravity launches `agy` but is presented as `Antigravity`.
+        assert_eq!(AgentCli::Antigravity.display_name(), "Antigravity");
     }
 
     #[test]
@@ -1366,6 +1378,13 @@ mod tests {
         assert_eq!(AgentCli::from_name("codex"), Some(AgentCli::Codex));
         assert_eq!(AgentCli::from_name("codex-fugu"), Some(AgentCli::CodexFugu));
         assert_eq!(AgentCli::from_name("gemini"), Some(AgentCli::Gemini));
+        // Antigravity resolves from both its launch command (`agy`) and its
+        // display name (`Antigravity`).
+        assert_eq!(AgentCli::from_name("agy"), Some(AgentCli::Antigravity));
+        assert_eq!(
+            AgentCli::from_name("antigravity"),
+            Some(AgentCli::Antigravity)
+        );
         // The display name resolves too — `sakana.ai` is codex-fugu's label.
         assert_eq!(AgentCli::from_name("sakana.ai"), Some(AgentCli::CodexFugu));
         // The on-disk serde label (`codex_fugu`) that `usagi config` prints

@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn available_clis_returns_all_when_everything_installed() {
-        let runner = FakeRunner(vec!["claude", "codex", "codex-fugu", "gemini"]);
+        let runner = FakeRunner(vec!["claude", "codex", "codex-fugu", "gemini", "agy"]);
         assert_eq!(available_clis(&runner), AgentCli::ALL.to_vec());
     }
 
