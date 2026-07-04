@@ -40,7 +40,7 @@ fn waiting_notice_is_empty_without_waiting_sessions() {
 
 #[test]
 fn render_frame_shows_waiting_count_on_the_header() {
-    // The sidebar still shows the per-session `◆ waiting` row; the header adds
+    // The sidebar still shows the per-session `◆` waiting icon; the header adds
     // a compact top-right summary so a waiting session is visible even when the
     // sidebar is scrolled or collapsed.
     let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
