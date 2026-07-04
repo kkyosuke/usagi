@@ -2831,28 +2831,38 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
         }
     }
 
+    // A `/` filter that matches nothing leaves the command area blank; a dim
+    // placeholder keeps the box from reading as a bug (an empty menu). Worded like
+    // the Open Project picker's "No projects match the filter." for consistency.
+    if commands.is_empty() {
+        rows.push(style("  No commands match the filter.").dim().to_string());
+    }
+
     // Window the command area to the widest expansion's height, so every picker
     // opens in place — its sub-rows shown, not collapsed into `↑/↓ N more` — and
     // the box never resizes as pickers open and close. Capped to the right pane so
     // it never overruns; only when the pane is too short does the window scroll.
     let visible = focus_menu_visible(focus_menu_target(state, &commands), avail_rows);
-    let mut lines = vec![style("Run a command:").dim().to_string()];
+    let mut lines = vec![focus_menu_filter_line(state, width)];
     lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
-    // a row-specific expand affordance while the cursor can open one, else base.
+    // the `/` filter's own keys while it is live, a row-specific expand affordance
+    // while the cursor can open one, else base.
     let hint = if close_expanded {
-        "↑↓ move   Enter run   ← back"
+        "↑↓ move   Enter run   ← back".to_string()
     } else if expanded {
-        "↑↓ move   Enter launch   ← back"
+        "↑↓ move   Enter launch   ← back".to_string()
+    } else if state.focus_menu_filtering() {
+        "↑↓ move   Enter run   ⌫ edit   Esc clear".to_string()
     } else if state.focus_menu_agent_can_expand() {
-        "↑↓ move   Enter run   → pick agent   t terminal   a agent"
+        "↑↓ move   Enter run   → pick agent   / filter   t terminal   a agent".to_string()
     } else if state.focus_menu_terminal_can_expand() {
-        "↑↓ move   Enter run   → pick terminal   t terminal   a agent"
+        "↑↓ move   Enter run   → pick terminal   / filter   t terminal   a agent".to_string()
     } else if state.focus_close_can_expand() {
-        "↑↓ move   Enter run   → expand   t terminal   a agent"
+        "↑↓ move   Enter run   → expand   / filter   t terminal   a agent".to_string()
     } else {
-        "↑↓ move   Enter run   t terminal   a agent"
+        "↑↓ move   Enter run   / filter   t terminal   a agent".to_string()
     };
     lines.push(style(hint).dim().to_string());
     lines
@@ -2870,6 +2880,23 @@ const FOCUS_PROMPT_HINT_ROWS: usize = HINT_MAX + 1;
 /// borders plus the `❯` command line and its blank spacer. The hint block is
 /// capped to `avail_rows - FOCUS_PROMPT_CHROME` so a short pane never overruns.
 const FOCUS_PROMPT_CHROME: usize = 4;
+
+/// The 在席 menu's first line: the dim `Run a command:` label normally, or — while
+/// a `/` filter is live — a `Filter: <query>` line that shows the typed text as the
+/// list narrows beneath it. Mirrors the Open Project picker's filter bar (see
+/// [`crate::presentation::tui::open`]) so the two search affordances read alike.
+fn focus_menu_filter_line(state: &HomeState, width: usize) -> String {
+    let Some(query) = state.focus_menu_filter() else {
+        return style("Run a command:").dim().to_string();
+    };
+    let label = style("Filter:").dim();
+    let value = if query.is_empty() {
+        style(" type to filter").dim().to_string()
+    } else {
+        format!(" {}", style(query).accent())
+    };
+    clip_to_width(&format!("{label}{value}"), width)
+}
 
 /// The body of the 在席 (Focus) prompt surface (no identity header): the
 /// session-scoped command line (`❯ <input>▏`) and a **fixed-height** Session-scope

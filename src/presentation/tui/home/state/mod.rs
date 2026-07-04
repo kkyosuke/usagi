@@ -576,6 +576,11 @@ pub struct HomeState {
     command_open: bool,
     /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
     focus_menu: FocusMenu,
+    /// The 在席 (Focus) menu's live filter (`/`): `None` when the menu lists every
+    /// command, `Some(query)` while the user narrows the list by typing. An empty
+    /// `Some` is filter mode with nothing typed yet (every command still shows), so
+    /// key routing knows to treat letters as filter input rather than shortcuts.
+    focus_menu_filter: Option<String>,
     /// The 在席 (Focus) prompt buffer (the session-scoped command line).
     focus_prompt: TextInput,
     /// Whether 在席's tab selector sits on the trailing "+ new" tab (the action
@@ -799,6 +804,7 @@ impl HomeState {
             resume_attach: false,
             command_open: false,
             focus_menu: FocusMenu::default(),
+            focus_menu_filter: None,
             focus_prompt: TextInput::new(),
             focus_new_tab: true,
             focus_action_over_pane: false,
@@ -1978,6 +1984,9 @@ impl HomeState {
         self.mode = Mode::Focus;
         self.focus_new_tab = true;
         self.focus_action_over_pane = false;
+        // Returning to the menu from a pane presents its full listing: a filter
+        // typed before the launch does not linger over the surface it left.
+        self.focus_menu_filter = None;
         self.clear_terminal_surface();
         // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
         // exited on the second key; clear it so 在席 starts without one pending.
@@ -2803,6 +2812,7 @@ impl HomeState {
         self.mode = Mode::Focus;
         self.overlay.clear_create();
         self.focus_menu.reset();
+        self.focus_menu_filter = None;
         self.focus_prompt.clear();
         self.focus_new_tab = true;
         self.focus_action_over_pane = false;
@@ -2896,9 +2906,30 @@ impl HomeState {
     /// filtered out on the root row, which belongs to no session. `agent` always
     /// stays: a session can hold one agent pane per CLI.
     ///
-    /// Resolved for the **active** row: 在席 acts on the session it focused.
+    /// Resolved for the **active** row: 在席 acts on the session it focused. When
+    /// the menu filter (`/`) is active the list is narrowed by
+    /// [`filter_focus_menu`](Self::filter_focus_menu) so both the renderer and key
+    /// routing operate on the same surviving commands.
     pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
-        self.menu_commands_for_root(self.list.root_active())
+        let commands = self.menu_commands_for_root(self.list.root_active());
+        self.filter_focus_menu(commands)
+    }
+
+    /// Narrow a Session-scope command list by the live 在席 menu filter (`/`): an
+    /// absent or empty filter keeps every command; otherwise only the commands
+    /// whose name starts with the typed text (case-insensitive) survive, mirroring
+    /// the command registry's prefix completion. The 切替 preview
+    /// ([`preview_menu_commands`](Self::preview_menu_commands)) deliberately skips
+    /// this — the filter is a 在席 interaction and is cleared on every 在席 entry.
+    fn filter_focus_menu(&self, commands: Vec<CommandInfo>) -> Vec<CommandInfo> {
+        let Some(query) = self.focus_menu_filter.as_deref().filter(|q| !q.is_empty()) else {
+            return commands;
+        };
+        let needle = query.to_lowercase();
+        commands
+            .into_iter()
+            .filter(|info| info.name.to_lowercase().starts_with(&needle))
+            .collect()
     }
 
     /// Shared body of [`focus_menu_commands`]: the
@@ -3116,6 +3147,58 @@ impl HomeState {
     /// The 在席 menu cursor (which Session-scope command is highlighted).
     pub fn focus_menu_cursor(&self) -> usize {
         self.focus_menu.cursor()
+    }
+
+    /// The live 在席 menu filter (`/`) text, or `None` when the menu lists every
+    /// command. The renderer draws a filter line (rather than the `Run a command:`
+    /// label) while this is `Some`.
+    pub fn focus_menu_filter(&self) -> Option<&str> {
+        self.focus_menu_filter.as_deref()
+    }
+
+    /// Whether the 在席 menu is in filter mode (`/`): typed characters narrow the
+    /// command list rather than driving the single-key shortcuts (`t` / `a` / `C`).
+    pub fn focus_menu_filtering(&self) -> bool {
+        self.focus_menu_filter.is_some()
+    }
+
+    /// Enter 在席 menu filter mode (`/`) from an empty query, homing the cursor on
+    /// the first command. A no-op while already filtering, so a stray `/` typed
+    /// into an active filter is ignored rather than wiping what was typed.
+    pub fn start_focus_menu_filter(&mut self) {
+        if self.focus_menu_filter.is_none() {
+            self.focus_menu_filter = Some(String::new());
+            self.focus_menu.reset_cursor();
+        }
+    }
+
+    /// Append a character to the 在席 menu filter and re-home the cursor on the
+    /// first surviving match. A no-op when the menu is not filtering.
+    pub fn push_focus_menu_filter(&mut self, c: char) {
+        if let Some(query) = self.focus_menu_filter.as_mut() {
+            query.push(c);
+            self.focus_menu.reset_cursor();
+        }
+    }
+
+    /// Delete the last character of the 在席 menu filter (`Backspace`), re-homing
+    /// the cursor. A no-op when not filtering or the query is already empty; filter
+    /// mode is left with `Esc` ([`clear_focus_menu_filter`]), not by backspacing
+    /// past the start.
+    ///
+    /// [`clear_focus_menu_filter`]: Self::clear_focus_menu_filter
+    pub fn focus_menu_filter_backspace(&mut self) {
+        if let Some(query) = self.focus_menu_filter.as_mut() {
+            query.pop();
+            self.focus_menu.reset_cursor();
+        }
+    }
+
+    /// Leave 在席 menu filter mode (`Esc`), returning whether it was filtering — so
+    /// the `Esc` handler treats the key as consumed only then, peeling the filter
+    /// before it steps back out of 在席. The list returns to its full listing.
+    pub fn clear_focus_menu_filter(&mut self) -> bool {
+        self.focus_menu_filter.take().is_some()
     }
 
     /// Whether any 在席 menu row is expanded into an inline picker (agent /

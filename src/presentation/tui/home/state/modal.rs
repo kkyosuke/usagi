@@ -841,6 +841,14 @@ impl FocusMenu {
         self.expanded = None;
     }
 
+    /// Re-home the cursor on the first row without touching any open picker — used
+    /// when the 在席 menu filter (`/`) changes and the match list shifts under it,
+    /// so the highlight lands on the first surviving command rather than a now
+    /// out-of-range row.
+    pub(super) fn reset_cursor(&mut self) {
+        self.cursor = 0;
+    }
+
     /// Expand an inline picker, highlighting `default_index` (clamped by the
     /// renderer).
     pub(super) fn expand(&mut self, submenu: FocusSubmenu, default_index: usize) {
@@ -1013,6 +1021,15 @@ mod tests {
         menu.reset();
         assert_eq!(menu.cursor(), 0);
         assert!(!menu.is_expanded());
+    }
+
+    #[test]
+    fn focus_menu_reset_cursor_rehomes_without_touching_the_picker() {
+        let mut menu = FocusMenu::default();
+        menu.move_down(3);
+        assert_eq!(menu.cursor(), 1);
+        menu.reset_cursor();
+        assert_eq!(menu.cursor(), 0);
     }
 
     #[test]
