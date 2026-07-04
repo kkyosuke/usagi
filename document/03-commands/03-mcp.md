@@ -11,9 +11,10 @@
 - **memory**: `usagi memory`（[01-cli.md](01-cli.md#usagi-memory)）と同じメモリ操作（セッションをまたいで
   覚えておく知識の保存・想起）。
 - **session**: usagi のセッション（[4. オーケストレーション](../04-orchestration.md)）操作。セッションを
-  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、セッションに紐づく PR を取得し、
-  不要になったセッションを削除できます。コーディネータ役のエージェントが、並行する worktree にタスクを
-  振り分けるオーケストレータとして振る舞えます。
+  作成し、特定のセッションのエージェントにプロンプトを送って作業を委譲し、各セッションの進捗（エージェントの
+  phase・worktree の git 状態）をポーリングし、セッションに紐づく PR を取得し、不要になったセッションを削除
+  できます。コーディネータ役のエージェントが、並行する worktree にタスクを振り分け、完了を検知して片付ける
+  オーケストレータとして振る舞えます。
 
 > MCP の tool 面は CLI と 1:1 対応ではなく、**エージェントが選びやすいワークフロー単位**に寄せています。
 > 一覧と検索は `issue_search` / `memory_search` の 1 tool（`query` 省略で全件）に、メモリの保存と更新は
@@ -27,6 +28,7 @@
 - [起動と登録](#起動と登録)
 - [アーキテクチャ](#アーキテクチャ)
 - [対応 tool 一覧](#対応-tool-一覧)
+- [`session_status` の挙動](#session_status-の挙動)
 - [`session_prompt` の挙動](#session_prompt-の挙動)
 - [`session_delegate_issue` の挙動](#session_delegate_issue-の挙動)
 - [`session_remove` の挙動](#session_remove-の挙動)
@@ -127,7 +129,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 18 tool（issue 6 + memory 4 + session 7 + オーケストレーション 1）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 19 tool（issue 6 + memory 4 + session 8 + オーケストレーション 1）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
@@ -144,8 +146,9 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
 | `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `created_at` / `worktrees`） |
+| `session_status` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `agent_phase` / `worktrees`。各 worktree に `status` / `dirty` / `merged`）（[挙動](#session_status-の挙動)） |
 | `session_prompt` | `name` / `prompt` | `mode`（`auto` / `queue` / `live`、既定 `auto`） | `{ "name": "…", "delivered_to": "queue" \| "live", "detail": "…" }`（[挙動](#session_prompt-の挙動)） |
-| `session_pr` | `name` | — | `{ "name": "…", "root": "…", "pr": [{ "number": N, "url": "…" }] }` |
+| `session_pr` | `name` | — | `{ "name": "…", "root": "…", "merged": bool, "pr": [{ "number": N, "url": "…", "state": "open" \| "merged" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
 | `session_delegate_issue` | `number` | `name` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
 
@@ -175,8 +178,14 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
   カーソルは動きません。
 - `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
-  PR URL を返します。PR が記録されていないセッションは `pr: []` を返します。存在しないセッション名は
-  実行エラー（`isError: true`）になります。
+  PR URL を返します。各 PR には `state`（セッションの全 worktree がデフォルトブランチにマージ済みなら
+  `merged`、それ以外は `open`）が付き、返り値トップレベルの `merged` も同じ判定を返します。この状態は
+  キャッシュ済みの worktree 状態から導出し（usagi は GitHub に問い合わせません）、**マージせずにクローズ
+  された PR は open と区別できません**。PR が記録されていないセッションは `pr: []` を返します。存在しない
+  セッション名は実行エラー（`isError: true`）になります。
+- `session_status` は、コーディネータ役のエージェントがポーリングして委譲先の進捗を知るための読み取り専用
+  tool です。エージェントの phase と各 worktree の git 状態をキャッシュから返します（git を起動しません）
+  （[挙動](#session_status-の挙動)）。
 - `session_prompt` は 1 つの tool で 2 つの配送チャネル（起動時キュー / 起動中ペイン）を持ち、`mode` で
   選びます。既定の `auto` はライブペインの有無を検知して自動で振り分けます。どちらに配送したかは返り値の
   `delivered_to` でわかります（[挙動](#session_prompt-の挙動)）。
@@ -187,6 +196,29 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   （保存フォーマットの正本は [data/02-workspace.md](../data/02-workspace.md#statejson)）。
 
 入力スキーマ（JSON Schema）は `tools/list` のレスポンスに各 tool の `inputSchema` として含まれます。
+
+## `session_status` の挙動
+
+`session_status` は、コーディネータ役のエージェントが**委譲先セッションの進捗をポーリング**して、子の完了や
+PR のマージを検知し、`session_remove` → 次の issue 委譲へと自律ループを回すための読み取り専用 tool です。
+各セッションについて次を返します。
+
+| フィールド | 内容 |
+|---|---|
+| `agent_phase` | セッションの root worktree に記録されたエージェントの lifecycle phase（`ready` / `running` / `waiting` / `ended`）。ペインが一度も起動していない（またはペインが死んで phase がクリアされた）場合は `none`。TUI のバッジを駆動するのと同じ agent phase ファイルを読む。 |
+| `worktrees[].status` | worktree の git 状態（`new` / `dirty` / `local` / `pushed` / `synced`）。`usagi status`（[`state.json`](../data/02-workspace.md#statejson)）と同じ分類。 |
+| `worktrees[].dirty` | 未コミットの変更がある（`status == dirty`）。 |
+| `worktrees[].merged` | デフォルトブランチがこの worktree の内容をすべて含む＝マージ済み（`status == synced`）。 |
+
+- **読み取り専用・軽量**です。`state.json`（直近の同期で記録した worktree 状態）と agent phase ファイルだけを
+  読み、**git を起動しません**。値の鮮度は直近の[ワークスペース同期](../data/02-workspace.md#statejson)
+  （稼働中の TUI がバックグラウンドで実行）に一致します。ポーリング用途で繰り返し呼んでも安価です。
+- `agent_phase` の `ended` は「子エージェントがターンを終えた／プロセスが終了した」ことを、`merged` は
+  「作業がデフォルトブランチに取り込まれた」ことを示します。コーディネータはこの 2 つを見てセッションの完了を
+  判定し、`session_remove` で片付けてから次の issue を委譲します。
+- `merged` は worktree 状態から導出するため、リモートでマージされた反映にはローカルの
+  `origin/<default>` が最新である必要があります（`usagi status` と同じ制約。GitHub には問い合わせません）。
+- セッションが 1 件も無ければ空配列 `[]` を返します。並び順は `session_list` と同じ（ホーム一覧の表示順）。
 
 ## `session_prompt` の挙動
 

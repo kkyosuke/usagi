@@ -34,6 +34,21 @@ pub enum AgentPhase {
 }
 
 impl AgentPhase {
+    /// The lowercase name of this phase (`ready` / `running` / `waiting` /
+    /// `ended`), matching its serde representation.
+    ///
+    /// Used where a phase is surfaced as a plain string rather than serialized
+    /// through serde — e.g. the `session_status` MCP tool, which reports a
+    /// worktree with no recorded phase as `none` and otherwise this name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentPhase::Ready => "ready",
+            AgentPhase::Running => "running",
+            AgentPhase::Waiting => "waiting",
+            AgentPhase::Ended => "ended",
+        }
+    }
+
     /// Whether this phase authoritatively decides the displayed state.
     ///
     /// [`Ready`](Self::Ready), [`Running`](Self::Running) and
@@ -86,6 +101,23 @@ mod tests {
             serde_json::from_str::<AgentPhase>("\"ready\"").unwrap(),
             AgentPhase::Ready
         );
+    }
+
+    #[test]
+    fn as_str_matches_the_serde_name() {
+        // The plain-string name mirrors the snake_case serde representation, so
+        // the two never drift.
+        for phase in [
+            AgentPhase::Ready,
+            AgentPhase::Running,
+            AgentPhase::Waiting,
+            AgentPhase::Ended,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&phase).unwrap(),
+                format!("\"{}\"", phase.as_str())
+            );
+        }
     }
 
     #[test]
