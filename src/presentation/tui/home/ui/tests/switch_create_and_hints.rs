@@ -57,6 +57,7 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     state.switch_begin_create(Vec::new());
@@ -90,6 +91,7 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
             created_at: Utc::now(),
             last_active: None,
         }],
+        issues: Vec::new(),
     }]);
     state.enter_switch(super::super::super::state::ReturnMode::Base);
     let before = render_frame(24, 80, &state)

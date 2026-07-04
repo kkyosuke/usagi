@@ -263,6 +263,43 @@ fn footer_line_shows_palette_controls_while_open() {
 }
 
 #[test]
+fn footer_and_palette_scope_to_the_cursor_group_in_unite_mode() {
+    let mut state = state_with_sessions(&["main"]);
+    // Single-workspace: the footer carries no scope tag (there is no ambiguity).
+    assert!(!footer_line(200, &state).contains(" · usagi"));
+
+    state.set_extra_groups(vec![GroupSource {
+        name: "wsB".to_string(),
+        root_path: PathBuf::from("/wsB"),
+        root_note: None,
+        sessions: vec![SessionRecord {
+            name: "b1".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            root: PathBuf::from("/wsB/.usagi/sessions/b1"),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        }],
+        issues: Vec::new(),
+    }]);
+
+    // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1. The switch footer names
+    // the cursor group's workspace inside its mode tag, so it survives elision.
+    state.switch_select(1); // primary session
+    assert!(footer_line(200, &state).contains("switch · usagi"));
+    state.switch_select(3); // extra group session
+    assert!(footer_line(200, &state).contains("switch · wsB"));
+
+    // The `:` palette input line names the same scope, so a `config` / `issue` run
+    // from the palette shows which workspace it targets.
+    state.open_command_palette();
+    let frame = stripped(&render_frame(40, 100, &state));
+    assert!(frame.contains("[wsB]"));
+}
+
+#[test]
 fn footer_elides_to_fit_a_narrow_terminal() {
     // The switch footer spells out every key and is far wider than an 80-column
     // terminal; it must be trimmed to fit (never overrun the row), while keeping
