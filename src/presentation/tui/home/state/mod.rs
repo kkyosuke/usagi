@@ -1348,18 +1348,59 @@ impl HomeState {
     /// sort toggling on/off, or a session entering/leaving the waiting set) so the
     /// rows can be replaced wholesale without yanking the cursor back to the root.
     fn rebuild_list_keep_cursor(&mut self) {
-        let selected = self.list.selected_name().to_string();
-        let active = self.list.active_name().to_string();
+        enum RowAnchor {
+            Create,
+            Root(usize),
+            Session { group: usize, name: String },
+        }
+
+        let selected = if self.list.create_row_selected() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.selected() {
+            RowAnchor::Session {
+                group: self.list.selected_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.selected_group())
+        };
+        let active = if self.list.active_index() == self.list.create_row() {
+            RowAnchor::Create
+        } else if let Some(worktree) = self.list.active() {
+            RowAnchor::Session {
+                group: self.list.active_group(),
+                name: worktree_name(worktree).to_string(),
+            }
+        } else {
+            RowAnchor::Root(self.list.active_group())
+        };
         // The fresh list drops the `Ctrl-^` jump target, so carry it across the
         // rebuild by name (it is re-validated lazily, so a session that vanished
         // in this sync simply yields no jump).
         let previous = self.list.previous_active_name().map(str::to_string);
         self.rebuild_list();
-        // Restore the cursor (`select_by_name` moves both cursor and active onto
-        // the row; it is a no-op for the root row / a vanished session, leaving
-        // the rebuilt default on the root), then correct the active row.
-        self.list.select_by_name(&selected);
-        self.list.activate_by_name(&active);
+        // Restore by the row's identity *within its workspace group*. In 統合
+        // (unite) mode every workspace contributes a synthetic root row named
+        // `ROOT_NAME`, and several workspaces may also share a branch name; using
+        // the old name-only lookup would resolve those ambiguous rows to the first
+        // group and snap 切替 back to the top when a background refresh landed.
+        let resolve = |list: &WorktreeList, anchor: &RowAnchor| match anchor {
+            RowAnchor::Create => list.create_row(),
+            RowAnchor::Root(group) => list.group_root_row(*group).unwrap_or(0),
+            RowAnchor::Session { group, name } => list
+                .row_in_group_of_name(*group, name)
+                .or_else(|| list.group_root_row(*group))
+                .unwrap_or(0),
+        };
+        self.list.focus_index(resolve(&self.list, &selected));
+        // The active row is command-facing, so keep it on a real selectable row;
+        // if a corrupt/old state ever had it on the create affordance, normalize
+        // it to the primary root while rebuilding.
+        let active_row = match active {
+            RowAnchor::Create => 0,
+            ref anchor => resolve(&self.list, anchor),
+        };
+        self.list.activate_index(active_row);
         self.list.set_previous_active(previous);
     }
 
