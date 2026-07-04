@@ -385,12 +385,11 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
 }
 
 #[test]
-fn focus_menu_keeps_a_fixed_height_and_scrolls_a_long_picker() {
+fn focus_menu_grows_to_fill_the_pane_then_scrolls_a_long_picker() {
     use crate::domain::settings::AgentCli;
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_focus(1);
-    // More installed agents than the window can hold once the picker opens, so
-    // expanding must scroll rather than grow the box.
+    // More installed agents than a short pane can hold once the picker opens.
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![
         AgentCli::Claude,
@@ -398,21 +397,33 @@ fn focus_menu_keeps_a_fixed_height_and_scrolls_a_long_picker() {
         AgentCli::CodexFugu,
         AgentCli::Gemini,
     ]);
-    let collapsed = focus_menu_body(&state, 60);
     state.focus_menu_expand_agent();
-    let expanded = focus_menu_body(&state, 60);
-    // The body is the same height expanded or not — the box never resizes.
-    assert_eq!(collapsed.len(), expanded.len());
-    // The overflow past the fixed window is summarised with a scroll marker.
-    let joined = console::strip_ansi_codes(&expanded.join("\n")).into_owned();
-    assert!(joined.contains("more"), "a long picker scrolls: {joined:?}");
+
+    // A tall pane fits every agent row, so the picker shows in full — the window
+    // grows to fill the pane rather than clipping straight into a `N more` marker.
+    let roomy = console::strip_ansi_codes(&focus_menu_body(&state, 60, 30).join("\n")).into_owned();
+    assert!(
+        roomy.contains("Gemini"),
+        "a tall pane shows every agent: {roomy:?}"
+    );
+    assert!(
+        !roomy.contains("more"),
+        "a tall pane needs no scroll marker: {roomy:?}"
+    );
+
+    // A short pane cannot hold them all, so the window caps its height and the
+    // overflow is summarised with a scroll marker instead.
+    let cramped = focus_menu_body(&state, 60, 11);
+    let joined = console::strip_ansi_codes(&cramped.join("\n")).into_owned();
+    assert!(joined.contains("more"), "a short pane scrolls: {joined:?}");
+
     // Moving the picker cursor down scrolls the hidden agents into view without
-    // changing the body height.
+    // growing the capped window.
     for _ in 0..3 {
         state.focus_menu_move_down();
     }
-    let scrolled = focus_menu_body(&state, 60);
-    assert_eq!(scrolled.len(), collapsed.len());
+    let scrolled = focus_menu_body(&state, 60, 11);
+    assert_eq!(scrolled.len(), cramped.len());
     let joined = console::strip_ansi_codes(&scrolled.join("\n")).into_owned();
     assert!(
         joined.contains("Gemini"),

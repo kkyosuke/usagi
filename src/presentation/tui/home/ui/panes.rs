@@ -2614,14 +2614,32 @@ fn focus_session_header(state: &HomeState) -> String {
         .to_string()
 }
 
-/// The height (in rows) the 在席 (Focus) menu's command area is fixed to. The
-/// window shows this many rows whatever is expanded, so opening an inline picker
-/// scrolls its sub-rows into view rather than resizing the box. Set to the full
-/// menu's command count (agent / terminal / diff / chat / close) via `max`, so a
-/// full menu never pads and every menu shares one height; it also leaves room —
-/// after the two overflow markers — for a two-option picker (terminal / close) to
-/// show in full, so only a long agent list actually scrolls.
+/// The **minimum** height (in rows) the 在席 (Focus) menu's command area shows.
+/// The window never drops below this many rows whatever is expanded, so opening an
+/// inline picker scrolls its sub-rows into view rather than shrinking the box.
+/// Floored at the full menu's command count (agent / terminal / diff / chat /
+/// close) via `max`, so a full menu never pads; the actual height grows past this
+/// to fill the right pane (see [`focus_menu_visible`]) so a long agent list shows
+/// as many rows as fit before it needs to scroll.
 const FOCUS_MENU_MIN_VISIBLE: usize = 5;
+
+/// The 在席 menu box's chrome rows around the windowed command area: the two box
+/// borders plus the `Run a command:` label, the blank spacer, and the key hint.
+/// The command window may take up to `avail_rows - FOCUS_MENU_CHROME` rows before
+/// the box would overrun the right pane.
+const FOCUS_MENU_CHROME: usize = 5;
+
+/// How many command rows the 在席 menu window shows for a pane `avail_rows` tall
+/// holding `total` command rows, given a `floor` (the collapsed command count, so
+/// the top-level menu never scrolls). It grows to fill the pane — showing every
+/// row when they all fit, so no scroll marker appears — but never below the floor
+/// (a longer list then scrolls within the window) nor past what the pane can hold
+/// after the box chrome.
+fn focus_menu_visible(total: usize, avail_rows: usize, floor: usize) -> usize {
+    let floor = floor.max(FOCUS_MENU_MIN_VISIBLE);
+    let max_fit = avail_rows.saturating_sub(FOCUS_MENU_CHROME);
+    total.clamp(floor, max_fit.max(floor))
+}
 
 /// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
 /// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
@@ -2661,12 +2679,13 @@ fn focus_menu_overflow(hidden: usize, above: bool) -> String {
 
 /// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. The command rows are windowed to a fixed height
-/// ([`focus_menu_window`]) so expanding an inline picker scrolls rather than
-/// resizing the box. Rendered as the body of the floating menu overlay modal (see
-/// [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the `session:`
-/// identity rides the modal's title rather than a header line here.
-pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
+/// and a key hint. The command rows are windowed ([`focus_menu_window`]) to a
+/// height that grows to fill the `avail_rows`-tall right pane, so a long picker
+/// shows as many rows as fit before it scrolls rather than collapsing straight
+/// into `↑/↓ N more` markers. Rendered as the body of the floating menu overlay
+/// modal (see [`super::render_frame`] and [`HomeState::focus_menu_overlay`]); the
+/// `session:` identity rides the modal's title rather than a header line here.
+pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let cursor = state.focus_menu_cursor();
     let expanded = state.focus_menu_expanded();
     let close_expanded = state.focus_close_expanded();
@@ -2744,11 +2763,12 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize) -> Vec<String> {
         }
     }
 
-    // Window the command area to a fixed height so expanding a picker scrolls its
-    // sub-rows into view rather than growing the box. The window height is the
-    // (expansion-invariant) command count, floored so there is always room for the
-    // two overflow markers plus a content row.
-    let visible = commands.len().max(FOCUS_MENU_MIN_VISIBLE);
+    // Window the command area to a height that grows to fill the right pane, so
+    // expanding a picker shows its sub-rows in place — as many as fit — rather than
+    // collapsing them into `↑/↓ N more` markers. Floored at the command count so
+    // the top-level menu never scrolls, and capped so the box never overruns the
+    // pane; only a picker taller than the pane then scrolls within the window.
+    let visible = focus_menu_visible(rows.len(), avail_rows, commands.len());
     let mut lines = vec![style("Run a command:").dim().to_string()];
     lines.extend(focus_menu_window(rows, active, visible));
     lines.push(String::new());

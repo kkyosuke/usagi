@@ -669,7 +669,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // keeps showing behind the box, so zooming out never blanks the terminal.
     if state.focus_menu_overlay() {
         let inner = widgets::modal_inner_width(right_w, FOCUS_MENU_INNER);
-        let body = focus_menu_body(state, inner);
+        let body = focus_menu_body(state, inner, body_rows);
         let title = format!("session: {}", state.focused_session_name());
         widgets::overlay_region_modal(
             &mut lines,
