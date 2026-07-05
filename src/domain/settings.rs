@@ -197,7 +197,7 @@ impl AgentCli {
     }
 
     /// Resolve a user-typed agent name to its variant, accepting the launch
-    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini`),
+    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini` / `agy`),
     /// the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu), and
     /// the on-disk serde label (`codex_fugu`) that `usagi config` prints — all
     /// case-insensitively. Used by the 在席 prompt's `agent <name>` and

@@ -550,6 +550,25 @@ fn agent_with_an_unknown_name_is_rejected_without_launching() {
 }
 
 #[test]
+fn agent_completes_available_cli_names() {
+    // "agent " (no prefix yet) suggests all configured agent commands and display names.
+    let completion = registry().complete("agent ", CommandScope::Session);
+    assert!(completion.candidates.contains(&"claude".to_string()));
+    assert!(completion.candidates.contains(&"sakana.ai".to_string()));
+    assert!(completion.candidates.contains(&"agy".to_string()));
+    assert!(completion.candidates.contains(&"antigravity".to_string()));
+
+    // "agent cl" uniquely completes to "agent claude" with no candidates.
+    let partial = registry().complete("agent cl", CommandScope::Session);
+    assert_eq!(partial.input, "agent claude");
+    assert!(partial.candidates.is_empty());
+
+    // After the first token, it returns nothing.
+    let too_many = registry().complete("agent claude ", CommandScope::Session);
+    assert!(too_many.candidates.is_empty());
+}
+
+#[test]
 fn config_requests_opening_the_settings_screen() {
     let result = registry().dispatch("config", &[], &[]);
     assert!(result.lines.is_empty());
