@@ -295,6 +295,12 @@ enum Commands {
         #[arg(long, value_name = "URL")]
         git: Option<String>,
     },
+    /// Initialize AI agent configuration files (like CLAUDE.md, .clinerules, .aider.conf.yml)
+    InitAgent {
+        /// Overwrite existing files without prompting
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Manage task issues stored in .usagi/issues/
     ///
     /// Hidden from the CLI: issues are operated by AI agents via the MCP server.
@@ -394,6 +400,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
         Commands::Init { git } => usagi::presentation::cli::init::run(git),
+        Commands::InitAgent { yes } => usagi::presentation::cli::init_agent::run(yes),
         Commands::Issue { command } => usagi::presentation::cli::issue::run(command),
         Commands::Memory { command } => usagi::presentation::cli::memory::run(command),
         Commands::Op { command } => {
@@ -460,6 +467,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Hop => Some("hop"),
         Commands::Icon { .. } => Some("icon"),
         Commands::Init { .. } => Some("init"),
+        Commands::InitAgent { .. } => Some("init-agent"),
         Commands::Issue { .. } => Some("issue"),
         Commands::Memory { .. } => Some("memory"),
         Commands::Op { .. } => Some("op"),

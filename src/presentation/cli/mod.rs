@@ -8,6 +8,7 @@ pub mod guard_workspace;
 pub mod hop;
 pub mod icon;
 pub mod init;
+pub mod init_agent;
 pub mod issue;
 pub mod llm_mcp;
 pub mod mcp;

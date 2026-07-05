@@ -1,13 +1,13 @@
 ---
 number: 17
 title: usagi init-agent（AI エージェント設定ファイルの初期化）
-status: todo
+status: done
 priority: low
 labels: [cli]
 dependson: [1]
 related: []
 created_at: 2026-06-16T23:02:04.449084+00:00
-updated_at: 2026-06-16T23:02:04.449084+00:00
+updated_at: 2026-07-05T22:21:58.439472+00:00
 ---
 
 # `usagi init-agent`
