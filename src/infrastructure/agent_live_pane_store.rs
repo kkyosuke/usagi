@@ -68,8 +68,13 @@ pub fn set(worktree: &Path, pid: u32) -> Result<()> {
 ///
 /// `pid_alive` is injected so the decision logic is unit-tested without a real
 /// process table; the production caller passes
-/// [`super::resource::process_alive`].
-pub fn is_live(worktree: &Path, pid_alive: impl Fn(u32) -> bool) -> bool {
+/// [`super::resource::process_alive`]. It is a plain `fn` pointer (not a generic
+/// `impl Fn`) on purpose: a generic here would be monomorphized separately in the
+/// binary crate that calls it (`main.rs`), and that binary-side instance — never
+/// exercised by these lib tests — would show as uncovered under
+/// `cargo llvm-cov --workspace` (the same double-build trap `scripts/coverage.sh`
+/// documents). A single concrete function is compiled once and linked from both.
+pub fn is_live(worktree: &Path, pid_alive: fn(u32) -> bool) -> bool {
     match read_marker(worktree) {
         // Ours and the owning TUI is still running: a live consumer exists.
         Some((_, pid)) if pid_alive(pid) => true,
