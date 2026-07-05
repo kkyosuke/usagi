@@ -38,20 +38,42 @@ impl AgentBackend for CliAgentBackend {
     fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
         usagi::infrastructure::agent_live_prompt_store::append(worktree, prompt)
             .map_err(|e| e.to_string())?;
-        Ok(
-            "Queued the prompt for this session's running agent pane. A running usagi TUI \
-            delivers it to the live agent by pasting it and pressing Enter; if no live \
-            agent pane is open, it waits until one is available."
-                .to_string(),
-        )
+        // Whether a running TUI actually has a live agent pane to drain this queue
+        // right now, so the confirmation tells the caller if the prompt was handed
+        // to a live consumer or is waiting for one — the live channel is delivered
+        // only by such a TUI, and reporting "live" for a prompt no one will drain
+        // is what strands it.
+        if self.agent_is_live(worktree) {
+            Ok(
+                "Queued the prompt for this session's running agent pane. A running usagi TUI \
+                delivers it to the live agent by pasting it and pressing Enter."
+                    .to_string(),
+            )
+        } else {
+            Ok(
+                "Appended the prompt to this session's live queue, but no live agent pane is \
+                open for it right now, so nothing will deliver it until one opens (launch the \
+                session's agent from the usagi home screen). To have the prompt run on the \
+                next fresh launch instead, send it with mode \"queue\"."
+                    .to_string(),
+            )
+        }
     }
 
     fn agent_is_live(&self, worktree: &Path) -> bool {
-        // A recorded agent phase means a pane was launched in this worktree and
-        // its lifecycle hooks fired; the home screen clears it when the pane dies,
-        // so its presence tracks a live pane. `session_prompt`'s `auto` mode uses
-        // this to prefer the live channel when the session's agent is running.
-        usagi::infrastructure::agent_state_store::read(worktree).is_some()
+        // A live-agent-pane marker published by a running TUI, stamped with that
+        // TUI's pid — present only while a TUI holds a live agent pane for this
+        // worktree, and read as dead once that TUI is gone (even if it crashed
+        // without clearing it). This is the authoritative "the live channel has a
+        // consumer" signal, so `session_prompt`'s `auto` mode uses it to prefer the
+        // live channel only when the prompt would actually be drained. (The
+        // agent-phase file is deliberately not used: it reports `ready` for an idle
+        // agent and lingers stale after a TUI quits, which is what made `auto`
+        // resolve to a live channel that no one was draining.)
+        usagi::infrastructure::agent_live_pane_store::is_live(
+            worktree,
+            usagi::infrastructure::resource::process_alive,
+        )
     }
 
     fn remove(

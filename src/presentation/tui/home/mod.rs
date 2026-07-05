@@ -1778,16 +1778,25 @@ fn restore_open_panes(
 /// the open-panes snapshot. Candidate dirs are the workspace root and every session
 /// worktree — the same set `restore_open_panes` scans. A session that already has a
 /// live pane is skipped, so its queued prompt is consumed the ordinary way (the
-/// next fresh launch) instead. Taking the prompt is one-shot; a spawn that fails
-/// re-queues it so a transient failure never silently drops a prompt the sender was
-/// told was queued.
+/// next fresh launch, or the live pane's drain) instead.
+///
+/// For a pane-less session it drains *both* delivery channels: the launch queue
+/// (the ordinary opening-message channel) and the
+/// [live queue](crate::infrastructure::agent_live_prompt_store). The latter holds
+/// prompts `session_prompt`'s explicit `mode="live"` appended for this session:
+/// that mode always queues to the live channel without checking for a live pane, so
+/// a prompt sent when none is open waits there. (`auto` mode does not strand prompts
+/// here — it routes live only when a pid-stamped live-pane marker confirms a running
+/// consumer.) With no pane to receive them they would otherwise strand forever, so
+/// they are folded into the fresh agent's opening message too. Taking each is
+/// one-shot; a spawn that fails re-queues the combined prompt so a transient failure
+/// never silently drops work the sender was told was queued.
 ///
 /// Returns one log line per pane it started, for the caller to append to the
 /// command log — so it is visible why an agent opened already working on something
 /// the user did not type. A no-op (empty) when `enabled` is false or nothing is
-/// queued; the cheap [`any_queued`](crate::infrastructure::agent_prompt_store::any_queued)
-/// check gates the per-session work so an idle tick with no queue costs one
-/// directory listing.
+/// queued; the cheap `any_queued` checks on both stores gate the per-session work so
+/// an idle tick with no queue costs two directory listings.
 fn autostart_queued_prompts(
     term: &Term,
     state: &HomeState,
@@ -1798,7 +1807,10 @@ fn autostart_queued_prompts(
 ) -> Vec<String> {
     use terminal::tabs::PaneKind;
 
-    if !enabled || !crate::infrastructure::agent_prompt_store::any_queued() {
+    if !enabled
+        || (!crate::infrastructure::agent_prompt_store::any_queued()
+            && !crate::infrastructure::agent_live_prompt_store::any_queued())
+    {
         return Vec::new();
     }
 
@@ -1832,11 +1844,21 @@ fn autostart_queued_prompts(
         if pool.borrow().has_live_pane(&dir) {
             continue;
         }
-        // One-shot take: nothing queued for this worktree (or a file stamped for
-        // another) simply skips it.
-        let Some(prompt) = crate::infrastructure::agent_prompt_store::take(&dir) else {
+        // Gather any prompt queued for this pane-less session from both channels
+        // (see the fn doc): the launch queue's one-shot opening message, then any
+        // live-queue prompts stranded because their target pane no longer exists.
+        // Both takes are one-shot; joined into a single opening message when both
+        // hold something (usually only one does). Nothing queued in either simply
+        // skips this worktree.
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(crate::infrastructure::agent_prompt_store::take(&dir));
+        parts.extend(crate::infrastructure::agent_live_prompt_store::take_all(
+            &dir,
+        ));
+        if parts.is_empty() {
             continue;
-        };
+        }
+        let prompt = parts.join("\n\n");
         // Launch with the session's pinned CLI / model when it has one (a delegated
         // issue routed to a specific model), else the workspace default. This is the
         // primary path a `session_delegate_issue(agent_cli, model)` takes effect on.
