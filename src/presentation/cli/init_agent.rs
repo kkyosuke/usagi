@@ -5,10 +5,12 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 pub fn run(yes: bool) -> Result<()> {
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
     let cwd = std::env::current_dir()?;
-    init_agent_cli(&cwd, yes, stdin.lock(), &mut stdout)
+    run_impl(yes, &cwd, std::io::stdin().lock(), std::io::stdout())
+}
+
+fn run_impl(yes: bool, cwd: &Path, input: impl BufRead, mut output: impl Write) -> Result<()> {
+    init_agent_cli(cwd, yes, input, &mut output)
 }
 
 fn init_agent_cli(
@@ -168,34 +170,45 @@ mod tests {
 
     #[test]
     fn test_run_executes_against_the_current_directory() {
-        let tmp = tempdir().unwrap();
-        std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
-
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let backup_claude = std::fs::read_to_string("CLAUDE.md").ok();
+        let backup_clinerules = std::fs::read_to_string(".clinerules").ok();
+        let backup_aider = std::fs::read_to_string(".aider.conf.yml").ok();
 
         let result = run(true);
 
-        std::env::set_current_dir(original).unwrap();
+        if let Some(content) = backup_claude {
+            let _ = std::fs::write("CLAUDE.md", content);
+        } else {
+            let _ = std::fs::remove_file("CLAUDE.md");
+        }
+        if let Some(content) = backup_clinerules {
+            let _ = std::fs::write(".clinerules", content);
+        } else {
+            let _ = std::fs::remove_file(".clinerules");
+        }
+        if let Some(content) = backup_aider {
+            let _ = std::fs::write(".aider.conf.yml", content);
+        } else {
+            let _ = std::fs::remove_file(".aider.conf.yml");
+        }
 
         assert!(result.is_ok());
-        assert!(tmp.path().join("CLAUDE.md").is_file());
     }
 
     #[test]
-    fn test_run_false_executes_against_the_current_directory() {
+    fn test_run_impl_executes_against_directory() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
 
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let input = b"";
+        let mut output = Vec::new();
 
-        let result = run(false);
-
-        std::env::set_current_dir(original).unwrap();
-
-        assert!(result.is_ok());
+        let result_true = run_impl(true, tmp.path(), &input[..], &mut output);
+        assert!(result_true.is_ok());
         assert!(tmp.path().join("CLAUDE.md").is_file());
+
+        let result_false = run_impl(false, tmp.path(), &input[..], &mut output);
+        assert!(result_false.is_ok());
     }
 
     struct FailingWriter;
