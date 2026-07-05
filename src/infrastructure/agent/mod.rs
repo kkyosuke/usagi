@@ -205,7 +205,7 @@ mod tests {
         let mut wiring = Settings::default().agent_wiring("usagi");
         wiring.is_root = false;
         let launch = agent.launch_command(&wiring, false, None);
-        assert!(launch.starts_with("agy -i='"));
+        assert!(launch.starts_with("agy --dangerously-skip-permission -i='"));
         assert!(launch.contains(SESSION_WORKTREE_PROMPT));
         assert!(launch.contains(GEMINI_AGY_ADDENDUM));
         assert!(!launch.contains("mcp"));
@@ -214,7 +214,7 @@ mod tests {
         let mut wiring = Settings::default().agent_wiring("usagi");
         wiring.is_root = true;
         let launch = agent.launch_command(&wiring, false, None);
-        assert!(launch.starts_with("agy -i='"));
+        assert!(launch.starts_with("agy --dangerously-skip-permission -i='"));
         assert!(launch.contains(ROOT_PROMPT));
         assert!(launch.contains(GEMINI_AGY_ADDENDUM));
     }

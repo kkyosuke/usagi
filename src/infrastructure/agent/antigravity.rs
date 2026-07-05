@@ -142,7 +142,10 @@ impl Agent for AntigravityAgent {
         // The MCP/hooks wiring is intentionally not rendered: `agy` has no inline
         // flag for it. Only the model (when pinned), resume, and the opening prompt
         // are wired, via plain flags.
-        let mut parts = vec!["agy".to_string()];
+        let mut parts = vec![
+            "agy".to_string(),
+            "--dangerously-skip-permission".to_string(),
+        ];
         // An explicit model rides in as `--model`; absent, `agy` auto-selects.
         parts.extend(model_flag_parts(wiring));
         // `-c` (`--continue`) resumes the most recent conversation. usagi only
@@ -176,7 +179,7 @@ impl Agent for AntigravityAgent {
         // text is escaped for the single-quoted shell context.
         let mut parts = vec![
             "agy".to_string(),
-            "--dangerously-skip-permissions".to_string(),
+            "--dangerously-skip-permission".to_string(),
         ];
         parts.extend(model_flag_parts(wiring));
         parts.push("-p".to_string());
@@ -228,7 +231,7 @@ mod tests {
         // note still rides in as the opening prompt so `agy` knows it is already in a
         // worktree. The MCP/local-LLM wiring is ignored either way.
         let expected = format!(
-            "agy -i={}",
+            "agy --dangerously-skip-permission -i={}",
             shell_single_quote(&session_opening_prompt(None))
         );
         assert_eq!(agent.launch_command(&test_wiring(), false, None), expected);
@@ -254,7 +257,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy --model 'gemini-3-pro' -i={}",
+                "agy --dangerously-skip-permission --model 'gemini-3-pro' -i={}",
                 shell_single_quote(&session_opening_prompt(None))
             )
         );
@@ -262,7 +265,7 @@ mod tests {
         assert_eq!(
             headless,
             format!(
-                "agy --dangerously-skip-permissions --model 'gemini-3-pro' -p {}",
+                "agy --dangerously-skip-permission --model 'gemini-3-pro' -p {}",
                 shell_single_quote(&session_opening_prompt(Some("clean up")))
             )
         );
@@ -276,7 +279,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy -c -i={}",
+                "agy --dangerously-skip-permission -c -i={}",
                 shell_single_quote(&session_opening_prompt(None))
             )
         );
@@ -292,7 +295,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy -i={}",
+                "agy --dangerously-skip-permission -i={}",
                 shell_single_quote(&session_opening_prompt(Some("fix issue #50")))
             )
         );
@@ -302,7 +305,7 @@ mod tests {
         assert_eq!(
             dashed,
             format!(
-                "agy -i={}",
+                "agy --dangerously-skip-permission -i={}",
                 shell_single_quote(&session_opening_prompt(Some("--help")))
             )
         );
@@ -317,7 +320,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy -c -i={}",
+                "agy --dangerously-skip-permission -c -i={}",
                 shell_single_quote(&session_opening_prompt(Some("keep going")))
             )
         );
@@ -334,7 +337,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy -i={}",
+                "agy --dangerously-skip-permission -i={}",
                 shell_single_quote(&session_opening_prompt(Some("don't stop")))
             )
         );
@@ -351,7 +354,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy --dangerously-skip-permissions -p {}",
+                "agy --dangerously-skip-permission -p {}",
                 shell_single_quote(&session_opening_prompt(Some("clean up")))
             )
         );
@@ -368,7 +371,7 @@ mod tests {
         assert_eq!(
             launch,
             format!(
-                "agy --dangerously-skip-permissions -p {}",
+                "agy --dangerously-skip-permission -p {}",
                 shell_single_quote(&session_opening_prompt(Some("don't delete 'main'")))
             )
         );
