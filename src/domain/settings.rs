@@ -753,6 +753,7 @@ impl Settings {
             // wiring a model in later (a setting or a launch-time argument) is a
             // change here alone.
             model: None,
+            is_root: true,
         }
     }
 }

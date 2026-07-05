@@ -212,7 +212,7 @@ impl Agent for ClaudeAgent {
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
-        let system_prompt = super::session_system_prompt(local_llm_model);
+        let system_prompt = super::session_system_prompt(wiring.is_root, false, local_llm_model);
         let hooks = claude_hooks_settings(&wiring.usagi_bin);
         // Every wiring value is escaped for the single-quoted `sh -c` context via
         // [`shell_single_quote`] rather than being wrapped in bare `'…'`. The JSON
@@ -337,6 +337,7 @@ mod tests {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
             model: None,
+            is_root: false,
         }
     }
 
@@ -368,7 +369,7 @@ mod tests {
         assert_eq!(
             launch,
             "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。' \
+             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください' \
              --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
         );
     }

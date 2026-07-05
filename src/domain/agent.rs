@@ -102,4 +102,7 @@ pub struct AgentWiring {
     /// leaves it unset), so usagi launches each CLI on its own default until a
     /// model source (a setting or a launch-time argument) fills it in.
     pub model: Option<String>,
+    /// Whether the agent is launched at the workspace root (the coordinator row)
+    /// rather than inside a session worktree.
+    pub is_root: bool,
 }

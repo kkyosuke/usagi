@@ -850,7 +850,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 .unwrap_or_else(|| home.default_agent());
             // The session's pinned model (if any) rides into this launch's wiring; an
             // unpinned session keeps the base wiring (the CLI's own default model).
-            let launch_wiring = wiring_with_model(&agent_wiring, session_agent.model);
+            let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
             // `ai <prompt>` sets an opening prompt for this one configured-agent
             // launch. When a fresh agent pane is spawned it is passed as the agent
             // CLI's initial prompt; when an agent pane already exists we type it
@@ -1182,7 +1182,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             let cli = choice
                 .or(session_agent.cli)
                 .unwrap_or_else(|| home.default_agent());
-            let launch_wiring = wiring_with_model(&agent_wiring, session_agent.model);
+            let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
             let direct_prompt = if run_agent {
                 home.take_agent_initial_prompt()
             } else {
@@ -1648,12 +1648,14 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
 /// carried over unchanged. Used at every agent launch site so a session created /
 /// delegated with a pinned model launches with it (see
 /// [`SessionRecord::agent`](crate::domain::workspace_state::SessionRecord::agent)).
-fn wiring_with_model(
+fn wiring_for_launch(
     base: &crate::domain::agent::AgentWiring,
     model: Option<String>,
+    dir: &std::path::Path,
 ) -> crate::domain::agent::AgentWiring {
     crate::domain::agent::AgentWiring {
         model,
+        is_root: !crate::usecase::workspace_guard::is_session_worktree(dir),
         ..base.clone()
     }
 }
@@ -1736,7 +1738,7 @@ fn restore_open_panes(
                     // Resume the conversation when one exists so the agent continues
                     // where it left off rather than starting over.
                     let resume = agent.has_resumable_session(&dir);
-                    let launch_wiring = wiring_with_model(agent_wiring, session_agent.model);
+                    let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
                     let command = agent.launch_command(&launch_wiring, resume, None);
                     pool.borrow_mut().add_pane(
                         term,
@@ -1868,7 +1870,7 @@ fn autostart_queued_prompts(
         // Resume an existing conversation when one exists (a re-delegated session),
         // else start fresh; the queued prompt is the opening message either way.
         let resume = agent.has_resumable_session(&dir);
-        let launch_wiring = wiring_with_model(agent_wiring, session_agent.model);
+        let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
         let command = agent.launch_command(&launch_wiring, resume, Some(&prompt));
         let ws_root = crate::usecase::session::workspace_root(&dir);
         let pane_env = env_by_root

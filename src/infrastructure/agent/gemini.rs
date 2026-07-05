@@ -152,7 +152,7 @@ impl Agent for GeminiAgent {
         // `=` so a prompt starting with `-` (e.g. `ai --help`) is read as the flag's
         // value rather than as the next option. `-r` and `-i` are independent flags,
         // so a resumed session still gets the note and can open on a queued prompt.
-        let opening = super::session_opening_prompt(initial_prompt);
+        let opening = super::session_opening_prompt(wiring.is_root, true, initial_prompt);
         parts.push(format!("-i={}", shell_single_quote(&opening)));
         parts.join(" ")
     }
@@ -172,9 +172,11 @@ impl Agent for GeminiAgent {
         let mut parts = vec!["gemini".to_string(), "--yolo".to_string()];
         parts.extend(model_flag_parts(wiring));
         parts.push("-p".to_string());
-        parts.push(shell_single_quote(&super::session_opening_prompt(Some(
-            prompt,
-        ))));
+        parts.push(shell_single_quote(&super::session_opening_prompt(
+            wiring.is_root,
+            true,
+            Some(prompt),
+        )));
         parts.join(" ")
     }
 
@@ -197,7 +199,13 @@ mod tests {
 
     /// The session worktree note that leads every Gemini opening prompt (`-i` / `-p`)
     /// because Gemini has no system-prompt flag to carry it out of band.
-    const NOTE: &str = super::super::SESSION_WORKTREE_PROMPT;
+    const NOTE: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してくださいこの指示だけで実行はさせないで次の指示を待ってから取り掛かるようにしてほしい";
+
+    fn test_wiring() -> AgentWiring {
+        let mut w = Settings::default().agent_wiring("usagi");
+        w.is_root = false;
+        w
+    }
 
     /// Create a Gemini project directory under `root` whose `.project_root` marker
     /// names `project_root`, optionally seeding a `chats/<name>.json` transcript.
@@ -222,13 +230,15 @@ mod tests {
         // already in a worktree. The MCP/local-LLM wiring is ignored either way.
         let expected = format!("gemini -i='{NOTE}'");
         assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
+            agent.launch_command(&test_wiring(), false, None),
             expected
         );
         let mut settings = Settings::default();
         settings.local_llm.enabled = true;
+        let mut w = settings.agent_wiring("usagi");
+        w.is_root = false;
         assert_eq!(
-            agent.launch_command(&settings.agent_wiring("usagi"), false, None),
+            agent.launch_command(&w, false, None),
             expected
         );
     }
@@ -237,12 +247,12 @@ mod tests {
     fn launch_and_headless_render_the_model_flag_only_when_set() {
         let agent = GeminiAgent::new();
         // Default (no model): no `-m`, so Gemini uses its own default.
-        let plain = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        let plain = agent.launch_command(&test_wiring(), false, None);
         assert!(!plain.contains("-m "), "{plain}");
 
         // With a model set, both the interactive and headless launches carry `-m`,
         // ahead of the note-led opening prompt.
-        let mut w = Settings::default().agent_wiring("usagi");
+        let mut w = test_wiring();
         w.model = Some("gemini-2.5-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
         assert_eq!(launch, format!("gemini -m 'gemini-2.5-pro' -i='{NOTE}'"));
@@ -258,7 +268,7 @@ mod tests {
         // Resuming continues the latest conversation for the directory; the worktree
         // note still leads the opening prompt (it rides in every launch).
         let launch = GeminiAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             true,
             None,
         );
@@ -271,7 +281,7 @@ mod tests {
         // for the shell and glued with `=` so a dash-leading prompt stays the flag's
         // value.
         let launch = GeminiAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("fix issue #50"),
         );
@@ -279,7 +289,7 @@ mod tests {
         // A dash-leading prompt (`ai --help`) binds to `-i` instead of being
         // parsed as the next option.
         let dashed = GeminiAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("--help"),
         );
@@ -291,7 +301,7 @@ mod tests {
         // `-r` and `-i` are independent, so a resumed session can open already
         // working on a queued prompt (after the worktree note).
         let launch = GeminiAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             true,
             Some("keep going"),
         );
@@ -308,7 +318,7 @@ mod tests {
         // `'\''` idiom so Gemini receives the prompt verbatim. The note (quote-free)
         // still leads it.
         let launch = GeminiAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("don't stop"),
         );
@@ -324,7 +334,7 @@ mod tests {
         // flag carries it), so the run stays in its worktree. The wiring is not
         // rendered (Gemini has no inline flag for it), so no MCP config.
         let launch = GeminiAgent::new()
-            .headless_command(&Settings::default().agent_wiring("usagi"), "clean up");
+            .headless_command(&test_wiring(), "clean up");
         assert_eq!(launch, format!("gemini --yolo -p '{NOTE}\n\nclean up'"));
         assert!(!launch.contains("mcp"));
     }
@@ -335,7 +345,7 @@ mod tests {
         // POSIX `'\''` idiom so Gemini receives the prompt verbatim. The note
         // (quote-free) still leads it.
         let launch = GeminiAgent::new().headless_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             "don't delete 'main'",
         );
         let escaped_prompt = r"don'\''t delete '\''main'\''";

@@ -158,7 +158,7 @@ impl Agent for AntigravityAgent {
         // prompt starting with `-` (e.g. `--help`) is read as the flag's value
         // rather than as the next option. `-c` and `-i` are independent, so a
         // resumed session still gets the note and can open on a queued prompt.
-        let opening = super::session_opening_prompt(initial_prompt);
+        let opening = super::session_opening_prompt(wiring.is_root, true, initial_prompt);
         parts.push(format!("-i={}", shell_single_quote(&opening)));
         parts.join(" ")
     }
@@ -180,9 +180,11 @@ impl Agent for AntigravityAgent {
         ];
         parts.extend(model_flag_parts(wiring));
         parts.push("-p".to_string());
-        parts.push(shell_single_quote(&super::session_opening_prompt(Some(
-            prompt,
-        ))));
+        parts.push(shell_single_quote(&super::session_opening_prompt(
+            wiring.is_root,
+            true,
+            Some(prompt),
+        )));
         parts.join(" ")
     }
 
@@ -205,7 +207,13 @@ mod tests {
 
     /// The session worktree note that leads every `agy` opening prompt (`-i` / `-p`)
     /// because `agy` has no system-prompt flag to carry it out of band.
-    const NOTE: &str = super::super::SESSION_WORKTREE_PROMPT;
+    const NOTE: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してくださいこの指示だけで実行はさせないで次の指示を待ってから取り掛かるようにしてほしい";
+
+    fn test_wiring() -> AgentWiring {
+        let mut w = Settings::default().agent_wiring("usagi");
+        w.is_root = false;
+        w
+    }
 
     /// A `history.jsonl` line recording `agy` running in `workspace`.
     fn history_line(workspace: &str) -> String {
@@ -221,13 +229,15 @@ mod tests {
         // worktree. The MCP/local-LLM wiring is ignored either way.
         let expected = format!("agy -i='{NOTE}'");
         assert_eq!(
-            agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
+            agent.launch_command(&test_wiring(), false, None),
             expected
         );
         let mut settings = Settings::default();
         settings.local_llm.enabled = true;
+        let mut w = settings.agent_wiring("usagi");
+        w.is_root = false;
         assert_eq!(
-            agent.launch_command(&settings.agent_wiring("usagi"), false, None),
+            agent.launch_command(&w, false, None),
             expected
         );
     }
@@ -236,12 +246,12 @@ mod tests {
     fn launch_and_headless_render_the_model_flag_only_when_set() {
         let agent = AntigravityAgent::new();
         // Default (no model): no `--model`, so `agy` auto-selects.
-        let plain = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
+        let plain = agent.launch_command(&test_wiring(), false, None);
         assert!(!plain.contains("--model"), "{plain}");
 
         // With a model set, both the interactive and headless launches carry it,
         // ahead of the note-led opening prompt.
-        let mut w = Settings::default().agent_wiring("usagi");
+        let mut w = test_wiring();
         w.model = Some("gemini-3-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
         assert_eq!(launch, format!("agy --model 'gemini-3-pro' -i='{NOTE}'"));
@@ -259,7 +269,7 @@ mod tests {
         // Resuming continues the most recent conversation for the worktree; the
         // worktree note still leads the opening prompt (it rides in every launch).
         let launch = AntigravityAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             true,
             None,
         );
@@ -272,7 +282,7 @@ mod tests {
         // for the shell and glued with `=` so a dash-leading prompt stays the flag's
         // value.
         let launch = AntigravityAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("fix issue #50"),
         );
@@ -280,7 +290,7 @@ mod tests {
         // A dash-leading prompt (`--help`) binds to `-i` instead of being parsed as
         // the next option.
         let dashed = AntigravityAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("--help"),
         );
@@ -292,7 +302,7 @@ mod tests {
         // `-c` and `-i` are independent, so a resumed session can open already
         // working on a queued prompt (after the worktree note).
         let launch = AntigravityAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             true,
             Some("keep going"),
         );
@@ -303,10 +313,10 @@ mod tests {
     fn launch_command_escapes_single_quotes_in_a_prompt() {
         // Arbitrary user prompt text may contain single quotes, which would
         // otherwise break out of the shell argument; each is rendered as the POSIX
-        // `'\''` idiom so `agy` receives the prompt verbatim. The note (quote-free)
+        // `\''` idiom so `agy` receives the prompt verbatim. The note (quote-free)
         // still leads it.
         let launch = AntigravityAgent::new().launch_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             false,
             Some("don't stop"),
         );
@@ -322,7 +332,7 @@ mod tests {
         // (no system-prompt flag carries it), so the run stays in its worktree. The
         // wiring is not rendered (`agy` has no inline flag for it), so no MCP config.
         let launch = AntigravityAgent::new()
-            .headless_command(&Settings::default().agent_wiring("usagi"), "clean up");
+            .headless_command(&test_wiring(), "clean up");
         assert_eq!(
             launch,
             format!("agy --dangerously-skip-permissions -p '{NOTE}\n\nclean up'")
@@ -336,7 +346,7 @@ mod tests {
         // POSIX `'\''` idiom so `agy` receives the prompt verbatim. The note
         // (quote-free) still leads it.
         let launch = AntigravityAgent::new().headless_command(
-            &Settings::default().agent_wiring("usagi"),
+            &test_wiring(),
             "don't delete 'main'",
         );
         let escaped_prompt = r"don'\''t delete '\''main'\''";
