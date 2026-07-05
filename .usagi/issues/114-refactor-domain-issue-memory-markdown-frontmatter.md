@@ -1,14 +1,14 @@
 ---
 number: 114
 title: refactor(domain): issue/memory の markdown 封筒処理を frontmatter に集約する
-status: todo
+status: done
 priority: high
 labels: [refactor, core, review]
 dependson: []
 related: []
 parent: 113
 created_at: 2026-07-04T23:13:07.199754+00:00
-updated_at: 2026-07-04T23:13:07.199754+00:00
+updated_at: 2026-07-05T01:02:05.387017+00:00
 ---
 
 ## 背景（なぜ問題か）
