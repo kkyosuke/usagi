@@ -149,13 +149,13 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `memory_get` | `name` | — | メモリ（存在しなければ `null`） |
 | `memory_search` | — | `query` / `type` | メモリ配列（`updated_at` の新しい順）。`query` 省略で全件、指定で全文検索 |
 | `memory_delete` | `name` | — | `{ "name": "…", "deleted": bool }` |
-| `session_create` | `name` | — | 作成されたセッション（`name` / `root` / `worktrees`） |
+| `session_create` | `name` | `agent_cli` / `model` | 作成されたセッション（`name` / `root` / `worktrees`） |
 | `session_list` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `created_at` / `worktrees`） |
 | `session_status` | — | — | セッション配列（各要素に `name` / `display_name` / `root` / `agent_phase` / `worktrees`。各 worktree に `status` / `dirty` / `merged`）（[挙動](#session_status-の挙動)） |
 | `session_prompt` | `name` / `prompt` | `mode`（`auto` / `queue` / `live`、既定 `auto`） | `{ "name": "…", "delivered_to": "queue" \| "live", "detail": "…" }`（[挙動](#session_prompt-の挙動)） |
 | `session_pr` | `name` | — | `{ "name": "…", "root": "…", "merged": bool, "pr": [{ "number": N, "url": "…", "state": "open" \| "merged" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
-| `session_delegate_issue` | `number` | `name` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
+| `session_delegate_issue` | `number` | `name` / `agent_cli` / `model` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
 
 - `status` は `todo` / `in-progress` / `done`、`priority` は `high` / `medium` / `low`、`type`（memory）は `user` / `feedback` / `project` / `reference`。
 - **`memory_save` は upsert 1 本**です。`name` が既存なら**渡したフィールドだけを部分更新**（未指定は保持、`created_at` も保持）、無ければ新規作成（このとき `title` 必須）。`name` は与えた文字列をスラッグ化して識別子にします。別途の `memory_update` tool はありません（body だけ直したいときは `name` と `body` だけ渡せば type 等は保たれます）。
@@ -188,6 +188,17 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   入りません（`usagi mcp` は TUI を操作できない別プロセスのため）。TUI から作成したときは作成完了後にその
   セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
   カーソルは動きません。
+- **`session_create` / `session_delegate_issue` は任意で `agent_cli` / `model` を受け取り、そのセッション単位で
+  起動するエージェント CLI・モデルを固定できます**（ワークスペースの実効設定 `agent_cli` より優先）。コーディネータが
+  「軽いタスクは小さいモデル、重い設計は大きいモデル」とタスクごとに振り分けるための口です。指定は `state.json` の
+  `SessionRecord.agent`（`cli` / `model`）に記録され（正本は [data/02-workspace.md](../data/02-workspace.md#statejson)）、
+  そのセッションのエージェントペイン起動（自動 spawn・ペイン復旧・在席からの起動）時に適用されます。
+  - `agent_cli` は `claude` / `codex` / `codex-fugu` / `gemini` / `agy`（大文字小文字・表示名も可、`AgentCli::from_name`）。
+    未知の値は実行エラー（`isError: true`）で、セッションは作成されません。
+  - `model` は CLI ごとのモデル指定フラグ（claude `--model`、codex / gemini `-m`）にそのまま展開されます。**allowlist は
+    設けず素通し**（モデル名は CLI ごとに異なり頻繁に増えるため）。前後空白は除去し、空文字は無指定として落とします。
+    起動時に shell エスケープされるため、任意文字列でも安全です。
+  - どちらも未指定なら従来どおり、ワークスペースの実効 `agent_cli` と各 CLI の既定モデルにフォールバックします。
 - `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
   PR URL を返します。各 PR には `state`（セッションの全 worktree がデフォルトブランチにマージ済みなら
   `merged`、それ以外は `open`）が付き、返り値トップレベルの `merged` も同じ判定を返します。この状態は
@@ -295,6 +306,7 @@ push で報告**するための経路です。ポーリング（[`session_status
 
 1. `issue_to_prompt(number)` で issue を実行プロンプトに整形する（issue が無ければ実行エラー）。
 2. `session_create(name)` でセッションを作成する（`name` 既定は `issue-<番号>`。名前が既存なら重複エラー）。
+   任意の `agent_cli` / `model` はここで `SessionRecord.agent` に記録され、そのセッションの起動に固定されます。
 3. `session_prompt(name, prompt, mode=queue)` でそのプロンプトを起動時キューに積む。
 
 - 新規作成したセッションには live なエージェントペインが存在しないため、配送は常に**起動時キュー**（`queue`）です。
@@ -306,7 +318,10 @@ push で報告**するための経路です。ポーリング（[`session_status
   合成サーバ（`usagi.rs`）が順に呼ぶだけなので、採番・検証・キューなどの挙動は primitive と完全に一致します。
 - primitive はそのまま残っています。**プロンプトを手で調整したい**、**既存セッションに載せたい**、**live 送信したい**
   といったケースでは `issue_to_prompt` → `session_prompt`（`mode` 指定）を直接使ってください。
-- 途中のステップが失敗すると（issue 不在・セッション名重複など）その時点でツールエラーを返します。
+- 途中のステップが失敗すると（issue 不在・セッション名重複・未知の `agent_cli` など）その時点でツールエラーを返します。
+  `agent_cli` の検証はセッション作成より前に行うため、未知の CLI 名を渡してもセッションは作られません。
+- 任意で `agent_cli` / `model` を渡すと、委譲先セッションを**指定 CLI・指定モデルで起動**できます（`autostart_queued_prompts`
+  による自動起動時にそのまま適用）。指定の意味とフォールバックは上の [対応 tool 一覧](#対応-tool-一覧) の説明と同じです。
 
 ## `session_remove` の挙動
 

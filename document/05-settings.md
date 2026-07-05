@@ -232,7 +232,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `workspace_root` | 新規プロジェクト画面（Clone）の Location 既定値（[design/03-new.md](design/03-new.md)） |
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の表示可否 |
 | `restore_panes_enabled` | 起動時に各セッションのペイン（agent / terminal）を復旧し、終了時にいたセッション・エンゲージメント段階へ復帰するかどうか（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
-| `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)） |
+| `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)）。**セッション単位の上書き**が優先する: `session_create` / `session_delegate_issue`（MCP）で `agent_cli` / `model` を指定すると、そのセッションだけ別 CLI・別モデルで起動する（[4. オーケストレーション#アクティブなセッションと AI 連携](04-orchestration.md#アクティブなセッションと-ai-連携)、[data/02-workspace.md](data/02-workspace.md#セッションごとsessionrecord)） |
 | `session_action_ui` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
 | `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |

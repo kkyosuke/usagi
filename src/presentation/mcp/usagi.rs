@@ -21,7 +21,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::issue::McpServer as IssueServer;
-use super::session::{AgentBackend, PromptMode, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS};
+use super::session::{
+    resolve_session_agent, AgentBackend, PromptMode, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS,
+};
 use super::McpService;
 
 /// The composite-only orchestration tool this server adds on top of the merged
@@ -107,12 +109,16 @@ impl UsagiMcpServer {
         //
         // 1. Render the issue as a ready-to-run prompt (errors if it is missing).
         let rendered = self.issue.render_prompt(args.number)?;
-        // 2. Create a fresh session for the issue (default name: issue-<number>).
-        //    A duplicate name surfaces the session server's own error.
+        // 2. Create a fresh session for the issue (default name: issue-<number>),
+        //    pinning the optional per-session agent CLI / model so the delegated
+        //    session launches with them. An unknown agent_cli is surfaced here,
+        //    before any session is created. A duplicate name surfaces the session
+        //    server's own error.
+        let agent = resolve_session_agent(args.agent_cli.as_deref(), args.model)?;
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
-        let created = self.session.create_session(&name)?;
+        let created = self.session.create_session(&name, agent)?;
         // 3. Deliver the prompt. A freshly created session has no live pane, so the
         //    launch queue is always the right channel here.
         let (channel, _detail) =
@@ -138,6 +144,14 @@ struct DelegateIssueArgs {
     /// Session name to create; defaults to `issue-<number>`.
     #[serde(default)]
     name: Option<String>,
+    /// Optional agent CLI the delegated session launches with, overriding the
+    /// workspace effective `agent_cli`. Accepts `claude` / `codex` / `codex-fugu`
+    /// / `gemini` / `agy` (case-insensitive).
+    #[serde(default)]
+    agent_cli: Option<String>,
+    /// Optional model the session's agent CLI runs (rendered as `--model` / `-m`).
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The JSON Schema for the composite's `session_delegate_issue` tool.
@@ -150,14 +164,26 @@ fn delegate_issue_schema() -> Value {
             session's first agent launch. A convenience over calling \
             issue_to_prompt + session_create + session_prompt yourself; use those \
             primitives instead when you need to tweak the prompt or target an \
-            existing session. `name` defaults to issue-<number>. Errors if the \
-            issue does not exist or the session name is already taken. Returns \
+            existing session. `name` defaults to issue-<number>. Optionally pin the \
+            agent CLI and model this session launches with (agent_cli / model) — so \
+            a coordinator can route a light issue to a small model and a heavy one \
+            to a large model. Errors if the issue does not exist, the agent_cli is \
+            unknown, or the session name is already taken. Returns \
             { issue, title, session, root, worktrees, delivered_to }.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "number": { "type": "integer", "description": "Issue number to delegate" },
-                "name": { "type": "string", "description": "Session name to create (default: issue-<number>)" }
+                "name": { "type": "string", "description": "Session name to create (default: issue-<number>)" },
+                "agent_cli": {
+                    "type": "string",
+                    "enum": ["claude", "codex", "codex-fugu", "gemini", "agy"],
+                    "description": "Agent CLI the delegated session launches (default: the workspace effective agent_cli)"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model the session's agent CLI runs (default: the CLI's own default)"
+                }
             },
             "required": ["number"]
         }
@@ -636,6 +662,58 @@ mod tests {
         assert_eq!(saved["isError"], false);
         let removed = call(&server, "memory_delete", json!({"name": "m"}));
         assert_eq!(removed["isError"], false);
+    }
+
+    #[test]
+    fn delegate_issue_pins_the_agent_cli_and_model_on_the_created_session() {
+        use crate::domain::settings::AgentCli;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"heavy design"}))
+            .unwrap();
+
+        let result = call(
+            &server,
+            "session_delegate_issue",
+            json!({"number":1,"agent_cli":"claude","model":"claude-opus-4-8"}),
+        );
+        assert_eq!(result["isError"], false);
+
+        // The delegated session carries the pinned CLI / model in state.json, so it
+        // will launch with them (auto-start / pane recovery honour the override).
+        let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
+        let session = &store.load().unwrap().unwrap().sessions[0];
+        assert_eq!(session.name, "issue-1");
+        assert_eq!(session.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn delegate_issue_with_an_unknown_agent_cli_errors_before_creating_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"task"}))
+            .unwrap();
+
+        let result = call(
+            &server,
+            "session_delegate_issue",
+            json!({"number":1,"agent_cli":"gpt"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown agent_cli"));
+        // No session was created despite the issue existing.
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
     }
 
     #[test]

@@ -35,7 +35,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{parse_args, to_pretty, McpService};
-use crate::domain::workspace_state::SessionRecord;
+use crate::domain::settings::AgentCli;
+use crate::domain::workspace_state::{SessionAgent, SessionRecord};
 use crate::usecase::session;
 
 /// Names of the session tools this server exposes. The unified `usagi` server
@@ -88,6 +89,33 @@ fn check_prompt_len(tool: &str, prompt: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Resolve the optional per-session agent overrides an MCP caller passed
+/// (`agent_cli` / `model`) into a [`SessionAgent`].
+///
+/// `agent_cli` is matched case-insensitively against each CLI's launch command,
+/// display name, and serde label via [`AgentCli::from_name`]; an unrecognised
+/// name is a tool error naming the accepted values so the caller can correct it.
+/// `model` is passed through untouched (the usecase trims it and drops an empty
+/// value on write) — no allowlist is imposed, since model names differ per CLI
+/// and change often. Both absent yields the default: the session follows the
+/// workspace effective settings and the CLI's own default model. Shared by
+/// `session_create` and the composite's `session_delegate_issue`.
+pub(crate) fn resolve_session_agent(
+    agent_cli: Option<&str>,
+    model: Option<String>,
+) -> Result<SessionAgent, String> {
+    let cli = match agent_cli {
+        Some(name) => Some(AgentCli::from_name(name).ok_or_else(|| {
+            format!(
+                "unknown agent_cli {name:?}: expected one of \
+                 claude, codex, codex-fugu, gemini, agy"
+            )
+        })?),
+        None => None,
+    };
+    Ok(SessionAgent { cli, model })
 }
 
 /// Drives the parts of session orchestration that touch a real agent or a real
@@ -169,7 +197,8 @@ impl SessionMcpServer {
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
         let args: CreateArgs = parse_args(arguments)?;
-        let created = self.create_session(&args.name)?;
+        let agent = resolve_session_agent(args.agent_cli.as_deref(), args.model)?;
+        let created = self.create_session(&args.name, agent)?;
         Ok(to_pretty(&json!({
             "name": created.name,
             "root": created.root,
@@ -177,18 +206,24 @@ impl SessionMcpServer {
         })))
     }
 
-    /// Create the session named `name`, returning it as the typed
+    /// Create the session named `name`, recording `agent` as its per-session
+    /// agent CLI / model override, and return it as the typed
     /// [`session::CreatedSession`]. Shared by the `session_create` tool and the
     /// unified server's `session_delegate_issue`, so the composite can create a
-    /// session without parsing the tool's serialized output back out.
+    /// session without parsing the tool's serialized output back out. Pass
+    /// [`SessionAgent::default`] to follow the workspace effective settings.
     ///
     /// The MCP server runs headless, so a creation failure would otherwise only
     /// travel back to the calling agent and never reach a log file. The full chain
     /// — matching the TUI's `session create "<name>" failed: ...` wording — is
     /// recorded before the short message is surfaced to the client, so failures
     /// stay inspectable in `<data dir>/logs/`.
-    pub(crate) fn create_session(&self, name: &str) -> Result<session::CreatedSession, String> {
-        session::create(&self.workspace_root, name).map_err(|e| {
+    pub(crate) fn create_session(
+        &self,
+        name: &str,
+        agent: SessionAgent,
+    ) -> Result<session::CreatedSession, String> {
+        session::create_with_agent(&self.workspace_root, name, agent).map_err(|e| {
             crate::infrastructure::error_log::ErrorLog::record(&format!(
                 "mcp session_create \"{name}\" failed: {e:#}"
             ));
@@ -357,6 +392,15 @@ impl McpService for SessionMcpServer {
 #[derive(Deserialize)]
 struct CreateArgs {
     name: String,
+    /// Optional agent CLI this session launches with, overriding the workspace
+    /// effective `agent_cli`. Accepts `claude` / `codex` / `codex-fugu` /
+    /// `gemini` / `agy` (case-insensitive). Absent defers to the workspace setting.
+    #[serde(default)]
+    agent_cli: Option<String>,
+    /// Optional model the session's agent CLI runs (rendered as `--model` / `-m`).
+    /// Absent lets the CLI use its configured default.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -492,14 +536,26 @@ fn session_tool_schemas() -> Value {
             "name": "session_create",
             "description": "Create a new usagi session: a parallel worktree under \
                 .usagi/sessions/<name>/ on a fresh branch usagi/<name> for every \
-                repository in the workspace. Returns the session name, root, and \
-                worktree paths.",
+                repository in the workspace. Optionally pin the agent CLI and model \
+                this session launches with (agent_cli / model), overriding the \
+                workspace's effective settings for just this session — so you can \
+                send a light task to a small model and a heavy one to a large model. \
+                Returns the session name, root, and worktree paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
                         "description": "Session name (the branch it cuts in every repository is usagi/<name>)"
+                    },
+                    "agent_cli": {
+                        "type": "string",
+                        "enum": ["claude", "codex", "codex-fugu", "gemini", "agy"],
+                        "description": "Agent CLI this session launches (default: the workspace effective agent_cli)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model the session's agent CLI runs, e.g. a specific Claude/Codex/Gemini model (default: the CLI's own default)"
                     }
                 },
                 "required": ["name"]
@@ -855,6 +911,73 @@ mod tests {
         assert_eq!(arr[0]["display_name"], Value::Null);
         // The worktree is checked out on the namespaced session branch.
         assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/feature-x");
+    }
+
+    #[test]
+    fn resolve_session_agent_parses_a_known_cli_passes_the_model_and_defaults_when_absent() {
+        // A known CLI name (case-insensitive, via AgentCli::from_name) resolves and
+        // the model rides through untouched.
+        let agent = resolve_session_agent(Some("Gemini"), Some("gemini-2.5-pro".to_string()))
+            .expect("known cli");
+        assert_eq!(agent.cli, Some(AgentCli::Gemini));
+        assert_eq!(agent.model.as_deref(), Some("gemini-2.5-pro"));
+        // The codex-fugu launch command resolves too.
+        assert_eq!(
+            resolve_session_agent(Some("codex-fugu"), None).unwrap().cli,
+            Some(AgentCli::CodexFugu)
+        );
+        // Neither argument yields the default (follow the workspace settings).
+        assert!(resolve_session_agent(None, None).unwrap().is_unset());
+    }
+
+    #[test]
+    fn resolve_session_agent_rejects_an_unknown_cli() {
+        let err = resolve_session_agent(Some("gpt"), None).unwrap_err();
+        assert!(err.contains("unknown agent_cli"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn create_records_the_agent_cli_and_model_override() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+
+        let created = call(
+            &server,
+            "session_create",
+            json!({"name":"pinned","agent_cli":"gemini","model":"gemini-2.5-pro"}),
+        );
+        assert_eq!(created["isError"], false);
+
+        // The override lands on the SessionRecord in state.json.
+        let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
+        let session = &store.load().unwrap().unwrap().sessions[0];
+        assert_eq!(session.agent.cli, Some(AgentCli::Gemini));
+        assert_eq!(session.agent.model.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn create_with_an_unknown_agent_cli_is_a_tool_error_and_creates_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+
+        let result = call(
+            &server,
+            "session_create",
+            json!({"name":"bad","agent_cli":"gpt"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown agent_cli"));
+        // The bad request never created a session.
+        assert_eq!(
+            tool_json(&call(&server, "session_list", json!({}))),
+            json!([])
+        );
     }
 
     #[test]
