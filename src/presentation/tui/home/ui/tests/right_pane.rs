@@ -257,11 +257,11 @@ fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
 }
 
 #[test]
-fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
-    // With the Prompt action UI, the idle-session preview must mirror the prompt
-    // surface (`❯`) — not the command menu — so the 切替 preview matches what
-    // focusing the session actually reveals (regression: it previewed the menu
-    // regardless of the setting).
+fn switch_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
+    // Both the Menu and Prompt action UIs now float as overlay modals, so neither
+    // has an inline surface to preview. An idle session in Prompt mode should
+    // show the mascot just like Menu mode does, rather than previewing an inline
+    // prompt that never appears.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.set_session_action_ui(SessionActionUi::Prompt);
@@ -269,11 +269,8 @@ fn switch_preview_shows_an_idle_session_as_its_prompt_when_prompt_ui() {
     state.switch_move_down();
     let preview = stripped(&switch_preview(&state, 40, 12));
     assert!(preview.contains("pushed"));
-    assert!(preview.contains('❯'), "the prompt surface is previewed");
-    assert!(
-        !preview.contains("Run a command"),
-        "the command menu must not be shown in prompt mode"
-    );
+    assert!(preview.contains("(='-')"), "the idle mascot is shown");
+    assert!(!preview.contains('❯'), "no inline prompt is previewed");
     assert!(!preview.contains("live terminal"));
 }
 
