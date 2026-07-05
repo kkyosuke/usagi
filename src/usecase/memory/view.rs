@@ -2,15 +2,14 @@
 //!
 //! The on-the-wire field set for a memory lives here once (a single source of
 //! truth), so adding a field updates both surfaces at the same place rather than
-//! risking a hand-duplicated `json!`/derive drifting out of sync. Both surfaces
-//! consume these via `serde_json` (`to_string_pretty` / `to_value`).
-//!
-//! Timestamps are rendered with [`chrono::DateTime::to_rfc3339`] (a `+00:00`
-//! offset) to match the rest of the JSON surface.
+//! risking a hand-duplicated `json!`/derive drifting out of sync. The shared
+//! shape of these views — borrowing fields and rendering timestamps as owned
+//! `String`s — is described in [`crate::usecase::view`].
 
 use serde::Serialize;
 
 use crate::domain::memory::{Memory, MemorySummary, MemoryType};
+use crate::usecase::view::timestamp;
 
 /// JSON view of a full memory (including the body).
 #[derive(Serialize)]
@@ -32,8 +31,8 @@ impl<'a> From<&'a Memory> for MemoryView<'a> {
             title: &memory.title,
             kind: memory.kind,
             related: &memory.related,
-            created_at: memory.created_at.to_rfc3339(),
-            updated_at: memory.updated_at.to_rfc3339(),
+            created_at: timestamp(&memory.created_at),
+            updated_at: timestamp(&memory.updated_at),
             body: &memory.body,
         }
     }
@@ -60,8 +59,8 @@ impl<'a> From<&'a MemorySummary> for MemorySummaryView<'a> {
             kind: summary.kind,
             related: &summary.related,
             file: &summary.file,
-            created_at: summary.created_at.to_rfc3339(),
-            updated_at: summary.updated_at.to_rfc3339(),
+            created_at: timestamp(&summary.created_at),
+            updated_at: timestamp(&summary.updated_at),
         }
     }
 }
