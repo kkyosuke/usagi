@@ -9,7 +9,7 @@ use std::fmt::Write;
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
-    format_string_list, inline, parse_string_list, parse_timestamp, split_frontmatter,
+    self, format_string_list, inline, parse_string_list, parse_timestamp,
 };
 
 use super::{Issue, IssuePriority, IssueStatus, ParseIssueError};
@@ -19,42 +19,38 @@ impl Issue {
     ///
     /// Required fields are always emitted; the optional `parent` and `milestone`
     /// lines are written only when set, so issues that don't use them stay clean.
+    /// The `---` envelope and body normalisation live in
+    /// [`frontmatter::to_markdown`]; this closure only lists the issue's fields,
+    /// appending straight into `out` rather than allocating a throwaway `String`
+    /// per field as `push_str(&format!(…))` would (cf. `format_number_list`).
     pub fn to_markdown(&self) -> String {
-        // Writing into a `String` via `std::fmt::Write` is infallible, so each
-        // `writeln!` result is discarded. This appends straight into `out`
-        // rather than allocating a throwaway `String` per field as
-        // `push_str(&format!(…))` would (cf. `format_number_list`).
-        let mut out = String::from("---\n");
-        let _ = writeln!(out, "number: {}", self.number);
-        let _ = writeln!(out, "title: {}", inline(&self.title));
-        let _ = writeln!(out, "status: {}", self.status.as_str());
-        let _ = writeln!(out, "priority: {}", self.priority.as_str());
-        let _ = writeln!(out, "labels: {}", format_string_list(&self.labels));
-        let _ = writeln!(out, "dependson: {}", format_number_list(&self.dependson));
-        let _ = writeln!(out, "related: {}", format_number_list(&self.related));
-        if let Some(parent) = self.parent {
-            let _ = writeln!(out, "parent: {parent}");
-        }
-        if let Some(milestone) = &self.milestone {
-            let _ = writeln!(out, "milestone: {}", inline(milestone));
-        }
-        let _ = writeln!(out, "created_at: {}", self.created_at.to_rfc3339());
-        let _ = writeln!(out, "updated_at: {}", self.updated_at.to_rfc3339());
-        out.push_str("---\n\n");
-        out.push_str(self.body.trim_end_matches('\n'));
-        out.push('\n');
-        out
+        frontmatter::to_markdown(&self.body, |out| {
+            let _ = writeln!(out, "number: {}", self.number);
+            let _ = writeln!(out, "title: {}", inline(&self.title));
+            let _ = writeln!(out, "status: {}", self.status.as_str());
+            let _ = writeln!(out, "priority: {}", self.priority.as_str());
+            let _ = writeln!(out, "labels: {}", format_string_list(&self.labels));
+            let _ = writeln!(out, "dependson: {}", format_number_list(&self.dependson));
+            let _ = writeln!(out, "related: {}", format_number_list(&self.related));
+            if let Some(parent) = self.parent {
+                let _ = writeln!(out, "parent: {parent}");
+            }
+            if let Some(milestone) = &self.milestone {
+                let _ = writeln!(out, "milestone: {}", inline(milestone));
+            }
+            let _ = writeln!(out, "created_at: {}", self.created_at.to_rfc3339());
+            let _ = writeln!(out, "updated_at: {}", self.updated_at.to_rfc3339());
+        })
     }
 
     /// Parse an issue from its on-disk markdown representation.
+    ///
+    /// The `---` envelope, line loop, and body normalisation live in
+    /// [`frontmatter::from_markdown`]; this dispatcher only maps each field.
+    /// Numeric / enum / list / timestamp fields work from the trimmed `value`,
+    /// while free-text scalars (`title`, `milestone`) take `text_value` so their
+    /// own leading/trailing spaces survive the round-trip.
     pub fn from_markdown(text: &str) -> Result<Issue, ParseIssueError> {
-        let rest = text
-            .strip_prefix("---\n")
-            .or_else(|| text.strip_prefix("---\r\n"))
-            .ok_or_else(|| ParseIssueError("missing frontmatter opening '---'".to_string()))?;
-
-        let (frontmatter, body) = split_frontmatter(rest)?;
-
         let mut number: Option<u32> = None;
         let mut title: Option<String> = None;
         let mut status = IssueStatus::default();
@@ -67,58 +63,45 @@ impl Issue {
         let mut created_at: Option<DateTime<Utc>> = None;
         let mut updated_at: Option<DateTime<Utc>> = None;
 
-        for line in frontmatter.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let (key, value) = line
-                .split_once(':')
-                .ok_or_else(|| ParseIssueError(format!("invalid frontmatter line: {line:?}")))?;
-            // Numeric / enum / list / timestamp fields are trimmed, but free-text
-            // scalars (`title`, `milestone`) are written verbatim after a single
-            // `key: ` delimiter space, so strip only that one space for them —
-            // full trimming would drop the user's own leading/trailing spaces and
-            // break the round-trip the list escaping is otherwise careful to keep.
-            let text_value = value.strip_prefix(' ').unwrap_or(value);
-            let value = value.trim();
-            match key.trim() {
-                "number" => {
-                    number = Some(
-                        value
-                            .parse()
-                            .map_err(|_| ParseIssueError(format!("invalid number: {value:?}")))?,
-                    )
-                }
-                "title" => title = Some(text_value.to_string()),
-                "status" => status = value.parse()?,
-                "priority" => priority = value.parse()?,
-                "labels" => labels = parse_string_list(value),
-                "dependson" => dependson = parse_number_list(value)?,
-                "related" => related = parse_number_list(value)?,
-                "parent" => {
-                    parent =
-                        if value.is_empty() {
+        let body = frontmatter::from_markdown(
+            text,
+            |key, value, text_value| -> Result<(), ParseIssueError> {
+                match key {
+                    "number" => {
+                        number =
+                            Some(value.parse().map_err(|_| {
+                                ParseIssueError(format!("invalid number: {value:?}"))
+                            })?)
+                    }
+                    "title" => title = Some(text_value.to_string()),
+                    "status" => status = value.parse()?,
+                    "priority" => priority = value.parse()?,
+                    "labels" => labels = parse_string_list(value),
+                    "dependson" => dependson = parse_number_list(value)?,
+                    "related" => related = parse_number_list(value)?,
+                    "parent" => {
+                        parent = if value.is_empty() {
                             None
                         } else {
                             Some(value.parse().map_err(|_| {
                                 ParseIssueError(format!("invalid parent: {value:?}"))
                             })?)
                         }
-                }
-                "milestone" => {
-                    milestone = if value.is_empty() {
-                        None
-                    } else {
-                        Some(text_value.to_string())
                     }
+                    "milestone" => {
+                        milestone = if value.is_empty() {
+                            None
+                        } else {
+                            Some(text_value.to_string())
+                        }
+                    }
+                    "created_at" => created_at = Some(parse_timestamp(value)?),
+                    "updated_at" => updated_at = Some(parse_timestamp(value)?),
+                    _ => {}
                 }
-                "created_at" => created_at = Some(parse_timestamp(value)?),
-                "updated_at" => updated_at = Some(parse_timestamp(value)?),
-                // Unknown keys are ignored so the format can grow without
-                // breaking older readers.
-                _ => {}
-            }
-        }
+                Ok(())
+            },
+        )?;
 
         Ok(Issue {
             number: number.ok_or_else(|| ParseIssueError("missing 'number'".to_string()))?,
@@ -134,13 +117,7 @@ impl Issue {
                 .ok_or_else(|| ParseIssueError("missing 'created_at'".to_string()))?,
             updated_at: updated_at
                 .ok_or_else(|| ParseIssueError("missing 'updated_at'".to_string()))?,
-            // Normalize the surrounding blank lines so the body round-trips
-            // with `to_markdown`, which trims trailing newlines and inserts a
-            // single blank line after the frontmatter.
-            body: body
-                .trim_start_matches(['\r', '\n'])
-                .trim_end_matches(['\r', '\n'])
-                .to_string(),
+            body,
         })
     }
 }

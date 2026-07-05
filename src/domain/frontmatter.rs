@@ -193,6 +193,76 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ParseFrontmatterErr
         .map_err(|_| ParseFrontmatterError(format!("invalid timestamp: {value:?}")))
 }
 
+/// Assemble a full frontmatter document from the caller's field lines and body.
+///
+/// This owns the *envelope* every entity shares: the opening `---`, the closing
+/// `---` plus its blank separator line, and the body normalised to exactly one
+/// trailing newline. `write_fields` appends the entity's `key: value` lines into
+/// the buffer — typically via `writeln!`, whose result is safe to discard
+/// because writing into a `String` is infallible. Keeping the envelope here is
+/// what stops the issue and memory serialisers from drifting apart.
+pub fn to_markdown(body: &str, write_fields: impl FnOnce(&mut String)) -> String {
+    let mut out = String::from("---\n");
+    write_fields(&mut out);
+    out.push_str("---\n\n");
+    out.push_str(body.trim_end_matches('\n'));
+    out.push('\n');
+    out
+}
+
+/// Parse a frontmatter document, feeding each field line to `dispatch` and
+/// returning the normalised body.
+///
+/// This owns the *envelope* every entity shares: the opening `---` guard, the
+/// split at the closing `---`, the per-line loop (skipping blank lines and
+/// splitting on the first `:`), and the body normalisation that inverts the
+/// trailing newline [`to_markdown`] writes. Each entity supplies only its field
+/// dispatcher.
+///
+/// `dispatch` is called with `(key, value, text_value)` where `key` and `value`
+/// are trimmed, and `text_value` has only the single `key: ` delimiter space
+/// stripped — so free-text scalars keep their own leading/trailing spaces while
+/// numeric / enum / list / timestamp fields work from the trimmed `value`. The
+/// dispatcher ignores keys it doesn't recognise (its `_ => {}` arm), which lets
+/// the format gain fields without breaking older readers.
+///
+/// Errors are raised as [`ParseFrontmatterError`]; the generic `E` bound lets
+/// each entity return its own `Parse*Error` via the `From` impl (the same one
+/// that already converts errors from the primitives above).
+pub fn from_markdown<E>(
+    text: &str,
+    mut dispatch: impl FnMut(&str, &str, &str) -> Result<(), E>,
+) -> Result<String, E>
+where
+    E: From<ParseFrontmatterError>,
+{
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+        .ok_or_else(|| ParseFrontmatterError("missing frontmatter opening '---'".to_string()))?;
+
+    let (frontmatter, body) = split_frontmatter(rest)?;
+
+    for line in frontmatter.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(':')
+            .ok_or_else(|| ParseFrontmatterError(format!("invalid frontmatter line: {line:?}")))?;
+        let text_value = value.strip_prefix(' ').unwrap_or(value);
+        dispatch(key.trim(), value.trim(), text_value)?;
+    }
+
+    // Normalize the surrounding blank lines so the body round-trips with
+    // `to_markdown`, which trims trailing newlines and inserts a single blank
+    // line after the frontmatter.
+    Ok(body
+        .trim_start_matches(['\r', '\n'])
+        .trim_end_matches(['\r', '\n'])
+        .to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
