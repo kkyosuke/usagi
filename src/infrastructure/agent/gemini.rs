@@ -454,4 +454,29 @@ mod tests {
         assert!(!agent.has_resumable_session(Path::new("/nonexistent/usagi/worktree")));
         agent.forget_session(Path::new("/nonexistent/usagi/worktree"));
     }
+
+    #[test]
+    fn test_provision_writes_mcp_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+
+        let agent = GeminiAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        agent.provision(&wiring).unwrap();
+
+        let expected_path = temp_dir
+            .path()
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json");
+        assert!(expected_path.exists());
+        let contents = std::fs::read_to_string(&expected_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+    }
 }
