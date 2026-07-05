@@ -247,7 +247,10 @@ mod tests {
         let mut w = Settings::default().agent_wiring("usagi");
         w.model = Some("gemini-3-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
-        assert_eq!(launch, format!("agy --dangerously-skip-permission --model 'gemini-3-pro' -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("agy --dangerously-skip-permission --model 'gemini-3-pro' -i='{NOTE}'")
+        );
         let headless = agent.headless_command(&w, "clean up");
         assert_eq!(
             headless,
@@ -266,7 +269,10 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(launch, format!("agy --dangerously-skip-permission -c -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("agy --dangerously-skip-permission -c -i='{NOTE}'")
+        );
     }
 
     #[test]
@@ -279,7 +285,10 @@ mod tests {
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, format!("agy --dangerously-skip-permission -i='{NOTE}\n\nfix issue #50'"));
+        assert_eq!(
+            launch,
+            format!("agy --dangerously-skip-permission -i='{NOTE}\n\nfix issue #50'")
+        );
         // A dash-leading prompt (`--help`) binds to `-i` instead of being parsed as
         // the next option.
         let dashed = AntigravityAgent::new().launch_command(
@@ -287,7 +296,10 @@ mod tests {
             false,
             Some("--help"),
         );
-        assert_eq!(dashed, format!("agy --dangerously-skip-permission -i='{NOTE}\n\n--help'"));
+        assert_eq!(
+            dashed,
+            format!("agy --dangerously-skip-permission -i='{NOTE}\n\n--help'")
+        );
     }
 
     #[test]
@@ -299,7 +311,10 @@ mod tests {
             true,
             Some("keep going"),
         );
-        assert_eq!(launch, format!("agy --dangerously-skip-permission -c -i='{NOTE}\n\nkeep going'"));
+        assert_eq!(
+            launch,
+            format!("agy --dangerously-skip-permission -c -i='{NOTE}\n\nkeep going'")
+        );
     }
 
     #[test]
@@ -314,7 +329,10 @@ mod tests {
             Some("don't stop"),
         );
         let escaped_prompt = r"don'\''t stop";
-        assert_eq!(launch, format!("agy --dangerously-skip-permission -i='{NOTE}\n\n{escaped_prompt}'"));
+        assert_eq!(
+            launch,
+            format!("agy --dangerously-skip-permission -i='{NOTE}\n\n{escaped_prompt}'")
+        );
     }
 
     #[test]
