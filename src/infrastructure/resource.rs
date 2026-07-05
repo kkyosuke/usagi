@@ -65,6 +65,7 @@ impl ResourceSampler for SysinfoSampler {
             parent: process.parent().map(|p| p.as_u32()),
             cpu_percent: process.cpu_usage(),
             memory_bytes: process.memory(),
+            name: process.name().to_string_lossy().to_string(),
         }));
         out
     }

@@ -96,6 +96,8 @@ struct Watched {
     agent_input: Option<PtyInputHandle>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
+    /// Whether any pane in this session is running the Antigravity agent CLI.
+    has_antigravity: bool,
 }
 
 impl Watched {
@@ -209,6 +211,7 @@ impl MonitorHandle {
                     pr_panes: Vec::new(),
                     agent_input: None,
                     label: String::new(),
+                    has_antigravity: false,
                 },
             );
         }
@@ -1056,6 +1059,10 @@ impl TerminalPool {
                 .iter()
                 .find(|p| matches!(p.kind, PaneKind::Agent))
                 .map(|p| p.pty.input_handle());
+            let has_antigravity = sp
+                .panes
+                .iter()
+                .any(|p| p.cli == Some(AgentCli::Antigravity));
             Some(Watched {
                 bell,
                 alive,
@@ -1063,6 +1070,7 @@ impl TerminalPool {
                 pr_panes,
                 agent_input,
                 label: label.to_string(),
+                has_antigravity,
             })
         });
         let mut shared = self.lock();
@@ -1411,20 +1419,28 @@ fn spawn_watcher(
         // workspace carries none.
         tick = tick.wrapping_add(1);
         if tick.is_multiple_of(RESOURCE_SAMPLE_EVERY) {
-            let roots: Vec<(PathBuf, Vec<u32>)> = match shared.lock() {
+            let active_sessions: Vec<_> = match shared.lock() {
                 Ok(shared) => shared
                     .sessions
                     .iter()
                     .filter(|(_, w)| w.any_alive())
-                    .map(|(path, w)| (path.clone(), w.roots.clone()))
+                    .map(|(path, w)| (path.clone(), w.roots.clone(), w.has_antigravity))
                     .collect(),
                 Err(_) => break,
             };
-            let (resources, total) = if roots.is_empty() {
+            let (resources, total) = if active_sessions.is_empty() {
                 (HashMap::new(), ResourceUsage::default())
             } else {
+                let roots: Vec<(PathBuf, Vec<u32>)> = active_sessions
+                    .iter()
+                    .map(|(p, r, _)| (p.clone(), r.clone()))
+                    .collect();
+                let global_daemon_keys: Vec<PathBuf> = active_sessions
+                    .into_iter()
+                    .filter_map(|(p, _, has_ag)| has_ag.then_some(p))
+                    .collect();
                 let samples = sampler.sample();
-                let (per_root, total) = aggregate_by_root(&samples, &roots);
+                let (per_root, total) = aggregate_by_root(&samples, &roots, &global_daemon_keys);
                 (per_root.into_iter().collect(), total)
             };
             if let Ok(mut shared) = shared.lock() {

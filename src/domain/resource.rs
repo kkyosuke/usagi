@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 /// rebuilt), and the CPU / memory it is using. `cpu_percent` is a share of a
 /// single core (so a busy multi-threaded process can read above 100, exactly as
 /// `top` reports it), and `memory_bytes` is its resident set in bytes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProcSample {
     /// The process id.
     pub pid: u32,
@@ -27,6 +27,8 @@ pub struct ProcSample {
     pub cpu_percent: f32,
     /// Resident memory in bytes.
     pub memory_bytes: u64,
+    /// The name of the process, used to match global daemons.
+    pub name: String,
 }
 
 /// The CPU and memory a session — or the whole workspace — is using, rounded for
@@ -145,9 +147,10 @@ impl ResourceUsage {
 /// (its process already gone) simply contributes nothing. CPU is summed as the
 /// sampled `f32` and rounded once at the end, so a tree of many small shares
 /// does not lose a percent to per-process rounding.
-pub fn aggregate_by_root<K: Clone>(
+pub fn aggregate_by_root<K: Clone + PartialEq>(
     samples: &[ProcSample],
     roots: &[(K, Vec<u32>)],
+    global_daemon_keys: &[K],
 ) -> (Vec<(K, ResourceUsage)>, ResourceUsage) {
     let mut by_pid: HashMap<u32, &ProcSample> = HashMap::with_capacity(samples.len());
     by_pid.extend(samples.iter().map(|s| (s.pid, s)));
@@ -157,6 +160,33 @@ pub fn aggregate_by_root<K: Clone>(
     for s in samples {
         if let Some(parent) = s.parent {
             children.entry(parent).or_default().push(s.pid);
+        }
+    }
+
+    let mut global_pids = Vec::new();
+    if !global_daemon_keys.is_empty() {
+        for s in samples {
+            let name = s.name.to_lowercase();
+            if name.contains("antigravity") || name == "agy" {
+                global_pids.push(s.pid);
+            }
+        }
+    }
+
+    let mut global_cpu = 0.0_f32;
+    let mut global_mem = 0_u64;
+    let mut global_visited = HashSet::new();
+    let mut stack = global_pids.clone();
+    while let Some(pid) = stack.pop() {
+        if !global_visited.insert(pid) {
+            continue;
+        }
+        if let Some(sample) = by_pid.get(&pid) {
+            global_cpu += sample.cpu_percent;
+            global_mem += sample.memory_bytes;
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
         }
     }
 
@@ -181,6 +211,12 @@ pub fn aggregate_by_root<K: Clone>(
                 stack.extend(kids.iter().copied());
             }
         }
+
+        if global_daemon_keys.contains(key) {
+            cpu += global_cpu / global_daemon_keys.len() as f32;
+            memory_bytes += global_mem / global_daemon_keys.len() as u64;
+        }
+
         let usage = ResourceUsage {
             cpu_percent: cpu.round() as u32,
             memory_bytes,
@@ -195,12 +231,13 @@ pub fn aggregate_by_root<K: Clone>(
 mod tests {
     use super::*;
 
-    fn sample(pid: u32, parent: Option<u32>, cpu: f32, mem: u64) -> ProcSample {
+    fn sample(pid: u32, parent: Option<u32>, cpu: f32, mem: u64, name: &str) -> ProcSample {
         ProcSample {
             pid,
             parent,
             cpu_percent: cpu,
             memory_bytes: mem,
+            name: name.to_string(),
         }
     }
 
@@ -337,13 +374,13 @@ mod tests {
     fn aggregate_sums_a_root_and_its_descendants() {
         // shell(10) → agent(11) → helper(12); a sibling tree under 20.
         let samples = vec![
-            sample(10, Some(1), 1.0, 10 * MIB),
-            sample(11, Some(10), 2.0, 20 * MIB),
-            sample(12, Some(11), 3.0, 30 * MIB),
-            sample(20, Some(1), 5.0, 50 * MIB),
+            sample(10, Some(1), 1.0, 10 * MIB, "sh"),
+            sample(11, Some(10), 2.0, 20 * MIB, "agent"),
+            sample(12, Some(11), 3.0, 30 * MIB, "helper"),
+            sample(20, Some(1), 5.0, 50 * MIB, "sh"),
         ];
         let roots = vec![("a", vec![10_u32]), ("b", vec![20_u32])];
-        let (per_root, total) = aggregate_by_root(&samples, &roots);
+        let (per_root, total) = aggregate_by_root(&samples, &roots, &[]);
         assert_eq!(
             per_root,
             vec![
@@ -376,11 +413,11 @@ mod tests {
     fn aggregate_rounds_the_summed_cpu_once() {
         // Three 0.4% shares sum to 1.2% → rounds to 1, not three 0%-rounded leaves.
         let samples = vec![
-            sample(10, None, 0.4, MIB),
-            sample(11, Some(10), 0.4, MIB),
-            sample(12, Some(11), 0.4, MIB),
+            sample(10, None, 0.4, MIB, "sh"),
+            sample(11, Some(10), 0.4, MIB, "sh"),
+            sample(12, Some(11), 0.4, MIB, "sh"),
         ];
-        let (per_root, _) = aggregate_by_root(&samples, &[("a", vec![10])]);
+        let (per_root, _) = aggregate_by_root(&samples, &[("a", vec![10])], &[]);
         assert_eq!(per_root[0].1.cpu_percent, 1);
     }
 
@@ -388,10 +425,10 @@ mod tests {
     fn aggregate_counts_several_roots_for_one_key() {
         // A session with two panes (two shell pids) sums both subtrees.
         let samples = vec![
-            sample(10, None, 1.0, 10 * MIB),
-            sample(30, None, 4.0, 40 * MIB),
+            sample(10, None, 1.0, 10 * MIB, "sh"),
+            sample(30, None, 4.0, 40 * MIB, "sh"),
         ];
-        let (per_root, _) = aggregate_by_root(&samples, &[("a", vec![10, 30])]);
+        let (per_root, _) = aggregate_by_root(&samples, &[("a", vec![10, 30])], &[]);
         assert_eq!(
             per_root[0].1,
             ResourceUsage {
@@ -406,11 +443,11 @@ mod tests {
         // pid 99 is not in the sample (its process is gone) → contributes nothing.
         // pids 10↔11 form a parent cycle (pid reuse) → each counted once.
         let samples = vec![
-            sample(10, Some(11), 2.0, 20 * MIB),
-            sample(11, Some(10), 3.0, 30 * MIB),
+            sample(10, Some(11), 2.0, 20 * MIB, "sh"),
+            sample(11, Some(10), 3.0, 30 * MIB, "sh"),
         ];
         let (per_root, total) =
-            aggregate_by_root(&samples, &[("gone", vec![99]), ("loop", vec![10])]);
+            aggregate_by_root(&samples, &[("gone", vec![99]), ("loop", vec![10])], &[]);
         assert_eq!(per_root[0].1, ResourceUsage::default());
         assert_eq!(
             per_root[1].1,
@@ -429,8 +466,51 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_distributes_global_daemon_memory() {
+        let samples = vec![
+            sample(10, None, 1.0, 10 * MIB, "sh"),
+            sample(20, None, 1.0, 10 * MIB, "sh"),
+            sample(100, None, 10.0, 100 * MIB, "AntiGravity"),
+            sample(101, Some(100), 20.0, 200 * MIB, "AGY"),
+            sample(102, Some(100), 4.0, 40 * MIB, "helper"),
+            sample(103, Some(104), 2.0, 20 * MIB, "agy"),
+            sample(104, Some(103), 1.0, 10 * MIB, "helper"),
+        ];
+        let roots = vec![("a", vec![10_u32]), ("b", vec![20_u32])];
+        let global_daemon_keys = vec!["a", "b"];
+        let (per_root, total) = aggregate_by_root(&samples, &roots, &global_daemon_keys);
+
+        assert_eq!(
+            per_root,
+            vec![
+                (
+                    "a",
+                    ResourceUsage {
+                        cpu_percent: 20,
+                        memory_bytes: 195 * MIB,
+                    }
+                ),
+                (
+                    "b",
+                    ResourceUsage {
+                        cpu_percent: 20,
+                        memory_bytes: 195 * MIB,
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            total,
+            ResourceUsage {
+                cpu_percent: 40,
+                memory_bytes: 390 * MIB,
+            }
+        );
+    }
+
+    #[test]
     fn aggregate_over_no_roots_is_idle() {
-        let (per_root, total) = aggregate_by_root::<&str>(&[], &[]);
+        let (per_root, total) = aggregate_by_root::<&str>(&[], &[], &[]);
         assert!(per_root.is_empty());
         assert!(total.is_idle());
     }
