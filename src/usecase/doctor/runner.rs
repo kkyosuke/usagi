@@ -64,17 +64,60 @@ pub trait CommandRunner {
     fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()>;
 }
 
-/// Whether `name` is installed and runnable, probed by invoking it with
-/// `--version` and discarding its output. The basis of
-/// [`SystemRunner::available`].
+/// Whether `name` is installed and runnable, probed by searching the PATH
+/// for an executable file. The basis of [`SystemRunner::available`].
 fn which(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let path_var = match std::env::var_os("PATH") {
+        Some(v) => v,
+        None => return false,
+    };
+
+    #[cfg(target_os = "windows")]
+    let extensions = {
+        let pathext = std::env::var_os("PATHEXT")
+            .unwrap_or_else(|| std::ffi::OsString::from(".EXE;.BAT;.CMD;.COM"));
+        std::env::split_paths(&pathext).collect::<Vec<_>>()
+    };
+
+    for path in std::env::split_paths(&path_var) {
+        let candidate = path.join(name);
+
+        #[cfg(target_os = "windows")]
+        {
+            if candidate.is_file() {
+                return true;
+            }
+            for ext in &extensions {
+                if let Some(ext_str) = ext.to_str() {
+                    let mut name_with_ext = name.to_string();
+                    name_with_ext.push_str(ext_str);
+                    if path.join(name_with_ext).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if let Ok(metadata) = candidate.metadata() {
+                    if metadata.is_file() && (metadata.permissions().mode() & 0o111) != 0 {
+                        return true;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if candidate.is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The production [`CommandRunner`], backed by [`std::process::Command`].

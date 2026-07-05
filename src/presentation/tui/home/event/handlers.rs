@@ -1306,11 +1306,10 @@ fn launch_agent(
     wiring: &mut Wiring,
     cli: Option<AgentCli>,
 ) {
-    if let Some(cli) = cli {
-        if cli != state.default_agent() && !state.installed_agents().contains(&cli) {
-            state.log_error(format!("{} is not installed", cli.display_name()));
-            return;
-        }
+    let target_cli = cli.unwrap_or_else(|| state.default_agent());
+    if !state.installed_agents().is_empty() && !state.installed_agents().contains(&target_cli) {
+        state.log_error(format!("{} is not installed", target_cli.display_name()));
+        return;
     }
     state.set_agent_choice(cli);
     launch_pane(term, state, painter, wiring, true);

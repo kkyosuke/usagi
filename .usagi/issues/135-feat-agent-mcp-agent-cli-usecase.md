@@ -1,7 +1,7 @@
 ---
 number: 135
 title: feat(agent): インストール済み かつ MCP 対応の agent CLI を列挙する usecase と、セッション委譲時の検証
-status: todo
+status: done
 priority: high
 labels: [orchestration, agent]
 dependson: []
