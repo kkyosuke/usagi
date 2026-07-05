@@ -2,23 +2,34 @@
 //!
 //! It is never run by a person: usagi wires it into Claude Code as a
 //! `PreToolUse` hook (see [`crate::domain::settings::AgentCli::launch_command`]),
-//! so every file-touching tool call is checked before it runs. The hook delivers
-//! its JSON payload on stdin — the agent's worktree (`cwd`) and the tool's target
-//! (`tool_input.file_path`) — and usagi denies the call when the target escapes
-//! the session worktree.
+//! so every tool call is checked before it runs. The hook delivers its JSON
+//! payload on stdin — the agent's `cwd`, the `tool_name`, and the tool input —
+//! and usagi denies the call when it would touch the wrong tree.
 //!
-//! Why this exists: a usagi session worktree lives *inside* the main repository
-//! (`<repo>/.usagi/sessions/<name>/`), so the repo root and its sibling worktrees
-//! sit just above it. Without a guard an agent can read or edit `<repo>/src/...`
-//! or `cd` up into the repo and quietly work on the wrong tree. The
-//! [`crate::usecase::session_system_prompt`] tells the agent to stay put; this
-//! hook enforces it for Claude.
+//! The same hook enforces one of two modes, chosen at runtime from `cwd`:
+//!
+//! - **Session mode** (cwd is inside `.usagi/sessions/<name>/`): a session's
+//!   agent may edit anything inside its worktree, so a file-touching tool is
+//!   denied only when its `tool_input.file_path` escapes the worktree. A usagi
+//!   session worktree lives *inside* the main repository, so the repo root and
+//!   sibling worktrees sit just above it on disk; without this an agent could
+//!   edit `<repo>/src/...` or `cd` up and quietly work on the wrong tree.
+//! - **Root mode** (cwd is the workspace root, *not* under `.usagi/sessions/`):
+//!   the coordinator must not mutate the repository at all. Here the worktree
+//!   confinement cannot help — cwd *is* the repo root, so nothing is "outside"
+//!   it — so instead every file-writing tool (`Edit` / `Write` / `MultiEdit` /
+//!   `NotebookEdit`) is denied regardless of path, and `Bash` calls are denied
+//!   when they invoke a repository-mutating git subcommand (read-only git like
+//!   `status` / `log` / `diff` still runs).
+//!
+//! The [`crate::usecase::session_system_prompt`] tells the agent to stay put;
+//! this hook enforces it for Claude.
 //!
 //! A denial is reported the way Claude Code's `PreToolUse` contract expects: a
 //! `hookSpecificOutput` object on stdout with `permissionDecision: "deny"` (and
 //! exit 0). An allowed call prints nothing, so the tool proceeds through Claude's
-//! usual permission flow. The path / JSON logic lives in
-//! [`crate::usecase::workspace_guard`] and
+//! usual permission flow. The mode / path / git logic lives in
+//! [`crate::usecase::workspace_guard`], the JSON parsing in
 //! [`crate::infrastructure::agent_state_store`]; this is a thin stdin → stdout
 //! shim.
 
@@ -69,21 +80,51 @@ pub fn run(mut input: impl Read, mut output: impl Write) -> Result<()> {
     Ok(())
 }
 
-/// The reason to deny this tool call, or `None` to let it proceed. A call is
-/// denied only when the payload carries both a worktree (`cwd`) and a tool target
-/// (`tool_input.file_path`) and that target escapes the worktree — a missing
-/// field, an unparseable payload, or a tool with no file path (e.g. `Bash`) is
-/// nothing to guard, so it is allowed. Split from [`run`] so the decision is
-/// tested without the stdin / stdout IO.
+/// The reason to deny this tool call, or `None` to let it proceed. The mode is
+/// chosen from the payload's `cwd`: a payload with no `cwd` to anchor against,
+/// or one that is unparseable, is nothing to guard and allowed. Split from
+/// [`run`] so the decision is tested without the stdin / stdout IO.
 fn deny_reason(raw: &str) -> Option<String> {
     let worktree = agent_state_store::worktree_from_hook_json(raw)?;
+    if workspace_guard::is_session_worktree(&worktree) {
+        session_deny_reason(raw, &worktree)
+    } else {
+        root_deny_reason(raw)
+    }
+}
+
+/// Session mode: deny only when the tool's target (`tool_input.file_path`)
+/// escapes the worktree. A tool with no file path (e.g. `Bash`, `Grep`) is
+/// nothing to confine, so it is allowed.
+fn session_deny_reason(raw: &str, worktree: &std::path::Path) -> Option<String> {
     let target = agent_state_store::tool_path_from_hook_json(raw)?;
-    workspace_guard::escapes_worktree(&worktree, &target).then(|| {
+    workspace_guard::escapes_worktree(worktree, &target).then(|| {
         format!(
             "{} はセッション worktree {} の外です。作業はこの worktree 配下だけで完結させ、\
              親のメインリポジトリのファイルには触れないでください。",
             target.display(),
             worktree.display()
+        )
+    })
+}
+
+/// Root mode: the coordinator must not mutate the repository. Deny every
+/// file-writing tool regardless of path, and any `Bash` call that runs a
+/// repository-mutating git subcommand (read-only git is allowed). All other
+/// tools proceed.
+fn root_deny_reason(raw: &str) -> Option<String> {
+    let tool_name = agent_state_store::tool_name_from_hook_json(raw)?;
+    if workspace_guard::is_write_tool(&tool_name) {
+        return Some(format!(
+            "ワークスペースルート（コーディネータ）ではファイル書き込みツール（{tool_name}）を実行できません。\
+             root 行はリポジトリを変更しません。編集はセッションの worktree に委譲してください。"
+        ));
+    }
+    let command = agent_state_store::bash_command_from_hook_json(raw)?;
+    workspace_guard::command_mutates_repo(&command).then(|| {
+        format!(
+            "ワークスペースルート（コーディネータ）ではリポジトリを変更する git を実行できません（{command}）。\
+             root 行はリポジトリを変更しません。読み取り（status / log / diff）は可能です。変更はセッションの worktree に委譲してください。"
         )
     })
 }
@@ -120,12 +161,50 @@ mod tests {
         // No cwd to anchor against.
         for payload in [
             r#"{"tool_input":{"file_path":"/repo/src/main.rs"}}"#,
-            // A cwd but no file path (e.g. a Bash call).
+            // A session cwd but no file path (e.g. a Bash call).
             r#"{"cwd":"/repo/.usagi/sessions/work","tool_input":{"command":"ls"}}"#,
             // Not JSON at all.
             "garbage",
         ] {
             assert_eq!(deny_reason(payload), None);
         }
+    }
+
+    #[test]
+    fn root_mode_denies_a_write_tool_at_any_path() {
+        // cwd is the workspace root (not under .usagi/sessions/), so even a
+        // write inside the repo is denied — the coordinator must not mutate it.
+        let payload =
+            r#"{"cwd":"/repo","tool_name":"Write","tool_input":{"file_path":"/repo/src/main.rs"}}"#;
+        let mut out = Vec::new();
+        run(Cursor::new(payload), &mut out).unwrap();
+        let written = String::from_utf8(out).unwrap();
+        assert!(written.contains("\"permissionDecision\":\"deny\""));
+        assert!(written.contains("Write"));
+    }
+
+    #[test]
+    fn root_mode_denies_a_mutating_git_command() {
+        let payload =
+            r#"{"cwd":"/repo","tool_name":"Bash","tool_input":{"command":"git commit -m x"}}"#;
+        assert!(deny_reason(payload).unwrap().contains("git commit -m x"));
+    }
+
+    #[test]
+    fn root_mode_allows_read_only_git_and_other_tools() {
+        // Read-only git passes.
+        assert_eq!(
+            deny_reason(
+                r#"{"cwd":"/repo","tool_name":"Bash","tool_input":{"command":"git status"}}"#
+            ),
+            None
+        );
+        // A non-writing tool (Read) passes regardless of path.
+        assert_eq!(
+            deny_reason(
+                r#"{"cwd":"/repo","tool_name":"Read","tool_input":{"file_path":"/repo/src/main.rs"}}"#
+            ),
+            None
+        );
     }
 }
