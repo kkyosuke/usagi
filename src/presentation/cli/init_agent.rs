@@ -181,4 +181,86 @@ mod tests {
         assert!(result.is_ok());
         assert!(tmp.path().join("CLAUDE.md").is_file());
     }
+
+    #[test]
+    fn test_run_false_executes_against_the_current_directory() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
+
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run(false);
+
+        std::env::set_current_dir(original).unwrap();
+
+        assert!(result.is_ok());
+        assert!(tmp.path().join("CLAUDE.md").is_file());
+    }
+
+    struct FailingWriter;
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "write error",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "flush error",
+            ))
+        }
+    }
+
+    struct FailingReader;
+    impl std::io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "read error"))
+        }
+    }
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "fill_buf error",
+            ))
+        }
+        fn consume(&mut self, _amt: usize) {}
+        fn read_line(&mut self, _buf: &mut String) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "read_line error",
+            ))
+        }
+    }
+
+    #[test]
+    fn test_init_agent_cli_write_error() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "dummy").unwrap();
+
+        let input = b"";
+        let mut output = FailingWriter;
+
+        let result = init_agent_cli(dir.path(), false, &input[..], &mut output);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "write error");
+    }
+
+    #[test]
+    fn test_init_agent_cli_read_error() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "dummy").unwrap();
+
+        let input = FailingReader;
+        let mut output = Vec::new();
+
+        let result = init_agent_cli(dir.path(), false, input, &mut output);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "read_line error");
+    }
 }
