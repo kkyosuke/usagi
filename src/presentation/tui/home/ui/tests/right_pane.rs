@@ -434,6 +434,7 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
         AgentCli::Codex,
         AgentCli::CodexFugu,
         AgentCli::Gemini,
+        AgentCli::Antigravity,
     ]);
 
     // The collapsed menu already reserves the widest expansion's height, so opening
@@ -449,7 +450,7 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
     );
     let roomy = console::strip_ansi_codes(&expanded.join("\n")).into_owned();
     assert!(
-        roomy.contains("Gemini"),
+        roomy.contains("Antigravity"),
         "the widest picker shows every agent: {roomy:?}"
     );
     assert!(
@@ -465,14 +466,14 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
 
     // Moving the picker cursor down scrolls the hidden agents into view without
     // growing the capped window.
-    for _ in 0..3 {
+    for _ in 0..4 {
         state.focus_menu_move_down();
     }
     let scrolled = focus_menu_body(&state, 60, 11);
     assert_eq!(scrolled.len(), cramped.len());
     let joined = console::strip_ansi_codes(&scrolled.join("\n")).into_owned();
     assert!(
-        joined.contains("Gemini"),
+        joined.contains("Antigravity"),
         "the last agent scrolls in: {joined:?}"
     );
 }

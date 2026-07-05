@@ -529,7 +529,7 @@ impl Command for AgentCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "agent [claude|codex|codex-fugu|sakana.ai|gemini]"
+        "agent [claude|codex|codex-fugu|sakana.ai|gemini|antigravity|agy]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
