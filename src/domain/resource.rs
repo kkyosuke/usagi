@@ -466,6 +466,49 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_distributes_global_daemon_memory() {
+        let samples = vec![
+            sample(10, None, 1.0, 10 * MIB, "sh"),
+            sample(20, None, 1.0, 10 * MIB, "sh"),
+            sample(100, None, 10.0, 100 * MIB, "AntiGravity"),
+            sample(101, Some(100), 20.0, 200 * MIB, "AGY"),
+            sample(102, Some(100), 4.0, 40 * MIB, "helper"),
+            sample(103, Some(104), 2.0, 20 * MIB, "agy"),
+            sample(104, Some(103), 1.0, 10 * MIB, "helper"),
+        ];
+        let roots = vec![("a", vec![10_u32]), ("b", vec![20_u32])];
+        let global_daemon_keys = vec!["a", "b"];
+        let (per_root, total) = aggregate_by_root(&samples, &roots, &global_daemon_keys);
+
+        assert_eq!(
+            per_root,
+            vec![
+                (
+                    "a",
+                    ResourceUsage {
+                        cpu_percent: 20,
+                        memory_bytes: 195 * MIB,
+                    }
+                ),
+                (
+                    "b",
+                    ResourceUsage {
+                        cpu_percent: 20,
+                        memory_bytes: 195 * MIB,
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            total,
+            ResourceUsage {
+                cpu_percent: 40,
+                memory_bytes: 390 * MIB,
+            }
+        );
+    }
+
+    #[test]
     fn aggregate_over_no_roots_is_idle() {
         let (per_root, total) = aggregate_by_root::<&str>(&[], &[], &[]);
         assert!(per_root.is_empty());
