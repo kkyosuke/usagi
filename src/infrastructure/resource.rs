@@ -9,9 +9,28 @@
 //! `sysinfo` call and is excluded from coverage (see `scripts/coverage.sh`),
 //! exactly like [`pty`](super::pty).
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::domain::resource::ProcSample;
+
+/// Whether the process with id `pid` is currently running on this host.
+///
+/// A cross-platform point check (no `libc::kill(pid, 0)`, which is Unix-only): it
+/// refreshes just that pid through [`sysinfo`] and reports whether the kernel
+/// still knows it. Used by [`super::agent_live_pane_store::is_live`] to decide
+/// whether the TUI that stamped a live-pane marker is still alive, so a marker
+/// left by a crashed TUI reads as dead. Live system I/O like the rest of this
+/// module, hence excluded from coverage.
+pub fn process_alive(pid: u32) -> bool {
+    let mut system = System::new();
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
+}
 
 /// Reads a snapshot of every process's CPU / memory and parent. Implemented over
 /// the live system by [`SysinfoSampler`]; the trait lets the watcher own a

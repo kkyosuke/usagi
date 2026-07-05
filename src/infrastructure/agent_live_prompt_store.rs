@@ -34,7 +34,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::json_file;
-use crate::infrastructure::store_lock::StoreLock;
+use crate::infrastructure::store_lock::{self, StoreLock};
 use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
 
 /// Subdirectory of the data dir the live-prompt files live under.
@@ -182,6 +182,36 @@ pub fn clear(worktree: &Path) {
     if let Ok(path) = path_for(PROMPT_SUBDIR, worktree) {
         let _ = fs::remove_file(path);
     }
+}
+
+/// Whether any prompt is currently queued for *some* worktree's live agent — a
+/// cheap directory listing, so the home screen's autostart pass can skip the
+/// per-session lookup on the common tick where nothing is queued.
+///
+/// The mirror of [`super::agent_prompt_store::any_queued`] for the live channel:
+/// autostart consults both, since a pane-less session may have a prompt stranded
+/// in *either* store. `session_prompt`'s explicit `mode="live"` always appends here
+/// without checking for a live pane, so a prompt sent that way to a session with no
+/// live agent pane waits here until one opens. (`auto` no longer strands prompts
+/// here — it routes live only when the pid-stamped live-pane marker confirms a
+/// running consumer, see [`super::agent_live_pane_store`].) Deliberately coarse —
+/// it does not read or validate the files (a
+/// [`take_all`] still confirms each queue belongs to the worktree it is keyed
+/// under); it only reports whether the directory holds anything besides the
+/// shared [`StoreLock`] file. A missing directory reads as empty.
+pub fn any_queued() -> bool {
+    dir(PROMPT_SUBDIR)
+        .ok()
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            // The store lock lives alongside the prompt files; it is not a queued
+            // prompt, so a directory holding only the lock reads as empty.
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_str() != Some(store_lock::LOCK_FILE_NAME)
+        })
 }
 
 #[cfg(test)]
@@ -371,6 +401,23 @@ mod tests {
             // An empty requeue leaves the existing queue untouched and writes nothing.
             requeue(wt.path(), &[]).unwrap();
             assert_eq!(take_all(wt.path()), vec!["kept"]);
+        });
+    }
+
+    #[test]
+    fn any_queued_reports_whether_a_live_prompt_is_waiting() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            // Nothing queued (the directory may not even exist yet).
+            assert!(!any_queued());
+            // A queued prompt makes it report true.
+            append(wt.path(), "queued").unwrap();
+            assert!(any_queued());
+            // Draining it (the file removed) makes it report empty again, even
+            // though the shared store-lock file remains in the directory.
+            let _ = take_all(wt.path());
+            assert!(StoreLock::path(&dir(PROMPT_SUBDIR).unwrap()).exists());
+            assert!(!any_queued());
         });
     }
 
