@@ -165,4 +165,20 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_run_executes_against_the_current_directory() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
+
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run(true);
+
+        std::env::set_current_dir(original).unwrap();
+
+        assert!(result.is_ok());
+        assert!(tmp.path().join("CLAUDE.md").is_file());
+    }
 }

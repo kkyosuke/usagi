@@ -142,4 +142,28 @@ mod tests {
             "dummy"
         );
     }
+
+    #[test]
+    fn test_init_agent_write_error() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+
+        // Create a directory where CLAUDE.md should be written to fail fs::write
+        std::fs::create_dir(dir.path().join("CLAUDE.md")).unwrap();
+
+        let result = init_agent(dir.path(), true, |_| Ok(true));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to write"));
+    }
+
+    #[test]
+    fn test_init_agent_confirm_error() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "dummy").unwrap();
+
+        let result = init_agent(dir.path(), false, |_| Err(anyhow::anyhow!("mock error")));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "mock error");
+    }
 }
