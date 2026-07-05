@@ -121,7 +121,8 @@ impl UsagiMcpServer {
         //    session launches with them. An unknown agent_cli is surfaced here,
         //    before any session is created. A duplicate name surfaces the session
         //    server's own error.
-        let agent = resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+        let agent =
+            resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
@@ -319,8 +320,12 @@ mod tests {
         let worktree = root.join(".usagi").join("sessions").join("work");
         fs::create_dir_all(&worktree).unwrap();
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
-        let server =
-            UsagiMcpServer::new(worktree.clone(), root.to_path_buf(), Box::new(StubBackend), runner);
+        let server = UsagiMcpServer::new(
+            worktree.clone(),
+            root.to_path_buf(),
+            Box::new(StubBackend),
+            runner,
+        );
         (server, worktree)
     }
 

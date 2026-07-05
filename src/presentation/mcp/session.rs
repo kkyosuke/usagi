@@ -119,14 +119,15 @@ pub(crate) fn resolve_session_agent(
 
             // 1. Verify MCP capability
             if matches!(
-                crate::domain::agent_feature::support(parsed, crate::domain::agent_feature::AgentFeature::Mcp),
+                crate::domain::agent_feature::support(
+                    parsed,
+                    crate::domain::agent_feature::AgentFeature::Mcp
+                ),
                 crate::domain::agent_feature::Support::No
             ) {
                 let capable = crate::usecase::agent::mcp_capable_clis(runner);
-                let capable_names: Vec<String> = capable
-                    .iter()
-                    .map(|c| c.command().to_string())
-                    .collect();
+                let capable_names: Vec<String> =
+                    capable.iter().map(|c| c.command().to_string()).collect();
                 return Err(format!(
                     "agent_cli {name:?} is not MCP-capable: usagi delegation requires an MCP-capable agent. \
                      Available installed MCP-capable agents: {capable_names:?}"
@@ -136,10 +137,8 @@ pub(crate) fn resolve_session_agent(
             // 2. Verify installation
             if !runner.available(parsed.command()) {
                 let capable = crate::usecase::agent::mcp_capable_clis(runner);
-                let capable_names: Vec<String> = capable
-                    .iter()
-                    .map(|c| c.command().to_string())
-                    .collect();
+                let capable_names: Vec<String> =
+                    capable.iter().map(|c| c.command().to_string()).collect();
                 return Err(format!(
                     "agent_cli {name:?} is not installed. \
                      Available installed MCP-capable agents: {capable_names:?}"
@@ -978,17 +977,25 @@ mod tests {
         // A known CLI name (case-insensitive, via AgentCli::from_name) resolves and
         // the model rides through untouched.
         let runner = FakeRunner(vec!["claude", "codex-fugu"]);
-        let agent = resolve_session_agent(&runner, Some("Claude"), Some("claude-3-5-sonnet".to_string()))
-            .expect("known cli");
+        let agent = resolve_session_agent(
+            &runner,
+            Some("Claude"),
+            Some("claude-3-5-sonnet".to_string()),
+        )
+        .expect("known cli");
         assert_eq!(agent.cli, Some(AgentCli::Claude));
         assert_eq!(agent.model.as_deref(), Some("claude-3-5-sonnet"));
         // The codex-fugu launch command resolves too.
         assert_eq!(
-            resolve_session_agent(&runner, Some("codex-fugu"), None).unwrap().cli,
+            resolve_session_agent(&runner, Some("codex-fugu"), None)
+                .unwrap()
+                .cli,
             Some(AgentCli::CodexFugu)
         );
         // Neither argument yields the default (follow the workspace settings).
-        assert!(resolve_session_agent(&runner, None, None).unwrap().is_unset());
+        assert!(resolve_session_agent(&runner, None, None)
+            .unwrap()
+            .is_unset());
     }
 
     #[test]
