@@ -392,4 +392,20 @@ mod tests {
         assert!(command_mutates_repo("env git rebase main"));
         assert!(!command_mutates_repo("FOO=bar git status"));
     }
+
+    #[test]
+    fn git_with_no_subcommand_is_not_mutating() {
+        // Bare `git`, and `git` whose only tokens are consumed by value-taking
+        // global options, leave no subcommand — the token walk falls through to
+        // `None`, so there is nothing to deny (read-only-by-omission).
+        assert!(!command_mutates_repo("git"));
+        assert!(!command_mutates_repo("git -C /repo"));
+    }
+
+    #[test]
+    fn an_env_assignment_name_may_contain_digits_after_the_first_char() {
+        // The name accepts digits past index 0 (`A1=…`); such a leading
+        // assignment is still seen through to the mutating git behind it.
+        assert!(command_mutates_repo("A1=x git commit"));
+    }
 }
