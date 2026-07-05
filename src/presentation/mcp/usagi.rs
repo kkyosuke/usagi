@@ -70,6 +70,8 @@ pub struct UsagiMcpServer {
     /// issue-write tools that mutate the git-tracked store (see
     /// [`ROOT_FORBIDDEN_TOOLS`]).
     at_workspace_root: bool,
+    /// The workspace root directory.
+    workspace_root: PathBuf,
 }
 
 impl UsagiMcpServer {
@@ -89,8 +91,9 @@ impl UsagiMcpServer {
         let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
-            session: SessionMcpServer::new(workspace_root, &worktree, backend, runner),
+            session: SessionMcpServer::new(workspace_root.clone(), &worktree, backend, runner),
             at_workspace_root,
+            workspace_root,
         }
     }
 
@@ -114,20 +117,44 @@ impl UsagiMcpServer {
         // tool output), so the orchestration reuses their logic without parsing
         // JSON text back out. Each step surfaces the sub-server's own error.
         //
-        // 1. Render the issue as a ready-to-run prompt (errors if it is missing).
-        let rendered = self.issue.render_prompt(args.number)?;
-        // 2. Create a fresh session for the issue (default name: issue-<number>),
-        //    pinning the optional per-session agent CLI / model so the delegated
-        //    session launches with them. An unknown agent_cli is surfaced here,
-        //    before any session is created. A duplicate name surfaces the session
-        //    server's own error.
+        // 1. Resolve and validate the agent override. An unknown agent_cli is surfaced
+        //    early, before reading files or committing validation.
         let agent =
             resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+
+        // 2. Render the issue as a ready-to-run prompt (errors if it is missing).
+        let rendered = self.issue.render_prompt(args.number)?;
+
+        // Verify that the issue file exists in the base commit of the repository
+        let local_settings = crate::usecase::settings::load_local(&self.workspace_root).unwrap_or_default();
+        let base = crate::infrastructure::git::resolve_base_ref(
+            &self.workspace_root,
+            local_settings.branch_source(),
+            local_settings.default_branch(),
+        );
+        let base_ref = base.unwrap_or_else(|| "HEAD".to_string());
+        let relative_issue_path = format!(".usagi/issues/{}", rendered.file_name);
+
+        if !crate::infrastructure::git::file_exists_at_rev(&self.workspace_root, &base_ref, &relative_issue_path) {
+            return Err(format!(
+                "issue #{} is not committed to the base branch ({}) yet: \
+                 uncommitted issues will not be present in the new session's worktree. \
+                 Please commit and merge this issue using a triage session first, \
+                 or use session_delegate_brief to start a triage session.",
+                args.number,
+                base_ref
+            ));
+        }
+
+        // 3. Create a fresh session for the issue (default name: issue-<number>),
+        //    pinning the optional per-session agent CLI / model so the delegated
+        //    session launches with them. A duplicate name surfaces the session
+        //    server's own error.
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
         let created = self.session.create_session(&name, agent)?;
-        // 3. Deliver the prompt. A freshly created session has no live pane, so the
+        // 4. Deliver the prompt. A freshly created session has no live pane, so the
         //    launch queue is always the right channel here.
         let (channel, _detail) =
             self.session
@@ -342,6 +369,15 @@ mod tests {
         run(&["commit", "-q", "-m", "init"]);
     }
 
+    /// Commit the created issues in the test repo to the current branch.
+    fn commit_issues(dir: &Path) {
+        let run = |args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+        run(&["add", ".usagi/issues/"]);
+        run(&["commit", "-q", "-m", "add issues"]);
+    }
+
     /// Parse a handler reply back into JSON for assertions.
     fn reply(server: &UsagiMcpServer, request: Value) -> Value {
         let line = serde_json::to_string(&request).unwrap();
@@ -549,6 +585,7 @@ mod tests {
                 json!({"title":"Add doctor","body":"Diagnose the env."}),
             )
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(&server, "session_delegate_issue", json!({"number":1}));
         assert_eq!(result["isError"], false);
@@ -583,6 +620,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"task"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -712,6 +750,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"heavy design"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -738,6 +777,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"task"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -767,6 +807,26 @@ mod tests {
             .unwrap()
             .contains("no issue #1"));
         // No stray session was created.
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
+    }
+
+    #[test]
+    fn delegate_issue_refuses_uncommitted_issue() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"uncommitted issue"}))
+            .unwrap();
+
+        // The issue is created but not committed yet, so delegate_issue must error.
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], true);
+        let err_text = result["content"][0]["text"].as_str().unwrap();
+        assert!(err_text.contains("is not committed to the base branch"), "{err_text}");
+        // No session was created.
         let listed = call(&server, "session_list", json!({}));
         assert_eq!(listed["content"][0]["text"], "[]");
     }

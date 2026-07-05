@@ -321,3 +321,13 @@ fn count_ahead_behind(repo: &Path, target: &str, branch: &str) -> Option<(usize,
     let ahead = counts.next()?.parse().ok()?;
     Some((ahead, behind))
 }
+
+/// Return `true` if `path` (relative to the repository root) exists at `rev`.
+pub fn file_exists_at_rev(repo: &Path, rev: &str, path: &str) -> bool {
+    let rev_path = format!("{rev}:{path}");
+    git_capture(repo, &["cat-file", "-e", &rev_path])
+        .ok()
+        .flatten()
+        .is_some()
+}
+

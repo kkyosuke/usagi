@@ -32,6 +32,7 @@ pub(crate) struct RenderedPrompt {
     pub number: u32,
     pub title: String,
     pub prompt: String,
+    pub file_name: String,
 }
 
 impl McpServer {
@@ -97,6 +98,7 @@ impl McpServer {
                 number: issue.number,
                 title: issue.title.clone(),
                 prompt: issue::to_prompt(&issue),
+                file_name: issue.file_name(),
             }),
             None => Err(format!("no issue #{number}")),
         }

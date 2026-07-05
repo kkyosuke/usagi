@@ -21,7 +21,7 @@ mod worktree;
 pub use branch::{
     ahead_behind, ahead_behind_against, branch_namespace_conflict, default_branch, delete_branch,
     diff_stat, diff_stat_against, diff_text, integration_base, list_branches, local_branches,
-    resolve_base_ref, IntegrationBase,
+    resolve_base_ref, file_exists_at_rev, IntegrationBase,
 };
 pub use merge::{fetch, merge, MergeStatus};
 pub use repo::{clone, is_repository, short_hash};
