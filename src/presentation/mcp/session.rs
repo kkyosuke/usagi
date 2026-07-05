@@ -207,7 +207,7 @@ pub struct SessionMcpServer {
     /// (over either delivery channel) and its live-pane detection.
     backend: Box<dyn AgentBackend>,
     /// Probes external tools (like checking if an agent CLI is installed on the PATH).
-    runner: Box<dyn CommandRunner>,
+    pub(crate) runner: Box<dyn CommandRunner>,
 }
 
 impl SessionMcpServer {
@@ -740,6 +740,24 @@ mod tests {
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
     type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
 
+    /// A runner that reports a fixed allowlist of programs as available.
+    struct FakeRunner(Vec<&'static str>);
+
+    impl CommandRunner for FakeRunner {
+        fn available(&self, program: &str) -> bool {
+            self.0.contains(&program)
+        }
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            true
+        }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A backend that records the calls it received and returns a scripted
     /// result, so the server's dispatch can be tested without a real agent. The
     /// call logs are shared via `Rc` so a test can inspect them after the backend
@@ -1006,15 +1024,15 @@ mod tests {
         let created = call(
             &server,
             "session_create",
-            json!({"name":"pinned","agent_cli":"gemini","model":"gemini-2.5-pro"}),
+            json!({"name":"pinned","agent_cli":"claude","model":"claude-3-5-sonnet"}),
         );
         assert_eq!(created["isError"], false);
 
         // The override lands on the SessionRecord in state.json.
         let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
         let session = &store.load().unwrap().unwrap().sessions[0];
-        assert_eq!(session.agent.cli, Some(AgentCli::Gemini));
-        assert_eq!(session.agent.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(session.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-3-5-sonnet"));
     }
 
     #[test]

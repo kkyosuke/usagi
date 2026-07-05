@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::usecase::doctor::CommandRunner;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -78,11 +80,16 @@ impl UsagiMcpServer {
     /// so a session agent's edits stay on its own branch), while session
     /// orchestration resolves against `workspace_root` (the whole workspace).
     /// When the process runs from the workspace root the two paths coincide.
-    pub fn new(worktree: PathBuf, workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
+    pub fn new(
+        worktree: PathBuf,
+        workspace_root: PathBuf,
+        backend: Box<dyn AgentBackend>,
+        runner: Box<dyn CommandRunner>,
+    ) -> Self {
         let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
-            session: SessionMcpServer::new(workspace_root, &worktree, backend),
+            session: SessionMcpServer::new(workspace_root, &worktree, backend, runner),
             at_workspace_root,
         }
     }
@@ -114,7 +121,7 @@ impl UsagiMcpServer {
         //    session launches with them. An unknown agent_cli is surfaced here,
         //    before any session is created. A duplicate name surfaces the session
         //    server's own error.
-        let agent = resolve_session_agent(args.agent_cli.as_deref(), args.model)?;
+        let agent = resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
@@ -244,6 +251,26 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use crate::usecase::doctor::CommandRunner;
+
+    /// A runner that reports a fixed allowlist of programs as available.
+    struct FakeRunner(Vec<&'static str>);
+
+    impl CommandRunner for FakeRunner {
+        fn available(&self, program: &str) -> bool {
+            self.0.contains(&program)
+        }
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            true
+        }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A backend that returns a fixed reply, so the unified server's routing of
     /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
@@ -275,10 +302,12 @@ mod tests {
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         UsagiMcpServer::new(
             root.to_path_buf(),
             root.to_path_buf(),
             Box::new(StubBackend),
+            runner,
         )
     }
 
@@ -289,8 +318,9 @@ mod tests {
     fn session_server_at(root: &Path) -> (UsagiMcpServer, PathBuf) {
         let worktree = root.join(".usagi").join("sessions").join("work");
         fs::create_dir_all(&worktree).unwrap();
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         let server =
-            UsagiMcpServer::new(worktree.clone(), root.to_path_buf(), Box::new(StubBackend));
+            UsagiMcpServer::new(worktree.clone(), root.to_path_buf(), Box::new(StubBackend), runner);
         (server, worktree)
     }
 
@@ -394,10 +424,12 @@ mod tests {
             .join("sessions")
             .join("work");
         fs::create_dir_all(&worktree).unwrap();
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         let server = UsagiMcpServer::new(
             worktree.clone(),
             workspace.path().to_path_buf(),
             Box::new(StubBackend),
+            runner,
         );
 
         let created = call(&server, "issue_create", json!({"title": "in session"}));
@@ -591,7 +623,8 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_ne!(link, real, "paths must differ textually for this test");
 
-        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend));
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
+        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend), runner);
         let result = call(&server, "issue_create", json!({"title": "x"}));
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
