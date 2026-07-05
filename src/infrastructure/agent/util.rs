@@ -125,4 +125,95 @@ mod tests {
         // also does not match.
         assert!(!same_dir(real, Path::new("/nonexistent/xyz")));
     }
+
+    #[test]
+    fn test_update_mcp_config_creates_new_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        update_mcp_config(&config_path, &wiring).unwrap();
+
+        assert!(config_path.exists());
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+        assert_eq!(
+            val["mcpServers"]["usagi"]["args"],
+            serde_json::json!(["mcp"])
+        );
+        assert!(val["mcpServers"]["usagi-llm"].is_null());
+    }
+
+    #[test]
+    fn test_update_mcp_config_merges_existing_and_includes_llm() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("subdir").join("config.json");
+
+        // Write existing file with other mcpServers
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let existing = serde_json::json!({
+            "otherField": "value",
+            "mcpServers": {
+                "existing-server": {
+                    "command": "node",
+                    "args": ["server.js"]
+                },
+                "usagi-llm": {
+                    "command": "old-bin",
+                    "args": ["llm-mcp"]
+                }
+            }
+        });
+        std::fs::write(&config_path, serde_json::to_string(&existing).unwrap()).unwrap();
+
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: Some("qwen2.5-coder".to_string()),
+            model: None,
+        };
+
+        update_mcp_config(&config_path, &wiring).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        // Check merged fields
+        assert_eq!(val["otherField"], "value");
+        assert_eq!(val["mcpServers"]["existing-server"]["command"], "node");
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+        assert_eq!(val["mcpServers"]["usagi-llm"]["command"], "/bin/usagi");
+        assert_eq!(
+            val["mcpServers"]["usagi-llm"]["args"],
+            serde_json::json!(["llm-mcp", "--model", "qwen2.5-coder"])
+        );
+    }
+
+    #[test]
+    fn test_update_mcp_config_handles_corrupt_file_and_removes_llm() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
+        // Write invalid json
+        std::fs::write(&config_path, "invalid-json").unwrap();
+
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        update_mcp_config(&config_path, &wiring).unwrap();
+
+        let contents = std::fs::read_to_string(&config_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+        assert!(val["mcpServers"]["usagi-llm"].is_null());
+    }
 }
