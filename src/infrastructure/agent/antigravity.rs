@@ -152,7 +152,10 @@ impl Agent for AntigravityAgent {
         // The MCP/hooks wiring is intentionally not rendered: `agy` has no inline
         // flag for it. Only the model (when pinned), resume, and the opening prompt
         // are wired, via plain flags.
-        let mut parts = vec!["agy".to_string()];
+        let mut parts = vec![
+            "agy".to_string(),
+            "--dangerously-skip-permission".to_string(),
+        ];
         // An explicit model rides in as `--model`; absent, `agy` auto-selects.
         parts.extend(model_flag_parts(wiring));
         // `-c` (`--continue`) resumes the most recent conversation. usagi only
@@ -179,14 +182,14 @@ impl Agent for AntigravityAgent {
         // launch, the MCP/hooks wiring is not rendered — `agy` exposes no inline
         // flag for it, so a headless run works with git and the filesystem alone;
         // only the model (when pinned) is wired. No interactive person is present,
-        // so `--dangerously-skip-permissions` auto-approves every tool request to
+        // so `--dangerously-skip-permission` auto-approves every tool request to
         // let it act without prompting. As in the interactive launch, the session
         // worktree note leads the prompt (there is no system-prompt flag to carry
         // it), so a headless run also stays confined to its worktree; the combined
         // text is escaped for the single-quoted shell context.
         let mut parts = vec![
             "agy".to_string(),
-            "--dangerously-skip-permissions".to_string(),
+            "--dangerously-skip-permission".to_string(),
         ];
         parts.extend(model_flag_parts(wiring));
         parts.push("-p".to_string());
@@ -236,7 +239,7 @@ mod tests {
         // With no queued prompt, the launch is not bare `agy`: the session worktree
         // note still rides in as the opening prompt so `agy` knows it is already in a
         // worktree. The MCP/local-LLM wiring is ignored either way.
-        let expected = format!("agy -i='{NOTE}'");
+        let expected = format!("agy --dangerously-skip-permission -i='{NOTE}'");
         assert_eq!(
             agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None),
             expected
@@ -261,12 +264,12 @@ mod tests {
         let mut w = Settings::default().agent_wiring("usagi");
         w.model = Some("gemini-3-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
-        assert_eq!(launch, format!("agy --model 'gemini-3-pro' -i='{NOTE}'"));
+        assert_eq!(launch, format!("agy --dangerously-skip-permission --model 'gemini-3-pro' -i='{NOTE}'"));
         let headless = agent.headless_command(&w, "clean up");
         assert_eq!(
             headless,
             format!(
-                "agy --dangerously-skip-permissions --model 'gemini-3-pro' -p '{NOTE}\n\nclean up'"
+                "agy --dangerously-skip-permission --model 'gemini-3-pro' -p '{NOTE}\n\nclean up'"
             )
         );
     }
@@ -280,7 +283,7 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(launch, format!("agy -c -i='{NOTE}'"));
+        assert_eq!(launch, format!("agy --dangerously-skip-permission -c -i='{NOTE}'"));
     }
 
     #[test]
@@ -293,7 +296,7 @@ mod tests {
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, format!("agy -i='{NOTE}\n\nfix issue #50'"));
+        assert_eq!(launch, format!("agy --dangerously-skip-permission -i='{NOTE}\n\nfix issue #50'"));
         // A dash-leading prompt (`--help`) binds to `-i` instead of being parsed as
         // the next option.
         let dashed = AntigravityAgent::new().launch_command(
@@ -301,7 +304,7 @@ mod tests {
             false,
             Some("--help"),
         );
-        assert_eq!(dashed, format!("agy -i='{NOTE}\n\n--help'"));
+        assert_eq!(dashed, format!("agy --dangerously-skip-permission -i='{NOTE}\n\n--help'"));
     }
 
     #[test]
@@ -313,7 +316,7 @@ mod tests {
             true,
             Some("keep going"),
         );
-        assert_eq!(launch, format!("agy -c -i='{NOTE}\n\nkeep going'"));
+        assert_eq!(launch, format!("agy --dangerously-skip-permission -c -i='{NOTE}\n\nkeep going'"));
     }
 
     #[test]
@@ -328,13 +331,13 @@ mod tests {
             Some("don't stop"),
         );
         let escaped_prompt = r"don'\''t stop";
-        assert_eq!(launch, format!("agy -i='{NOTE}\n\n{escaped_prompt}'"));
+        assert_eq!(launch, format!("agy --dangerously-skip-permission -i='{NOTE}\n\n{escaped_prompt}'"));
     }
 
     #[test]
     fn headless_command_runs_print_mode_with_auto_approval() {
         // The headless command runs `agy` non-interactively (`-p <prompt>`) with
-        // `--dangerously-skip-permissions` auto-approving every tool request, so the
+        // `--dangerously-skip-permission` auto-approving every tool request, so the
         // background agent acts without prompting. The worktree note leads the prompt
         // (no system-prompt flag carries it), so the run stays in its worktree. The
         // wiring is not rendered (`agy` has no inline flag for it), so no MCP config.
@@ -342,7 +345,7 @@ mod tests {
             .headless_command(&Settings::default().agent_wiring("usagi"), "clean up");
         assert_eq!(
             launch,
-            format!("agy --dangerously-skip-permissions -p '{NOTE}\n\nclean up'")
+            format!("agy --dangerously-skip-permission -p '{NOTE}\n\nclean up'")
         );
         assert!(!launch.contains("mcp"));
     }
@@ -359,7 +362,7 @@ mod tests {
         let escaped_prompt = r"don'\''t delete '\''main'\''";
         assert_eq!(
             launch,
-            format!("agy --dangerously-skip-permissions -p '{NOTE}\n\n{escaped_prompt}'")
+            format!("agy --dangerously-skip-permission -p '{NOTE}\n\n{escaped_prompt}'")
         );
     }
 

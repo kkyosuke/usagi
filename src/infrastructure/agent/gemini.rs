@@ -33,11 +33,7 @@ use crate::domain::settings::AgentCli;
 /// Where Gemini looks for its MCP configuration:
 /// `~/.gemini/config/mcp_config.json`.
 fn gemini_mcp_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| {
-        home.join(".gemini")
-            .join("config")
-            .join("mcp_config.json")
-    })
+    dirs::home_dir().map(|home| home.join(".gemini").join("config").join("mcp_config.json"))
 }
 
 /// Where Gemini stores each project's chat history:

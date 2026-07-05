@@ -1006,7 +1006,6 @@ mod tests {
         assert!(err.contains("claude"), "{err}");
     }
 
-
     #[test]
     fn resolve_session_agent_rejects_uninstalled_cli() {
         let runner = FakeRunner(vec!["claude"]);

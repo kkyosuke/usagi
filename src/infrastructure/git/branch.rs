@@ -330,4 +330,3 @@ pub fn file_exists_at_rev(repo: &Path, rev: &str, path: &str) -> bool {
         .flatten()
         .is_some()
 }
-

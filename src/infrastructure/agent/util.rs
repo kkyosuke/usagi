@@ -5,8 +5,8 @@
 //! path-comparison idioms are identical across them, so they live here once
 //! rather than being copied per adapter.
 
-use std::path::Path;
 use crate::domain::agent::AgentWiring;
+use std::path::Path;
 
 /// Wrap `text` as a single shell argument in single quotes, safe to drop into a
 /// `sh -c` command line. A single quote cannot appear inside a single-quoted
@@ -38,8 +38,8 @@ pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(),
     }
 
     let mut config: serde_json::Value = if path.exists() {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read MCP config: {e}"))?;
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| format!("failed to read MCP config: {e}"))?;
         serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -83,8 +83,7 @@ pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(),
 
     let serialized = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("failed to serialize MCP config: {e}"))?;
-    std::fs::write(path, serialized)
-        .map_err(|e| format!("failed to write MCP config: {e}"))?;
+    std::fs::write(path, serialized).map_err(|e| format!("failed to write MCP config: {e}"))?;
 
     Ok(())
 }

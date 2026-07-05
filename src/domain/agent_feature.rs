@@ -132,10 +132,7 @@ mod tests {
 
     #[test]
     fn gemini_supports_mcp_and_plain_flag_features() {
-        assert_eq!(
-            support(AgentCli::Gemini, AgentFeature::Mcp),
-            Support::Yes
-        );
+        assert_eq!(support(AgentCli::Gemini, AgentFeature::Mcp), Support::Yes);
         assert_eq!(
             support(AgentCli::Gemini, AgentFeature::LocalLlmMcp),
             Support::Yes

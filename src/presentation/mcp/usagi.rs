@@ -126,7 +126,8 @@ impl UsagiMcpServer {
         let rendered = self.issue.render_prompt(args.number)?;
 
         // Verify that the issue file exists in the base commit of the repository
-        let local_settings = crate::usecase::settings::load_local(&self.workspace_root).unwrap_or_default();
+        let local_settings =
+            crate::usecase::settings::load_local(&self.workspace_root).unwrap_or_default();
         let base = crate::infrastructure::git::resolve_base_ref(
             &self.workspace_root,
             local_settings.branch_source(),
@@ -135,14 +136,17 @@ impl UsagiMcpServer {
         let base_ref = base.unwrap_or_else(|| "HEAD".to_string());
         let relative_issue_path = format!(".usagi/issues/{}", rendered.file_name);
 
-        if !crate::infrastructure::git::file_exists_at_rev(&self.workspace_root, &base_ref, &relative_issue_path) {
+        if !crate::infrastructure::git::file_exists_at_rev(
+            &self.workspace_root,
+            &base_ref,
+            &relative_issue_path,
+        ) {
             return Err(format!(
                 "issue #{} is not committed to the base branch ({}) yet: \
                  uncommitted issues will not be present in the new session's worktree. \
                  Please commit and merge this issue using a triage session first, \
                  or use session_delegate_brief to start a triage session.",
-                args.number,
-                base_ref
+                args.number, base_ref
             ));
         }
 
@@ -825,7 +829,10 @@ mod tests {
         let result = call(&server, "session_delegate_issue", json!({"number":1}));
         assert_eq!(result["isError"], true);
         let err_text = result["content"][0]["text"].as_str().unwrap();
-        assert!(err_text.contains("is not committed to the base branch"), "{err_text}");
+        assert!(
+            err_text.contains("is not committed to the base branch"),
+            "{err_text}"
+        );
         // No session was created.
         let listed = call(&server, "session_list", json!({}));
         assert_eq!(listed["content"][0]["text"], "[]");
