@@ -35,7 +35,7 @@ use chrono::{DateTime, Utc};
 use crate::domain::agent::Agent;
 use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::LocalSettings;
-use crate::domain::workspace_state::{BranchStatus, PrLink, SessionRecord};
+use crate::domain::workspace_state::{BranchStatus, PrLink, SessionAgent, SessionRecord};
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
 use crate::infrastructure::workspace_store::WorkspaceStore;
@@ -84,18 +84,35 @@ pub trait SetupCommandRunner {
     fn run(&self, cwd: &Path, command: &str) -> Result<()>;
 }
 
-/// Create session `name` under `workspace_root`.
+/// Create session `name` under `workspace_root`, following the workspace's
+/// effective agent settings for its launches.
 ///
 /// Fails if the name is empty or contains path separators, or if the session
 /// already exists. Any git error (e.g. the branch already exists in a repo) is
-/// surfaced.
+/// surfaced. To pin a specific agent CLI / model on the session, use
+/// [`create_with_agent`].
 pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
-    create_with_setup_runner(workspace_root, name, &SystemSetupCommandRunner)
+    create_with_agent(workspace_root, name, SessionAgent::default())
+}
+
+/// Create session `name`, recording `agent` as its per-session agent CLI / model
+/// override so its agent pane launches with that CLI and model ahead of the
+/// workspace's effective settings (see [`SessionAgent`]). An unset `agent` (the
+/// default) behaves exactly like [`create`]. The model, when set, is trimmed and
+/// an empty value is dropped; it is otherwise passed through verbatim (no
+/// allowlist) and shell-escaped at launch time.
+pub fn create_with_agent(
+    workspace_root: &Path,
+    name: &str,
+    agent: SessionAgent,
+) -> Result<CreatedSession> {
+    create_with_setup_runner(workspace_root, name, agent, &SystemSetupCommandRunner)
 }
 
 fn create_with_setup_runner(
     workspace_root: &Path,
     name: &str,
+    agent: SessionAgent,
     setup_runner: &dyn SetupCommandRunner,
 ) -> Result<CreatedSession> {
     let name = name.trim();
@@ -196,7 +213,7 @@ fn create_with_setup_runner(
     // lock-acquire timeout. Recording first keeps reconcile from mistaking this
     // now-registered worktree for a stray while setup runs; a setup failure is
     // logged, never rolled back (the worktree already exists for the user to fix).
-    record(&store, name, &dest_root, &worktrees)?;
+    record(&store, name, &dest_root, &worktrees, agent)?;
     drop(_lock);
 
     run_setup_commands(&dest_root, name, &local_settings, setup_runner);
@@ -298,7 +315,13 @@ pub fn existing_branch_names(workspace_root: &Path) -> Vec<String> {
 /// Append the session to `<workspace>/.usagi/state.json`, creating the state
 /// when none exists yet. This is what lets a multi-repo, non-git root still
 /// track its sessions. Each worktree's git status is captured at record time.
-fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]) -> Result<()> {
+fn record(
+    store: &WorkspaceStore,
+    name: &str,
+    root: &Path,
+    worktrees: &[PathBuf],
+    agent: SessionAgent,
+) -> Result<()> {
     // The caller ([`create`]) holds the store lock across the whole operation,
     // so the load → append → save here is already serialised against any other
     // process mutating this workspace's `state.json`.
@@ -309,12 +332,26 @@ fn record(store: &WorkspaceStore, name: &str, root: &Path, worktrees: &[PathBuf]
     // repository's default branch, resolved once per repository.
     let worktree_states = workspace_state::inspect_worktrees(worktrees);
 
+    // Normalise the model override before it is persisted and later interpolated
+    // into a launch command: trim surrounding whitespace and drop a value that
+    // trims to empty (so a blank string never renders as an empty `--model ''`).
+    // The value is otherwise passed through — no allowlist — since model names
+    // differ per CLI and change often, and the adapter shell-escapes it at launch.
+    let agent = SessionAgent {
+        cli: agent.cli,
+        model: agent
+            .model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty()),
+    };
+
     let now = Utc::now();
     state.sessions.push(SessionRecord {
         name: name.to_string(),
         display_name: None,
         note: None,
         label_id: None,
+        agent,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
@@ -1030,7 +1067,9 @@ mod tests {
         .unwrap();
         let runner = RecordingSetupRunner::default();
 
-        let created = create_with_setup_runner(root.path(), "with-setup", &runner).unwrap();
+        let created =
+            create_with_setup_runner(root.path(), "with-setup", SessionAgent::default(), &runner)
+                .unwrap();
 
         assert_eq!(
             *runner.calls.borrow(),
@@ -1040,6 +1079,53 @@ mod tests {
             ]
         );
         assert_eq!(list(root.path()).unwrap()[0].name, "with-setup");
+    }
+
+    #[test]
+    fn create_with_agent_records_the_pinned_cli_and_trims_the_model() {
+        use crate::domain::settings::AgentCli;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+
+        create_with_agent(
+            root.path(),
+            "pinned",
+            SessionAgent {
+                cli: Some(AgentCli::Gemini),
+                // Surrounding whitespace is trimmed on the way into state.json.
+                model: Some("  gemini-2.5-pro  ".to_string()),
+            },
+        )
+        .unwrap();
+
+        let session = &list(root.path()).unwrap()[0];
+        assert_eq!(session.agent.cli, Some(AgentCli::Gemini));
+        assert_eq!(session.agent.model.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn create_with_agent_drops_a_blank_model_and_plain_create_pins_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+
+        // A model that trims to empty is dropped, so it never renders as `--model ''`.
+        create_with_agent(
+            root.path(),
+            "blank-model",
+            SessionAgent {
+                cli: None,
+                model: Some("   ".to_string()),
+            },
+        )
+        .unwrap();
+        // Plain `create` records no override at all (follows the workspace settings).
+        create(root.path(), "plain").unwrap();
+
+        let sessions = list(root.path()).unwrap();
+        let blank = sessions.iter().find(|s| s.name == "blank-model").unwrap();
+        assert!(blank.agent.is_unset());
+        let plain = sessions.iter().find(|s| s.name == "plain").unwrap();
+        assert!(plain.agent.is_unset());
     }
 
     #[test]
@@ -1062,7 +1148,9 @@ mod tests {
             ..Default::default()
         };
 
-        let created = create_with_setup_runner(root.path(), "keeps-going", &runner).unwrap();
+        let created =
+            create_with_setup_runner(root.path(), "keeps-going", SessionAgent::default(), &runner)
+                .unwrap();
 
         assert!(created.root.exists());
         assert_eq!(
@@ -1932,6 +2020,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: ghost_root.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

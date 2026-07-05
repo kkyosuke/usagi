@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::settings::AgentCli;
+
 /// Lifecycle status of a branch relative to its working tree, its remote, and
 /// the default branch.
 ///
@@ -290,6 +292,48 @@ pub struct WorktreeState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Per-session overrides for the agent CLI its pane launches, chosen when the
+/// session is created or delegated (MCP `session_create` /
+/// `session_delegate_issue`) and applied **ahead of the workspace's effective
+/// settings** when the session's agent pane spawns — the interactive launch, the
+/// startup pane recovery, and the background auto-start of a queued prompt all
+/// honour it. This is what lets a coordinator send a light task to a small model
+/// and a heavy design to a large one, session by session.
+///
+/// Both fields unset (the default, and omitted from `state.json`) means the
+/// session follows the workspace `agent_cli` and the CLI's own default model,
+/// exactly as before this override existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionAgent {
+    /// The agent CLI this session launches, overriding the workspace effective
+    /// [`agent_cli`](crate::domain::settings::Settings::agent_cli). `None` defers
+    /// to that setting. An unrecognised stored value degrades to `None` (defer)
+    /// rather than failing the whole `state.json` — see
+    /// [`crate::domain::serde_fallback`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
+    pub cli: Option<AgentCli>,
+    /// The model the session's agent CLI runs, rendered by the adapter as that
+    /// CLI's own model flag (`--model` for Claude, `-m` for Codex / Gemini). `None`
+    /// lets the CLI use its configured default. The value is stored verbatim and
+    /// shell-escaped at launch, so no allowlist is imposed — model names differ per
+    /// CLI and change often, and pass-through keeps usagi from rejecting a model a
+    /// newer CLI added.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl SessionAgent {
+    /// Whether neither override is set, i.e. the session follows the workspace
+    /// effective settings. Used to omit the field from `state.json` when empty.
+    pub fn is_unset(&self) -> bool {
+        self.cli.is_none() && self.model.is_none()
+    }
+}
+
 /// A session created under `.usagi/sessions/<name>/`: a parallel working tree
 /// spanning every repository found under the workspace root (each as a git
 /// worktree on the session branch) plus any copied non-git files.
@@ -325,6 +369,12 @@ pub struct SessionRecord {
     /// is omitted from the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_id: Option<String>,
+    /// Per-session agent CLI / model overrides, applied ahead of the workspace's
+    /// effective settings when this session's agent pane launches. Unset by
+    /// default (the session follows the workspace `agent_cli` and the CLI's own
+    /// default model); omitted from `state.json` when empty. See [`SessionAgent`].
+    #[serde(default, skip_serializing_if = "SessionAgent::is_unset")]
+    pub agent: SessionAgent,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -427,6 +477,68 @@ mod tests {
         assert!(json.contains("root_note"));
         let restored: WorkspaceState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.root_note(), Some("root memo"));
+    }
+
+    #[test]
+    fn session_agent_is_unset_only_when_both_fields_are_none() {
+        assert!(SessionAgent::default().is_unset());
+        assert!(!SessionAgent {
+            cli: Some(AgentCli::Claude),
+            model: None,
+        }
+        .is_unset());
+        assert!(!SessionAgent {
+            cli: None,
+            model: Some("opus".to_string()),
+        }
+        .is_unset());
+    }
+
+    #[test]
+    fn session_agent_is_omitted_from_the_record_when_unset_and_round_trips_when_set() {
+        // A default (unset) agent override is skipped entirely, so an older
+        // `state.json` without the key still loads and a fresh one stays lean.
+        let mut session = SessionRecord {
+            name: "s".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: SessionAgent::default(),
+            root: PathBuf::from("/tmp/s"),
+            worktrees: vec![],
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            last_active: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("agent"), "{json}");
+
+        // A pinned CLI + model round-trips through the file.
+        session.agent = SessionAgent {
+            cli: Some(AgentCli::Gemini),
+            model: Some("gemini-2.5-pro".to_string()),
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.agent.cli, Some(AgentCli::Gemini));
+        assert_eq!(restored.agent.model.as_deref(), Some("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn session_agent_degrades_an_unknown_cli_to_none_without_failing_the_load() {
+        // A `cli` a newer usagi wrote (or a hand-edited typo) degrades to None
+        // rather than failing the whole record — the model beside it still loads.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "agent": {"cli": "future-cli", "model": "m"},
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.agent.cli, None);
+        assert_eq!(restored.agent.model.as_deref(), Some("m"));
     }
 
     #[test]
@@ -621,6 +733,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -657,6 +770,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -709,6 +823,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -727,6 +842,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -746,6 +862,7 @@ mod tests {
             display_name: Some("Nice name".to_string()),
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -776,6 +893,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -810,6 +928,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: created,
@@ -847,6 +966,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),

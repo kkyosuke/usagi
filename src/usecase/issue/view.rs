@@ -2,16 +2,15 @@
 //!
 //! The on-the-wire field set for an issue lives here once (a single source of
 //! truth), so adding a field updates both surfaces at the same place rather than
-//! risking a hand-duplicated `json!`/derive drifting out of sync. Both surfaces
-//! consume these via `serde_json` (`to_string_pretty` / `to_value`).
-//!
-//! Timestamps are rendered with [`chrono::DateTime::to_rfc3339`] (a `+00:00`
-//! offset) to match the rest of the JSON surface.
+//! risking a hand-duplicated `json!`/derive drifting out of sync. The shared
+//! shape of these views — borrowing fields and rendering timestamps as owned
+//! `String`s — is described in [`crate::usecase::view`].
 
 use serde::Serialize;
 
 use super::ListedIssue;
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
+use crate::usecase::view::timestamp;
 
 /// JSON view of a full issue (including the body).
 #[derive(Serialize)]
@@ -42,8 +41,8 @@ impl<'a> From<&'a Issue> for IssueView<'a> {
             related: &issue.related,
             parent: issue.parent,
             milestone: issue.milestone.as_deref(),
-            created_at: issue.created_at.to_rfc3339(),
-            updated_at: issue.updated_at.to_rfc3339(),
+            created_at: timestamp(&issue.created_at),
+            updated_at: timestamp(&issue.updated_at),
             body: &issue.body,
         }
     }
@@ -82,8 +81,8 @@ impl<'a> From<&'a ListedIssue> for ListedIssueView<'a> {
             parent: summary.parent,
             milestone: summary.milestone.as_deref(),
             file: &summary.file,
-            created_at: summary.created_at.to_rfc3339(),
-            updated_at: summary.updated_at.to_rfc3339(),
+            created_at: timestamp(&summary.created_at),
+            updated_at: timestamp(&summary.updated_at),
             ready: listed.is_ready(),
             unmet_deps: &listed.unmet_deps,
         }

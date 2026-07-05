@@ -1,14 +1,14 @@
 ---
 number: 107
 title: feat(agent): guard-workspace に root モードを追加し root 行での Edit/Write・変更系 git を拒否する
-status: todo
+status: done
 priority: high
 labels: [orchestration, agent]
 dependson: []
 related: []
 parent: 105
 created_at: 2026-07-04T21:45:48.099614+00:00
-updated_at: 2026-07-04T21:45:48.099614+00:00
+updated_at: 2026-07-04T23:16:13.480977+00:00
 ---
 
 ## 背景

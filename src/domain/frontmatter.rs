@@ -28,6 +28,75 @@ impl fmt::Display for ParseFrontmatterError {
 
 impl std::error::Error for ParseFrontmatterError {}
 
+/// An error parsing an entity's markdown frontmatter (an issue or a memory).
+///
+/// Both entities share one parse-error type: the message is the sole payload, so
+/// distinct newtypes bought nothing but duplicated `Display` / `Error` / `From`
+/// boilerplate. Each entity re-exports this under its own historical name
+/// ([`crate::domain::issue::ParseIssueError`] /
+/// [`crate::domain::memory::ParseMemoryError`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseError(pub String);
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl From<ParseFrontmatterError> for ParseError {
+    fn from(e: ParseFrontmatterError) -> Self {
+        ParseError(e.0)
+    }
+}
+
+/// Generate the `as_str` / [`Display`](std::fmt::Display) /
+/// [`FromStr`](std::str::FromStr) string-token trio for a fieldless enum whose
+/// variants map one-to-one to on-disk / display tokens.
+///
+/// The caller supplies the enum type, its [`FromStr::Err`](std::str::FromStr)
+/// type, the noun used in the `invalid <noun>: ...` parse error, and the
+/// variant → token table. The enum itself (with its `serde` derives and
+/// `#[default]`) stays hand-written; only the three string impls — which were
+/// near-identical copies across `IssueStatus` / `IssuePriority` / `MemoryType` /
+/// `GroupBy` — are generated.
+macro_rules! str_enum {
+    ($name:ident, $err:path, $noun:literal, { $($variant:ident => $token:literal),+ $(,)? }) => {
+        impl $name {
+            /// The on-disk / display token for this value.
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $($name::$variant => $token,)+
+                }
+            }
+        }
+
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl ::std::str::FromStr for $name {
+            type Err = $err;
+
+            fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
+                match s.trim() {
+                    $($token => ::std::result::Result::Ok($name::$variant),)+
+                    other => ::std::result::Result::Err($err(format!(
+                        concat!("invalid ", $noun, ": {:?}"),
+                        other
+                    ))),
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use str_enum;
+
 /// Turn an arbitrary string into a filename-safe slug: lowercase, with every run
 /// of non-alphanumeric characters collapsed to a single hyphen. Falls back to
 /// `fallback` when the input has no usable characters.
@@ -191,6 +260,76 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ParseFrontmatterErr
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|_| ParseFrontmatterError(format!("invalid timestamp: {value:?}")))
+}
+
+/// Assemble a full frontmatter document from the caller's field lines and body.
+///
+/// This owns the *envelope* every entity shares: the opening `---`, the closing
+/// `---` plus its blank separator line, and the body normalised to exactly one
+/// trailing newline. `write_fields` appends the entity's `key: value` lines into
+/// the buffer — typically via `writeln!`, whose result is safe to discard
+/// because writing into a `String` is infallible. Keeping the envelope here is
+/// what stops the issue and memory serialisers from drifting apart.
+pub fn to_markdown(body: &str, write_fields: impl FnOnce(&mut String)) -> String {
+    let mut out = String::from("---\n");
+    write_fields(&mut out);
+    out.push_str("---\n\n");
+    out.push_str(body.trim_end_matches('\n'));
+    out.push('\n');
+    out
+}
+
+/// Parse a frontmatter document, feeding each field line to `dispatch` and
+/// returning the normalised body.
+///
+/// This owns the *envelope* every entity shares: the opening `---` guard, the
+/// split at the closing `---`, the per-line loop (skipping blank lines and
+/// splitting on the first `:`), and the body normalisation that inverts the
+/// trailing newline [`to_markdown`] writes. Each entity supplies only its field
+/// dispatcher.
+///
+/// `dispatch` is called with `(key, value, text_value)` where `key` and `value`
+/// are trimmed, and `text_value` has only the single `key: ` delimiter space
+/// stripped — so free-text scalars keep their own leading/trailing spaces while
+/// numeric / enum / list / timestamp fields work from the trimmed `value`. The
+/// dispatcher ignores keys it doesn't recognise (its `_ => {}` arm), which lets
+/// the format gain fields without breaking older readers.
+///
+/// Errors are raised as [`ParseFrontmatterError`]; the generic `E` bound lets
+/// each entity return its own `Parse*Error` via the `From` impl (the same one
+/// that already converts errors from the primitives above).
+pub fn from_markdown<E>(
+    text: &str,
+    mut dispatch: impl FnMut(&str, &str, &str) -> Result<(), E>,
+) -> Result<String, E>
+where
+    E: From<ParseFrontmatterError>,
+{
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+        .ok_or_else(|| ParseFrontmatterError("missing frontmatter opening '---'".to_string()))?;
+
+    let (frontmatter, body) = split_frontmatter(rest)?;
+
+    for line in frontmatter.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (key, value) = line
+            .split_once(':')
+            .ok_or_else(|| ParseFrontmatterError(format!("invalid frontmatter line: {line:?}")))?;
+        let text_value = value.strip_prefix(' ').unwrap_or(value);
+        dispatch(key.trim(), value.trim(), text_value)?;
+    }
+
+    // Normalize the surrounding blank lines so the body round-trips with
+    // `to_markdown`, which trims trailing newlines and inserts a single blank
+    // line after the frontmatter.
+    Ok(body
+        .trim_start_matches(['\r', '\n'])
+        .trim_end_matches(['\r', '\n'])
+        .to_string())
 }
 
 #[cfg(test)]
