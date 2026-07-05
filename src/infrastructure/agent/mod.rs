@@ -146,7 +146,7 @@ mod tests {
         let agent = agent_for(AgentCli::Antigravity);
         assert_eq!(agent.program(), "agy");
         let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
-        assert!(launch.starts_with("agy -i='"));
+        assert!(launch.starts_with("agy --dangerously-skip-permission -i='"));
         assert!(launch.contains(SESSION_WORKTREE_PROMPT));
         assert!(!launch.contains("mcp"));
     }
