@@ -529,7 +529,7 @@ impl Command for AgentCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "agent [claude|codex|codex-fugu|sakana.ai|gemini|antigravity|agy]"
+        "agent [name]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
@@ -538,6 +538,24 @@ impl Command for AgentCommand {
 
     fn scope(&self) -> CommandScope {
         CommandScope::Session
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        if head.is_empty() {
+            let mut names = Vec::new();
+            for cli in crate::domain::settings::AgentCli::ALL {
+                let cmd = cli.command().to_string();
+                let display = cli.display_name().to_lowercase();
+                names.push(cmd.clone());
+                if display != cmd.to_lowercase() {
+                    names.push(display);
+                }
+            }
+            names
+        } else {
+            Vec::new()
+        }
     }
 
     fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
