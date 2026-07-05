@@ -1,10 +1,9 @@
 //! Aggregate statistics and grouping for issue listings.
 
 use std::collections::BTreeMap;
-use std::fmt;
-use std::str::FromStr;
 
 use super::ListedIssue;
+use crate::domain::frontmatter::str_enum;
 use crate::domain::issue::{IssuePriority, IssueStatus, ParseIssueError};
 
 /// Aggregate counts over a set of listed issues, used for progress summaries.
@@ -87,30 +86,12 @@ pub enum GroupBy {
     Parent,
 }
 
-impl fmt::Display for GroupBy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            GroupBy::Status => "status",
-            GroupBy::Priority => "priority",
-            GroupBy::Milestone => "milestone",
-            GroupBy::Parent => "parent",
-        })
-    }
-}
-
-impl FromStr for GroupBy {
-    type Err = ParseIssueError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "status" => Ok(GroupBy::Status),
-            "priority" => Ok(GroupBy::Priority),
-            "milestone" => Ok(GroupBy::Milestone),
-            "parent" => Ok(GroupBy::Parent),
-            other => Err(ParseIssueError(format!("invalid group-by: {other:?}"))),
-        }
-    }
-}
+str_enum!(GroupBy, ParseIssueError, "group-by", {
+    Status => "status",
+    Priority => "priority",
+    Milestone => "milestone",
+    Parent => "parent",
+});
 
 /// Partition `items` into labelled groups along `axis`. Groups come back in a
 /// stable, meaningful order (status/priority follow their lifecycle order;
