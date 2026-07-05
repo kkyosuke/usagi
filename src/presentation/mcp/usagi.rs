@@ -28,20 +28,19 @@ use super::McpService;
 /// issue/memory and session surfaces (see [`UsagiMcpServer::tool_delegate_issue`]).
 const DELEGATE_ISSUE_TOOL: &str = "session_delegate_issue";
 
-/// Issue/memory tools that write to the repository's `.usagi/` store. When the
-/// server runs from the workspace root (`worktree == workspace_root`) these are
-/// refused, so the root can never dirty the git-tracked repo — the technical
-/// enforcement of "root does not modify the tracked repository" (principle 2).
-/// Read/format tools (`issue_get` / `issue_search` / `issue_to_prompt` /
-/// `memory_get` / `memory_search`) and every `session_*` tool stay allowed, as
-/// they are what a coordinator needs and do not touch the tracked store.
-const ROOT_FORBIDDEN_TOOLS: [&str; 5] = [
-    "issue_create",
-    "issue_update",
-    "issue_delete",
-    "memory_save",
-    "memory_delete",
-];
+/// Issue tools that write to the repository's **git-tracked** `.usagi/issues/`
+/// store. When the server runs from the workspace root (`worktree ==
+/// workspace_root`) these are refused, so the root can never dirty the tracked
+/// repo — the technical enforcement of "root does not modify the tracked
+/// repository" (principle 2).
+///
+/// Memory writes (`memory_save` / `memory_delete`) are **not** listed: the memory
+/// store (`.usagi/memory/`) is git-ignored (see `.usagi/.gitignore`), so writing
+/// it at the root leaves the tracked tree clean and needs no guard. Read/format
+/// tools (`issue_get` / `issue_search` / `issue_to_prompt` / `memory_get` /
+/// `memory_search`) and every `session_*` tool likewise stay allowed, as they are
+/// what a coordinator needs and do not touch the tracked store.
+const ROOT_FORBIDDEN_TOOLS: [&str; 3] = ["issue_create", "issue_update", "issue_delete"];
 
 /// Whether two paths name the same directory, comparing canonicalized forms (so a
 /// symlinked or `/tmp` ⇄ `/private/tmp` difference still matches) and falling back
@@ -64,7 +63,8 @@ pub struct UsagiMcpServer {
     session: SessionMcpServer,
     /// True when the process runs from the workspace root (`worktree` and
     /// `workspace_root` coincide). In that case the write-guardrail refuses the
-    /// repo-mutating issue/memory tools (see [`ROOT_FORBIDDEN_TOOLS`]).
+    /// issue-write tools that mutate the git-tracked store (see
+    /// [`ROOT_FORBIDDEN_TOOLS`]).
     at_workspace_root: bool,
 }
 
@@ -181,15 +181,17 @@ impl McpService for UsagiMcpServer {
     }
 
     fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
-        // Root guardrail: at the workspace root the repo is git-tracked, so refuse
-        // the issue/memory write tools before routing. This keeps a coordinator
-        // running `usagi mcp` at the root from dirtying the tracked store — those
-        // writes belong on a session's own branch.
+        // Root guardrail: the issue store is git-tracked, so refuse the issue-write
+        // tools before routing when running at the workspace root. This keeps a
+        // coordinator running `usagi mcp` at the root from dirtying the tracked
+        // repo — those writes belong on a session's own branch. (Memory writes are
+        // not guarded: the memory store is git-ignored, so they leave the tracked
+        // tree clean.)
         if self.at_workspace_root && ROOT_FORBIDDEN_TOOLS.contains(&name) {
             return Err(format!(
                 "{name} is refused at the workspace root: it would modify the \
-                 git-tracked repository. Run issue/memory writes from inside a \
-                 session worktree (create or open one with session_create / \
+                 git-tracked issue store. Run issue writes from inside a session \
+                 worktree (create or open one with session_create / \
                  session_delegate_issue) so the change rides that session's branch."
             ));
         }
@@ -531,10 +533,11 @@ mod tests {
     }
 
     #[test]
-    fn root_refuses_the_issue_and_memory_write_tools() {
-        // At the workspace root (worktree == workspace_root) every repo-mutating
-        // issue/memory tool is refused with the "run it from a session" guidance,
-        // regardless of arguments — the guardrail fires before the tool runs.
+    fn root_refuses_the_issue_write_tools() {
+        // At the workspace root (worktree == workspace_root) every tool that
+        // mutates the git-tracked issue store is refused with the "run it from a
+        // session" guidance, regardless of arguments — the guardrail fires before
+        // the tool runs.
         let tmp = tempfile::tempdir().unwrap();
         let server = server_at(tmp.path());
         for tool in ROOT_FORBIDDEN_TOOLS {
@@ -547,27 +550,52 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn root_still_allows_read_format_and_session_tools() {
-        // The read/format issue+memory tools and all session tools stay usable at
-        // the root — a coordinator polls and delegates from there.
+    fn root_is_detected_when_the_paths_differ_textually_but_resolve_to_one_dir() {
+        // A coordinator may launch usagi from a path that is not the canonical
+        // one (e.g. through a symlinked directory). The root check compares
+        // canonicalized forms, so worktree and workspace_root that are textually
+        // different yet resolve to the same directory are still recognised as the
+        // root — and the issue-write guardrail fires.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_ne!(link, real, "paths must differ textually for this test");
+
+        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend));
+        let result = call(&server, "issue_create", json!({"title": "x"}));
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("workspace root"));
+    }
+
+    #[test]
+    fn root_allows_memory_writes_reads_and_session_tools() {
+        // The memory store is git-ignored, so memory writes are allowed at the
+        // root; the read/format issue+memory tools and all session tools stay
+        // usable there too — a coordinator polls and delegates from the root.
         let tmp = tempfile::tempdir().unwrap();
         let server = server_at(tmp.path());
-        // Seed one issue + memory straight through the sub-server (the composite
-        // refuses these writes at root) so the read tools have data to return.
+        // Seed one issue straight through the sub-server (the composite refuses
+        // issue writes at root) so the issue read tools have data to return.
         server
             .issue
             .call_tool("issue_create", json!({"title": "seed"}))
             .unwrap();
-        server
-            .issue
-            .call_tool(
-                "memory_save",
-                json!({"name":"m","title":"m","body":"b","type":"project"}),
-            )
-            .unwrap();
 
         for (tool, args) in [
+            // Memory writes are not guarded (git-ignored store).
+            (
+                "memory_save",
+                json!({"name":"m","title":"m","body":"b","type":"project"}),
+            ),
+            ("memory_delete", json!({"name": "m"})),
+            // Reads / formatting.
             ("issue_search", json!({})),
             ("issue_get", json!({"number": 1})),
             ("issue_to_prompt", json!({"number": 1})),

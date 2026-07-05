@@ -47,7 +47,8 @@
   自身の `.usagi/` に書き（ブランチに乗って PR で `main` へ流れる）、session は workspace root に解決します
   （[起動と登録](#起動と登録)）。
 - **ルートでの書き込みガードレール**: workspace root で起動したとき（issue / memory の対象と session の対象が
-  一致するとき）は、git 追跡下のリポジトリを汚す書き込み系 issue / memory tool を**拒否**します
+  一致するとき）は、git 追跡下の issue ストアを汚す書き込み系 issue tool（`issue_create` / `issue_update` /
+  `issue_delete`）を**拒否**します。メモリストアは git 管理外のため memory 書き込みは拒否しません
   （[ルートでの書き込みガードレール](#ルートでの書き込みガードレール)）。
 - **ロジックの共有**: 各 tool は CLI・TUI と同じ [`usecase/issue`](../02-architecture.md#各層の責務) /
   `usecase/memory` / `usecase/session` を呼ぶ薄いアダプタ。挙動（採番・依存 readiness 判定・メモリの
@@ -320,13 +321,15 @@ push で報告**するための経路です。ポーリング（[`session_status
 ことを、規約ではなく**技術的に**担保するためのガードレールです。
 
 `usagi mcp` は issue / memory をカレントの worktree に、session を workspace root に解決します（[概要](#概要)）。
-root で起動するとこの 2 つの対象が一致するため、その一致を「root で動いている」の判定に使い、**リポジトリを汚す
-書き込み系 issue / memory tool を拒否**します。
+root で起動するとこの 2 つの対象が一致するため、その一致を「root で動いている」の判定に使い、**git 追跡下の issue
+ストア（`.usagi/issues/`）を汚す書き込み系 issue tool を拒否**します。**メモリストア（`.usagi/memory/`）は git 管理外**
+（`.usagi/.gitignore` で除外）のため、root で書き込んでも追跡ツリーは汚れず、`memory_save` / `memory_delete` は拒否
+しません。
 
 | tool | root（対象が一致） | セッション worktree |
 |---|---|---|
 | `issue_create` / `issue_update` / `issue_delete` | 拒否（`isError: true`） | 実行可 |
-| `memory_save` / `memory_delete` | 拒否（`isError: true`） | 実行可 |
+| `memory_save` / `memory_delete` | 実行可（git 管理外） | 実行可 |
 | `issue_get` / `issue_search` / `issue_to_prompt` | 実行可 | 実行可 |
 | `memory_get` / `memory_search` | 実行可 | 実行可 |
 | すべての `session_*` / `session_delegate_issue` | 実行可 | 実行可 |
@@ -337,6 +340,8 @@ root で起動するとこの 2 つの対象が一致するため、その一致
 - 読み取り・整形（`issue_get` / `issue_search` / `issue_to_prompt` / `memory_get` / `memory_search`）と、
   オーケストレーションに必要な `session_*`・`session_delegate_issue` は root でも許可します。既存の issue を
   プロンプト化してセッションに委譲する、というコーディネータの主要な動線は root のまま回せます。
+- パスの一致は**正規化して比較**します（`canonicalize` でシンボリックリンクや `/tmp` ⇄ `/private/tmp` の差を吸収し、
+  正規化できないときは素の比較にフォールバック）。カレントが非正規パスでも root を取りこぼしません。
 - 判定は合成層（`usagi.rs`）に閉じており、issue / memory / session の各サブサーバは無改変です。セッション worktree
   （対象が一致しない）では全 tool が従来どおり動作します（回帰なし）。
 
@@ -396,7 +401,7 @@ root で起動するとこの 2 つの対象が一致するため、その一致
 - **tool 実行エラー**: `tools/call` の結果として `isError: true` を立てて返します（プロトコルエラーには
   しません）。これによりエージェントがエラー内容をテキストで受け取り、自己修復できます。
   - 例: 不正な引数（必須項目の欠落・型不一致）、未知の tool 名、`issue_update` の対象が存在しない、
-    root での書き込み系 issue / memory tool の拒否（[ルートでの書き込みガードレール](#ルートでの書き込みガードレール)）。
+    root での書き込み系 issue tool の拒否（[ルートでの書き込みガードレール](#ルートでの書き込みガードレール)）。
 
 ## 設計上の選択
 
