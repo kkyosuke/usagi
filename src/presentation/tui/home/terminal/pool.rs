@@ -47,7 +47,7 @@ use crate::infrastructure::pty::{PtyInputHandle, PtySession, ScreenCallbacks};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{
-    agent_live_prompt_store, agent_state_store, error_log, session_monitor,
+    agent_live_pane_store, agent_live_prompt_store, agent_state_store, error_log, session_monitor,
 };
 
 use super::super::pane_input;
@@ -1065,6 +1065,22 @@ impl TerminalPool {
                 label: label.to_string(),
             })
         });
+        // Publish (or retract) the cross-process live-agent-pane marker the MCP
+        // `session_prompt` tool reads to decide whether the live channel has a
+        // consumer. Stamped with this TUI's pid so a reader can tell a live pane
+        // from a stale marker left by a crashed TUI. Written before taking the
+        // lock — it is an independent on-disk file, not shared state.
+        match watched.as_ref().and_then(|w| w.agent_input.as_ref()) {
+            Some(_) => {
+                if let Err(err) = agent_live_pane_store::set(dir, std::process::id()) {
+                    error_log::ErrorLog::record(&format!(
+                        "failed to publish live-agent-pane marker for {}: {err:#}",
+                        dir.display()
+                    ));
+                }
+            }
+            None => agent_live_pane_store::clear(dir),
+        }
         let mut shared = self.lock();
         match watched {
             Some(watched) => {
@@ -1117,6 +1133,7 @@ impl TerminalPool {
             shared.pr_link_updates.remove(path);
             shared.monitor.forget(path);
             agent_state_store::clear(path);
+            agent_live_pane_store::clear(path);
         }
         drop(shared);
         removed
@@ -1227,6 +1244,14 @@ impl Drop for TerminalPool {
         if let Some(watcher) = self.watcher.take() {
             let _ = watcher.join();
         }
+        // Retract every live-agent-pane marker this TUI published, so the moment it
+        // quits the MCP `session_prompt` tool stops resolving `auto` to the live
+        // channel for these sessions. A crash that skips this `Drop` is still caught
+        // on read: the marker names this pid, which is then no longer alive (see
+        // [`agent_live_pane_store`]).
+        for path in self.sessions.keys() {
+            agent_live_pane_store::clear(path);
+        }
         // Tear the live shells down concurrently instead of letting the `sessions`
         // map drop them one by one. Each [`PtySession`]'s `Drop` bounds itself to
         // ~2s (kill → reap → reader-join sharing one deadline) for the pathological
@@ -1316,6 +1341,7 @@ fn spawn_watcher(
                 shared.sessions.remove(&path);
                 shared.monitor.forget(&path);
                 agent_state_store::clear(&path);
+                agent_live_pane_store::clear(&path);
             }
             // Release phase-cache entries for sessions no longer tracked — those
             // pruned just above and those a session removal took straight out of
