@@ -22,9 +22,7 @@ use super::{
     STATUS_COL, SYNCED_ICON, TERMINAL_STARTING,
 };
 use crate::domain::resource::{Load, ResourceUsage};
-use crate::domain::settings::{
-    AgentCli, LabelColor, SessionActionUi, SessionLabelDef, SessionLabelMaster, Sidebar,
-};
+use crate::domain::settings::{AgentCli, LabelColor, SessionLabelDef, SessionLabelMaster, Sidebar};
 use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
 use crate::presentation::tui::diff::{split_rows, DiffRow, DiffSpan, RowKind, SplitRow};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
@@ -3324,29 +3322,12 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         }
     } else {
         // An idle session (no live pane, so no tab) has no screen to mirror.
-        // Selecting opens 在席's action surface, which differs by Session Action
-        // UI, so the preview matches each:
-        match state.session_action_ui() {
-            // The menu floats as an overlay *modal* over a blank pane — nothing is
-            // drawn inline. Previewing its choices here would promise an inline
-            // surface that never appears, so rest the mascot in the middle of the
-            // pane with a light English quip instead: the preview reads as "nothing
-            // is running yet — Enter to hop in" with no mismatch.
-            SessionActionUi::Menu => {
-                let body = body_rows.saturating_sub(lines.len());
-                lines.extend(idle_rabbit_body(idle_quip(state), width, body));
-            }
-            // The prompt focuses *inline* (its own `session:` prompt), so previewing
-            // that prompt here matches what selecting reveals.
-            SessionActionUi::Prompt => {
-                lines.push(String::new());
-                let prompt = style("❯").danger().bold();
-                let value = widgets::block_caret("", "", &Style::new().accent());
-                lines.push(clip_to_width(&format!("{prompt} {value}"), width));
-                lines.push(String::new());
-                lines.push(style("Enter で開く").dim().to_string());
-            }
-        }
+        // Selecting opens 在席's action surface (which floats as an overlay modal for
+        // both Menu and Prompt), so nothing is drawn inline. Previewing it here would
+        // promise an inline surface that never appears, so rest the mascot in the
+        // middle of the pane with a light English quip instead.
+        let body = body_rows.saturating_sub(lines.len());
+        lines.extend(idle_rabbit_body(idle_quip(state), width, body));
     }
 
     // Trim the body to its budget and pad up so the pane is always full-height.
