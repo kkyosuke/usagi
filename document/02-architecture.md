@@ -56,7 +56,7 @@ src/
 │   ├── workspace_state.rs      # WorkspaceState / WorktreeState / BranchStatus
 │   ├── history.rs              # コマンド履歴の 1 件 HistoryEntry
 │   ├── trace.rs                # 操作トレースの 1 件 TraceEvent / TraceCategory（USAGI_TRACE 有効時に記録）
-│   ├── frontmatter.rs          # frontmatter 形式の正本（slug 化・--- 分割・リスト escape・timestamp・改行無害化。issue/memory 共用）
+│   ├── frontmatter.rs          # frontmatter 形式の正本（slug 化・--- 分割・リスト escape・timestamp・改行無害化・読み書きの封筒スキャフォールド。issue/memory 共用）
 │   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
 │   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
