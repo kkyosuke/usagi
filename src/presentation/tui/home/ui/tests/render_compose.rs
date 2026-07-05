@@ -428,6 +428,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         display_name: None,
         note: Some("first line\nsecond".to_string()),
         label_id: None,
+        agent: Default::default(),
         root: PathBuf::from("/repo/.usagi/sessions/alpha"),
         worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
         created_at: Utc::now(),

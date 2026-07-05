@@ -427,6 +427,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
     use crate::domain::workspace_state::SessionRecord;
     let session = |name: &str, label: Option<&str>, note: Option<&str>| SessionRecord {
         label_id: None,
+        agent: Default::default(),
         name: name.to_string(),
         display_name: label.map(str::to_string),
         note: note.map(str::to_string),

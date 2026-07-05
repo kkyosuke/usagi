@@ -23,7 +23,7 @@ use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
-use crate::domain::workspace_state::{SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{SessionAgent, SessionRecord, WorktreeState};
 
 use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
@@ -1685,6 +1685,20 @@ impl HomeState {
 
     pub fn sessions(&self) -> &[SessionRecord] {
         &self.sessions
+    }
+
+    /// The per-session agent CLI / model override recorded for the session that
+    /// owns worktree `dir` — its session root or any of its worktree paths — or
+    /// the default (follow the workspace effective settings) when `dir` belongs to
+    /// no session (e.g. the `⌂ root` row) or the matched session pinned nothing.
+    /// Read at every agent launch site (interactive, pane recovery, queued-prompt
+    /// auto-start) so a session started with a chosen CLI / model launches with it.
+    pub fn session_agent_for(&self, dir: &Path) -> SessionAgent {
+        self.sessions
+            .iter()
+            .find(|s| s.root == dir || s.worktrees.iter().any(|w| w.path == dir))
+            .map(|s| s.agent.clone())
+            .unwrap_or_default()
     }
 
     /// Mark the session rooted at `root` as touched at `now`, driving its sidebar

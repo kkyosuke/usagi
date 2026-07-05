@@ -71,6 +71,7 @@ mod tests {
                 display_name: None,
                 note: None,
                 label_id: None,
+                agent: Default::default(),
                 root: PathBuf::from("/repo/.usagi/sessions/login"),
                 created_at: ts,
                 last_active: None,

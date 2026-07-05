@@ -94,6 +94,7 @@ mod tests {
             display_name: Some("My Feature".to_string()),
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from("/repo/.usagi/sessions/feature"),
             worktrees: vec![WorktreeState {
                 branch: Some("feature".to_string()),
