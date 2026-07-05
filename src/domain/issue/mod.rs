@@ -11,11 +11,10 @@
 //! machine data (see `document/`), and a focused parser keeps the dependency
 //! surface small while staying fully testable.
 
-use std::fmt;
-use std::str::FromStr;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::domain::frontmatter::str_enum;
 
 /// Where an issue sits in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -30,35 +29,11 @@ pub enum IssueStatus {
     Done,
 }
 
-impl IssueStatus {
-    /// The on-disk / display token for this status.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IssueStatus::Todo => "todo",
-            IssueStatus::InProgress => "in-progress",
-            IssueStatus::Done => "done",
-        }
-    }
-}
-
-impl fmt::Display for IssueStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for IssueStatus {
-    type Err = ParseIssueError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "todo" => Ok(IssueStatus::Todo),
-            "in-progress" => Ok(IssueStatus::InProgress),
-            "done" => Ok(IssueStatus::Done),
-            other => Err(ParseIssueError(format!("invalid status: {other:?}"))),
-        }
-    }
-}
+str_enum!(IssueStatus, ParseIssueError, "status", {
+    Todo => "todo",
+    InProgress => "in-progress",
+    Done => "done",
+});
 
 /// How urgent an issue is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -70,35 +45,11 @@ pub enum IssuePriority {
     Low,
 }
 
-impl IssuePriority {
-    /// The on-disk / display token for this priority.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IssuePriority::High => "high",
-            IssuePriority::Medium => "medium",
-            IssuePriority::Low => "low",
-        }
-    }
-}
-
-impl fmt::Display for IssuePriority {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for IssuePriority {
-    type Err = ParseIssueError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "high" => Ok(IssuePriority::High),
-            "medium" => Ok(IssuePriority::Medium),
-            "low" => Ok(IssuePriority::Low),
-            other => Err(ParseIssueError(format!("invalid priority: {other:?}"))),
-        }
-    }
-}
+str_enum!(IssuePriority, ParseIssueError, "priority", {
+    High => "high",
+    Medium => "medium",
+    Low => "low",
+});
 
 /// A single tracked task.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,23 +101,10 @@ pub struct IssueSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// An error parsing an issue's markdown frontmatter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseIssueError(pub String);
-
-impl fmt::Display for ParseIssueError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ParseIssueError {}
-
-impl From<crate::domain::frontmatter::ParseFrontmatterError> for ParseIssueError {
-    fn from(e: crate::domain::frontmatter::ParseFrontmatterError) -> Self {
-        ParseIssueError(e.0)
-    }
-}
+/// An error parsing an issue's markdown frontmatter. Unified with the memory
+/// parse error as a single [`crate::domain::frontmatter::ParseError`]; kept under
+/// this name for the issue module's public API.
+pub use crate::domain::frontmatter::ParseError as ParseIssueError;
 
 impl Issue {
     /// A filename-safe slug derived from the title: lowercase, with every run of

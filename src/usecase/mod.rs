@@ -14,6 +14,7 @@ pub mod session;
 pub mod settings;
 pub mod update;
 pub mod update_check;
+pub mod view;
 pub mod workspace;
 pub mod workspace_guard;
 pub mod workspace_state;

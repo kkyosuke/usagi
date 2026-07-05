@@ -14,11 +14,10 @@
 //! issue store, to keep the dependency surface small while staying fully
 //! testable.
 
-use std::fmt;
-use std::str::FromStr;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::domain::frontmatter::str_enum;
 
 /// What kind of knowledge a memory holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -35,37 +34,12 @@ pub enum MemoryType {
     Reference,
 }
 
-impl MemoryType {
-    /// The on-disk / display token for this type.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            MemoryType::User => "user",
-            MemoryType::Feedback => "feedback",
-            MemoryType::Project => "project",
-            MemoryType::Reference => "reference",
-        }
-    }
-}
-
-impl fmt::Display for MemoryType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for MemoryType {
-    type Err = ParseMemoryError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "user" => Ok(MemoryType::User),
-            "feedback" => Ok(MemoryType::Feedback),
-            "project" => Ok(MemoryType::Project),
-            "reference" => Ok(MemoryType::Reference),
-            other => Err(ParseMemoryError(format!("invalid type: {other:?}"))),
-        }
-    }
-}
+str_enum!(MemoryType, ParseMemoryError, "type", {
+    User => "user",
+    Feedback => "feedback",
+    Project => "project",
+    Reference => "reference",
+});
 
 /// A single durable fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,23 +74,10 @@ pub struct MemorySummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// An error parsing a memory's markdown frontmatter.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseMemoryError(pub String);
-
-impl fmt::Display for ParseMemoryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ParseMemoryError {}
-
-impl From<crate::domain::frontmatter::ParseFrontmatterError> for ParseMemoryError {
-    fn from(e: crate::domain::frontmatter::ParseFrontmatterError) -> Self {
-        ParseMemoryError(e.0)
-    }
-}
+/// An error parsing a memory's markdown frontmatter. Unified with the issue
+/// parse error as a single [`crate::domain::frontmatter::ParseError`]; kept under
+/// this name for the memory module's public API.
+pub use crate::domain::frontmatter::ParseError as ParseMemoryError;
 
 /// Turn an arbitrary string into a filename-safe slug: lowercase, with every run
 /// of non-alphanumeric characters collapsed to a single hyphen. Falls back to
