@@ -1,14 +1,14 @@
 ---
 number: 115
 title: refactor(domain): issue/memory の enum 文字列トリオ・ParseError・Summary・JSON view の重複を集約する
-status: todo
+status: done
 priority: medium
 labels: [refactor, core, review]
 dependson: []
 related: []
 parent: 113
 created_at: 2026-07-04T23:13:25.912374+00:00
-updated_at: 2026-07-04T23:13:25.912374+00:00
+updated_at: 2026-07-05T01:04:10.889504+00:00
 ---
 
 ## 背景（なぜ問題か）
