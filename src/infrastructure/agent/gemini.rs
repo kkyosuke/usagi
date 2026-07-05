@@ -30,6 +30,16 @@ use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::settings::AgentCli;
 
+/// Where Gemini looks for its MCP configuration:
+/// `~/.gemini/config/mcp_config.json`.
+fn gemini_mcp_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".gemini")
+            .join("config")
+            .join("mcp_config.json")
+    })
+}
+
 /// Where Gemini stores each project's chat history:
 /// `~/.gemini/tmp/<project>/`. `None` when the home directory can't be
 /// determined, so usagi simply launches fresh rather than guessing.
@@ -186,6 +196,13 @@ impl Agent for GeminiAgent {
         if let Some(root) = gemini_projects_root() {
             forget_session_in(&root, dir);
         }
+    }
+
+    fn provision(&self, wiring: &AgentWiring) -> Result<(), String> {
+        if let Some(path) = gemini_mcp_config_path() {
+            super::util::update_mcp_config(&path, wiring)?;
+        }
+        Ok(())
     }
 }
 

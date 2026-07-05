@@ -6,6 +6,7 @@
 //! rather than being copied per adapter.
 
 use std::path::Path;
+use crate::domain::agent::AgentWiring;
 
 /// Wrap `text` as a single shell argument in single quotes, safe to drop into a
 /// `sh -c` command line. A single quote cannot appear inside a single-quoted
@@ -27,6 +28,65 @@ pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
             (Ok(x), Ok(y)) if x == y
         )
+}
+
+/// Write or merge usagi's MCP server configuration into the JSON file at `path`.
+pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create directories for MCP config: {e}"))?;
+    }
+
+    let mut config: serde_json::Value = if path.exists() {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read MCP config: {e}"))?;
+        serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if !config.is_object() {
+        config = serde_json::json!({});
+    }
+
+    let mcp_servers = config
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+
+    if !mcp_servers.is_object() {
+        *mcp_servers = serde_json::json!({});
+    }
+
+    if let Some(servers_obj) = mcp_servers.as_object_mut() {
+        servers_obj.insert(
+            "usagi".to_string(),
+            serde_json::json!({
+                "command": wiring.usagi_bin,
+                "args": ["mcp"]
+            }),
+        );
+
+        if let Some(ref model) = wiring.local_llm_model {
+            servers_obj.insert(
+                "usagi-llm".to_string(),
+                serde_json::json!({
+                    "command": wiring.usagi_bin,
+                    "args": ["llm-mcp", "--model", model]
+                }),
+            );
+        } else {
+            servers_obj.remove("usagi-llm");
+        }
+    }
+
+    let serialized = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("failed to serialize MCP config: {e}"))?;
+    std::fs::write(path, serialized)
+        .map_err(|e| format!("failed to write MCP config: {e}"))?;
+
+    Ok(())
 }
 
 #[cfg(test)]

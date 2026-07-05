@@ -60,6 +60,7 @@ pub fn run(
     let wiring = settings.agent_wiring(&usagi_bin);
 
     let prompt = clean_prompt(dry_run);
+    let _ = adapter.provision(&wiring);
     let command = adapter.headless_command(&wiring, &prompt);
 
     let log_path = root.join(STATE_DIR).join(CLEAN_LOG);

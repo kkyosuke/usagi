@@ -90,13 +90,12 @@ pub fn support(cli: AgentCli, feature: AgentFeature) -> Support {
     match cli {
         AgentCli::Claude | AgentCli::Codex | AgentCli::CodexFugu => Support::Yes,
         AgentCli::Gemini | AgentCli::Antigravity => match feature {
-            AgentFeature::InitialPrompt | AgentFeature::Resume | AgentFeature::ForgetHistory => {
-                Support::Yes
-            }
             AgentFeature::Mcp
             | AgentFeature::LocalLlmMcp
-            | AgentFeature::PhaseReporting
-            | AgentFeature::SystemPrompt => Support::No,
+            | AgentFeature::InitialPrompt
+            | AgentFeature::Resume
+            | AgentFeature::ForgetHistory => Support::Yes,
+            AgentFeature::PhaseReporting | AgentFeature::SystemPrompt => Support::No,
         },
     }
 }
@@ -132,8 +131,15 @@ mod tests {
     }
 
     #[test]
-    fn gemini_supports_only_the_plain_flag_features() {
-        // What Gemini's plain CLI flags expose, usagi wires.
+    fn gemini_supports_mcp_and_plain_flag_features() {
+        assert_eq!(
+            support(AgentCli::Gemini, AgentFeature::Mcp),
+            Support::Yes
+        );
+        assert_eq!(
+            support(AgentCli::Gemini, AgentFeature::LocalLlmMcp),
+            Support::Yes
+        );
         assert_eq!(
             support(AgentCli::Gemini, AgentFeature::InitialPrompt),
             Support::Yes
@@ -145,12 +151,6 @@ mod tests {
         assert_eq!(
             support(AgentCli::Gemini, AgentFeature::ForgetHistory),
             Support::Yes
-        );
-        // What needs inline injection / a hook system, it cannot.
-        assert_eq!(support(AgentCli::Gemini, AgentFeature::Mcp), Support::No);
-        assert_eq!(
-            support(AgentCli::Gemini, AgentFeature::LocalLlmMcp),
-            Support::No
         );
         assert_eq!(
             support(AgentCli::Gemini, AgentFeature::PhaseReporting),

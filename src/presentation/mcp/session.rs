@@ -1006,13 +1006,6 @@ mod tests {
         assert!(err.contains("claude"), "{err}");
     }
 
-    #[test]
-    fn resolve_session_agent_rejects_mcp_incapable_cli() {
-        let runner = FakeRunner(vec!["gemini", "claude"]);
-        let err = resolve_session_agent(&runner, Some("gemini"), None).unwrap_err();
-        assert!(err.contains("is not MCP-capable"), "{err}");
-        assert!(err.contains("claude"), "{err}");
-    }
 
     #[test]
     fn resolve_session_agent_rejects_uninstalled_cli() {

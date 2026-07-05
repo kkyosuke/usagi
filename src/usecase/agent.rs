@@ -93,7 +93,7 @@ mod tests {
         let runner = FakeRunner(vec!["claude", "codex", "gemini"]);
         assert_eq!(
             mcp_capable_clis(&runner),
-            vec![AgentCli::Claude, AgentCli::Codex]
+            vec![AgentCli::Claude, AgentCli::Codex, AgentCli::Gemini]
         );
     }
 }

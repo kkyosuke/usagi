@@ -51,6 +51,16 @@ fn antigravity_history_path() -> Option<PathBuf> {
     })
 }
 
+/// Where Antigravity looks for its MCP configuration:
+/// `~/.gemini/antigravity-cli/mcp_config.json`.
+fn antigravity_mcp_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".gemini")
+            .join("antigravity-cli")
+            .join("mcp_config.json")
+    })
+}
+
 /// The `workspace` path recorded on a single `history.jsonl` line, or `None` when
 /// the line is not JSON or has no string `workspace` field (so malformed lines are
 /// ignored rather than aborting the scan).
@@ -194,6 +204,13 @@ impl Agent for AntigravityAgent {
         if let Some(history) = antigravity_history_path() {
             forget_session_in(&history, dir);
         }
+    }
+
+    fn provision(&self, wiring: &AgentWiring) -> Result<(), String> {
+        if let Some(path) = antigravity_mcp_config_path() {
+            super::util::update_mcp_config(&path, wiring)?;
+        }
+        Ok(())
     }
 }
 
