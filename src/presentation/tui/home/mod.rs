@@ -836,14 +836,21 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let terminal_root = workspace.path.clone();
     let mut open_terminal =
         |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
-            // Resolve which agent CLI this launch drives: the user's 在席 choice (menu
-            // picker / `agent <name>`), consumed here so it applies once, falling back
-            // to the configured default. `take` clears it whether or not a fresh agent
-            // spawn follows, so a stale choice never leaks into a later launch. The
-            // default is read from the state (not captured at startup) so a CLI
-            // switched in Config takes effect on the next launch without restarting.
+            // Resolve which agent CLI this launch drives. Priority: the user's 在席
+            // choice (menu picker / `agent <name>`), then the session's own pinned CLI
+            // (recorded when it was created / delegated), then the configured default.
+            // `take` clears the choice whether or not a fresh agent spawn follows, so a
+            // stale choice never leaks into a later launch. The default is read from
+            // the state (not captured at startup) so a CLI switched in Config takes
+            // effect on the next launch without restarting.
+            let session_agent = home.session_agent_for(dir);
             let choice = home.take_agent_choice();
-            let cli = choice.unwrap_or_else(|| home.default_agent());
+            let cli = choice
+                .or(session_agent.cli)
+                .unwrap_or_else(|| home.default_agent());
+            // The session's pinned model (if any) rides into this launch's wiring; an
+            // unpinned session keeps the base wiring (the CLI's own default model).
+            let launch_wiring = wiring_with_model(&agent_wiring, session_agent.model);
             // `ai <prompt>` sets an opening prompt for this one configured-agent
             // launch. When a fresh agent pane is spawned it is passed as the agent
             // CLI's initial prompt; when an agent pane already exists we type it
@@ -910,9 +917,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // `Ctrl-O a` agent tabs never re-sends that one-shot prompt, so only the
             // first launch receives it.
             let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
-            let spawn_command = agent.launch_command(&agent_wiring, resume, spawn_prompt);
+            let spawn_command = agent.launch_command(&launch_wiring, resume, spawn_prompt);
             let plain_command = match spawn_prompt {
-                Some(_) => agent.launch_command(&agent_wiring, resume, None),
+                Some(_) => agent.launch_command(&launch_wiring, resume, None),
                 None => spawn_command.clone(),
             };
             let initial = Some(spawn_command.as_str());
@@ -1167,8 +1174,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // `Reused` so the caller re-attaches instead of tracking a loading tab.
     let mut start_pending_spawn =
         |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
+            // CLI priority mirrors `open_terminal`: 在席 choice, then the session's
+            // pinned CLI, then the configured default; the session's pinned model
+            // rides into this launch's wiring.
+            let session_agent = home.session_agent_for(dir);
             let choice = home.take_agent_choice();
-            let cli = choice.unwrap_or_else(|| home.default_agent());
+            let cli = choice
+                .or(session_agent.cli)
+                .unwrap_or_else(|| home.default_agent());
+            let launch_wiring = wiring_with_model(&agent_wiring, session_agent.model);
             let direct_prompt = if run_agent {
                 home.take_agent_initial_prompt()
             } else {
@@ -1220,7 +1234,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             let (kind, agent_command, chip) = if run_agent {
                 (
                     terminal::tabs::PaneKind::Agent,
-                    Some(agent.launch_command(&agent_wiring, resume, spawn_prompt)),
+                    Some(agent.launch_command(&launch_wiring, resume, spawn_prompt)),
                     cli.display_name().to_string(),
                 )
             } else {
@@ -1627,6 +1641,23 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     outcome
 }
 
+/// Layer a session's model override onto the base wiring for one launch, so the
+/// agent CLI runs the session's chosen model (the adapter renders it as `--model`
+/// / `-m`). `None` keeps the base wiring untouched — the CLI uses its own default
+/// model. The rest of the wiring (usagi binary, local-LLM offload model) is
+/// carried over unchanged. Used at every agent launch site so a session created /
+/// delegated with a pinned model launches with it (see
+/// [`SessionRecord::agent`](crate::domain::workspace_state::SessionRecord::agent)).
+fn wiring_with_model(
+    base: &crate::domain::agent::AgentWiring,
+    model: Option<String>,
+) -> crate::domain::agent::AgentWiring {
+    crate::domain::agent::AgentWiring {
+        model,
+        ..base.clone()
+    }
+}
+
 /// Restore each session's persisted panes into the pool on startup, in the
 /// background (nothing is attached yet): a terminal pane reopens a fresh shell, an
 /// agent pane relaunches its CLI — resuming the conversation when one exists, so it
@@ -1696,12 +1727,17 @@ fn restore_open_panes(
                     },
                 ),
                 StoredPaneKind::Agent => {
-                    let cli = pane.cli.unwrap_or(default_cli);
+                    // The snapshot records the CLI the pane was launched with; fall
+                    // back to the session's pinned CLI, then the default. The session's
+                    // pinned model rides into the restored launch's wiring.
+                    let session_agent = state.session_agent_for(&dir);
+                    let cli = pane.cli.or(session_agent.cli).unwrap_or(default_cli);
                     let agent = crate::infrastructure::agent::agent_for(cli);
                     // Resume the conversation when one exists so the agent continues
                     // where it left off rather than starting over.
                     let resume = agent.has_resumable_session(&dir);
-                    let command = agent.launch_command(agent_wiring, resume, None);
+                    let launch_wiring = wiring_with_model(agent_wiring, session_agent.model);
+                    let command = agent.launch_command(&launch_wiring, resume, None);
                     pool.borrow_mut().add_pane(
                         term,
                         &dir,
@@ -1801,11 +1837,17 @@ fn autostart_queued_prompts(
         let Some(prompt) = crate::infrastructure::agent_prompt_store::take(&dir) else {
             continue;
         };
-        let agent = crate::infrastructure::agent::agent_for(default_cli);
+        // Launch with the session's pinned CLI / model when it has one (a delegated
+        // issue routed to a specific model), else the workspace default. This is the
+        // primary path a `session_delegate_issue(agent_cli, model)` takes effect on.
+        let session_agent = state.session_agent_for(&dir);
+        let cli = session_agent.cli.unwrap_or(default_cli);
+        let agent = crate::infrastructure::agent::agent_for(cli);
         // Resume an existing conversation when one exists (a re-delegated session),
         // else start fresh; the queued prompt is the opening message either way.
         let resume = agent.has_resumable_session(&dir);
-        let command = agent.launch_command(agent_wiring, resume, Some(&prompt));
+        let launch_wiring = wiring_with_model(agent_wiring, session_agent.model);
+        let command = agent.launch_command(&launch_wiring, resume, Some(&prompt));
         let ws_root = crate::usecase::session::workspace_root(&dir);
         let pane_env = env_by_root
             .entry(ws_root.clone())
@@ -1817,7 +1859,7 @@ fn autostart_queued_prompts(
             PaneKind::Agent,
             terminal::pool::PaneLaunch {
                 agent_command: Some(&command),
-                cli: default_cli,
+                cli,
                 label: &label,
                 env: &pane_env,
             },

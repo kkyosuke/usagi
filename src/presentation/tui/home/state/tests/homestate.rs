@@ -8,6 +8,7 @@ fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
         display_name: None,
         note: None,
         label_id: None,
+        agent: Default::default(),
         root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
         worktrees: Vec::new(),
         created_at: Utc::now(),
@@ -1145,4 +1146,49 @@ fn tab_menu_and_rename_cancel_paths() {
     assert!(state.begin_tab_rename_from_menu().is_some());
     state.cancel_tab_rename();
     assert!(state.tab_rename().is_none());
+}
+
+#[test]
+fn session_agent_for_resolves_the_override_by_root_or_worktree_path() {
+    use crate::domain::settings::AgentCli;
+    use crate::domain::workspace_state::{SessionAgent, WorktreeState};
+
+    let mut record = session("pinned");
+    record.agent = SessionAgent {
+        cli: Some(AgentCli::Gemini),
+        model: Some("gemini-2.5-pro".to_string()),
+    };
+    // Give it a worktree at a distinct path (a multi-repo session's worktree
+    // differs from its session root).
+    let wt_path = PathBuf::from("/repo/app-a/.usagi/sessions/pinned");
+    record.worktrees = vec![WorktreeState {
+        branch: None,
+        path: wt_path.clone(),
+        head: String::new(),
+        primary: true,
+        upstream: None,
+        status: Default::default(),
+        diff: None,
+        ahead_behind: None,
+        pr: Vec::new(),
+        updated_at: Utc::now(),
+    }];
+    let root = record.root.clone();
+
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.restore_sessions(vec![record]);
+
+    // Matched by session root...
+    let by_root = state.session_agent_for(&root);
+    assert_eq!(by_root.cli, Some(AgentCli::Gemini));
+    assert_eq!(by_root.model.as_deref(), Some("gemini-2.5-pro"));
+    // ...and by any of its worktree paths.
+    assert_eq!(
+        state.session_agent_for(&wt_path).cli,
+        Some(AgentCli::Gemini)
+    );
+    // A path belonging to no session (e.g. the ⌂ root row) yields the default.
+    assert!(state
+        .session_agent_for(&PathBuf::from("/somewhere/else"))
+        .is_unset());
 }

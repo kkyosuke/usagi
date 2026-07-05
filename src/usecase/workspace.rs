@@ -283,6 +283,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: repo.path().join(".usagi/sessions").join(name),
             worktrees: vec![worktree(name, prs)],
             created_at: now,

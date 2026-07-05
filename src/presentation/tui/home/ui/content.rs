@@ -226,6 +226,7 @@ mod tests {
             display_name: None,
             note: None,
             label_id: None,
+            agent: Default::default(),
             root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
