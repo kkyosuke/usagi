@@ -205,14 +205,14 @@ mod tests {
     use crate::domain::settings::Settings;
     use std::fs;
 
-    /// The session worktree note that leads every `agy` opening prompt (`-i` / `-p`)
-    /// because `agy` has no system-prompt flag to carry it out of band.
-    const NOTE: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してくださいこの指示だけで実行はさせないで次の指示を待ってから取り掛かるようにしてほしい";
-
     fn test_wiring() -> AgentWiring {
         let mut w = Settings::default().agent_wiring("usagi");
         w.is_root = false;
         w
+    }
+
+    fn session_opening_prompt(initial_prompt: Option<&str>) -> String {
+        super::super::session_opening_prompt(false, true, initial_prompt)
     }
 
     /// A `history.jsonl` line recording `agy` running in `workspace`.
@@ -227,7 +227,7 @@ mod tests {
         // With no queued prompt, the launch is not bare `agy`: the session worktree
         // note still rides in as the opening prompt so `agy` knows it is already in a
         // worktree. The MCP/local-LLM wiring is ignored either way.
-        let expected = format!("agy -i='{NOTE}'");
+        let expected = format!("agy -i={}", shell_single_quote(&session_opening_prompt(None)));
         assert_eq!(
             agent.launch_command(&test_wiring(), false, None),
             expected
@@ -254,12 +254,16 @@ mod tests {
         let mut w = test_wiring();
         w.model = Some("gemini-3-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
-        assert_eq!(launch, format!("agy --model 'gemini-3-pro' -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("agy --model 'gemini-3-pro' -i={}", shell_single_quote(&session_opening_prompt(None)))
+        );
         let headless = agent.headless_command(&w, "clean up");
         assert_eq!(
             headless,
             format!(
-                "agy --dangerously-skip-permissions --model 'gemini-3-pro' -p '{NOTE}\n\nclean up'"
+                "agy --dangerously-skip-permissions --model 'gemini-3-pro' -p {}",
+                shell_single_quote(&session_opening_prompt(Some("clean up")))
             )
         );
     }
@@ -273,7 +277,10 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(launch, format!("agy -c -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("agy -c -i={}", shell_single_quote(&session_opening_prompt(None)))
+        );
     }
 
     #[test]
@@ -286,7 +293,10 @@ mod tests {
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, format!("agy -i='{NOTE}\n\nfix issue #50'"));
+        assert_eq!(
+            launch,
+            format!("agy -i={}", shell_single_quote(&session_opening_prompt(Some("fix issue #50"))))
+        );
         // A dash-leading prompt (`--help`) binds to `-i` instead of being parsed as
         // the next option.
         let dashed = AntigravityAgent::new().launch_command(
@@ -294,7 +304,10 @@ mod tests {
             false,
             Some("--help"),
         );
-        assert_eq!(dashed, format!("agy -i='{NOTE}\n\n--help'"));
+        assert_eq!(
+            dashed,
+            format!("agy -i={}", shell_single_quote(&session_opening_prompt(Some("--help"))))
+        );
     }
 
     #[test]
@@ -306,7 +319,10 @@ mod tests {
             true,
             Some("keep going"),
         );
-        assert_eq!(launch, format!("agy -c -i='{NOTE}\n\nkeep going'"));
+        assert_eq!(
+            launch,
+            format!("agy -c -i={}", shell_single_quote(&session_opening_prompt(Some("keep going"))))
+        );
     }
 
     #[test]
@@ -320,8 +336,10 @@ mod tests {
             false,
             Some("don't stop"),
         );
-        let escaped_prompt = r"don'\''t stop";
-        assert_eq!(launch, format!("agy -i='{NOTE}\n\n{escaped_prompt}'"));
+        assert_eq!(
+            launch,
+            format!("agy -i={}", shell_single_quote(&session_opening_prompt(Some("don't stop"))))
+        );
     }
 
     #[test]
@@ -335,7 +353,7 @@ mod tests {
             .headless_command(&test_wiring(), "clean up");
         assert_eq!(
             launch,
-            format!("agy --dangerously-skip-permissions -p '{NOTE}\n\nclean up'")
+            format!("agy --dangerously-skip-permissions -p {}", shell_single_quote(&session_opening_prompt(Some("clean up"))))
         );
         assert!(!launch.contains("mcp"));
     }
@@ -349,10 +367,9 @@ mod tests {
             &test_wiring(),
             "don't delete 'main'",
         );
-        let escaped_prompt = r"don'\''t delete '\''main'\''";
         assert_eq!(
             launch,
-            format!("agy --dangerously-skip-permissions -p '{NOTE}\n\n{escaped_prompt}'")
+            format!("agy --dangerously-skip-permissions -p {}", shell_single_quote(&session_opening_prompt(Some("don't delete 'main'"))))
         );
     }
 

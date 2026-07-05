@@ -197,14 +197,14 @@ mod tests {
     use crate::domain::settings::Settings;
     use std::fs;
 
-    /// The session worktree note that leads every Gemini opening prompt (`-i` / `-p`)
-    /// because Gemini has no system-prompt flag to carry it out of band.
-    const NOTE: &str = "あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してくださいこの指示だけで実行はさせないで次の指示を待ってから取り掛かるようにしてほしい";
-
     fn test_wiring() -> AgentWiring {
         let mut w = Settings::default().agent_wiring("usagi");
         w.is_root = false;
         w
+    }
+
+    fn session_opening_prompt(initial_prompt: Option<&str>) -> String {
+        super::super::session_opening_prompt(false, true, initial_prompt)
     }
 
     /// Create a Gemini project directory under `root` whose `.project_root` marker
@@ -228,7 +228,7 @@ mod tests {
         // With no queued prompt, the launch is not bare `gemini`: the session
         // worktree note still rides in as the opening prompt so Gemini knows it is
         // already in a worktree. The MCP/local-LLM wiring is ignored either way.
-        let expected = format!("gemini -i='{NOTE}'");
+        let expected = format!("gemini -i={}", shell_single_quote(&session_opening_prompt(None)));
         assert_eq!(
             agent.launch_command(&test_wiring(), false, None),
             expected
@@ -255,11 +255,14 @@ mod tests {
         let mut w = test_wiring();
         w.model = Some("gemini-2.5-pro".to_string());
         let launch = agent.launch_command(&w, false, None);
-        assert_eq!(launch, format!("gemini -m 'gemini-2.5-pro' -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("gemini -m 'gemini-2.5-pro' -i={}", shell_single_quote(&session_opening_prompt(None)))
+        );
         let headless = agent.headless_command(&w, "clean up");
         assert_eq!(
             headless,
-            format!("gemini --yolo -m 'gemini-2.5-pro' -p '{NOTE}\n\nclean up'")
+            format!("gemini --yolo -m 'gemini-2.5-pro' -p {}", shell_single_quote(&session_opening_prompt(Some("clean up"))))
         );
     }
 
@@ -272,7 +275,10 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(launch, format!("gemini -r latest -i='{NOTE}'"));
+        assert_eq!(
+            launch,
+            format!("gemini -r latest -i={}", shell_single_quote(&session_opening_prompt(None)))
+        );
     }
 
     #[test]
@@ -285,7 +291,10 @@ mod tests {
             false,
             Some("fix issue #50"),
         );
-        assert_eq!(launch, format!("gemini -i='{NOTE}\n\nfix issue #50'"));
+        assert_eq!(
+            launch,
+            format!("gemini -i={}", shell_single_quote(&session_opening_prompt(Some("fix issue #50"))))
+        );
         // A dash-leading prompt (`ai --help`) binds to `-i` instead of being
         // parsed as the next option.
         let dashed = GeminiAgent::new().launch_command(
@@ -293,7 +302,10 @@ mod tests {
             false,
             Some("--help"),
         );
-        assert_eq!(dashed, format!("gemini -i='{NOTE}\n\n--help'"));
+        assert_eq!(
+            dashed,
+            format!("gemini -i={}", shell_single_quote(&session_opening_prompt(Some("--help"))))
+        );
     }
 
     #[test]
@@ -307,7 +319,7 @@ mod tests {
         );
         assert_eq!(
             launch,
-            format!("gemini -r latest -i='{NOTE}\n\nkeep going'")
+            format!("gemini -r latest -i={}", shell_single_quote(&session_opening_prompt(Some("keep going"))))
         );
     }
 
@@ -322,8 +334,10 @@ mod tests {
             false,
             Some("don't stop"),
         );
-        let escaped_prompt = r"don'\''t stop";
-        assert_eq!(launch, format!("gemini -i='{NOTE}\n\n{escaped_prompt}'"));
+        assert_eq!(
+            launch,
+            format!("gemini -i={}", shell_single_quote(&session_opening_prompt(Some("don't stop"))))
+        );
     }
 
     #[test]
@@ -335,7 +349,10 @@ mod tests {
         // rendered (Gemini has no inline flag for it), so no MCP config.
         let launch = GeminiAgent::new()
             .headless_command(&test_wiring(), "clean up");
-        assert_eq!(launch, format!("gemini --yolo -p '{NOTE}\n\nclean up'"));
+        assert_eq!(
+            launch,
+            format!("gemini --yolo -p {}", shell_single_quote(&session_opening_prompt(Some("clean up"))))
+        );
         assert!(!launch.contains("mcp"));
     }
 
@@ -348,10 +365,9 @@ mod tests {
             &test_wiring(),
             "don't delete 'main'",
         );
-        let escaped_prompt = r"don'\''t delete '\''main'\''";
         assert_eq!(
             launch,
-            format!("gemini --yolo -p '{NOTE}\n\n{escaped_prompt}'")
+            format!("gemini --yolo -p {}", shell_single_quote(&session_opening_prompt(Some("don't delete 'main'"))))
         );
     }
 
