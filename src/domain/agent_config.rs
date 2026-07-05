@@ -252,10 +252,23 @@ mod tests {
 
     #[test]
     fn test_config_templates() {
-        let templates = ProjectLanguage::Rust.config_templates();
-        assert_eq!(templates.len(), 3);
-        assert_eq!(templates[0].filename, "CLAUDE.md");
-        assert_eq!(templates[1].filename, ".clinerules");
-        assert_eq!(templates[2].filename, ".aider.conf.yml");
+        for lang in &[
+            ProjectLanguage::Rust,
+            ProjectLanguage::NodeJs,
+            ProjectLanguage::Python,
+            ProjectLanguage::Go,
+            ProjectLanguage::Java,
+            ProjectLanguage::Ruby,
+            ProjectLanguage::Generic,
+        ] {
+            let templates = lang.config_templates();
+            assert_eq!(templates.len(), 3);
+            assert_eq!(templates[0].filename, "CLAUDE.md");
+            assert_eq!(templates[1].filename, ".clinerules");
+            assert_eq!(templates[2].filename, ".aider.conf.yml");
+            assert!(!templates[0].content.is_empty());
+            assert!(!templates[1].content.is_empty());
+            assert!(!templates[2].content.is_empty());
+        }
     }
 }

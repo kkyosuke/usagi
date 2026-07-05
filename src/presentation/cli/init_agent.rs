@@ -135,4 +135,34 @@ mod tests {
             "dummy"
         );
     }
+
+    #[test]
+    fn test_init_agent_cli_languages() {
+        let cases = &[
+            ("package.json", "Node.js"),
+            ("requirements.txt", "Python"),
+            ("go.mod", "Go"),
+            ("pom.xml", "Java"),
+            ("Gemfile", "Ruby"),
+        ];
+
+        for &(file, expected_lang) in cases {
+            let dir = tempdir().unwrap();
+            std::fs::write(dir.path().join(file), "").unwrap();
+
+            let input = b"";
+            let mut output = Vec::new();
+
+            let result = init_agent_cli(dir.path(), false, &input[..], &mut output);
+            assert!(result.is_ok());
+
+            let out_str = String::from_utf8(output).unwrap();
+            assert!(
+                out_str.contains(&format!("検出したプロジェクト言語/構成: {}", expected_lang)),
+                "failed on {}, got: {}",
+                file,
+                out_str
+            );
+        }
+    }
 }
