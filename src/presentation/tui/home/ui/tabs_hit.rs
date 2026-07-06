@@ -1,6 +1,7 @@
 //! Tab strip rendering and right-pane tab hit tests.
 
 use crate::presentation::theme::Palette;
+use crate::presentation::tui::widgets;
 use console::style;
 
 use super::super::state::HomeState;
@@ -49,23 +50,7 @@ pub(super) fn tab_strip_parts(
 /// and a short tail past the end, giving a brief all-dim beat before it re-enters
 /// from the left — a wave that flows, not a bar that fills then snaps back.
 pub(super) fn loading_chip(text: &str, frame: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    // Sweep across the chip plus a few columns of tail, so the band leaves the
-    // right edge and re-enters the left with a short gap between passes. The `+ 3`
-    // keeps the period positive even for an empty chip (which sweeps to "").
-    let period = chars.len() + 3;
-    let head = frame % period;
-    let mut out = String::new();
-    for (i, c) in chars.into_iter().enumerate() {
-        let s = c.to_string();
-        // A two-column bright band trailing the sweep head.
-        if i == head || i + 1 == head {
-            out.push_str(&style(s).accent().bold().to_string());
-        } else {
-            out.push_str(&style(s).dim().to_string());
-        }
-    }
-    out
+    widgets::shimmer_text(text, frame)
 }
 
 /// The divider drawn between the fixed-width header identity and the tab strip,

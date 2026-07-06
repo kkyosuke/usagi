@@ -780,7 +780,10 @@ fn left_pane_inserts_a_three_row_pending_session_above_the_create_row() {
     let resource = console::strip_ansi_codes(&lines[5]);
     let create = console::strip_ansi_codes(&lines[6]);
     assert!(name.contains("newx"));
-    assert!(detail.contains("creating session"));
+    // The detail row is blank height only; the resource row keeps the CPU/MEM
+    // shape but shimmers instead of resting.
+    assert!(!detail.contains("creating session"));
+    assert!(detail.trim().is_empty());
     assert!(resource.contains("0%"));
     assert!(resource.contains("0MB"));
     assert!(create.contains("+ new session"));
@@ -812,6 +815,7 @@ fn left_pane_inserts_the_pending_session_at_the_foot_with_a_session_present() {
     // Root(2) + divider(1) + session(3) = 6, so the pending skeleton is 6..=8
     // and the persistent create row remains selectable at line 9.
     assert!(console::strip_ansi_codes(&lines[6]).contains("newx"));
+    assert!(console::strip_ansi_codes(&lines[7]).trim().is_empty()); // height-only detail row
     assert!(console::strip_ansi_codes(&lines[8]).contains("0MB"));
     assert!(console::strip_ansi_codes(&lines[9]).contains("+ new session"));
 }
