@@ -67,7 +67,11 @@ pub trait CommandRunner {
 /// Whether `name` is installed and runnable, probed by searching the PATH
 /// for an executable file. The basis of [`SystemRunner::available`].
 fn which(name: &str) -> bool {
-    let path_var = match std::env::var_os("PATH") {
+    which_in(name, std::env::var_os("PATH"))
+}
+
+fn which_in(name: &str, path_var: Option<std::ffi::OsString>) -> bool {
+    let path_var = match path_var {
         Some(v) => v,
         None => return false,
     };
@@ -273,16 +277,7 @@ mod tests {
 
     #[test]
     fn test_which_fails_when_path_is_missing() {
-        // Backup original PATH
-        let original_path = std::env::var_os("PATH");
-        std::env::remove_var("PATH");
-
-        assert!(!which("git"));
-
-        // Restore original PATH
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        }
+        assert!(!which_in("git", None));
     }
 
     #[test]
@@ -292,16 +287,8 @@ mod tests {
         // Create a non-executable file
         std::fs::write(&file_path, "not executable").unwrap();
 
-        // Backup original PATH and set it to temp_dir
-        let original_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", temp_dir.path());
-
-        // The dummy-command is a file but not executable (on Unix), so which should return false.
-        assert!(!which("dummy-command"));
-
-        // Restore PATH
-        if let Some(path) = original_path {
-            std::env::set_var("PATH", path);
-        }
+        // Pass the temp_dir directly as the PATH variable using which_in
+        let path_var = Some(std::ffi::OsString::from(temp_dir.path()));
+        assert!(!which_in("dummy-command", path_var));
     }
 }
