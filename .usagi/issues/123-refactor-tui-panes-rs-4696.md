@@ -1,13 +1,13 @@
 ---
 number: 123
 title: refactor(tui): panes.rs（4696 行）をペイン種別ごとのサブモジュールに分割する
-status: todo
+status: done
 priority: high
 labels: [refactor, tui, review]
 dependson: []
 related: []
 created_at: 2026-07-04T23:15:28.342337+00:00
-updated_at: 2026-07-04T23:15:28.342337+00:00
+updated_at: 2026-07-06T03:22:52.354478+00:00
 ---
 
 ## 背景（なぜ問題か）

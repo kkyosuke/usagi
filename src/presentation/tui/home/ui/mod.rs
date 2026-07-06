@@ -11,13 +11,21 @@
 //! IO.
 //!
 //! This module owns the shared text/layout helpers and the top-level
-//! [`render_frame`] that stitches the screen together. The pane bodies live in
-//! [`panes`]; the surrounding chrome (title, ladder, input, footer, the command
-//! palette, modals) lives in [`chrome`].
+//! [`render_frame`] that stitches the screen together. The pane-specific bodies
+//! are split by responsibility (`sidebar`, `focus_menu`, `tabs_hit`,
+//! `pr_popup`, `diff_render`, `markdown_render`) while [`panes`] keeps the
+//! right-pane dispatcher; the surrounding chrome (title, ladder, input, footer,
+//! the command palette, modals) lives in [`chrome`].
 
 mod chrome;
 pub mod content;
+mod diff_render;
+mod focus_menu;
+mod markdown_render;
 mod panes;
+mod pr_popup;
+mod sidebar;
+mod tabs_hit;
 
 use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
@@ -29,17 +37,17 @@ use chrome::{
     ENV_MODAL_INNER, FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER,
     TEXT_MODAL_INNER,
 };
-use panes::{
-    focus_menu_body, focus_prompt_body, group_inline_insert_line, left_pane, right_pane_contents,
-};
+use focus_menu::{focus_menu_body, focus_prompt_body};
+use panes::right_pane_contents;
+use sidebar::{group_inline_insert_line, left_pane};
 // The right-pane tab strips map clicks to the tab under them through these.
-pub(super) use panes::{
+pub(super) use tabs_hit::{
     attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
 };
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
-pub(super) use panes::sidebar_pr_badge_at;
+pub(super) use pr_popup::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
-pub(super) use panes::{pr_popup_click, PopupClick};
+pub(super) use pr_popup::{pr_popup_click, PopupClick};
 
 use super::state::{HomeState, ModalSize, Mode, WorktreeList};
 use crate::domain::resource::ResourceUsage;
@@ -105,7 +113,7 @@ const LEFT_MAX: usize = 40;
 /// on row 2 (under the git status). Narrow enough to hand most of the width to the
 /// right pane while still showing which session is active, its git state, and what
 /// its agent is doing. Each worktree entry spans the same
-/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows as the full sidebar (its third row
+/// [`SESSION_ROWS`](sidebar::SESSION_ROWS) rows as the full sidebar (its third row
 /// blank — the rail has no room for a CPU / memory figure), so toggling the
 /// sidebar never shifts a session to a different row — only the width changes.
 const RAIL_WIDTH: usize = 5;
@@ -250,11 +258,11 @@ pub fn terminal_geometry(
 /// later group's root, matching
 /// [`WorktreeList::focus_index`](crate::presentation::tui::home::state::WorktreeList).
 ///
-/// Defers the layout walk to [`panes::sidebar_row_at_line_for_sidebar`], which
+/// Defers the layout walk to [`sidebar::sidebar_row_at_line_for_sidebar`], which
 /// replays exactly what [`left_pane`](panes::left_pane) draws — in both
 /// single-workspace mode and 統合(unite) mode (full-sidebar group headers,
 /// inter-workspace gaps, root pairs, dividers, and
-/// [`SESSION_ROWS`](panes::SESSION_ROWS) rows per worktree) — so a click maps back
+/// [`SESSION_ROWS`](sidebar::SESSION_ROWS) rows per worktree) — so a click maps back
 /// to its row without the renderer and the hit test ever disagreeing. Returns
 /// `None` for a click in the right pane (past `left_w`), in the chrome above or
 /// below the body, on a header / divider, or below the last session.
@@ -278,8 +286,8 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows {
         return None;
     }
-    let scroll = panes::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
-    panes::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
+    let scroll = sidebar::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
+    sidebar::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -444,10 +452,10 @@ fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
 /// the icon-led ` 23%   512MB` — or `None` when nothing is live (idle), so the
 /// rabbit rests without a number. The CPU and memory figures are each tinted by
 /// their load band (dim / yellow / red) via
-/// [`resource_inline_label_tinted`](panes::resource_inline_label_tinted), so a
+/// [`resource_inline_label_tinted`](sidebar::resource_inline_label_tinted), so a
 /// heavy figure stands out beside the mascot.
 fn workspace_total_label(total: ResourceUsage) -> Option<String> {
-    (!total.is_idle()).then(|| panes::resource_inline_label_tinted(total))
+    (!total.is_idle()).then(|| sidebar::resource_inline_label_tinted(total))
 }
 
 /// Append the workspace resource `total` to the mascot's feet row (its last line
@@ -585,14 +593,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // Float the pinned PR popup beside the session whose badge was clicked. The
     // placement is only ever produced on the full sidebar, for a PR-bearing session,
     // with its anchor already clamped to where this overlay lands (see
-    // [`panes::pr_popup_placement`] — the click hit-test shares it so a click on a
+    // [`pr_popup::pr_popup_placement`] — the click hit-test shares it so a click on a
     // `#<number>` opens exactly the link the user sees). It lists the session's PRs
     // — the row itself folds them to an `<icon> <count>` badge — anchored at the
     // session's first row and pushed just past the divider into the right pane, so
     // it never hides the sidebar it describes. Composited now, while `lines` holds
     // only the body rows, so the box stays within the panes and never spills onto
     // the input / footer below.
-    if let Some((popup, top, left)) = panes::pr_popup_placement(state, raw_height, raw_width) {
+    if let Some((popup, top, left)) = pr_popup::pr_popup_placement(state, raw_height, raw_width) {
         widgets::overlay_at(&mut lines, width, top, left, &popup);
     }
 
@@ -792,7 +800,7 @@ fn left_column(
             // `left_pane` draws each workspace's own persistent "+ new session"
             // affordance; while the input is open it *becomes* the targeted
             // workspace's affordance, so [`place_create_rows`] replaces that row.
-            let scroll = panes::sidebar_scroll(state.list(), true, body_rows);
+            let scroll = sidebar::sidebar_scroll(state.list(), true, body_rows);
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows, scroll);
             left.truncate(body_rows);

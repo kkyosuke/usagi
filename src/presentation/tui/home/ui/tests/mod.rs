@@ -1,5 +1,11 @@
 use super::chrome::*;
+use super::diff_render::*;
+use super::focus_menu::*;
+use super::markdown_render::*;
 use super::panes::*;
+use super::pr_popup::*;
+use super::sidebar::*;
+use super::tabs_hit::*;
 use super::*;
 
 use super::super::command::{CommandHint, CommandInfo};
@@ -11,7 +17,7 @@ use super::super::terminal::view::TerminalView;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{BranchStatus, PrLink, SessionRecord, WorktreeState};
-use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Span, SpanStyle};
+use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -145,6 +151,7 @@ mod diff;
 mod env_editor;
 mod input_footer;
 mod notices_and_tasks;
+mod pane_helpers;
 mod removal_modal;
 mod render_compose;
 mod right_pane;
