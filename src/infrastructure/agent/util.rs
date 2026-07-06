@@ -9,13 +9,11 @@ use crate::domain::agent::AgentWiring;
 use std::path::Path;
 
 /// Wrap `text` as a single shell argument in single quotes, safe to drop into a
-/// `sh -c` command line. A single quote cannot appear inside a single-quoted
-/// string, so each one is rendered as `'\''` (close the quote, an escaped quote,
-/// reopen) — the standard POSIX idiom. Everything else (newlines, `$`, spaces,
-/// the `[`, `]`, `"` of a TOML value …) is literal inside single quotes, so the
-/// agent receives the argument verbatim.
+/// `sh -c` command line. Thin wrapper around the domain-level launch-plan
+/// escaper so current adapters and future [`LaunchPlan`](crate::domain::agent::LaunchPlan)
+/// migrations share one escaping rule.
 pub(super) fn shell_single_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
+    crate::domain::agent::shell_single_quote(text)
 }
 
 /// Whether two paths name the same directory, comparing canonicalized forms (so a
