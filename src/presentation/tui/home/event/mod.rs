@@ -581,9 +581,13 @@ pub(super) fn event_loop(
                 target_root,
                 evict,
                 focus,
+                created,
             } = completion;
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
+            }
+            if let (Some(root), Some(name)) = (target_root.as_deref(), created.as_deref()) {
+                state.clear_pending_session(root, name);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create/close may ask to drop into 在席 (Focus) on its
@@ -1581,6 +1585,7 @@ pub(crate) fn event_loop_compat(
                 target_root: Some(_root.to_path_buf()),
                 evict: None,
                 focus,
+                created: Some(name.to_string()),
             },
         );
     };
@@ -1605,6 +1610,7 @@ pub(crate) fn event_loop_compat(
                     target_root: Some(_root.to_path_buf()),
                     evict,
                     focus,
+                    created: None,
                 },
             );
         };

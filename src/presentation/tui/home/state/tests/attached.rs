@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::tui::home::tasks::TaskKind;
 
 // --- 没入 (Attached) ---------------------------------------------------
 
@@ -204,10 +205,12 @@ fn set_tasks_round_trips_the_panel_rows() {
     assert!(state.tasks().is_empty());
     let rows = vec![
         TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成中… x".to_string(),
             mark: TaskMark::Running(2),
         },
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "削除完了 y".to_string(),
             mark: TaskMark::Done(true),
         },
