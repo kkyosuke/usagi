@@ -1,7 +1,7 @@
 //! Rendering and hit-test layout for the home screen sidebar.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::super::state::{PendingSession, WorktreeList, ROOT_NAME};
 use super::{
@@ -1034,29 +1034,58 @@ pub(super) fn skeleton_frame(now: DateTime<Utc>) -> usize {
     (now.timestamp_millis().rem_euclid(1 << 30) / SKELETON_TICK_MS) as usize
 }
 
-/// The full-sidebar create row repainted as an inline **skeleton** while a
-/// session by `name` is being created into this workspace: the same gutter as
-/// [`create_row`], then `+ name` drawn as a left-to-right loading wave
-/// ([`loading_chip`](super::tabs_hit::loading_chip)) so the create reads as busy
-/// right where the new session's row will land — the sidebar twin of the tab
-/// strip's launching-pane chip. It never carries the create row's `+ new session`
-/// wording while pending, so the row cannot be mistaken for an idle affordance.
-pub(super) fn create_skeleton_row(
+/// The full-sidebar **pending session** placeholder inserted above a workspace's
+/// persistent "+ new session" row while a session by `name` is being created.
+/// It occupies the same three rows as a real session — name, detail, resource —
+/// so the list is already at the final height before the worker finishes and the
+/// real row lands. The name/detail shimmer with the same wave as loading tab
+/// chips, while the third row keeps the CPU/MEM field visible (at the default
+/// zero sample) so the placeholder has the exact shape of a session entry.
+pub(super) fn pending_session_rows(
     name: &str,
     frame: usize,
+    label_col: usize,
+    name_width: usize,
+    detail_width: usize,
     in_switch: bool,
-    width: usize,
-) -> String {
-    // The skeleton is never the cursor row's action (a create is already in
-    // flight), so it draws with the unselected gutter regardless of the cursor.
-    let gutter = gutter_cell(false, false, in_switch);
-    let wave = super::tabs_hit::loading_chip(&format!("+ {name}"), frame);
-    clip_to_width(&format!("{gutter} {wave}"), width)
+) -> [String; SESSION_ROWS] {
+    // The placeholder is not itself selectable; the persistent "+ new session"
+    // row remains below it and keeps the cursor/activation target.
+    let gutter = session_gutter_cell(false, false, in_switch, 0);
+    let kind = super::tabs_hit::loading_chip("●", frame);
+    let wave = super::tabs_hit::loading_chip(&clip_to_width(name, name_width), frame);
+    let name = pad_to_width(wave, name_width);
+    let status_tag = label_cell(None, label_col);
+    let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
+    let detail = super::tabs_hit::loading_chip("creating session", frame);
+    let line2 = detail_line(
+        &session_gutter_cell(false, false, in_switch, 1),
+        clip_to_width(&detail, detail_width),
+    );
+    let line3 = resource_line(
+        ResourceUsage::default(),
+        detail_width,
+        false,
+        false,
+        in_switch,
+    );
+    [line1, line2, line3]
 }
 
-/// The rail twin of [`create_skeleton_row`]: a pulsing `+` in the create row
-/// position while a session is being created into this workspace, so the
-/// collapsed rail shows the same "coming up" beat without room for the name.
+/// The rail twin of a pending session skeleton: three rows so the collapsed rail
+/// reserves the same height as a real session. The rail has no room for the name
+/// or CPU/MEM text, so only the top `+` pulses and the lower rows are blanks.
+pub(super) fn rail_pending_session_rows(frame: usize) -> [String; SESSION_ROWS] {
+    [
+        rail_create_skeleton_row(frame),
+        pad_to_width(String::new(), RAIL_WIDTH),
+        pad_to_width(String::new(), RAIL_WIDTH),
+    ]
+}
+
+/// A pulsing `+` glyph used by [`rail_pending_session_rows`] while a session is
+/// being created into this workspace. The rail twin of the full pending-session
+/// skeleton has no room for the name, so only this glyph animates.
 pub(super) fn rail_create_skeleton_row(frame: usize) -> String {
     let plus = super::tabs_hit::loading_chip("+", frame);
     let gutter = gutter_cell(false, false, false);
@@ -1090,20 +1119,40 @@ pub(super) fn line_hits_unite_workspace_gap(line: usize, cur: &mut usize) -> boo
     false
 }
 
+/// Pending create skeletons that belong to `root`; each one occupies a full
+/// session-height placeholder above the group's persistent "+ new session" row.
+fn pending_sessions_for_root<'a>(
+    pending_sessions: &'a [PendingSession],
+    root: &Path,
+) -> Vec<&'a PendingSession> {
+    pending_sessions
+        .iter()
+        .filter(|p| p.root() == root)
+        .collect()
+}
+
+/// Number of pending create skeletons currently inserted into `root`'s group.
+fn pending_session_count(pending_sessions: &[PendingSession], root: &Path) -> usize {
+    pending_sessions_for_root(pending_sessions, root).len()
+}
+
 /// The number of body lines one workspace group occupies in the sidebar: the
 /// (統合(unite)) inter-workspace gap and group header, the two-row root entry, the
 /// one-row divider, then either the single empty-workspace message or
-/// [`SESSION_ROWS`] rows per session. `with_headers` matches the full sidebar,
-/// which heads each 統合 group with its name; the collapsed rail draws no header
-/// (but keeps the gap), so it passes `false`. Shared by the create/rename insert
-/// anchor ([`group_inline_insert_line`]) and the scroll maths
-/// ([`sidebar_total_lines`] / [`selected_row_span`]) so every caller walks the one
-/// layout [`left_pane`] / [`rail_pane`] draw.
-pub(super) fn group_block_rows(
+/// [`SESSION_ROWS`] rows per session, then any pending-create skeletons (also
+/// [`SESSION_ROWS`] rows each), then the trailing "+ new session" row.
+/// `with_headers` matches the full sidebar, which heads each 統合 group with its
+/// name; the collapsed rail draws no header (but keeps the gap), so it passes
+/// `false`. Shared by the create/rename insert anchor
+/// ([`group_inline_insert_line`]) and the scroll maths
+/// ([`sidebar_total_lines`] / [`selected_row_span`]) so every caller walks the
+/// one layout [`left_pane`] / [`rail_pane`] draw.
+fn group_block_rows_with_pending(
     list: &WorktreeList,
     group_index: usize,
     worktree_count: usize,
     with_headers: bool,
+    pending_count: usize,
 ) -> usize {
     let united = list.group_count() > 1;
     let gap = usize::from(united && group_index > 0) * UNITE_WORKSPACE_GAP_ROWS;
@@ -1117,9 +1166,10 @@ pub(super) fn group_block_rows(
     } else {
         SESSION_ROWS * worktree_count
     };
+    let pending = SESSION_ROWS * pending_count;
     // Each expanded workspace ends with its own "+ new session" row (the final
     // `+ 1`), so creating a session lands in the workspace it sits under.
-    gap + header + 2 + 1 + body + 1
+    gap + header + 2 + 1 + body + pending + 1
 }
 
 /// The total body lines the sidebar draws for `list`: every group's block (each
@@ -1127,11 +1177,23 @@ pub(super) fn group_block_rows(
 /// `with_headers` matches the sidebar variant (full draws 統合 group headers, the
 /// rail does not). The scroll offset clamps against this so the window never runs
 /// past the list's foot.
-pub(super) fn sidebar_total_lines(list: &WorktreeList, with_headers: bool) -> usize {
+fn sidebar_total_lines_with_pending(
+    list: &WorktreeList,
+    with_headers: bool,
+    pending_sessions: &[PendingSession],
+) -> usize {
     list.groups()
         .iter()
         .enumerate()
-        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), with_headers))
+        .map(|(i, g)| {
+            group_block_rows_with_pending(
+                list,
+                i,
+                g.worktrees().len(),
+                with_headers,
+                pending_session_count(pending_sessions, g.root_path()),
+            )
+        })
         .sum::<usize>()
 }
 
@@ -1140,7 +1202,16 @@ pub(super) fn sidebar_total_lines(list: &WorktreeList, with_headers: bool) -> us
 /// root entry, one [`SESSION_ROWS`] block per session, or a group's "+ new session"
 /// row. Walks the same layout as [`sidebar_row_at_line_walk`] so the scroll offset
 /// reveals exactly the row the renderer draws as selected.
+#[cfg(test)]
 pub(super) fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usize, usize) {
+    selected_row_span_with_pending(list, with_headers, &[])
+}
+
+fn selected_row_span_with_pending(
+    list: &WorktreeList,
+    with_headers: bool,
+    pending_sessions: &[PendingSession],
+) -> (usize, usize) {
     let united = list.group_count() > 1;
     let sel = list.selected_index();
     let mut cur = 0usize;
@@ -1176,6 +1247,10 @@ pub(super) fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usi
                 flat += 1;
             }
         }
+        // Pending create skeletons are not selectable, but they reserve the exact
+        // three rows the created session will occupy, keeping the following
+        // persistent "+ new session" row at its final landing position.
+        cur += SESSION_ROWS * pending_session_count(pending_sessions, group.root_path());
         // The group's own "+ new session" row.
         if flat == sel {
             return (cur, 1);
@@ -1193,16 +1268,26 @@ pub(super) fn selected_row_span(list: &WorktreeList, with_headers: bool) -> (usi
 /// the list's end. A pure function of the list, the sidebar variant, and the
 /// viewport height, so the renderer ([`left_pane`] / [`rail_pane`]) and every
 /// hit-test compute the identical offset and never disagree on what is on screen.
+#[cfg(test)]
 pub(super) fn sidebar_scroll(
     list: &WorktreeList,
     with_headers: bool,
     viewport_rows: usize,
 ) -> usize {
-    let total = sidebar_total_lines(list, with_headers);
+    sidebar_scroll_with_pending(list, with_headers, viewport_rows, &[])
+}
+
+pub(super) fn sidebar_scroll_with_pending(
+    list: &WorktreeList,
+    with_headers: bool,
+    viewport_rows: usize,
+    pending_sessions: &[PendingSession],
+) -> usize {
+    let total = sidebar_total_lines_with_pending(list, with_headers, pending_sessions);
     if viewport_rows == 0 || total <= viewport_rows {
         return 0;
     }
-    let (start, len) = selected_row_span(list, with_headers);
+    let (start, len) = selected_row_span_with_pending(list, with_headers, pending_sessions);
     let end = start + len;
     let scroll = end.saturating_sub(viewport_rows);
     scroll.min(total - viewport_rows)
@@ -1288,7 +1373,7 @@ pub(super) fn rail_pane(
     let skeleton = skeleton_frame(now);
     // Scroll so the selected entry stays on screen once the list outgrows the rail
     // (the rail draws no 統合 group header, so `with_headers` is false).
-    let scroll = sidebar_scroll(list, false, rows);
+    let scroll = sidebar_scroll_with_pending(list, false, rows, pending_sessions);
     let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (the
     // 統合 group separators are pure decoration and do not advance it).
@@ -1340,16 +1425,14 @@ pub(super) fn rail_pane(
             // Mirror the full sidebar's single empty-message row so the row count
             // matches and toggling never shifts the layout.
             win.push(pad_to_width(String::new(), RAIL_WIDTH));
+            for _pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
+                for row in rail_pending_session_rows(skeleton) {
+                    win.push(row);
+                }
+            }
             let selected = flat_row == list.selected_index();
-            let pending = pending_sessions
-                .iter()
-                .any(|p| p.root() == group.root_path());
-            let mut row = if pending {
-                rail_create_skeleton_row(skeleton)
-            } else {
-                rail_create_row(selected, in_switch)
-            };
-            if !pending && in_switch && !selected {
+            let mut row = rail_create_row(selected, in_switch);
+            if in_switch && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1404,16 +1487,14 @@ pub(super) fn rail_pane(
         if win.full() {
             break;
         }
+        for _pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
+            for row in rail_pending_session_rows(skeleton) {
+                win.push(row);
+            }
+        }
         let selected = flat_row == list.selected_index();
-        let pending = pending_sessions
-            .iter()
-            .any(|p| p.root() == group.root_path());
-        let mut row = if pending {
-            rail_create_skeleton_row(skeleton)
-        } else {
-            rail_create_row(selected, in_switch)
-        };
-        if !pending && in_switch && !selected {
+        let mut row = rail_create_row(selected, in_switch);
+        if in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);
@@ -1442,10 +1523,11 @@ pub(super) fn dim_row(line: &str) -> String {
 /// `with_headers` matches the full sidebar (which heads each 統合(unite) group
 /// with its name); the rail draws no header, so it walks the same layout minus
 /// that one line per group.
-pub(super) fn sidebar_row_at_line_walk(
+pub(super) fn sidebar_row_at_line_walk_with_pending(
     list: &WorktreeList,
     line: usize,
     with_headers: bool,
+    pending_sessions: &[PendingSession],
 ) -> Option<usize> {
     let united = list.group_count() > 1;
     let mut cur = 0usize; // body line being walked
@@ -1495,6 +1577,12 @@ pub(super) fn sidebar_row_at_line_walk(
                 flat += 1;
             }
         }
+        let pending_rows =
+            SESSION_ROWS * pending_session_count(pending_sessions, group.root_path());
+        if line >= cur && line < cur + pending_rows {
+            return None;
+        }
+        cur += pending_rows;
         // The group's own "+ new session" row.
         if line == cur {
             return Some(flat);
@@ -1509,16 +1597,27 @@ pub(super) fn sidebar_row_at_line_walk(
 /// sidebar's current `scroll` offset (see [`sidebar_scroll`]). The screen line is
 /// lifted back into the full-column layout by adding `scroll` before the walk, so a
 /// click resolves to the right row even when the list is scrolled.
+#[cfg(test)]
 pub(super) fn sidebar_row_at_line_for_sidebar(
     list: &WorktreeList,
     line: usize,
     sidebar: Sidebar,
     scroll: usize,
 ) -> Option<usize> {
+    sidebar_row_at_line_for_sidebar_with_pending(list, line, sidebar, scroll, &[])
+}
+
+pub(super) fn sidebar_row_at_line_for_sidebar_with_pending(
+    list: &WorktreeList,
+    line: usize,
+    sidebar: Sidebar,
+    scroll: usize,
+    pending_sessions: &[PendingSession],
+) -> Option<usize> {
     let line = line + scroll;
     match sidebar {
-        Sidebar::Full => sidebar_row_at_line_walk(list, line, true),
-        Sidebar::Rail => sidebar_row_at_line_walk(list, line, false),
+        Sidebar::Full => sidebar_row_at_line_walk_with_pending(list, line, true, pending_sessions),
+        Sidebar::Rail => sidebar_row_at_line_walk_with_pending(list, line, false, pending_sessions),
     }
 }
 
@@ -1529,18 +1628,43 @@ pub(super) fn sidebar_row_at_line_for_sidebar(
 /// where several workspaces stack. The create flow expands a folded group first,
 /// so `group` is always expanded here. Walks the same layout as
 /// [`sidebar_row_at_line_for_sidebar`].
+#[cfg(test)]
 pub(super) fn group_inline_insert_line(list: &WorktreeList, group: usize) -> usize {
+    group_inline_insert_line_with_pending(list, group, &[])
+}
+
+pub(super) fn group_inline_insert_line_with_pending(
+    list: &WorktreeList,
+    group: usize,
+    pending_sessions: &[PendingSession],
+) -> usize {
     let before: usize = list
         .groups()
         .iter()
         .enumerate()
         .take(group)
-        .map(|(i, g)| group_block_rows(list, i, g.worktrees().len(), true))
+        .map(|(i, g)| {
+            group_block_rows_with_pending(
+                list,
+                i,
+                g.worktrees().len(),
+                true,
+                pending_session_count(pending_sessions, g.root_path()),
+            )
+        })
         .sum();
     let block = list
         .groups()
         .get(group)
-        .map(|g| group_block_rows(list, group, g.worktrees().len(), true))
+        .map(|g| {
+            group_block_rows_with_pending(
+                list,
+                group,
+                g.worktrees().len(),
+                true,
+                pending_session_count(pending_sessions, g.root_path()),
+            )
+        })
         .unwrap_or(0);
     // The create row is the final line of the group's block.
     before + block.saturating_sub(1)
@@ -1682,7 +1806,7 @@ pub(super) fn left_pane(
     // Scroll so the selected row stays on screen once the list outgrows the pane;
     // the window keeps only the visible slice while the loop walks the whole layout
     // so every flat index (and its selected / active styling) stays correct.
-    let scroll = sidebar_scroll(list, true, rows);
+    let scroll = sidebar_scroll_with_pending(list, true, rows, pending_sessions);
     let mut win = LineWindow::new(scroll, rows);
     // The flat selectable-row index, matching `WorktreeList`'s row space (group
     // headers are pure decoration and do not advance it).
@@ -1746,16 +1870,21 @@ pub(super) fn left_pane(
                     .dim()
                     .to_string(),
             );
+            for pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
+                for row in pending_session_rows(
+                    pending.name(),
+                    skeleton,
+                    label_col,
+                    name_width,
+                    detail_width,
+                    in_switch,
+                ) {
+                    win.push(row);
+                }
+            }
             let selected = flat_row == list.selected_index();
-            let pending = pending_sessions
-                .iter()
-                .find(|p| p.root() == group.root_path());
-            let mut row = if let Some(pending) = pending {
-                create_skeleton_row(pending.name(), skeleton, in_switch, left_w)
-            } else {
-                create_row(selected, in_switch, left_w)
-            };
-            if pending.is_none() && in_switch && !selected {
+            let mut row = create_row(selected, in_switch, left_w);
+            if in_switch && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1822,16 +1951,21 @@ pub(super) fn left_pane(
         if win.full() {
             break;
         }
+        for pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
+            for row in pending_session_rows(
+                pending.name(),
+                skeleton,
+                label_col,
+                name_width,
+                detail_width,
+                in_switch,
+            ) {
+                win.push(row);
+            }
+        }
         let selected = flat_row == list.selected_index();
-        let pending = pending_sessions
-            .iter()
-            .find(|p| p.root() == group.root_path());
-        let mut row = if let Some(pending) = pending {
-            create_skeleton_row(pending.name(), skeleton, in_switch, left_w)
-        } else {
-            create_row(selected, in_switch, left_w)
-        };
-        if pending.is_none() && in_switch && !selected {
+        let mut row = create_row(selected, in_switch, left_w);
+        if in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);

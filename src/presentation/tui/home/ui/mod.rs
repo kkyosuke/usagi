@@ -39,7 +39,7 @@ use chrome::{
 };
 use focus_menu::{focus_menu_body, focus_prompt_body};
 use panes::right_pane_contents;
-use sidebar::{group_inline_insert_line, left_pane};
+use sidebar::{group_inline_insert_line_with_pending, left_pane};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use tabs_hit::{
     attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
@@ -49,7 +49,7 @@ pub(super) use pr_popup::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
 pub(super) use pr_popup::{pr_popup_click, PopupClick};
 
-use super::state::{HomeState, ModalSize, Mode, WorktreeList};
+use super::state::{HomeState, ModalSize, Mode, PendingSession, WorktreeList};
 use super::tasks::{TaskKind, TaskRow};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
@@ -287,8 +287,19 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows {
         return None;
     }
-    let scroll = sidebar::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
-    sidebar::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
+    let scroll = sidebar::sidebar_scroll_with_pending(
+        state.list(),
+        state.sidebar() == Sidebar::Full,
+        body_rows,
+        state.pending_sessions(),
+    );
+    sidebar::sidebar_row_at_line_for_sidebar_with_pending(
+        state.list(),
+        line,
+        state.sidebar(),
+        scroll,
+        state.pending_sessions(),
+    )
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -809,9 +820,20 @@ fn left_column(
             // `left_pane` draws each workspace's own persistent "+ new session"
             // affordance; while the input is open it *becomes* the targeted
             // workspace's affordance, so [`place_create_rows`] replaces that row.
-            let scroll = sidebar::sidebar_scroll(state.list(), true, body_rows);
+            let scroll = sidebar::sidebar_scroll_with_pending(
+                state.list(),
+                true,
+                body_rows,
+                state.pending_sessions(),
+            );
             let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
-            place_create_rows(&mut left, state.list(), rows, scroll);
+            place_create_rows(
+                &mut left,
+                state.list(),
+                state.pending_sessions(),
+                rows,
+                scroll,
+            );
             left.truncate(body_rows);
         }
         // The inline rename is not spliced here: unlike create (a *new* row), it
@@ -832,6 +854,7 @@ fn left_column(
 fn place_create_rows(
     column: &mut Vec<String>,
     list: &WorktreeList,
+    pending_sessions: &[PendingSession],
     rows: Vec<String>,
     scroll: usize,
 ) {
@@ -840,7 +863,8 @@ fn place_create_rows(
     let group = list.selected_group();
     // The create row's line is a full-column line; the window may be scrolled, so
     // pull it back into the visible column the caller passed.
-    let line = group_inline_insert_line(list, group).saturating_sub(scroll);
+    let line =
+        group_inline_insert_line_with_pending(list, group, pending_sessions).saturating_sub(scroll);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);
     } else {

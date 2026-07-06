@@ -757,7 +757,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
 }
 
 #[test]
-fn left_pane_repaints_the_create_row_as_a_pending_session_skeleton() {
+fn left_pane_inserts_a_three_row_pending_session_above_the_create_row() {
     let mut state = state_with(Vec::new());
     state.set_root_path("/repo");
     state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
@@ -771,7 +771,7 @@ fn left_pane_repaints_the_create_row_as_a_pending_session_skeleton() {
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
-        6,
+        8,
         true,
         Sidebar::Full,
         chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
@@ -779,9 +779,93 @@ fn left_pane_repaints_the_create_row_as_a_pending_session_skeleton() {
             .with_timezone(&Utc),
         None,
     );
-    let create = console::strip_ansi_codes(&lines[4]);
-    assert!(create.contains("+ newx"));
-    assert!(!create.contains("+ new session"));
+    let name = console::strip_ansi_codes(&lines[4]);
+    let detail = console::strip_ansi_codes(&lines[5]);
+    let resource = console::strip_ansi_codes(&lines[6]);
+    let create = console::strip_ansi_codes(&lines[7]);
+    assert!(name.contains("newx"));
+    assert!(detail.contains("creating session"));
+    assert!(resource.contains("0%"));
+    assert!(resource.contains("0MB"));
+    assert!(create.contains("+ new session"));
+}
+
+#[test]
+fn left_pane_inserts_the_pending_session_at_the_foot_with_a_session_present() {
+    // A workspace that already has a session draws its "+ new session" row at the
+    // foot; a pending create reserves a three-line skeleton immediately above it.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        10,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    // Root(2) + divider(1) + session(3) = 6, so the pending skeleton is 6..=8
+    // and the persistent create row remains selectable at line 9.
+    assert!(console::strip_ansi_codes(&lines[6]).contains("newx"));
+    assert!(console::strip_ansi_codes(&lines[8]).contains("0MB"));
+    assert!(console::strip_ansi_codes(&lines[9]).contains("+ new session"));
+}
+
+#[test]
+fn rail_pending_session_rows_reserve_three_rows() {
+    let rows = rail_pending_session_rows(0);
+    assert_eq!(rows.len(), SESSION_ROWS);
+    assert!(console::strip_ansi_codes(&rows[0]).contains('+'));
+}
+
+#[test]
+fn rail_pane_inserts_three_pending_rows_before_the_create_slot() {
+    // The rail draws only the pulsing `+` glyph (no room for the name), so it
+    // keeps the same plain `+` affordance text while reserving the three rows a
+    // real session will occupy before the still-selectable create slot.
+    let render_rail = |state: &HomeState| {
+        left_pane(
+            state.list(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            state.pending_sessions(),
+            &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
+            30,
+            10,
+            false,
+            Sidebar::Rail,
+            Utc::now(),
+            None,
+        )
+    };
+
+    // Empty workspace: the create slot sits under the empty-message row.
+    let mut empty = state_with(Vec::new());
+    empty.set_root_path("/repo");
+    empty.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let empty_rail = render_rail(&empty);
+    assert!(console::strip_ansi_codes(&empty_rail[4]).contains('+'));
+    assert!(console::strip_ansi_codes(&empty_rail[7]).contains('+'));
+
+    // Populated workspace: the create slot sits at the foot of the sessions.
+    let mut full = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    full.set_root_path("/repo");
+    full.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let full_rail = render_rail(&full);
+    assert!(console::strip_ansi_codes(&full_rail[6]).contains('+'));
+    assert!(console::strip_ansi_codes(&full_rail[9]).contains('+'));
 }
 
 #[test]
@@ -2326,6 +2410,25 @@ fn sidebar_pr_badge_at_ignores_clicks_off_the_sidebar() {
 }
 
 #[test]
+fn pr_popup_worktree_entries_count_pending_skeletons_before_later_groups() {
+    let mut a = WorkspaceGroup::new(
+        "wsA",
+        vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+    );
+    a.set_root_path("/a");
+    let mut b = WorkspaceGroup::new("wsB", vec![worktree_with_pr(7)]);
+    b.set_root_path("/b");
+    let list = WorktreeList::from_groups(vec![a, b]);
+    let mut state = state_with(Vec::new());
+    state.begin_pending_session(PathBuf::from("/a"), "newx".to_string());
+
+    let without = full_sidebar_worktree_entries_with_pending(&list, &[]);
+    let with = full_sidebar_worktree_entries_with_pending(&list, state.pending_sessions());
+    assert_eq!(with[0], without[0]);
+    assert_eq!(with[1].1, without[1].1 + SESSION_ROWS);
+}
+
+#[test]
 fn sidebar_pr_badge_at_is_none_on_the_collapsed_rail() {
     let mut state = attached_with_pr_sidebar();
     // The rail shows no PR badge, so a click there maps to nothing.
@@ -2587,6 +2690,47 @@ fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
     assert_eq!(
         sidebar_row_at_line_for_sidebar(&list, 6, Sidebar::Rail, 0),
         Some(2)
+    );
+}
+
+#[test]
+fn sidebar_row_at_line_skips_pending_skeleton_and_maps_create_after_it() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    // root(0,1), divider(2), main(3,4,5), pending skeleton(6,7,8), create(9).
+    for line in 6..=8 {
+        assert_eq!(
+            sidebar_row_at_line_for_sidebar_with_pending(
+                state.list(),
+                line,
+                Sidebar::Full,
+                0,
+                state.pending_sessions(),
+            ),
+            None
+        );
+    }
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar_with_pending(
+            state.list(),
+            9,
+            Sidebar::Full,
+            0,
+            state.pending_sessions(),
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn group_inline_insert_line_counts_pending_skeleton_rows() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    assert_eq!(
+        group_inline_insert_line_with_pending(state.list(), 0, state.pending_sessions()),
+        9
     );
 }
 
