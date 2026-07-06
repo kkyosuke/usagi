@@ -126,6 +126,27 @@ fn blank_pane(rows: usize) -> Vec<String> {
     vec![String::new(); rows]
 }
 
+macro_rules! loading_tab_body {
+    ($width:expr, $rows:expr, $frame:expr) => {{
+        let width = $width;
+        let rows = $rows;
+        let mut pane = vec![String::new(); rows];
+        let mut block = launch_loading_block!($frame, width);
+        if !block.is_empty() {
+            let mut block_w = 0;
+            for line in &block {
+                block_w = block_w.max(console::measure_text_width(line));
+            }
+            block.push(super::center_row(
+                &style("起動中…").dim().to_string(),
+                block_w,
+            ));
+            widgets::overlay_region_centered(&mut pane, width, 0, width, 0, rows, &block);
+        }
+        pane
+    }};
+}
+
 /// Builds the 在席 (Focus) right pane. With no live panes it is a blank pane
 /// behind the session's floating action surface — the Menu or the Prompt, both
 /// composited as overlay modals by [`render_frame`] (see
@@ -163,14 +184,23 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     // A background pane loading in this session animates its chip here (the
     // resolving placeholder chip is appended to the published strip by the loop; a
     // spawned pane's chip sits at its pool index).
-    let mut lines = header_tab_rows(header, Some(&combined), state.loading_tab(), width);
+    let loading_body = state.terminal_loading_body_frame();
+    let mut lines = header_tab_rows(
+        header,
+        Some(&combined),
+        loading_body.and_then(|_| state.loading_tab()),
+        width,
+    );
 
     // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
     // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows
     // behind it here. On a pane tab, preview the pane's live screen (the snapshot
     // taken before painting) so the selection shows what re-attaching reveals,
     // falling back to a label until the first snapshot is available.
-    if !on_new {
+    if let Some(frame) = loading_body {
+        let body = rows.saturating_sub(lines.len());
+        lines.extend(loading_tab_body!(width, body, frame));
+    } else if !on_new {
         match state.terminal_view() {
             Some(view) => {
                 let body = rows.saturating_sub(lines.len());
@@ -476,20 +506,29 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     // ([`switch_tab_at`]), so they are built once in [`switch_preview_header`]
     // and shared — the strip a click lands on is exactly the one drawn here.
     let (header, live) = switch_preview_header(state);
+    let loading_body = state.terminal_loading_body_frame();
+    let live_or_loading = live || loading_body.is_some();
 
     // A live session's tabs share the header's row (the `←`/`→` — and click —
     // targets), so the identity and the tabs read together on one line; the
     // preview below mirrors the active pane.
     let mut lines = header_tab_rows(
         header,
-        if live { state.terminal_tabs() } else { None },
+        if live_or_loading {
+            state.terminal_tabs()
+        } else {
+            None
+        },
         // A background pane starting in this session animates its chip here (the
         // 切替 preview is where the user waits while it loads).
-        if live { state.loading_tab() } else { None },
+        loading_body.and_then(|_| state.loading_tab()),
         width,
     );
 
-    if live {
+    if let Some(frame) = loading_body {
+        let body = body_rows.saturating_sub(lines.len());
+        lines.extend(loading_tab_body!(width, body, frame));
+    } else if live {
         // Selecting re-attaches the running shell / agent: preview its actual
         // screen (the live snapshot taken before painting) so the choice shows
         // what re-attaching reveals. Fall back to a label until the first

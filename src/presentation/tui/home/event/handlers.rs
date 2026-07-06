@@ -6,7 +6,7 @@
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Result;
 use console::Key;
@@ -22,19 +22,9 @@ use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME}
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
-    paint_now, selected_diff, selected_dir, Flow, StartPending, Wiring, CTRL_CARET, CTRL_E, CTRL_N,
-    CTRL_O, CTRL_P, CTRL_S,
+    selected_diff, selected_dir, Flow, StartPending, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O,
+    CTRL_P, CTRL_S,
 };
-
-/// Minimum time the launch loader stays visible before a fresh pane spawn begins.
-///
-/// The home loop is about to hand control to the embedded PTY driver, so a fast
-/// spawn can otherwise replace the frame before the user perceives it. Four
-/// frames at 60ms cover this minimum and reach frame `3`, where the `run 2`
-/// loader grows from three to four rabbits (`RUN2_LOADING_GROW = 3` in `ui`).
-const LAUNCH_LOADING_MIN_VISIBLE: Duration = Duration::from_millis(180);
-/// Frame cadence for the pre-spawn launch loader.
-const LAUNCH_LOADING_FRAME_INTERVAL: Duration = Duration::from_millis(60);
 
 /// Handle one key in the workspace command palette overlay (`:`): edit /
 /// complete / recall the workspace command line and run it on `Enter`,
@@ -1368,28 +1358,20 @@ fn launch_pane(
     agent: bool,
 ) {
     let dir = selected_dir(state, wiring.workspace_root);
-    // A session with no live pane yet has no tab strip to load into, so spawn its
-    // first pane the blocking way — the centred launch rabbit owns the whole pane
-    // while the PTY starts — and attach it directly, as before.
-    if (wiring.preview)(&dir, state.sidebar()).is_none() {
-        open_pane(term, state, painter, wiring, agent, true, false);
-        return;
-    }
-    // The session already shows tabs: dispatch the pane in the background so its
-    // tab appears in the strip and animates (including while its `op://` env
-    // resolves) instead of blocking on the spawn or painting a centre loader. The
-    // event loop moves to it once ready — unless the user acts first (see
-    // [`HomeState::begin_pending_pane`]). Reusing an existing agent tab opens no new
-    // pane, so attach it right away instead.
+    // Dispatch every fresh pane through the same pending-tab path — including the
+    // first pane in an idle session. The tab appears and becomes selected
+    // immediately, its chip animates while `op://` env resolves / the PTY starts,
+    // and readiness only replaces the loading body with the live pane (it no
+    // longer selects the tab at the end). Reusing an existing agent tab opens no
+    // new pane, so attach it right away instead.
     match (wiring.start_pending_spawn)(state, &dir, agent) {
         Ok(StartPending::Pending { label }) => {
-            let epoch = wiring.interaction_epoch;
-            state.begin_pending_pane(dir, epoch, label);
-            // Close the 在席 action surface and drop back onto the current pane's
-            // tab, so its preview stays on screen with the new tab loading in the
-            // strip above it. Any keypress here cancels the auto-move (it bumps the
-            // epoch); staying in 在席 keeps the loop monitoring the launch.
-            state.focus_discard_new_tab();
+            state.begin_pending_pane(dir, label);
+            // Close the 在席 action surface and select the pending tab. If the
+            // session had no live pane yet, the event loop publishes a synthetic
+            // placeholder chip for it on the next frame; if it already had panes,
+            // the new pool tab takes over the selected slot once spawned.
+            state.focus_select_active_pane_tab();
             state.close_focus_action_over_pane();
         }
         Ok(StartPending::Reused) => reattach_pane(term, state, painter, wiring),
@@ -1398,10 +1380,10 @@ fn launch_pane(
 }
 
 /// Re-attach (没入) the focused session's active pane, skipping the launch loader
-/// (the pane is already live). Used when a background launch reused an existing
-/// tab (no new pane to load), and by the event loop when a loading tab becomes
-/// ready and the user has not acted — the pool has just made that pane active, so
-/// this drives it.
+/// (the pane is already live). Used when a pending launch reused an existing tab
+/// (no new pane to load), and by the event loop when the selected loading tab
+/// becomes ready — the pool already made that pane active when it spawned, so this
+/// drives it.
 pub(super) fn reattach_pane(
     term: &Term,
     state: &mut HomeState,
@@ -1409,49 +1391,6 @@ pub(super) fn reattach_pane(
     wiring: &mut Wiring,
 ) {
     open_pane(term, state, painter, wiring, false, false, true);
-}
-
-/// Number of paint calls required to keep a transient loader visible for at
-/// least `min_visible`. The first frame is immediate; each additional frame is
-/// separated by `interval`, so `180ms / 60ms` needs four paints at
-/// 0/60/120/180ms.
-fn launch_loading_frame_count(min_visible: Duration, interval: Duration) -> usize {
-    if interval.is_zero() {
-        return 1;
-    }
-    let intervals = min_visible
-        .as_nanos()
-        .saturating_add(interval.as_nanos().saturating_sub(1))
-        / interval.as_nanos();
-    usize::try_from(intervals)
-        .unwrap_or(usize::MAX)
-        .saturating_add(1)
-        .max(1)
-}
-
-fn wait_launch_loading_frame() {
-    std::thread::sleep(LAUNCH_LOADING_FRAME_INTERVAL);
-}
-
-/// Paint the launch loader for a short minimum window before entering a fresh
-/// pane. This guarantees the indicator is perceptible even when the PTY starts
-/// quickly, while the already-painted final frame remains on screen during any
-/// subsequent blocking spawn work.
-fn paint_launch_loading(
-    term: &Term,
-    painter: &mut FramePainter,
-    state: &mut HomeState,
-    label: &str,
-) {
-    let frames =
-        launch_loading_frame_count(LAUNCH_LOADING_MIN_VISIBLE, LAUNCH_LOADING_FRAME_INTERVAL);
-    for frame in 0..frames {
-        state.step_loading(label);
-        let _ = paint_now(term, painter, state);
-        if frame + 1 < frames {
-            wait_launch_loading_frame();
-        }
-    }
 }
 
 /// Open the embedded terminal pane (没入) for the focused session and run it
@@ -1477,9 +1416,6 @@ fn paint_launch_loading(
 /// - [`PaneExit::Quit`] — `Ctrl-Q`: leave the pane and raise the quit-confirmation
 ///   modal on the home screen (every pane stays alive in the pool until confirmed).
 ///
-/// `known_live` means the caller already proved that the focused session has a
-/// live pane (typically via a preview snapshot). Re-attaching that pane should
-/// avoid both the loading frame and a second preview snapshot.
 fn open_pane(
     term: &Term,
     state: &mut HomeState,
@@ -1489,34 +1425,9 @@ fn open_pane(
     new_pane: bool,
     known_live: bool,
 ) {
-    let (label, fail) = if agent {
-        ("Agent", "agent")
-    } else {
-        ("Terminal", "terminal")
-    };
+    let (label, fail) = ("Terminal", "terminal");
+    let _ = (term, agent, new_pane, known_live);
     let dir = selected_dir(state, wiring.workspace_root);
-    // Re-attaching a pane that is already live in the pool is instant — the grid
-    // is already buffered, so the pane paints over the screen in the same beat.
-    // Only a *fresh spawn* (a brand-new pane, or the session's first pane when
-    // none is live yet) blocks while the PTY and agent CLI start up. Flashing the
-    // loading indicator means painting the whole home frame for one tick; doing
-    // that on a re-attach is the visible flicker when switching sessions (the
-    // home screen blinks between the old pane and the new one), so restrict it
-    // to the spawning case where the wait is real.
-    let will_spawn = new_pane || (!known_live && (wiring.preview)(&dir, state.sidebar()).is_none());
-    if will_spawn {
-        // Spawning the PTY (and launching the agent CLI inside it) blocks for a
-        // beat; keep the right-pane-centred loading indicator visible for a
-        // short minimum window so the wait reads as deliberate, until the pane
-        // itself paints over the screen.
-        let label = if agent {
-            "エージェント起動中…"
-        } else {
-            "ターミナル起動中…"
-        };
-        paint_launch_loading(term, painter, state, label);
-        state.finish_loading();
-    }
     state.show_attached();
     let outcome = (wiring.open_terminal)(state, &dir, agent, new_pane);
     // The pane toggled `crossterm`'s raw mode around itself and ran a full-screen
@@ -1620,9 +1531,7 @@ fn open_pane(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::{launch_loading_frame_count, shift_select, Select};
+    use super::{shift_select, Select};
     use console::Key;
 
     /// Build the reassembled key for `CSI 1 ; <modifier> <letter>`.
@@ -1666,32 +1575,5 @@ mod tests {
         assert_eq!(shift_select(&seq("x", 'D')), None);
         // Shift held but the final byte is not a cursor key.
         assert_eq!(shift_select(&seq("2", 'Z')), None);
-    }
-
-    #[test]
-    fn launch_loading_frame_count_covers_the_minimum_visible_window() {
-        assert_eq!(
-            launch_loading_frame_count(Duration::from_millis(180), Duration::from_millis(60)),
-            4,
-            "frames paint at 0/60/120/180ms"
-        );
-        assert_eq!(
-            launch_loading_frame_count(Duration::from_millis(181), Duration::from_millis(60)),
-            5,
-            "round up so the elapsed window is never shorter than requested"
-        );
-        assert_eq!(
-            launch_loading_frame_count(Duration::ZERO, Duration::from_millis(60)),
-            1,
-            "even a zero-duration flash still paints once"
-        );
-    }
-
-    #[test]
-    fn launch_loading_frame_count_is_safe_with_a_zero_interval() {
-        assert_eq!(
-            launch_loading_frame_count(Duration::from_millis(180), Duration::ZERO),
-            1
-        );
     }
 }
