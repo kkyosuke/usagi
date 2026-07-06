@@ -22,6 +22,7 @@
 |---|---|
 | `usagi init` | カレントディレクトリをプロジェクトとして登録する（`.usagi/` を初期化し、グローバルレジストリ `workspaces.json` に追加） |
 | `usagi init --git <URL>` | カレントディレクトリ配下に `<リポジトリ名>/` を作成して clone し、プロジェクトとして登録する |
+| `usagi init-agent [--yes]` | AI エージェント用の設定ファイル（`CLAUDE.md`, `.clinerules`, `.aider.conf.yml`）をプロジェクトの言語/構成に応じて自動生成する（`--yes` または `-y` で上書き確認をスキップ） |
 | `usagi` / `usagi hop` | メインの TUI を起動する。起動画面 → プロジェクト選択 → ホーム画面へ遷移（[design/](../design/README.md)）。サブコマンドを省略した `usagi` は `usagi hop` と同じ |
 | `usagi run [N]` | うさぎアニメを全画面で再生して見るギャラリー。`N`（1–5）で種類を選ぶ（既定 1）。なにかキーで終了 |
 | `usagi icon [view]` | 正方形ピクセルで組んだうさぎマークをブロック文字（`█▀▄▘▝▖▗…`）で標準出力に印字する。`view`（`all` / `flip` / `half`、既定 `all`）で表示を選ぶ（下記） |
@@ -47,6 +48,14 @@
 - `.usagi/` を初期化し、グローバルレジストリ `~/.usagi/workspaces.json` にエントリを追加。
 - `.usagi/.gitignore` を生成してローカル状態を無視する設定を自己完結で書き込む（ただし共有対象の `.usagi/issues/` は追跡。リポジトリルートの `.gitignore` は汚さない。詳細は [data/02-workspace.md](../data/02-workspace.md#保存場所)）。
 - `--git <URL>` 指定時は、カレントディレクトリ配下に `<リポジトリ名>/` を作って `git clone` してから登録。`<URL>` は `https` / `http` / `ssh` / `git` スキームと scp 形式（`git@host:owner/repo.git`）のみ許可し、コマンド実行につながる git リモートヘルパー（`ext::` など）や `file://` は拒否する。
+
+### `usagi init-agent`
+
+AI エージェント用の設定ファイル（`CLAUDE.md` / `.clinerules` / `.aider.conf.yml`）をプロジェクトディレクトリに自動生成する。
+
+- プロジェクト内のファイル（`Cargo.toml`, `package.json`, `requirements.txt` など）を走査して主要な開発言語を自動検出し、その言語に応じた推奨のビルド・テスト・Lint・フォーマット用のコマンドおよびガイドラインを初期設定する。
+- すでに設定ファイルが存在する場合は、ファイルごとに上書き確認を行う。
+- `--yes`（または `-y`）オプションを指定すると、既存ファイルを上書き確認なしで強制的に上書きする。
 
 ### `usagi hop`
 

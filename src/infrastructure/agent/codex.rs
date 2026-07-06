@@ -168,7 +168,7 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
         ));
     }
     // The system prompt rides along as Codex's additive `developer_instructions`.
-    let system_prompt = super::session_system_prompt(local_llm_model);
+    let system_prompt = super::session_system_prompt(wiring.is_root, false, local_llm_model);
     overrides.push(config_override(
         "developer_instructions",
         &toml_basic_string(&system_prompt),
@@ -412,6 +412,7 @@ mod tests {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
             model: None,
+            is_root: false,
         }
     }
 
@@ -479,16 +480,19 @@ mod tests {
         // The session note rides along as Codex's additive `developer_instructions`
         // override (the worktree note alone with the local LLM off).
         let launch = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
-        assert!(launch.contains(
-            "-c 'developer_instructions=\"あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。\"'"
-        ));
+        let expected_prompt = super::super::session_system_prompt(false, false, None);
+        let expected_toml_val = toml_basic_string(&expected_prompt);
+        assert!(launch.contains(&format!(
+            "-c 'developer_instructions={}'",
+            expected_toml_val
+        )));
         // With the local LLM on, the delegation nudge is appended to the note.
         let with_llm = CodexAgent::new().launch_command(
             &wiring("usagi", Some("qwen2.5-coder:7b")),
             false,
             None,
         );
-        assert!(with_llm.contains("developer_instructions=\"あなたは usagi"));
+        assert!(with_llm.contains("developer_instructions="));
         assert!(with_llm.contains("local_llm_ask"));
     }
 

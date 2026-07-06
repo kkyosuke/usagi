@@ -1,5 +1,6 @@
 // Business entities (no external dependencies) live here.
 pub mod agent;
+pub mod agent_config;
 pub mod agent_feature;
 pub mod agent_phase;
 pub mod frontmatter;

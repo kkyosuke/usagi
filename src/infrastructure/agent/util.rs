@@ -140,6 +140,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -182,6 +183,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: Some("qwen2.5-coder".to_string()),
             model: None,
+            is_root: false,
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -212,6 +214,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -232,6 +235,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -254,6 +258,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -277,6 +282,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         let err = update_mcp_config(&config_path, &wiring).unwrap_err();
@@ -290,6 +296,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         let err = update_mcp_config(temp_dir.path(), &wiring).unwrap_err();
@@ -302,6 +309,7 @@ mod tests {
             usagi_bin: "/bin/usagi".to_string(),
             local_llm_model: None,
             model: None,
+            is_root: false,
         };
 
         let err = update_mcp_config(Path::new(""), &wiring).unwrap_err();

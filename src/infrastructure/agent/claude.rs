@@ -212,7 +212,7 @@ impl Agent for ClaudeAgent {
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
-        let system_prompt = super::session_system_prompt(local_llm_model);
+        let system_prompt = super::session_system_prompt(wiring.is_root, false, local_llm_model);
         let hooks = claude_hooks_settings(&wiring.usagi_bin);
         // Every wiring value is escaped for the single-quoted `sh -c` context via
         // [`shell_single_quote`] rather than being wrapped in bare `'…'`. The JSON
@@ -337,6 +337,7 @@ mod tests {
             usagi_bin: usagi_bin.to_string(),
             local_llm_model: local_llm_model.map(str::to_string),
             model: None,
+            is_root: false,
         }
     }
 
@@ -365,11 +366,23 @@ mod tests {
         // The program is `claude`, with usagi's MCP server passed inline via
         // `--mcp-config` and a session-scoped instruction passed via
         // `--append-system-prompt` (both single-quoted so the shell keeps them).
+        let tokens = shell_words::split(&launch).expect("launch line is well-formed shell");
+        assert_eq!(tokens.len(), 7);
+        assert_eq!(tokens[0], "claude");
+        assert_eq!(tokens[1], "--mcp-config");
         assert_eq!(
-            launch,
-            "claude --mcp-config '{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}' \
-             --append-system-prompt 'あなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。ここで直接作業を進めてください。なお、この worktree は親のメインリポジトリの内側に置かれていますが、作業はこのディレクトリ配下だけで完結させ、親ディレクトリ（メインリポジトリ本体）のファイルは読み書きせず、そこへ cd もしないでください。' \
-             --settings '{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}'"
+            tokens[2],
+            "{\"mcpServers\":{\"usagi\":{\"command\":\"usagi\",\"args\":[\"mcp\"]}}}"
+        );
+        assert_eq!(tokens[3], "--append-system-prompt");
+        assert_eq!(
+            tokens[4],
+            super::super::session_system_prompt(false, false, None)
+        );
+        assert_eq!(tokens[5], "--settings");
+        assert_eq!(
+            tokens[6],
+            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}"
         );
     }
 

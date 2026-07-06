@@ -3,6 +3,7 @@ pub mod agent_phase;
 pub mod doctor;
 pub mod font;
 pub mod history;
+pub mod init_agent;
 pub mod issue;
 pub mod local_llm;
 pub mod memory;
