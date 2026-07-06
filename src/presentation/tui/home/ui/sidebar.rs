@@ -1039,10 +1039,10 @@ pub(super) fn skeleton_frame(now: DateTime<Utc>) -> usize {
 /// It occupies the same three rows as a real session — name, detail, resource —
 /// so the list is already at the final height before the worker finishes and the
 /// real row lands. The name shimmers with the same wave as loading tab chips,
-/// the detail row is a neutral shimmer bar (no status wording), and the third
-/// row keeps the CPU/MEM field visible (at the default zero sample) with the
-/// same left-to-right shimmer so the placeholder has the exact shape of a
-/// session entry.
+/// the detail row is intentionally blank (height only), and the third row keeps
+/// the CPU/MEM field visible (at the default zero sample) with the same
+/// left-to-right shimmer so the placeholder has the exact shape of a session
+/// entry.
 pub(super) fn pending_session_rows(
     name: &str,
     frame: usize,
@@ -1059,10 +1059,9 @@ pub(super) fn pending_session_rows(
     let name = pad_to_width(wave, name_width);
     let status_tag = label_cell(None, label_col);
     let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
-    let detail = widgets::shimmer_bar(detail_width, frame);
     let line2 = detail_line(
         &session_gutter_cell(false, false, in_switch, 1),
-        clip_to_width(&detail, detail_width),
+        String::new(),
     );
     let resource = widgets::shimmer_text(
         &clip_to_width(
