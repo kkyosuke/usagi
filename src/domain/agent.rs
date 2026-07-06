@@ -78,6 +78,12 @@ pub trait Agent: Send + Sync {
     /// argument. Lifecycle hooks are deliberately omitted: a headless run reports
     /// no interactive phase, so there is nothing for usagi to watch.
     fn headless_command(&self, wiring: &AgentWiring, prompt: &str) -> String;
+
+    /// Setup or configure any external state needed by this agent before it launches.
+    /// Returns `Ok(())` on success, or an error message.
+    fn provision(&self, _wiring: &AgentWiring) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// usagi's wiring policy handed to an [`Agent`] adapter when it builds the launch

@@ -283,4 +283,28 @@ mod tests {
         assert!(!updated.mascot_animation_enabled);
         assert!(!load(&storage).unwrap().mascot_animation_enabled);
     }
+
+    #[test]
+    fn other_global_setters_persist_their_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().join("global"));
+
+        // Default workspace
+        let updated = set_default_workspace(&storage, Some("ws".to_string())).unwrap();
+        assert_eq!(updated.default_workspace.as_deref(), Some("ws"));
+        assert_eq!(
+            load(&storage).unwrap().default_workspace.as_deref(),
+            Some("ws")
+        );
+
+        // Notifications
+        let updated = set_notifications_enabled(&storage, false).unwrap();
+        assert!(!updated.notifications_enabled);
+        assert!(!load(&storage).unwrap().notifications_enabled);
+
+        // Agent CLI
+        let updated = set_agent_cli(&storage, AgentCli::Gemini).unwrap();
+        assert_eq!(updated.agent_cli, AgentCli::Gemini);
+        assert_eq!(load(&storage).unwrap().agent_cli, AgentCli::Gemini);
+    }
 }

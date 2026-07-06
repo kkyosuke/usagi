@@ -6,6 +6,7 @@
 //! agent presence report. The probe goes through [`CommandRunner`] so callers can
 //! test it without shelling out.
 
+use crate::domain::agent_feature::{self, AgentFeature, Support};
 use crate::domain::settings::AgentCli;
 use crate::usecase::doctor::CommandRunner;
 
@@ -15,6 +16,15 @@ pub fn available_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
     AgentCli::ALL
         .into_iter()
         .filter(|cli| runner.available(cli.command()))
+        .collect()
+}
+
+/// The agent CLIs whose launch command is available on the PATH, and which
+/// support usagi's MCP server integration.
+pub fn mcp_capable_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
+    available_clis(runner)
+        .into_iter()
+        .filter(|cli| agent_feature::support(*cli, AgentFeature::Mcp) == Support::Yes)
         .collect()
 }
 
@@ -71,5 +81,14 @@ mod tests {
         assert!(runner.run("x", &[]).unwrap());
         assert!(runner.check("x", &[]));
         assert!(runner.spawn("x", &[]).is_ok());
+    }
+
+    #[test]
+    fn mcp_capable_clis_filters_to_installed_and_mcp_supported() {
+        let runner = FakeRunner(vec!["claude", "codex", "gemini"]);
+        assert_eq!(
+            mcp_capable_clis(&runner),
+            vec![AgentCli::Claude, AgentCli::Codex, AgentCli::Gemini]
+        );
     }
 }

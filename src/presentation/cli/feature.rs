@@ -173,13 +173,21 @@ mod tests {
     #[test]
     fn render_shows_the_matrix_support_per_cli() {
         let lines = render();
-        // Claude's MCP row cell is yes; Gemini's is no — the row carries both.
+        // Claude and Gemini both support MCP now, so the MCP row has no no-cell.
         let mcp_row = lines
             .iter()
             .find(|line| line.contains(AgentFeature::Mcp.label()))
             .unwrap();
         assert!(mcp_row.contains(&feature_cell(Support::Yes)));
-        assert!(mcp_row.contains(&feature_cell(Support::No)));
+        assert!(!mcp_row.contains(&feature_cell(Support::No)));
+
+        // Phase reporting is yes for Claude, but no for Gemini.
+        let phase_row = lines
+            .iter()
+            .find(|line| line.contains(AgentFeature::PhaseReporting.label()))
+            .unwrap();
+        assert!(phase_row.contains(&feature_cell(Support::Yes)));
+        assert!(phase_row.contains(&feature_cell(Support::No)));
 
         // Gemini's resume row is supported, so that row has no no-cell — every
         // column is yes.

@@ -917,6 +917,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // `Ctrl-O a` agent tabs never re-sends that one-shot prompt, so only the
             // first launch receives it.
             let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            let _ = agent.provision(&launch_wiring);
             let spawn_command = agent.launch_command(&launch_wiring, resume, spawn_prompt);
             let plain_command = match spawn_prompt {
                 Some(_) => agent.launch_command(&launch_wiring, resume, None),
@@ -1231,6 +1232,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
             }
             let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            if run_agent {
+                let _ = agent.provision(&launch_wiring);
+            }
             let (kind, agent_command, chip) = if run_agent {
                 (
                     terminal::tabs::PaneKind::Agent,
@@ -1739,6 +1743,7 @@ fn restore_open_panes(
                     // where it left off rather than starting over.
                     let resume = agent.has_resumable_session(&dir);
                     let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
+                    let _ = agent.provision(&launch_wiring);
                     let command = agent.launch_command(&launch_wiring, resume, None);
                     pool.borrow_mut().add_pane(
                         term,
@@ -1871,6 +1876,7 @@ fn autostart_queued_prompts(
         // else start fresh; the queued prompt is the opening message either way.
         let resume = agent.has_resumable_session(&dir);
         let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
+        let _ = agent.provision(&launch_wiring);
         let command = agent.launch_command(&launch_wiring, resume, Some(&prompt));
         let ws_root = crate::usecase::session::workspace_root(&dir);
         let pane_env = env_by_root

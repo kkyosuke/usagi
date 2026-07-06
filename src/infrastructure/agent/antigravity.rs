@@ -51,6 +51,16 @@ fn antigravity_history_path() -> Option<PathBuf> {
     })
 }
 
+/// Where Antigravity looks for its MCP configuration:
+/// `~/.gemini/antigravity-cli/mcp_config.json`.
+fn antigravity_mcp_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| {
+        home.join(".gemini")
+            .join("antigravity-cli")
+            .join("mcp_config.json")
+    })
+}
+
 /// The `workspace` path recorded on a single `history.jsonl` line, or `None` when
 /// the line is not JSON or has no string `workspace` field (so malformed lines are
 /// ignored rather than aborting the scan).
@@ -172,7 +182,7 @@ impl Agent for AntigravityAgent {
         // launch, the MCP/hooks wiring is not rendered — `agy` exposes no inline
         // flag for it, so a headless run works with git and the filesystem alone;
         // only the model (when pinned) is wired. No interactive person is present,
-        // so `--dangerously-skip-permissions` auto-approves every tool request to
+        // so `--dangerously-skip-permission` auto-approves every tool request to
         // let it act without prompting. As in the interactive launch, the session
         // worktree note leads the prompt (there is no system-prompt flag to carry
         // it), so a headless run also stays confined to its worktree; the combined
@@ -199,6 +209,11 @@ impl Agent for AntigravityAgent {
         if let Some(history) = antigravity_history_path() {
             forget_session_in(&history, dir);
         }
+    }
+
+    fn provision(&self, wiring: &AgentWiring) -> Result<(), String> {
+        antigravity_mcp_config_path()
+            .map_or(Ok(()), |path| super::util::update_mcp_config(&path, wiring))
     }
 }
 
@@ -346,7 +361,7 @@ mod tests {
     #[test]
     fn headless_command_runs_print_mode_with_auto_approval() {
         // The headless command runs `agy` non-interactively (`-p <prompt>`) with
-        // `--dangerously-skip-permissions` auto-approving every tool request, so the
+        // `--dangerously-skip-permission` auto-approving every tool request, so the
         // background agent acts without prompting. The worktree note leads the prompt
         // (no system-prompt flag carries it), so the run stays in its worktree. The
         // wiring is not rendered (`agy` has no inline flag for it), so no MCP config.
@@ -477,5 +492,51 @@ mod tests {
         let agent = AntigravityAgent::new();
         assert!(!agent.has_resumable_session(Path::new("/nonexistent/usagi/worktree")));
         agent.forget_session(Path::new("/nonexistent/usagi/worktree"));
+    }
+
+    #[test]
+    fn test_provision_writes_mcp_config() {
+        let _guard = crate::test_support::process_env_guard();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+
+        let agent = AntigravityAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+            is_root: false,
+        };
+
+        agent.provision(&wiring).unwrap();
+
+        let expected_path = temp_dir
+            .path()
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("mcp_config.json");
+        assert!(expected_path.exists());
+        let contents = std::fs::read_to_string(&expected_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+    }
+
+    #[test]
+    fn test_provision_reports_mcp_config_write_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+        std::fs::write(temp_dir.path().join(".gemini"), "not a dir").unwrap();
+
+        let agent = AntigravityAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+            is_root: false,
+        };
+
+        let err = agent.provision(&wiring).unwrap_err();
+        assert!(err.contains("failed to create directories"), "{err}");
     }
 }
