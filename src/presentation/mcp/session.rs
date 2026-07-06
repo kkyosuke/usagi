@@ -117,30 +117,12 @@ pub(crate) fn resolve_session_agent(
                 )
             })?;
 
-            // 1. Verify MCP capability
-            if matches!(
-                crate::domain::agent_feature::support(
-                    parsed,
-                    crate::domain::agent_feature::AgentFeature::Mcp
-                ),
-                crate::domain::agent_feature::Support::No
-            ) {
-                let capable = crate::usecase::agent::mcp_capable_clis(runner);
+            let capable = crate::usecase::agent::mcp_capable_clis(runner);
+            if !capable.contains(&parsed) {
                 let capable_names: Vec<String> =
                     capable.iter().map(|c| c.command().to_string()).collect();
                 return Err(format!(
-                    "agent_cli {name:?} is not MCP-capable: usagi delegation requires an MCP-capable agent. \
-                     Available installed MCP-capable agents: {capable_names:?}"
-                ));
-            }
-
-            // 2. Verify installation
-            if !runner.available(parsed.command()) {
-                let capable = crate::usecase::agent::mcp_capable_clis(runner);
-                let capable_names: Vec<String> =
-                    capable.iter().map(|c| c.command().to_string()).collect();
-                return Err(format!(
-                    "agent_cli {name:?} is not installed. \
+                    "agent_cli {name:?} is not installed or not MCP-capable. \
                      Available installed MCP-capable agents: {capable_names:?}"
                 ));
             }
@@ -1010,8 +992,16 @@ mod tests {
     fn resolve_session_agent_rejects_uninstalled_cli() {
         let runner = FakeRunner(vec!["claude"]);
         let err = resolve_session_agent(&runner, Some("codex"), None).unwrap_err();
-        assert!(err.contains("is not installed"), "{err}");
+        assert!(err.contains("not installed or not MCP-capable"), "{err}");
         assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn fake_runner_non_probe_methods_are_inert() {
+        let runner = FakeRunner(vec![]);
+        assert!(runner.run("x", &[]).unwrap());
+        assert!(runner.check("x", &[]));
+        assert!(runner.spawn("x", &[]).is_ok());
     }
 
     #[test]

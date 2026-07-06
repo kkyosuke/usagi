@@ -33,13 +33,16 @@ pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
 /// Write or merge usagi's MCP server configuration into the JSON file at `path`.
 pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create directories for MCP config: {e}"))?;
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return Err(format!("failed to create directories for MCP config: {e}"));
+        }
     }
 
     let mut config: serde_json::Value = if path.exists() {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| format!("failed to read MCP config: {e}"))?;
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) => return Err(format!("failed to read MCP config: {e}")),
+        };
         serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -59,31 +62,34 @@ pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(),
         *mcp_servers = serde_json::json!({});
     }
 
-    if let Some(servers_obj) = mcp_servers.as_object_mut() {
+    let servers_obj = mcp_servers
+        .as_object_mut()
+        .expect("mcpServers is forced to an object above");
+    servers_obj.insert(
+        "usagi".to_string(),
+        serde_json::json!({
+            "command": wiring.usagi_bin,
+            "args": ["mcp"]
+        }),
+    );
+
+    if let Some(ref model) = wiring.local_llm_model {
         servers_obj.insert(
-            "usagi".to_string(),
+            "usagi-llm".to_string(),
             serde_json::json!({
                 "command": wiring.usagi_bin,
-                "args": ["mcp"]
+                "args": ["llm-mcp", "--model", model]
             }),
         );
-
-        if let Some(ref model) = wiring.local_llm_model {
-            servers_obj.insert(
-                "usagi-llm".to_string(),
-                serde_json::json!({
-                    "command": wiring.usagi_bin,
-                    "args": ["llm-mcp", "--model", model]
-                }),
-            );
-        } else {
-            servers_obj.remove("usagi-llm");
-        }
+    } else {
+        servers_obj.remove("usagi-llm");
     }
 
-    let serialized = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("failed to serialize MCP config: {e}"))?;
-    std::fs::write(path, serialized).map_err(|e| format!("failed to write MCP config: {e}"))?;
+    let serialized =
+        serde_json::to_string_pretty(&config).expect("serializing a serde_json::Value cannot fail");
+    if let Err(e) = std::fs::write(path, serialized) {
+        return Err(format!("failed to write MCP config: {e}"));
+    }
 
     Ok(())
 }
@@ -215,5 +221,90 @@ mod tests {
 
         assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
         assert!(val["mcpServers"]["usagi-llm"].is_null());
+    }
+
+    #[test]
+    fn test_update_mcp_config_replaces_non_object_roots() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::fs::write(&config_path, "[]").unwrap();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        update_mcp_config(&config_path, &wiring).unwrap();
+
+        let val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+    }
+
+    #[test]
+    fn test_update_mcp_config_replaces_non_object_mcp_servers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({"mcpServers": "not an object"}).to_string(),
+        )
+        .unwrap();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        update_mcp_config(&config_path, &wiring).unwrap();
+
+        let val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(val["mcpServers"].is_object());
+        assert_eq!(
+            val["mcpServers"]["usagi"]["args"],
+            serde_json::json!(["mcp"])
+        );
+    }
+
+    #[test]
+    fn test_update_mcp_config_reports_parent_creation_errors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_parent = temp_dir.path().join("not-a-dir");
+        std::fs::write(&file_parent, "x").unwrap();
+        let config_path = file_parent.join("config.json");
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        let err = update_mcp_config(&config_path, &wiring).unwrap_err();
+        assert!(err.contains("failed to create directories"), "{err}");
+    }
+
+    #[test]
+    fn test_update_mcp_config_reports_read_errors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        let err = update_mcp_config(temp_dir.path(), &wiring).unwrap_err();
+        assert!(err.contains("failed to read MCP config"), "{err}");
+    }
+
+    #[test]
+    fn test_update_mcp_config_reports_write_errors_without_a_parent() {
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        let err = update_mcp_config(Path::new(""), &wiring).unwrap_err();
+        assert!(err.contains("failed to write MCP config"), "{err}");
     }
 }

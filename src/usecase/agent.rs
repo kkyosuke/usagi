@@ -23,6 +23,9 @@ pub fn available_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
 /// support usagi's MCP server integration.
 pub fn mcp_capable_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
     available_clis(runner)
+        .into_iter()
+        .filter(|cli| agent_feature::support(*cli, AgentFeature::Mcp) == Support::Yes)
+        .collect()
 }
 
 #[cfg(test)]

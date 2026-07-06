@@ -210,10 +210,8 @@ impl Agent for AntigravityAgent {
     }
 
     fn provision(&self, wiring: &AgentWiring) -> Result<(), String> {
-        if let Some(path) = antigravity_mcp_config_path() {
-            super::util::update_mcp_config(&path, wiring)?;
-        }
-        Ok(())
+        antigravity_mcp_config_path()
+            .map_or(Ok(()), |path| super::util::update_mcp_config(&path, wiring))
     }
 }
 
@@ -488,6 +486,7 @@ mod tests {
 
     #[test]
     fn test_provision_writes_mcp_config() {
+        let _guard = crate::test_support::process_env_guard();
         let temp_dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", temp_dir.path());
 
@@ -509,5 +508,23 @@ mod tests {
         let contents = std::fs::read_to_string(&expected_path).unwrap();
         let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+    }
+
+    #[test]
+    fn test_provision_reports_mcp_config_write_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+        std::fs::write(temp_dir.path().join(".gemini"), "not a dir").unwrap();
+
+        let agent = AntigravityAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        let err = agent.provision(&wiring).unwrap_err();
+        assert!(err.contains("failed to create directories"), "{err}");
     }
 }
