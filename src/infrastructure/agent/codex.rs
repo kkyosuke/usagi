@@ -26,9 +26,13 @@
 //!   `--sandbox workspace-write --ask-for-approval on-request`, so tool calls
 //!   auto-run inside Codex's workspace sandbox and the model only escalates for
 //!   approval when it needs to step outside that sandbox, instead of prompting on
-//!   every command or edit. (Codex dropped the older `--full-auto` shorthand for
-//!   this pair.) Headless runs use Codex's stronger
-//!   `--dangerously-bypass-approvals-and-sandbox` because no user is present.
+//!   every command or edit. usagi's data directory (`$USAGI_HOME` or
+//!   `~/.usagi`) is added to Codex's `writable_roots`, because the bundled MCP
+//!   server stores prompt queues, agent phases, and other orchestration state
+//!   there even when the agent itself works in a session worktree. (Codex
+//!   dropped the older `--full-auto` shorthand for this pair.) Headless runs use
+//!   Codex's stronger `--dangerously-bypass-approvals-and-sandbox` because no
+//!   user is present.
 //!
 //! When a worktree has a prior Codex conversation, the launch resumes it
 //! (`codex resume --last`, which Codex filters to the current directory) so
@@ -77,6 +81,7 @@ const HOOK_PHASES: [(&str, &str); 6] = [
 /// per-tool MCP confirmation prompt while leaving shell command approval policy
 /// untouched.
 const USAGI_MCP_APPROVAL_MODE: &str = "approve";
+const SANDBOX_WRITABLE_ROOTS_KEY: &str = "sandbox_workspace_write.writable_roots";
 
 /// Render `text` as a TOML basic string (double-quoted), escaping the backslash
 /// and double-quote that TOML treats specially. Used for the hook command and the
@@ -101,6 +106,29 @@ fn dash_c(assignment: &str) -> String {
 /// because it must parse as a list.
 fn config_override(key: &str, value: &str) -> String {
     dash_c(&format!("{key}={value}"))
+}
+
+/// A `-c sandbox_workspace_write.writable_roots=[…]` override that lets an
+/// attended Codex session write usagi's own data directory while keeping the
+/// rest of `--sandbox workspace-write` in force.
+fn sandbox_writable_roots_override(data_dir: &Path) -> String {
+    let data_dir = data_dir.to_string_lossy();
+    config_override(
+        SANDBOX_WRITABLE_ROOTS_KEY,
+        &format!("[{}]", toml_basic_string(data_dir.as_ref())),
+    )
+}
+
+/// Resolve usagi's data dir and render the Codex writable-roots override.
+///
+/// `storage::data_dir` honours `$USAGI_HOME` and otherwise falls back to
+/// `~/.usagi`. If the home directory cannot be resolved, keep launching Codex
+/// rather than failing session startup; the MCP calls that need persistence will
+/// then report their own errors.
+fn resolved_sandbox_writable_roots_override() -> Option<String> {
+    crate::infrastructure::storage::data_dir()
+        .ok()
+        .map(|dir| sandbox_writable_roots_override(&dir))
 }
 
 /// The Codex config overrides for one usagi-owned MCP server. Besides transport
@@ -339,6 +367,9 @@ impl Agent for CodexAgent {
                 "on-request".to_string(),
             ]
         };
+        if let Some(writable_roots) = resolved_sandbox_writable_roots_override() {
+            parts.push(writable_roots);
+        }
         // An explicit model rides in as Codex's `-m`; absent, Codex uses its own
         // configured default.
         parts.extend(model_flag_parts(wiring));
@@ -414,6 +445,32 @@ mod tests {
             model: None,
             is_root: false,
         }
+    }
+
+    #[test]
+    fn sandbox_writable_roots_override_renders_a_toml_string_array() {
+        assert_eq!(
+            sandbox_writable_roots_override(Path::new("/Users/usagi/.usagi")),
+            r#"-c 'sandbox_workspace_write.writable_roots=["/Users/usagi/.usagi"]'"#
+        );
+        assert_eq!(
+            sandbox_writable_roots_override(Path::new(r#"/tmp/usagi "home"/dir\leaf"#)),
+            r#"-c 'sandbox_workspace_write.writable_roots=["/tmp/usagi \"home\"/dir\\leaf"]'"#
+        );
+    }
+
+    #[test]
+    fn interactive_launches_add_usagi_data_dir_to_writable_roots() {
+        let expected = resolved_sandbox_writable_roots_override().unwrap();
+
+        let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
+        assert!(fresh.contains(&expected), "{fresh}");
+
+        let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
+        assert!(resumed.contains(&expected), "{resumed}");
+
+        let headless = CodexAgent::new().headless_command(&wiring("usagi", None), "clean up");
+        assert!(!headless.contains(SANDBOX_WRITABLE_ROOTS_KEY), "{headless}");
     }
 
     #[test]
