@@ -151,7 +151,7 @@ fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
         Outcome::Quit
     ));
     assert_eq!(*opened.borrow(), 1);
-    assert_eq!(*new_pane_seen.borrow(), Some(true));
+    assert_eq!(*new_pane_seen.borrow(), Some(false));
 }
 
 #[test]

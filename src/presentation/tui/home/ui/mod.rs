@@ -17,6 +17,48 @@
 //! right-pane dispatcher; the surrounding chrome (title, ladder, input, footer,
 //! the command palette, modals) lives in [`chrome`].
 
+/// How often the loading indicator gains another rabbit.
+pub(crate) const RUN2_LOADING_GROW: usize = 3;
+/// It starts with three rabbits so it reads as the `usagi run 2` visual even
+/// though the event loop paints it only once before spawning the PTY.
+pub(crate) const RUN2_LOADING_MIN_RABBITS: usize = 3;
+/// The gallery's `usagi run 2` animation tops out at eight rabbits.
+pub(crate) const RUN2_LOADING_MAX_RABBITS: usize = 8;
+
+macro_rules! launch_loading_block {
+    ($frame:expr, $right_w:expr) => {{
+        let right_w = $right_w;
+        let mut max_count = 0usize;
+        let mut max_w = 0usize;
+        for count in (1..=$crate::presentation::tui::home::ui::RUN2_LOADING_MAX_RABBITS).rev() {
+            let block = $crate::presentation::tui::widgets::multiplying_rabbits(count);
+            let mut block_w = 0usize;
+            for line in &block {
+                block_w = block_w.max(console::measure_text_width(line));
+            }
+            if block_w <= right_w {
+                max_count = count;
+                max_w = block_w;
+                break;
+            }
+        }
+        if max_count == 0 {
+            Vec::new()
+        } else {
+            let count = $crate::presentation::tui::home::ui::RUN2_LOADING_MIN_RABBITS
+                .saturating_add($frame / $crate::presentation::tui::home::ui::RUN2_LOADING_GROW)
+                .min(max_count);
+            let block = $crate::presentation::tui::widgets::multiplying_rabbits(count);
+            let mut padded = Vec::with_capacity(block.len());
+            for row in block {
+                let row_w = console::measure_text_width(&row);
+                padded.push(format!("{row}{}", " ".repeat(max_w.saturating_sub(row_w))));
+            }
+            padded
+        }
+    }};
+}
+
 mod chrome;
 pub mod content;
 mod diff_render;
@@ -324,35 +366,6 @@ fn body_rows_for(height: usize) -> usize {
     height.saturating_sub(5).max(1)
 }
 
-/// Frames each new rabbit takes to join the `usagi run 2`-style launch loader.
-const RUN2_LOADING_GROW: usize = 3;
-/// Keep the one-frame terminal / agent launch flash recognisably "run 2" even
-/// though the event loop paints it only once before spawning the PTY.
-const RUN2_LOADING_MIN_RABBITS: usize = 3;
-/// The gallery's `usagi run 2` animation tops out at eight rabbits.
-const RUN2_LOADING_MAX_RABBITS: usize = 8;
-
-/// The launch overlay body: the same multiplying-rabbit visual as
-/// `usagi run 2`, clamped to the right pane so narrow terminals degrade to fewer
-/// rabbits instead of dropping the indicator while at least one can fit.
-fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
-    let span = RUN2_LOADING_MAX_RABBITS - RUN2_LOADING_MIN_RABBITS + 1;
-    let mut count = RUN2_LOADING_MIN_RABBITS + (frame / RUN2_LOADING_GROW) % span;
-    while count > 0 {
-        let block = widgets::multiplying_rabbits(count);
-        let block_w = block
-            .iter()
-            .map(|line| console::measure_text_width(line))
-            .max()
-            .unwrap_or(0);
-        if block_w <= right_w {
-            return block;
-        }
-        count -= 1;
-    }
-    Vec::new()
-}
-
 /// The home frame with the 1Password env-resolution indicator floated in the
 /// **centre of the right pane** — the same region and multiplying-rabbit visual
 /// [`launch_loading_block`] gives the pane launch, since resolving a pane's secret
@@ -395,7 +408,7 @@ pub fn env_resolve_loading_frame(
 /// sits under the rabbits, and `label` is clipped to `right_w` so a long label
 /// never widens the block past the pane (which would drop the whole indicator).
 fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<String> {
-    let rabbits = launch_loading_block(frame, right_w);
+    let rabbits = launch_loading_block!(frame, right_w);
     if rabbits.is_empty() {
         return Vec::new();
     }
@@ -422,7 +435,7 @@ fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<S
 /// display columns wide with its content centred — the alignment
 /// [`overlay_region_centered`] needs, since it composites each block row at a
 /// fixed column and every row must therefore span the block's full width.
-fn center_row(row: &str, width: usize) -> String {
+pub(super) fn center_row(row: &str, width: usize) -> String {
     let row_w = console::measure_text_width(row);
     let left = widgets::centered_padding(width, row_w);
     let right = width.saturating_sub(left + row_w);
@@ -631,7 +644,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // Tabs carry their own inline loading indicator (see [`panes::header_tab_rows`]),
         // so we only draw the big centred overlay if there are no tabs.
         if state.terminal_tabs().is_none_or(|s| s.labels.is_empty()) {
-            let loading_block = launch_loading_block(loading.frame(), right_w);
+            let loading_block = launch_loading_block!(loading.frame(), right_w);
             widgets::overlay_region_centered(
                 &mut lines,
                 width,

@@ -284,6 +284,18 @@ fn render_frame_keeps_the_run2_loading_over_a_live_terminal() {
 }
 
 #[test]
+fn render_frame_skips_the_big_loading_overlay_when_tabs_are_present() {
+    // Pending tabs carry loading inline in their chip/body, so the legacy
+    // full-pane loading overlay does not draw on top of an existing tab strip.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_focus(1);
+    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
+    state.step_loading("ターミナル起動中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("(｡･-･)"));
+}
+
+#[test]
 fn update_notice_is_skipped_when_the_sidebar_is_too_narrow_for_the_mascot() {
     // The notice rides the sidebar mascot, which is dropped when the sidebar is
     // too narrow to hold the art — so the notice goes with it rather than
@@ -361,6 +373,39 @@ fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
     // row spans several rabbits, proving the whole `usagi run 2` block is
     // centred in the right pane rather than anchored to the far right edge.
     assert!(col < pane_mid);
+}
+
+#[test]
+fn run2_loading_grows_rightward_without_shifting_or_looping() {
+    let first = launch_loading_block!(0, 100);
+    let grown = launch_loading_block!(RUN2_LOADING_GROW * 3, 100);
+    let later = launch_loading_block!(RUN2_LOADING_GROW * 99, 100);
+    let plain_first = console::strip_ansi_codes(&first.join("\n")).into_owned();
+    let plain_grown = console::strip_ansi_codes(&grown.join("\n")).into_owned();
+    let plain_later = console::strip_ansi_codes(&later.join("\n")).into_owned();
+
+    for (before, after) in plain_first.lines().zip(plain_grown.lines()) {
+        assert!(
+            after.starts_with(before.trim_end()),
+            "existing rabbits stay anchored while new ones appear to the right"
+        );
+    }
+    assert!(
+        plain_grown.matches("(｡･-･)").count() > plain_first.matches("(｡･-･)").count(),
+        "the warren grows"
+    );
+    assert_eq!(
+        plain_later.matches("(｡･-･)").count(),
+        RUN2_LOADING_MAX_RABBITS,
+        "growth saturates at the maximum instead of looping back smaller"
+    );
+    assert!(
+        first
+            .iter()
+            .zip(grown.iter())
+            .all(|(a, b)| console::measure_text_width(a) == console::measure_text_width(b)),
+        "every frame reserves the same block width so the centred overlay is stable"
+    );
 }
 
 #[test]

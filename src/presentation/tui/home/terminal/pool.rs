@@ -660,17 +660,14 @@ impl TerminalPool {
         Ok(())
     }
 
-    /// Spawn a new pane of `kind` for `dir` **without** making it active — the
-    /// background-tab path (在席's `terminal` / `agent` when the session already
-    /// shows tabs). The new tab appears in the strip while the previously active
-    /// pane stays attached; the caller switches to it (via [`activate_pane_id`])
-    /// only once it is ready and the user has not acted in the meantime. Returns
-    /// the new pane's stable id so the caller can track / activate exactly this
-    /// pane. An agent pane sends `agent_command` once on spawn; a terminal pane
-    /// opens a plain shell.
-    ///
-    /// [`activate_pane_id`]: Self::activate_pane_id
-    pub fn add_pane_inactive(
+    /// Spawn a new pane of `kind` for `dir`, append it to the tab strip, and make
+    /// it the active tab immediately. This is the unified tab-add path used after
+    /// the launch environment has resolved: selection already belongs to the
+    /// pending tab, and spawning the real pane simply replaces the placeholder chip
+    /// with the pool-backed tab at the same selected position. Returns the pane's
+    /// stable id so the caller can keep polling exactly this launch until it
+    /// paints.
+    pub fn add_pane_selected(
         &mut self,
         term: &Term,
         dir: &Path,
@@ -684,17 +681,17 @@ impl TerminalPool {
             .entry(dir.to_path_buf())
             .or_insert_with(|| SessionPanes::new(Vec::new(), 0));
         sp.panes.push(pane);
-        // Deliberately leave `active` where it is (unlike `add_pane`): the new
-        // pane loads in the background while the current tab stays attached.
+        sp.active = sp.panes.len().saturating_sub(1);
         sp.rebuild_tab_labels();
         self.refresh_watched(dir, launch.label);
         Ok(id)
     }
 
     /// Make the pane with stable `id` the active tab for `dir`, returning whether
-    /// a pane with that id was found. The background-tab counterpart to
-    /// [`add_pane_inactive`]: once the loading pane is ready (and the user has not
-    /// acted) the caller activates it, then re-attaches the now-active pane.
+    /// a pane with that id was found. Kept for defensive re-selection just before a
+    /// ready pending pane is attached; the normal tab-add path selects the pane at
+    /// spawn time, so this should not be the point where a newly added tab first
+    /// becomes active.
     pub fn activate_pane_id(&mut self, dir: &Path, id: u64) -> bool {
         match self.sessions.get_mut(dir) {
             Some(sp) => match sp.panes.iter().position(|p| p.id == id) {
@@ -706,6 +703,16 @@ impl TerminalPool {
             },
             None => false,
         }
+    }
+
+    /// Whether the pane with stable `id` is currently the selected tab for
+    /// `dir`. Used by the pending-launch loop to decide whether a ready pane
+    /// should be attached now (still selected) or simply become an ordinary
+    /// background tab (the user selected something else while it loaded).
+    pub fn pane_is_active(&self, dir: &Path, id: u64) -> bool {
+        self.sessions
+            .get(dir)
+            .is_some_and(|sp| sp.panes.get(sp.active).is_some_and(|pane| pane.id == id))
     }
 
     /// The 0-based tab index of the pane with stable `id`, or `None` when no pane

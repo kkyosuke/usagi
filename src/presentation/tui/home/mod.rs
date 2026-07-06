@@ -166,7 +166,7 @@ fn resolve_pane_env(
 /// environment-resolver thread fills. Held on the UI thread across frames (the
 /// pool spawn is not `Send`) — the per-worktree environment (`op://` secrets)
 /// resolves off-thread so the tab bar keeps animating, and once it lands the pane
-/// is spawned inactive (its tab starts loading). See `start_pending_spawn` /
+/// is spawned as the selected tab. See `start_pending_spawn` /
 /// `poll_pending_spawn` in [`run`].
 struct PendingSpawn {
     /// Whether it opens an agent CLI pane or a plain terminal.
@@ -1154,25 +1154,26 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             result
         };
 
-    // Spawn a new pane for `dir` in the background — the 在席 `terminal` / `agent`
-    // path when the session already shows tabs — without attaching. Mirrors the
+    // Spawn a new pane for `dir` through the unified pending-tab path. Mirrors the
     // launch resolution `open_terminal` does (agent CLI choice, resume, opening
-    // prompt, per-worktree env), but pushes the pane *inactive* via
-    // `TerminalPool::add_pane_inactive` and returns its stable id so the event
-    // loop can poll it and move to it once ready. Reusing an existing agent tab
-    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
-    // returns `None` so the caller re-attaches instead of tracking a loading tab.
+    // prompt, per-worktree env), but defers the actual pool spawn until the
+    // off-thread environment resolution lands. The tab is selected at dispatch
+    // time (as a placeholder while resolving, then as a real pool tab once
+    // spawned); readiness only decides whether to attach the still-selected tab.
+    // Reusing an existing agent tab opens no new pane: it activates that tab,
+    // delivers any `ai <prompt>`, and returns `None` so the caller re-attaches
+    // instead of tracking a loading tab.
     // The single background pane launch in flight (see [`PendingSpawn`]); held on
     // the UI thread across frames and driven by the three hooks below.
     let pending_spawn = std::cell::RefCell::new(None::<PendingSpawn>);
 
-    // Dispatch a background pane launch: resolve the launch spec on the UI thread
+    // Dispatch a pending pane launch: resolve the launch spec on the UI thread
     // (consuming the one-shot agent choice / opening prompt) and kick the
     // per-worktree environment resolution off-thread, WITHOUT spawning a pane yet —
     // so nothing blocks and no centre loader is painted. `poll_pending_spawn` spawns
-    // the pane once the environment lands. Reusing an existing agent tab opens no
-    // new pane: it activates that tab, delivers any `ai <prompt>`, and returns
-    // `Reused` so the caller re-attaches instead of tracking a loading tab.
+    // the selected pane once the environment lands. Reusing an existing agent tab
+    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
+    // returns `Reused` so the caller re-attaches instead of tracking a loading tab.
     let mut start_pending_spawn =
         |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
             // CLI priority mirrors `open_terminal`: 在席 choice, then the session's
@@ -1272,7 +1273,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         };
 
     // Drive the in-flight launch one frame. While its environment is still
-    // resolving, report `Resolving`; on the frame it lands, spawn the pane inactive
+    // resolving, report `Resolving`; on the frame it lands, spawn the pane selected
     // (on this — the UI — thread, since the pool is not `Send`) and report
     // `Starting`; then `Ready` once the pane's shell has painted, or `Gone` if the
     // spawn failed / the pane vanished.
@@ -1288,7 +1289,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     return event::PendingPoll::Resolving;
                 };
                 let mut pool = pool.borrow_mut();
-                match pool.add_pane_inactive(
+                match pool.add_pane_selected(
                     term,
                     dir,
                     ps.kind,
@@ -1315,7 +1316,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     None => event::PendingPoll::Gone,
                     Some(tab) => {
                         if pool.pane_ready(dir, id) {
-                            event::PendingPoll::Ready
+                            event::PendingPoll::Ready {
+                                selected: pool.pane_is_active(dir, id),
+                            }
                         } else {
                             event::PendingPoll::Starting(tab)
                         }
@@ -1325,8 +1328,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Make the spawned background pane the active tab (so the following re-attach
-    // drives it) and consume the launch.
+    // Consume the launch and defensively re-select its pane. The normal path
+    // already selected the tab at spawn time; this is only a guard before
+    // attaching a ready pane that still reports itself active.
     let mut activate_pending = |dir: &Path| -> bool {
         let id = pending_spawn.borrow_mut().take().and_then(|ps| ps.pane_id);
         match id {

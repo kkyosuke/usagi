@@ -156,8 +156,11 @@ pub(super) enum PendingPoll {
     /// The pane has spawned and is starting; carries its current tab index so the
     /// loading chip animates on the right chip.
     Starting(usize),
-    /// The pane's shell has painted — ready to move to.
-    Ready,
+    /// The pane's shell has painted. `selected` is true when the pending pane is
+    /// still the selected tab, in which case the loop may attach it immediately;
+    /// false means the user selected something else while it loaded, so it should
+    /// simply stop showing as pending.
+    Ready { selected: bool },
     /// The launch is gone (its spawn failed, or the pane vanished): drop it.
     Gone,
 }
@@ -230,26 +233,25 @@ pub(super) struct Wiring<'a> {
     /// Embed a live shell in the right pane (没入) and drive it: the first `bool`
     /// is `agent` vs plain `terminal`, the second `new_pane` vs re-attach.
     pub open_terminal: &'a mut dyn FnMut(&mut HomeState, &Path, bool, bool) -> Result<PaneExit>,
-    /// Dispatch a new pane launch for the given session in the background — the 在席
-    /// `terminal` / `agent` path when the session already shows tabs. `bool` is
-    /// `agent` vs plain `terminal`. It resolves the launch and kicks the
-    /// environment resolution off-thread **without** making a pane active, so the
-    /// current pane stays put and a loading tab appears; the loop then drives it via
-    /// [`Self::poll_pending_spawn`] / [`Self::activate_pending`]. Returns
-    /// [`StartPending::Reused`] when it reused an existing agent tab (no loading
-    /// tab — re-attach directly), else [`StartPending::Pending`] with the
-    /// placeholder chip label.
+    /// Dispatch a new pane launch for the given session. `bool` is `agent` vs
+    /// plain `terminal`. It resolves the launch and kicks the environment
+    /// resolution off-thread **without** spawning the pane yet, so the selected
+    /// loading tab can appear immediately; the loop then drives it via
+    /// [`Self::poll_pending_spawn`]. Returns [`StartPending::Reused`] when it
+    /// reused an existing agent tab (no loading tab — re-attach directly), else
+    /// [`StartPending::Pending`] with the placeholder chip label.
     pub start_pending_spawn: &'a mut StartPendingFn<'a>,
-    /// Poll the in-flight background launch each frame: resolving / starting (with
-    /// its tab index) / ready / gone. On the frame its environment lands this
-    /// spawns the pane inactive into the pool (both spawn and pool access must run
-    /// on this — the loop — thread, since the pool is not `Send`).
+    /// Poll the in-flight launch each frame: resolving / starting (with its tab
+    /// index) / ready / gone. On the frame its environment lands this spawns the
+    /// pane selected into the pool (both spawn and pool access must run on this —
+    /// the loop — thread, since the pool is not `Send`).
     pub poll_pending_spawn: &'a mut dyn FnMut(&Path) -> PendingPoll,
-    /// Make the spawned background pane the active tab so the following re-attach
-    /// drives it, and consume the launch. Returns whether a pane was activated.
+    /// Consume the launch and defensively re-select its pane before attaching.
+    /// Normal tab-add selection already happened at dispatch/spawn time.
     pub activate_pending: &'a mut dyn FnMut(&Path) -> bool,
-    /// Drop the in-flight background launch (user acted, or it vanished): its
-    /// environment-resolver result is discarded and no pane is spawned.
+    /// Drop the in-flight launch (it vanished, or it finished after another tab /
+    /// session was selected): its environment-resolver result is discarded when no
+    /// pane was spawned yet; otherwise the spawned pane simply remains live.
     pub clear_pending_spawn: &'a mut dyn FnMut(),
     /// Open `url` in the platform's default browser — the side effect behind
     /// clicking a `#<number>` in a session's pinned PR popup. [`super::run`] wires
@@ -633,11 +635,13 @@ pub(super) fn event_loop(
         // single covered branch.
         if let Some(dir) = drive_now.then(|| selected_dir(&state, workspace_root)) {
             let view = (wiring.preview)(&dir, state.sidebar());
-            let (mut labels, active) = (wiring.tab_op)(&dir, None);
-            // A background launch whose environment is still resolving has no pool
-            // pane yet, so append a synthetic placeholder chip at the strip's end
-            // (like the `+ new` chip) and animate it there — this is what shows the
-            // loading in the tab bar while `op://` secrets resolve off-thread.
+            let (mut labels, mut active) = (wiring.tab_op)(&dir, None);
+            // A launch whose environment is still resolving has no pool pane yet,
+            // so append a synthetic placeholder chip at the strip's end (like the
+            // `+ new` chip). The new tab is selected immediately — readiness no
+            // longer selects it later — and the same loading frame is also
+            // published for the pane body while this dir is previewed/focused.
+            let mut loading_body = None;
             if let Some(label) = state
                 .pending_pane()
                 .filter(|p| p.dir() == dir)
@@ -645,52 +649,63 @@ pub(super) fn event_loop(
                 .map(str::to_string)
             {
                 labels.push(label);
-                state.advance_pending_pane(labels.len() - 1, true);
+                active = labels.len() - 1;
+                state.advance_pending_pane(active, true);
+            }
+            // Once spawned, the pane is already the selected pool tab (see
+            // `add_pane_selected`), so `active` from `tab_op` is correct as-is; the
+            // body just needs the current loading frame for either phase.
+            if let Some(frame) = state
+                .pending_pane()
+                .filter(|p| p.dir() == dir)
+                .map(|p| p.frame())
+            {
+                loading_body = Some(frame);
             }
             let mut surface = state.surface_writer(SurfaceOwner::Preview);
             if let Some(v) = view {
                 surface.set_view(v);
             }
             surface.set_tabs(labels, active);
+            if let Some(frame) = loading_body {
+                surface.set_loading_body(frame);
+            }
         }
-        // A background pane (在席's `terminal` / `agent` on a session that already
-        // showed tabs) loads its tab in the strip. Poll it each frame: animate its
-        // chip and, once its shell has started painting, move to it (没入) — but only
-        // while the user has not acted since it was dispatched. Any interaction
-        // cancels the move, leaving a spawned tab as an ordinary background pane the
-        // user reaches through the strip (or dropping a still-resolving launch).
-        // Fields are copied out first so the tracker can be cleared without holding
-        // the read borrow.
-        if let Some((dir, idle)) = state.pending_pane().map(|p| {
-            (
-                p.dir().to_path_buf(),
-                p.interaction_epoch() == wiring.interaction_epoch,
-            )
-        }) {
-            if !idle {
-                state.clear_pending_pane();
-                (wiring.clear_pending_spawn)();
-            } else {
-                match (wiring.poll_pending_spawn)(&dir) {
-                    // Environment still resolving: the placeholder chip is animated
-                    // by the publish above; nothing to do here.
-                    PendingPoll::Resolving => {}
-                    // Spawned and starting: animate the real chip at its tab index.
-                    PendingPoll::Starting(tab) => state.advance_pending_pane(tab, false),
-                    // Ready: move to the now-active tab (没入). This blocks in the pane
-                    // until the user leaves it, exactly like a launch from the menu;
-                    // the loop resumes when it returns.
-                    PendingPoll::Ready => {
-                        state.clear_pending_pane();
+        // A pending pane loads its selected tab in the strip. Poll it each frame:
+        // animate its chip and, once its shell has started painting, attach it
+        // (没入) only if that tab is still selected. There is no ready-time
+        // selection step: if the user selected something else while it loaded, the
+        // pane simply becomes an ordinary background tab.
+        if let Some(dir) = state.pending_pane().map(|p| p.dir().to_path_buf()) {
+            match (wiring.poll_pending_spawn)(&dir) {
+                // Environment still resolving: the placeholder chip is animated by
+                // the publish above; nothing to do here.
+                PendingPoll::Resolving => {}
+                // Spawned and starting: animate the real chip at its tab index.
+                PendingPoll::Starting(tab) => state.advance_pending_pane(tab, false),
+                // Ready: stop showing the loading chip/body. Attach only if the
+                // user still has this session and this tab selected; no delayed
+                // tab selection happens here.
+                PendingPoll::Ready { selected } => {
+                    state.clear_pending_pane();
+                    if selected && selected_dir(&state, workspace_root) == dir {
+                        // The pane spawned already made itself the selected pool
+                        // tab; re-assert it defensively before attaching so a
+                        // concurrent tab close cannot leave a stale index behind.
                         (wiring.activate_pending)(&dir);
                         handlers::reattach_pane(term, &mut state, &mut painter, wiring);
-                        force_paint = true;
-                    }
-                    // The launch is gone (spawn failed / pane vanished): drop it.
-                    PendingPoll::Gone => {
-                        state.clear_pending_pane();
+                    } else {
+                        // The user selected another tab / session while it loaded:
+                        // leave it as an ordinary background pane and just drop the
+                        // launch tracker.
                         (wiring.clear_pending_spawn)();
                     }
+                    force_paint = true;
+                }
+                // The launch is gone (spawn failed / pane vanished): drop it.
+                PendingPoll::Gone => {
+                    state.clear_pending_pane();
+                    (wiring.clear_pending_spawn)();
                 }
             }
         }
@@ -1419,18 +1434,6 @@ enum Flow {
     Continue,
     /// Quit the application.
     Quit,
-}
-
-/// Paint the current frame immediately, outside the loop's top-of-iteration
-/// paint. Used to flush a transient [`HomeState`] state — the loading rabbit —
-/// to the screen just before a blocking action runs, since the action would
-/// otherwise hold the loop until it returned without ever drawing the indicator.
-/// Errors are the caller's to ignore: a missed transient frame must not abort
-/// the action it was announcing.
-pub(super) fn paint_now(term: &Term, painter: &mut FramePainter, state: &HomeState) -> Result<()> {
-    let (height, width) = term.size();
-    let frame = ui::render_frame(height as usize, width as usize, state);
-    painter.paint(term, frame)
 }
 
 /// The directory the pane should root at for the focused list row: the selected

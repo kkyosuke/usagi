@@ -1,10 +1,10 @@
 //! The background loading-tab flow: 在席's `terminal` / `agent` on a session that
 //! already shows tabs dispatches the pane through `start_pending_spawn` (no attach,
-//! no centre loader), stays in 在席 with a loading tab in the strip, and the loop
-//! moves to it once ready — unless the user acts first. These drive the loop with
-//! capturing background hooks (the pool-less [`super::event_loop_compat`] only
-//! no-ops them). Each test pins one loop branch: the fake `poll_pending_spawn`
-//! returns a fixed phase, since [`ScriptedReader`] cancels on the next key.
+//! no centre loader), selects the loading tab in the strip, and the loop attaches
+//! it once ready if it is still selected. These drive the loop with capturing
+//! background hooks (the pool-less [`super::event_loop_compat`] only no-ops them).
+//! Each test pins one loop branch: the fake `poll_pending_spawn` returns a fixed
+//! phase, since [`ScriptedReader`] cancels on the next key.
 
 use super::*;
 use std::cell::RefCell;
@@ -125,12 +125,12 @@ fn a_ready_background_tab_is_attached_when_the_user_stays_idle() {
         if opens.borrow().len() == 1 {
             Ok(PaneExit::ToFocus) // the initial re-attach zooms out to 在席
         } else {
-            Ok(PaneExit::Closed) // the ready background tab, once attached
+            Ok(PaneExit::Closed) // the ready pending tab, once attached
         }
     };
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
-    let mut poll = |_d: &Path| PendingPoll::Ready;
+    let mut poll = |_d: &Path| PendingPoll::Ready { selected: true };
     let mut activate = |_d: &Path| {
         *activated.borrow_mut() += 1;
         true
@@ -148,9 +148,52 @@ fn a_ready_background_tab_is_attached_when_the_user_stays_idle() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(*activated.borrow(), 1, "the ready pane was activated");
+    assert_eq!(*activated.borrow(), 1, "the ready pane was re-asserted");
     // Two attaches: the initial re-attach, then the now-active background tab.
     assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
+}
+
+#[test]
+fn a_ready_tab_that_is_no_longer_selected_stays_in_the_background() {
+    // Readiness no longer performs a delayed tab selection. If the pool reports
+    // that the pending pane is no longer the selected tab, the loop just drops the
+    // tracker and leaves the spawned pane as a normal background tab.
+    let activated = RefCell::new(0usize);
+    let cleared = RefCell::new(0usize);
+    let opens = RefCell::new(Vec::new());
+    let mut open = |_h: &mut HomeState, _d: &Path, a: bool, n: bool| {
+        opens.borrow_mut().push((a, n));
+        Ok(PaneExit::ToFocus)
+    };
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut start = pending_start;
+    let mut poll = |_d: &Path| PendingPoll::Ready { selected: false };
+    let mut activate = |_d: &Path| {
+        *activated.borrow_mut() += 1;
+        true
+    };
+    let mut clear = || {
+        *cleared.borrow_mut() += 1;
+    };
+    let outcome = run_bg(
+        reach_focus_and_launch_terminal(),
+        sample_state(),
+        &mut open,
+        &mut preview,
+        &mut start,
+        &mut poll,
+        &mut activate,
+        &mut clear,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*activated.borrow(), 0, "no ready-time tab selection");
+    assert_eq!(*cleared.borrow(), 1, "the launch tracker is consumed");
+    assert_eq!(
+        *opens.borrow(),
+        vec![(false, false)],
+        "only the initial re-attach ran"
+    );
 }
 
 #[test]
@@ -216,9 +259,10 @@ fn a_resolving_background_tab_shows_a_placeholder_chip() {
 }
 
 #[test]
-fn acting_before_the_tab_is_ready_cancels_the_move() {
-    // A keypress (↓) after the launch bumps the interaction epoch, so the loop drops
-    // the tracker (and the in-flight launch) without moving to the tab.
+fn acting_before_the_tab_is_ready_keeps_the_launch_pending() {
+    // A keypress (↓) after the launch no longer cancels the pending tab: selection
+    // moved to the tab at dispatch time, so a still-resolving launch remains in
+    // flight and simply has not attached yet.
     let activated = RefCell::new(0usize);
     let cleared = RefCell::new(0usize);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
@@ -233,7 +277,7 @@ fn acting_before_the_tab_is_ready_cancels_the_move() {
         *cleared.borrow_mut() += 1;
     };
     let mut keys = reach_focus_and_launch_terminal();
-    keys.push(Ok(Key::ArrowDown)); // acts while loading -> cancels the auto-move
+    keys.push(Ok(Key::ArrowDown)); // acts while loading; the launch keeps running
     let outcome = run_bg(
         keys,
         sample_state(),
@@ -246,8 +290,12 @@ fn acting_before_the_tab_is_ready_cancels_the_move() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    assert_eq!(*activated.borrow(), 0, "acting cancelled the move");
-    assert!(*cleared.borrow() >= 1, "the in-flight launch was dropped");
+    assert_eq!(
+        *activated.borrow(),
+        0,
+        "still resolving, so nothing attached"
+    );
+    assert_eq!(*cleared.borrow(), 0, "the in-flight launch keeps running");
 }
 
 #[test]
@@ -299,7 +347,7 @@ fn reusing_an_agent_tab_re_attaches_without_a_loading_tab() {
     };
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = |_: &mut HomeState, _: &Path, _: bool| Ok(StartPending::Reused);
-    let mut poll = |_d: &Path| PendingPoll::Ready;
+    let mut poll = |_d: &Path| PendingPoll::Ready { selected: true };
     let mut activate = |_d: &Path| {
         *activated.borrow_mut() += 1;
         true
@@ -337,7 +385,7 @@ fn a_failed_dispatch_is_logged_and_tracks_nothing() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = |_: &mut HomeState, _: &Path, _: bool| Err(anyhow::anyhow!("no shell"));
-    let mut poll = |_d: &Path| PendingPoll::Ready;
+    let mut poll = |_d: &Path| PendingPoll::Ready { selected: true };
     let mut activate = |_d: &Path| {
         *activated.borrow_mut() += 1;
         true
