@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::{self, StoreLock};
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
+use crate::infrastructure::worktree_keyed_store::{
+    self, dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the queued-prompt files live under.
 const PROMPT_SUBDIR: &str = "agent-prompts";
@@ -40,6 +41,12 @@ struct PromptFile {
     prompt: String,
 }
 
+impl WorktreeStamped for PromptFile {
+    fn stamped(&self) -> &Path {
+        &self.worktree
+    }
+}
+
 /// Queue `prompt` for the agent of the session rooted at `worktree`, replacing
 /// any prompt already queued there.
 pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
@@ -50,7 +57,7 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
     // just renamed into place — which would silently drop the queued prompt.
     let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &PromptFile {
@@ -74,24 +81,12 @@ pub fn take(worktree: &Path) -> Option<String> {
     // launch rather than risking a lost or misattributed delivery.
     let _lock = StoreLock::acquire(&dir).ok()?;
     let path = dir.join(file_name(&key));
-    match json_file::read::<PromptFile>(&path) {
-        // Ours: hand back the prompt and remove the file (one-shot delivery).
-        Ok(Some(file)) if file.worktree.as_path() == key => {
+    match read_ours::<PromptFile>(&path, &key) {
+        Some(file) => {
             let _ = fs::remove_file(&path);
             Some(file.prompt)
         }
-        // A parseable file stamped with a different worktree: a hash collision
-        // or a leftover synced from another machine. It belongs to that
-        // worktree, so leave it untouched for its rightful owner to take.
-        Ok(Some(_)) => None,
-        // Either nothing is queued, or the file is corrupt/unparseable. A
-        // corrupt file can never be delivered to anyone, so clear it; a missing
-        // file is a no-op to remove.
-        Ok(None) => None,
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            None
-        }
+        None => None,
     }
 }
 
@@ -102,9 +97,7 @@ pub fn take(worktree: &Path) -> Option<String> {
 /// queued. Unlike [`take`] this does not hand the prompt back: it is being
 /// thrown away with the session, not delivered.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(PROMPT_SUBDIR, worktree) {
-        let _ = fs::remove_file(path);
-    }
+    worktree_keyed_store::clear(PROMPT_SUBDIR, worktree);
 }
 
 /// Whether any prompt is currently queued for *some* worktree — a cheap
@@ -138,6 +131,7 @@ pub fn any_queued() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,

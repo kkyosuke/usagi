@@ -33,9 +33,10 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::{self, StoreLock};
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
+use crate::infrastructure::worktree_keyed_store::{
+    self, dir, file_name, key, path_for, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the live-prompt files live under.
 const PROMPT_SUBDIR: &str = "agent-live-prompts";
@@ -48,6 +49,12 @@ struct LivePromptFile {
     worktree: PathBuf,
     /// The prompts awaiting delivery to the session's live agent, in send order.
     prompts: Vec<String>,
+}
+
+impl WorktreeStamped for LivePromptFile {
+    fn stamped(&self) -> &Path {
+        &self.worktree
+    }
 }
 
 /// Append `prompt` to the live queue for the session rooted at `worktree`, to be
@@ -66,12 +73,11 @@ pub fn append(worktree: &Path, prompt: &str) -> Result<()> {
     // a different worktree (hash collision) or a corrupt one is treated as absent
     // and the queue starts fresh — the take side checks the stamp, so this can
     // never misdeliver another worktree's prompts.
-    let mut prompts = match json_file::read::<LivePromptFile>(&path) {
-        Ok(Some(file)) if file.worktree.as_path() == key => file.prompts,
-        _ => Vec::new(),
-    };
+    let mut prompts = read_ours::<LivePromptFile>(&path, &key)
+        .map(|file| file.prompts)
+        .unwrap_or_default();
     prompts.push(prompt.to_string());
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &LivePromptFile {
@@ -113,22 +119,12 @@ fn drain(worktree: &Path) -> Option<Vec<String>> {
     // taken, leave everything queued for a later drain rather than risk loss.
     let _lock = StoreLock::acquire(&dir).ok()?;
     let path = dir.join(file_name(&key));
-    Some(match json_file::read::<LivePromptFile>(&path) {
-        // Ours: hand back the queued prompts and remove the file (one-shot).
-        Ok(Some(file)) if file.worktree.as_path() == key => {
+    Some(match read_ours::<LivePromptFile>(&path, &key) {
+        Some(file) => {
             let _ = fs::remove_file(&path);
             file.prompts
         }
-        // A file stamped for another worktree (hash collision) — leave it for its
-        // rightful owner — or nothing parseable there (a race removed it between
-        // the fast-path check and here). Either way there is nothing to hand back
-        // and nothing of ours to remove.
-        Ok(Some(_)) | Ok(None) => Vec::new(),
-        // Corrupt / unparseable: it can never be delivered, so clear it.
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            Vec::new()
-        }
+        None => Vec::new(),
     })
 }
 
@@ -158,13 +154,12 @@ pub fn requeue(worktree: &Path, prompts: &[String]) -> Result<()> {
     // Anything appended since the drain (stamped as ours); a file for a different
     // worktree or a corrupt one is treated as absent so we never adopt another
     // session's prompts — the same stamp check `append` / `drain` apply.
-    let existing = match json_file::read::<LivePromptFile>(&path) {
-        Ok(Some(file)) if file.worktree.as_path() == key => file.prompts,
-        _ => Vec::new(),
-    };
+    let existing = read_ours::<LivePromptFile>(&path, &key)
+        .map(|file| file.prompts)
+        .unwrap_or_default();
     let mut merged = prompts.to_vec();
     merged.extend(existing);
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &LivePromptFile {
@@ -179,9 +174,7 @@ pub fn requeue(worktree: &Path, prompts: &[String]) -> Result<()> {
 /// not inherit prompts sent to the previous session. Called from session removal
 /// (see [`crate::usecase::session::remove`]); a no-op when nothing is queued.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(PROMPT_SUBDIR, worktree) {
-        let _ = fs::remove_file(path);
-    }
+    worktree_keyed_store::clear(PROMPT_SUBDIR, worktree);
 }
 
 /// Whether any prompt is currently queued for *some* worktree's live agent — a
@@ -217,6 +210,7 @@ pub fn any_queued() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,

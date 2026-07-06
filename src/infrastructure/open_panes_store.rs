@@ -18,15 +18,15 @@
 //! from another machine) is detected and read as absent rather than
 //! misattributed.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::settings::AgentCli;
-use crate::infrastructure::json_file;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key};
+use crate::infrastructure::worktree_keyed_store::{
+    self, dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the open-pane snapshots live under.
 const OPEN_PANES_SUBDIR: &str = "open-panes";
@@ -73,6 +73,12 @@ pub struct OpenPanes {
     pub panes: Vec<StoredPane>,
 }
 
+impl WorktreeStamped for OpenPanes {
+    fn stamped(&self) -> &Path {
+        &self.worktree
+    }
+}
+
 /// Persist the open panes of the session rooted at `worktree`, replacing any
 /// previous snapshot. Saving an empty `panes` list clears the snapshot instead,
 /// so a session left with no panes is not "restored" into an empty shell.
@@ -84,7 +90,7 @@ pub fn save(worktree: &Path, active: usize, panes: &[StoredPane]) -> Result<()> 
     let key = key(worktree);
     let dir = dir(OPEN_PANES_SUBDIR)?;
     let path = dir.join(file_name(&key));
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &OpenPanes {
@@ -101,35 +107,21 @@ pub fn save(worktree: &Path, active: usize, panes: &[StoredPane]) -> Result<()> 
 pub fn load(worktree: &Path) -> Option<OpenPanes> {
     let key = key(worktree);
     let path = dir(OPEN_PANES_SUBDIR).ok()?.join(file_name(&key));
-    match json_file::read::<OpenPanes>(&path) {
-        // Ours: hand back the snapshot.
-        Ok(Some(snapshot)) if snapshot.worktree.as_path() == key => Some(snapshot),
-        // A parseable file stamped with a different worktree: leave it untouched
-        // for its rightful owner.
-        Ok(Some(_)) => None,
-        // Nothing stored.
-        Ok(None) => None,
-        // Corrupt / unparseable: it can never be restored, so clear it.
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            None
-        }
-    }
+    read_ours::<OpenPanes>(&path, &key)
 }
 
 /// Remove the open-pane snapshot of the session rooted at `worktree`. A no-op
 /// when none is stored.
 pub fn clear(worktree: &Path) {
-    if let Ok(dir) = dir(OPEN_PANES_SUBDIR) {
-        let path = dir.join(file_name(&key(worktree)));
-        let _ = fs::remove_file(path);
-    }
+    worktree_keyed_store::clear(OPEN_PANES_SUBDIR, worktree);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
+    use std::fs;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,
     /// serialized against other env-mutating tests, and run `body`.
