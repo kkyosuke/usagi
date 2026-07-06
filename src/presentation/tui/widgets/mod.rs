@@ -214,6 +214,47 @@ pub fn spinner_char(frame: usize) -> &'static str {
     LOADING_SPINNER[frame % LOADING_SPINNER.len()]
 }
 
+/// The glyph a [`shimmer_bar`] fills its width with — a light shade block that
+/// reads as an inert placeholder when dim and as a filling bar under the sweep.
+const SHIMMER_GLYPH: char = '░';
+
+/// A left-to-right "loading" sweep over `text`: the whole string is dim with a
+/// short accent band flowing across it and a few columns past the end before it
+/// re-enters from the left, so a placeholder reads as busy rather than frozen.
+/// `frame` advances the band. Shared by the tab strip's launching-pane chip and
+/// the sidebar's pending-session skeleton so every shimmer in the UI flows in
+/// step. The caller sizes the text; an empty string sweeps to nothing.
+pub fn shimmer_text(text: &str, frame: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    // Sweep across the text plus a short tail, so the band leaves the right edge
+    // and re-enters from the left with a brief all-dim beat between passes. The
+    // `+ 3` keeps the period positive even for an empty string.
+    let period = chars.len() + 3;
+    let head = frame % period;
+    let mut out = String::new();
+    for (i, c) in chars.into_iter().enumerate() {
+        let s = c.to_string();
+        // A two-column bright band trailing the sweep head.
+        if i == head || i + 1 == head {
+            out.push_str(&style(s).accent().bold().to_string());
+        } else {
+            out.push_str(&style(s).dim().to_string());
+        }
+    }
+    out
+}
+
+/// A `width`-column skeleton bar: a dim shade fill carrying the same
+/// left-to-right accent sweep as [`shimmer_text`], for a placeholder row that has
+/// no text to show yet (a loading session's detail / resource lines). Returns the
+/// empty string when `width == 0`.
+pub fn shimmer_bar(width: usize, frame: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    shimmer_text(&SHIMMER_GLYPH.to_string().repeat(width), frame)
+}
+
 /// A fixed-width `[===>   ]` progress bar `width` columns wide (inside the
 /// brackets), filled to the `done / total` fraction rounded to the nearest
 /// column. Unlike a per-task spinner this is a **real** ratio — the share of a
@@ -1740,5 +1781,27 @@ mod tests {
         // … and a row outside the box still carries its original content (the
         // frame shows around the float, not blanked).
         assert!(base[0].contains('a') || base.last().unwrap().contains('a'));
+    }
+
+    #[test]
+    fn shimmer_text_keeps_the_plain_text_across_frames() {
+        // The plain text is preserved whatever the frame; only the styling (the
+        // sweeping band) moves. Colours are stripped in the test environment, so
+        // the assertion is on the retained text — a frame 0 hits the leading-band
+        // branch and the dim branch in one pass.
+        assert_eq!(console::strip_ansi_codes(&shimmer_text("abcd", 0)), "abcd");
+        assert_eq!(console::strip_ansi_codes(&shimmer_text("abcd", 1)), "abcd");
+        assert!(shimmer_text("", 0).is_empty());
+    }
+
+    #[test]
+    fn shimmer_bar_fills_the_width_with_the_shade_glyph() {
+        let bar = shimmer_bar(5, 0);
+        assert_eq!(
+            console::strip_ansi_codes(&bar),
+            SHIMMER_GLYPH.to_string().repeat(5)
+        );
+        // A zero width has nothing to draw.
+        assert!(shimmer_bar(0, 0).is_empty());
     }
 }
