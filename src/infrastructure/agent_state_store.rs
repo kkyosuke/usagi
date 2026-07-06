@@ -26,8 +26,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::agent_phase::AgentPhase;
-use crate::infrastructure::json_file;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
+use crate::infrastructure::worktree_keyed_store::{
+    self, dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the phase files live under.
 const STATE_SUBDIR: &str = "agent-state";
@@ -42,12 +43,18 @@ struct PhaseFile {
     phase: AgentPhase,
 }
 
+impl WorktreeStamped for PhaseFile {
+    fn stamped(&self) -> &Path {
+        &self.worktree
+    }
+}
+
 /// Record the agent `phase` for the session rooted at `worktree`.
 pub fn write(worktree: &Path, phase: AgentPhase) -> Result<()> {
     let key = key(worktree);
     let dir = dir(STATE_SUBDIR)?;
     let path = dir.join(file_name(&key));
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &PhaseFile {
@@ -73,8 +80,7 @@ pub fn read(worktree: &Path) -> Option<AgentPhase> {
 /// worktree it must belong to. `None` when the file is absent/unreadable or was
 /// recorded for a different worktree (a hashed-name collision or stale file).
 fn read_phase_file(path: &Path, key: &Path) -> Option<AgentPhase> {
-    let file: PhaseFile = json_file::read(path).ok()??;
-    (file.worktree.as_path() == key).then_some(file.phase)
+    read_ours::<PhaseFile>(path, key).map(|file| file.phase)
 }
 
 /// The file's last-modified time, or `None` when it is absent or unstattable —
@@ -162,9 +168,7 @@ impl PhaseReader {
 /// Forget any recorded phase for `worktree` (best-effort), so a session freshly
 /// spawned there does not inherit a previous run's phase.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(STATE_SUBDIR, worktree) {
-        let _ = std::fs::remove_file(path);
-    }
+    worktree_keyed_store::clear(STATE_SUBDIR, worktree);
 }
 
 /// Extract the worktree directory from a Claude Code hook's JSON payload: its
@@ -261,6 +265,7 @@ pub fn session_start_source_from_hook_json(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,

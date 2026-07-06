@@ -29,9 +29,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::workspace_state::PrLink;
-use crate::infrastructure::json_file;
 use crate::infrastructure::store_lock::StoreLock;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key, path_for};
+use crate::infrastructure::worktree_keyed_store::{
+    self, dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the PR-link files live under.
 const PR_SUBDIR: &str = "pr-links";
@@ -47,6 +48,12 @@ struct PrLinkFile {
     prs: Vec<PrLink>,
 }
 
+impl WorktreeStamped for PrLinkFile {
+    fn stamped(&self) -> &Path {
+        &self.worktree
+    }
+}
+
 /// Merge `prs` into the pull requests recorded for the session rooted at
 /// `worktree`, keeping the existing ones and appending any whose `url` is not
 /// already recorded (so a PR seen again is not duplicated). New PRs land at the
@@ -58,13 +65,13 @@ pub fn add(worktree: &Path, prs: &[PrLink]) -> Result<()> {
     // the same worktree at once cannot clobber each other's additions.
     let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
-    let mut recorded = read_ours(&path, &key);
+    let mut recorded = read_prs_ours(&path, &key);
     for pr in prs {
         if !recorded.iter().any(|p| p.url == pr.url) {
             recorded.push(pr.clone());
         }
     }
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &PrLinkFile {
@@ -82,7 +89,7 @@ pub fn get(worktree: &Path) -> Vec<PrLink> {
     // An unresolvable data dir yields the empty list (via `unwrap_or_default`),
     // same as a missing file.
     dir(PR_SUBDIR)
-        .map(|dir| read_ours(&dir.join(file_name(&key)), &key))
+        .map(|dir| read_prs_ours(&dir.join(file_name(&key)), &key))
         .unwrap_or_default()
 }
 
@@ -91,26 +98,23 @@ pub fn get(worktree: &Path) -> Vec<PrLink> {
 /// PR badges. Called from session removal (see
 /// [`crate::usecase::session::remove`]); a no-op when nothing is recorded.
 pub fn clear(worktree: &Path) {
-    if let Ok(path) = path_for(PR_SUBDIR, worktree) {
-        let _ = std::fs::remove_file(path);
-    }
+    worktree_keyed_store::clear(PR_SUBDIR, worktree);
 }
 
 /// Read the PR list from `path`, but only when the file is stamped with `key` (our
 /// worktree). A file stamped with a different worktree (a hash collision, or a
 /// stale file synced from another machine), a missing file, or a corrupt one all
-/// read as an empty list — a collision victim is left untouched for its rightful
-/// owner, and a corrupt file is simply overwritten by the next [`add`].
-fn read_ours(path: &Path, key: &Path) -> Vec<PrLink> {
-    match json_file::read::<PrLinkFile>(path) {
-        Ok(Some(file)) if file.worktree.as_path() == key => file.prs,
-        _ => Vec::new(),
-    }
+/// read as an empty list.
+fn read_prs_ours(path: &Path, key: &Path) -> Vec<PrLink> {
+    read_ours::<PrLinkFile>(path, key)
+        .map(|file| file.prs)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,

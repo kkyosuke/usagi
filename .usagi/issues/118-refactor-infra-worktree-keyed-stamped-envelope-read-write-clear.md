@@ -1,13 +1,13 @@
 ---
 number: 118
 title: refactor(infra): worktree-keyed ストアの stamped-envelope read/write/clear を共通化する
-status: todo
+status: done
 priority: high
 labels: [refactor, infra, review]
 dependson: []
 related: []
 created_at: 2026-07-04T23:14:15.402066+00:00
-updated_at: 2026-07-04T23:14:15.402066+00:00
+updated_at: 2026-07-06T03:19:24.434560+00:00
 ---
 
 ## 背景（なぜ問題か）

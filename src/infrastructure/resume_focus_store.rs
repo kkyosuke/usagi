@@ -21,14 +21,14 @@
 //! from another machine) is detected and read as absent rather than
 //! misattributed.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::infrastructure::json_file;
-use crate::infrastructure::worktree_keyed_store::{dir, file_name, key};
+use crate::infrastructure::worktree_keyed_store::{
+    dir, file_name, key, read_ours, write_stamped, WorktreeStamped,
+};
 
 /// Subdirectory of the data dir the resume-focus snapshots live under.
 const RESUME_FOCUS_SUBDIR: &str = "resume-focus";
@@ -66,13 +66,19 @@ pub struct ResumeFocus {
     pub engagement: StoredEngagement,
 }
 
+impl WorktreeStamped for ResumeFocus {
+    fn stamped(&self) -> &Path {
+        &self.workspace
+    }
+}
+
 /// Persist the resume focus for the workspace rooted at `workspace`, replacing
 /// any previous snapshot.
 pub fn save(workspace: &Path, session: &str, engagement: StoredEngagement) -> Result<()> {
     let key = key(workspace);
     let dir = dir(RESUME_FOCUS_SUBDIR)?;
     let path = dir.join(file_name(&key));
-    json_file::write_atomic(
+    write_stamped(
         &dir,
         &path,
         &ResumeFocus {
@@ -89,26 +95,15 @@ pub fn save(workspace: &Path, session: &str, engagement: StoredEngagement) -> Re
 pub fn load(workspace: &Path) -> Option<ResumeFocus> {
     let key = key(workspace);
     let path = dir(RESUME_FOCUS_SUBDIR).ok()?.join(file_name(&key));
-    match json_file::read::<ResumeFocus>(&path) {
-        // Ours: hand back the snapshot.
-        Ok(Some(snapshot)) if snapshot.workspace.as_path() == key => Some(snapshot),
-        // A parseable file stamped with a different workspace: leave it untouched
-        // for its rightful owner.
-        Ok(Some(_)) => None,
-        // Nothing stored.
-        Ok(None) => None,
-        // Corrupt / unparseable: it can never be restored, so clear it.
-        Err(_) => {
-            let _ = fs::remove_file(&path);
-            None
-        }
-    }
+    read_ours::<ResumeFocus>(&path, &key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
+    use std::fs;
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,
     /// serialized against other env-mutating tests, and run `body`.
