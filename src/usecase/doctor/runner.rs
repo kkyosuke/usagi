@@ -261,4 +261,47 @@ mod tests {
         assert!(fake.check("x", &[]));
         assert!(fake.spawn("x", &[]).is_ok());
     }
+
+    #[test]
+    fn test_system_runner_available() {
+        let runner = SystemRunner;
+        // git is definitely installed on the host
+        assert!(runner.available("git"));
+        // nonexistent command should not be available
+        assert!(!runner.available("nonexistent-command-xyz"));
+    }
+
+    #[test]
+    fn test_which_fails_when_path_is_missing() {
+        // Backup original PATH
+        let original_path = std::env::var_os("PATH");
+        std::env::remove_var("PATH");
+
+        assert!(!which("git"));
+
+        // Restore original PATH
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        }
+    }
+
+    #[test]
+    fn test_which_skips_non_executable_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("dummy-command");
+        // Create a non-executable file
+        std::fs::write(&file_path, "not executable").unwrap();
+
+        // Backup original PATH and set it to temp_dir
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", temp_dir.path());
+
+        // The dummy-command is a file but not executable (on Unix), so which should return false.
+        assert!(!which("dummy-command"));
+
+        // Restore PATH
+        if let Some(path) = original_path {
+            std::env::set_var("PATH", path);
+        }
+    }
 }
