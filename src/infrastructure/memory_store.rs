@@ -4,15 +4,12 @@
 //! frontmatter markdown document (see [`crate::domain::memory`]). The markdown
 //! files are the source of truth. Two derived artifacts sit alongside them:
 //!
-//! - `MEMORY.md` — a human/agent-facing table of contents (one line per memory)
-//!   meant to be loaded into context at the start of a session. It is committed
-//!   and shared, like the memory files themselves.
-//! - `index.json` — a metadata cache that speeds up listings. It is a local,
-//!   rebuildable cache (kept out of git by `usagi init`'s `.gitignore` rules) and
-//!   is never relied upon for correctness, only for speed.
+//! - `MEMORY.md` — a human/agent-facing table of contents, committed and shared
+//!   like the memory files themselves.
+//! - `index.json` — a local rebuildable metadata cache used only for speed.
 //!
-//! Both derived files are rebuilt from the markdown files whenever they are
-//! missing or unreadable.
+//! The derived files are rebuilt whenever the cache is missing, unreadable, or
+//! stale relative to the markdown source files.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -21,43 +18,94 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::memory::{Memory, MemorySummary};
-use crate::infrastructure::error_log::ErrorLog;
-use crate::infrastructure::json_file;
+use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore};
 use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::infrastructure::store_lock::StoreLock;
 
 const MEMORY_DIR_NAME: &str = "memory";
-/// Filename of the derived metadata cache. Kept out of git by the rules in
-/// [`crate::infrastructure::gitignore`], which a test there cross-checks against
-/// this constant.
-pub(crate) const INDEX_FILE: &str = "index.json";
 const TOC_FILE: &str = "MEMORY.md";
 
-/// On-disk shape of `index.json`, read back as owned data. The `version` key is
-/// written (see [`IndexFileRef`]) but ignored on read, so it is not modelled
-/// here — serde skips unknown keys.
 #[derive(Debug, Deserialize)]
 struct IndexFile {
     memories: Vec<MemorySummary>,
 }
 
-/// Borrowed view used only when *writing* `index.json`, so the rebuild does not
-/// have to clone every summary just to hand it to the serialiser.
 #[derive(Serialize)]
 struct IndexFileRef<'a> {
     version: u32,
     memories: &'a [MemorySummary],
 }
 
+struct MemoryEntry;
+
+impl MarkdownEntry for MemoryEntry {
+    type Entry = Memory;
+    type Summary = MemorySummary;
+    type Key = String;
+    type IndexFile = IndexFile;
+    type IndexFileRef<'a> = IndexFileRef<'a>;
+
+    const NAME: &'static str = "memory";
+
+    fn is_entry_file(path: &Path) -> bool {
+        is_memory_file(path)
+    }
+
+    fn parse_markdown(text: &str) -> Result<Memory> {
+        Ok(Memory::from_markdown(text)?)
+    }
+
+    fn to_markdown(entry: &Memory) -> String {
+        entry.to_markdown()
+    }
+
+    fn file_name(entry: &Memory) -> Result<String> {
+        memory_file_name(&entry.name)
+    }
+
+    fn key(entry: &Memory) -> String {
+        entry.name.clone()
+    }
+
+    fn key_from_summary(summary: &MemorySummary) -> String {
+        summary.name.clone()
+    }
+
+    fn key_from_path(path: &Path) -> Option<String> {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(ToOwned::to_owned)
+    }
+
+    fn summary(entry: &Memory) -> MemorySummary {
+        entry.summary()
+    }
+
+    fn sort_entries(entries: &mut Vec<Memory>) {
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    fn summaries_from_index(index: IndexFile) -> Vec<MemorySummary> {
+        index.memories
+    }
+
+    fn index_file_ref(summaries: &[MemorySummary]) -> IndexFileRef<'_> {
+        IndexFileRef {
+            version: crate::infrastructure::json_file::FILE_FORMAT_VERSION,
+            memories: summaries,
+        }
+    }
+
+    fn write_extra_derived(dir: &Path, summaries: &[MemorySummary]) -> Result<()> {
+        crate::infrastructure::json_file::write_text_atomic(
+            &dir.join(TOC_FILE),
+            &render_toc(summaries),
+        )
+    }
+}
+
 /// The on-disk filename for a memory `name`, rejecting anything that is not a
 /// single safe path component so a name can never escape the memory directory.
-///
-/// Defense in depth: the usecase layer already slugifies names to
-/// ASCII-alphanumeric before they reach the store (see
-/// [`crate::usecase::memory`]), so a separator or `..` only arrives through a
-/// programming error — but [`MemoryStore`] is public, and `read`/`remove` would
-/// otherwise turn `../../etc/passwd` into a read or delete outside `.usagi/`.
-/// Mirrors the component check in [`crate::infrastructure::markdown_file`].
 fn memory_file_name(name: &str) -> Result<String> {
     let mut components = Path::new(name).components();
     let single_component =
@@ -73,289 +121,95 @@ fn memory_file_name(name: &str) -> Result<String> {
 
 /// File-based persistence rooted at a repository's `.usagi/memory/` directory.
 pub struct MemoryStore {
-    dir: PathBuf,
+    inner: MarkdownStore<MemoryEntry>,
 }
 
 impl MemoryStore {
     /// Open the memory store for the repository at `repo_root`.
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
-            dir: repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME),
+            inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME)),
         }
     }
 
     pub fn dir(&self) -> &Path {
-        &self.dir
+        self.inner.dir()
     }
 
     pub fn index_path(&self) -> PathBuf {
-        self.dir.join(INDEX_FILE)
+        self.inner.index_path()
     }
 
     pub fn toc_path(&self) -> PathBuf {
-        self.dir.join(TOC_FILE)
+        self.dir().join(TOC_FILE)
     }
 
     /// Acquire this store's cross-process write lock, blocking until it is free.
-    ///
-    /// Hold the returned guard across a whole read-modify-write that must be
-    /// atomic with respect to other processes — e.g. the upsert in
-    /// [`crate::usecase::memory::save`], which reads the existing memory (to
-    /// preserve its `created_at`) and then writes. The [`write`](Self::write) /
-    /// [`remove`](Self::remove) entry points take the lock themselves; pass the
-    /// guard to [`write_locked`](Self::write_locked) when you already hold it.
+    /// Hold the guard across read-modify-write operations that must be atomic.
     pub fn lock(&self) -> Result<StoreLock> {
-        StoreLock::acquire(&self.dir)
+        StoreLock::acquire(self.dir())
     }
 
     /// Read and parse every memory markdown file, sorted by name.
     pub fn scan(&self) -> Result<Vec<Memory>> {
-        use rayon::prelude::*;
-
-        let mut memories: Vec<Memory> = self
-            .memory_files()?
-            .into_par_iter()
-            .map(|path| {
-                let text = fs::read_to_string(&path)
-                    .context(format!("failed to read {}", path.display()))?;
-                Memory::from_markdown(&text)
-                    .with_context(|| format!("failed to parse {}", path.display()))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        memories.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(memories)
+        self.inner.scan()
     }
 
-    /// Like [`scan`](Self::scan) but **tolerant**: a markdown file that fails to
-    /// read or parse is recorded to the daily error log and skipped, rather than
-    /// failing the whole scan. Directory-level read failures still propagate.
-    ///
-    /// Used by [`rebuild_derived`](Self::rebuild_derived) so one corrupt or
-    /// half-written memory file cannot fail an unrelated [`write`](Self::write)
-    /// (whose target file is already persisted by the time the index rebuilds) or
-    /// break `memory list` — the index and `MEMORY.md` simply rebuild from the
-    /// files that parse, mirroring how [`load_index`](Self::load_index) self-heals
-    /// a corrupt cache. Full-text `memory search` uses it too, so one unparseable
-    /// file yields partial results instead of failing the whole query. The strict
-    /// [`scan`](Self::scan) stays the choice where every memory must be readable.
+    /// Like [`scan`](Self::scan), but logs unreadable/unparseable memory files and
+    /// skips them so one corrupt sibling cannot break listings or cache rebuilds.
     pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
-        use rayon::prelude::*;
-
-        let parsed: Vec<(PathBuf, Result<Memory>)> = self
-            .memory_files()?
-            .into_par_iter()
-            .map(|path| {
-                let memory = fs::read_to_string(&path)
-                    .context(format!("failed to read {}", path.display()))
-                    .and_then(|text| {
-                        Memory::from_markdown(&text)
-                            .with_context(|| format!("failed to parse {}", path.display()))
-                    });
-                (path, memory)
-            })
-            .collect();
-
-        let mut memories = Vec::with_capacity(parsed.len());
-        for (path, memory) in parsed {
-            match memory {
-                Ok(memory) => memories.push(memory),
-                Err(e) => ErrorLog::record(&format!(
-                    "skipping unparseable memory file {}: {e:#}",
-                    path.display()
-                )),
-            }
-        }
-        memories.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(memories)
-    }
-
-    /// Paths of every memory markdown file in the directory (the `MEMORY.md` table
-    /// of contents and any non-`.md` files excluded). Empty when the directory
-    /// does not exist.
-    fn memory_files(&self) -> Result<Vec<PathBuf>> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).context(format!("failed to read {}", self.dir.display())),
-        };
-        let mut files = Vec::new();
-        for entry in entries {
-            let path = entry
-                .context(format!("failed to read an entry in {}", self.dir.display()))?
-                .path();
-            if is_memory_file(&path) {
-                files.push(path);
-            }
-        }
-        Ok(files)
+        self.inner.scan_lenient()
     }
 
     /// Read a single memory by name, or `None` if it does not exist.
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
-        let path = self.dir.join(memory_file_name(name)?);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e).context(format!("failed to read {}", path.display())),
-        };
-        let memory = Memory::from_markdown(&text)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
-        Ok(Some(memory))
+        let path = self.dir().join(memory_file_name(name)?);
+        match self.inner.read_existing_path(&path) {
+            Ok(memory) => Ok(Some(memory)),
+            Err(e) if path_missing(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Write `memory` to disk and refresh the derived files, taking the store
-    /// lock for the duration so concurrent writers serialise (the derived
-    /// `index.json` / `MEMORY.md` are rebuilt by scanning the whole directory, so
-    /// concurrent writes could otherwise commit a stale rebuild).
+    /// lock for the duration so concurrent writers serialise.
     pub fn write(&self, memory: &Memory) -> Result<()> {
         let lock = self.lock()?;
         self.write_locked(&lock, memory)
     }
 
     /// Like [`write`](Self::write) but assumes the caller already holds this
-    /// store's [`lock`](Self::lock). Use this to keep the upsert read and the
-    /// write inside one lock acquisition (see [`crate::usecase::memory::save`]).
+    /// store's [`lock`](Self::lock).
     pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-
-        // Validate the name through the same single-component guard `read` and
-        // `remove` use, so all three entry points share one defense: the write
-        // path can no longer place a file outside `.usagi/memory/` either (e.g.
-        // a `../../` name reaching a public `MemoryStore` through a programming
-        // error). Equivalent to `memory.file_name()` for the slugified names the
-        // usecase layer produces today.
-        let target = self.dir.join(memory_file_name(&memory.name)?);
-        json_file::write_text_atomic(&target, &memory.to_markdown())?;
-        self.reindex_after_write(memory)?;
-        Ok(())
+        self.inner.write_markdown(memory)?;
+        self.inner.reindex_after_write(memory)
     }
 
-    /// Refresh the derived files to reflect `memory` having just been written,
-    /// patching only its entry instead of re-reading and re-parsing every markdown
-    /// file. A full [`rebuild_derived`](Self::rebuild_derived) on every write costs
-    /// O(all memories) reads + parses while the store lock is held; the write
-    /// already carries the new `memory`, so its summary is spliced into the cached,
-    /// name-sorted list directly. `MEMORY.md` is then re-rendered from that list
-    /// (its own newest-first ordering is applied by [`render_toc`]). A missing or
-    /// unreadable cache falls back to a full rebuild (self-healing, matching
-    /// [`summaries`](Self::summaries)).
-    fn reindex_after_write(&self, memory: &Memory) -> Result<()> {
-        let Some(mut summaries) = self.load_index()?.map(|index| index.memories) else {
-            return self.rebuild_derived().map(|_| ());
-        };
-        // The cache is name-sorted (rebuilt from `scan_lenient`, which sorts by
-        // name), so a binary search finds either the entry to replace (an edit) or
-        // the slot to insert a new name at, keeping it sorted. `name` is a memory's
-        // stable, unique identity, so there is at most one entry per name.
-        let summary = memory.summary();
-        match summaries.binary_search_by(|s| s.name.cmp(&memory.name)) {
-            Ok(pos) => summaries[pos] = summary,
-            Err(pos) => summaries.insert(pos, summary),
-        }
-        self.write_derived(&summaries)
-    }
-
-    /// Refresh the derived files after the memory named `name` was removed,
-    /// dropping only its entry rather than rebuilding from every markdown file (see
-    /// [`reindex_after_write`](Self::reindex_after_write)). A missing or unreadable
-    /// cache falls back to a full rebuild; a cache that never listed the name is
-    /// already consistent with the removal, so it is left untouched.
-    fn reindex_after_remove(&self, name: &str) -> Result<()> {
-        let Some(mut summaries) = self.load_index()?.map(|index| index.memories) else {
-            return self.rebuild_derived().map(|_| ());
-        };
-        if let Ok(pos) = summaries.binary_search_by(|s| s.name.as_str().cmp(name)) {
-            summaries.remove(pos);
-            self.write_derived(&summaries)?;
-        }
-        Ok(())
-    }
-
-    /// Write the name-sorted `summaries` to the derived files: `index.json` (a
-    /// rebuildable cache, written atomically but without an fsync) and `MEMORY.md`
-    /// (a committed, human/agent-facing table of contents, kept durable).
-    fn write_derived(&self, summaries: &[MemorySummary]) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .context(format!("failed to create {}", self.dir.display()))?;
-        let index = IndexFileRef {
-            version: json_file::FILE_FORMAT_VERSION,
-            memories: summaries,
-        };
-        json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)?;
-        json_file::write_text_atomic(&self.toc_path(), &render_toc(summaries))?;
-        Ok(())
-    }
-
-    /// Remove the memory with `name`, returning whether anything was deleted, then
-    /// refresh the derived files. Takes the store lock for the duration.
+    /// Remove the memory with `name`, returning whether anything was deleted,
+    /// then refresh the derived files. Takes the store lock for the duration.
     pub fn remove(&self, name: &str) -> Result<bool> {
         let _lock = self.lock()?;
-        let path = self.dir.join(memory_file_name(name)?);
+        let path = self.dir().join(memory_file_name(name)?);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e).context(format!("failed to remove {}", path.display())),
         }
-        self.reindex_after_remove(name)?;
+        self.inner.reindex_after_remove(&name.to_string())?;
         Ok(true)
     }
 
     /// Metadata summaries for every memory.
-    ///
-    /// Uses `index.json` when it is present and parseable; otherwise it rebuilds
-    /// the derived files from the markdown files (self-healing on a missing or
-    /// corrupt cache).
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
-        match self.load_index()? {
-            Some(index) => Ok(index.memories),
-            None => self.rebuild_derived(),
-        }
+        self.inner.summaries()
     }
+}
 
-    /// Load `index.json`, returning `None` when it is missing or unreadable (so the
-    /// caller falls back to rebuilding from the markdown files).
-    fn load_index(&self) -> Result<Option<IndexFile>> {
-        let text = match fs::read_to_string(self.index_path()) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => {
-                return Err(e).context(format!("failed to read {}", self.index_path().display()))
-            }
-        };
-        match serde_json::from_str(&text) {
-            Ok(index) => Ok(Some(index)),
-            // A present-but-unparseable cache is recoverable — the caller rebuilds
-            // from the markdown files — but it still signals real data corruption.
-            // Record it so the silent self-heal leaves a trace in the daily log.
-            Err(e) => {
-                ErrorLog::record(&format!(
-                    "memory index {} is corrupt; rebuilding from markdown: {e}",
-                    self.index_path().display()
-                ));
-                Ok(None)
-            }
-        }
-    }
-
-    /// Rebuild `index.json` and `MEMORY.md` from the markdown files and return the
-    /// summaries.
-    fn rebuild_derived(&self) -> Result<Vec<MemorySummary>> {
-        // Tolerant scan: one corrupt sibling file must not fail a write whose own
-        // file already landed, nor break `memory list`. The skipped files are
-        // logged (see [`scan_lenient`](Self::scan_lenient)).
-        let summaries: Vec<MemorySummary> =
-            self.scan_lenient()?.iter().map(Memory::summary).collect();
-        if summaries.is_empty() && !self.dir.exists() {
-            // Nothing stored and no directory yet: don't create files eagerly.
-            return Ok(summaries);
-        }
-        // `index.json` is a rebuildable cache (written without an fsync); `MEMORY.md`
-        // stays durable (see [`write_derived`](Self::write_derived)).
-        self.write_derived(&summaries)?;
-        Ok(summaries)
-    }
+fn path_missing(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Render the `MEMORY.md` table of contents: a heading and one bullet per memory
@@ -406,6 +260,18 @@ mod tests {
         }
     }
 
+    /// Pin a file's modification time so freshness tests are independent of the
+    /// filesystem's timestamp granularity.
+    fn set_mtime(path: &Path, secs_from_epoch: u64) {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
     #[test]
     fn scan_is_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -450,9 +316,6 @@ mod tests {
 
     #[test]
     fn read_and_remove_reject_a_path_traversing_name() {
-        // Defense in depth: even though callers slugify, the public store must
-        // not let a `..`-bearing or separator-bearing name escape the memory
-        // directory.
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         for bad in ["../../etc/passwd", "a/b", "..", "/etc/hosts"] {
@@ -464,14 +327,11 @@ mod tests {
                 store.remove(bad).is_err(),
                 "remove should reject the traversing name {bad:?}"
             );
-            // The write path applies the same guard, so a `Memory` whose `name`
-            // would escape the directory is refused before any file is written.
             assert!(
                 store.write(&memory(bad, "evil")).is_err(),
                 "write should reject the traversing name {bad:?}"
             );
         }
-        // A plain single-component name is still accepted (here: simply absent).
         assert!(store.read("ok-name").unwrap().is_none());
     }
 
@@ -529,7 +389,6 @@ mod tests {
 
         assert!(store.remove("doomed").unwrap());
         assert!(store.read("doomed").unwrap().is_none());
-        // Removing again reports nothing was deleted.
         assert!(!store.remove("doomed").unwrap());
     }
 
@@ -539,8 +398,6 @@ mod tests {
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
         store.write(&memory("two", "Two")).unwrap();
-        // Drop the cache so the removal cannot patch it incrementally; it must fall
-        // back to a full rebuild from the markdown files that remain.
         fs::remove_file(store.index_path()).unwrap();
 
         assert!(store.remove("one").unwrap());
@@ -560,16 +417,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("two", "Two")).unwrap();
-        // A markdown file lands on disk without going through `write`, so the cache
-        // (built from "two" alone) never lists it.
         fs::write(
             store.dir().join("one.md"),
             memory("one", "One").to_markdown(),
         )
         .unwrap();
 
-        // Removing "one" deletes its file and finds no cache entry to drop, so the
-        // cache is left as-is — it is already consistent with the removal.
         assert!(store.remove("one").unwrap());
         let names: Vec<String> = store
             .summaries()
@@ -597,8 +450,6 @@ mod tests {
 
     #[test]
     fn summaries_rebuild_when_index_is_corrupt() {
-        // Recording the corruption writes to `<data dir>/logs/`, so pin the data
-        // directory to a temp home to keep the test hermetic.
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
@@ -613,7 +464,6 @@ mod tests {
         let text = fs::read_to_string(store.index_path()).unwrap();
         assert!(text.contains("\"version\": 1"));
 
-        // The recoverable corruption is still recorded in the daily log.
         let entry = fs::read_dir(home.path().join("logs"))
             .expect("logs dir exists")
             .next()
@@ -647,10 +497,6 @@ mod tests {
 
     #[test]
     fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
-        // A corrupt sibling file used to fail every later write: `write` persists
-        // its own file, then `rebuild_derived` scanned *all* markdown and choked on
-        // the bad one. The rebuild is now tolerant. Pin the data dir so the skip's
-        // log line is hermetic.
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
@@ -658,12 +504,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
-        // A corrupt, unparseable memory file lands beside the valid one.
         fs::write(store.dir().join("broken.md"), "not a memory").unwrap();
 
-        // Writing another memory still succeeds. The incremental index update
-        // patches only "two"'s entry into the cached list, so it never reads — and
-        // cannot choke on — the unrelated corrupt sibling.
         store.write(&memory("two", "Two")).unwrap();
         let names: Vec<String> = store
             .summaries()
@@ -673,9 +515,6 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
 
-        // A *full rebuild* — forced here by dropping the cache — is where the whole
-        // directory is scanned, and it stays tolerant: it indexes the files that
-        // parse and skips the corrupt one, which the strict `scan` still surfaces.
         fs::remove_file(store.index_path()).unwrap();
         let rebuilt: Vec<String> = store
             .summaries()
@@ -686,7 +525,6 @@ mod tests {
         assert_eq!(rebuilt, vec!["one".to_string(), "two".to_string()]);
         assert!(store.scan().is_err());
 
-        // The skip is recorded in the daily log rather than silently swallowed.
         let entry = fs::read_dir(home.path().join("logs"))
             .expect("logs dir exists")
             .next()
@@ -744,7 +582,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
-        // A directory where the memory file should be makes reading it fail.
         fs::create_dir(store.dir().join("broken.md")).unwrap();
 
         assert!(store
@@ -759,8 +596,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
-        // A directory at the memory path makes remove_file fail with a non-NotFound
-        // error.
         fs::create_dir(store.dir().join("weird.md")).unwrap();
 
         assert!(store
@@ -775,8 +610,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
-        // Acquiring the lock creates the `.lock` file inside the store dir; it
-        // must never be parsed as a memory or counted by scans.
         let _guard = store.lock().unwrap();
         assert!(store.dir().join(".lock").is_file());
         assert_eq!(store.scan().unwrap().len(), 1);
@@ -787,9 +620,32 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         store.write(&memory("one", "One")).unwrap();
-        // A stray non-markdown file, the index, and MEMORY.md must not be parsed.
         fs::write(store.dir().join("README.txt"), "ignore me").unwrap();
 
         assert_eq!(store.scan().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn memory_entry_key_from_path_uses_the_file_stem() {
+        assert_eq!(
+            MemoryEntry::key_from_path(Path::new("/repo/.usagi/memory/one.md")),
+            Some("one".to_string())
+        );
+    }
+
+    #[test]
+    fn summaries_rebuild_when_a_memory_file_is_newer_than_the_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+
+        let edited = memory("one", "Updated title");
+        let path = store.dir().join("one.md");
+        fs::write(&path, edited.to_markdown()).unwrap();
+
+        set_mtime(&store.index_path(), 1_000);
+        set_mtime(&path, 2_000);
+
+        assert_eq!(store.summaries().unwrap()[0].title, "Updated title");
     }
 }

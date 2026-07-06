@@ -26,8 +26,7 @@ use crate::infrastructure::repo_paths::STATE_DIR;
 /// The `index.json` / `.lock` filenames are spelled out here for readability;
 /// `gitignore_covers_the_derived_and_lock_files` asserts they stay in step with
 /// the constants that actually name those files
-/// ([`issue_store::INDEX_FILE`](crate::infrastructure::issue_store) /
-/// [`memory_store::INDEX_FILE`](crate::infrastructure::memory_store) /
+/// ([`markdown_store::INDEX_FILE`](crate::infrastructure::markdown_store) /
 /// [`store_lock::LOCK_FILE_NAME`](crate::infrastructure::store_lock)), so renaming
 /// one without the other fails the test rather than leaking a file into git.
 pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.lock\n";
@@ -98,7 +97,7 @@ fn is_legacy_root_ignore_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::{issue_store, memory_store, store_lock};
+    use crate::infrastructure::{markdown_store, store_lock};
 
     #[test]
     fn gitignore_covers_the_derived_and_lock_files() {
@@ -106,8 +105,7 @@ mod tests {
         // store renames its index or lock file, these constants change but the
         // literal string above would not — leaking the file into git. Assert the
         // string still mentions each actual filename so that drift is caught here.
-        assert!(USAGI_GITIGNORE.contains(issue_store::INDEX_FILE));
-        assert!(USAGI_GITIGNORE.contains(memory_store::INDEX_FILE));
+        assert!(USAGI_GITIGNORE.contains(markdown_store::INDEX_FILE));
         assert!(USAGI_GITIGNORE.contains(store_lock::LOCK_FILE_NAME));
     }
 

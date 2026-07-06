@@ -1,14 +1,14 @@
 ---
 number: 117
 title: refactor(infra): issue_store/memory_store の markdown+index 永続化を MarkdownStore に共通化する（memory の鮮度判定欠落も是正）
-status: todo
+status: done
 priority: high
 labels: [refactor, infra, review]
 dependson: []
 related: [116]
 parent: 113
 created_at: 2026-07-04T23:13:59.167071+00:00
-updated_at: 2026-07-04T23:13:59.167071+00:00
+updated_at: 2026-07-06T03:21:50.189247+00:00
 ---
 
 ## 背景（なぜ問題か）
