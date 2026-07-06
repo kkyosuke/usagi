@@ -14,7 +14,7 @@ use crate::domain::workspace_state::PrLink;
 /// starts on. Walks the same layout [`left_pane`] builds — in single-workspace
 /// mode and 統合(unite) mode (the [`UNITE_WORKSPACE_GAP_ROWS`]-row gap and the
 /// one-row group header before each later workspace, the two-row root entry, the
-/// divider, then either the empty-workspace message or the worktree rows) — so
+/// divider, then the worktree rows) — so
 /// the PR badge hit-test and popup anchor agree with what is drawn without ever
 /// drifting from the renderer. The global index is what the PR popup pins, so a
 /// badge in any workspace (not just the first group) can open its popup.
@@ -34,10 +34,6 @@ pub(super) fn full_sidebar_worktree_entries_with_pending(
             cur += 1; // the unite group header
         }
         cur += ROOT_ENTRY_LINES; // root entry (two rows) + divider
-        if group.worktrees().is_empty() {
-            cur += 1; // the empty-workspace message
-            continue;
-        }
         for _ in group.worktrees() {
             out.push((global, cur));
             cur += SESSION_ROWS;
@@ -48,6 +44,7 @@ pub(super) fn full_sidebar_worktree_entries_with_pending(
                 .iter()
                 .filter(|p| p.root() == group.root_path())
                 .count();
+        cur += 1; // the group's persistent "+ new session" row
     }
     out
 }

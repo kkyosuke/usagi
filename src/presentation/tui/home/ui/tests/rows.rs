@@ -621,7 +621,7 @@ fn worktree_row_truncates_a_long_branch() {
         "",
         None,
         0,
-        8,
+        7,
         8,
         DetailCols::default(),
         false,
@@ -717,7 +717,7 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
-        6,
+        5,
         false,
         Sidebar::Full,
         Utc::now(),
@@ -745,15 +745,11 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         Utc::now(),
         None,
     );
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[1].contains("workspace root"));
     assert!(lines[2].contains('─'));
-    assert!(lines[3].contains("no sessions"));
-    assert!(console::strip_ansi_codes(&lines[4]).contains("+ new session"));
-    let hint = console::strip_ansi_codes(&lines[3]);
-    assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
-    assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
+    assert!(console::strip_ansi_codes(&lines[3]).contains("+ new session"));
 }
 
 #[test]
@@ -779,10 +775,10 @@ fn left_pane_inserts_a_three_row_pending_session_above_the_create_row() {
             .with_timezone(&Utc),
         None,
     );
-    let name = console::strip_ansi_codes(&lines[4]);
-    let detail = console::strip_ansi_codes(&lines[5]);
-    let resource = console::strip_ansi_codes(&lines[6]);
-    let create = console::strip_ansi_codes(&lines[7]);
+    let name = console::strip_ansi_codes(&lines[3]);
+    let detail = console::strip_ansi_codes(&lines[4]);
+    let resource = console::strip_ansi_codes(&lines[5]);
+    let create = console::strip_ansi_codes(&lines[6]);
     assert!(name.contains("newx"));
     assert!(detail.contains("creating session"));
     assert!(resource.contains("0%"));
@@ -851,13 +847,13 @@ fn rail_pane_inserts_three_pending_rows_before_the_create_slot() {
         )
     };
 
-    // Empty workspace: the create slot sits under the empty-message row.
+    // Empty workspace: the create slot sits under the pending skeleton.
     let mut empty = state_with(Vec::new());
     empty.set_root_path("/repo");
     empty.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
     let empty_rail = render_rail(&empty);
-    assert!(console::strip_ansi_codes(&empty_rail[4]).contains('+'));
-    assert!(console::strip_ansi_codes(&empty_rail[7]).contains('+'));
+    assert!(console::strip_ansi_codes(&empty_rail[3]).contains('+'));
+    assert!(console::strip_ansi_codes(&empty_rail[6]).contains('+'));
 
     // Populated workspace: the create slot sits at the foot of the sessions.
     let mut full = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
@@ -1179,9 +1175,9 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
 }
 
 #[test]
-fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
+fn left_pane_in_unite_mode_shows_an_empty_workspace_create_row() {
     // A stacked workspace with no sessions still shows its header, root, divider,
-    // and the empty message under it.
+    // and create row under it.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new(
             "wsA",
@@ -1208,7 +1204,8 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
     let rendered = stripped(&full);
     assert!(rendered.contains("a1")); // wsA's session
     assert!(rendered.contains("▌ wsB")); // the empty workspace still gets a header
-    assert!(rendered.contains(EMPTY_MESSAGE)); // and the "no sessions" message
+    assert!(rendered.contains("+ new session")); // and a create row
+    assert!(!rendered.contains("no sessions"));
 }
 
 fn unite_pair() -> WorktreeList {
@@ -1502,16 +1499,15 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
         ),
     ]);
     let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
-    // wsA (empty): 0 hdr, 1-2 root(flat0), 3 div, 4 empty message, 5 create(flat1),
-    //   6-7 gap. wsB: 8 hdr, 9-10 root(flat2), 11 div, 12-14 b1(flat3), 15 create.
+    // wsA (empty): 0 hdr, 1-2 root(flat0), 3 div, 4 create(flat1),
+    //   5-6 gap. wsB: 7 hdr, 8-9 root(flat2), 10 div, 11-13 b1(flat3), 14 create.
     assert_eq!(at(1), Some(0)); // wsA root
-    assert_eq!(at(4), None); // empty-workspace message
-    assert_eq!(at(5), Some(1)); // wsA create row (empty workspace)
-    assert_eq!(at(6), None); // first gap row
-    assert_eq!(at(7), None); // second gap row
+    assert_eq!(at(4), Some(1)); // wsA create row (empty workspace)
+    assert_eq!(at(5), None); // first gap row
+    assert_eq!(at(6), None); // second gap row
 
-    assert_eq!(at(9), Some(2)); // wsB root
-    assert_eq!(at(12), Some(3)); // b1
+    assert_eq!(at(8), Some(2)); // wsB root
+    assert_eq!(at(11), Some(3)); // b1
 }
 
 #[test]
@@ -1604,21 +1600,22 @@ fn unite_with_prs() -> HomeState {
 fn sidebar_pr_badge_at_maps_badges_across_unite_groups() {
     let state = unite_with_prs();
     // The primary workspace's badge (detail row 8) maps to global index 0, and the
-    // extra workspace's badge (detail row 17, past the gap and header) to global
+    // extra workspace's badge (detail row 18, past the create row, gap, and header) to global
     // index 1 — the popup reaches a session in any group, not just the first.
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), Some(0));
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), Some(1));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 18), Some(1));
     // The identity line (row 7 / 16) above each detail line carries no badge.
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 16), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), None);
 }
 
 #[test]
 fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
-    // An empty primary workspace contributes only its one-row "no sessions" line,
-    // which the walk steps over so the extra workspace's badge still resolves. `b1`
-    // starts on body line 11 (empty primary: header 0, root 1-2, divider 3, message
-    // 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → detail row 15.
+    // An empty primary workspace contributes root/divider/create (no "no
+    // sessions" message), then the extra workspace's badge still resolves. `b1`
+    // starts on body line 11 (empty primary: header 0, root 1-2, divider 3,
+    // create 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → screen
+    // detail row 15.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
@@ -1649,17 +1646,17 @@ fn pr_popup_floats_and_opens_across_unite_groups() {
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 0");
     assert_eq!((top, left), (7, 43));
     assert!(stripped(&popup).contains("#412"));
-    // The extra workspace's PR (global 1) floats lower, past the gap and header
-    // (entry starts on body line 13 → screen row 16).
+    // The extra workspace's PR (global 1) floats lower, past the first group's
+    // create row, gap, and header (entry starts on body line 14 → screen row 17).
     state.set_pr_popup(Some(1));
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 1");
-    assert_eq!((top, left), (16, 43));
+    assert_eq!((top, left), (17, 43));
     assert!(stripped(&popup).contains("#777"));
-    // Clicking `#777` in that box (content row 17, the token flush at left+2 = 45)
+    // Clicking `#777` in that box (content row 18, the token flush at left+2 = 45)
     // opens the extra workspace's PR — the click resolves the right session's URL
     // across groups.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 17),
+        pr_popup_click(&state, 24, 120, 45, 18),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/777"
     ));
 }
@@ -2873,8 +2870,8 @@ fn sidebar_row_click_maps_through_the_scroll_offset() {
 
 #[test]
 fn sidebar_scroll_walks_past_an_empty_workspace_group() {
-    // Unite mode with an empty leading workspace forces the span walk through the
-    // empty-workspace message row before it reaches the selected session in the
+    // Unite mode with an empty leading workspace still walks that workspace's
+    // root/divider/create block before it reaches the selected session in the
     // second group.
     let mut list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new("wsA", Vec::new()),
@@ -2889,10 +2886,10 @@ fn sidebar_scroll_walks_past_an_empty_workspace_group() {
     // Flat rows (each expanded workspace owns a create row): wsA root 0, wsA create
     // 1, wsB root 2, b0 3, b1 4, wsB create 5. Select b1.
     list.focus_index(4);
-    // Group A block (header 1 + root 2 + divider 1 + empty 1 + create 1 = 6), then
-    // group B (gap 2 + header 1 + root 2 + divider 1 + 2×3 + create 1 = 13) = 19.
-    // b1's block spans lines 15-17, so a 9-row pane scrolls by 9 (18 − 9).
-    assert_eq!(sidebar_scroll(&list, true, 9), 9);
+    // Group A block (header 1 + root 2 + divider 1 + create 1 = 5), then group B
+    // (gap 2 + header 1 + root 2 + divider 1 + 2×3 + create 1 = 13) = 18. b1's
+    // block spans lines 14-16, so a 9-row pane scrolls by 8 (17 − 9).
+    assert_eq!(sidebar_scroll(&list, true, 9), 8);
 }
 
 #[test]

@@ -54,9 +54,6 @@ use super::tasks::{TaskKind, TaskRow};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 
-/// Shown below the root row when the workspace has no recorded worktrees.
-const EMPTY_MESSAGE: &str = "no sessions";
-
 /// The detail shown on the root row's second line (it has no git status).
 const ROOT_DETAIL: &str = "workspace root";
 

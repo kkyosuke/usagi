@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::state::{PendingSession, WorktreeList, ROOT_NAME};
 use super::{
-    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, LOCAL_ICON,
-    NAME_PREFIX, NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, SYNCED_ICON,
+    clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, LOCAL_ICON, NAME_PREFIX,
+    NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, SYNCED_ICON,
 };
 use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{LabelColor, SessionLabelDef, SessionLabelMaster, Sidebar};
@@ -1138,9 +1138,9 @@ fn pending_session_count(pending_sessions: &[PendingSession], root: &Path) -> us
 
 /// The number of body lines one workspace group occupies in the sidebar: the
 /// (統合(unite)) inter-workspace gap and group header, the two-row root entry, the
-/// one-row divider, then either the single empty-workspace message or
-/// [`SESSION_ROWS`] rows per session, then any pending-create skeletons (also
-/// [`SESSION_ROWS`] rows each), then the trailing "+ new session" row.
+/// one-row divider, then [`SESSION_ROWS`] rows per existing session, then any
+/// pending-create skeletons (also [`SESSION_ROWS`] rows each), then the trailing
+/// "+ new session" row.
 /// `with_headers` matches the full sidebar, which heads each 統合 group with its
 /// name; the collapsed rail draws no header (but keeps the gap), so it passes
 /// `false`. Shared by the create/rename insert anchor
@@ -1161,11 +1161,7 @@ fn group_block_rows_with_pending(
         return gap + 1;
     }
     let header = usize::from(united && with_headers);
-    let body = if worktree_count == 0 {
-        1
-    } else {
-        SESSION_ROWS * worktree_count
-    };
+    let body = SESSION_ROWS * worktree_count;
     let pending = SESSION_ROWS * pending_count;
     // Each expanded workspace ends with its own "+ new session" row (the final
     // `+ 1`), so creating a session lands in the workspace it sits under.
@@ -1236,16 +1232,12 @@ fn selected_row_span_with_pending(
         }
         cur += 2 + 1; // root entry + divider
         flat += 1;
-        if group.worktrees().is_empty() {
-            cur += 1; // the empty-workspace message
-        } else {
-            for _ in group.worktrees() {
-                if flat == sel {
-                    return (cur, SESSION_ROWS);
-                }
-                cur += SESSION_ROWS;
-                flat += 1;
+        for _ in group.worktrees() {
+            if flat == sel {
+                return (cur, SESSION_ROWS);
             }
+            cur += SESSION_ROWS;
+            flat += 1;
         }
         // Pending create skeletons are not selectable, but they reserve the exact
         // three rows the created session will occupy, keeping the following
@@ -1422,9 +1414,6 @@ pub(super) fn rail_pane(
         flat_row += 1;
         win.push(style("─".repeat(RAIL_WIDTH)).dim().to_string());
         if group.worktrees().is_empty() {
-            // Mirror the full sidebar's single empty-message row so the row count
-            // matches and toggling never shifts the layout.
-            win.push(pad_to_width(String::new(), RAIL_WIDTH));
             for _pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
                 for row in rail_pending_session_rows(skeleton) {
                     win.push(row);
@@ -1516,9 +1505,9 @@ pub(super) fn dim_row(line: &str) -> String {
 
 /// The flat selectable row (root rows included, matching `WorktreeList`'s row
 /// space) a 0-based body `line` lands on, or `None` for a group header, a divider,
-/// a unite workspace gap, an empty-workspace message, or a line past the last
-/// group. Replays the exact layout [`left_pane`] / [`rail_pane`] build so a click
-/// maps back to its row without the renderer and the hit test ever disagreeing.
+/// a unite workspace gap, a pending skeleton row, or a line past the last group.
+/// Replays the exact layout [`left_pane`] / [`rail_pane`] build so a click maps
+/// back to its row without the renderer and the hit test ever disagreeing.
 ///
 /// `with_headers` matches the full sidebar (which heads each 統合(unite) group
 /// with its name); the rail draws no header, so it walks the same layout minus
@@ -1563,19 +1552,12 @@ pub(super) fn sidebar_row_at_line_walk_with_pending(
             return None; // the divider
         }
         cur += 1;
-        if group.worktrees().is_empty() {
-            if line == cur {
-                return None; // the empty-workspace message
+        for _ in group.worktrees() {
+            if line >= cur && line < cur + SESSION_ROWS {
+                return Some(flat);
             }
-            cur += 1;
-        } else {
-            for _ in group.worktrees() {
-                if line >= cur && line < cur + SESSION_ROWS {
-                    return Some(flat);
-                }
-                cur += SESSION_ROWS;
-                flat += 1;
-            }
+            cur += SESSION_ROWS;
+            flat += 1;
         }
         let pending_rows =
             SESSION_ROWS * pending_session_count(pending_sessions, group.root_path());
@@ -1862,14 +1844,9 @@ pub(super) fn left_pane(
                 .to_string(),
         );
         if group.worktrees().is_empty() {
-            // No sessions yet in this workspace — show the empty message under the
-            // divider, then the group's own create row so a session can be started
-            // straight into this (otherwise empty) workspace.
-            win.push(
-                style(format!("{indent}{}", clip_to_width(EMPTY_MESSAGE, inner_w)))
-                    .dim()
-                    .to_string(),
-            );
+            // No sessions yet in this workspace — the group's own create row sits
+            // straight under the divider so a session can be started into this
+            // (otherwise empty) workspace.
             for pending in pending_sessions_for_root(pending_sessions, group.root_path()) {
                 for row in pending_session_rows(
                     pending.name(),
