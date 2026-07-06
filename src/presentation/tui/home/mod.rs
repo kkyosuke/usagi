@@ -352,7 +352,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     };
 
     // The background session tasks (create / remove) the event loop dispatches
-    // and renders in the top-right task panel, shared with the worker threads.
+    // and renders by kind (create as an inline sidebar skeleton, remove in the
+    // top-right task block), shared with the worker threads.
     let tasks = tasks::TaskHandle::new();
     // Serialises the session-mutating git work across worker threads: both
     // create and remove load-modify-save `state.json`, so concurrent runs would
@@ -1934,6 +1935,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                     name: created.name.clone(),
                     interaction_epoch,
                 }),
+                created: Some(created.name.clone()),
             },
         ),
         // The failure line is recorded to the daily log when the event loop applies
@@ -1947,6 +1949,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                 target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
+                created: Some(name.to_string()),
             },
         ),
     }
@@ -1977,6 +1980,7 @@ fn run_remove(
                         .join(name),
                 ),
                 focus,
+                created: None,
             },
         ),
         Ok(outcome) => {
@@ -1997,6 +2001,7 @@ fn run_remove(
                     target_root: Some(root.to_path_buf()),
                     evict: None,
                     focus: None,
+                    created: None,
                 },
             )
         }
@@ -2011,6 +2016,7 @@ fn run_remove(
                 target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
+                created: None,
             },
         ),
     }

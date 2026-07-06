@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use super::super::state::{WorktreeList, ROOT_NAME};
+use super::super::state::{PendingSession, WorktreeList, ROOT_NAME};
 use super::{
     clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, EMPTY_MESSAGE, LOCAL_ICON,
     NAME_PREFIX, NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, SYNCED_ICON,
@@ -1022,6 +1022,47 @@ pub(super) fn create_row(selected: bool, in_switch: bool, width: usize) -> Strin
     clip_to_width(&format!("{gutter} {label}"), width)
 }
 
+/// How often (ms) the inline create skeleton's loading wave advances one column.
+/// Fast enough to read as live motion while the background git work runs; the
+/// frame is derived from the wall clock so every skeleton on screen pulses in
+/// step and needs no per-row tick threaded through the state.
+const SKELETON_TICK_MS: i64 = 90;
+
+/// The animation frame for the create skeletons this paint, derived from the
+/// frame's wall-clock instant so the wave advances between repaints.
+pub(super) fn skeleton_frame(now: DateTime<Utc>) -> usize {
+    (now.timestamp_millis().rem_euclid(1 << 30) / SKELETON_TICK_MS) as usize
+}
+
+/// The full-sidebar create row repainted as an inline **skeleton** while a
+/// session by `name` is being created into this workspace: the same gutter as
+/// [`create_row`], then `+ name` drawn as a left-to-right loading wave
+/// ([`loading_chip`](super::tabs_hit::loading_chip)) so the create reads as busy
+/// right where the new session's row will land — the sidebar twin of the tab
+/// strip's launching-pane chip. It never carries the create row's `+ new session`
+/// wording while pending, so the row cannot be mistaken for an idle affordance.
+pub(super) fn create_skeleton_row(
+    name: &str,
+    frame: usize,
+    in_switch: bool,
+    width: usize,
+) -> String {
+    // The skeleton is never the cursor row's action (a create is already in
+    // flight), so it draws with the unselected gutter regardless of the cursor.
+    let gutter = gutter_cell(false, false, in_switch);
+    let wave = super::tabs_hit::loading_chip(&format!("+ {name}"), frame);
+    clip_to_width(&format!("{gutter} {wave}"), width)
+}
+
+/// The rail twin of [`create_skeleton_row`]: a pulsing `+` in the create row
+/// position while a session is being created into this workspace, so the
+/// collapsed rail shows the same "coming up" beat without room for the name.
+pub(super) fn rail_create_skeleton_row(frame: usize) -> String {
+    let plus = super::tabs_hit::loading_chip("+", frame);
+    let gutter = gutter_cell(false, false, false);
+    pad_to_width(format!("{gutter} {plus}"), RAIL_WIDTH)
+}
+
 /// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
 /// input itself moves to the right pane while the sidebar is collapsed, but the
 /// click / focus target remains visible at the rail's bottom.
@@ -1237,12 +1278,14 @@ pub(super) fn rail_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    pending_sessions: &[PendingSession],
     label_master: &SessionLabelMaster,
     rows: usize,
     in_switch: bool,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
+    let skeleton = skeleton_frame(now);
     // Scroll so the selected entry stays on screen once the list outgrows the rail
     // (the rail draws no 統合 group header, so `with_headers` is false).
     let scroll = sidebar_scroll(list, false, rows);
@@ -1298,8 +1341,15 @@ pub(super) fn rail_pane(
             // matches and toggling never shifts the layout.
             win.push(pad_to_width(String::new(), RAIL_WIDTH));
             let selected = flat_row == list.selected_index();
-            let mut row = rail_create_row(selected, in_switch);
-            if in_switch && !selected {
+            let pending = pending_sessions
+                .iter()
+                .any(|p| p.root() == group.root_path());
+            let mut row = if pending {
+                rail_create_skeleton_row(skeleton)
+            } else {
+                rail_create_row(selected, in_switch)
+            };
+            if !pending && in_switch && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1355,8 +1405,15 @@ pub(super) fn rail_pane(
             break;
         }
         let selected = flat_row == list.selected_index();
-        let mut row = rail_create_row(selected, in_switch);
-        if in_switch && !selected {
+        let pending = pending_sessions
+            .iter()
+            .any(|p| p.root() == group.root_path());
+        let mut row = if pending {
+            rail_create_skeleton_row(skeleton)
+        } else {
+            rail_create_row(selected, in_switch)
+        };
+        if !pending && in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);
@@ -1552,6 +1609,7 @@ pub(super) fn left_pane(
     running: &HashSet<PathBuf>,
     waiting: &HashSet<PathBuf>,
     done: &HashSet<PathBuf>,
+    pending_sessions: &[PendingSession],
     resources: &HashMap<PathBuf, ResourceUsage>,
     label_master: &SessionLabelMaster,
     left_w: usize,
@@ -1574,6 +1632,7 @@ pub(super) fn left_pane(
             running,
             waiting,
             done,
+            pending_sessions,
             label_master,
             rows,
             in_switch,
@@ -1618,6 +1677,7 @@ pub(super) fn left_pane(
     let inner_w = left_w.saturating_sub(NAME_PREFIX);
     // In 統合(unite) mode each workspace's rows are headed by its name.
     let united = list.group_count() > 1;
+    let skeleton = skeleton_frame(now);
 
     // Scroll so the selected row stays on screen once the list outgrows the pane;
     // the window keeps only the visible slice while the loop walks the whole layout
@@ -1687,8 +1747,15 @@ pub(super) fn left_pane(
                     .to_string(),
             );
             let selected = flat_row == list.selected_index();
-            let mut row = create_row(selected, in_switch, left_w);
-            if in_switch && !selected {
+            let pending = pending_sessions
+                .iter()
+                .find(|p| p.root() == group.root_path());
+            let mut row = if let Some(pending) = pending {
+                create_skeleton_row(pending.name(), skeleton, in_switch, left_w)
+            } else {
+                create_row(selected, in_switch, left_w)
+            };
+            if pending.is_none() && in_switch && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1756,8 +1823,15 @@ pub(super) fn left_pane(
             break;
         }
         let selected = flat_row == list.selected_index();
-        let mut row = create_row(selected, in_switch, left_w);
-        if in_switch && !selected {
+        let pending = pending_sessions
+            .iter()
+            .find(|p| p.root() == group.root_path());
+        let mut row = if let Some(pending) = pending {
+            create_skeleton_row(pending.name(), skeleton, in_switch, left_w)
+        } else {
+            create_row(selected, in_switch, left_w)
+        };
+        if pending.is_none() && in_switch && !selected {
             row = dim_row(&row);
         }
         win.push(row);

@@ -50,6 +50,7 @@ pub(super) use pr_popup::sidebar_pr_badge_at;
 pub(super) use pr_popup::{pr_popup_click, PopupClick};
 
 use super::state::{HomeState, ModalSize, Mode, WorktreeList};
+use super::tasks::{TaskKind, TaskRow};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 
@@ -619,10 +620,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     // Overlay status affordances in priority order: a momentary blocking action
     // (terminal / agent launch) shows the loading rabbit centred in the right
-    // pane; otherwise any in-flight background session work (create / remove)
-    // shows the task status line in the top-right corner; otherwise a `◆ N
-    // waiting` notice appears while at least one session is waiting for the
-    // user's input. The task status and waiting notice ride the header rows. The
+    // pane; otherwise any in-flight background removal work shows the task
+    // status line in the top-right corner (session creation lives inline as a
+    // sidebar skeleton); otherwise a `◆ N waiting` notice appears while at least
+    // one session is waiting for the user's input. The task status and waiting
+    // notice ride the header rows. The
     // "update available" notice is no longer a corner overlay — the sidebar
     // mascot speaks it (above) instead. The mascot also speaks the current
     // loading / background-task label, so the left-bottom usagi explains what is
@@ -642,26 +644,32 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
                 &loading_block,
             );
         }
-    } else if !state.tasks().is_empty() {
-        // Background session work (create / remove) running off the event-loop
-        // thread. It rides the two header rows (row 0 the title bar, row 1 the
-        // mode ladder), whose centred content leaves the right columns blank —
-        // so it never collides with the right pane (preview / menu / live
-        // terminal) the way the old body-row panel did, and needs no
-        // live-terminal suppression. Two rows give the label more width.
-        widgets::overlay_top_right(
-            &mut lines,
-            0,
-            width,
-            &task_status_line(state.tasks(), width),
-        );
     } else {
-        widgets::overlay_top_right(
-            &mut lines,
-            0,
-            width,
-            &waiting_notice(state.waiting_paths().len()),
-        );
+        // Background *removal* work (running off the event-loop thread) rides the
+        // two header rows (row 0 the title bar, row 1 the mode ladder), whose
+        // centred content leaves the right columns blank — so it never collides
+        // with the right pane. A **create** is no longer shown here: it animates
+        // as an inline skeleton on its target workspace's "+ new session" row
+        // (see [`sidebar::create_skeleton_row`]), so the corner is left free for
+        // the `◆ N waiting` notice the way the tab strip freed it for launching
+        // panes. When no removal holds the corner the waiting notice takes it.
+        let corner_tasks: Vec<TaskRow> = state
+            .tasks()
+            .iter()
+            .filter(|row| !matches!(row.kind, TaskKind::CreateSession))
+            .cloned()
+            .collect();
+        let task_lines = task_status_line(&corner_tasks, width);
+        if task_lines.is_empty() {
+            widgets::overlay_top_right(
+                &mut lines,
+                0,
+                width,
+                &waiting_notice(state.waiting_paths().len()),
+            );
+        } else {
+            widgets::overlay_top_right(&mut lines, 0, width, &task_lines);
+        }
     }
 
     // Float the 在席 (Focus) action surface — the Menu or the Prompt — as a box
@@ -773,6 +781,7 @@ fn left_column(
         state.running_paths(),
         state.waiting_paths(),
         state.done_paths(),
+        state.pending_sessions(),
         state.resource_usages(),
         state.label_master(),
         left_w,
@@ -969,7 +978,8 @@ fn place_mascot(
 /// Operational status wins over informational news: when a blocking action is in
 /// progress, the launch loader animates in the right pane while the mascot says
 /// the action's label; otherwise background session tasks (create / remove) are
-/// spoken from the same bubble that used to carry only update notices. Update
+/// spoken from the same bubble that used to carry only update notices (even
+/// creates whose visual progress lives inline in the sidebar). Update
 /// availability remains the fallback when no active work needs explaining.
 fn mascot_speech(state: &HomeState) -> Option<Vec<String>> {
     if let Some(loading) = state.loading() {

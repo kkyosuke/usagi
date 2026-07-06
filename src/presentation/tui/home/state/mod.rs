@@ -224,6 +224,37 @@ impl PendingPane {
     }
 }
 
+/// A session being created in the background whose row is not in the list yet.
+///
+/// Creating a session shells out to git (worktree add / submodule init) on a
+/// worker thread, so its row only appears once that work finishes and the
+/// refreshed list lands. Meanwhile the sidebar repaints the target workspace's
+/// "+ new session" row as an animated **skeleton** carrying this pending name —
+/// the same "coming up right where it will land" idea the tab strip uses for a
+/// launching pane ([`PendingPane`]) — so the create reads as busy inline instead
+/// of stealing the top-right corner the waiting notice wants. Tracked per
+/// `(root, name)` so a create lands its skeleton in the workspace it targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSession {
+    /// The workspace root the session is being created under (the group whose
+    /// "+ new session" row repaints as the skeleton).
+    root: PathBuf,
+    /// The session (branch) name being created — shown inside the skeleton.
+    name: String,
+}
+
+impl PendingSession {
+    /// The workspace root the pending session lands in.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The session name being created.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// The embedded-terminal surface shown in the home screen's right pane: the
 /// screen `view` snapshot and the `tabs` strip above it.
 ///
@@ -718,10 +749,14 @@ pub struct HomeState {
     /// the event loop polls it each frame, animating its chip and — once ready —
     /// moving to it unless the user acted meanwhile. See [`PendingPane`].
     pending_pane: Option<PendingPane>,
-    /// The rows of the background-task panel (session create / remove running off
-    /// the event-loop thread), refreshed each frame from the shared task handle.
-    /// While non-empty the top-right corner stacks them instead of the update
-    /// notice, so the user sees in-flight work without the screen freezing.
+    /// Sessions currently being created in the background, shown as animated
+    /// skeleton rows on their target workspace's "+ new session" row until the
+    /// worker reports success or failure.
+    pending_sessions: Vec<PendingSession>,
+    /// The rows of the background-task board (session create / remove running
+    /// off the event-loop thread), refreshed each frame from the shared task
+    /// handle. The renderer filters these by kind: creates are mirrored as
+    /// sidebar skeletons, while removals still use the top-right status block.
     tasks: Vec<TaskRow>,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
@@ -883,6 +918,7 @@ impl HomeState {
             update: None,
             loading: None,
             pending_pane: None,
+            pending_sessions: Vec::new(),
             tasks: Vec::new(),
             root_note: None,
             extra_groups: Vec::new(),
@@ -2350,14 +2386,43 @@ impl HomeState {
             .and_then(|p| p.tab.map(|tab| (tab, p.frame)))
     }
 
+    /// Begin showing an inline skeleton for a session create targeting `root`.
+    /// Duplicate begins for the same `(root, name)` are ignored so repeated
+    /// dispatch paths cannot stack identical skeletons.
+    pub fn begin_pending_session(&mut self, root: PathBuf, name: String) {
+        if self
+            .pending_sessions
+            .iter()
+            .any(|p| p.root == root && p.name == name)
+        {
+            return;
+        }
+        self.pending_sessions.push(PendingSession { root, name });
+    }
+
+    /// Clear the inline create skeleton for `name` under `root`, returning
+    /// whether one was present.
+    pub fn clear_pending_session(&mut self, root: &Path, name: &str) -> bool {
+        let before = self.pending_sessions.len();
+        self.pending_sessions
+            .retain(|p| !(p.root.as_path() == root && p.name == name));
+        self.pending_sessions.len() != before
+    }
+
+    /// Pending session-create skeletons currently shown in the sidebar.
+    pub fn pending_sessions(&self) -> &[PendingSession] {
+        &self.pending_sessions
+    }
+
     /// Swap in the current background-task rows (session create / remove running
     /// off the event-loop thread), read from the shared task handle each frame.
-    /// While non-empty the top-right corner stacks them.
+    /// The UI decides per row kind whether it belongs in the sidebar skeleton or
+    /// the top-right status block.
     pub fn set_tasks(&mut self, tasks: Vec<TaskRow>) {
         self.tasks = tasks;
     }
 
-    /// The background-task panel rows to render in the top-right corner.
+    /// The background-task rows the UI renders by kind.
     pub fn tasks(&self) -> &[TaskRow] {
         &self.tasks
     }

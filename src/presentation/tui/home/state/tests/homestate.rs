@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::tui::home::tasks::TaskKind;
 
 /// A minimal recorded session rooted at `/repo/.usagi/sessions/<name>`, used to
 /// give the primary workspace real rows that survive a rebuild.
@@ -502,6 +503,22 @@ fn loading_indicator_starts_clear_steps_and_finishes() {
 }
 
 #[test]
+fn pending_session_create_skeletons_begin_dedupe_and_clear_by_root_and_name() {
+    let mut state = state();
+    let root = PathBuf::from("/repo");
+    state.begin_pending_session(root.clone(), "newx".to_string());
+    state.begin_pending_session(root.clone(), "newx".to_string());
+    assert_eq!(state.pending_sessions().len(), 1);
+    assert_eq!(state.pending_sessions()[0].root(), root.as_path());
+    assert_eq!(state.pending_sessions()[0].name(), "newx");
+
+    assert!(!state.clear_pending_session(&root, "other"));
+    assert_eq!(state.pending_sessions().len(), 1);
+    assert!(state.clear_pending_session(&root, "newx"));
+    assert!(state.pending_sessions().is_empty());
+}
+
+#[test]
 fn a_notice_is_seeded_as_an_error_line() {
     let state = HomeState::new("usagi", Vec::new(), Some("load failed".to_string()));
     assert_eq!(state.log().len(), 2);
@@ -684,6 +701,7 @@ fn clicking_the_mascot_reacts_when_work_status_hides_the_update_notice() {
     let mut tasking = state();
     tasking.set_update(Version::parse("9.9.9"));
     tasking.set_tasks(vec![crate::presentation::tui::home::tasks::TaskRow {
+        kind: TaskKind::CreateSession,
         label: "作成中… main".to_string(),
         mark: crate::presentation::tui::home::tasks::TaskMark::Running(0),
     }]);

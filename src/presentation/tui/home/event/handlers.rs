@@ -81,11 +81,15 @@ pub(super) fn palette_key(
                 },
                 // `session create <name>` dispatches the git work to a background
                 // worker and returns at once; the new session appears in the list
-                // when the task finishes (tracked in the top-right task panel).
+                // when the task finishes (tracked by an inline sidebar skeleton).
                 Effect::CreateSession(name) => {
+                    state.expand_selected_group_for_create();
                     let root = state.selected_workspace_root();
                     state.set_op_target(root.clone());
                     let interaction_epoch = wiring.interaction_epoch;
+                    // Show the create as an inline skeleton on the target
+                    // workspace's "+ new session" row while the worker runs.
+                    state.begin_pending_session(root.clone(), name.clone());
                     (wiring.dispatch_create)(&root, &name, interaction_epoch);
                 }
                 // `session create` with no name moves to 切替 and opens the inline
@@ -257,11 +261,13 @@ pub(super) fn switch_key(
                 if let Some(name) = state.switch_confirm_create() {
                     // Dispatch the git work to a background worker and stay in
                     // 切替 so the user keeps navigating; the new session appears in
-                    // the list when the task finishes (tracked in the task panel).
+                    // the list when the task finishes (tracked by an inline
+                    // sidebar skeleton).
                     // It lands in the cursor's group's workspace (統合/unite mode).
                     let root = state.selected_workspace_root();
                     state.set_op_target(root.clone());
                     let interaction_epoch = wiring.interaction_epoch;
+                    state.begin_pending_session(root.clone(), name.clone());
                     (wiring.dispatch_create)(&root, &name, interaction_epoch);
                 }
             }
