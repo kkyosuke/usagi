@@ -64,17 +64,64 @@ pub trait CommandRunner {
     fn spawn(&self, program: &str, args: &[&str]) -> std::io::Result<()>;
 }
 
-/// Whether `name` is installed and runnable, probed by invoking it with
-/// `--version` and discarding its output. The basis of
-/// [`SystemRunner::available`].
+/// Whether `name` is installed and runnable, probed by searching the PATH
+/// for an executable file. The basis of [`SystemRunner::available`].
 fn which(name: &str) -> bool {
-    std::process::Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    which_in(name, std::env::var_os("PATH"))
+}
+
+fn which_in(name: &str, path_var: Option<std::ffi::OsString>) -> bool {
+    let path_var = match path_var {
+        Some(v) => v,
+        None => return false,
+    };
+
+    #[cfg(target_os = "windows")]
+    let extensions = {
+        let pathext = std::env::var_os("PATHEXT")
+            .unwrap_or_else(|| std::ffi::OsString::from(".EXE;.BAT;.CMD;.COM"));
+        std::env::split_paths(&pathext).collect::<Vec<_>>()
+    };
+
+    for path in std::env::split_paths(&path_var) {
+        let candidate = path.join(name);
+
+        #[cfg(target_os = "windows")]
+        {
+            if candidate.is_file() {
+                return true;
+            }
+            for ext in &extensions {
+                if let Some(ext_str) = ext.to_str() {
+                    let mut name_with_ext = name.to_string();
+                    name_with_ext.push_str(ext_str);
+                    if path.join(name_with_ext).is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if let Ok(metadata) = candidate.metadata() {
+                    if metadata.is_file() && (metadata.permissions().mode() & 0o111) != 0 {
+                        return true;
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if candidate.is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The production [`CommandRunner`], backed by [`std::process::Command`].
@@ -217,5 +264,31 @@ mod tests {
         assert!(fake.available("x"));
         assert!(fake.check("x", &[]));
         assert!(fake.spawn("x", &[]).is_ok());
+    }
+
+    #[test]
+    fn test_system_runner_available() {
+        let runner = SystemRunner;
+        // git is definitely installed on the host
+        assert!(runner.available("git"));
+        // nonexistent command should not be available
+        assert!(!runner.available("nonexistent-command-xyz"));
+    }
+
+    #[test]
+    fn test_which_fails_when_path_is_missing() {
+        assert!(!which_in("git", None));
+    }
+
+    #[test]
+    fn test_which_skips_non_executable_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("dummy-command");
+        // Create a non-executable file
+        std::fs::write(&file_path, "not executable").unwrap();
+
+        // Pass the temp_dir directly as the PATH variable using which_in
+        let path_var = Some(std::ffi::OsString::from(temp_dir.path()));
+        assert!(!which_in("dummy-command", path_var));
     }
 }

@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::usecase::doctor::CommandRunner;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -68,6 +70,8 @@ pub struct UsagiMcpServer {
     /// issue-write tools that mutate the git-tracked store (see
     /// [`ROOT_FORBIDDEN_TOOLS`]).
     at_workspace_root: bool,
+    /// The workspace root directory.
+    workspace_root: PathBuf,
 }
 
 impl UsagiMcpServer {
@@ -78,12 +82,18 @@ impl UsagiMcpServer {
     /// so a session agent's edits stay on its own branch), while session
     /// orchestration resolves against `workspace_root` (the whole workspace).
     /// When the process runs from the workspace root the two paths coincide.
-    pub fn new(worktree: PathBuf, workspace_root: PathBuf, backend: Box<dyn AgentBackend>) -> Self {
+    pub fn new(
+        worktree: PathBuf,
+        workspace_root: PathBuf,
+        backend: Box<dyn AgentBackend>,
+        runner: Box<dyn CommandRunner>,
+    ) -> Self {
         let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
-            session: SessionMcpServer::new(workspace_root, &worktree, backend),
+            session: SessionMcpServer::new(workspace_root.clone(), &worktree, backend, runner),
             at_workspace_root,
+            workspace_root,
         }
     }
 
@@ -107,19 +117,48 @@ impl UsagiMcpServer {
         // tool output), so the orchestration reuses their logic without parsing
         // JSON text back out. Each step surfaces the sub-server's own error.
         //
-        // 1. Render the issue as a ready-to-run prompt (errors if it is missing).
+        // 1. Resolve and validate the agent override. An unknown agent_cli is surfaced
+        //    early, before reading files or committing validation.
+        let agent =
+            resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+
+        // 2. Render the issue as a ready-to-run prompt (errors if it is missing).
         let rendered = self.issue.render_prompt(args.number)?;
-        // 2. Create a fresh session for the issue (default name: issue-<number>),
+
+        // Verify that the issue file exists in the base commit of the repository
+        let local_settings =
+            crate::usecase::settings::load_local(&self.workspace_root).unwrap_or_default();
+        let base = crate::infrastructure::git::resolve_base_ref(
+            &self.workspace_root,
+            local_settings.branch_source(),
+            local_settings.default_branch(),
+        );
+        let base_ref = base.unwrap_or_else(|| "HEAD".to_string());
+        let relative_issue_path = format!(".usagi/issues/{}", rendered.file_name);
+
+        if !crate::infrastructure::git::file_exists_at_rev(
+            &self.workspace_root,
+            &base_ref,
+            &relative_issue_path,
+        ) {
+            return Err(format!(
+                "issue #{} is not committed to the base branch ({}) yet: \
+                 uncommitted issues will not be present in the new session's worktree. \
+                 Please commit and merge this issue using a triage session first, \
+                 or create a new triage session manually with session_create + session_prompt.",
+                args.number, base_ref
+            ));
+        }
+
+        // 3. Create a fresh session for the issue (default name: issue-<number>),
         //    pinning the optional per-session agent CLI / model so the delegated
-        //    session launches with them. An unknown agent_cli is surfaced here,
-        //    before any session is created. A duplicate name surfaces the session
+        //    session launches with them. A duplicate name surfaces the session
         //    server's own error.
-        let agent = resolve_session_agent(args.agent_cli.as_deref(), args.model)?;
         let name = args
             .name
             .unwrap_or_else(|| format!("issue-{}", args.number));
         let created = self.session.create_session(&name, agent)?;
-        // 3. Deliver the prompt. A freshly created session has no live pane, so the
+        // 4. Deliver the prompt. A freshly created session has no live pane, so the
         //    launch queue is always the right channel here.
         let (channel, _detail) =
             self.session
@@ -244,6 +283,26 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use crate::usecase::doctor::CommandRunner;
+
+    /// A runner that reports a fixed allowlist of programs as available.
+    struct FakeRunner(Vec<&'static str>);
+
+    impl CommandRunner for FakeRunner {
+        fn available(&self, program: &str) -> bool {
+            self.0.contains(&program)
+        }
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            true
+        }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A backend that returns a fixed reply, so the unified server's routing of
     /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
@@ -275,10 +334,12 @@ mod tests {
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         UsagiMcpServer::new(
             root.to_path_buf(),
             root.to_path_buf(),
             Box::new(StubBackend),
+            runner,
         )
     }
 
@@ -289,8 +350,13 @@ mod tests {
     fn session_server_at(root: &Path) -> (UsagiMcpServer, PathBuf) {
         let worktree = root.join(".usagi").join("sessions").join("work");
         fs::create_dir_all(&worktree).unwrap();
-        let server =
-            UsagiMcpServer::new(worktree.clone(), root.to_path_buf(), Box::new(StubBackend));
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
+        let server = UsagiMcpServer::new(
+            worktree.clone(),
+            root.to_path_buf(),
+            Box::new(StubBackend),
+            runner,
+        );
         (server, worktree)
     }
 
@@ -305,6 +371,15 @@ mod tests {
         fs::write(dir.join("code.txt"), "x").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "init"]);
+    }
+
+    /// Commit the created issues in the test repo to the current branch.
+    fn commit_issues(dir: &Path) {
+        let run = |args: &[&str]| {
+            assert!(git_cmd(dir).args(args).status().unwrap().success());
+        };
+        run(&["add", ".usagi/issues/"]);
+        run(&["commit", "-q", "-m", "add issues"]);
     }
 
     /// Parse a handler reply back into JSON for assertions.
@@ -394,10 +469,12 @@ mod tests {
             .join("sessions")
             .join("work");
         fs::create_dir_all(&worktree).unwrap();
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
         let server = UsagiMcpServer::new(
             worktree.clone(),
             workspace.path().to_path_buf(),
             Box::new(StubBackend),
+            runner,
         );
 
         let created = call(&server, "issue_create", json!({"title": "in session"}));
@@ -512,6 +589,7 @@ mod tests {
                 json!({"title":"Add doctor","body":"Diagnose the env."}),
             )
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(&server, "session_delegate_issue", json!({"number":1}));
         assert_eq!(result["isError"], false);
@@ -546,6 +624,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"task"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -591,7 +670,8 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert_ne!(link, real, "paths must differ textually for this test");
 
-        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend));
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
+        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend), runner);
         let result = call(&server, "issue_create", json!({"title": "x"}));
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
@@ -665,6 +745,14 @@ mod tests {
     }
 
     #[test]
+    fn fake_runner_non_probe_methods_are_inert() {
+        let runner = FakeRunner(vec![]);
+        assert!(runner.run("x", &[]).unwrap());
+        assert!(runner.check("x", &[]));
+        assert!(runner.spawn("x", &[]).is_ok());
+    }
+
+    #[test]
     fn delegate_issue_pins_the_agent_cli_and_model_on_the_created_session() {
         use crate::domain::settings::AgentCli;
         let root = tempfile::tempdir().unwrap();
@@ -674,6 +762,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"heavy design"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -700,6 +789,7 @@ mod tests {
             .issue
             .call_tool("issue_create", json!({"title":"task"}))
             .unwrap();
+        commit_issues(root.path());
 
         let result = call(
             &server,
@@ -731,5 +821,47 @@ mod tests {
         // No stray session was created.
         let listed = call(&server, "session_list", json!({}));
         assert_eq!(listed["content"][0]["text"], "[]");
+    }
+
+    #[test]
+    fn delegate_issue_refuses_uncommitted_issue() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"uncommitted issue"}))
+            .unwrap();
+
+        // The issue is created but not committed yet, so delegate_issue must error.
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], true);
+        let err_text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            err_text.contains("is not committed to the base branch"),
+            "{err_text}"
+        );
+        // No session was created.
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
+    }
+
+    #[test]
+    fn delegate_issue_without_a_resolvable_base_uses_head_in_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let server = server_at(root.path());
+        server
+            .issue
+            .call_tool("issue_create", json!({"title":"non git issue"}))
+            .unwrap();
+
+        let result = call(&server, "session_delegate_issue", json!({"number":1}));
+        assert_eq!(result["isError"], true);
+        let err_text = result["content"][0]["text"].as_str().unwrap();
+        assert!(err_text.contains("base branch (HEAD)"), "{err_text}");
+        assert_eq!(
+            call(&server, "session_list", json!({}))["content"][0]["text"],
+            "[]"
+        );
     }
 }

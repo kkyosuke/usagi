@@ -294,6 +294,40 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Claude))]);
 }
 
+#[test]
+fn focus_menu_agent_default_refuses_when_not_installed() {
+    use crate::domain::settings::AgentCli;
+    let opened = RefCell::new(Vec::new());
+    let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
+        opened.borrow_mut().push((a, h.take_agent_choice()));
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut state = sample_state();
+    state.set_default_agent(AgentCli::Claude);
+    state.set_installed_agents(vec![AgentCli::Codex]); // default Claude is not installed
+    let mut keys = cmd("session switch feat");
+    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Enter)); // attempt to launch default agent (Claude) -> refused
+    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // quit
+    assert!(matches!(
+        run_full(
+            keys,
+            state,
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    // Refused because Claude is not installed: no launch occurred.
+    assert!(opened.borrow().is_empty());
+}
+
 /// A zero-argument Session-scope command with no `run_focus_command` arm, for
 /// proving the menu's dispatch fails loudly instead of falling back to an agent
 /// launch.

@@ -41,7 +41,12 @@ use crate::usecase::session;
 pub fn run(backend: Box<dyn AgentBackend>, input: impl BufRead, output: impl Write) -> Result<()> {
     let worktree = std::env::current_dir()?;
     let workspace_root = session::workspace_root(&worktree);
-    let server = UsagiMcpServer::new(worktree, workspace_root, backend);
+    let server = UsagiMcpServer::new(
+        worktree,
+        workspace_root,
+        backend,
+        Box::new(crate::usecase::doctor::SystemRunner),
+    );
     crate::presentation::mcp::serve(&server, input, output)?;
     Ok(())
 }

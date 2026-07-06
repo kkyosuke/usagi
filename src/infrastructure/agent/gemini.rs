@@ -30,6 +30,12 @@ use super::util::{same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::settings::AgentCli;
 
+/// Where Gemini looks for its MCP configuration:
+/// `~/.gemini/config/mcp_config.json`.
+fn gemini_mcp_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".gemini").join("config").join("mcp_config.json"))
+}
+
 /// Where Gemini stores each project's chat history:
 /// `~/.gemini/tmp/<project>/`. `None` when the home directory can't be
 /// determined, so usagi simply launches fresh rather than guessing.
@@ -186,6 +192,11 @@ impl Agent for GeminiAgent {
         if let Some(root) = gemini_projects_root() {
             forget_session_in(&root, dir);
         }
+    }
+
+    fn provision(&self, wiring: &AgentWiring) -> Result<(), String> {
+        gemini_mcp_config_path()
+            .map_or(Ok(()), |path| super::util::update_mcp_config(&path, wiring))
     }
 }
 
@@ -440,5 +451,49 @@ mod tests {
         let agent = GeminiAgent::new();
         assert!(!agent.has_resumable_session(Path::new("/nonexistent/usagi/worktree")));
         agent.forget_session(Path::new("/nonexistent/usagi/worktree"));
+    }
+
+    #[test]
+    fn test_provision_writes_mcp_config() {
+        let _guard = crate::test_support::process_env_guard();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+
+        let agent = GeminiAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        agent.provision(&wiring).unwrap();
+
+        let expected_path = temp_dir
+            .path()
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json");
+        assert!(expected_path.exists());
+        let contents = std::fs::read_to_string(&expected_path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(val["mcpServers"]["usagi"]["command"], "/bin/usagi");
+    }
+
+    #[test]
+    fn test_provision_reports_mcp_config_write_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_dir.path());
+        std::fs::write(temp_dir.path().join(".gemini"), "not a dir").unwrap();
+
+        let agent = GeminiAgent::new();
+        let wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+        };
+
+        let err = agent.provision(&wiring).unwrap_err();
+        assert!(err.contains("failed to create directories"), "{err}");
     }
 }

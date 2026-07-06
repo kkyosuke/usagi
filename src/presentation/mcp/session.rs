@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 use super::{parse_args, to_pretty, McpService};
 use crate::domain::settings::AgentCli;
 use crate::domain::workspace_state::{SessionAgent, SessionRecord};
+use crate::usecase::doctor::CommandRunner;
 use crate::usecase::session;
 
 /// Names of the session tools this server exposes. The unified `usagi` server
@@ -103,16 +104,31 @@ fn check_prompt_len(tool: &str, prompt: &str) -> Result<(), String> {
 /// workspace effective settings and the CLI's own default model. Shared by
 /// `session_create` and the composite's `session_delegate_issue`.
 pub(crate) fn resolve_session_agent(
+    runner: &dyn CommandRunner,
     agent_cli: Option<&str>,
     model: Option<String>,
 ) -> Result<SessionAgent, String> {
     let cli = match agent_cli {
-        Some(name) => Some(AgentCli::from_name(name).ok_or_else(|| {
-            format!(
-                "unknown agent_cli {name:?}: expected one of \
-                 claude, codex, codex-fugu, gemini, agy"
-            )
-        })?),
+        Some(name) => {
+            let parsed = AgentCli::from_name(name).ok_or_else(|| {
+                format!(
+                    "unknown agent_cli {name:?}: expected one of \
+                     claude, codex, codex-fugu, gemini, agy"
+                )
+            })?;
+
+            let capable = crate::usecase::agent::mcp_capable_clis(runner);
+            if !capable.contains(&parsed) {
+                let capable_names: Vec<String> =
+                    capable.iter().map(|c| c.command().to_string()).collect();
+                return Err(format!(
+                    "agent_cli {name:?} is not installed or not MCP-capable. \
+                     Available installed MCP-capable agents: {capable_names:?}"
+                ));
+            }
+
+            Some(parsed)
+        }
         None => None,
     };
     Ok(SessionAgent { cli, model })
@@ -171,6 +187,8 @@ pub struct SessionMcpServer {
     /// Delegate that actually drives a session's agent for `session_prompt`
     /// (over either delivery channel) and its live-pane detection.
     backend: Box<dyn AgentBackend>,
+    /// Probes external tools (like checking if an agent CLI is installed on the PATH).
+    pub(crate) runner: Box<dyn CommandRunner>,
 }
 
 impl SessionMcpServer {
@@ -179,12 +197,18 @@ impl SessionMcpServer {
     /// working directory; when it sits under `.usagi/sessions/<name>/` the server
     /// derives the current session name from it, enabling the note self-access
     /// tools (`session_note_get` / `session_note_update`).
-    pub fn new(workspace_root: PathBuf, worktree: &Path, backend: Box<dyn AgentBackend>) -> Self {
+    pub fn new(
+        workspace_root: PathBuf,
+        worktree: &Path,
+        backend: Box<dyn AgentBackend>,
+        runner: Box<dyn CommandRunner>,
+    ) -> Self {
         let current_session = derive_current_session(worktree, &workspace_root);
         Self {
             workspace_root,
             current_session,
             backend,
+            runner,
         }
     }
 
@@ -197,7 +221,7 @@ impl SessionMcpServer {
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
         let args: CreateArgs = parse_args(arguments)?;
-        let agent = resolve_session_agent(args.agent_cli.as_deref(), args.model)?;
+        let agent = resolve_session_agent(&*self.runner, args.agent_cli.as_deref(), args.model)?;
         let created = self.create_session(&args.name, agent)?;
         Ok(to_pretty(&json!({
             "name": created.name,
@@ -697,6 +721,24 @@ mod tests {
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
     type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
 
+    /// A runner that reports a fixed allowlist of programs as available.
+    struct FakeRunner(Vec<&'static str>);
+
+    impl CommandRunner for FakeRunner {
+        fn available(&self, program: &str) -> bool {
+            self.0.contains(&program)
+        }
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn check(&self, _program: &str, _args: &[&str]) -> bool {
+            true
+        }
+        fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A backend that records the calls it received and returns a scripted
     /// result, so the server's dispatch can be tested without a real agent. The
     /// call logs are shared via `Rc` so a test can inspect them after the backend
@@ -823,16 +865,15 @@ mod tests {
     }
 
     fn server_at(root: &Path, backend: FakeBackend) -> SessionMcpServer {
-        // Tests that don't exercise the note self-access tools run from the
-        // workspace root (not inside a session), so current_session is None.
-        SessionMcpServer::new(root.to_path_buf(), root, Box::new(backend))
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
+        SessionMcpServer::new(root.to_path_buf(), root, Box::new(backend), runner)
     }
 
-    /// Build a server that pretends to run inside session `name` under `root`.
     fn server_in_session(root: &Path, name: &str, backend: FakeBackend) -> SessionMcpServer {
-        use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
-        let worktree = root.join(STATE_DIR).join(SESSIONS_DIR).join(name);
-        SessionMcpServer::new(root.to_path_buf(), &worktree, Box::new(backend))
+        let worktree = root.join(".usagi").join("sessions").join(name);
+        fs::create_dir_all(&worktree).unwrap();
+        let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
+        SessionMcpServer::new(root.to_path_buf(), &worktree, Box::new(backend), runner)
     }
 
     #[test]
@@ -917,24 +958,50 @@ mod tests {
     fn resolve_session_agent_parses_a_known_cli_passes_the_model_and_defaults_when_absent() {
         // A known CLI name (case-insensitive, via AgentCli::from_name) resolves and
         // the model rides through untouched.
-        let agent = resolve_session_agent(Some("Gemini"), Some("gemini-2.5-pro".to_string()))
-            .expect("known cli");
-        assert_eq!(agent.cli, Some(AgentCli::Gemini));
-        assert_eq!(agent.model.as_deref(), Some("gemini-2.5-pro"));
+        let runner = FakeRunner(vec!["claude", "codex-fugu"]);
+        let agent = resolve_session_agent(
+            &runner,
+            Some("Claude"),
+            Some("claude-3-5-sonnet".to_string()),
+        )
+        .expect("known cli");
+        assert_eq!(agent.cli, Some(AgentCli::Claude));
+        assert_eq!(agent.model.as_deref(), Some("claude-3-5-sonnet"));
         // The codex-fugu launch command resolves too.
         assert_eq!(
-            resolve_session_agent(Some("codex-fugu"), None).unwrap().cli,
+            resolve_session_agent(&runner, Some("codex-fugu"), None)
+                .unwrap()
+                .cli,
             Some(AgentCli::CodexFugu)
         );
         // Neither argument yields the default (follow the workspace settings).
-        assert!(resolve_session_agent(None, None).unwrap().is_unset());
+        assert!(resolve_session_agent(&runner, None, None)
+            .unwrap()
+            .is_unset());
     }
 
     #[test]
     fn resolve_session_agent_rejects_an_unknown_cli() {
-        let err = resolve_session_agent(Some("gpt"), None).unwrap_err();
+        let runner = FakeRunner(vec!["claude"]);
+        let err = resolve_session_agent(&runner, Some("gpt"), None).unwrap_err();
         assert!(err.contains("unknown agent_cli"), "{err}");
         assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn resolve_session_agent_rejects_uninstalled_cli() {
+        let runner = FakeRunner(vec!["claude"]);
+        let err = resolve_session_agent(&runner, Some("codex"), None).unwrap_err();
+        assert!(err.contains("not installed or not MCP-capable"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn fake_runner_non_probe_methods_are_inert() {
+        let runner = FakeRunner(vec![]);
+        assert!(runner.run("x", &[]).unwrap());
+        assert!(runner.check("x", &[]));
+        assert!(runner.spawn("x", &[]).is_ok());
     }
 
     #[test]
@@ -946,15 +1013,15 @@ mod tests {
         let created = call(
             &server,
             "session_create",
-            json!({"name":"pinned","agent_cli":"gemini","model":"gemini-2.5-pro"}),
+            json!({"name":"pinned","agent_cli":"claude","model":"claude-3-5-sonnet"}),
         );
         assert_eq!(created["isError"], false);
 
         // The override lands on the SessionRecord in state.json.
         let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
         let session = &store.load().unwrap().unwrap().sessions[0];
-        assert_eq!(session.agent.cli, Some(AgentCli::Gemini));
-        assert_eq!(session.agent.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(session.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-3-5-sonnet"));
     }
 
     #[test]
