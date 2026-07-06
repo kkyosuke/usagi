@@ -1,14 +1,14 @@
 ---
 number: 139
 title: refactor(agent): Agent capability と LaunchPlan builder の土台を追加する
-status: todo
+status: done
 priority: high
 labels: [refactor, agent, review]
 dependson: []
 related: []
 parent: 137
 created_at: 2026-07-06T00:19:39.800692+00:00
-updated_at: 2026-07-06T00:19:39.800692+00:00
+updated_at: 2026-07-06T04:01:26.093880+00:00
 ---
 
 ## 目的
