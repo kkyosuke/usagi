@@ -213,7 +213,7 @@ pub struct AlternateScreenGuard {
 /// ([`ENABLE_MOUSE`]). Pulled out as a pure function so the exact bytes can be
 /// asserted in a unit test — the `Term` write itself goes to a real terminal and
 /// is not capturable.
-fn input_mode_sequence() -> String {
+pub(crate) fn input_mode_sequence() -> String {
     format!("{ENTER_ALT_SCREEN}{ENABLE_MOUSE}")
 }
 
@@ -286,8 +286,10 @@ impl Drop for AlternateScreenGuard {
 /// A *frame* is the `Vec<String>` an `ui::render_frame` returns: one styled line
 /// per terminal row. The painter remembers the frame it last drew and, on the
 /// next paint, moves to and rewrites only the rows whose text differs. The first
-/// paint — and any paint after [`reset`](FramePainter::reset) — clears the
-/// screen first, so leftover content from another screen can't show through.
+/// paint clears the screen before drawing every row; after
+/// [`reset`](FramePainter::reset) it instead rewrites every remembered row with
+/// per-row clears, so leftover content from another screen can't show through
+/// without a whole-screen flash.
 ///
 /// Before diffing, the painter overlays the global background-install rabbit
 /// (when one is in flight) onto the screen's frame, so every screen surfaces the
@@ -307,6 +309,13 @@ pub struct FramePainter {
     /// frame every time, so a steady stream of repaints does no heap work for the
     /// frame buffer itself.
     scratch: Vec<String>,
+    /// Escape bytes to emit at the very front of the next flush, before the diff.
+    /// Set by [`reset_with_prefix`](Self::reset_with_prefix) so a mode
+    /// re-assertion after the embedded pane (re-entering the alternate screen,
+    /// which *clears* it) rides the same terminal write as the forced full
+    /// repaint — never a separate flush that leaves the cleared screen visible as
+    /// a one-frame black flash. Drained (cleared) on the flush that emits it.
+    prefix: String,
 }
 
 impl FramePainter {
@@ -330,6 +339,23 @@ impl FramePainter {
         for line in &mut self.prev {
             line.clear();
         }
+    }
+
+    /// Like [`reset`](Self::reset) (a flicker-free full repaint on the next
+    /// paint), but also queue `prefix` to be written at the front of that next
+    /// flush, ahead of the diff.
+    ///
+    /// Called when the embedded pane hands control back: the alternate-screen and
+    /// mouse-mode re-assertion (and the pointer reset) go here rather than being
+    /// written and flushed on their own. Re-entering the alternate screen
+    /// (`\x1b[?1049h`) clears it, so a standalone flush would show a blank screen
+    /// for the frame between it and the event loop's next repaint — the black
+    /// flash. Riding the same write as the forced full repaint below makes the
+    /// clear and the redraw land in one terminal update, so nothing blank is ever
+    /// shown.
+    pub fn reset_with_prefix(&mut self, prefix: String) {
+        self.reset();
+        self.prefix = prefix;
     }
 
     /// Draw `frame` (overlaying any in-flight install), rewriting only the rows
@@ -363,7 +389,11 @@ impl FramePainter {
         // before diffing so the marker never reaches the terminal and the
         // diff/`prev` stay clean.
         let caret = take_caret(&mut self.scratch);
-        let mut out = diff_frame(&self.prev, &self.scratch);
+        // Emit any queued prefix (a mode re-assertion after the embedded pane)
+        // ahead of the diff, so it rides this same terminal write instead of a
+        // separate flush. Drained here so it is written exactly once.
+        let mut out = std::mem::take(&mut self.prefix);
+        out.push_str(&diff_frame(&self.prev, &self.scratch));
         // Park the real cursor over the caret (showing it) so an OS IME draws its
         // preedit text in the input field rather than wherever the cursor was left
         // — otherwise composing Japanese surfaces at the bottom of the screen. With
@@ -677,5 +707,22 @@ mod tests {
         assert!(out.contains("\x1b[2;1H\x1b[2Kb"));
         painter.paint(&term, lines(&["a", "b"])).unwrap();
         assert_eq!(painter.prev, lines(&["a", "b"]));
+    }
+
+    #[test]
+    fn reset_with_prefix_keeps_the_flicker_free_repaint_base() {
+        let mut painter = FramePainter::new();
+        painter.prev = lines(&["old", "frame"]);
+
+        painter.reset_with_prefix("prefix".to_string());
+
+        // It is still the reset path: rows are blanked, not forgotten, so the next
+        // diff rewrites row-by-row instead of emitting a whole-screen clear.
+        assert_eq!(painter.prev, lines(&["", ""]));
+        assert_eq!(painter.prefix, "prefix");
+        let out = diff_frame(&painter.prev, &lines(&["new", "frame"]));
+        assert!(!out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[1;1H\x1b[2Knew"));
+        assert!(out.contains("\x1b[2;1H\x1b[2Kframe"));
     }
 }

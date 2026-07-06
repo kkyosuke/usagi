@@ -1516,19 +1516,21 @@ fn open_pane(
     // The pane toggled `crossterm`'s raw mode around itself and ran a full-screen
     // child that may have reset the terminal; re-assert the alternate screen and
     // wheel-capture modes so the wheel can't scroll the host terminal once we are
-    // back on the workspace screen.
-    let _ = screen::write_input_modes(term);
+    // back on the workspace screen. Queue these bytes into the next forced repaint
+    // rather than flushing them now: re-entering the alternate screen clears it,
+    // and a separate flush would leave a one-frame black flash before the event
+    // loop redraws Switch / Focus.
+    let mut repaint_prefix = screen::input_mode_sequence();
     // Leaving the embedded pane returns the pointer to management chrome. The
     // pane itself keeps the last OSC 22 pointer shape across in-pane tab hops so
     // a text caret does not flicker back to an arrow during `Ctrl-O ←/→`, so the
     // boundary between 没入 and the home UI owns the reset instead. Emit this
     // after re-entering the alternate screen so terminals that scope pointer
     // shapes per screen also reset the visible management screen.
-    let _ = term.write_str(PointerShape::Default.osc22());
-    let _ = term.flush();
+    repaint_prefix.push_str(PointerShape::Default.osc22());
     // The embedded terminal drew over the whole screen, so the remembered frame
     // is stale: force a full repaint on the next pass.
-    painter.reset();
+    painter.reset_with_prefix(repaint_prefix);
     match outcome {
         Ok(PaneExit::ToSwitch) => {
             // `Ctrl-O` zooms out: pick a session in the left pane, re-attaching
