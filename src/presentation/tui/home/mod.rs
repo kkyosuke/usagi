@@ -656,7 +656,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         if let Some(focus) = crate::infrastructure::resume_focus_store::load(&workspace.path) {
             use crate::infrastructure::resume_focus_store::StoredEngagement;
             let level = match focus.engagement {
-                StoredEngagement::Overview => ResumeLevel::Overview,
+                StoredEngagement::Overview => ResumeLevel::Switch,
                 StoredEngagement::Closeup => ResumeLevel::Closeup,
                 StoredEngagement::Attached => ResumeLevel::Attached,
             };
@@ -1018,7 +1018,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     };
                     match terminal::pane::run(term, home, pty, &handle)? {
                         // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
-                        terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToOverview),
+                        terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
                         // `Ctrl-E`: leave the pane to open the note editor over it;
                         // the event loop re-attaches when the editor closes.
                         terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
@@ -1052,7 +1052,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // `Ctrl-T`: zoom out to 集中 (Closeup) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
                         // the pool (like `Ctrl-O`, but one level shallower).
-                        terminal::pane::PaneStep::ToCloseup => return Ok(PaneExit::ToCloseup),
+                        terminal::pane::PaneStep::ToCloseup => return Ok(PaneExit::ToFocus),
                         // `Ctrl-G`: a session holds at most one agent per CLI — jump
                         // to this CLI's existing agent tab when present, else add one
                         // (then loop, so the next iteration drives it and republishes
@@ -1485,7 +1485,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
         use crate::infrastructure::resume_focus_store::StoredEngagement;
         let engagement = match level {
-            ResumeLevel::Overview => StoredEngagement::Overview,
+            ResumeLevel::Switch => StoredEngagement::Overview,
             ResumeLevel::Closeup => StoredEngagement::Closeup,
             ResumeLevel::Attached => StoredEngagement::Attached,
         };

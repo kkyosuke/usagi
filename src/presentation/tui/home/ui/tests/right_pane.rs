@@ -5,7 +5,7 @@ fn right_pane_previews_the_cursor_row_in_overview() {
     // 選択 (Overview) is the default mode: the right pane previews the would-be
     // screen for the cursor row.
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     let preview = stripped(&right_pane_contents(&state, 40, 12));
     // The idle root row rests the mascot (the workspace-root header still shows).
     assert!(preview.contains("root"));
@@ -22,7 +22,7 @@ fn overview_preview_shows_a_live_session_as_a_reattach() {
         live: [PathBuf::from("/repo/run")].into(),
         ..Default::default()
     });
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     // Move the cursor off the root onto the session row.
     state.overview_move_down();
     let preview = stripped(&overview_preview(&state, 40, 12));
@@ -51,7 +51,7 @@ fn overview_preview_shows_a_live_session_as_its_actual_screen() {
         vec!["$ echo hi".to_string(), "hi".to_string()],
         None,
     ));
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let preview = stripped(&overview_preview(&state, 40, 12));
     // The real terminal screen is shown, not the placeholder label.
@@ -76,7 +76,7 @@ fn overview_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
     });
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let lines = overview_preview(&state, 80, 12);
     // The header (name + status + agent) and both numbered chips share the top
@@ -94,7 +94,7 @@ fn overview_preview_shows_loading_body_for_the_selected_pending_tab() {
     let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
     pending.path = PathBuf::from("/repo/pending");
     let mut state = HomeState::new("usagi", vec![pending], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     state
@@ -113,7 +113,7 @@ fn loading_tab_body_is_blank_when_too_narrow_for_even_one_rabbit() {
     let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
     pending.path = PathBuf::from("/repo/pending");
     let mut state = HomeState::new("usagi", vec![pending], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     state
@@ -145,7 +145,7 @@ fn overview_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     });
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
 
     // The display column of the divider, used as the anchor for the tabs. Measured
     // by plain display width (the identity is padded the same way), which is where
@@ -191,7 +191,7 @@ fn overview_preview_shows_the_root_live_session_as_its_screen() {
         vec!["$ claude".to_string(), "How can I help?".to_string()],
         None,
     ));
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     // The cursor starts on the root row, so no navigation is needed.
     let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("root"));
@@ -207,7 +207,7 @@ fn overview_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
     // resting mascot and a quip — not the inline choices it once promised.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("workspace root"));
     assert!(preview.contains("(='-')"), "the mascot rests in the pane");
@@ -220,7 +220,7 @@ fn overview_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
 fn overview_preview_rests_the_mascot_for_an_idle_session_on_the_menu_ui() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let preview = stripped(&overview_preview(&state, 40, 12));
     // An idle session rests the mascot rather than previewing the menu, whose
@@ -237,7 +237,7 @@ fn overview_preview_centres_the_idle_mascot_with_a_quip_below_it() {
     // its witty English quip on the row beneath it.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let lines: Vec<String> = overview_preview(&state, 40, 12)
         .iter()
@@ -266,7 +266,7 @@ fn overview_right_pane_fades_the_preview_but_keeps_its_text() {
     // `dim_row_strips_existing_colour_but_keeps_the_text`.)
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let preview = stripped(&overview_preview(&state, 40, 12));
     let pane = stripped(&right_pane_contents(&state, 40, 12));
@@ -280,7 +280,7 @@ fn overview_preview_fills_the_pane_without_a_pinned_key_hint() {
     // duplicate the footer's key list.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let preview = overview_preview(&state, 60, 12);
     // The pane fills its rows, and the bottom row is no longer a key hint.
@@ -301,7 +301,7 @@ fn overview_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("pushed"));

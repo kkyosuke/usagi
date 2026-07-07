@@ -463,9 +463,8 @@ pub fn preview_visible(raw_height: usize, raw_width: usize, _state: &HomeState) 
 /// what the user is doing without coupling the widget to the screen's enum.
 fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
     match mode {
-        Mode::Overview => widgets::RabbitMood::Browsing,
+        Mode::Switch => widgets::RabbitMood::Browsing,
         Mode::Closeup => widgets::RabbitMood::Attentive,
-        Mode::Attached => widgets::RabbitMood::Working,
     }
 }
 
@@ -700,7 +699,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             SessionActionUi::Menu => closeup_menu_body(state, inner, body_rows),
             SessionActionUi::Prompt => closeup_prompt_body(state, inner, body_rows),
         };
-        let title = format!("session: {}", state.focused_session_name());
+        let title = format!("Focus: {}", state.focused_session_name());
         widgets::overlay_region_modal(
             &mut lines,
             width,
@@ -722,7 +721,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     if state.command_palette_open() {
         let inner = widgets::modal_inner_width(width, PALETTE_INNER);
         let body = command_palette_body(state, inner);
-        widgets::overlay_modal(&mut lines, width, "Command", inner, &body);
+        widgets::overlay_modal(&mut lines, width, "Overview", inner, &body);
     }
 
     // Float the workspace-env editor (`env`) over the palette, so editing the
@@ -794,7 +793,7 @@ fn left_column(
         left_w,
         body_rows,
         // In 選択 the keyboard is on the list: fade the rows the cursor is not on.
-        state.mode() == Mode::Overview,
+        state.mode() == Mode::Switch,
         sidebar,
         state.now(),
         // While renaming, the selected session's name line is drawn as the inline

@@ -15,6 +15,38 @@ fn enter_closeup_activates_a_row_and_resets_the_surface() {
 }
 
 #[test]
+fn focus_modal_opens_from_switch_and_from_a_closeup_pane_preview() {
+    let mut state = state(); // root, main, feature
+    state.overview_move_down(); // main
+    state.open_focus_modal();
+    assert_eq!(state.mode(), Mode::Closeup);
+    assert_eq!(state.focused_session_name(), "main");
+    assert!(state.closeup_action_overlay());
+
+    // When Closeup is browsing an existing pane tab, `Ctrl-O a` brings the Focus
+    // modal back over that preview instead of creating a third top-level mode.
+    state.set_terminal_tabs(vec!["agent".to_string()], 0);
+    assert_eq!(state.closeup_select_pane_tab(0), Some(0));
+    assert!(!state.closeup_action_overlay());
+    state.open_focus_modal();
+    assert!(state.closeup_action_overlay());
+    assert!(state.closeup_action_over_pane());
+}
+
+#[test]
+fn focus_modal_is_a_noop_while_already_attached() {
+    let mut state = state();
+    state.enter_closeup(1);
+    state.show_attached();
+
+    state.open_focus_modal();
+
+    assert_eq!(state.mode(), Mode::Closeup);
+    assert!(state.closeup_attached());
+    assert!(!state.closeup_action_overlay());
+}
+
+#[test]
 fn closeup_action_overlay_holds_for_both_surfaces_on_the_action_tab() {
     let mut state = state(); // root, main, feature
                              // Not in 集中: nothing floats.
@@ -118,7 +150,7 @@ fn enter_closeup_named_is_a_no_op_for_an_unknown_session() {
     let mut state = state();
     // An unmatched name leaves the mode and cursor untouched (still 選択, root row).
     assert!(!state.enter_closeup_named("nope"));
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(state.list().root_active());
 }
 
@@ -135,8 +167,7 @@ fn leave_closeup_returns_to_base_overview() {
     let mut state = state();
     state.enter_closeup(1);
     state.leave_closeup();
-    assert_eq!(state.mode(), Mode::Overview);
-    assert_eq!(state.overview_return(), ReturnMode::Base);
+    assert_eq!(state.mode(), Mode::Switch);
 }
 
 #[test]

@@ -127,24 +127,21 @@ pub fn cheatsheet(scheme: KeyScheme) -> Vec<LogLine> {
 fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
     let mut lines = match scheme {
         KeyScheme::Prefix => vec![
-            cheatsheet_header("没入 / Attached — live terminal (Ctrl-O is the leader)"),
-            key_row("Ctrl-O o", "Zoom out to Overview"),
-            key_row("Ctrl-O a", "Zoom out to Closeup (action menu)"),
+            cheatsheet_header("Closeup live — terminal (Ctrl-O is the leader)"),
+            key_row("Ctrl-O o", "Switch mode"),
+            key_row("Ctrl-O a", "Open Focus modal"),
             key_row("Ctrl-O n/p", "Next / previous tab (or Ctrl-O →/←)"),
             key_row("Ctrl-O g", "Add an agent tab"),
             key_row("Ctrl-O e", "Edit the session note"),
             key_row("Ctrl-O s", "Toggle the session sidebar"),
             key_row("Ctrl-O x", "Close the active tab"),
             key_row("Ctrl-O q", "Quit usagi"),
-            key_row(
-                "Ctrl-O Ctrl-O",
-                "Zoom out to Overview (IME-safe second key)",
-            ),
+            key_row("Ctrl-O Ctrl-O", "Switch mode (IME-safe second key)"),
         ],
         KeyScheme::Alt => vec![
-            cheatsheet_header("没入 / Attached — live terminal (needs Option=Meta on macOS)"),
-            key_row("Alt-o", "Zoom out to Overview"),
-            key_row("Alt-a", "Zoom out to Closeup (action menu)"),
+            cheatsheet_header("Closeup live — terminal (needs Option=Meta on macOS)"),
+            key_row("Alt-o", "Switch mode"),
+            key_row("Alt-a", "Open Focus modal"),
             key_row("Alt-→ / Alt-←", "Next / previous tab"),
             key_row("Alt-g", "Add an agent tab"),
             key_row("Alt-e", "Edit the session note"),
@@ -181,7 +178,7 @@ fn closeup_keys(scheme: KeyScheme) -> Vec<LogLine> {
     ];
     match scheme {
         KeyScheme::Prefix => lines.extend([
-            key_row("Ctrl-O o", "Zoom out to Overview (or Esc)"),
+            key_row("Ctrl-O o", "Switch mode (or Esc)"),
             key_row("Ctrl-O n/p", "Next / previous tab (or Ctrl-O →/←)"),
             key_row("Ctrl-O g", "Launch an agent"),
             key_row("Ctrl-O e", "Edit the session note (or Ctrl-E)"),
@@ -189,7 +186,7 @@ fn closeup_keys(scheme: KeyScheme) -> Vec<LogLine> {
             key_row("Ctrl-O q", "Quit usagi"),
         ]),
         KeyScheme::Alt => lines.extend([
-            key_row("Ctrl-O", "Zoom out to Overview"),
+            key_row("Ctrl-O", "Switch mode"),
             key_row("Ctrl-E", "Edit the session note"),
         ]),
     }
@@ -282,7 +279,7 @@ mod tests {
         assert!(text.iter().any(|t| t.starts_with("General")));
         assert!(text.iter().any(|t| t.contains("選択 / Overview")));
         assert!(text.iter().any(|t| t.contains("集中 / Closeup")));
-        assert!(text.iter().any(|t| t.contains("没入 / Attached")));
+        assert!(text.iter().any(|t| t.contains("Closeup live")));
         // The keys the cheat sheet exists to surface are all present.
         let joined = text.join("\n");
         for chord in ["Ctrl-O", "Ctrl-^", "Ctrl-Q", "?", ":"] {
@@ -351,12 +348,12 @@ mod tests {
             .expect("the Closeup header renders");
         let attached_idx = alt
             .lines()
-            .position(|l| l.contains("没入 / Attached"))
+            .position(|l| l.contains("Closeup live"))
             .expect("the Attached header renders");
         let closeup_section = alt.lines().collect::<Vec<_>>()[closeup_idx..attached_idx].to_vec();
         assert!(closeup_section
             .iter()
-            .any(|l| l.contains("Ctrl-O") && l.contains("Zoom out to Overview")));
+            .any(|l| l.contains("Ctrl-O") && l.contains("Switch mode")));
         assert!(!closeup_section.iter().any(|l| l.contains("Ctrl-O o")));
     }
 

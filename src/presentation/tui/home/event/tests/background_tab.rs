@@ -123,7 +123,7 @@ fn a_ready_background_tab_is_attached_when_the_user_stays_idle() {
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, n: bool| {
         opens.borrow_mut().push((a, n));
         if opens.borrow().len() == 1 {
-            Ok(PaneExit::ToCloseup) // the initial re-attach zooms out to 集中
+            Ok(PaneExit::ToFocus) // the initial re-attach zooms out to 集中
         } else {
             Ok(PaneExit::Closed) // the ready pending tab, once attached
         }
@@ -163,7 +163,7 @@ fn a_ready_tab_that_is_no_longer_selected_stays_in_the_background() {
     let opens = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, n: bool| {
         opens.borrow_mut().push((a, n));
-        Ok(PaneExit::ToCloseup)
+        Ok(PaneExit::ToFocus)
     };
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
@@ -201,7 +201,7 @@ fn a_starting_background_tab_animates_without_moving() {
     // While the pane is starting (spawned, shell not yet painted) the loop animates
     // its chip but does not move to it.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Starting(1);
@@ -234,7 +234,7 @@ fn a_resolving_background_tab_shows_a_placeholder_chip() {
     // While the environment resolves there is no pool pane yet, so the loop shows a
     // synthetic placeholder chip; nothing is activated.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Resolving;
@@ -265,7 +265,7 @@ fn acting_before_the_tab_is_ready_keeps_the_launch_pending() {
     // flight and simply has not attached yet.
     let activated = RefCell::new(0usize);
     let cleared = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Resolving;
@@ -304,7 +304,7 @@ fn a_vanished_background_launch_is_dropped() {
     // tracker without attaching.
     let activated = RefCell::new(0usize);
     let cleared = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Gone;
@@ -340,7 +340,7 @@ fn reusing_an_agent_tab_re_attaches_without_a_loading_tab() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opens.borrow_mut() += 1;
         if *opens.borrow() == 1 {
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -382,7 +382,7 @@ fn a_failed_dispatch_is_logged_and_tracks_nothing() {
     // When `start_pending_spawn` errors, the launch is logged and no pending tab is
     // tracked — the loop never polls or activates anything.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = |_: &mut HomeState, _: &Path, _: bool| Err(anyhow::anyhow!("no shell"));
     let mut poll = |_d: &Path| PendingPoll::Ready { selected: true };

@@ -145,7 +145,7 @@ fn overview_state_with_note(note: &str) -> HomeState {
         created_at: Utc::now(),
         last_active: None,
     }]);
-    state.enter_overview(super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down(); // root -> alpha
     state
 }

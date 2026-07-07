@@ -38,7 +38,7 @@ fn render_frame_overlays_the_removal_modal_with_a_checklist() {
     assert!(joined.contains("Enter: remove"));
     // The modal floats over the live workspace: the chrome (here the 選択 footer)
     // shows through around it rather than a black backdrop.
-    assert!(joined.contains("[overview]"));
+    assert!(joined.contains("[switch]"));
 }
 
 #[test]
@@ -224,5 +224,5 @@ fn remove_modal_overlays_a_well_formed_box_over_the_workspace() {
     );
 
     // It is an overlay, not a full-screen frame: the 選択 footer shows through.
-    assert!(stripped.join("\n").contains("[overview]"));
+    assert!(stripped.join("\n").contains("[switch]"));
 }

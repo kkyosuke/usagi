@@ -9,7 +9,7 @@ fn command_palette_renders_the_prompt() {
     assert!(frame.contains('m'));
     assert!(frame.contains('❯'));
     // The palette is titled and footers its keys.
-    assert!(frame.contains("Command"));
+    assert!(frame.contains("Overview"));
     assert!(frame.contains("Esc: close"));
 }
 
@@ -112,7 +112,7 @@ fn command_palette_floats_over_the_visible_workspace() {
     assert!(joined.contains("❯ m"));
     // … and the workspace chrome behind it stays visible (the mode ladder and the
     // workspace title), which a black full-screen modal would have hidden.
-    assert!(joined.contains("Overview"), "the mode ladder shows behind");
+    assert!(joined.contains("Switch"), "the mode ladder shows behind");
     assert!(joined.contains("usagi"), "the workspace title shows behind");
     // A row above the box still carries workspace content (it is not blanked).
     let top = frame
@@ -144,7 +144,7 @@ fn text_modal_floats_over_the_visible_workspace() {
     assert!(joined.contains("man — show this help"));
     // … and the workspace chrome behind it stays visible (the mode ladder and the
     // workspace title), which a black full-screen modal would have hidden.
-    assert!(joined.contains("Overview"), "the mode ladder shows behind");
+    assert!(joined.contains("Switch"), "the mode ladder shows behind");
     assert!(joined.contains("usagi"), "the workspace title shows behind");
     // A row above the box still carries workspace content (it is not blanked).
     let top = frame
@@ -175,18 +175,18 @@ fn footer_line_differs_by_mode() {
     // narrow width the lowest-priority trailing keys are elided (see
     // `footer_elides_to_fit_a_narrow_terminal`).
     let switch = footer_line(200, &state);
-    assert!(switch.contains("overview"));
+    assert!(switch.contains("switch"));
     assert!(switch.contains("x close tab"));
-    assert!(switch.contains(": commands"));
+    assert!(switch.contains(": overview"));
     state.enter_closeup(1);
     let focus = footer_line(80, &state);
     assert!(focus.contains("session: main"));
-    assert!(footer_line(200, &state).contains(": commands"));
+    assert!(footer_line(200, &state).contains(": overview"));
     state.show_attached();
     // 没入 no longer advertises scroll keys in the footer; by default it names the
     // Ctrl-O prefix sequence.
     let attached = footer_line(80, &state);
-    assert!(attached.contains("attached"));
+    assert!(attached.contains("closeup:live"));
     assert!(!attached.contains("scroll"));
     assert!(attached.contains("Ctrl-O then"));
     // The Alt scheme names the Alt-chords instead.
@@ -214,7 +214,7 @@ fn closeup_footer_reflects_the_prefix_leader_and_scheme() {
     // plainly with no leader (and no pending state applies).
     state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
     let alt = footer_line(120, &state);
-    assert!(alt.contains("Ctrl-O: overview"));
+    assert!(alt.contains("Ctrl-O: switch"));
     assert!(!alt.contains("Ctrl-O then"));
     assert!(!alt.contains("Ctrl-O ▸"));
 }
@@ -291,9 +291,9 @@ fn footer_and_palette_scope_to_the_cursor_group_in_unite_mode() {
     // Flat rows: 0 usagi root, 1 main, 2 wsB root, 3 b1. The overview footer names
     // the cursor group's workspace inside its mode tag, so it survives elision.
     state.overview_select(1); // primary session
-    assert!(footer_line(200, &state).contains("overview · usagi"));
+    assert!(footer_line(200, &state).contains("switch · usagi"));
     state.overview_select(3); // extra group session
-    assert!(footer_line(200, &state).contains("overview · wsB"));
+    assert!(footer_line(200, &state).contains("switch · wsB"));
 
     // The `:` palette input line names the same scope, so a `config` / `issue` run
     // from the palette shows which workspace it targets.
@@ -317,7 +317,7 @@ fn footer_elides_to_fit_a_narrow_terminal() {
     );
     let plain = console::strip_ansi_codes(&footer);
     // The mode tag and the first keys survive …
-    assert!(plain.contains("[overview]"));
+    assert!(plain.contains("[switch]"));
     assert!(plain.contains("↑↓ session"));
     // … the low-priority tail is dropped, marked with an ellipsis.
     assert!(plain.contains('…'));
@@ -358,7 +358,7 @@ fn render_frame_honours_the_rail_in_overview_too() {
 fn overview_create_on_the_rail_renders_the_input_in_the_right_pane() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     // The rail is too narrow for the inline `+ new: …` row, so opening the create
     // input moves it into the (wide) right pane with its own header and key hint.
     state.overview_begin_create(Vec::new());
@@ -379,7 +379,7 @@ fn overview_create_on_the_rail_renders_the_input_in_the_right_pane() {
 fn overview_rename_on_the_rail_renders_the_input_in_the_right_pane() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     // Move the cursor off the root onto the session, then rename it: collapsed to
     // the rail the input takes over the right pane just like create does.
     state.overview_move_down();
@@ -395,7 +395,7 @@ fn overview_rename_on_the_rail_renders_the_input_in_the_right_pane() {
 fn overview_create_with_the_full_sidebar_stays_inline_on_the_left() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Full);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_begin_create(Vec::new());
     let frame = stripped(&render_frame(24, 80, &state));
     // Full width keeps the original inline left-pane form, not the right-pane box.
@@ -405,9 +405,9 @@ fn overview_create_with_the_full_sidebar_stays_inline_on_the_left() {
 
 #[test]
 fn mode_ladder_lists_every_step_and_keeps_them_for_each_mode() {
-    for mode in [Mode::Overview, Mode::Closeup, Mode::Attached] {
+    for mode in [Mode::Switch, Mode::Closeup] {
         let ladder = console::strip_ansi_codes(&mode_ladder(80, mode)).into_owned();
-        for step in ["Overview", "Closeup", "Attached"] {
+        for step in ["Switch", "Closeup"] {
             assert!(ladder.contains(step), "{mode:?} ladder missing {step}");
         }
         // The workspace-wide command palette is not a rung on the ladder.

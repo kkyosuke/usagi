@@ -8,7 +8,7 @@ fn attached_holds_a_terminal_view_and_leaving_drops_it() {
     let mut state = state();
     state.enter_closeup(1);
     state.show_attached();
-    assert_eq!(state.mode(), Mode::Attached);
+    assert_eq!(state.mode(), Mode::Closeup);
     state.set_terminal_view(TerminalView::from_rows(
         vec!["$ ".to_string()],
         Some((0, 2)),
@@ -29,7 +29,7 @@ fn clear_terminal_surface_drops_the_snapshot_without_changing_the_mode() {
     state.clear_terminal_surface();
     assert!(state.terminal_view().is_none());
     // The mode is untouched (the per-frame cleanup must not leave 没入).
-    assert_eq!(state.mode(), Mode::Attached);
+    assert_eq!(state.mode(), Mode::Closeup);
 }
 
 #[test]
@@ -57,9 +57,12 @@ fn surface_owner_claim_drops_the_previous_owners_snapshot() {
     {
         let mut surface = state.surface_writer(SurfaceOwner::Attached);
         surface.set_tabs(vec!["agent".to_string()], 0);
-        surface.set_view(TerminalView::from_rows(vec!["attached".to_string()], None));
+        surface.set_view(TerminalView::from_rows(
+            vec!["closeup:live".to_string()],
+            None,
+        ));
     }
-    assert_eq!(state.terminal_view().unwrap().rows(), ["attached"]);
+    assert_eq!(state.terminal_view().unwrap().rows(), ["closeup:live"]);
     assert_eq!(
         state.terminal_tabs().expect("attached tabs are set").labels,
         ["agent"]
@@ -130,8 +133,7 @@ fn leave_closeup_returns_to_base_overview_clearing_the_create_input() {
     // Leaving 集中 returns to the base 選択 (via `enter_overview(Base)`), which clears
     // the inline create input. Re-entering 集中 later resets the prompt / menu.
     state.leave_closeup();
-    assert_eq!(state.mode(), Mode::Overview);
-    assert_eq!(state.overview_return(), ReturnMode::Base);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(!state.is_creating());
     // Re-entering 集中 resets the focus surface (prompt cleared, cursor at top).
     state.enter_closeup(1);
@@ -357,7 +359,7 @@ fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
 fn refresh_sessions_keeps_the_overview_cursor_on_the_create_row() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_select(state.list().create_row());
     assert!(state.list().create_row_selected());
 
@@ -376,7 +378,7 @@ fn refresh_sessions_keeps_the_overview_cursor_on_the_create_row() {
 fn refresh_sessions_normalizes_a_corrupt_active_create_row_to_root() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // The active row is command-facing and should never point at the create
     // affordance, but older/corrupt state must be normalized safely if it does.
     state.list.activate_index(state.list.create_row());
@@ -397,7 +399,7 @@ fn refresh_sessions_keeps_the_overview_cursor_on_an_extra_unite_root() {
         sessions: vec![session_record("beta", 1)],
         issues: Vec::new(),
     }]);
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // Rows (each expanded group owns a create row): primary root0, alpha1, primary
     // create2, tools root3, beta4, tools create5.
     state.overview_select(3); // tools' root row.
@@ -423,7 +425,7 @@ fn refresh_sessions_keeps_the_overview_cursor_in_the_same_unite_group_on_duplica
         sessions: vec![session_record("alpha", 1)],
         issues: Vec::new(),
     }]);
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // Rows (each expanded group owns a create row): primary root0, primary alpha1,
     // primary create2, tools root3, tools alpha4, tools create5.
     state.overview_select(4); // tools' alpha.
@@ -822,7 +824,7 @@ fn quit_confirm_opens_and_cancels() {
 fn resume_level_reads_off_the_current_mode_when_nothing_is_armed() {
     // 選択 (the default) records Overview.
     let mut switch = state();
-    assert_eq!(switch.resume_level(), ResumeLevel::Overview);
+    assert_eq!(switch.resume_level(), ResumeLevel::Switch);
     // 集中 records Closeup.
     let mut focus = state();
     focus.enter_closeup(1);
@@ -848,15 +850,15 @@ fn cancelling_the_quit_modal_drops_an_armed_level() {
     let mut state = state();
     state.arm_resume_attached();
     state.cancel_quit_confirm();
-    assert_eq!(state.resume_level(), ResumeLevel::Overview);
+    assert_eq!(state.resume_level(), ResumeLevel::Switch);
 }
 
 #[test]
 fn restore_focus_overview_moves_the_cursor_without_focusing() {
     let mut state = state(); // root, main, feature
-    state.restore_focus("feature", ResumeLevel::Overview);
+    state.restore_focus("feature", ResumeLevel::Switch);
     // The cursor lands on the session, but the screen stays in 選択.
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert_eq!(state.list().selected_name(), "feature");
     assert!(!state.take_resume_attach());
 }
@@ -887,7 +889,7 @@ fn restore_focus_is_a_no_op_for_a_since_removed_session() {
     let mut state = state();
     state.restore_focus("gone", ResumeLevel::Attached);
     // No matching row: the screen opens in the default 選択 with nothing armed.
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(state.list().root_selected());
     assert!(!state.take_resume_attach());
 }

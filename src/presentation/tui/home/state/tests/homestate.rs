@@ -432,9 +432,8 @@ fn a_sync_outcome_routes_sessions_and_root_note_to_the_target_group() {
 fn new_state_starts_in_overview_with_a_hint() {
     let state = state();
     // The default mode is the base 選択 (Overview); the command palette is closed.
-    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.mode(), Mode::Switch);
     assert!(!state.command_palette_open());
-    assert_eq!(state.overview_return(), ReturnMode::Base);
     assert_eq!(state.input(), "");
     assert_eq!(state.list().worktrees().len(), 2);
     // The seed log carries the usage hint.

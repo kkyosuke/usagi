@@ -141,7 +141,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（選択・集中でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/home/02-layout.md](../design/home/02-layout.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[選択モードの `r`](../design/home/01-modes.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[選択モードの `n` / 没入の `Ctrl-E`](../design/home/05-overlays.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[選択モードの `r`](../design/home/01-modes.md#2-つの-mode)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[選択モードの `n` / 没入の `Ctrl-E`](../design/home/05-overlays.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 
