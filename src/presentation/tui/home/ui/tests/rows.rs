@@ -874,8 +874,8 @@ fn left_pane_replaces_a_removing_session_with_a_leaf_skeleton_in_place() {
     let create = console::strip_ansi_codes(&lines[6]);
     assert!(name.contains("old"));
     assert!(name.contains('✂'));
-    assert!(detail.contains("removing session"));
-    assert!(prune.contains("pruning worktree"));
+    assert!(detail.trim().is_empty());
+    assert!(prune.trim().is_empty());
     assert!(create.contains("+ new session"));
 }
 
@@ -1340,9 +1340,9 @@ fn left_pane_keeps_child_session_indented_while_removing_it() {
     assert!(plain[6].contains("↳ child"));
     assert!(plain[6].contains('✂'));
     assert!(plain[7].starts_with("     "));
-    assert!(plain[7].contains("removing session"));
+    assert!(plain[7].trim().is_empty());
     assert!(plain[8].starts_with("     "));
-    assert!(plain[8].contains("pruning worktree"));
+    assert!(plain[8].trim().is_empty());
 }
 
 #[test]
