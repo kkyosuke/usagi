@@ -1283,17 +1283,18 @@ fn run_closeup_command(
 }
 
 /// Open a native terminal application at the focused row's directory. Unlike
-/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal. Once it
-/// is launched the 集中 menu has nothing more to act on, so — like `close` — this
-/// leaves 集中 for 選択, dismissing the menu overlay rather than leaving it floating
-/// over the session it just spawned a terminal for.
+/// [`launch_pane`], this does not enter 没入: the OS owns the new terminal. After
+/// launching, stay in 集中 on the same session while dismissing any action surface
+/// that was floating over a live pane. Idle sessions still show their action
+/// surface because the "+ new" tab is the only tab they have.
 fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
     let dir = selected_dir(state, wiring.workspace_root);
     match (wiring.open_external_terminal)(&dir) {
         Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
         Err(e) => state.log_error(e),
     }
-    state.leave_closeup();
+    state.close_closeup_action_over_pane();
+    state.closeup_select_active_pane_tab();
 }
 
 /// Launch an agent pane, recording which CLI to spawn: `None` uses the

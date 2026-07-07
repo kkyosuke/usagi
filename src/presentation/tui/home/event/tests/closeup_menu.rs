@@ -1159,11 +1159,11 @@ fn cheatsheet_opens_from_the_closeup_menu_and_dismisses() {
 }
 
 #[test]
-fn closeup_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
+fn closeup_menu_terminal_picker_new_stays_in_closeup() {
     let opened = RefCell::new(Vec::new());
     let external = RefCell::new(Vec::new());
-    let mut open = |_h: &mut HomeState, d: &Path, a: bool, n: bool| {
-        opened.borrow_mut().push((d.to_path_buf(), a, n));
+    let mut open = |h: &mut HomeState, d: &Path, a: bool, n: bool| {
+        opened.borrow_mut().push((d.to_path_buf(), a, n, h.mode()));
         Ok(PaneExit::Closed)
     };
     let mut open_external = |d: &Path| {
@@ -1177,8 +1177,9 @@ fn closeup_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     keys.push(Ok(Key::Enter)); // open = embedded pane/tab
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker again
     keys.push(Ok(Key::ArrowDown)); // open -> new
-    keys.push(Ok(Key::Enter)); // new = native terminal, then leaves 集中 -> Overview
-    keys.push(Ok(Key::Escape)); // Overview -> Base
+    keys.push(Ok(Key::Enter)); // new = native terminal, staying in Closeup
+    keys.push(Ok(Key::Char('t'))); // proves Closeup remained active: launches a pane
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, sample_state(), &mut open, &mut open_external).unwrap(),
@@ -1186,7 +1187,10 @@ fn closeup_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     ));
     assert_eq!(
         *opened.borrow(),
-        vec![(PathBuf::from("/r/feat"), false, false)]
+        vec![
+            (PathBuf::from("/r/feat"), false, false, Mode::Closeup),
+            (PathBuf::from("/r/feat"), false, false, Mode::Closeup),
+        ]
     );
     assert_eq!(*external.borrow(), vec![PathBuf::from("/r/feat")]);
 }
@@ -1208,8 +1212,8 @@ fn closeup_prompt_terminal_new_opens_native_terminal() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Closeup feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter)); // native terminal, then leaves 集中 -> Overview
-    keys.push(Ok(Key::Escape)); // Overview -> Base
+    keys.push(Ok(Key::Enter)); // native terminal, staying in Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1228,8 +1232,8 @@ fn closeup_prompt_terminal_new_reports_native_terminal_errors() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Closeup feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter)); // native terminal (errors), then leaves 集中 -> Overview
-    keys.push(Ok(Key::Escape)); // Overview -> Base
+    keys.push(Ok(Key::Enter)); // native terminal (errors), staying in Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
