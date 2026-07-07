@@ -33,6 +33,8 @@ fn session(name: &str, label: Option<&str>) -> SessionRecord {
         note: None,
         label_id: label.map(str::to_string),
         agent: Default::default(),
+        origin: Default::default(),
+        started_from: None,
         root: PathBuf::from(format!("/r/{name}")),
         worktrees: vec![worktree(Some(name), &format!("/r/{name}"))],
         created_at: Utc::now(),

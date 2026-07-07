@@ -278,6 +278,8 @@ fn footer_and_palette_scope_to_the_cursor_group_in_unite_mode() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),

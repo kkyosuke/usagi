@@ -334,6 +334,61 @@ impl SessionAgent {
     }
 }
 
+/// Who launched a session — a person operating the TUI, or an agent driving the
+/// MCP server — recorded once when the session is created so a later reader (a
+/// coordinating agent polling `session_status`, an operator scanning the home
+/// screen) can tell an automated session apart from a hand-made one.
+///
+/// The two real origins are [`Human`](Self::Human) and [`Mcp`](Self::Mcp); every
+/// session usagi creates from here on carries one of them. [`Unknown`](Self::Unknown)
+/// is only the degraded reading of a session recorded by an *older* usagi that
+/// predates this field (its key is simply absent) — it is the default so such a
+/// record still loads, and it is omitted from the file rather than fabricating a
+/// `human` / `mcp` origin the old usagi never knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    /// Origin not recorded: a session read from a `state.json` written before
+    /// usagi tracked this. Also the value an unrecognised stored origin degrades
+    /// to (see [`crate::domain::serde_fallback`]). Never written for a session
+    /// usagi creates itself — those are always [`Human`](Self::Human) or
+    /// [`Mcp`](Self::Mcp).
+    #[default]
+    Unknown,
+    /// Created interactively by a person from the TUI home screen (切替 create).
+    Human,
+    /// Created by an agent through the MCP server — the `session_create` and
+    /// `session_delegate_issue` tools.
+    Mcp,
+}
+
+impl SessionOrigin {
+    /// The lowercase token used in `state.json` and the MCP tool output
+    /// (`"unknown"` / `"human"` / `"mcp"`), matching the `snake_case` serde
+    /// rename so the string form has one source of truth.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionOrigin::Unknown => "unknown",
+            SessionOrigin::Human => "human",
+            SessionOrigin::Mcp => "mcp",
+        }
+    }
+
+    /// Whether the origin was not recorded (the pre-field default). Used to omit
+    /// the field from `state.json` so an untracked session stays lean, exactly as
+    /// unset [`display_name`](SessionRecord::display_name) / [`agent`](SessionAgent)
+    /// are omitted.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, SessionOrigin::Unknown)
+    }
+}
+
+impl std::fmt::Display for SessionOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A session created under `.usagi/sessions/<name>/`: a parallel working tree
 /// spanning every repository found under the workspace root (each as a git
 /// worktree on the session branch) plus any copied non-git files.
@@ -375,6 +430,35 @@ pub struct SessionRecord {
     /// default model); omitted from `state.json` when empty. See [`SessionAgent`].
     #[serde(default, skip_serializing_if = "SessionAgent::is_unset")]
     pub agent: SessionAgent,
+    /// Who launched the session — a person via the TUI ([`SessionOrigin::Human`])
+    /// or an agent via the MCP server ([`SessionOrigin::Mcp`]) — recorded once at
+    /// creation and never changed afterwards (a workspace refresh leaves it
+    /// untouched, like [`label_id`](Self::label_id)). Defaults to
+    /// [`SessionOrigin::Unknown`] for a record written before usagi tracked this,
+    /// and that default is omitted from `state.json`. An unrecognised stored value
+    /// degrades to `Unknown` rather than failing the whole load — see
+    /// [`crate::domain::serde_fallback`].
+    #[serde(
+        default,
+        skip_serializing_if = "SessionOrigin::is_unknown",
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
+    pub origin: SessionOrigin,
+    /// The name of the session this one was **started from** — the parent session
+    /// the agent was running inside when it created this one through the MCP server
+    /// (`session_create` / `session_delegate_issue`). This is the session-level
+    /// lineage: it answers "which session did this session get started from?", so a
+    /// tree of coordinator-and-children sessions can be reconstructed.
+    ///
+    /// `None` when there is no parent to record: a session a person cut in the TUI
+    /// ([`SessionOrigin::Human`]), or one an agent created while running at the
+    /// workspace root rather than inside a session (the root coordinator has no
+    /// parent session). Recorded once at creation and never changed afterwards (a
+    /// workspace refresh leaves it untouched, like [`origin`](Self::origin)).
+    /// Omitted from `state.json` when absent, and an older file without the key
+    /// loads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -504,6 +588,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: SessionAgent::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/tmp/s"),
             worktrees: vec![],
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
@@ -539,6 +625,140 @@ mod tests {
         .unwrap();
         assert_eq!(restored.agent.cli, None);
         assert_eq!(restored.agent.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn session_origin_as_str_and_display_match() {
+        for (origin, text) in [
+            (SessionOrigin::Unknown, "unknown"),
+            (SessionOrigin::Human, "human"),
+            (SessionOrigin::Mcp, "mcp"),
+        ] {
+            assert_eq!(origin.as_str(), text);
+            assert_eq!(format!("{origin}"), text);
+        }
+        // Only the pre-field default reports as unknown.
+        assert!(SessionOrigin::default().is_unknown());
+        assert!(SessionOrigin::Unknown.is_unknown());
+        assert!(!SessionOrigin::Human.is_unknown());
+        assert!(!SessionOrigin::Mcp.is_unknown());
+    }
+
+    #[test]
+    fn session_origin_is_omitted_when_unknown_and_round_trips_when_set() {
+        // The default (Unknown) origin is skipped entirely, so a session recorded
+        // before usagi tracked provenance stays lean and its key is simply absent.
+        let mut session = SessionRecord {
+            name: "s".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: SessionAgent::default(),
+            origin: SessionOrigin::Unknown,
+            started_from: None,
+            root: PathBuf::from("/tmp/s"),
+            worktrees: vec![],
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            last_active: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("origin"), "{json}");
+
+        // A human origin serializes as "human" and round-trips.
+        session.origin = SessionOrigin::Human;
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"origin\":\"human\""), "{json}");
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.origin, SessionOrigin::Human);
+
+        // As does an MCP origin.
+        session.origin = SessionOrigin::Mcp;
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"origin\":\"mcp\""), "{json}");
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.origin, SessionOrigin::Mcp);
+    }
+
+    #[test]
+    fn session_origin_defaults_to_unknown_when_the_key_is_absent() {
+        // An older `state.json` written before this field simply has no `origin`
+        // key; it must still load, with the origin reading as Unknown rather than
+        // fabricating a human / mcp provenance the old usagi never recorded.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.origin, SessionOrigin::Unknown);
+    }
+
+    #[test]
+    fn session_origin_degrades_an_unknown_value_without_failing_the_load() {
+        // An `origin` a newer usagi wrote (a future provenance) or a hand-edited
+        // typo degrades to Unknown rather than failing the whole record — the
+        // fields beside it still load.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "origin": "cron",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.origin, SessionOrigin::Unknown);
+        assert_eq!(restored.name, "s");
+    }
+
+    #[test]
+    fn session_started_from_is_omitted_when_absent_and_round_trips_when_set() {
+        // No parent recorded: the field is skipped entirely, so a root-launched or
+        // interactively-created session stays lean and an older file without the
+        // key still loads.
+        let mut session = SessionRecord {
+            name: "child".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: SessionAgent::default(),
+            origin: SessionOrigin::Mcp,
+            started_from: None,
+            root: PathBuf::from("/tmp/child"),
+            worktrees: vec![],
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            last_active: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("started_from"), "{json}");
+
+        // A recorded parent session round-trips through the file — this is the
+        // lineage answer to "which session was this started from?".
+        session.started_from = Some("coordinator".to_string());
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"started_from\":\"coordinator\""), "{json}");
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.started_from.as_deref(), Some("coordinator"));
+    }
+
+    #[test]
+    fn session_started_from_defaults_to_none_when_the_key_is_absent() {
+        // An older `state.json` written before this field simply has no
+        // `started_from` key; it must still load, with the parent reading as None.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.started_from, None);
     }
 
     #[test]
@@ -734,6 +954,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -771,6 +993,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -824,6 +1048,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -843,6 +1069,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -863,6 +1091,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -894,6 +1124,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -929,6 +1161,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: created,
@@ -967,6 +1201,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
