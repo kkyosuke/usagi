@@ -3182,9 +3182,6 @@ impl HomeState {
     /// idle session (no live pane), where [`closeup_on_new_tab`](Self::closeup_on_new_tab)
     /// is forced on anyway. Returns whether a session matched.
     ///
-    /// Used by the auto-focus a finished `close` requests: the neighbouring
-    /// session opens in the state it was left in (its running agent/terminal),
-    /// not a new-tab prompt.
     pub fn enter_closeup_named_existing(&mut self, name: &str) -> bool {
         if !self.enter_closeup_named(name) {
             return false;
@@ -3193,6 +3190,21 @@ impl HomeState {
         // session's existing pane shows (an idle one has no pane, so
         // `closeup_on_new_tab` stays true and the action surface shows regardless).
         self.closeup_new_tab = false;
+        true
+    }
+
+    /// Land the Switch cursor on the session named `name`, staying in 選択
+    /// (Switch), returning whether one matched. The Switch mirror of
+    /// [`enter_closeup_named_existing`]: used by the auto-focus a finished `close`
+    /// requests so the neighbouring session is selected without dropping the user
+    /// into its inside — they asked to leave the closed session, so they stay on
+    /// the session set. A no-op (returning `false`, leaving the mode untouched)
+    /// when no session matches.
+    pub fn focus_switch_named(&mut self, name: &str) -> bool {
+        if !self.list.select_by_name(name) {
+            return false;
+        }
+        self.enter_switch();
         true
     }
 

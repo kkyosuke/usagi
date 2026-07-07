@@ -597,16 +597,24 @@ pub(super) fn event_loop(
                 state.clear_removing_session(root, name);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
-            // A finished create/close may ask to drop into 集中 (Closeup) on its
-            // landing session. Done after the refresh above so the branch is in
-            // the list to match. Unlike that refresh — which deliberately keeps
-            // the cursor put for background changes — this is the user's own
-            // task landing, so moving the cursor onto it is the intended result.
-            // `close` auto-focuses a neighbouring *existing* session; land on its
-            // live pane when it has one instead of forcing the "+ new" tab.
+            // A finished create/close may ask to focus a landing session. Done
+            // after the refresh above so the branch is in the list to match.
+            // Unlike that refresh — which deliberately keeps the cursor put for
+            // background changes — this is the user's own task landing, so moving
+            // the cursor onto it is the intended result. A create drops into
+            // 集中 (Closeup) so the user can operate the new session immediately;
+            // a close stays in 選択 (Switch) on the neighbouring session because
+            // the user just asked to leave the closed session.
             if let Some(focus) = focus {
                 if focus.interaction_epoch == wiring.interaction_epoch {
-                    state.enter_closeup_named_existing(&focus.name);
+                    match focus.landing {
+                        super::tasks::FocusLanding::Closeup => {
+                            state.enter_closeup_named_existing(&focus.name);
+                        }
+                        super::tasks::FocusLanding::Switch => {
+                            state.focus_switch_named(&focus.name);
+                        }
+                    }
                 }
             }
         }
@@ -1578,6 +1586,7 @@ pub(crate) fn event_loop_compat(
         // no new sessions just won't match it.
         let focus = outcome.sessions.as_ref().map(|_| super::tasks::AutoFocus {
             name: name.to_string(),
+            landing: super::tasks::FocusLanding::Closeup,
             interaction_epoch,
         });
         tasks.complete(

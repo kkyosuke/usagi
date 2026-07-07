@@ -655,7 +655,7 @@ impl Command for ChatCommand {
     }
 }
 
-/// `close`: remove the focused session and return to 選択 (Overview). It is the
+/// `close`: remove the focused session and return to 選択 (Switch). It is the
 /// 集中 equivalent of `session remove <name>`: a clean session's worktrees and
 /// branches are deleted. Bare `close` (no `--force`) **refuses a session with
 /// uncommitted changes** — the removal logs how to discard them — so it can
