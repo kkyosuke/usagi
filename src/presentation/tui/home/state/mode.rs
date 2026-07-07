@@ -119,3 +119,21 @@ impl Mode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ladder_is_ordered_from_base_to_deepest_with_stable_display_names() {
+        let labels: Vec<_> = Mode::LADDER.iter().map(|mode| mode.label()).collect();
+        let tags: Vec<_> = Mode::LADDER.iter().map(|mode| mode.tag()).collect();
+
+        assert_eq!(
+            Mode::LADDER,
+            [Mode::Overview, Mode::Closeup, Mode::Attached]
+        );
+        assert_eq!(labels, ["Overview", "Closeup", "Attached"]);
+        assert_eq!(tags, ["overview", "closeup", "attached"]);
+    }
+}
