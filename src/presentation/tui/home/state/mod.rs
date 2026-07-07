@@ -45,7 +45,7 @@ pub use modal::{
     CreateInput, DiffView, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal,
     RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
-pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
+pub use mode::{Mode, PaneExit, ResumeLevel};
 
 use list::{session_row, session_tree_layout};
 use modal::{CloseupMenu, CloseupSubmenu, Overlay};
@@ -581,6 +581,10 @@ fn changed_roots(old: &MonitorSnapshot, new: &MonitorSnapshot) -> HashSet<PathBu
 pub struct HomeState {
     list: WorktreeList,
     mode: Mode,
+    /// Whether the current Closeup sub-state is a live embedded pane. This used
+    /// to be a third top-level mode; now it only affects Closeup rendering while
+    /// the pane driver owns input.
+    closeup_attached: bool,
     /// The workspace command line (buffer, history, and recall cursor). See
     /// [`CommandLine`].
     cmdline: CommandLine,
@@ -647,9 +651,6 @@ pub struct HomeState {
     /// separate from [`agent_choice`](Self::agent_choice) because `ai` always uses
     /// the configured default CLI rather than an ad-hoc override.
     agent_initial_prompt: Option<String>,
-    /// Where a 選択 (Overview) returns to on `Esc`; only meaningful in
-    /// [`Mode::Overview`].
-    overview_return: ReturnMode,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
     /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
     /// badge (in any mode, on the full sidebar) and held open across pointer moves —
@@ -725,7 +726,7 @@ pub struct HomeState {
     /// selector moves (the user is browsing previews), or when the mode changes.
     closeup_action_over_pane: bool,
     /// A one-shot arming bit: 集中 (Closeup) was reached by zooming *out* of a live
-    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToCloseup`), so the very next
+    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
     /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
     /// started from rather than peeling back toward 選択. Armed in that zoom-out
     /// path and cleared the moment any other key is handled (or the mode changes),
@@ -914,7 +915,8 @@ impl HomeState {
         let session_menu_commands = sorted_session_menu_commands(&registry);
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
-            mode: Mode::Overview,
+            mode: Mode::Switch,
+            closeup_attached: false,
             cmdline: CommandLine::new(),
             log,
             registry,
@@ -930,7 +932,6 @@ impl HomeState {
             installed_agents: Vec::new(),
             agent_choice: None,
             agent_initial_prompt: None,
-            overview_return: ReturnMode::Base,
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
@@ -2145,10 +2146,16 @@ impl HomeState {
     /// [`SurfaceOwner::Attached`] writer from
     /// [`surface_writer`](Self::surface_writer).
     pub fn show_attached(&mut self) {
-        self.mode = Mode::Attached;
+        self.mode = Mode::Closeup;
+        self.closeup_attached = true;
         // Attaching consumes any action surface still floating over a pane tab, so
         // a later return to 集中 starts fresh rather than over a stale float.
         self.closeup_action_over_pane = false;
+    }
+
+    /// Whether Closeup is currently being rendered as a live attached pane.
+    pub fn closeup_attached(&self) -> bool {
+        self.closeup_attached
     }
 
     /// Leave 没入 for 集中 (Closeup): the embedded session was closed or detached,
@@ -2165,6 +2172,7 @@ impl HomeState {
     /// [`closeup_discard_new_tab`]: Self::closeup_discard_new_tab
     pub fn leave_attached(&mut self) {
         self.mode = Mode::Closeup;
+        self.closeup_attached = false;
         self.closeup_new_tab = true;
         self.closeup_action_over_pane = false;
         // Returning to the menu from a pane presents its full listing: a filter
@@ -2613,13 +2621,12 @@ impl HomeState {
 
     /// The engagement to persist for restore, consuming any arm. An armed level
     /// (a 没入 quit) wins; otherwise it is read off the current [`mode`](Self::mode)
-    /// — 選択 → [`ResumeLevel::Overview`], 集中 → [`ResumeLevel::Closeup`]. The live
-    /// event loop never observes [`Mode::Attached`] (the pane driver arms instead),
-    /// so that arm maps to Closeup as a defensive fallback.
+    /// — 選択 → [`ResumeLevel::Switch`], 集中 → [`ResumeLevel::Closeup`]. Attached is a Closeup sub-state, so the pane driver arms it
+    /// explicitly before returning to the management loop.
     pub fn resume_level(&mut self) -> ResumeLevel {
         self.pending_resume.take().unwrap_or(match self.mode {
-            Mode::Overview => ResumeLevel::Overview,
-            Mode::Closeup | Mode::Attached => ResumeLevel::Closeup,
+            Mode::Switch => ResumeLevel::Switch,
+            Mode::Closeup => ResumeLevel::Closeup,
         })
     }
 
@@ -2631,7 +2638,7 @@ impl HomeState {
     /// the event loop's first-pass attach.
     pub fn restore_focus(&mut self, session: &str, level: ResumeLevel) {
         match level {
-            ResumeLevel::Overview => {
+            ResumeLevel::Switch => {
                 // Move the 選択 cursor onto the session (root stays at the default
                 // cursor, which `select_by_name` leaves put by not matching it).
                 self.list.select_by_name(session);
@@ -2662,43 +2669,72 @@ impl HomeState {
             .focus_index(row.min(self.list.create_row().saturating_sub(1)));
     }
 
-    // --- command palette (`:`) ---------------------------------------------
+    // --- Overview modal (`:`) ----------------------------------------------
 
-    /// Open the workspace command palette overlay (`:`), clearing any half-typed
-    /// command line so it starts fresh. The palette reuses the workspace
+    /// Open the workspace Overview modal (`:`), clearing any half-typed command
+    /// line so it starts fresh. The modal reuses the workspace
     /// command-line state ([`input`](Self::input) / [`recall`](Self::recall)),
     /// floating over the current 選択 / 集中 panes while open.
-    pub fn open_command_palette(&mut self) {
+    pub fn open_overview_modal(&mut self) {
         self.command_open = true;
         self.cmdline.clear();
     }
 
-    /// Close the command palette overlay (`Esc`), clearing its command line.
-    pub fn close_command_palette(&mut self) {
+    /// Compatibility wrapper while command handlers still call the old name.
+    pub fn open_command_palette(&mut self) {
+        self.open_overview_modal();
+    }
+
+    /// Close the Overview modal (`Esc`), clearing its command line.
+    pub fn close_overview_modal(&mut self) {
         self.command_open = false;
         self.cmdline.clear();
     }
 
-    /// Whether the workspace command palette overlay is open.
-    pub fn command_palette_open(&self) -> bool {
+    /// Compatibility wrapper while command handlers still call the old name.
+    pub fn close_command_palette(&mut self) {
+        self.close_overview_modal();
+    }
+
+    /// Whether the workspace Overview modal is open.
+    pub fn overview_modal_open(&self) -> bool {
         self.command_open
     }
 
-    // --- 選択 (Overview) -----------------------------------------------------
+    /// Compatibility wrapper while command handlers still call the old name.
+    pub fn command_palette_open(&self) -> bool {
+        self.overview_modal_open()
+    }
 
-    /// Enter 選択 (Overview): move keyboard focus to the left pane to pick a
-    /// session, remembering where to return on `Esc`.
-    pub fn enter_overview(&mut self, return_to: ReturnMode) {
-        self.mode = Mode::Overview;
-        self.overview_return = return_to;
+    // --- Switch --------------------------------------------------------------
+
+    /// Enter Switch: move keyboard focus to the left pane to pick a session.
+    pub fn enter_switch(&mut self) {
+        self.mode = Mode::Switch;
+        self.closeup_attached = false;
         self.overlay.clear_create();
         // Any 集中 `Ctrl-O` leader is abandoned by leaving the surface.
         self.prefix_pending = false;
     }
 
-    /// Where the current 選択 returns to on `Esc`.
-    pub fn overview_return(&self) -> ReturnMode {
-        self.overview_return
+    /// Open the Focus modal (`Ctrl-O a`) for the selected / focused session.
+    ///
+    /// From Switch this enters Closeup on the highlighted row, so the session's
+    /// action surface appears. From Closeup it makes the action surface visible
+    /// again: on a pane preview it floats over that pane, and on the "+ new" tab
+    /// it is already the active surface.
+    pub fn open_focus_modal(&mut self) {
+        match self.mode {
+            Mode::Switch => {
+                let row = self.list.selected_index();
+                self.enter_closeup(row);
+            }
+            Mode::Closeup if self.closeup_attached => {}
+            Mode::Closeup if self.closeup_on_new_tab() => {}
+            Mode::Closeup => {
+                self.closeup_action_over_active_pane();
+            }
+        }
     }
 
     /// Move the Overview cursor up one row, wrapping (delegates to the list).
@@ -2946,7 +2982,7 @@ impl HomeState {
     /// this is `Some` — so its absence is a genuine path, not a dead branch
     /// behind a separate predicate.
     pub fn visible_overview_note(&self) -> Option<&str> {
-        if self.mode != Mode::Overview || matches!(self.overlay, Overlay::Note(_)) {
+        if self.mode != Mode::Switch || matches!(self.overlay, Overlay::Note(_)) {
             return None;
         }
         self.selected_session_note()
@@ -3110,6 +3146,7 @@ impl HomeState {
     /// there.
     fn enter_closeup_surface(&mut self) {
         self.mode = Mode::Closeup;
+        self.closeup_attached = false;
         self.overlay.clear_create();
         self.closeup_menu.reset();
         self.closeup_menu_filter = None;
@@ -3195,7 +3232,7 @@ impl HomeState {
 
     /// Leave 集中 for the base 選択 (Overview) — the default mode.
     pub fn leave_closeup(&mut self) {
-        self.enter_overview(ReturnMode::Base);
+        self.enter_switch();
     }
 
     /// The Session-scope commands the 集中 menu lists, in alphabetical order
@@ -3311,6 +3348,7 @@ impl HomeState {
     /// [`closeup_pane`]: super::ui::panes
     pub fn closeup_action_overlay(&self) -> bool {
         self.mode == Mode::Closeup
+            && !self.closeup_attached
             && (self.closeup_on_new_tab() || self.closeup_action_over_pane)
             && self.loading().is_none()
             && matches!(self.overlay, Overlay::None)

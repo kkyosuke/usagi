@@ -181,7 +181,7 @@ fn overview_with_tabs(active: usize) -> HomeState {
     });
     state.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], active);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down(); // root -> feat
     state
 }
@@ -244,7 +244,7 @@ fn overview_tab_at_is_none_for_a_non_live_row_or_without_a_strip() {
     // lands on a tab even if a strip is still published in the surface.
     let mut idle = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     idle.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
-    idle.enter_overview(super::super::super::state::ReturnMode::Base);
+    idle.enter_switch();
     idle.overview_move_down(); // root -> main (not live)
     assert_eq!(
         overview_tab_at(&idle, geo.origin_col, geo.origin_row, 24, 120),
@@ -291,7 +291,7 @@ fn tab_context_hit_tests_cover_empty_and_off_row_paths() {
     );
 
     let mut switch = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
-    switch.enter_overview(super::super::super::state::ReturnMode::Base);
+    switch.enter_switch();
     switch.overview_move_down();
     switch.set_terminal_tabs(Vec::new(), 0);
     assert_eq!(
@@ -494,7 +494,7 @@ fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
     assert!(joined.contains("main"));
     assert!(joined.contains("$ cargo test"));
     // The attached footer advertises Ctrl-O.
-    assert!(joined.contains("attached"));
+    assert!(joined.contains("closeup:live"));
 }
 
 #[test]
@@ -513,8 +513,8 @@ fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
     state.show_attached();
     let attached = stripped(&render_frame(24, 80, &state));
     assert!(
-        attached.contains("(>.<)9"),
-        "working face in 没入: {attached}"
+        attached.contains("(^.^)/"),
+        "attentive face remains in live Closeup: {attached}"
     );
 }
 

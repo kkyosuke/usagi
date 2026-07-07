@@ -90,9 +90,8 @@ fn recall_and_submit_place_the_caret_at_the_end() {
 #[test]
 fn enter_overview_remembers_its_return_mode_and_moves_the_cursor() {
     let mut state = state(); // root, main, feature
-    state.enter_overview(ReturnMode::Base);
-    assert_eq!(state.mode(), Mode::Overview);
-    assert_eq!(state.overview_return(), ReturnMode::Base);
+    state.enter_switch();
+    assert_eq!(state.mode(), Mode::Switch);
     state.overview_move_down();
     assert_eq!(state.list().selected_index(), 1);
     state.overview_move_up();
@@ -107,16 +106,14 @@ fn enter_overview_remembers_its_return_mode_and_moves_the_cursor() {
 #[test]
 fn overview_return_carries_each_origin() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Closeup);
-    assert_eq!(state.overview_return(), ReturnMode::Closeup);
-    state.enter_overview(ReturnMode::Attached);
-    assert_eq!(state.overview_return(), ReturnMode::Attached);
+    state.enter_switch();
+    state.enter_switch();
 }
 
 #[test]
 fn overview_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     assert!(!state.is_creating());
     state.overview_begin_create(Vec::new());
     assert!(state.is_creating());
@@ -136,7 +133,7 @@ fn overview_inline_create_edits_then_confirms_a_fresh_name() {
 #[test]
 fn overview_inline_create_rejects_empty_and_duplicate_names() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // The session "feature" would cut `usagi/feature`, which already exists, so
     // it is in the taken set (a bare `feature` would not collide).
     state.overview_begin_create(vec!["usagi/feature".to_string()]);
@@ -164,7 +161,7 @@ fn overview_inline_create_rejects_empty_and_duplicate_names() {
 #[test]
 fn overview_inline_create_flags_a_branch_namespace_clash_live() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // Branches nested under the session's namespaced branch `usagi/test/` make a
     // `test` session impossible.
     state.overview_begin_create(vec!["usagi/test/home-ui-e2e".to_string()]);
@@ -192,7 +189,7 @@ fn overview_inline_create_flags_a_branch_namespace_clash_live() {
 #[test]
 fn overview_inline_create_can_be_cancelled() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_begin_create(Vec::new());
     state.create_mut().unwrap().push_char('x');
     state.create_cancel();
@@ -214,7 +211,7 @@ fn create_accessors_are_none_when_not_creating() {
 #[test]
 fn create_caret_moves_and_edits_mid_name() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
@@ -242,7 +239,7 @@ fn create_caret_moves_and_edits_mid_name() {
 #[test]
 fn overview_inline_rename_prefills_edits_then_confirms_a_label() {
     let mut state = state(); // sessions: main, feature
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down(); // cursor onto "main"
     assert!(state.overview_begin_rename());
     assert!(state.is_renaming());
@@ -270,7 +267,7 @@ fn overview_inline_rename_prefills_edits_then_confirms_a_label() {
 #[test]
 fn overview_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     // Cursor on the root row: there is no session to rename.
     assert!(state.list().root_selected());
     assert!(!state.overview_begin_rename());
@@ -299,7 +296,7 @@ fn rename_accessors_are_none_when_not_renaming() {
 #[test]
 fn rename_can_be_cancelled() {
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     state.overview_begin_rename();
     state.rename_mut().unwrap().push_char('x');
@@ -312,7 +309,7 @@ fn rename_input_supports_caret_movement_and_forward_delete() {
     // The rename input has the same mid-string editing affordances as create: the
     // caret can move and a character can be deleted forward, not only at the end.
     let mut state = state();
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down();
     assert!(state.overview_begin_rename());
     let rename = state.rename_mut().unwrap();

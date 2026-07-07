@@ -387,7 +387,7 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
 /// ignored, mirroring how those overlays capture every key in the loop below — so a
 /// stray click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
-    matches!(state.mode(), Mode::Overview | Mode::Closeup)
+    matches!(state.mode(), Mode::Switch | Mode::Closeup)
         && !state.quit_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
@@ -629,14 +629,14 @@ pub(super) fn event_loop(
         // focused session's panes show as tabs and the chosen one previews live
         // (an idle session has no live snapshot, so the strip stays absent and the
         // action surface shows instead).
-        let drives_surface = matches!(state.mode(), Mode::Overview | Mode::Closeup);
+        let drives_surface = matches!(state.mode(), Mode::Switch | Mode::Closeup);
         // The note editor opened from 没入 (`Ctrl-E`) floats over the attached
         // session's pane, which keeps drawing in Attached mode while the editor is
         // open. The surface was just cleared, so refresh it here too — otherwise
         // the live terminal would not show behind the floating box, and the empty
         // fallback pane (a one-line starting hint) would be too short to hold the
         // box, clipping its bottom border as the note grows with each newline.
-        let attached_note = state.mode() == Mode::Attached && state.note_editor().is_some();
+        let attached_note = state.closeup_attached() && state.note_editor().is_some();
         let drive_now = (drives_surface && !input_in_right_pane) || attached_note;
         // Refresh the surface for the mode that draws it, when the highlighted /
         // focused session has a live snapshot. Folded into one `if let` (rather
@@ -738,7 +738,7 @@ pub(super) fn event_loop(
         // so a live pane is never frozen stale. The cheap per-frame state updates
         // above still run, so the next paint (when something does change) is
         // correct.
-        let skip_paint = state.mode() == Mode::Overview
+        let skip_paint = state.mode() == Mode::Switch
             && state.terminal_view().is_none()
             && !state.command_palette_open()
             // A loading tab animates on the clock, so its frames must not be skipped.
@@ -891,7 +891,7 @@ pub(super) fn event_loop(
                 // re-attaches move together. 没入 handles its own tab clicks
                 // inside the pane driver.
                 match state.mode() {
-                    Mode::Overview => {
+                    Mode::Switch => {
                         if let Some(index) = ui::overview_tab_at(
                             &state,
                             click.col,
@@ -922,7 +922,6 @@ pub(super) fn event_loop(
                             continue;
                         }
                     }
-                    Mode::Attached => {}
                 }
                 let selected = click_selects_session(&state)
                     .then(|| {
@@ -973,21 +972,21 @@ pub(super) fn event_loop(
                 bump_interaction_epoch(wiring);
                 state.set_pr_popup(None);
                 let hit = match state.mode() {
-                    Mode::Overview => ui::overview_tab_hit(
+                    Mode::Switch => ui::overview_tab_hit(
                         &state,
                         click.col,
                         click.row,
                         height as usize,
                         width as usize,
                     ),
-                    Mode::Closeup => ui::closeup_tab_hit(
+                    Mode::Closeup if !state.closeup_attached() => ui::closeup_tab_hit(
                         &state,
                         click.col,
                         click.row,
                         height as usize,
                         width as usize,
                     ),
-                    Mode::Attached => None,
+                    Mode::Closeup => None,
                 };
                 if let Some(index) = hit {
                     let dir = selected_dir(&state, wiring.workspace_root);
@@ -1025,7 +1024,7 @@ pub(super) fn event_loop(
         // to blink and animates on the live tick instead. A fresh `now` (the read
         // may have blocked a while) so the blink's window starts from the keypress;
         // the call is a no-op when the mascot animation is turned off.
-        if matches!(state.mode(), Mode::Overview | Mode::Closeup) {
+        if matches!(state.mode(), Mode::Switch | Mode::Closeup) {
             state.kick_mascot_blink(Instant::now());
         }
 
@@ -1424,14 +1423,10 @@ pub(super) fn event_loop(
         // the quit-confirm modal do — both handled above), so their `Flow` is
         // discarded rather than matched for a now-dead `Quit` arm.
         match state.mode() {
-            Mode::Overview => {
+            Mode::Switch => {
                 overview_key(term, &mut state, &mut painter, key, wiring);
             }
-            // 没入 (Attached) is driven inside `open_pane`, which always leaves it
-            // (for 選択 or 集中) before returning — so the loop only ever observes
-            // 集中 here. It shares the 集中 handler to keep the match total without a
-            // separate, unreachable arm.
-            Mode::Closeup | Mode::Attached => {
+            Mode::Closeup => {
                 closeup_key(term, &mut state, &mut painter, key, wiring);
             }
         }
@@ -1491,7 +1486,7 @@ fn selected_diff(state: &HomeState) -> Result<(String, String)> {
 /// editor, or the command palette — a click is meant for it (or for nothing), not
 /// the rabbit drawn beneath it.
 fn mascot_clickable(state: &HomeState) -> bool {
-    matches!(state.mode(), Mode::Overview | Mode::Closeup)
+    matches!(state.mode(), Mode::Switch | Mode::Closeup)
         && !state.quit_confirm()
         && !state.update_confirm()
         && state.remove_modal().is_none()

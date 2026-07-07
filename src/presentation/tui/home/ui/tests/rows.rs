@@ -3010,7 +3010,7 @@ fn group_inline_insert_line_counts_pending_skeleton_rows() {
 #[test]
 fn overview_preview_prompts_to_create_when_the_create_row_is_selected() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_select(state.list().create_row());
     let lines = overview_preview(&state, 60, 10);
     let text = console::strip_ansi_codes(&lines.join("\n")).into_owned();

@@ -15,7 +15,6 @@ fn overview_n_opens_the_note_editor_edits_the_buffer_and_saves() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)),     // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),        // root -> alpha
         Ok(Key::Char('n')),        // open the note editor for alpha
         Ok(Key::Tab),              // ignored inside the editor
@@ -102,9 +101,8 @@ fn shift_arrows_select_text_and_delete_removes_the_selection() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
-        Ok(Key::ArrowDown),    // root -> alpha
-        Ok(Key::Char('n')),    // open the note editor for alpha
+        Ok(Key::ArrowDown), // root -> alpha
+        Ok(Key::Char('n')), // open the note editor for alpha
     ];
     keys.extend(typed("hello world"));
     keys.push(Ok(Key::Home)); // caret to the line start (clears any selection)
@@ -153,7 +151,6 @@ fn overview_ctrl_e_opens_the_note_editor_like_n() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),    // root -> alpha
         Ok(Key::Char(CTRL_E)), // open the note editor for alpha
     ];
@@ -193,9 +190,8 @@ fn overview_end_key_opens_the_note_editor_like_ctrl_e() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
-        Ok(Key::ArrowDown),    // root -> alpha
-        Ok(Key::End),          // Ctrl-E as console delivers it: open the note
+        Ok(Key::ArrowDown), // root -> alpha
+        Ok(Key::End),       // Ctrl-E as console delivers it: open the note
     ];
     keys.extend(typed("hi"));
     keys.push(Ok(Key::Char(CTRL_S))); // save
@@ -231,9 +227,8 @@ fn overview_n_note_editor_cancel_discards_the_edit() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Overview
-        Ok(Key::ArrowDown),    // root -> alpha
-        Ok(Key::Char('n')),    // open the editor
+        Ok(Key::ArrowDown), // root -> alpha
+        Ok(Key::Char('n')), // open the editor
     ];
     keys.extend(typed("draft"));
     keys.push(Ok(Key::Escape)); // cancel the editor (no save)

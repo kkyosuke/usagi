@@ -29,7 +29,7 @@ fn overview_create_rows_show_the_input_and_an_error() {
 #[test]
 fn render_frame_shows_the_inline_create_row_in_overview() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
@@ -37,7 +37,7 @@ fn render_frame_shows_the_inline_create_row_in_overview() {
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("+ new: wip"));
-    assert!(joined.contains("overview"));
+    assert!(joined.contains("switch"));
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
         }],
         issues: Vec::new(),
     }]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
@@ -99,7 +99,7 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
         }],
         issues: Vec::new(),
     }]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     let before = render_frame(24, 80, &state)
         .iter()
         .position(|line| console::strip_ansi_codes(line).contains("▌ wsB"))
@@ -150,7 +150,7 @@ fn replace_one_with_rows_pads_when_the_target_line_is_below_the_built_rows() {
 #[test]
 fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_overview() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down(); // cursor onto "main"
     assert!(state.overview_begin_rename());
     for c in " 2".chars() {

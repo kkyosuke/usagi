@@ -730,7 +730,7 @@ fn pump_input(
                         flush_pending_input(pty, &mut pending_bytes)?;
                         return Ok(Some(match action {
                             Reserved::Detach => PaneStep::Detach,
-                            Reserved::ToCloseup => PaneStep::ToCloseup,
+                            Reserved::ToFocus => PaneStep::ToCloseup,
                             Reserved::NextTab => PaneStep::NextTab,
                             Reserved::PrevTab => PaneStep::PrevTab,
                             Reserved::SwapTabRight => PaneStep::SwapTabRight,

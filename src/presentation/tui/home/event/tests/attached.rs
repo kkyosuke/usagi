@@ -4,7 +4,7 @@ use super::*;
 fn ctrl_o_in_the_pane_zooms_out_to_overview() {
     // Attaching to a live session; the pane returns ToOverview (Ctrl-O), so the
     // loop enters Overview with return=Attached. Then Ctrl-O -> Overview (fallback Ctrl-C quits).
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToOverview);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToSwitch);
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
@@ -26,7 +26,7 @@ fn ctrl_o_in_the_pane_zooms_out_to_overview() {
 }
 
 #[test]
-fn pane_to_overview_then_esc_re_attaches() {
+fn pane_to_switch_then_esc_stays_in_switch() {
     // ToOverview -> Overview(return=Attached). In Overview, Esc re-attaches. The pane
     // returns ToOverview the first time and Closed the second so the run ends.
     let calls = RefCell::new(0);
@@ -34,7 +34,7 @@ fn pane_to_overview_then_esc_re_attaches() {
         let mut n = calls.borrow_mut();
         *n += 1;
         if *n == 1 {
-            Ok(PaneExit::ToOverview)
+            Ok(PaneExit::ToSwitch)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -58,7 +58,7 @@ fn pane_to_overview_then_esc_re_attaches() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*calls.borrow(), 2);
+    assert_eq!(*calls.borrow(), 1);
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn pane_to_overview_then_esc_onto_an_idle_session_lands_in_closeup() {
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
-        Ok(PaneExit::ToOverview)
+        Ok(PaneExit::ToSwitch)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     // Only the root (/ws) is live; the worktree rows are idle.
@@ -114,7 +114,7 @@ fn ctrl_t_in_the_pane_zooms_out_to_closeup() {
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
-        Ok(PaneExit::ToCloseup)
+        Ok(PaneExit::ToFocus)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
@@ -152,7 +152,7 @@ fn ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane() {
         let mut n = calls.borrow_mut();
         *n += 1;
         if *n == 1 {
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }

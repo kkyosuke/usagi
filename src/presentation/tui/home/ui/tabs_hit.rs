@@ -148,14 +148,13 @@ pub(in crate::presentation::tui::home) fn attached_tab_hit(
         .position(|range| range.contains(&rel_col))
 }
 
-/// The tab a left click at the 0-based screen (`col`, `row`) lands on while 没入
-/// (Attached), or `None` when the click is not on a switchable chip. The strip
+/// The tab a left click at the 0-based screen (`col`, `row`) lands on while the Closeup live-terminal sub-state, or `None` when the click is not on a switchable chip. The strip
 /// occupies the [`TAB_BAR_ROWS`](super::TAB_BAR_ROWS) rows at the top of the right
 /// pane — the embedded terminal `geo` is pushed down by exactly that — so a click
 /// on either of those rows, in a chip's column, hits its tab. Returns `None` for a
 /// click off the strip rows, off every chip (the indent, the gaps, past the last
 /// chip), or on the already-active tab, so the caller only switches on a real
-/// change. Mirrors what [`right_pane_contents`] draws for [`Mode::Attached`].
+/// change. Mirrors what [`right_pane_contents`] draws for the Closeup live-terminal sub-state.
 pub(in crate::presentation::tui::home) fn attached_tab_at(
     state: &HomeState,
     col: u16,

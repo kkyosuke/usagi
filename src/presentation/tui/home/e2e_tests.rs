@@ -95,7 +95,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         landing.contains('▶'),
         "the live agent is surfaced (icon only)"
     );
-    assert!(landing.contains("overview"), "footer reports Overview");
+    assert!(landing.contains("switch"), "footer reports Switch");
     assert!(
         landing.contains("Pick a session"),
         "the picker prompt shows"
@@ -104,7 +104,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     // The `:` command palette floats the workspace command line over the panes.
     state.open_command_palette();
     let palette = plain(&render_frame(ROWS, COLS, &state));
-    assert!(palette.contains("Command"), "the palette is titled");
+    assert!(palette.contains("Overview"), "the Overview modal is titled");
     assert!(palette.contains('❯'), "the palette carries the prompt");
     state.close_command_palette();
 
@@ -148,7 +148,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         None,
     ));
     let attached = plain(&render_frame(ROWS, COLS, &state));
-    assert!(attached.contains("attached"), "footer reports Attached");
+    assert!(attached.contains("closeup:live"), "footer reports Attached");
     assert!(
         attached.contains("live terminal"),
         "the input line yields to the pane"
@@ -276,8 +276,8 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     assert!(matches!(outcome, Outcome::Quit), "Ctrl-C quits the screen");
     let attached = plain(&captured.borrow());
     assert!(
-        attached.contains("attached"),
-        "the loop painted the Attached mode"
+        attached.contains("closeup:live"),
+        "the loop painted the live Closeup sub-state"
     );
     assert!(attached.contains("feat"), "the focused session is `feat`");
     assert!(

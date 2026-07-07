@@ -18,7 +18,7 @@ use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
 use super::super::command::Effect;
 use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
-use super::super::state::{HomeState, ModalSize, PaneExit, ReturnMode, ROOT_NAME};
+use super::super::state::{HomeState, ModalSize, PaneExit, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
@@ -58,7 +58,7 @@ pub(super) fn palette_key(
                 Effect::Quit => return Ok(Flow::Quit),
                 // `session switch` with no name moves keyboard focus to the base
                 // 選択 to pick a session.
-                Effect::EnterSwitch => state.enter_overview(ReturnMode::Base),
+                Effect::EnterSwitch => state.enter_switch(),
                 // `session switch <name>` focuses that session: if it resolves,
                 // close the palette and enter 集中 (attaching when it is live);
                 // an unknown name keeps the palette open so the error shows.
@@ -85,7 +85,7 @@ pub(super) fn palette_key(
                 // `session create` with no name moves to 選択 and opens the inline
                 // name input there (creation lives in Overview).
                 Effect::OpenSessionModal => {
-                    state.enter_overview(ReturnMode::Base);
+                    state.enter_switch();
                     let branches = (wiring.existing_branches)();
                     state.overview_begin_create(branches);
                 }
@@ -324,6 +324,17 @@ pub(super) fn overview_key(
         return Flow::Continue;
     }
 
+    // `Ctrl-O a` opens the Focus modal from Switch. The same leader grammar is
+    // used inside Closeup / live panes; here only `a` has an effect because
+    // Switch is already the outer session-operation mode.
+    if state.prefix_pending() {
+        state.set_prefix_pending(false);
+        if matches!(key, Key::Char('a')) {
+            state.open_focus_modal();
+        }
+        return Flow::Continue;
+    }
+
     if state.list().create_row_selected() {
         match key {
             // The visible "+ new session" row behaves like an input affordance:
@@ -418,6 +429,11 @@ pub(super) fn overview_key(
         Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
             state.overview_begin_note();
         }
+        Key::Char(CTRL_O) => {
+            if state.key_scheme() == KeyScheme::Prefix {
+                state.set_prefix_pending(true);
+            }
+        }
         // `:` summons the workspace command palette overlay (the `session` /
         // `config` / `doctor` / `man` commands). It is placed after the inline
         // create / rename / note guards above, so `:` is a literal character
@@ -510,26 +526,14 @@ fn reorder_selected(state: &mut HomeState, wiring: &mut Wiring, up: bool) {
 /// attaches a live session (so backing out onto an idle row lands in 集中 rather
 /// than spawning a surprise shell).
 fn leave_overview(
-    term: &Term,
-    state: &mut HomeState,
-    painter: &mut FramePainter,
-    wiring: &mut Wiring,
+    _term: &Term,
+    _state: &mut HomeState,
+    _painter: &mut FramePainter,
+    _wiring: &mut Wiring,
 ) {
-    match state.overview_return() {
-        // The base Overview is the default mode: `Esc` stays put.
-        ReturnMode::Base => {}
-        ReturnMode::Closeup => {
-            let row = state.list().selected_index();
-            state.enter_closeup(row);
-        }
-        ReturnMode::Attached => {
-            let row = state.list().selected_index();
-            // Re-attach only when the focused session is live (it always is when
-            // the cursor never left the just-detached session); an idle row stays
-            // in 集中.
-            focus_and_attach(term, state, painter, wiring, row);
-        }
-    }
+    // Switch is the base top-level mode. `Esc` is inert here; it no longer
+    // returns to a hidden Closeup / attached state because Closeup is a sibling
+    // mode, not the caller of an Overview mode.
 }
 
 /// Handle one key in the session-note editor overlay (opened with `n` in 選択 or
@@ -788,7 +792,7 @@ pub(super) fn closeup_click(
     if state.list().is_create_row(row) {
         // The create row lives in 選択: a click on it from 集中 zooms back to the
         // picker and opens the same inline input a 選択 click would.
-        state.enter_overview(ReturnMode::Closeup);
+        state.enter_switch();
         state.overview_select(row);
         begin_overview_create(state, wiring, None);
         return;
@@ -920,7 +924,7 @@ pub(super) fn closeup_key(
             if state.key_scheme() == KeyScheme::Prefix {
                 state.set_prefix_pending(true);
             } else {
-                state.enter_overview(ReturnMode::Closeup);
+                state.enter_switch();
             }
             return Flow::Continue;
         }
@@ -1026,7 +1030,8 @@ fn closeup_prefix_action(
     wiring: &mut Wiring,
 ) -> Flow {
     match key {
-        Key::Char('o') | Key::Char(CTRL_O) => state.enter_overview(ReturnMode::Closeup),
+        Key::Char('o') | Key::Char(CTRL_O) => state.enter_switch(),
+        Key::Char('a') => state.open_focus_modal(),
         Key::Char('n') | Key::ArrowRight => {
             if let Some(index) = state.closeup_tab_next() {
                 let dir = selected_dir(state, wiring.workspace_root);
@@ -1083,7 +1088,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
         });
     state.begin_removing_session(root.clone(), name.clone());
     (wiring.dispatch_remove)(&root, &name, force, focus);
-    state.enter_overview(ReturnMode::Base);
+    state.enter_switch();
 }
 
 /// 集中 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
@@ -1406,9 +1411,8 @@ pub(super) fn reattach_pane(
 /// which returns:
 ///
 /// - [`PaneExit::Closed`] — the shell exited: return to 集中 (Closeup).
-/// - [`PaneExit::ToOverview`] — `Ctrl-O`: zoom out to 選択 (Overview), remembering to
-///   re-attach (`ReturnMode::Attached`) if the user backs out.
-/// - [`PaneExit::ToCloseup`] — `Ctrl-T`: zoom out to 集中 (Closeup), the session's
+/// - [`PaneExit::ToSwitch`] — `Ctrl-O o`: zoom out to Switch, leaving every pane live.
+/// - [`PaneExit::ToFocus`] — `Ctrl-T`: zoom out to 集中 (Closeup), the session's
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
 ///   session, re-attaching it when live (or 集中 when none was recorded).
@@ -1451,10 +1455,9 @@ fn open_pane(
     // is stale: force a full repaint on the next pass.
     painter.reset_with_prefix(repaint_prefix);
     match outcome {
-        Ok(PaneExit::ToOverview) => {
-            // `Ctrl-O` zooms out: pick a session in the left pane, re-attaching
-            // this one if the user backs out.
-            state.enter_overview(ReturnMode::Attached);
+        Ok(PaneExit::ToSwitch) => {
+            // `Ctrl-O o` zooms out to Switch; re-selecting the same live session re-attaches.
+            state.enter_switch();
         }
         Ok(PaneExit::OpenNote) => {
             // `Ctrl-E` opens the focused row's note editor over the (now detached)
@@ -1463,7 +1466,7 @@ fn open_pane(
             // overlay already open, so this always opens.
             state.open_focused_note(true);
         }
-        Ok(PaneExit::ToCloseup) => {
+        Ok(PaneExit::ToFocus) => {
             // `Ctrl-T` zooms out one level to 集中: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
             // pane stays alive in the pool, so re-launching re-attaches them. The
@@ -1494,10 +1497,9 @@ fn open_pane(
             if state.list().is_create_row(row) {
                 // A double click on the sidebar create row in 没入: leave the pane
                 // to the picker and open the same inline create editor that 選択 /
-                // 集中 expose. ReturnMode::Attached preserves the usual `Esc`
-                // path: if the user cancels creation and backs out of 選択, the
-                // live pane re-attaches.
-                state.enter_overview(ReturnMode::Attached);
+                // 集中 expose. Switch is now the base mode, so cancelling creation
+                // leaves the user in Switch rather than re-attaching implicitly.
+                state.enter_switch();
                 state.overview_select(row);
                 begin_overview_create(state, wiring, None);
             } else {

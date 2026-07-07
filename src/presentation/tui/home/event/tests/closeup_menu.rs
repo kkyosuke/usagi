@@ -529,7 +529,7 @@ fn closeup_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
     };
     // Entering Closeup on a live session attaches; `Ctrl-T` (ToCloseup) zooms back out
     // to Closeup with the panes still alive, which is where the tab strip shows.
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat; ToCloseup -> Closeup on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_N))); // pane 0 -> pane 1: To(1)
@@ -590,7 +590,7 @@ fn closeup_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
             *active.borrow(),
         )
     };
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // attach feat; ToCloseup -> Closeup on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
@@ -653,7 +653,7 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
         opened.borrow_mut().push(n);
         if opened.borrow().len() == 1 {
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -817,7 +817,7 @@ fn closeup_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         // The first attach (from focusing the live session) zooms out to Closeup with
         // the panes kept alive; the re-attach then drops straight back out.
         if count == 1 {
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -888,7 +888,7 @@ fn closeup_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
             o.len()
         };
         if count == 1 {
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }

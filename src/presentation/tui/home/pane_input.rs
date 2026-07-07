@@ -260,8 +260,8 @@ fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
 pub(super) enum Reserved {
     /// Zoom out to 選択 (Overview), leaving every pane alive in the pool.
     Detach,
-    /// Zoom out to 集中 (Closeup), the session's action menu.
-    ToCloseup,
+    /// Open the Focus modal inside Closeup, the session's action menu / prompt.
+    ToFocus,
     /// Switch to the next tab in place.
     NextTab,
     /// Switch to the previous tab in place.
@@ -359,7 +359,7 @@ fn alt_action(key: &KeyEvent) -> Option<Reserved> {
     }
     Some(match key.code {
         KeyCode::Char('o') => Reserved::Detach,
-        KeyCode::Char('a') => Reserved::ToCloseup,
+        KeyCode::Char('a') => Reserved::ToFocus,
         KeyCode::Char('g') => Reserved::NewAgentTab,
         KeyCode::Char('e') => Reserved::OpenNote,
         KeyCode::Char('s') => Reserved::ToggleSidebar,
@@ -378,7 +378,7 @@ fn alt_action(key: &KeyEvent) -> Option<Reserved> {
 fn prefix_action(key: &KeyEvent) -> Option<Reserved> {
     Some(match key.code {
         KeyCode::Char('o') => Reserved::Detach,
-        KeyCode::Char('a') => Reserved::ToCloseup,
+        KeyCode::Char('a') => Reserved::ToFocus,
         KeyCode::Char('n') | KeyCode::Right => Reserved::NextTab,
         KeyCode::Char('p') | KeyCode::Left => Reserved::PrevTab,
         KeyCode::Char('g') => Reserved::NewAgentTab,
@@ -800,7 +800,7 @@ mod tests {
         // After the leader, each second key maps to its action.
         let second = |ch: char| classify(Prefix, true, &key(KeyCode::Char(ch), KeyModifiers::NONE));
         assert_eq!(second('o'), KeyAction::Reserved(Reserved::Detach));
-        assert_eq!(second('a'), KeyAction::Reserved(Reserved::ToCloseup));
+        assert_eq!(second('a'), KeyAction::Reserved(Reserved::ToFocus));
         assert_eq!(second('n'), KeyAction::Reserved(Reserved::NextTab));
         assert_eq!(second('p'), KeyAction::Reserved(Reserved::PrevTab));
         assert_eq!(second('g'), KeyAction::Reserved(Reserved::NewAgentTab));
@@ -901,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             classify(Alt, false, &alt('a')),
-            KeyAction::Reserved(Reserved::ToCloseup)
+            KeyAction::Reserved(Reserved::ToFocus)
         );
         assert_eq!(
             classify(Alt, false, &alt('g')),

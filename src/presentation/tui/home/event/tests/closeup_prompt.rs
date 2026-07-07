@@ -205,7 +205,7 @@ fn closeup_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
         if count == 1 {
             // The first attach (Enter on the live session in 選択) zooms out to
             // 集中, landing on the "+ new" action surface where `ai` is typed.
-            Ok(PaneExit::ToCloseup)
+            Ok(PaneExit::ToFocus)
         } else {
             Ok(PaneExit::Closed)
         }

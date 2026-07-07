@@ -11,7 +11,7 @@ fn render_frame_combines_all_sections_at_full_height() {
     assert!(frame[2].trim().is_empty());
     assert!(frame[3].contains('│'));
     // The default mode is 選択, so the footer carries its tag.
-    assert!(frame.last().unwrap().contains("overview"));
+    assert!(frame.last().unwrap().contains("switch"));
     let joined = frame.join("\n");
     assert!(joined.contains("main"));
 }
@@ -245,7 +245,7 @@ fn render_frame_survives_a_short_terminal() {
     let state = state_with(Vec::new());
     let frame = render_frame(3, 80, &state);
     assert!(frame[0].contains("usagi"));
-    assert!(frame.last().unwrap().contains("overview"));
+    assert!(frame.last().unwrap().contains("switch"));
     assert!(frame.len() >= 4);
 }
 
@@ -437,7 +437,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         last_active: None,
     };
     state.restore_sessions(vec![session]);
-    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.enter_switch();
     state.overview_move_down(); // root -> alpha
     assert!(state.overview_begin_note());
 
@@ -459,7 +459,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     assert!(frame.contains("Ctrl-S: save"));
     // The chrome and sidebar are still drawn (not replaced by a modal): the mode
     // ladder and the root row's `workspace root` line are present.
-    assert!(frame.contains("Overview"), "the mode ladder stays visible");
+    assert!(frame.contains("Switch"), "the mode ladder stays visible");
     assert!(
         frame.contains("workspace root"),
         "the sidebar stays visible"

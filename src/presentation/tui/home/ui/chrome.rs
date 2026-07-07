@@ -281,20 +281,22 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
 /// (Attached). The workspace command line is the `:` palette overlay, not this
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
+    if state.closeup_attached() {
+        return style(" ● live terminal".to_string()).success().to_string();
+    }
     match state.mode() {
-        Mode::Overview if state.list().create_row_selected() => {
+        Mode::Switch if state.list().create_row_selected() => {
             style(" Type a session name to create".to_string())
                 .green()
                 .to_string()
         }
-        Mode::Overview => style(" Pick a session".to_string()).dim().to_string(),
+        Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
         Mode::Closeup => style(format!(
             " Operating session: {}",
             state.focused_session_name()
         ))
         .dim()
         .to_string(),
-        Mode::Attached => style(" ● live terminal".to_string()).success().to_string(),
     }
 }
 
@@ -455,7 +457,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         format!("[command{scope}]  Tab: complete / ↑↓: history / Enter: run / Esc: close")
     } else {
         match state.mode() {
-        Mode::Overview => {
+        Mode::Switch => {
             // `s sort` names the waiting-first toggle and reflects its state.
             let sort = if state.sort_waiting() {
                 "s sort:on"
@@ -463,46 +465,40 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[overview{scope}]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter closeup / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
+                "[switch{scope}]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter closeup / c new / r rename / n/Ctrl-E note / x close tab / : overview / ? keys / Esc back"
             )
         }
         // 集中 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
         // a leader, so while one is pending the footer flips to the waiting hint
         // (mirroring 没入), and otherwise it names the leader. The alt scheme keeps
         // `Ctrl-O` a direct zoom-out here, so its footer names that instead.
-        Mode::Closeup => match state.key_scheme() {
+        Mode::Closeup if state.closeup_attached() => match state.key_scheme() {
             KeyScheme::Prefix if state.prefix_pending() => {
-                "[closeup]  Ctrl-O ▸ o overview / n/p tab / g agent / e note / s sidebar / q quit · Esc cancel"
-                    .to_string()
-            }
-            KeyScheme::Prefix => format!(
-                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o overview / g agent … / Ctrl-^: last / : commands / ? keys / Esc: overview",
-                state.focused_session_name()
-            ),
-            KeyScheme::Alt => format!(
-                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: overview / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: overview",
-                state.focused_session_name()
-            ),
-        },
-        // The 没入 navigation keys depend on the configured key scheme: the
-        // `Ctrl-O` leader (then a key) or single `Alt`-chords.
-        Mode::Attached => match state.key_scheme() {
-            // While the leader is pending the footer flips to the waiting hint, so
-            // a `Ctrl-O` that drew no visible response reads as "waiting for the
-            // next key" rather than "ignored"; it lapses on its own after
-            // `PREFIX_TIMEOUT`, or on `Esc` / any other unbound key.
-            KeyScheme::Prefix if state.prefix_pending() => {
-                "[attached]  Ctrl-O ▸ o overview / a closeup / n/p tab / g agent / e note / x close / q quit · Esc cancel"
+                "[closeup:live]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / x close / q quit · Esc cancel"
                     .to_string()
             }
             KeyScheme::Prefix => {
-                "[attached]  Ctrl-O then: o overview / a closeup / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
+                "[closeup:live]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
             KeyScheme::Alt => {
-                "[attached]  Alt: o overview / a closeup / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
+                "[closeup:live]  Alt: o switch / a focus / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
+        },
+        Mode::Closeup => match state.key_scheme() {
+            KeyScheme::Prefix if state.prefix_pending() => {
+                "[closeup]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / s sidebar / q quit · Esc cancel"
+                    .to_string()
+            }
+            KeyScheme::Prefix => format!(
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o switch / a focus / g agent … / Ctrl-^: last / : overview / ? keys / Esc: switch",
+                state.focused_session_name()
+            ),
+            KeyScheme::Alt => format!(
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : overview / ? keys / Esc: switch",
+                state.focused_session_name()
+            ),
         },
         }
     };

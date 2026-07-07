@@ -636,7 +636,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // below, so editing / reading the note never switches the screen — the
     // preview / terminal stays visible behind the floating box.
     let mut base = match state.mode() {
-        Mode::Overview => {
+        Mode::Switch => {
             // Collapsed to the rail, 選択's name input has no room inline in the
             // (5-column) list, so it takes over the wide right pane; at full width
             // it rides the left pane inline and the right pane keeps previewing the
@@ -659,8 +659,8 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
                 .map(|row| dim_row(row))
                 .collect()
         }
-        Mode::Closeup => closeup_pane(state, right_w, rows),
-        Mode::Attached => {
+        Mode::Closeup if !state.closeup_attached() => closeup_pane(state, right_w, rows),
+        Mode::Closeup => {
             // The active session's identity shares the top row with its tab chips
             // (the underline marker below them), so the header reads beside the
             // tabs just as it does in 選択. This header + tab block always fills
