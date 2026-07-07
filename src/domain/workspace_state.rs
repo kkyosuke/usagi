@@ -355,7 +355,7 @@ pub enum SessionOrigin {
     /// [`Mcp`](Self::Mcp).
     #[default]
     Unknown,
-    /// Created interactively by a person from the TUI home screen (切替 create).
+    /// Created interactively by a person from the TUI home screen (選択 create).
     Human,
     /// Created by an agent through the MCP server — the `session_create` and
     /// `session_delegate_issue` tools.

@@ -47,7 +47,7 @@ pub use modal::{
 };
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
-use list::session_row;
+use list::{session_row, session_tree_layout};
 use modal::{CloseupMenu, CloseupSubmenu, Overlay};
 
 /// The terminal row's inline choices, in display/default order. `open` preserves
@@ -1678,35 +1678,39 @@ impl HomeState {
         // it across the rebuild (which replaces the list wholesale), exactly as the
         // workspace name is carried above.
         let root_path = self.list.root_path().to_path_buf();
-        let order = self.display_order();
-        let rows = order
+        let layout = self.display_layout();
+        let rows = layout
             .iter()
-            .map(|&i| session_row(&self.sessions[i]))
+            .map(|(i, _)| session_row(&self.sessions[*i]))
             .collect();
         // Carry each session's sidebar label override onto its row so the pane
         // shows the custom display name while commands still key on the branch.
-        let labels = order
+        let labels = layout
             .iter()
-            .map(|&i| self.sessions[i].display_name.clone())
+            .map(|(i, _)| self.sessions[*i].display_name.clone())
             .collect();
         // Carry each session's note-presence onto its row so the pane can show a
         // memo marker; the note text itself is read on demand (Overview preview /
         // editor), never stored on the row.
-        let notes = order
+        let notes = layout
             .iter()
-            .map(|&i| self.sessions[i].note.is_some())
+            .map(|(i, _)| self.sessions[*i].note.is_some())
             .collect();
         // Carry each session's manual-status label id onto its row so the sidebar
         // can resolve it against the master; the id itself is cosmetic and every
         // command still keys on the branch.
-        let label_ids = order
+        let label_ids = layout
             .iter()
-            .map(|&i| self.sessions[i].label_id.clone())
+            .map(|(i, _)| self.sessions[*i].label_id.clone())
             .collect();
+        // Carry the session lineage depth (derived from `started_from`) so child
+        // sessions can be drawn indented under the session that created them.
+        let nesting_depths = layout.iter().map(|(_, depth)| *depth).collect();
         let mut list = WorktreeList::with_labels(name, rows, labels);
         list.set_root_path(root_path);
         list.set_notes(notes);
         list.set_label_ids(label_ids);
+        list.set_nesting_depths(nesting_depths);
         // The root row's note lives on the workspace state (it belongs to no
         // session), so its marker is carried separately from the per-session notes.
         list.set_root_note_marker(self.root_note.is_some());
@@ -1731,7 +1735,7 @@ impl HomeState {
     /// [`sort_waiting`](Self::sort_waiting) on, a *stable* partition that lifts the
     /// sessions whose agent is waiting for input (◆) above the rest while keeping
     /// each group in its canonical order.
-    fn display_order(&self) -> Vec<usize> {
+    fn base_display_order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.sessions.len()).collect();
         if self.sort_waiting {
             // `sort_by_key` is stable, and `false` (waiting) sorts before `true`,
@@ -1740,6 +1744,14 @@ impl HomeState {
             order.sort_by_key(|&i| !self.badges.waiting.contains(&self.sessions[i].root));
         }
         order
+    }
+
+    /// The order and indentation depth the sessions are laid out in the left
+    /// pane. It starts from [`base_display_order`](Self::base_display_order), then
+    /// folds `started_from` parent links into a visible tree: children are drawn
+    /// immediately below the session that created them.
+    fn display_layout(&self) -> Vec<(usize, usize)> {
+        session_tree_layout(&self.sessions, &self.base_display_order())
     }
 
     /// Whether the left pane is lifting the waiting-for-input (◆) sessions to the

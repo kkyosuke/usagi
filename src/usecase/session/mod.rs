@@ -95,7 +95,7 @@ pub trait SetupCommandRunner {
 /// [`create_with_agent`].
 ///
 /// The session is recorded with [`SessionOrigin::Human`]: this is the
-/// interactive entry point the TUI's 切替 (Switch) create calls, so a session
+/// interactive entry point the TUI's 選択 (Overview) create calls, so a session
 /// made this way is a person's. Agent-driven creation goes through
 /// [`create_with_agent`] with [`SessionOrigin::Mcp`].
 pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {

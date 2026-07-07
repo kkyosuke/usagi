@@ -14,6 +14,7 @@
 //! on. The cursor (`selected_index`) and the command target (`active_index`) are
 //! indices into that flat space.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::workspace_state::{
@@ -74,6 +75,83 @@ pub(super) fn session_row(session: &SessionRecord) -> WorktreeState {
     }
 }
 
+/// The display order and nesting depth of `sessions`, derived from each
+/// [`SessionRecord::started_from`] parent link.
+///
+/// `base_order` is the caller's preferred flat order (manual order, or the
+/// waiting-first projection). Root sessions keep that order, and each parent's
+/// children are inserted immediately below it, preserving their relative
+/// `base_order` among siblings. A session whose parent is missing is left at the
+/// root level: there is no visible parent to nest it under.
+pub(super) fn session_tree_layout(
+    sessions: &[SessionRecord],
+    base_order: &[usize],
+) -> Vec<(usize, usize)> {
+    let name_to_index: HashMap<&str, usize> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, session)| (session.name.as_str(), i))
+        .collect();
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut child_indices = HashSet::new();
+    for &i in base_order {
+        let Some(session) = sessions.get(i) else {
+            continue;
+        };
+        let Some(parent) = session.started_from.as_deref() else {
+            continue;
+        };
+        let Some(&parent_index) = name_to_index.get(parent) else {
+            continue;
+        };
+        if parent_index == i {
+            // A self-parented record is malformed; draw it as a root so the list
+            // remains navigable and the DFS below cannot loop on it.
+            continue;
+        }
+        children.entry(parent).or_default().push(i);
+        child_indices.insert(i);
+    }
+
+    let mut layout = Vec::with_capacity(sessions.len());
+    let mut visited = HashSet::new();
+    fn push_tree<'a>(
+        index: usize,
+        depth: usize,
+        sessions: &'a [SessionRecord],
+        children: &HashMap<&'a str, Vec<usize>>,
+        visited: &mut HashSet<usize>,
+        layout: &mut Vec<(usize, usize)>,
+    ) {
+        if !visited.insert(index) {
+            return;
+        }
+        layout.push((index, depth));
+        let session = &sessions[index];
+        if let Some(child_rows) = children.get(session.name.as_str()) {
+            for &child in child_rows {
+                push_tree(child, depth + 1, sessions, children, visited, layout);
+            }
+        }
+    }
+
+    for &i in base_order {
+        if i >= sessions.len() || child_indices.contains(&i) {
+            continue;
+        }
+        push_tree(i, 0, sessions, &children, &mut visited, &mut layout);
+    }
+    // Cycles (A started_from B, B started_from A) produce no root. Fall back to
+    // the caller's flat order for any still-unvisited records, then let the DFS
+    // show reachable descendants beneath that first recovered root.
+    for &i in base_order {
+        if i < sessions.len() && !visited.contains(&i) {
+            push_tree(i, 0, sessions, &children, &mut visited, &mut layout);
+        }
+    }
+    layout
+}
+
 /// One opened workspace's slice of the left pane: its sessions (collapsed to one
 /// [`WorktreeState`] row each by [`session_row`]) plus the per-row sidebar
 /// metadata, fronted in the list by a synthetic root row the group owns.
@@ -108,6 +186,10 @@ pub struct WorkspaceGroup {
     /// / `notes` it is cosmetic and never used for lookups. Defaults to all-`None`
     /// and is filled in by [`set_label_ids`](Self::set_label_ids) on a rebuild.
     label_ids: Vec<Option<String>>,
+    /// Visual nesting depth for each session row, aligned 1:1 with `worktrees`.
+    /// Depth `0` is a root-level session; depth `1+` means this session was
+    /// started from a visible parent session and is drawn indented below it.
+    nesting_depths: Vec<usize>,
     /// Whether this group's synthetic root row carries a note, driving its line-1
     /// memo marker. Like [`notes`](Self::notes) it is cosmetic and never used for
     /// lookups; the root belongs to no session, so its note lives on the workspace
@@ -142,14 +224,30 @@ impl WorkspaceGroup {
         sessions: &[SessionRecord],
         root_has_note: bool,
     ) -> Self {
-        let rows = sessions.iter().map(session_row).collect();
-        let labels = sessions.iter().map(|s| s.display_name.clone()).collect();
-        let notes = sessions.iter().map(|s| s.note.is_some()).collect();
-        let label_ids = sessions.iter().map(|s| s.label_id.clone()).collect();
+        let base_order: Vec<_> = (0..sessions.len()).collect();
+        let layout = session_tree_layout(sessions, &base_order);
+        let rows = layout
+            .iter()
+            .map(|(i, _)| session_row(&sessions[*i]))
+            .collect();
+        let labels = layout
+            .iter()
+            .map(|(i, _)| sessions[*i].display_name.clone())
+            .collect();
+        let notes = layout
+            .iter()
+            .map(|(i, _)| sessions[*i].note.is_some())
+            .collect();
+        let label_ids = layout
+            .iter()
+            .map(|(i, _)| sessions[*i].label_id.clone())
+            .collect();
+        let nesting_depths = layout.iter().map(|(_, depth)| *depth).collect();
         let mut group = Self::with_labels(name, rows, labels);
         group.set_root_path(root_path);
         group.set_notes(notes);
         group.set_label_ids(label_ids);
+        group.set_nesting_depths(nesting_depths);
         group.set_root_note_marker(root_has_note);
         group
     }
@@ -164,6 +262,7 @@ impl WorkspaceGroup {
         labels.resize(worktrees.len(), None);
         let notes = vec![false; worktrees.len()];
         let label_ids = vec![None; worktrees.len()];
+        let nesting_depths = vec![0; worktrees.len()];
         Self {
             name: name.into(),
             root_path: PathBuf::new(),
@@ -171,6 +270,7 @@ impl WorkspaceGroup {
             labels,
             notes,
             label_ids,
+            nesting_depths,
             root_has_note: false,
             collapsed: false,
         }
@@ -233,6 +333,20 @@ impl WorkspaceGroup {
     /// unset / out of range. Resolved against the effective master by the renderer.
     pub fn row_label_id(&self, index: usize) -> Option<&str> {
         self.label_ids.get(index).and_then(Option::as_deref)
+    }
+
+    /// Record the visual nesting depth for each row. A shorter/longer slice is
+    /// padded/truncated to the worktree count, mirroring the other per-row
+    /// metadata setters.
+    pub fn set_nesting_depths(&mut self, mut nesting_depths: Vec<usize>) {
+        nesting_depths.resize(self.worktrees.len(), 0);
+        self.nesting_depths = nesting_depths;
+    }
+
+    /// The visual nesting depth of the worktree at `index` (out-of-range is
+    /// root-level). Used only by the sidebar renderer.
+    pub fn nesting_depth(&self, index: usize) -> usize {
+        self.nesting_depths.get(index).copied().unwrap_or(0)
     }
 
     /// Record whether the root row carries a note, driving its memo marker.
@@ -431,6 +545,14 @@ impl WorktreeList {
         self.first().and_then(|g| g.row_label_id(index))
     }
 
+    /// Record the first group's per-worktree nesting depths (see
+    /// [`WorkspaceGroup::set_nesting_depths`]).
+    pub fn set_nesting_depths(&mut self, nesting_depths: Vec<usize>) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_nesting_depths(nesting_depths);
+        }
+    }
+
     /// Record whether the first group's root row carries a note.
     pub fn set_root_note_marker(&mut self, has_note: bool) {
         if let Some(group) = self.groups.first_mut() {
@@ -610,17 +732,11 @@ impl WorktreeList {
     /// Both indices are always in range, so their `(group, slot)` resolves; a slot
     /// in the now-folded group maps onto its single header line.
     fn set_group_collapsed(&mut self, index: usize, collapsed: bool) {
-        let sel = self.locate(self.selected_index);
-        let act = self.locate(self.active_index);
-        if let Some(group) = self.groups.get_mut(index) {
-            group.collapsed = collapsed;
-        }
-        if let Some((g, slot)) = sel {
-            self.selected_index = self.nav_index_of(g, slot);
-        }
-        if let Some((g, slot)) = act {
-            self.active_index = self.nav_index_of(g, slot);
-        }
+        let (sel_g, sel_slot) = self.locate(self.selected_index).unwrap();
+        let (act_g, act_slot) = self.locate(self.active_index).unwrap();
+        self.groups[index].collapsed = collapsed;
+        self.selected_index = self.nav_index_of(sel_g, sel_slot);
+        self.active_index = self.nav_index_of(act_g, act_slot);
     }
 
     /// The flat index of a `(group, slot)` (a valid group from [`locate`]). In a
