@@ -110,9 +110,9 @@ fn command_palette_floats_over_the_visible_workspace() {
     // The palette box and its prompt are drawn …
     assert!(joined.contains('┌'));
     assert!(joined.contains("❯ m"));
-    // … and the workspace chrome behind it stays visible (the mode ladder and the
+    // … and the workspace chrome behind it stays visible (the mode header and the
     // workspace title), which a black full-screen modal would have hidden.
-    assert!(joined.contains("Switch"), "the mode ladder shows behind");
+    assert!(joined.contains("Switch"), "the mode header shows behind");
     assert!(joined.contains("usagi"), "the workspace title shows behind");
     // A row above the box still carries workspace content (it is not blanked).
     let top = frame
@@ -142,9 +142,9 @@ fn text_modal_floats_over_the_visible_workspace() {
     assert!(joined.contains('┌'));
     assert!(joined.contains("Help"));
     assert!(joined.contains("man — show this help"));
-    // … and the workspace chrome behind it stays visible (the mode ladder and the
+    // … and the workspace chrome behind it stays visible (the mode header and the
     // workspace title), which a black full-screen modal would have hidden.
-    assert!(joined.contains("Switch"), "the mode ladder shows behind");
+    assert!(joined.contains("Switch"), "the mode header shows behind");
     assert!(joined.contains("usagi"), "the workspace title shows behind");
     // A row above the box still carries workspace content (it is not blanked).
     let top = frame
@@ -340,10 +340,12 @@ fn render_frame_honours_the_rail_in_overview_too() {
     let mut state = state_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
     // 選択 (the default) honours the rail: collapsed, the session name is not
-    // spelled out on the left, but the active entry still rides in the title bar
-    // (`▸`). The cursored root previews `workspace root` with no `feature` name.
+    // spelled out on the left, but the active entry still rides in the header
+    // breadcrumb. The cursored root previews `workspace root` with no `feature`
+    // name.
     let rail = stripped(&render_frame(24, 80, &state));
-    assert!(rail.contains('▸'));
+    assert!(rail.contains("usagi"));
+    assert!(rail.contains("root"));
     assert!(!rail.contains("feature"));
     // The picker keeps working collapsed (the cursor lives on the rail).
     let rail_overview = stripped(&render_frame(24, 80, &state));
@@ -406,10 +408,18 @@ fn overview_create_with_the_full_sidebar_stays_inline_on_the_left() {
 #[test]
 fn mode_ladder_lists_every_step_and_keeps_them_for_each_mode() {
     for mode in [Mode::Switch, Mode::Closeup] {
-        let ladder = console::strip_ansi_codes(&mode_ladder(80, mode)).into_owned();
+        let ladder = console::strip_ansi_codes(&mode_ladder(mode)).into_owned();
         for step in ["Switch", "Closeup"] {
             assert!(ladder.contains(step), "{mode:?} ladder missing {step}");
         }
+        assert!(
+            ladder.contains('\u{f0ec}'),
+            "{mode:?} ladder missing switch icon"
+        );
+        assert!(
+            ladder.contains('\u{f00e}'),
+            "{mode:?} ladder missing closeup icon"
+        );
         // The workspace-wide command palette is not a rung on the ladder.
         assert!(!ladder.contains("command"));
     }

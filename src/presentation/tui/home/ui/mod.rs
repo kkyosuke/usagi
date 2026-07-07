@@ -1,8 +1,8 @@
 //! Rendering for the home (workspace) screen's mode-aware layout.
 //!
-//! Top to bottom: a title bar, the engagement-ladder mode indicator, a blank
-//! separator row, a body split into the worktree list (left) and a
-//! mode-dependent right pane, the command input, and a footer. The right pane is
+//! Top to bottom: a one-line breadcrumb / mode header, a blank separator row, a
+//! body split into the worktree list (left) and a mode-dependent right pane, the
+//! command input, and a footer. The right pane is
 //! a preview of the highlighted session in 選択 (Overview); the session's action
 //! surface (a menu or a prompt) in 集中 (Closeup); and the live embedded terminal
 //! in 没入 (Attached). The workspace command line is the `:` command palette
@@ -14,8 +14,8 @@
 //! [`render_frame`] that stitches the screen together. The pane-specific bodies
 //! are split by responsibility (`sidebar`, `closeup_menu`, `tabs_hit`,
 //! `pr_popup`, `diff_render`, `markdown_render`) while [`panes`] keeps the
-//! right-pane dispatcher; the surrounding chrome (title, ladder, input, footer,
-//! the command palette, modals) lives in [`chrome`].
+//! right-pane dispatcher; the surrounding chrome (header, input, footer, the
+//! command palette, modals) lives in [`chrome`].
 
 /// How often the loading indicator gains another rabbit.
 pub(crate) const RUN2_LOADING_GROW: usize = 3;
@@ -73,10 +73,10 @@ use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
-    command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
-    overview_create_rows, quit_confirm_frame, remove_modal_body, tab_menu_box, tab_rename_body,
-    text_modal_body, title_bar, update_confirm_frame, waiting_notice, ENV_MODAL_INNER,
-    FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
+    command_palette_body, env_editor_body, footer_line, input_line, overview_create_rows,
+    quit_confirm_frame, remove_modal_body, tab_menu_box, tab_rename_body, text_modal_body,
+    title_bar, update_confirm_frame, waiting_notice, ENV_MODAL_INNER, FOCUS_MENU_INNER,
+    FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use closeup_menu::{closeup_menu_body, closeup_prompt_body};
 use panes::right_pane_contents;
@@ -131,10 +131,10 @@ const NOTE_ICON: char = '\u{f249}'; // nf-fa-sticky_note — the session has a m
 /// between the branch name and the right-edge status field.
 const ACTIVE_COL: usize = 2;
 
-/// Chrome rows above the two-pane body: the title bar, the mode ladder, and a
-/// blank separator. The body — and so the left pane's first row — starts at this
+/// Chrome rows above the two-pane body: the one-line header and a blank
+/// separator. The body — and so the left pane's first row — starts at this
 /// 0-based screen row, which is also the embedded terminal's `origin_row`.
-const CHROME_TOP_ROWS: usize = 3;
+const CHROME_TOP_ROWS: usize = 2;
 
 /// The vertical bar (with surrounding spaces) dividing the two panes.
 const SEP: &str = " │ ";
@@ -267,7 +267,7 @@ impl TerminalGeometry {
 }
 
 /// Computes the [`TerminalGeometry`] for a raw terminal size, matching the
-/// layout [`render_frame`] draws (title + mode ladder + a blank separator above
+/// layout [`render_frame`] draws (the one-line header + a blank separator above
 /// the body, the left pane and divider to its left). `rows` and `cols` are at
 /// least 1.
 pub fn terminal_geometry(
@@ -277,16 +277,14 @@ pub fn terminal_geometry(
 ) -> TerminalGeometry {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, right_w) = layout(width, sidebar);
-    // Chrome above the body is three rows: the title bar, the mode ladder, and a
-    // blank separator. Below it sit the single-line input and the footer (two
-    // more rows in the modes that show a live terminal).
-    let pane_rows = height.saturating_sub(5).max(1);
+    // Chrome above the body is two rows: the one-line header and a blank
+    // separator. Below it sit the single-line input and the footer.
+    let pane_rows = height.saturating_sub(CHROME_TOP_ROWS + 2).max(1);
     TerminalGeometry {
         rows: pane_rows.max(1) as u16,
         cols: right_w.max(1) as u16,
         origin_col: (left_w + SEP_WIDTH) as u16,
-        // The body starts below the title bar, the mode ladder, and the blank
-        // separator row beneath them.
+        // The body starts below the header and its blank separator row.
         origin_row: CHROME_TOP_ROWS as u16,
     }
 }
@@ -366,12 +364,12 @@ pub fn attached_geometry(
 }
 
 /// The number of two-pane body rows for a normalized terminal `height` — the
-/// rows between the title/ladder/blank chrome above (3 rows) and the input /
-/// footer chrome below (2 rows). Mode-independent now that every base mode uses
-/// the single-line [`input_line`] (the workspace command line is the `:` palette
-/// overlay), so the preview's scroll clamp agrees with what is actually drawn.
+/// rows between the header/blank chrome above and the input / footer chrome
+/// below. Mode-independent now that every base mode uses the single-line
+/// [`input_line`] (the workspace command line is the `:` palette overlay), so
+/// the preview's scroll clamp agrees with what is actually drawn.
 fn body_rows_for(height: usize) -> usize {
-    height.saturating_sub(5).max(1)
+    height.saturating_sub(CHROME_TOP_ROWS + 2).max(1)
 }
 
 /// The home frame with the 1Password env-resolution indicator floated in the
@@ -554,7 +552,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // box). The footer and the input are one row each.
     let input_lines = vec![input_line(state)];
 
-    // Chrome: title + mode ladder + a blank separator on top, the input line +
+    // Chrome: one-line header + a blank separator on top, the input line +
     // footer at the bottom. Everything between is the two-pane body.
     let body_rows = body_rows_for(height);
 
@@ -567,10 +565,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let right = right_pane_contents(state, right_w, body_rows);
 
     let mut lines = Vec::with_capacity(height);
-    lines.push(title_bar(width, state.list()));
-    lines.push(mode_ladder(width, state.mode()));
-    // A blank separator row between the mode ladder and the body, so the
-    // engagement-ladder header reads as its own band set apart from the panes.
+    lines.push(title_bar(width, state.list(), state.mode()));
+    // A blank separator row between the header and the body, so the breadcrumb /
+    // mode band reads as its own strip set apart from the panes.
     lines.push(pad_to_width(String::new(), width));
     let body_start = lines.len();
     // `left` / `right` are not read past this loop, so consume them by value: each
@@ -760,10 +757,10 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     lines
 }
 
-/// Header rows above the two-pane body: the title bar, the mode ladder, and the
-/// blank separator. The body — and so the sidebar mascot — starts just below them,
-/// so a body-row index lifts into a screen row by adding this.
-const HEADER_ROWS: usize = 3;
+/// Header rows above the two-pane body: the one-line header and the blank
+/// separator. The body — and so the sidebar mascot — starts just below them, so
+/// a body-row index lifts into a screen row by adding this.
+const HEADER_ROWS: usize = CHROME_TOP_ROWS;
 
 /// The mascot art's left indent inside the sidebar, so its left edge lines up with
 /// the bottom input line's content (the `● live terminal` indicator carries a

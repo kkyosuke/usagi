@@ -408,10 +408,10 @@ fn terminal_geometry_matches_the_rendered_layout() {
     let geo = terminal_geometry(24, 80, Sidebar::Full);
     let (left, _) = layout(80, Sidebar::Full);
     assert_eq!(geo.origin_col as usize, left + SEP_WIDTH);
-    // Three chrome rows above the body (title + mode ladder + blank separator).
-    assert_eq!(geo.origin_row, 3);
-    // 24 rows less the three above and two below (input + footer).
-    assert_eq!(geo.rows, 19);
+    // Two chrome rows above the body (one-line header + blank separator).
+    assert_eq!(geo.origin_row, 2);
+    // 24 rows less the two above and two below (input + footer).
+    assert_eq!(geo.rows, 20);
     assert_eq!(geo.cols as usize, 80 - left - SEP_WIDTH);
 }
 

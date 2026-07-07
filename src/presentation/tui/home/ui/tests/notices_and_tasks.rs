@@ -289,7 +289,7 @@ fn render_frame_speaks_task_status_from_the_sidebar_over_a_live_terminal() {
     // stays intact.
     assert!(joined.contains("削除中… old"));
     assert!(joined.contains("$ echo hi"));
-    // The status no longer rides row 0 (the title bar); row 0 remains available
+    // The status no longer rides row 0 (the header); row 0 remains available
     // for title/waiting chrome.
     assert!(!stripped(&[frame[0].clone()]).contains("削除中… old"));
 }

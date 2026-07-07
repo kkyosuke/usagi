@@ -6,10 +6,12 @@ fn render_frame_combines_all_sections_at_full_height() {
     let frame = render_frame(24, 80, &state);
     assert_eq!(frame.len(), 24);
     assert!(frame[0].contains("usagi"));
-    // Row 1 is the mode ladder, row 2 the blank separator, so the two-pane body
-    // (with its `│` divider) starts at row 3.
-    assert!(frame[2].trim().is_empty());
-    assert!(frame[3].contains('│'));
+    assert!(frame[0].contains("Switch"));
+    assert!(frame[0].contains("Closeup"));
+    // Row 1 is the blank separator, so the two-pane body (with its `│` divider)
+    // starts at row 2.
+    assert!(frame[1].trim().is_empty());
+    assert!(frame[2].contains('│'));
     // The default mode is 選択, so the footer carries its tag.
     assert!(frame.last().unwrap().contains("switch"));
     let joined = frame.join("\n");
@@ -134,7 +136,7 @@ fn render_frame_surfaces_running_and_waiting_agent_icons() {
     });
     // Height accommodates root (2 lines) + divider + 2 sessions (2 lines each)
     // without the lowest detail row slipping behind the bottom hint band — plus
-    // the blank separator row below the mode ladder.
+    // the blank separator row below the header.
     let frame = render_frame(26, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     // The sidebar shows the agent state as icons only (no spelled-out word).
@@ -420,7 +422,7 @@ fn preview_visible_tracks_the_body_height() {
 fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     // The note editor is edited *in place* in the right pane: the session name
     // header, the note body, and the footer hints all show — and crucially the
-    // surrounding chrome (mode ladder) and the sidebar stay on screen, so the
+    // surrounding chrome (header) and the sidebar stay on screen, so the
     // screen never switches to a full-screen modal.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let session = SessionRecord {
@@ -459,7 +461,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     assert!(frame.contains("Ctrl-S: save"));
     // The chrome and sidebar are still drawn (not replaced by a modal): the mode
     // ladder and the root row's `workspace root` line are present.
-    assert!(frame.contains("Switch"), "the mode ladder stays visible");
+    assert!(frame.contains("Switch"), "the mode header stays visible");
     assert!(
         frame.contains("workspace root"),
         "the sidebar stays visible"

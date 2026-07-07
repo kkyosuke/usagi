@@ -144,7 +144,7 @@ fn layout_collapses_to_the_rail_width() {
 
 #[test]
 fn title_bar_singular_and_plural() {
-    let one = title_bar(80, &list_with(vec![]));
+    let one = title_bar(80, &list_with(vec![]), Mode::Switch);
     assert!(one.contains("usagi"));
     assert!(one.contains("1 session"));
     assert!(!one.contains("1 sessions"));
@@ -154,6 +154,7 @@ fn title_bar_singular_and_plural() {
             worktree(Some("main"), true, BranchStatus::Pushed),
             worktree(Some("x"), false, BranchStatus::Local),
         ]),
+        Mode::Switch,
     );
     assert!(three.contains("3 sessions"));
 }
@@ -170,7 +171,7 @@ fn title_bar_names_the_union_and_counts_workspaces_in_unite_mode() {
             vec![worktree(Some("b1"), false, BranchStatus::Local)],
         ),
     ]);
-    let bar = console::strip_ansi_codes(&title_bar(120, &list)).into_owned();
+    let bar = console::strip_ansi_codes(&title_bar(120, &list, Mode::Switch)).into_owned();
     assert!(bar.contains("unite"));
     assert!(bar.contains("across 2 workspaces"));
     // 2 roots + 2 sessions = 4 rows.
@@ -187,13 +188,17 @@ fn title_bar_shows_the_active_session_name() {
         true,
         BranchStatus::Local,
     )]);
-    let root = console::strip_ansi_codes(&title_bar(80, &list)).into_owned();
-    assert!(root.contains(&format!("▸ {ROOT_NAME}")));
+    let root = console::strip_ansi_codes(&title_bar(80, &list, Mode::Switch)).into_owned();
+    assert!(root.contains(ROOT_NAME));
     // Activating a session names it in the title.
     list.move_down();
     list.activate_selected();
-    let active = console::strip_ansi_codes(&title_bar(80, &list)).into_owned();
-    assert!(active.contains("▸ feat-login"));
+    let active = console::strip_ansi_codes(&title_bar(80, &list, Mode::Closeup)).into_owned();
+    assert!(active.contains("feat-login"));
+    assert!(active.contains("Switch"));
+    assert!(active.contains("Closeup"));
+    assert!(active.contains('\u{f0ec}'));
+    assert!(active.contains('\u{f00e}'));
 }
 
 #[test]
@@ -213,7 +218,7 @@ fn title_bar_keeps_the_centre_fixed_as_the_active_session_changes() {
     long.activate_selected();
 
     let lead = |list: &_| {
-        let line = console::strip_ansi_codes(&title_bar(80, list)).into_owned();
+        let line = console::strip_ansi_codes(&title_bar(80, list, Mode::Switch)).into_owned();
         line.len() - line.trim_start().len()
     };
     assert_eq!(lead(&short), lead(&long));
@@ -1822,8 +1827,8 @@ fn row_select_click_works_in_unite_mode() {
         issues: Vec::new(),
     }]);
     // Body line 4 (header 0, root 1-2, divider 3, session 4) is the primary's
-    // session → flat row 1. Screen row = CHROME_TOP_ROWS (3) + 4 = 7.
-    assert_eq!(left_pane_session_at(&state, 2, 7, 24, 120), Some(1));
+    // session → flat row 1. Screen row = CHROME_TOP_ROWS (2) + 4 = 6.
+    assert_eq!(left_pane_session_at(&state, 2, 6, 24, 120), Some(1));
 }
 
 /// A 統合(unite) state at 120×24 with the full sidebar: the primary workspace
@@ -1831,8 +1836,8 @@ fn row_select_click_works_in_unite_mode() {
 /// carries session `b1` with PR #777 — so a badge / popup must reach across the
 /// per-workspace group headers and the inter-workspace gap, not just the first
 /// group. Worktree rows (per [`full_sidebar_worktree_entries`]): `main` starts on
-/// body line 4 (header 0, root 1-2, divider 3) → detail screen row 8; `b1` starts
-/// on body line 13 (the 2-row gap, wsB's header, root, divider) → detail row 17.
+/// body line 4 (header 0, root 1-2, divider 3) → detail screen row 7; `b1` starts
+/// on body line 13 (the 2-row gap, wsB's header, root, divider) → detail row 16.
 fn unite_with_prs() -> HomeState {
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.restore_sessions(vec![SessionRecord {
@@ -1873,14 +1878,14 @@ fn unite_with_prs() -> HomeState {
 #[test]
 fn sidebar_pr_badge_at_maps_badges_across_unite_groups() {
     let state = unite_with_prs();
-    // The primary workspace's badge (detail row 8) maps to global index 0, and the
-    // extra workspace's badge (detail row 18, past the create row, gap, and header) to global
+    // The primary workspace's badge (detail row 7) maps to global index 0, and the
+    // extra workspace's badge (detail row 17, past the create row, gap, and header) to global
     // index 1 — the popup reaches a session in any group, not just the first.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), Some(0));
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 18), Some(1));
-    // The identity line (row 7 / 16) above each detail line carries no badge.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), Some(1));
+    // The identity line (row 6 / 16) above each detail line carries no badge.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 6), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 16), None);
 }
 
 #[test]
@@ -1889,7 +1894,7 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
     // sessions" message), then the extra workspace's badge still resolves. `b1`
     // starts on body line 11 (empty primary: header 0, root 1-2, divider 3,
     // create 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → screen
-    // detail row 15.
+    // detail row 14.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
@@ -1910,29 +1915,29 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
         }],
         issues: Vec::new(),
     }]);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 15), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 14), Some(0));
 }
 
 #[test]
 fn pr_popup_floats_and_opens_across_unite_groups() {
     let mut state = unite_with_prs();
     // The primary workspace's PR (global 0) floats at its entry's first row (screen
-    // row 7) just past the 40-column pane and 3-column divider (left 43).
+    // row 6) just past the 40-column pane and 3-column divider (left 43).
     state.set_pr_popup(Some(0));
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 0");
-    assert_eq!((top, left), (7, 43));
+    assert_eq!((top, left), (6, 43));
     assert!(stripped(&popup).contains("#412"));
     // The extra workspace's PR (global 1) floats lower, past the first group's
-    // create row, gap, and header (entry starts on body line 14 → screen row 17).
+    // create row, gap, and header (entry starts on body line 14 → screen row 16).
     state.set_pr_popup(Some(1));
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 1");
-    assert_eq!((top, left), (17, 43));
+    assert_eq!((top, left), (16, 43));
     assert!(stripped(&popup).contains("#777"));
-    // Clicking `#777` in that box (content row 18, the token flush at left+2 = 45)
+    // Clicking `#777` in that box (content row 17, the token flush at left+2 = 45)
     // opens the extra workspace's PR — the click resolves the right session's URL
     // across groups.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 18),
+        pr_popup_click(&state, 24, 120, 45, 17),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/777"
     ));
 }
@@ -2617,9 +2622,9 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
 
 /// An attached (没入) state at 120×24 with the full sidebar, listing a session that
 /// carries two PRs followed by one with no PR — the fixture the PR badge / popup
-/// click tests share. Worktree rows start at screen row 6 (the body begins at row 3;
+/// click tests share. Worktree rows start at screen row 5 (the body begins at row 2;
 /// the root entry and divider take its first 3 lines), three screen rows each: the
-/// PR session at rows 6–8, the PR-less one at rows 9–11.
+/// PR session at rows 5–7, the PR-less one at rows 8–10.
 fn attached_with_pr_sidebar() -> HomeState {
     let mut wt = worktree_with_pr(412);
     wt.pr.push(PrLink {
@@ -2640,32 +2645,32 @@ fn sidebar_pr_badge_at_maps_the_badge_columns_to_its_session() {
     let state = attached_with_pr_sidebar();
     // The left pane is 40 columns at width 120, so the folded `<icon> <count>` badge
     // (here ` 2`, three columns wide) seats flush at its right edge — columns 37–39
-    // on the entry's detail line (row 7, the second of its three rows). A click on
+    // on the entry's detail line (row 6, the second of its three rows). A click on
     // the badge maps to that session (index 0), so the loop pins its PR popup.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 37, 7), Some(0));
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 39, 7), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 37, 6), Some(0));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 39, 6), Some(0));
     // Left of the badge (the agent-label side of the detail line) maps to nothing.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 33, 7), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 10, 7), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 33, 6), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 10, 6), None);
 }
 
 #[test]
 fn sidebar_pr_badge_at_ignores_the_rows_other_than_the_detail_line() {
     let state = attached_with_pr_sidebar();
-    // The badge columns on the identity line (row 6) and the CPU / memory line
-    // (row 8) of the same session carry no badge, so a click there maps to nothing.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 6), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), None);
+    // The badge columns on the identity line (row 5) and the CPU / memory line
+    // (row 7) of the same session carry no badge, so a click there maps to nothing.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 5), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), None);
 }
 
 #[test]
 fn sidebar_pr_badge_at_ignores_rows_without_a_pr() {
     let state = attached_with_pr_sidebar();
-    // The second session's detail line (row 10 of rows 9–11) has no PR.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 10), None);
-    // The root entry (rows 3–4) and the divider (row 5) are not session rows.
+    // The second session's detail line (row 9 of rows 8–10) has no PR.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 9), None);
+    // The root entry (rows 2–3) and the divider (row 4) are not session rows.
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 3), None);
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 4), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 5), None);
     // A body row past the end of the session list maps to no worktree.
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 13), None);
 }
@@ -2675,8 +2680,8 @@ fn sidebar_pr_badge_at_ignores_clicks_off_the_sidebar() {
     let state = attached_with_pr_sidebar();
     // Left pane is 40 columns at width 120, so a click at column 40+ is the
     // divider / right pane, not a sidebar row.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 40, 7), None);
-    // Rows above the body (the title bar / mode ladder / blank separator).
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 40, 6), None);
+    // Rows above the body (the header and its blank separator).
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 1), None);
     // A row below the two-pane body (past `body_rows`).
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 22), None);
@@ -2716,7 +2721,7 @@ fn sidebar_pr_badge_at_ignores_a_badge_clipped_by_a_cramped_pane() {
     // longer seat flush-right past the name indent, so its columns can't be placed —
     // a click maps to nothing rather than guessing. At width 9 the left pane is 6
     // columns and the 3-column badge would start at column 3, inside `NAME_PREFIX`.
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 9, 3, 7), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 9, 3, 6), None);
 }
 
 #[test]
@@ -2724,11 +2729,11 @@ fn pr_popup_placement_floats_the_box_beside_the_pinned_session() {
     let mut state = attached_with_pr_sidebar();
     // Nothing pinned → no box to float.
     assert!(pr_popup_placement(&state, 24, 120).is_none());
-    // Pinning the PR session floats its box at its first row (screen row 6) just
+    // Pinning the PR session floats its box at its first row (screen row 5) just
     // past the 40-column pane and the 3-column divider (left 43).
     state.set_pr_popup(Some(0));
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for a pinned PR");
-    assert_eq!((top, left), (6, 43));
+    assert_eq!((top, left), (5, 43));
     let plain = stripped(&popup);
     assert!(plain.contains("#412") && plain.contains("#98"));
     // Pinning the PR-less second session yields nothing, and so does the rail.
@@ -2745,27 +2750,27 @@ fn pr_popup_click_opens_the_number_under_the_pointer() {
     state.set_pr_popup(Some(0));
     // Content sits two columns in from the box's left edge (left 43 → col 45). The
     // packed row is `#412 #98`: `#412` spans cols 45–48, a gap at 49, `#98` 50–52,
-    // all on the box's content row (top 6 + 1 = row 7).
+    // all on the box's content row (top 5 + 1 = row 6).
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 7),
+        pr_popup_click(&state, 24, 120, 45, 6),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/412"
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 50, 7),
+        pr_popup_click(&state, 24, 120, 50, 6),
         PopupClick::Open(url) if url == "https://github.com/o/other/pull/98"
     ));
     // The gap between tokens is inside the box but on no number → stays pinned.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 49, 7),
+        pr_popup_click(&state, 24, 120, 49, 6),
         PopupClick::Inside
     ));
-    // The box's borders (top row 6, bottom row 8) are inside it too.
+    // The box's borders (top row 5, bottom row 7) are inside it too.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 6),
+        pr_popup_click(&state, 24, 120, 45, 5),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 8),
+        pr_popup_click(&state, 24, 120, 45, 7),
         PopupClick::Inside
     ));
 }
@@ -2775,22 +2780,22 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
     let mut state = attached_with_pr_sidebar();
     // With nothing pinned every click is outside.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 7),
+        pr_popup_click(&state, 24, 120, 45, 6),
         PopupClick::Outside
     ));
     state.set_pr_popup(Some(0));
     // A click left of the box (over the sidebar), above it, and below it all land
     // outside the box's rectangle and so dismiss the popup.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 2, 7),
+        pr_popup_click(&state, 24, 120, 2, 6),
         PopupClick::Outside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 5),
+        pr_popup_click(&state, 24, 120, 45, 4),
         PopupClick::Outside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 9),
+        pr_popup_click(&state, 24, 120, 45, 8),
         PopupClick::Outside
     ));
 }
@@ -2848,24 +2853,24 @@ fn log_line_colours_each_kind_and_prompts_commands() {
 #[test]
 fn left_pane_session_at_maps_each_row_pair_to_its_session() {
     // Two sessions on a 24×120 screen: left pane is 40 columns, body starts at
-    // screen row 3 (after the title / ladder / blank chrome). The root pair spans
-    // rows 3,4, a divider on row 5, then each worktree spans three rows.
+    // screen row 2 (after the header / blank chrome). The root pair spans
+    // rows 2,3, a divider on row 4, then each worktree spans three rows.
     let state = state_with(vec![
         worktree(Some("main"), true, BranchStatus::Local),
         worktree(Some("feature"), false, BranchStatus::Local),
     ]);
     let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
     // The root entry's two rows both select the root (index 0).
-    assert_eq!(at(0, 3), Some(0));
-    assert_eq!(at(10, 4), Some(0));
+    assert_eq!(at(0, 2), Some(0));
+    assert_eq!(at(10, 3), Some(0));
     // The divider between the root and the sessions selects nothing.
-    assert_eq!(at(0, 5), None);
-    // Worktree 0 spans rows 6,7,8 (index 1); worktree 1 spans rows 9,10,11 (index 2).
-    assert_eq!(at(0, 6), Some(1));
-    assert_eq!(at(39, 7), Some(1));
-    assert_eq!(at(0, 8), Some(1));
-    assert_eq!(at(0, 9), Some(2));
-    assert_eq!(at(0, 11), Some(2));
+    assert_eq!(at(0, 4), None);
+    // Worktree 0 spans rows 5,6,7 (index 1); worktree 1 spans rows 8,9,10 (index 2).
+    assert_eq!(at(0, 5), Some(1));
+    assert_eq!(at(39, 6), Some(1));
+    assert_eq!(at(0, 7), Some(1));
+    assert_eq!(at(0, 8), Some(2));
+    assert_eq!(at(0, 10), Some(2));
 }
 
 #[test]
@@ -2873,14 +2878,14 @@ fn left_pane_session_at_ignores_clicks_off_the_session_rows() {
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     let at = |col, row| left_pane_session_at(&state, col, row, 24, 120);
     // The right pane (past the 40-column left pane) is not a row select.
-    assert_eq!(at(40, 3), None);
-    assert_eq!(at(80, 6), None);
-    // The chrome above the body (title / ladder / blank) selects nothing.
+    assert_eq!(at(40, 2), None);
+    assert_eq!(at(80, 5), None);
+    // The chrome above the body (header / blank) selects nothing.
     assert_eq!(at(0, 0), None);
-    assert_eq!(at(0, 2), None);
-    // The persistent create row sits below the only session (rows 6,7,8).
-    assert_eq!(at(0, 9), Some(2));
-    // Far below the body (past its 19 rows) selects nothing either.
+    assert_eq!(at(0, 1), None);
+    // The persistent create row sits below the only session (rows 5,6,7).
+    assert_eq!(at(0, 8), Some(2));
+    // Far below the body selects nothing either.
     assert_eq!(at(0, 23), None);
 }
 
@@ -2891,9 +2896,9 @@ fn left_pane_session_at_maps_clicks_on_the_collapsed_rail() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_sidebar(Sidebar::Rail);
     // A click within the rail on worktree 0's rows selects it.
-    assert_eq!(left_pane_session_at(&state, 0, 6, 24, 120), Some(1));
+    assert_eq!(left_pane_session_at(&state, 0, 5, 24, 120), Some(1));
     // A click just past the 5-column rail is in the right pane, not a select.
-    assert_eq!(left_pane_session_at(&state, 5, 6, 24, 120), None);
+    assert_eq!(left_pane_session_at(&state, 5, 5, 24, 120), None);
 }
 
 #[test]
