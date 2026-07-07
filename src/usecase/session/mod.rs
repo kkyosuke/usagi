@@ -104,6 +104,7 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
         name,
         SessionAgent::default(),
         SessionOrigin::Human,
+        None,
     )
 }
 
@@ -117,17 +118,24 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
 /// `origin` records who launched the session — pass [`SessionOrigin::Mcp`] from
 /// the MCP tools (`session_create` / `session_delegate_issue`) and
 /// [`SessionOrigin::Human`] for an interactive create (what [`create`] does).
+///
+/// `started_from` is the name of the parent session this one was started from —
+/// the session the creating agent was running inside — recorded as
+/// [`SessionRecord::started_from`]. Pass `None` when there is no parent (an
+/// interactive create, or an agent creating from the workspace root).
 pub fn create_with_agent(
     workspace_root: &Path,
     name: &str,
     agent: SessionAgent,
     origin: SessionOrigin,
+    started_from: Option<String>,
 ) -> Result<CreatedSession> {
     create_with_setup_runner(
         workspace_root,
         name,
         agent,
         origin,
+        started_from,
         &SystemSetupCommandRunner,
     )
 }
@@ -137,6 +145,7 @@ fn create_with_setup_runner(
     name: &str,
     agent: SessionAgent,
     origin: SessionOrigin,
+    started_from: Option<String>,
     setup_runner: &dyn SetupCommandRunner,
 ) -> Result<CreatedSession> {
     let name = name.trim();
@@ -237,7 +246,15 @@ fn create_with_setup_runner(
     // lock-acquire timeout. Recording first keeps reconcile from mistaking this
     // now-registered worktree for a stray while setup runs; a setup failure is
     // logged, never rolled back (the worktree already exists for the user to fix).
-    record(&store, name, &dest_root, &worktrees, agent, origin)?;
+    record(
+        &store,
+        name,
+        &dest_root,
+        &worktrees,
+        agent,
+        origin,
+        started_from,
+    )?;
     drop(_lock);
 
     run_setup_commands(&dest_root, name, &local_settings, setup_runner);
@@ -346,6 +363,7 @@ fn record(
     worktrees: &[PathBuf],
     agent: SessionAgent,
     origin: SessionOrigin,
+    started_from: Option<String>,
 ) -> Result<()> {
     // The caller ([`create`]) holds the store lock across the whole operation,
     // so the load → append → save here is already serialised against any other
@@ -378,6 +396,7 @@ fn record(
         label_id: None,
         agent,
         origin,
+        started_from,
         root: root.to_path_buf(),
         worktrees: worktree_states,
         created_at: now,
@@ -610,6 +629,12 @@ pub struct SessionStatus {
     /// Lets a coordinator polling `session_status` tell an automated session from
     /// a hand-made one.
     pub origin: SessionOrigin,
+    /// The name of the session this one was started from — the parent session the
+    /// creating agent was running inside — or `None` when it has no parent (an
+    /// interactive create, a root-launched session, or a record written before
+    /// usagi tracked this). Lets a coordinator polling `session_status`
+    /// reconstruct which session started which.
+    pub started_from: Option<String>,
     /// The session's root worktree — the directory the agent runs in and the key
     /// its agent-phase and PR-link files are stored under.
     pub root: PathBuf,
@@ -671,6 +696,7 @@ pub fn statuses(workspace_root: &Path) -> Result<Vec<SessionStatus>> {
                 name: session.name,
                 display_name: session.display_name,
                 origin: session.origin,
+                started_from: session.started_from,
                 root: session.root,
                 agent_phase,
                 worktrees,
@@ -1104,6 +1130,7 @@ mod tests {
             "with-setup",
             SessionAgent::default(),
             SessionOrigin::Human,
+            None,
             &runner,
         )
         .unwrap();
@@ -1133,6 +1160,7 @@ mod tests {
                 model: Some("  gemini-2.5-pro  ".to_string()),
             },
             SessionOrigin::Mcp,
+            Some("coordinator".to_string()),
         )
         .unwrap();
 
@@ -1142,6 +1170,8 @@ mod tests {
         // The agent-pinning entry point is the MCP one, so the recorded origin
         // reflects that it was launched by an agent, not a person.
         assert_eq!(session.origin, SessionOrigin::Mcp);
+        // The parent session it was started from round-trips into the record.
+        assert_eq!(session.started_from.as_deref(), Some("coordinator"));
     }
 
     #[test]
@@ -1158,6 +1188,7 @@ mod tests {
                 model: Some("   ".to_string()),
             },
             SessionOrigin::Mcp,
+            None,
         )
         .unwrap();
         // Plain `create` records no override at all (follows the workspace settings).
@@ -1172,6 +1203,10 @@ mod tests {
         let plain = sessions.iter().find(|s| s.name == "plain").unwrap();
         assert!(plain.agent.is_unset());
         assert_eq!(plain.origin, SessionOrigin::Human);
+        // Neither records a parent here: the MCP stand-in passed None and the
+        // interactive `create` never has a parent session.
+        assert_eq!(blank.started_from, None);
+        assert_eq!(plain.started_from, None);
     }
 
     #[test]
@@ -1199,6 +1234,7 @@ mod tests {
             "keeps-going",
             SessionAgent::default(),
             SessionOrigin::Human,
+            None,
             &runner,
         )
         .unwrap();
@@ -2073,6 +2109,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: ghost_root.clone(),
             worktrees: vec![WorktreeState {
                 branch: None,

@@ -429,6 +429,7 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
         label_id: None,
         agent: Default::default(),
         origin: Default::default(),
+        started_from: None,
         name: name.to_string(),
         display_name: label.map(str::to_string),
         note: note.map(str::to_string),

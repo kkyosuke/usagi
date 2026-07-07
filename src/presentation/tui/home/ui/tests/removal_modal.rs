@@ -55,6 +55,7 @@ fn render_frame_removal_modal_prefixes_rows_in_unite_mode() {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/ws/tools/.usagi/sessions/beta"),
             worktrees: Vec::new(),
             created_at: Utc::now(),

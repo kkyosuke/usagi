@@ -251,14 +251,25 @@ impl SessionMcpServer {
         // creates — whether from `session_create` or `session_delegate_issue` —
         // is recorded with an MCP origin, distinguishing it from a session a
         // person cut interactively in the TUI.
-        session::create_with_agent(&self.workspace_root, name, agent, SessionOrigin::Mcp).map_err(
-            |e| {
-                crate::infrastructure::error_log::ErrorLog::record(&format!(
-                    "mcp session_create \"{name}\" failed: {e:#}"
-                ));
-                e.to_string()
-            },
+        // Record which session this one was started from: the session this MCP
+        // process is running inside (`current_session`). `None` when the agent is
+        // running at the workspace root (the coordinator has no parent session),
+        // so a root-launched session carries no lineage. This is what lets a
+        // reader tell which session a given session was started from.
+        let started_from = self.current_session.clone();
+        session::create_with_agent(
+            &self.workspace_root,
+            name,
+            agent,
+            SessionOrigin::Mcp,
+            started_from,
         )
+        .map_err(|e| {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "mcp session_create \"{name}\" failed: {e:#}"
+            ));
+            e.to_string()
+        })
     }
 
     fn tool_list(&self) -> Result<String, String> {
@@ -519,6 +530,7 @@ fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
                     "name": s.name,
                     "display_name": s.display_name,
                     "origin": s.origin.as_str(),
+                    "started_from": s.started_from,
                     "root": s.root,
                     "created_at": s.created_at.to_rfc3339(),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
@@ -546,6 +558,7 @@ fn statuses_to_json(statuses: &[session::SessionStatus]) -> Value {
                     "name": s.name,
                     "display_name": s.display_name,
                     "origin": s.origin.as_str(),
+                    "started_from": s.started_from,
                     "root": s.root,
                     "agent_phase": s.agent_phase.map_or("none", |p| p.as_str()),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
@@ -961,6 +974,8 @@ mod tests {
         // Created through the MCP server, so it is recorded — and surfaced — as an
         // agent-launched session.
         assert_eq!(arr[0]["origin"], "mcp");
+        // Created from the workspace root (no parent session), so started_from is null.
+        assert_eq!(arr[0]["started_from"], Value::Null);
         // The worktree is checked out on the namespaced session branch.
         assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/feature-x");
     }
@@ -1033,6 +1048,47 @@ mod tests {
         let session = &store.load().unwrap().unwrap().sessions[0];
         assert_eq!(session.agent.cli, Some(AgentCli::Claude));
         assert_eq!(session.agent.model.as_deref(), Some("claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn create_from_within_a_session_records_which_session_it_was_started_from() {
+        // An agent whose MCP process runs inside session "coordinator" creates a
+        // child session. The child must record that it was started from
+        // "coordinator" — the session-lineage answer to "which session started
+        // this one?".
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // First cut the parent session so its worktree exists on disk.
+        let parent = server_at(root.path(), FakeBackend::ok("x"));
+        call(&parent, "session_create", json!({"name":"coordinator"}));
+
+        // Now act as the agent running inside "coordinator" and create a child.
+        let inside = server_in_session(root.path(), "coordinator", FakeBackend::ok("x"));
+        let created = call(&inside, "session_create", json!({"name":"child"}));
+        assert_eq!(created["isError"], false);
+
+        // state.json records the parent on the child, and the parent itself has
+        // none (it was cut from the workspace root).
+        let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
+        let state = store.load().unwrap().unwrap();
+        let child = state.sessions.iter().find(|s| s.name == "child").unwrap();
+        assert_eq!(child.started_from.as_deref(), Some("coordinator"));
+        let coordinator = state
+            .sessions
+            .iter()
+            .find(|s| s.name == "coordinator")
+            .unwrap();
+        assert_eq!(coordinator.started_from, None);
+
+        // And it is surfaced to callers through session_list / session_status.
+        let listed = tool_json(&call(&inside, "session_list", json!({})));
+        let child_json = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "child")
+            .unwrap();
+        assert_eq!(child_json["started_from"], "coordinator");
     }
 
     #[test]
@@ -1425,6 +1481,8 @@ mod tests {
         assert_eq!(arr[0]["agent_phase"], "none");
         // session_status surfaces the launch origin too; this one was cut via MCP.
         assert_eq!(arr[0]["origin"], "mcp");
+        // Cut from the workspace root, so it has no parent session.
+        assert_eq!(arr[0]["started_from"], Value::Null);
         assert_eq!(arr[0]["worktrees"][0]["status"], "local");
         assert_eq!(arr[0]["worktrees"][0]["dirty"], false);
         assert_eq!(arr[0]["worktrees"][0]["merged"], false);

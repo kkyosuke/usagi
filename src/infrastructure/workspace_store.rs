@@ -96,6 +96,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature"),
             worktrees: vec![WorktreeState {
                 branch: Some("feature".to_string()),

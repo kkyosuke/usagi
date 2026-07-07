@@ -444,6 +444,21 @@ pub struct SessionRecord {
         deserialize_with = "crate::domain::serde_fallback::or_default"
     )]
     pub origin: SessionOrigin,
+    /// The name of the session this one was **started from** — the parent session
+    /// the agent was running inside when it created this one through the MCP server
+    /// (`session_create` / `session_delegate_issue`). This is the session-level
+    /// lineage: it answers "which session did this session get started from?", so a
+    /// tree of coordinator-and-children sessions can be reconstructed.
+    ///
+    /// `None` when there is no parent to record: a session a person cut in the TUI
+    /// ([`SessionOrigin::Human`]), or one an agent created while running at the
+    /// workspace root rather than inside a session (the root coordinator has no
+    /// parent session). Recorded once at creation and never changed afterwards (a
+    /// workspace refresh leaves it untouched, like [`origin`](Self::origin)).
+    /// Omitted from `state.json` when absent, and an older file without the key
+    /// loads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_from: Option<String>,
     /// Root of the session tree: `<workspace>/.usagi/sessions/<name>`.
     pub root: PathBuf,
     /// One entry per repository that received a worktree, with its git status.
@@ -574,6 +589,7 @@ mod tests {
             label_id: None,
             agent: SessionAgent::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/tmp/s"),
             worktrees: vec![],
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
@@ -639,6 +655,7 @@ mod tests {
             label_id: None,
             agent: SessionAgent::default(),
             origin: SessionOrigin::Unknown,
+            started_from: None,
             root: PathBuf::from("/tmp/s"),
             worktrees: vec![],
             created_at: Utc.timestamp_opt(0, 0).unwrap(),
@@ -696,6 +713,52 @@ mod tests {
         .unwrap();
         assert_eq!(restored.origin, SessionOrigin::Unknown);
         assert_eq!(restored.name, "s");
+    }
+
+    #[test]
+    fn session_started_from_is_omitted_when_absent_and_round_trips_when_set() {
+        // No parent recorded: the field is skipped entirely, so a root-launched or
+        // interactively-created session stays lean and an older file without the
+        // key still loads.
+        let mut session = SessionRecord {
+            name: "child".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: SessionAgent::default(),
+            origin: SessionOrigin::Mcp,
+            started_from: None,
+            root: PathBuf::from("/tmp/child"),
+            worktrees: vec![],
+            created_at: Utc.timestamp_opt(0, 0).unwrap(),
+            last_active: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("started_from"), "{json}");
+
+        // A recorded parent session round-trips through the file — this is the
+        // lineage answer to "which session was this started from?".
+        session.started_from = Some("coordinator".to_string());
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"started_from\":\"coordinator\""), "{json}");
+        let restored: SessionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.started_from.as_deref(), Some("coordinator"));
+    }
+
+    #[test]
+    fn session_started_from_defaults_to_none_when_the_key_is_absent() {
+        // An older `state.json` written before this field simply has no
+        // `started_from` key; it must still load, with the parent reading as None.
+        let restored: SessionRecord = serde_json::from_str(
+            r#"{
+                "name": "s",
+                "root": "/tmp/s",
+                "worktrees": [],
+                "created_at": "2026-06-13T05:01:18.659149Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.started_from, None);
     }
 
     #[test]
@@ -892,6 +955,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -930,6 +994,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -984,6 +1049,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -1004,6 +1070,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -1025,6 +1092,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -1057,6 +1125,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),
@@ -1093,6 +1162,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: created,
@@ -1132,6 +1202,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
             worktrees: vec![sample_worktree()],
             created_at: Utc::now(),

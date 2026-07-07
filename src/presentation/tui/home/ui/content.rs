@@ -228,6 +228,7 @@ mod tests {
             label_id: None,
             agent: Default::default(),
             origin: Default::default(),
+            started_from: None,
             root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: (0..worktrees).map(|_| worktree(name)).collect(),
             created_at: Utc::now(),
