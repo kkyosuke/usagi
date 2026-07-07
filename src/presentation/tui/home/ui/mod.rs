@@ -75,9 +75,8 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
     quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
-    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    ENV_MODAL_INNER, FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER,
-    TEXT_MODAL_INNER,
+    text_modal_body, title_bar, update_confirm_frame, waiting_notice, ENV_MODAL_INNER,
+    FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use focus_menu::{focus_menu_body, focus_prompt_body};
 use panes::right_pane_contents;
@@ -92,7 +91,6 @@ pub(super) use pr_popup::sidebar_pr_badge_at;
 pub(super) use pr_popup::{pr_popup_click, PopupClick};
 
 use super::state::{HomeState, ModalSize, Mode, PendingSession, WorktreeList};
-use super::tasks::{TaskKind, TaskRow};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 
@@ -641,9 +639,9 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     // Overlay status affordances in priority order: a momentary blocking action
     // (terminal / agent launch) shows the loading rabbit centred in the right
-    // pane; otherwise any in-flight background removal work shows the task
-    // status line in the top-right corner (session creation lives inline as a
-    // sidebar skeleton); otherwise a `◆ N waiting` notice appears while at least
+    // pane; otherwise the top-right corner stays available for a `◆ N waiting`
+    // notice while session create/remove work lives inline in the sidebar as
+    // skeleton rows; otherwise a `◆ N waiting` notice appears while at least
     // one session is waiting for the user's input. The task status and waiting
     // notice ride the header rows. The
     // "update available" notice is no longer a corner overlay — the sidebar
@@ -666,31 +664,18 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             );
         }
     } else {
-        // Background *removal* work (running off the event-loop thread) rides the
-        // two header rows (row 0 the title bar, row 1 the mode ladder), whose
-        // centred content leaves the right columns blank — so it never collides
-        // with the right pane. A **create** is no longer shown here: it animates
-        // as an inline skeleton on its target workspace's "+ new session" row
-        // (see [`sidebar::create_skeleton_row`]), so the corner is left free for
-        // the `◆ N waiting` notice the way the tab strip freed it for launching
-        // panes. When no removal holds the corner the waiting notice takes it.
-        let corner_tasks: Vec<TaskRow> = state
-            .tasks()
-            .iter()
-            .filter(|row| !matches!(row.kind, TaskKind::CreateSession))
-            .cloned()
-            .collect();
-        let task_lines = task_status_line(&corner_tasks, width);
-        if task_lines.is_empty() {
-            widgets::overlay_top_right(
-                &mut lines,
-                0,
-                width,
-                &waiting_notice(state.waiting_paths().len()),
-            );
-        } else {
-            widgets::overlay_top_right(&mut lines, 0, width, &task_lines);
-        }
+        // Background session work (running off the event-loop thread) no longer
+        // rides the header corner: **creates** animate as inline placeholders
+        // above the target workspace's "+ new session" row, and **removals**
+        // replace the target session row with an inline pruning skeleton. The
+        // corner is therefore left free for the `◆ N waiting` notice the way the
+        // tab strip freed it for launching panes.
+        widgets::overlay_top_right(
+            &mut lines,
+            0,
+            width,
+            &waiting_notice(state.waiting_paths().len()),
+        );
     }
 
     // Float the 在席 (Focus) action surface — the Menu or the Prompt — as a box

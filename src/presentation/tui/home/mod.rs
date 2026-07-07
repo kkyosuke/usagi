@@ -119,13 +119,15 @@ fn complete_or_record_panic(
     handle: &tasks::TaskHandle,
     id: u64,
     kind: tasks::TaskKind,
+    target_root: &Path,
     target: &str,
     work: impl FnOnce() -> (bool, tasks::Completion),
 ) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok((ok, completion)) => handle.complete(id, ok, completion),
         Err(payload) => {
-            let (log_line, completion) = tasks::panic_outcome(kind, target, payload);
+            let (log_line, mut completion) = tasks::panic_outcome(kind, target, payload);
+            completion.target_root = Some(target_root.to_path_buf());
             crate::infrastructure::error_log::ErrorLog::record(&log_line);
             handle.complete(id, false, completion);
         }
@@ -387,10 +389,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let name = name.to_string();
         let lock = create_lock.clone();
         let worker = std::thread::spawn(move || {
-            complete_or_record_panic(&handle, id, tasks::TaskKind::CreateSession, &name, || {
-                let _guard = lock_session_ops(&lock);
-                run_create(&root, &name, interaction_epoch)
-            });
+            complete_or_record_panic(
+                &handle,
+                id,
+                tasks::TaskKind::CreateSession,
+                &root,
+                &name,
+                || {
+                    let _guard = lock_session_ops(&lock);
+                    run_create(&root, &name, interaction_epoch)
+                },
+            );
         });
         track_worker(&create_workers, worker);
     };
@@ -683,24 +692,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let remove_workers = workers.clone();
     // `root` is the workspace the targeted session lives in (the cursor's group in
     // 統合/unite mode), resolved by the handler before dispatch.
-    let mut dispatch_remove = move |root: &Path,
-                                    name: &str,
-                                    force: bool,
-                                    focus: Option<tasks::AutoFocus>| {
-        let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
-        let handle = remove_tasks.clone();
-        let root = root.to_path_buf();
-        let name = name.to_string();
-        let lock = remove_lock.clone();
-        let agent = remove_agent.clone();
-        let worker = std::thread::spawn(move || {
-            complete_or_record_panic(&handle, id, tasks::TaskKind::RemoveSession, &name, || {
-                let _guard = lock_session_ops(&lock);
-                run_remove(&root, &name, force, agent.as_ref(), focus)
+    let mut dispatch_remove =
+        move |root: &Path, name: &str, force: bool, focus: Option<tasks::AutoFocus>| {
+            let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
+            let handle = remove_tasks.clone();
+            let root = root.to_path_buf();
+            let name = name.to_string();
+            let lock = remove_lock.clone();
+            let agent = remove_agent.clone();
+            let worker = std::thread::spawn(move || {
+                complete_or_record_panic(
+                    &handle,
+                    id,
+                    tasks::TaskKind::RemoveSession,
+                    &root,
+                    &name,
+                    || {
+                        let _guard = lock_session_ops(&lock);
+                        run_remove(&root, &name, force, agent.as_ref(), focus)
+                    },
+                );
             });
-        });
-        track_worker(&remove_workers, worker);
-    };
+            track_worker(&remove_workers, worker);
+        };
 
     // Evict a removed session's still-running shell from the pool so a session
     // later recreated at the same path starts fresh instead of re-attaching to
@@ -1940,6 +1954,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                     interaction_epoch,
                 }),
                 created: Some(created.name.clone()),
+                removed: None,
             },
         ),
         // The failure line is recorded to the daily log when the event loop applies
@@ -1954,6 +1969,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                 evict: None,
                 focus: None,
                 created: Some(name.to_string()),
+                removed: None,
             },
         ),
     }
@@ -1985,6 +2001,7 @@ fn run_remove(
                 ),
                 focus,
                 created: None,
+                removed: Some(name.to_string()),
             },
         ),
         Ok(outcome) => {
@@ -2006,6 +2023,7 @@ fn run_remove(
                     evict: None,
                     focus: None,
                     created: None,
+                    removed: Some(name.to_string()),
                 },
             )
         }
@@ -2021,6 +2039,7 @@ fn run_remove(
                 evict: None,
                 focus: None,
                 created: None,
+                removed: Some(name.to_string()),
             },
         ),
     }

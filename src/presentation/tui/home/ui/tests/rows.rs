@@ -821,10 +821,90 @@ fn left_pane_inserts_the_pending_session_at_the_foot_with_a_session_present() {
 }
 
 #[test]
+fn left_pane_replaces_a_removing_session_with_a_leaf_skeleton_in_place() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        7,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    // Root(2) + divider(1) + the replacing removal skeleton(3) + create(1).
+    let name = console::strip_ansi_codes(&lines[3]);
+    let detail = console::strip_ansi_codes(&lines[4]);
+    let prune = console::strip_ansi_codes(&lines[5]);
+    let create = console::strip_ansi_codes(&lines[6]);
+    assert!(name.contains("old"));
+    assert!(name.contains('✂'));
+    assert!(detail.contains("removing session"));
+    assert!(prune.contains("pruning worktree"));
+    assert!(create.contains("+ new session"));
+}
+
+#[test]
+fn removal_skeletons_do_not_move_hit_tests_or_the_create_row() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar_with_pending(
+            state.list(),
+            3,
+            Sidebar::Full,
+            0,
+            state.pending_sessions(),
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        group_inline_insert_line_with_pending(state.list(), 0, state.pending_sessions()),
+        6
+    );
+}
+
+#[test]
 fn rail_pending_session_rows_reserve_three_rows() {
     let rows = rail_pending_session_rows(0);
     assert_eq!(rows.len(), SESSION_ROWS);
     assert!(console::strip_ansi_codes(&rows[0]).contains('+'));
+}
+
+#[test]
+fn rail_removing_session_rows_use_a_pruning_glyph_in_place() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        7,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+        None,
+    );
+    assert!(console::strip_ansi_codes(&lines[3]).contains('✂'));
+    assert!(console::strip_ansi_codes(&lines[6]).contains('+'));
 }
 
 #[test]

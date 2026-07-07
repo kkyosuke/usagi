@@ -509,12 +509,53 @@ fn pending_session_create_skeletons_begin_dedupe_and_clear_by_root_and_name() {
     state.begin_pending_session(root.clone(), "newx".to_string());
     state.begin_pending_session(root.clone(), "newx".to_string());
     assert_eq!(state.pending_sessions().len(), 1);
+    assert_eq!(
+        state.pending_sessions()[0].kind(),
+        PendingSessionKind::Create
+    );
     assert_eq!(state.pending_sessions()[0].root(), root.as_path());
     assert_eq!(state.pending_sessions()[0].name(), "newx");
 
     assert!(!state.clear_pending_session(&root, "other"));
     assert_eq!(state.pending_sessions().len(), 1);
     assert!(state.clear_pending_session(&root, "newx"));
+    assert!(state.pending_sessions().is_empty());
+}
+
+#[test]
+fn pending_session_remove_skeletons_begin_dedupe_and_clear_by_root_and_name() {
+    let mut state = state();
+    let root = PathBuf::from("/repo");
+    state.begin_removing_session(root.clone(), "old".to_string());
+    state.begin_removing_session(root.clone(), "old".to_string());
+    assert_eq!(state.pending_sessions().len(), 1);
+    assert_eq!(
+        state.pending_sessions()[0].kind(),
+        PendingSessionKind::Remove
+    );
+    assert!(state.pending_sessions()[0].is_remove());
+    assert_eq!(state.pending_sessions()[0].root(), root.as_path());
+    assert_eq!(state.pending_sessions()[0].name(), "old");
+
+    assert!(!state.clear_removing_session(&root, "other"));
+    assert_eq!(state.pending_sessions().len(), 1);
+    assert!(state.clear_removing_session(&root, "old"));
+    assert!(state.pending_sessions().is_empty());
+}
+
+#[test]
+fn pending_create_and_remove_skeletons_are_tracked_separately() {
+    let mut state = state();
+    let root = PathBuf::from("/repo");
+    state.begin_pending_session(root.clone(), "same".to_string());
+    state.begin_removing_session(root.clone(), "same".to_string());
+    assert_eq!(state.pending_sessions().len(), 2);
+
+    assert!(state.clear_pending_session(&root, "same"));
+    assert_eq!(state.pending_sessions().len(), 1);
+    assert!(state.pending_sessions()[0].is_remove());
+
+    assert!(state.clear_removing_session(&root, "same"));
     assert!(state.pending_sessions().is_empty());
 }
 

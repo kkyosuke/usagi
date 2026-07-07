@@ -42,7 +42,7 @@ pub(super) fn full_sidebar_worktree_entries_with_pending(
         cur += SESSION_ROWS
             * pending_sessions
                 .iter()
-                .filter(|p| p.root() == group.root_path())
+                .filter(|p| p.is_create() && p.root() == group.root_path())
                 .count();
         cur += 1; // the group's persistent "+ new session" row
     }

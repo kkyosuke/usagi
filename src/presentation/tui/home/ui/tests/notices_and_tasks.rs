@@ -83,7 +83,7 @@ fn render_frame_keeps_waiting_notice_while_a_create_runs() {
 }
 
 #[test]
-fn render_frame_lets_a_remove_take_the_corner_over_the_waiting_notice() {
+fn render_frame_keeps_waiting_notice_while_a_remove_runs() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
     waiting.path = PathBuf::from("/repo/wait");
@@ -93,8 +93,9 @@ fn render_frame_lets_a_remove_take_the_corner_over_the_waiting_notice() {
         waiting: [PathBuf::from("/repo/wait")].into(),
         ..Default::default()
     });
-    // A removal has no inline skeleton, so it still rides the corner and hides
-    // the waiting notice while it runs.
+    // A removal no longer steals the corner — it replaces the target row with an
+    // inline sidebar skeleton — so the waiting notice keeps the top-right corner
+    // and the remove label is not drawn there.
     state.set_tasks(vec![TaskRow {
         kind: TaskKind::RemoveSession,
         label: "削除中… old".to_string(),
@@ -102,8 +103,8 @@ fn render_frame_lets_a_remove_take_the_corner_over_the_waiting_notice() {
     }]);
     let frame = render_frame(24, 100, &state);
     let header = stripped(&[frame[0].clone()]);
-    assert!(header.contains("削除中… old"));
-    assert!(!header.contains(" 1 waiting"));
+    assert!(header.contains(" 1 waiting"));
+    assert!(!header.contains("削除中… old"));
 }
 
 // --- background-task panel ---------------------------------------------
@@ -267,11 +268,12 @@ fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
+fn render_frame_speaks_task_status_from_the_sidebar_over_a_live_terminal() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     // A live embedded terminal owns the right pane (没入's attached shell, or
-    // 切替's live preview). The task status now rides the header's title-bar row,
-    // outside the pane, so it shows without clobbering the shell output below.
+    // 切替's live preview). Session task status no longer rides the header: the
+    // target row carries the inline skeleton, and the sidebar mascot speaks the
+    // label without clobbering shell output below.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_focus(1);
     state.show_attached();
@@ -283,11 +285,13 @@ fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
     }]);
     let frame = render_frame(24, 100, &state);
     let joined = stripped(&frame);
-    // The status shows on the header row and the shell output stays intact.
+    // The status is still explained by the sidebar mascot and the shell output
+    // stays intact.
     assert!(joined.contains("削除中… old"));
     assert!(joined.contains("$ echo hi"));
-    // The status rides row 0 (the title bar), not the body where the shell is.
-    assert!(stripped(&[frame[0].clone()]).contains("削除中… old"));
+    // The status no longer rides row 0 (the title bar); row 0 remains available
+    // for title/waiting chrome.
+    assert!(!stripped(&[frame[0].clone()]).contains("削除中… old"));
 }
 
 #[test]

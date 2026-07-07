@@ -108,6 +108,7 @@ pub(super) fn palette_key(
                 } => {
                     let root = state.workspace_root_for_session(workspace.as_deref(), &name);
                     state.set_op_target(root.clone());
+                    state.begin_removing_session(root.clone(), name.clone());
                     (wiring.dispatch_remove)(&root, &name, force, None);
                 }
                 // `session remove` with no name opens the removal checklist over
@@ -1080,6 +1081,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
             name,
             interaction_epoch: wiring.interaction_epoch,
         });
+    state.begin_removing_session(root.clone(), name.clone());
     (wiring.dispatch_remove)(&root, &name, force, focus);
     state.enter_switch(ReturnMode::Base);
 }

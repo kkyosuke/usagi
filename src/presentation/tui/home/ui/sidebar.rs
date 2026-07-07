@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::super::state::{PendingSession, WorktreeList, ROOT_NAME};
+use super::super::state::{worktree_name, PendingSession, WorktreeList, ROOT_NAME};
 use super::{
     clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, LOCAL_ICON, NAME_PREFIX,
     NEW_ICON, NOTE_ICON, PUSHED_ICON, RAIL_WIDTH, ROOT_DETAIL, SYNCED_ICON,
@@ -1034,6 +1034,25 @@ pub(super) fn skeleton_frame(now: DateTime<Utc>) -> usize {
     (now.timestamp_millis().rem_euclid(1 << 30) / SKELETON_TICK_MS) as usize
 }
 
+/// Render a loading wave in a leaf-green (`success`) band rather than the
+/// blue/cyan accent used for creation. Used by removal skeletons so a row being
+/// pruned reads differently from a row being born.
+fn leaf_loading_chip(text: &str, frame: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let period = chars.len() + 3;
+    let head = frame % period;
+    let mut out = String::new();
+    for (i, c) in chars.into_iter().enumerate() {
+        let s = c.to_string();
+        if i == head || i + 1 == head {
+            out.push_str(&style(s).success().bold().to_string());
+        } else {
+            out.push_str(&style(s).dim().to_string());
+        }
+    }
+    out
+}
+
 /// The full-sidebar **pending session** placeholder inserted above a workspace's
 /// persistent "+ new session" row while a session by `name` is being created.
 /// It occupies the same three rows as a real session — name, detail, resource —
@@ -1074,6 +1093,40 @@ pub(super) fn pending_session_rows(
     [line1, line2, line3]
 }
 
+/// The full-sidebar skeleton that replaces a session row while that session is
+/// being removed. It keeps the same three-row footprint as the real row but uses
+/// a leaf-green wave and pruning language, visually separating deletion from the
+/// blue/cyan create skeleton.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn removing_session_rows(
+    label: &str,
+    frame: usize,
+    label_col: usize,
+    name_width: usize,
+    detail_width: usize,
+    selected: bool,
+    active: bool,
+    in_switch: bool,
+) -> [String; SESSION_ROWS] {
+    let gutter = session_gutter_cell(selected, active, in_switch, 0);
+    let kind = leaf_loading_chip("✂", frame);
+    let wave = leaf_loading_chip(&clip_to_width(label, name_width), frame);
+    let name = pad_to_width(wave, name_width);
+    let status_tag = label_cell(None, label_col);
+    let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
+    let detail = leaf_loading_chip("removing session", frame);
+    let line2 = detail_line(
+        &session_gutter_cell(selected, active, in_switch, 1),
+        clip_to_width(&detail, detail_width),
+    );
+    let prune = leaf_loading_chip("pruning worktree", frame + 1);
+    let line3 = detail_line(
+        &session_gutter_cell(selected, active, in_switch, 2),
+        clip_to_width(&prune, detail_width),
+    );
+    [line1, line2, line3]
+}
+
 /// The rail twin of a pending session skeleton: three rows so the collapsed rail
 /// reserves the same height as a real session. The rail has no room for the name
 /// or CPU/MEM text, so only the top `+` pulses and the lower rows are blanks.
@@ -1092,6 +1145,33 @@ pub(super) fn rail_create_skeleton_row(frame: usize) -> String {
     let plus = super::tabs_hit::loading_chip("+", frame);
     let gutter = gutter_cell(false, false, false);
     pad_to_width(format!("{gutter} {plus}"), RAIL_WIDTH)
+}
+
+/// The rail twin of [`removing_session_rows`]: a three-row in-place placeholder
+/// for a session being pruned. Only the top glyph is visible in the narrow rail.
+pub(super) fn rail_removing_session_rows(
+    frame: usize,
+    selected: bool,
+    active: bool,
+    in_switch: bool,
+) -> [String; SESSION_ROWS] {
+    let cut = leaf_loading_chip("✂", frame);
+    let top = pad_to_width(
+        format!(
+            "{} {cut}",
+            session_gutter_cell(selected, active, in_switch, 0)
+        ),
+        RAIL_WIDTH,
+    );
+    let detail = pad_to_width(
+        session_gutter_cell(selected, active, in_switch, 1),
+        RAIL_WIDTH,
+    );
+    let resource = pad_to_width(
+        session_gutter_cell(selected, active, in_switch, 2),
+        RAIL_WIDTH,
+    );
+    [top, detail, resource]
 }
 
 /// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
@@ -1121,21 +1201,35 @@ pub(super) fn line_hits_unite_workspace_gap(line: usize, cur: &mut usize) -> boo
     false
 }
 
-/// Pending create skeletons that belong to `root`; each one occupies a full
+/// Pending **create** skeletons that belong to `root`; each one occupies a full
 /// session-height placeholder above the group's persistent "+ new session" row.
+/// Removals are excluded here: they replace an existing session row in place (see
+/// [`is_removing`]) rather than adding a new placeholder line, so they never
+/// change the group's row count.
 fn pending_sessions_for_root<'a>(
     pending_sessions: &'a [PendingSession],
     root: &Path,
 ) -> Vec<&'a PendingSession> {
     pending_sessions
         .iter()
-        .filter(|p| p.root() == root)
+        .filter(|p| p.is_create() && p.root() == root)
         .collect()
 }
 
-/// Number of pending create skeletons currently inserted into `root`'s group.
+/// Number of pending **create** skeletons currently inserted into `root`'s group
+/// (the only kind that adds rows; see [`pending_sessions_for_root`]).
 fn pending_session_count(pending_sessions: &[PendingSession], root: &Path) -> usize {
     pending_sessions_for_root(pending_sessions, root).len()
+}
+
+/// Whether the session named `name` under `root` is currently being removed, so
+/// its existing row should render as an in-place removal skeleton instead of the
+/// normal session row. Unlike a create, a removal keeps the row it replaces, so
+/// this changes only how that row is drawn — never the group's row count.
+fn is_removing(pending_sessions: &[PendingSession], root: &Path, name: &str) -> bool {
+    pending_sessions
+        .iter()
+        .any(|p| p.is_remove() && p.root() == root && p.name() == name)
 }
 
 /// The number of body lines one workspace group occupies in the sidebar: the
@@ -1445,6 +1539,13 @@ pub(super) fn rail_pane(
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
+            if is_removing(pending_sessions, group.root_path(), worktree_name(w)) {
+                for row in rail_removing_session_rows(skeleton, selected, active, in_switch) {
+                    win.push(row);
+                }
+                flat_row += 1;
+                continue;
+            }
             let kind = kind_dot(heat_of(w.updated_at, now));
             let label = rail_label_glyph(group.row_label_id(i).and_then(|id| label_master.get(id)));
             let agent = AgentState::from_flags(
@@ -1886,6 +1987,22 @@ pub(super) fn left_pane(
             }
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
+            if is_removing(pending_sessions, group.root_path(), worktree_name(w)) {
+                for row in removing_session_rows(
+                    group.display_label(i),
+                    skeleton,
+                    label_col,
+                    name_width,
+                    detail_width,
+                    selected,
+                    active,
+                    in_switch,
+                ) {
+                    win.push(row);
+                }
+                flat_row += 1;
+                continue;
+            }
             let status_label = group.row_label_id(i).and_then(|id| label_master.get(id));
             let (mut top, mut detail) = worktree_row(
                 w,
