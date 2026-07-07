@@ -506,6 +506,36 @@ pub fn set_label(
     })
 }
 
+/// Overwrite a session's per-session agent CLI / model override in `state.json`,
+/// leaving its branch / identity untouched.
+///
+/// This is the counterpart to recording the override at [`create_with_agent`]
+/// time: it re-pins the CLI and model an already-created session launches with,
+/// so a coordinator can re-target a session (e.g. hand a heavier follow-up to a
+/// larger model) before its next fresh agent launch. The change only takes
+/// effect the next time the session's pane is launched from the home screen — a
+/// pane already running keeps the CLI it was started with until relaunched.
+///
+/// `agent.model` is normalised exactly as at record time — trimmed, with a value
+/// that trims to empty dropped — so a blank string never renders as `--model ''`
+/// at launch. Passing [`SessionAgent::default`] clears both overrides, so the
+/// session falls back to the workspace effective settings and the CLI's own
+/// default model. Returns the override now stored. Fails when no session named
+/// `name` exists.
+pub fn set_agent(workspace_root: &Path, name: &str, agent: SessionAgent) -> Result<SessionAgent> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_session(&store, name, |session| {
+        session.agent = SessionAgent {
+            cli: agent.cli,
+            model: agent
+                .model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty()),
+        };
+        session.agent.clone()
+    })
+}
+
 /// Return a session's free-form note, or `None` when none has been written.
 /// Fails when no session named `name` exists.
 pub fn get_note(workspace_root: &Path, name: &str) -> Result<Option<String>> {
@@ -1207,6 +1237,33 @@ mod tests {
         // interactive `create` never has a parent session.
         assert_eq!(blank.started_from, None);
         assert_eq!(plain.started_from, None);
+    }
+
+    #[test]
+    fn set_agent_updates_an_existing_session_and_normalises_the_model() {
+        use crate::domain::settings::AgentCli;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "work").unwrap();
+
+        let stored = set_agent(
+            root.path(),
+            "work",
+            SessionAgent {
+                cli: Some(AgentCli::CodexFugu),
+                model: Some("  fugu-ultra  ".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(stored.cli, Some(AgentCli::CodexFugu));
+        assert_eq!(stored.model.as_deref(), Some("fugu-ultra"));
+        assert_eq!(list(root.path()).unwrap()[0].agent, stored);
+
+        // The default value clears both overrides, returning the session to the
+        // workspace effective CLI and the CLI's own default model.
+        let cleared = set_agent(root.path(), "work", SessionAgent::default()).unwrap();
+        assert!(cleared.is_unset());
+        assert!(list(root.path()).unwrap()[0].agent.is_unset());
     }
 
     #[test]
