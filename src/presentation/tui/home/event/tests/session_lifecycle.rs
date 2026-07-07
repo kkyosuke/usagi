@@ -246,7 +246,7 @@ fn a_finished_create_drops_into_closeup_on_the_new_session() {
 
 #[test]
 fn finished_create_does_not_auto_closeup_after_another_operation() {
-    use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
+    use super::super::super::tasks::{AutoFocus, Completion, FocusLanding, TaskKind};
     use std::rc::Rc;
 
     struct CompleteOnArrowDown {
@@ -350,6 +350,7 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
         *task_id.borrow_mut() = Some(id);
         *focus.borrow_mut() = Some(AutoFocus {
             name: name.to_string(),
+            landing: FocusLanding::Closeup,
             interaction_epoch,
         });
     };
@@ -434,16 +435,21 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
 }
 
 #[test]
-fn finished_close_drops_into_closeup_on_the_previous_session() {
+fn finished_close_lands_in_switch_on_the_previous_session() {
     // `close` removes the focused session on a worker. When it finishes before
-    // the user does anything else, the landing mirrors create's auto-focus path:
-    // focus the nearest session above the closed one instead of snapping to root.
-    // Prove that by pressing Closeup menu's `t` shortcut after completion — it can
-    // only open `/main` if the close landed in 集中 on `main`.
+    // the user does anything else, the landing selects the nearest session above
+    // the closed one while staying in 選択 (Switch): the user just left a session,
+    // so do not drop into the neighbour's 集中 surface.
+    //
+    // Prove both pieces by pressing `t` twice after completion. In Switch, the
+    // first `t` enters 集中 on `main` and the second opens a terminal there. If the
+    // close incorrectly auto-entered 集中, the first `t` would already open a
+    // terminal and the second would open another one.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // -> Closeup(feat), menu UI
     keys.push(Ok(Key::ArrowDown)); // agent -> close
-    keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Closeup(main)
+    keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Switch(main)
+    keys.push(Ok(Key::Char('t'))); // Switch shortcut: enter Closeup on `main`
     keys.push(Ok(Key::Char('t'))); // Closeup menu shortcut: open terminal on `main`
 
     let term = Term::stdout();
@@ -511,7 +517,7 @@ fn finished_close_drops_into_closeup_on_the_previous_session() {
 }
 
 #[test]
-fn finished_close_does_not_auto_closeup_after_another_operation() {
+fn finished_close_does_not_auto_focus_after_another_operation() {
     use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
     use std::rc::Rc;
 
@@ -668,7 +674,7 @@ fn finished_close_does_not_auto_closeup_after_another_operation() {
     ));
     assert_eq!(
         branches_called, 1,
-        "`c` after the delayed close completion stayed in 選択 instead of auto-focusing"
+        "`c` after the delayed close completion stayed in 選択 instead of being consumed elsewhere"
     );
 }
 

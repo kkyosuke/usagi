@@ -155,6 +155,22 @@ fn enter_closeup_named_is_a_no_op_for_an_unknown_session() {
 }
 
 #[test]
+fn focus_switch_named_selects_the_matching_session_without_entering_closeup() {
+    let mut state = state();
+    state.enter_closeup(1);
+    assert_eq!(state.mode(), Mode::Closeup);
+
+    assert!(state.focus_switch_named("feature"));
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.focused_session_name(), "feature");
+
+    // An unmatched name leaves the mode and cursor untouched.
+    assert!(!state.focus_switch_named("nope"));
+    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.focused_session_name(), "feature");
+}
+
+#[test]
 fn enter_closeup_on_the_root_row_names_root() {
     let mut state = state();
     state.enter_closeup(0);
@@ -183,7 +199,7 @@ fn entering_closeup_selects_the_new_tab() {
 
 #[test]
 fn entering_closeup_existing_selects_a_live_pane_instead_of_new_tab() {
-    // Close auto-focus lands on the neighbouring session's current live pane when
+    // Existing-pane Closeup entry lands on the session's current live pane when
     // one exists, rather than opening the "+ new" action surface.
     let mut live = state();
     assert!(live.enter_closeup_named_existing("feature"));
@@ -195,6 +211,15 @@ fn entering_closeup_existing_selects_a_live_pane_instead_of_new_tab() {
     let mut idle = state();
     assert!(idle.enter_closeup_named_existing("feature"));
     assert!(idle.closeup_on_new_tab());
+}
+
+#[test]
+fn enter_closeup_named_existing_is_a_no_op_for_an_unknown_session() {
+    let mut state = state();
+    // An unmatched name leaves the mode and cursor untouched (still 選択, root row).
+    assert!(!state.enter_closeup_named_existing("nope"));
+    assert_eq!(state.mode(), Mode::Switch);
+    assert!(state.list().root_active());
 }
 
 #[test]

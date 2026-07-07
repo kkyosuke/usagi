@@ -77,7 +77,22 @@ impl TaskKind {
     }
 }
 
-/// A successful create/close's request to automatically land in 集中 (Closeup).
+/// Where a finished task's auto-focus should leave the user once its landing
+/// session is in the refreshed list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusLanding {
+    /// Drop into 集中 (Closeup) on the landing session — a fresh `create`, which
+    /// the user asked to operate right away.
+    Closeup,
+    /// Land the Switch cursor on the session, staying in 選択 (Switch) — a
+    /// finished `close`, which leaves the user operating the session set rather
+    /// than dropping into the closed session's neighbour.
+    Switch,
+}
+
+/// A successful create/close's request to automatically focus a session once the
+/// refreshed list lands — `landing` says whether that means dropping into 集中
+/// (Closeup) on it (a create) or just moving the Switch cursor onto it (a close).
 /// The `interaction_epoch` is the user-input counter from the moment the task
 /// was dispatched; the event loop only honors it when no later input has
 /// arrived.
@@ -85,6 +100,8 @@ impl TaskKind {
 pub struct AutoFocus {
     /// The branch/session name to focus after the refreshed list lands.
     pub name: String,
+    /// Where honoring this auto-focus leaves the user (集中 vs. 選択).
+    pub landing: FocusLanding,
     /// The user-input epoch at dispatch time.
     pub interaction_epoch: u64,
 }

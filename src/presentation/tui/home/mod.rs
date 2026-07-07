@@ -1952,6 +1952,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                 // without making them navigate over. (MCP creates never reach here.)
                 focus: Some(tasks::AutoFocus {
                     name: created.name.clone(),
+                    landing: tasks::FocusLanding::Closeup,
                     interaction_epoch,
                 }),
                 created: Some(created.name.clone()),

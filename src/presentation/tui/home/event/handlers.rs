@@ -1063,12 +1063,13 @@ fn closeup_prefix_action(
 /// `session remove <name> --force`.
 ///
 /// Either way the user asked to leave this session, so 集中 yields to the base
-/// 選択 (Overview) at once (`Esc` is inert there). If removal finishes before any
-/// other operation, the task then lands on the neighbouring session instead of
-/// root; otherwise the refreshed list preserves the user's current operation.
-/// The removal's result — success or the dirty refusal — is logged and the list
-/// refreshed when the background task finishes. The root row is the workspace
-/// itself, not a session, so closing it is refused outright and stays in 集中.
+/// 選択 (Switch) at once (`Esc` is inert there). If removal finishes before any
+/// other operation, the task then keeps Switch selected on the neighbouring
+/// session instead of root; otherwise the refreshed list preserves the user's
+/// current operation. The removal's result — success or the dirty refusal — is
+/// logged and the list refreshed when the background task finishes. The root row
+/// is the workspace itself, not a session, so closing it is refused outright and
+/// stays in 集中.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
@@ -1084,6 +1085,7 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
         .focus_target_after_close()
         .map(|name| super::super::tasks::AutoFocus {
             name,
+            landing: super::super::tasks::FocusLanding::Switch,
             interaction_epoch: wiring.interaction_epoch,
         });
     state.begin_removing_session(root.clone(), name.clone());
