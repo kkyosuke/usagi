@@ -127,11 +127,10 @@ pub(super) fn session_tree_layout(
             return;
         }
         layout.push((index, depth));
-        if let Some(session) = sessions.get(index) {
-            if let Some(child_rows) = children.get(session.name.as_str()) {
-                for &child in child_rows {
-                    push_tree(child, depth + 1, sessions, children, visited, layout);
-                }
+        let session = &sessions[index];
+        if let Some(child_rows) = children.get(session.name.as_str()) {
+            for &child in child_rows {
+                push_tree(child, depth + 1, sessions, children, visited, layout);
             }
         }
     }
@@ -733,17 +732,11 @@ impl WorktreeList {
     /// Both indices are always in range, so their `(group, slot)` resolves; a slot
     /// in the now-folded group maps onto its single header line.
     fn set_group_collapsed(&mut self, index: usize, collapsed: bool) {
-        let sel = self.locate(self.selected_index);
-        let act = self.locate(self.active_index);
-        if let Some(group) = self.groups.get_mut(index) {
-            group.collapsed = collapsed;
-        }
-        if let Some((g, slot)) = sel {
-            self.selected_index = self.nav_index_of(g, slot);
-        }
-        if let Some((g, slot)) = act {
-            self.active_index = self.nav_index_of(g, slot);
-        }
+        let (sel_g, sel_slot) = self.locate(self.selected_index).unwrap();
+        let (act_g, act_slot) = self.locate(self.active_index).unwrap();
+        self.groups[index].collapsed = collapsed;
+        self.selected_index = self.nav_index_of(sel_g, sel_slot);
+        self.active_index = self.nav_index_of(act_g, act_slot);
     }
 
     /// The flat index of a `(group, slot)` (a valid group from [`locate`]). In a

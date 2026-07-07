@@ -237,6 +237,13 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
+fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
+    let cell = nested_name_cell("child", 1, false, 1);
+    assert_eq!(console::measure_text_width(&cell), 1);
+    assert!(!console::strip_ansi_codes(&cell).contains("child"));
+}
+
+#[test]
 fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
     // The selected session in 切替 (Switch) uses the one-line usagi glyph on line
     // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
