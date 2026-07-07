@@ -717,7 +717,7 @@ fn session_tool_schemas() -> Value {
                     },
                     "agent_cli": {
                         "type": "string",
-                        "enum": ["claude", "codex", "codex-fugu", "gemini", "agy"],
+                        "enum": ["claude", "codex", "sakana.ai", "gemini", "antigravity"],
                         "description": "Agent CLI this session should launch with from now on (default: leave the existing CLI override unchanged)"
                     },
                     "model": {
@@ -1298,7 +1298,7 @@ mod tests {
             .into_iter()
             .find(|s| s.name == "work")
             .unwrap();
-        assert_eq!(session.agent.cli, Some(AgentCli::CodexFugu));
+        assert_eq!(session.agent.cli, Some(AgentCli::SakanaAi));
         assert_eq!(session.agent.model.as_deref(), Some("fugu-ultra"));
     }
 
@@ -1338,7 +1338,7 @@ mod tests {
             .into_iter()
             .find(|s| s.name == "work")
             .unwrap();
-        assert_eq!(session.agent.cli, Some(AgentCli::CodexFugu));
+        assert_eq!(session.agent.cli, Some(AgentCli::SakanaAi));
         assert_eq!(session.agent.model.as_deref(), Some("claude-opus"));
     }
 

@@ -1250,12 +1250,12 @@ mod tests {
             root.path(),
             "work",
             SessionAgent {
-                cli: Some(AgentCli::CodexFugu),
+                cli: Some(AgentCli::SakanaAi),
                 model: Some("  fugu-ultra  ".to_string()),
             },
         )
         .unwrap();
-        assert_eq!(stored.cli, Some(AgentCli::CodexFugu));
+        assert_eq!(stored.cli, Some(AgentCli::SakanaAi));
         assert_eq!(stored.model.as_deref(), Some("fugu-ultra"));
         assert_eq!(list(root.path()).unwrap()[0].agent, stored);
 
