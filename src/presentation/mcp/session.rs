@@ -281,14 +281,36 @@ impl SessionMcpServer {
 
     fn tool_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: PromptArgs = parse_args(arguments)?;
+        check_prompt_len("session_prompt", &args.prompt)?;
+        let stored_agent = if args.agent_cli.is_some() || args.model.is_some() {
+            if args.name == ROOT_TARGET {
+                return Err(
+                    "session_prompt agent_cli/model cannot be used with the :root target"
+                        .to_string(),
+                );
+            }
+            let existing = self.find_session(&args.name)?.agent;
+            let cli = match args.agent_cli.as_deref() {
+                Some(agent_cli) => resolve_session_agent(&*self.runner, Some(agent_cli), None)?.cli,
+                None => existing.cli,
+            };
+            let model = args.model.or(existing.model);
+            Some(self.set_session_agent(&args.name, SessionAgent { cli, model })?)
+        } else {
+            None
+        };
         let (channel, detail) = self.deliver_prompt(&args.name, &args.prompt, args.mode)?;
         // Report the channel that actually took the prompt, so a caller using
         // `auto` sees whether it reached a running pane or was queued for launch.
-        Ok(to_pretty(&json!({
+        let mut result = json!({
             "name": args.name,
             "delivered_to": channel.as_str(),
             "detail": detail,
-        })))
+        });
+        if let Some(agent) = stored_agent {
+            result["agent"] = session_agent_to_json(&agent);
+        }
+        Ok(to_pretty(&result))
     }
 
     /// Deliver `prompt` to `name` over the channel chosen by `mode`, returning the
@@ -333,6 +355,17 @@ impl SessionMcpServer {
         } else {
             Ok(self.find_session(name)?.root)
         }
+    }
+
+    /// Persist a new per-session agent CLI / model override for `name`.
+    ///
+    /// This is used by `session_prompt` when a caller supplies `agent_cli` and/or
+    /// `model`: the override is recorded before the prompt is delivered, so a
+    /// queued prompt is opened by the requested agent on the next fresh launch.
+    /// Live delivery can only affect future launches; the already-running pane
+    /// keeps whatever CLI/model started it.
+    fn set_session_agent(&self, name: &str, agent: SessionAgent) -> Result<SessionAgent, String> {
+        session::set_agent(&self.workspace_root, name, agent).map_err(|e| e.to_string())
     }
 
     fn tool_list_status(&self) -> Result<String, String> {
@@ -453,6 +486,16 @@ struct PromptArgs {
     /// Which delivery channel to use; defaults to [`PromptMode::Auto`].
     #[serde(default)]
     mode: PromptMode,
+    /// Optional agent CLI this session should launch with from now on. When
+    /// present, `session_prompt` stores the override before queuing/sending the
+    /// prompt so the next fresh launch uses this CLI. Absent leaves any existing
+    /// per-session CLI override unchanged.
+    #[serde(default)]
+    agent_cli: Option<String>,
+    /// Optional model this session's agent CLI should launch with from now on.
+    /// Absent leaves any existing per-session model override unchanged.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// How `session_prompt` chooses between the launch queue and the live pane.
@@ -470,7 +513,7 @@ pub(crate) enum PromptMode {
 
 /// The channel a prompt was actually delivered over, reported back to the caller
 /// as `delivered_to`.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Channel {
     Queue,
     Live,
@@ -576,6 +619,15 @@ fn statuses_to_json(statuses: &[session::SessionStatus]) -> Value {
     )
 }
 
+/// Serialize the stored per-session agent override in a stable shape for MCP
+/// tool results.
+fn session_agent_to_json(agent: &SessionAgent) -> Value {
+    json!({
+        "cli": agent.cli.map(|cli| cli.command()),
+        "model": agent.model.as_deref(),
+    })
+}
+
 /// JSON Schemas for the session tools advertised via `tools/list`.
 fn session_tool_schemas() -> Value {
     json!([
@@ -643,7 +695,11 @@ fn session_tool_schemas() -> Value {
                 pane (waiting if none is open yet). `mode` defaults to `auto`, \
                 which delivers live when the session has a live agent pane and \
                 queues for launch otherwise — so you need not know whether the \
-                agent is currently running. The result's `delivered_to` reports \
+                agent is currently running. Optionally set `agent_cli` and/or \
+                `model` to re-pin the session's future agent launches before the \
+                prompt is delivered; a currently running live pane is not \
+                restarted, so the override applies after it is relaunched. The \
+                result's `delivered_to` reports \
                 which channel took the prompt (\"live\" or \"queue\"). Pass the \
                 reserved name \":root\" to target the workspace's root row (the \
                 coordinator running there) instead of a session: a child session's \
@@ -658,6 +714,15 @@ fn session_tool_schemas() -> Value {
                         "type": "string",
                         "enum": ["auto", "queue", "live"],
                         "description": "auto (default): live if a pane is running, else queue for launch. queue: always the next fresh launch. live: always the running pane (waits if none open)."
+                    },
+                    "agent_cli": {
+                        "type": "string",
+                        "enum": ["claude", "codex", "sakana.ai", "gemini", "antigravity"],
+                        "description": "Agent CLI this session should launch with from now on (default: leave the existing CLI override unchanged)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model this session's agent CLI should launch with from now on (default: leave the existing model override unchanged; blank clears it)"
                     }
                 },
                 "required": ["name", "prompt"]
@@ -1200,6 +1265,201 @@ mod tests {
     }
 
     #[test]
+    fn prompt_with_agent_override_updates_the_session_before_queueing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done").with_live(false);
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({
+                "name": "work",
+                "prompt": "heavy follow-up",
+                "mode": "queue",
+                "agent_cli": "codex-fugu",
+                "model": "  fugu-ultra  "
+            }),
+        );
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(
+            body["agent"],
+            json!({"cli":"codex-fugu","model":"fugu-ultra"})
+        );
+        assert_eq!(calls.borrow().len(), 1);
+
+        let session = session::list(root.path())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "work")
+            .unwrap();
+        assert_eq!(session.agent.cli, Some(AgentCli::SakanaAi));
+        assert_eq!(session.agent.model.as_deref(), Some("fugu-ultra"));
+    }
+
+    #[test]
+    fn prompt_agent_override_is_a_partial_update() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("done"));
+        call(
+            &server,
+            "session_create",
+            json!({"name":"work","agent_cli":"claude","model":"claude-3-5-sonnet"}),
+        );
+
+        let model_only = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"same cli, new model","model":"claude-opus"}),
+        );
+        assert_eq!(model_only["isError"], false);
+        let session = session::list(root.path())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "work")
+            .unwrap();
+        assert_eq!(session.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-opus"));
+
+        let cli_only = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"new cli, same model","agent_cli":"codex-fugu"}),
+        );
+        assert_eq!(cli_only["isError"], false);
+        let session = session::list(root.path())
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "work")
+            .unwrap();
+        assert_eq!(session.agent.cli, Some(AgentCli::SakanaAi));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-opus"));
+    }
+
+    #[test]
+    fn prompt_agent_override_rejects_root_target_and_unknown_cli() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let root_result = call(
+            &server,
+            "session_prompt",
+            json!({"name":":root","prompt":"report","agent_cli":"claude"}),
+        );
+        assert_eq!(root_result["isError"], true);
+        assert!(root_result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be used with the :root target"));
+
+        let bad_cli = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"hi","agent_cli":"gemini"}),
+        );
+        assert_eq!(bad_cli["isError"], true);
+        assert!(bad_cli["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not installed or not MCP-capable"));
+
+        // Both errors happen before anything reaches a prompt queue.
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn prompt_agent_override_for_an_unknown_session_errors_before_queueing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"ghost","prompt":"hi","model":"fugu-ultra"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_agent_override_surfaces_store_write_errors_before_queueing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let state_dir = root.path().join(".usagi");
+        let original_mode = fs::metadata(&state_dir).unwrap().permissions().mode();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"hi","model":"fugu-ultra"}),
+        );
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("failed to create"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn set_session_agent_surfaces_usecase_errors() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("done"));
+
+        let err = server
+            .set_session_agent("ghost", SessionAgent::default())
+            .unwrap_err();
+        assert!(err.contains("no sessions recorded"), "{err}");
+    }
+
+    #[test]
+    fn deliver_prompt_rejects_oversized_prompts_before_resolving_target() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let err = server
+            .deliver_prompt(
+                "ghost",
+                &"x".repeat(MAX_PROMPT_BYTES + 1),
+                PromptMode::Queue,
+            )
+            .unwrap_err();
+        assert!(err.contains("session_prompt prompt is too large"), "{err}");
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
     fn auto_prompt_delivers_live_when_a_pane_is_detected() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
@@ -1664,6 +1924,9 @@ mod tests {
         assert_eq!(result["isError"], true);
         // session_remove requires a name.
         let result = call(&server, "session_remove", json!({}));
+        assert_eq!(result["isError"], true);
+        // session_note_update requires a note before it checks the current session.
+        let result = call(&server, "session_note_update", json!({}));
         assert_eq!(result["isError"], true);
     }
 
