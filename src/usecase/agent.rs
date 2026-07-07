@@ -169,12 +169,30 @@ mod tests {
 
     #[test]
     fn launch_wiring_marks_workspace_root_and_skips_headless_sandbox_roots() {
+        use std::cell::Cell;
+
         let dir = Path::new("/repo");
-        let wiring = wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Headless, |_| {
+        let calls = Cell::new(0);
+        let resolve_git_common_dir = |path: &Path| {
+            calls.set(calls.get() + 1);
+            Some(path.join(".git"))
+        };
+        assert_eq!(
+            resolve_git_common_dir(dir),
             Some(PathBuf::from("/repo/.git"))
-        });
+        );
+        let calls_before_launch = calls.get();
+
+        let wiring = wiring_for_launch(
+            &base_wiring(),
+            None,
+            dir,
+            LaunchMode::Headless,
+            resolve_git_common_dir,
+        );
 
         assert!(wiring.is_root);
+        assert_eq!(calls.get(), calls_before_launch);
         assert_eq!(
             wiring.sandbox_writable_roots,
             vec![PathBuf::from("/old/git")]
