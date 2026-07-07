@@ -139,6 +139,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -182,6 +183,7 @@ mod tests {
             local_llm_model: Some("qwen2.5-coder".to_string()),
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -213,6 +215,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -234,6 +237,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -257,6 +261,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         update_mcp_config(&config_path, &wiring).unwrap();
@@ -281,6 +286,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         let err = update_mcp_config(&config_path, &wiring).unwrap_err();
@@ -295,6 +301,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         let err = update_mcp_config(temp_dir.path(), &wiring).unwrap_err();
@@ -308,6 +315,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         let err = update_mcp_config(Path::new(""), &wiring).unwrap_err();
