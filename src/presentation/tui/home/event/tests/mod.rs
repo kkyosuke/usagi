@@ -543,6 +543,7 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
             root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
             worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
             created_at: Utc::now(),

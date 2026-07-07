@@ -83,6 +83,7 @@
       "note": "バリデーションを実装中\n・API は未着手",
       "label_id": "review",
       "agent": { "cli": "claude", "model": "claude-opus-4-8" },
+      "origin": "human",
       "root": "/Users/me/git/usagi/.usagi/sessions/login",
       "worktrees": [
         {
@@ -131,6 +132,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
 | `label_id` | string? | ユーザーが切替（Switch）で手で付けた**ステータスラベルの ID**（任意）。[`session_labels` マスタ](../05-settings.md#ステータスラベルsession_labels)の要素 `id` を指し、表示時にマスタへ解決される（マスタから消えた ID は未設定扱い）。`status` と違い git からは導出されない純粋なユーザー付与タグで、ワークスペース同期では書き換えない。未設定（既定）なら省略される |
 | `agent` | object? | このセッション単位のエージェント CLI・モデルの上書き（任意）。`{ "cli": <AgentCli>?, "model": string? }` で、`session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成・委譲するときに指定する。このセッションのエージェントペイン起動（自動 spawn・ペイン復旧・在席からの起動）時に、ワークスペースの実効設定 `agent_cli` より**優先**して適用される。`cli` は `claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`（未知の値は `null` に劣化し、その場を含む記録全体は読める）、`model` は各 CLI のモデル指定フラグ（claude `--model`、codex / gemini `-m`）に素通しで展開される（allowlist 無し）。両方未設定（既定）なら省略され、セッションはワークスペースの実効設定と各 CLI の既定モデルに従う |
+| `origin` | enum? | このセッションを**誰が起動したか**（作成時に一度だけ記録し、以後変えない。ワークスペース同期でも書き換えない）。`human`＝人が TUI ホーム画面の切替（Switch）で作成、`mcp`＝エージェントが MCP の `session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成。この項目が無い古い `state.json` のセッションは `unknown`（＝未記録）に縮退し、未知の値も `unknown` に劣化して記録全体は読める。`unknown`（既定）なら省略される |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |

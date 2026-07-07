@@ -85,6 +85,7 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
             root: std::path::PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
             worktrees: Vec::new(),
             created_at: chrono::Utc::now(),

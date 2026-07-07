@@ -649,6 +649,7 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
             root: ghost.clone(),
             worktrees: vec![WorktreeState {
                 branch: Some("usagi/ghost".to_string()),

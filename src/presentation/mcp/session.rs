@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use super::{parse_args, to_pretty, McpService};
 use crate::domain::settings::AgentCli;
-use crate::domain::workspace_state::{SessionAgent, SessionRecord};
+use crate::domain::workspace_state::{SessionAgent, SessionOrigin, SessionRecord};
 use crate::usecase::doctor::CommandRunner;
 use crate::usecase::session;
 
@@ -247,12 +247,18 @@ impl SessionMcpServer {
         name: &str,
         agent: SessionAgent,
     ) -> Result<session::CreatedSession, String> {
-        session::create_with_agent(&self.workspace_root, name, agent).map_err(|e| {
-            crate::infrastructure::error_log::ErrorLog::record(&format!(
-                "mcp session_create \"{name}\" failed: {e:#}"
-            ));
-            e.to_string()
-        })
+        // The MCP server is the agent-facing entry point, so every session it
+        // creates — whether from `session_create` or `session_delegate_issue` —
+        // is recorded with an MCP origin, distinguishing it from a session a
+        // person cut interactively in the TUI.
+        session::create_with_agent(&self.workspace_root, name, agent, SessionOrigin::Mcp).map_err(
+            |e| {
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "mcp session_create \"{name}\" failed: {e:#}"
+                ));
+                e.to_string()
+            },
+        )
     }
 
     fn tool_list(&self) -> Result<String, String> {
@@ -512,6 +518,7 @@ fn sessions_to_json(sessions: &[SessionRecord]) -> Value {
                 json!({
                     "name": s.name,
                     "display_name": s.display_name,
+                    "origin": s.origin.as_str(),
                     "root": s.root,
                     "created_at": s.created_at.to_rfc3339(),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
@@ -538,6 +545,7 @@ fn statuses_to_json(statuses: &[session::SessionStatus]) -> Value {
                 json!({
                     "name": s.name,
                     "display_name": s.display_name,
+                    "origin": s.origin.as_str(),
                     "root": s.root,
                     "agent_phase": s.agent_phase.map_or("none", |p| p.as_str()),
                     "worktrees": s.worktrees.iter().map(|wt| json!({
@@ -950,6 +958,9 @@ mod tests {
         assert_eq!(arr[0]["name"], "feature-x");
         // No sidebar override set yet, so display_name is present but null.
         assert_eq!(arr[0]["display_name"], Value::Null);
+        // Created through the MCP server, so it is recorded — and surfaced — as an
+        // agent-launched session.
+        assert_eq!(arr[0]["origin"], "mcp");
         // The worktree is checked out on the namespaced session branch.
         assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/feature-x");
     }
@@ -1412,6 +1423,8 @@ mod tests {
         assert_eq!(arr[0]["name"], "work");
         assert_eq!(arr[0]["display_name"], Value::Null);
         assert_eq!(arr[0]["agent_phase"], "none");
+        // session_status surfaces the launch origin too; this one was cut via MCP.
+        assert_eq!(arr[0]["origin"], "mcp");
         assert_eq!(arr[0]["worktrees"][0]["status"], "local");
         assert_eq!(arr[0]["worktrees"][0]["dirty"], false);
         assert_eq!(arr[0]["worktrees"][0]["merged"], false);
