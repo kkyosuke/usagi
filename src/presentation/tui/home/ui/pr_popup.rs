@@ -56,8 +56,8 @@ pub(super) fn full_sidebar_worktree_entries_with_pending(
 /// only the badge columns count, so the rest of the row stays free for selection.
 ///
 /// The geometry mirrors what [`super::render_frame`] lays out: the two-pane body
-/// begins at row [`BODY_TOP`] (below the title bar, mode ladder, and blank
-/// separator) and is [`super::body_rows_for`] rows tall; the left pane is the
+/// begins at row [`BODY_TOP`] (below the one-line header and blank separator)
+/// and is [`super::body_rows_for`] rows tall; the left pane is the
 /// first `left_w` columns. Within it the entries stack as [`left_pane`] builds
 /// them — including the 統合(unite) gaps and group headers, walked by
 /// [`full_sidebar_worktree_entries`]. The badge is the right-aligned tail of the
@@ -334,10 +334,10 @@ pub(in crate::presentation::tui::home) fn pr_popup_click(
 /// badges sit.
 pub(super) const DETAIL_LINE: usize = 1;
 
-/// The 0-based screen row the two-pane body begins at, matching the title bar,
-/// mode ladder, and blank separator [`super::render_frame`] stacks above it (and
-/// the `origin_row` of [`super::terminal_geometry`]).
-pub(super) const BODY_TOP: u16 = 3;
+/// The 0-based screen row the two-pane body begins at, matching the one-line
+/// header and blank separator [`super::render_frame`] stacks above it (and the
+/// `origin_row` of [`super::terminal_geometry`]).
+pub(super) const BODY_TOP: u16 = 2;
 
 /// Lines the left pane spends before the first worktree row: the root entry (two
 /// rows) and the divider beneath it. Worktree `i` then occupies the

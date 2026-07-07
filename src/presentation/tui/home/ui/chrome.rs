@@ -1,7 +1,7 @@
-//! The chrome around the body: the title bar and engagement-ladder indicator,
+//! The chrome around the body: the one-line workspace breadcrumb / mode header,
 //! the mode-aware command input and footer, the `:` command palette overlay
-//! (with its command hints), and the session-removal / quit-confirmation
-//! modals. All functions take plain data and return styled lines.
+//! (with its command hints), and the session-removal / quit-confirmation modals.
+//! All functions take plain data and return styled lines.
 
 use crate::presentation::theme::Palette;
 use console::{style, Style};
@@ -27,42 +27,79 @@ use crate::presentation::tui::widgets;
 const CREATE_ROW_INDENT: &str = "  ";
 
 /// Minimum / maximum display width of the active-session-name field in the
-/// title bar. The field scales with the terminal (a quarter of its width) and
+/// header. The field scales with the terminal (a quarter of its width) and
 /// is clamped to this range, so a roomy window shows more of a long name while a
 /// narrow one stays compact. A long name is clipped to the chosen width, a short
 /// one padded out — and since the width depends only on the (per-frame constant)
 /// terminal size, never the name text, the label keeps the same width every
-/// frame, so the centred title never shifts as the active session changes.
+/// frame, so the centred header never shifts as the active session changes.
 const TITLE_NAME_MIN_W: usize = 12;
 const TITLE_NAME_MAX_W: usize = 24;
 
-/// The centred title bar: workspace name and session count. The count covers
-/// every row in the left pane — the root row plus each session (one row per
-/// session, not per repository) — so it matches what the user sees.
-pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
+/// Display columns left blank on both sides of the centred header whenever the
+/// terminal is wide enough. The right-side gap lets the top-right waiting notice
+/// (` N waiting`) append to row 0 instead of colliding with the now longer
+/// breadcrumb + mode strip; the left-side twin keeps the header visually
+/// centred.
+const HEADER_SIDE_RESERVE: usize = 12;
+
+/// The centred one-line header: workspace breadcrumb, session count, and mode
+/// indicator. The count covers every row in the left pane — the root row plus
+/// each session (one row per session, not per repository) — so it matches what
+/// the user sees.
+pub(super) fn title_bar(width: usize, list: &WorktreeList, current: Mode) -> String {
+    let mut name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
+    let budget = header_content_budget(width);
+    let mut header = title_bar_content(list, current, name_w);
+    if console::measure_text_width(&header) > budget && name_w > TITLE_NAME_MIN_W {
+        name_w = TITLE_NAME_MIN_W;
+        header = title_bar_content(list, current, name_w);
+    }
+    let header = widgets::clip_to_width(&header, budget);
+    let pad = widgets::centered_padding(width, console::measure_text_width(&header));
+    format!("{}{header}", " ".repeat(pad))
+}
+
+fn header_content_budget(width: usize) -> usize {
+    if width > HEADER_SIDE_RESERVE * 2 {
+        width - HEADER_SIDE_RESERVE * 2
+    } else {
+        width
+    }
+}
+
+fn title_bar_content(list: &WorktreeList, current: Mode, name_w: usize) -> String {
     let count = list.session_count();
     // The active session's name rides in the title so it is identifiable even
-    // when the sidebar is collapsed to the rail (which shows no names). `▸` marks
-    // it; the root row reads as the workspace itself.
+    // when the sidebar is collapsed to the rail (which shows no names). The root
+    // row reads as the workspace itself.
     //
     // Pin the name to a fixed-width field (clipped if long, padded if short) so
     // the whole label keeps a constant width and the centred bar stays put as
     // the active session changes — a longer name no longer pushes it sideways.
-    let name_w = (width / 4).clamp(TITLE_NAME_MIN_W, TITLE_NAME_MAX_W);
     let name = pad_to_width(clip_to_width(list.active_name(), name_w), name_w);
     let groups = list.group_count();
-    let label = if groups > 1 {
+    let workspace = if groups > 1 {
         // 統合(unite): the title names the union, not one workspace, and counts the
         // workspaces stacked in the sidebar.
-        format!("unite · ▸ {name} · {count} sessions across {groups} workspaces")
+        "unite".to_string()
     } else {
-        format!(
-            "{} · ▸ {name} · {count} session{}",
-            list.workspace_name(),
-            if count == 1 { "" } else { "s" }
-        )
+        list.workspace_name().to_string()
     };
-    widgets::title_line(width, &label)
+    let count_label = if groups > 1 {
+        format!("{count} sessions across {groups} workspaces")
+    } else {
+        format!("{count} session{}", if count == 1 { "" } else { "s" })
+    };
+    let sep = style(" › ").dim();
+    let spacer = style(" · ").dim();
+    format!(
+        "{}{sep}{}{sep}{}{spacer}{}",
+        style(workspace).success().bold(),
+        style(name).success().bold(),
+        style(count_label).success(),
+        mode_ladder(current),
+    )
 }
 
 /// Minimum / maximum display width of the task-status label field. The field
@@ -92,15 +129,14 @@ const TASK_COUNT_W: usize = 5;
 /// everything has settled. Returns no lines when nothing is tracked, so the
 /// corner falls back to the waiting notice.
 ///
-/// Anchored to the **two header rows** (the centred title bar and mode ladder,
-/// whose right columns are blank) by [`overlay_top_right`](super::overlay_top_right)
-/// rather than over the body, so it never collides with the right pane's preview
-/// / menu / live terminal. Splitting onto two rows lets the label field use more
-/// of the terminal's width than a single corner line could. The bar is a real
-/// ratio — the share of the tracked tasks that have finished — not a per-task
-/// percentage git cannot report. Both rows are the same width (the icon column
-/// plus the label field) so the block right-aligns cleanly and never changes
-/// size frame to frame.
+/// Anchored to the top-right chrome by
+/// [`overlay_top_right`](super::overlay_top_right) rather than over the body, so
+/// it never collides with the right pane's preview / menu / live terminal.
+/// Splitting onto two rows lets the label field use more of the terminal's width
+/// than a single corner line could. The bar is a real ratio — the share of the
+/// tracked tasks that have finished — not a per-task percentage git cannot
+/// report. Both rows are the same width (the icon column plus the label field)
+/// so the block right-aligns cleanly and never changes size frame to frame.
 #[cfg(test)]
 pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     if rows.is_empty() {
@@ -122,8 +158,8 @@ pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
         TaskMark::Done(false) => ("✗".to_string(), Style::new().danger().bold()),
     };
     // Scale the label field with the terminal, clamped so the block still tucks
-    // into the blank gap beside the centred title / mode ladder. Constant for
-    // the whole frame, so the right-anchored block never shifts.
+    // into the blank gap beside the centred header. Constant for the whole
+    // frame, so the right-anchored block never shifts.
     let label_w = (width / 4).clamp(TASK_LABEL_MIN_W, TASK_LABEL_MAX_W);
     let label = pad_to_width(clip_to_width(&lead.label, label_w), label_w);
     let done = rows
@@ -175,15 +211,14 @@ pub(super) fn waiting_notice(count: usize) -> Vec<String> {
     vec![style(label).yellow().bold().to_string()]
 }
 
-/// The engagement-ladder indicator drawn just under the title bar: the three
-/// modes in order with the current one highlighted (cyan-bold) and the rest
-/// dimmed, so the screen always shows which step the keys act on. Centred for
-/// the terminal width.
-pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
+/// The engagement-ladder segment embedded in the header: the modes in order
+/// with the current one highlighted (cyan-bold) and the rest dimmed, so the
+/// screen always shows which step the keys act on.
+pub(super) fn mode_ladder(current: Mode) -> String {
     let steps: Vec<String> = Mode::LADDER
         .iter()
         .map(|mode| {
-            let label = mode.label();
+            let label = format!("{} {}", mode.icon(), mode.label());
             if *mode == current {
                 style(label).accent().bold().to_string()
             } else {
@@ -191,13 +226,7 @@ pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
             }
         })
         .collect();
-    // Clip to the terminal width so the ladder never overruns a very narrow
-    // window (the styling is ANSI, which `clip_to_width` carries through); at any
-    // normal width the fixed `Overview › Closeup › Attached` label fits and this
-    // is a no-op.
-    let ladder = widgets::clip_to_width(&steps.join(&style(" › ").dim().to_string()), width);
-    let pad = widgets::centered_padding(width, console::measure_text_width(&ladder));
-    format!("{}{ladder}", " ".repeat(pad))
+    steps.join("  ")
 }
 
 /// Renders one command-hint row: a `›` marker for the highlighted best match,

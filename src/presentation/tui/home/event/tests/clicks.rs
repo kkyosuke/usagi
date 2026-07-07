@@ -21,13 +21,13 @@ fn right_click(col: u16, row: u16) -> io::Result<Input> {
 }
 
 /// Screen row of the first line of the second worktree (`feat`, selectable index
-/// 2): body rows start at 3, root spans 3,4, the divider is 5, `main` 6,7,8,
-/// `feat` 9,10,11.
-const FEAT_ROW: u16 = 9;
+/// 2): body rows start at 2, root spans 2,3, the divider is 4, `main` 5,6,7,
+/// `feat` 8,9,10.
+const FEAT_ROW: u16 = 8;
 
 /// Screen row of the persistent "+ new session" row after `sample_state`'s two
-/// sessions: root rows 3,4; divider 5; `main` 6-8; `feat` 9-11; create row 12.
-const CREATE_ROW: u16 = 12;
+/// sessions: root rows 2,3; divider 4; `main` 5-7; `feat` 8-10; create row 11.
+const CREATE_ROW: u16 = 11;
 
 #[test]
 fn a_double_click_on_a_session_row_focuses_and_attaches_it() {

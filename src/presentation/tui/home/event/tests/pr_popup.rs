@@ -3,11 +3,11 @@
 //! clicking a `#<number>` opens that PR in the browser, and a click outside it — or
 //! any keypress — dismisses it. Pinning the popup never moves the selection.
 //!
-//! The left pane lays the root pair on body rows 3,4, a divider on row 5, then a
-//! three-row entry per worktree (`main` on rows 6,7,8), so `main`'s folded
-//! `<icon> 1` badge seats flush-right on its detail line (row 7) and its pinned
+//! The left pane lays the root pair on body rows 2,3, a divider on row 4, then a
+//! three-row entry per worktree (`main` on rows 5,6,7), so `main`'s folded
+//! `<icon> 1` badge seats flush-right on its detail line (row 6) and its pinned
 //! popup floats just past the pane and the 3-column divider: the `PR` box's top
-//! border on row 6, the `#412` content row on row 7, the bottom border on row 8.
+//! border on row 5, the `#412` content row on row 6, the bottom border on row 7.
 //!
 //! The loop reads the real terminal width (not a fixed test width), so the columns
 //! are derived from it via [`geom`] rather than hard-coded — the badge's three
@@ -22,9 +22,9 @@ fn click(col: u16, row: u16) -> io::Result<Input> {
 }
 
 /// `main`'s detail line (its badge row) and the popup's content row both sit on
-/// body row 7; the popup's top / bottom borders are rows 6 and 8.
-const BADGE_ROW: u16 = 7;
-const POPUP_ROW: u16 = 7;
+/// screen row 6; the popup's top / bottom borders are rows 5 and 7.
+const BADGE_ROW: u16 = 6;
+const POPUP_ROW: u16 = 6;
 
 /// Columns derived from the loop's real terminal width: the left pane is
 /// `(width / 3)` clamped to 16..=40, the flush-right `<icon> 1` badge is its last

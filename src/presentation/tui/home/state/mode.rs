@@ -85,6 +85,20 @@ impl Mode {
         }
     }
 
+    /// The Nerd Font icon shown beside the mode label in the header.
+    ///
+    /// These use Font Awesome 4 codepoints (U+F000 range) so older Nerd Font
+    /// installations can render them:
+    ///
+    /// - Switch: `nf-fa-exchange`
+    /// - Closeup: `nf-fa-search_plus`
+    pub fn icon(self) -> char {
+        match self {
+            Mode::Switch => '\u{f0ec}',
+            Mode::Closeup => '\u{f00e}',
+        }
+    }
+
     /// The lowercase tag the footer wraps in brackets (e.g. `[switch]`).
     pub fn tag(self) -> &'static str {
         match self {
@@ -101,10 +115,12 @@ mod tests {
     #[test]
     fn ladder_is_ordered_from_base_to_deepest_with_stable_display_names() {
         let labels: Vec<_> = Mode::LADDER.iter().map(|mode| mode.label()).collect();
+        let icons: Vec<_> = Mode::LADDER.iter().map(|mode| mode.icon()).collect();
         let tags: Vec<_> = Mode::LADDER.iter().map(|mode| mode.tag()).collect();
 
         assert_eq!(Mode::LADDER, [Mode::Switch, Mode::Closeup]);
         assert_eq!(labels, ["Switch", "Closeup"]);
+        assert_eq!(icons, ['\u{f0ec}', '\u{f00e}']);
         assert_eq!(tags, ["switch", "closeup"]);
     }
 }
