@@ -244,6 +244,25 @@ fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
 }
 
 #[test]
+fn nested_inline_field_applies_the_lineage_prefix_by_depth() {
+    // Depth 0 is not nested, so the field is returned clipped without a prefix.
+    let flat = nested_inline_field("edit", 10, 0);
+    assert_eq!(console::strip_ansi_codes(&flat), "edit");
+
+    // A nested field carries the dim `↳ ` marker and clips the body to the width
+    // left after it, so the whole entry line stays within its cell.
+    let nested = console::strip_ansi_codes(&nested_inline_field("edit", 10, 1)).into_owned();
+    assert!(nested.starts_with("↳ "));
+    assert!(nested.contains("edit"));
+
+    // When the width cannot even hold the prefix, only the (clipped) prefix is
+    // drawn — the body drops rather than overrunning the cell.
+    let tiny = nested_inline_field("edit", 1, 1);
+    assert_eq!(console::measure_text_width(&tiny), 1);
+    assert!(!console::strip_ansi_codes(&tiny).contains("edit"));
+}
+
+#[test]
 fn worktree_row_marks_the_selected_session_in_overview_and_shows_detached() {
     // The selected session in 選択 (Overview) uses the one-line usagi glyph on line
     // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
@@ -1222,6 +1241,108 @@ fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
         .collect();
     assert!(plain[7].starts_with("     ")); // child detail row
     assert!(plain[8].starts_with("     ")); // child resource row
+}
+
+#[test]
+fn left_pane_keeps_child_session_indented_while_renaming_it() {
+    let record = |name: &str, parent: Option<&str>| SessionRecord {
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: parent.map(str::to_string),
+        root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
+        worktrees: vec![worktree(Some(name), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.restore_sessions(vec![
+        record("parent", None),
+        record("child", Some("parent")),
+    ]);
+    state.overview_select(2); // root, parent, child
+
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &[],
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        34,
+        10,
+        true,
+        Sidebar::Full,
+        Utc::now(),
+        Some(("renamed", "renamed".len())),
+    );
+    let plain: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    assert!(plain[6].contains("↳ renamed"));
+    // The child entry's lower rows remain shifted under the indented edit field,
+    // so opening rename does not make a nested session jump back to root level.
+    let detail_indent: String = plain[7].chars().skip(1).take(4).collect();
+    let resource_indent: String = plain[8].chars().skip(1).take(4).collect();
+    assert_eq!(detail_indent, "    ");
+    assert_eq!(resource_indent, "    ");
+}
+
+#[test]
+fn left_pane_keeps_child_session_indented_while_removing_it() {
+    let record = |name: &str, parent: Option<&str>| SessionRecord {
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: parent.map(str::to_string),
+        root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
+        worktrees: vec![worktree(Some(name), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path("/repo");
+    state.restore_sessions(vec![
+        record("parent", None),
+        record("child", Some("parent")),
+    ]);
+    state.begin_removing_session(PathBuf::from("/repo"), "child".to_string());
+
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        34,
+        10,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let plain: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    assert!(plain[6].contains("↳ child"));
+    assert!(plain[6].contains('✂'));
+    assert!(plain[7].starts_with("     "));
+    assert!(plain[7].contains("removing session"));
+    assert!(plain[8].starts_with("     "));
+    assert!(plain[8].contains("pruning worktree"));
 }
 
 #[test]
