@@ -424,6 +424,18 @@ fn drive(
         if last_pr_popup != state.pr_popup() {
             interactive = true;
         }
+        // While 没入 (Attached) owns the event loop, the outer home loop is not
+        // running, so it cannot drain the terminal-pool watcher updates that
+        // background panes harvest. Drain them here too and apply them to the
+        // shared `HomeState`: a PR printed by another session should appear in the
+        // left sidebar immediately, without first zooming out to 選択 (Switch).
+        // Attached-pane PRs still update their own row below from the fresh
+        // terminal snapshot; this drain handles the detached/background path.
+        for (root, prs) in monitor.take_pr_link_updates() {
+            if state.set_pr_links(&root, prs) {
+                interactive = true;
+            }
+        }
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions
         // (including this one) keep their current state.
