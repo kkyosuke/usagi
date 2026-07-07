@@ -1385,6 +1385,23 @@ mod tests {
     }
 
     #[test]
+    fn create_surfaces_state_recording_errors_after_the_worktree_is_built() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // Keep `.usagi/sessions/` absent so `reconcile_locked` returns before it
+        // loads state.json, then make the later record() load fail. This covers
+        // the `record(...)?` propagation path that runs after the worktree was
+        // successfully constructed.
+        let usagi_dir = root.path().join(STATE_DIR);
+        fs::create_dir_all(&usagi_dir).unwrap();
+        fs::write(usagi_dir.join("state.json"), "not json").unwrap();
+
+        let err = create(root.path(), "bad-state").unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+        assert!(err.to_string().contains("state.json"));
+    }
+
+    #[test]
     fn a_plain_branch_sharing_the_session_name_does_not_collide() {
         // The whole point of the `usagi/` namespace: a hand-made branch named
         // exactly like the session no longer blocks creating it.
