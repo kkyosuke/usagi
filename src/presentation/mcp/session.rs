@@ -513,7 +513,7 @@ pub(crate) enum PromptMode {
 
 /// The channel a prompt was actually delivered over, reported back to the caller
 /// as `delivered_to`.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Channel {
     Queue,
     Live,
@@ -1378,6 +1378,88 @@ mod tests {
     }
 
     #[test]
+    fn prompt_agent_override_for_an_unknown_session_errors_before_queueing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"ghost","prompt":"hi","model":"fugu-ultra"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no such session"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_agent_override_surfaces_store_write_errors_before_queueing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let state_dir = root.path().join(".usagi");
+        let original_mode = fs::metadata(&state_dir).unwrap().permissions().mode();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"hi","model":"fugu-ultra"}),
+        );
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(original_mode)).unwrap();
+
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("failed to create"));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn set_session_agent_surfaces_usecase_errors() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("done"));
+
+        let err = server
+            .set_session_agent("ghost", SessionAgent::default())
+            .unwrap_err();
+        assert!(err.contains("no sessions recorded"), "{err}");
+    }
+
+    #[test]
+    fn deliver_prompt_rejects_oversized_prompts_before_resolving_target() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let calls = backend.calls.clone();
+        let server = server_at(root.path(), backend);
+
+        let err = server
+            .deliver_prompt(
+                "ghost",
+                &"x".repeat(MAX_PROMPT_BYTES + 1),
+                PromptMode::Queue,
+            )
+            .unwrap_err();
+        assert!(err.contains("session_prompt prompt is too large"), "{err}");
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
     fn auto_prompt_delivers_live_when_a_pane_is_detected() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
@@ -1842,6 +1924,9 @@ mod tests {
         assert_eq!(result["isError"], true);
         // session_remove requires a name.
         let result = call(&server, "session_remove", json!({}));
+        assert_eq!(result["isError"], true);
+        // session_note_update requires a note before it checks the current session.
+        let result = call(&server, "session_note_update", json!({}));
         assert_eq!(result["isError"], true);
     }
 
