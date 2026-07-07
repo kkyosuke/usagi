@@ -1581,7 +1581,11 @@ impl HomeState {
     /// commit, push, or merge — so the worktree status reflects what they just
     /// did, without yanking the cursor back to the root row the way
     /// [`restore_sessions`](Self::restore_sessions) (which resets it) would.
-    pub fn refresh_sessions(&mut self, sessions: Vec<SessionRecord>) {
+    /// Re-folds PR links from the store at apply time so a slow/stale refresh
+    /// cannot overwrite a badge harvested by a live pane while the refresh was
+    /// in flight.
+    pub fn refresh_sessions(&mut self, mut sessions: Vec<SessionRecord>) {
+        crate::usecase::workspace_state::refold_pr_links(&mut sessions);
         self.sessions = sessions;
         self.rebuild_list_keep_cursor();
     }
@@ -1597,10 +1601,11 @@ impl HomeState {
     /// have written any of them). A `root` matching no displayed workspace — one
     /// dropped from unite mode after the refresh was queued — is ignored rather
     /// than misfiled onto the primary.
-    pub fn refresh_sessions_for(&mut self, root: &Path, sessions: Vec<SessionRecord>) {
+    pub fn refresh_sessions_for(&mut self, root: &Path, mut sessions: Vec<SessionRecord>) {
         if root == self.root_path() {
             self.refresh_sessions(sessions);
         } else if let Some(i) = self.extra_groups.iter().position(|g| g.root_path == root) {
+            crate::usecase::workspace_state::refold_pr_links(&mut sessions);
             self.extra_groups[i].sessions = sessions;
             self.rebuild_list_keep_cursor();
         }

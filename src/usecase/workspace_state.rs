@@ -147,6 +147,25 @@ fn fold_pr_links(session: &mut SessionRecord) {
     }
 }
 
+/// Re-derive every session's `#<number>` PR badges from the [`pr_link_store`],
+/// upgrading a possibly-stale session list to the store's **current** contents
+/// just before it is displayed.
+///
+/// A background [`sync`] (or any other producer) folds the store into its
+/// session list at the moment it *reads* the store, then hands the list to the
+/// TUI to apply on a later frame. If a PR is harvested into the store in the gap
+/// between that read and the apply, the handed-over list is stale and would
+/// clobber a badge the live watcher already surfaced — so the freshly detected
+/// PR flickers on and then vanishes until the next full re-sync. Re-folding at
+/// apply time closes that gap: because [`fold_pr_links`] is **additive** (it only
+/// merges in URLs not already present, never dropping any), and the store is the
+/// monotonic superset of every PR ever seen for a session, re-folding can only
+/// restore missing badges — never lose one. Callers on the presentation refresh
+/// path use this so a stale list never drops a live PR badge.
+pub fn refold_pr_links(sessions: &mut [SessionRecord]) {
+    sessions.iter_mut().for_each(fold_pr_links);
+}
+
 /// The sessions recorded in `<root>/.usagi/state.json` for the home screen's
 /// immediate, git-free first paint, plus a notice when the state could not be
 /// read.

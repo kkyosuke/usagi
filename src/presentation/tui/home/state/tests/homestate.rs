@@ -1162,6 +1162,53 @@ fn set_pr_links_updates_the_sidebar_row_live() {
 }
 
 #[test]
+fn refresh_sessions_refolds_pr_links_so_a_stale_sync_cannot_drop_live_badges() {
+    use crate::domain::workspace_state::PrLink;
+    use crate::infrastructure::{pr_link_store, storage};
+
+    let _guard = crate::test_support::process_env_guard();
+    let data_dir = tempfile::tempdir().unwrap();
+    let old_home = std::env::var_os(storage::DATA_DIR_ENV);
+    std::env::set_var(storage::DATA_DIR_ENV, data_dir.path());
+
+    let session_root = tempfile::tempdir().unwrap();
+    let root = session_root.path().to_path_buf();
+    let pr = |n: u32| PrLink {
+        number: n,
+        url: format!("https://github.com/o/r/pull/{n}"),
+    };
+
+    let mut session = session_record("pr-session", 1);
+    session.root = root.clone();
+
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.restore_sessions(vec![session.clone()]);
+
+    // A live/background watcher may have already surfaced a PR badge on the row.
+    assert!(state.set_pr_links(&root, vec![pr(7)]));
+
+    // Then a slow background sync that started earlier can land with a stale
+    // session list whose `wt.pr` is still empty, while the store already contains
+    // the accumulated PRs harvested by the live watcher.
+    pr_link_store::add(&root, &[pr(7), pr(8)]).unwrap();
+    state.refresh_sessions(vec![session]);
+
+    let row = state
+        .list()
+        .worktrees()
+        .iter()
+        .find(|w| w.path == root)
+        .expect("session row survives the refresh");
+    assert_eq!(row.pr, vec![pr(7), pr(8)]);
+
+    if let Some(old_home) = old_home {
+        std::env::set_var(storage::DATA_DIR_ENV, old_home);
+    } else {
+        std::env::remove_var(storage::DATA_DIR_ENV);
+    }
+}
+
+#[test]
 fn tab_menu_and_rename_overlay_lifecycle() {
     let mut state = state();
     state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 42, 7);
