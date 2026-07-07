@@ -244,6 +244,39 @@ fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
 }
 
 #[test]
+fn nested_session_name_cell_prefixes_human_mcp_and_unknown_origins_without_shifting_width() {
+    let cases = [
+        (SessionOrigin::Human, Some(HUMAN_ORIGIN_ICON)),
+        (SessionOrigin::Mcp, Some(MCP_ORIGIN_ICON)),
+        (SessionOrigin::Unknown, None),
+    ];
+
+    for (origin, expected_icon) in cases {
+        let cell = nested_session_name_cell("child", 12, false, 0, origin);
+        let plain = console::strip_ansi_codes(&cell).into_owned();
+        assert_eq!(console::measure_text_width(&cell), 12);
+        assert_eq!(plain.chars().nth(1), Some(' '));
+        assert!(plain.ends_with("child     "), "{plain:?}");
+        match expected_icon {
+            Some(icon) => assert_eq!(plain.chars().next(), Some(icon), "{plain:?}"),
+            None => assert_eq!(plain.chars().next(), Some(' '), "{plain:?}"),
+        }
+    }
+}
+
+#[test]
+fn nested_session_name_cell_keeps_lineage_before_the_origin_field() {
+    let cell = nested_session_name_cell("grandchild", 12, false, 1, SessionOrigin::Mcp);
+    let plain = console::strip_ansi_codes(&cell).into_owned();
+    assert_eq!(console::measure_text_width(&cell), 12);
+    assert!(
+        plain.starts_with(&format!("↳ {MCP_ORIGIN_ICON} ")),
+        "{plain:?}"
+    );
+    assert!(plain.contains("grandch…"), "{plain:?}");
+}
+
+#[test]
 fn nested_inline_field_applies_the_lineage_prefix_by_depth() {
     // Depth 0 is not nested, so the field is returned clipped without a prefix.
     let flat = nested_inline_field("edit", 10, 0);
@@ -363,7 +396,8 @@ fn worktree_row_marks_the_selected_session_in_overview_and_shows_detached() {
         false,
         None,
     );
-    assert!(detached_top.contains("(detached)"));
+    let plain_detached = console::strip_ansi_codes(&detached_top).into_owned();
+    assert!(plain_detached.contains("(detach…"), "{plain_detached:?}");
 }
 
 #[test]
@@ -1229,7 +1263,7 @@ fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
     );
     let rendered = stripped(&lines);
     let parent = rendered.find("parent").unwrap();
-    let child = rendered.find("↳ child").unwrap();
+    let child = rendered.find("↳   child").unwrap();
     let sibling = rendered.find("sibling").unwrap();
     assert!(parent < child);
     assert!(child < sibling);
@@ -1239,8 +1273,8 @@ fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
         .iter()
         .map(|line| console::strip_ansi_codes(line).into_owned())
         .collect();
-    assert!(plain[7].starts_with("     ")); // child detail row
-    assert!(plain[8].starts_with("     ")); // child resource row
+    assert!(plain[7].starts_with("       ")); // child detail row
+    assert!(plain[8].starts_with("       ")); // child resource row
 }
 
 #[test]
@@ -3043,6 +3077,41 @@ fn full_pane(list: &WorktreeList, rows: usize) -> Vec<String> {
         Utc::now(),
         None,
     )
+}
+
+#[test]
+fn left_pane_renders_session_origin_glyphs_and_keeps_name_columns_aligned() {
+    let mut list = list_with(sessions(3));
+    list.set_origins(vec![
+        SessionOrigin::Human,
+        SessionOrigin::Mcp,
+        SessionOrigin::Unknown,
+    ]);
+
+    let lines = full_pane(&list, 20);
+    let human = console::strip_ansi_codes(&lines[3]).into_owned();
+    let mcp = console::strip_ansi_codes(&lines[6]).into_owned();
+    let unknown = console::strip_ansi_codes(&lines[9]).into_owned();
+
+    assert!(human.contains(HUMAN_ORIGIN_ICON), "{human:?}");
+    assert!(mcp.contains(MCP_ORIGIN_ICON), "{mcp:?}");
+    assert!(!unknown.contains(HUMAN_ORIGIN_ICON), "{unknown:?}");
+    assert!(!unknown.contains(MCP_ORIGIN_ICON), "{unknown:?}");
+
+    let name_col = |line: &str, name: &str| {
+        let prefix = line.split_once(name).expect("session name is rendered").0;
+        console::measure_text_width(prefix)
+    };
+    assert_eq!(name_col(&human, "s0"), name_col(&mcp, "s1"));
+    assert_eq!(name_col(&human, "s0"), name_col(&unknown, "s2"));
+    assert_eq!(
+        console::measure_text_width(&lines[3]),
+        console::measure_text_width(&lines[6])
+    );
+    assert_eq!(
+        console::measure_text_width(&lines[3]),
+        console::measure_text_width(&lines[9])
+    );
 }
 
 #[test]

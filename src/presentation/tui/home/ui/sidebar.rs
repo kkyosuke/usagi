@@ -10,7 +10,9 @@ use super::{
 };
 use crate::domain::resource::{Load, ResourceUsage};
 use crate::domain::settings::{LabelColor, SessionLabelDef, SessionLabelMaster, Sidebar};
-use crate::domain::workspace_state::{AheadBehind, BranchStatus, DiffStat, PrLink, WorktreeState};
+use crate::domain::workspace_state::{
+    AheadBehind, BranchStatus, DiffStat, PrLink, SessionOrigin, WorktreeState,
+};
 use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use chrono::{DateTime, Duration, Utc};
@@ -325,6 +327,32 @@ pub(super) fn session_gutter_cell(
     }
 }
 
+/// Fixed display columns reserved for a session-origin marker in front of the
+/// sidebar name. Human / MCP rows draw one Font Awesome 4 glyph plus a trailing
+/// space; legacy unknown rows keep the same blank field so the name column does
+/// not shift between rows.
+pub(super) const ORIGIN_COL: usize = 2;
+
+/// The human-origin glyph (`nf-fa-user`) kept in the Font Awesome 4 range, where
+/// older / partial Nerd Fonts are more likely to render it than FA5 glyphs.
+pub(super) const HUMAN_ORIGIN_ICON: char = '\u{f007}';
+
+/// The agent/MCP-origin glyph (`nf-fa-cogs`) kept in the Font Awesome 4 range so
+/// it does not fall back to `?` on older / partial Nerd Fonts.
+pub(super) const MCP_ORIGIN_ICON: char = '\u{f085}';
+
+/// The fixed-width, dim origin field that prefixes a session's name. It is
+/// intentionally separate from [`AgentState`]'s android/detail icon: this marker
+/// says who *created* the session, not whether an agent is currently running in
+/// it.
+pub(super) fn origin_cell(origin: SessionOrigin) -> String {
+    match origin {
+        SessionOrigin::Unknown => " ".repeat(ORIGIN_COL),
+        SessionOrigin::Human => style(format!("{HUMAN_ORIGIN_ICON} ")).dim().to_string(),
+        SessionOrigin::Mcp => style(format!("{MCP_ORIGIN_ICON} ")).dim().to_string(),
+    }
+}
+
 /// The branch / root name cell: clipped and padded to `width`, cyan, and bold
 /// when the row is active or under the cursor.
 pub(super) fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
@@ -351,6 +379,14 @@ pub(super) fn lineage_width(depth: usize) -> usize {
     depth.saturating_mul(LINEAGE_INDENT_WIDTH)
 }
 
+/// Display columns before the session's actual name inside a session identity
+/// cell: the optional lineage marker plus the fixed origin field. Detail and
+/// resource rows use the same width so their text starts under the display name,
+/// not under the origin glyph.
+pub(super) fn session_name_prefix_width(depth: usize) -> usize {
+    lineage_width(depth).saturating_add(ORIGIN_COL)
+}
+
 /// The dim tree prefix drawn in front of a child session's name. A depth-1 child
 /// reads `↳ child`; deeper descendants add two spaces per level (`  ↳ grandchild`).
 pub(super) fn lineage_prefix(depth: usize) -> String {
@@ -365,6 +401,7 @@ pub(super) fn lineage_prefix(depth: usize) -> String {
 /// same `width` the plain [`name_cell`] uses. The prefix is dim and the session
 /// name keeps the normal accent styling, so child rows read as subordinate while
 /// preserving the existing active/selected emphasis on the name itself.
+#[cfg(test)]
 pub(super) fn nested_name_cell(
     text: &str,
     width: usize,
@@ -383,6 +420,50 @@ pub(super) fn nested_name_cell(
         "{}{}",
         style(prefix).dim(),
         name_cell(text, width - prefix_width, emphasised)
+    )
+}
+
+fn origin_cell_for_width(origin: SessionOrigin, width: usize) -> String {
+    match width {
+        0 => String::new(),
+        1 => match origin {
+            SessionOrigin::Unknown => " ".to_string(),
+            SessionOrigin::Human => style(HUMAN_ORIGIN_ICON).dim().to_string(),
+            SessionOrigin::Mcp => style(MCP_ORIGIN_ICON).dim().to_string(),
+        },
+        _ => origin_cell(origin),
+    }
+}
+
+/// A session name cell with both the optional lineage prefix and the fixed
+/// creation-origin field reserved before the display name. The lineage marker is
+/// drawn first (`↳  <origin> name`) so children still read as children, while the
+/// origin field remains immediately adjacent to the name it describes.
+pub(super) fn nested_session_name_cell(
+    text: &str,
+    width: usize,
+    emphasised: bool,
+    nesting_depth: usize,
+    origin: SessionOrigin,
+) -> String {
+    let prefix = lineage_prefix(nesting_depth);
+    let prefix_width = console::measure_text_width(&prefix);
+    if prefix_width >= width {
+        return style(clip_to_width(&prefix, width)).dim().to_string();
+    }
+    let name_area = width.saturating_sub(prefix_width);
+    if name_area <= ORIGIN_COL {
+        return format!(
+            "{}{}",
+            style(prefix).dim(),
+            origin_cell_for_width(origin, name_area)
+        );
+    }
+    format!(
+        "{}{}{}",
+        style(prefix).dim(),
+        origin_cell(origin),
+        name_cell(text, name_area - ORIGIN_COL, emphasised)
     )
 }
 
@@ -517,7 +598,7 @@ pub(super) fn nested_resource_line(
     in_overview: bool,
     nesting_depth: usize,
 ) -> String {
-    let lineage_cols = lineage_width(nesting_depth).min(detail_width);
+    let lineage_cols = session_name_prefix_width(nesting_depth).min(detail_width);
     let detail_width = detail_width.saturating_sub(lineage_cols);
     let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
         .dim()
@@ -593,6 +674,7 @@ pub(super) fn worktree_row(
         done,
         rename,
         0,
+        SessionOrigin::Unknown,
     )
 }
 
@@ -623,6 +705,7 @@ pub(super) fn nested_worktree_row(
     // in a separate input at the list foot.
     rename: Option<(&str, usize)>,
     nesting_depth: usize,
+    origin: SessionOrigin,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
     let gutter = session_gutter_cell(selected, active, in_overview, 0);
@@ -644,7 +727,8 @@ pub(super) fn nested_worktree_row(
         } else {
             label
         };
-        let branch = nested_name_cell(name, name_width, active || selected, nesting_depth);
+        let branch =
+            nested_session_name_cell(name, name_width, active || selected, nesting_depth, origin);
         // The manual-status label sits between the branch name and the memo marker
         // in its own fixed-width column (blank when this row has none, dropped
         // entirely when no visible session carries a label — `label_col == 0`), so
@@ -666,7 +750,7 @@ pub(super) fn nested_worktree_row(
     // bar runs down to it — the `>` cursor stays a single point on line 1, so the
     // detail-line gutter ignores the cursor.
     let agent = AgentState::from_flags(live, running, waiting, done);
-    let lineage_cols = lineage_width(nesting_depth).min(detail_width);
+    let lineage_cols = session_name_prefix_width(nesting_depth).min(detail_width);
     let detail_width = detail_width.saturating_sub(lineage_cols);
     let mut cells = Vec::new();
     if cols.time > 0 {
@@ -2003,7 +2087,9 @@ pub(super) fn left_pane(
     let max_lineage_w = list
         .groups()
         .iter()
-        .flat_map(|g| (0..g.worktrees().len()).map(|i| lineage_width(g.nesting_depth(i))))
+        .flat_map(|g| {
+            (0..g.worktrees().len()).map(|i| session_name_prefix_width(g.nesting_depth(i)))
+        })
         .max()
         .unwrap_or(0)
         .min(detail_width);
@@ -2176,6 +2262,7 @@ pub(super) fn left_pane(
                 // label rides that row only; every other row renders normally.
                 if selected { rename } else { None },
                 nesting_depth,
+                group.origin(i),
             );
             // Every session draws a third CPU / memory line at a fixed height, so
             // the list never reflows as a session goes live or idle. An unsampled

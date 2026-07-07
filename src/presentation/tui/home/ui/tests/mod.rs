@@ -16,7 +16,9 @@ use super::super::terminal::pool::MonitorSnapshot;
 use super::super::terminal::view::TerminalView;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
-use crate::domain::workspace_state::{BranchStatus, PrLink, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{
+    BranchStatus, PrLink, SessionOrigin, SessionRecord, WorktreeState,
+};
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use chrono::Utc;
 use std::collections::{HashMap, HashSet};

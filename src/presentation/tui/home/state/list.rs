@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::workspace_state::{
-    AheadBehind, BranchStatus, DiffStat, PrLink, SessionRecord, WorktreeState,
+    AheadBehind, BranchStatus, DiffStat, PrLink, SessionOrigin, SessionRecord, WorktreeState,
 };
 
 use super::super::command::WorktreeRef;
@@ -186,6 +186,12 @@ pub struct WorkspaceGroup {
     /// / `notes` it is cosmetic and never used for lookups. Defaults to all-`None`
     /// and is filled in by [`set_label_ids`](Self::set_label_ids) on a rebuild.
     label_ids: Vec<Option<String>>,
+    /// Who created each row's session, aligned 1:1 with `worktrees`
+    /// (`origins[i]` is for `worktrees[i]`). The sidebar renders this as a
+    /// cosmetic origin glyph and commands still key on the branch/session name.
+    /// Defaults to [`SessionOrigin::Unknown`] and is filled in from
+    /// [`SessionRecord::origin`] on a rebuild.
+    origins: Vec<SessionOrigin>,
     /// Visual nesting depth for each session row, aligned 1:1 with `worktrees`.
     /// Depth `0` is a root-level session; depth `1+` means this session was
     /// started from a visible parent session and is drawn indented below it.
@@ -242,11 +248,13 @@ impl WorkspaceGroup {
             .iter()
             .map(|(i, _)| sessions[*i].label_id.clone())
             .collect();
+        let origins = layout.iter().map(|(i, _)| sessions[*i].origin).collect();
         let nesting_depths = layout.iter().map(|(_, depth)| *depth).collect();
         let mut group = Self::with_labels(name, rows, labels);
         group.set_root_path(root_path);
         group.set_notes(notes);
         group.set_label_ids(label_ids);
+        group.set_origins(origins);
         group.set_nesting_depths(nesting_depths);
         group.set_root_note_marker(root_has_note);
         group
@@ -262,6 +270,7 @@ impl WorkspaceGroup {
         labels.resize(worktrees.len(), None);
         let notes = vec![false; worktrees.len()];
         let label_ids = vec![None; worktrees.len()];
+        let origins = vec![SessionOrigin::Unknown; worktrees.len()];
         let nesting_depths = vec![0; worktrees.len()];
         Self {
             name: name.into(),
@@ -270,6 +279,7 @@ impl WorkspaceGroup {
             labels,
             notes,
             label_ids,
+            origins,
             nesting_depths,
             root_has_note: false,
             collapsed: false,
@@ -333,6 +343,23 @@ impl WorkspaceGroup {
     /// unset / out of range. Resolved against the effective master by the renderer.
     pub fn row_label_id(&self, index: usize) -> Option<&str> {
         self.label_ids.get(index).and_then(Option::as_deref)
+    }
+
+    /// Record each row's session origin (`origins[i]` for `worktrees[i]`). A
+    /// shorter/longer slice is padded/truncated to the worktree count, mirroring
+    /// the other per-row metadata setters.
+    pub fn set_origins(&mut self, mut origins: Vec<SessionOrigin>) {
+        origins.resize(self.worktrees.len(), SessionOrigin::Unknown);
+        self.origins = origins;
+    }
+
+    /// The origin of the worktree/session at `index` (out-of-range is the legacy
+    /// unknown origin). Used only by the sidebar renderer.
+    pub fn origin(&self, index: usize) -> SessionOrigin {
+        self.origins
+            .get(index)
+            .copied()
+            .unwrap_or(SessionOrigin::Unknown)
     }
 
     /// Record the visual nesting depth for each row. A shorter/longer slice is
@@ -543,6 +570,22 @@ impl WorktreeList {
     /// carries, or `None` when unset (see [`WorkspaceGroup::row_label_id`]).
     pub fn row_label_id(&self, index: usize) -> Option<&str> {
         self.first().and_then(|g| g.row_label_id(index))
+    }
+
+    /// Record the first group's per-worktree session origins (see
+    /// [`WorkspaceGroup::set_origins`]).
+    pub fn set_origins(&mut self, origins: Vec<SessionOrigin>) {
+        if let Some(group) = self.groups.first_mut() {
+            group.set_origins(origins);
+        }
+    }
+
+    /// The origin of the worktree/session at `index` in the first group (see
+    /// [`WorkspaceGroup::origin`]).
+    pub fn origin(&self, index: usize) -> SessionOrigin {
+        self.first()
+            .map(|g| g.origin(index))
+            .unwrap_or(SessionOrigin::Unknown)
     }
 
     /// Record the first group's per-worktree nesting depths (see

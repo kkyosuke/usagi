@@ -1704,6 +1704,13 @@ impl HomeState {
             .iter()
             .map(|(i, _)| self.sessions[*i].label_id.clone())
             .collect();
+        // Carry each session's creation origin so the sidebar can distinguish
+        // sessions a person made in the TUI from sessions an agent made through
+        // MCP. The value is display-only; commands still key on the branch.
+        let origins = layout
+            .iter()
+            .map(|(i, _)| self.sessions[*i].origin)
+            .collect();
         // Carry the session lineage depth (derived from `started_from`) so child
         // sessions can be drawn indented under the session that created them.
         let nesting_depths = layout.iter().map(|(_, depth)| *depth).collect();
@@ -1711,6 +1718,7 @@ impl HomeState {
         list.set_root_path(root_path);
         list.set_notes(notes);
         list.set_label_ids(label_ids);
+        list.set_origins(origins);
         list.set_nesting_depths(nesting_depths);
         // The root row's note lives on the workspace state (it belongs to no
         // session), so its marker is carried separately from the per-session notes.
