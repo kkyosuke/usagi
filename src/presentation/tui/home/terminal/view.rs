@@ -27,7 +27,7 @@ use super::selection::{Cell, Selection};
 
 /// An owned snapshot of an embedded terminal's visible screen.
 ///
-/// The 切替 preview re-snapshots the same backgrounded session every frame and
+/// The 選択 preview re-snapshots the same backgrounded session every frame and
 /// caches the result; the rows are wrapped in an [`Arc`] so that cache (and any
 /// other) `clone` is a refcount bump rather than a deep copy of the whole grid's
 /// text — the view is immutable once built, so sharing it is safe.

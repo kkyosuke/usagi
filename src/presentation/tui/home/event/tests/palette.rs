@@ -1,9 +1,9 @@
 use super::*;
 
 #[test]
-fn escape_at_the_base_switch_is_inert_and_does_not_leave() {
+fn escape_at_the_base_overview_is_inert_and_does_not_leave() {
     // Esc no longer backs out to the project list: it is a no-op at the base
-    // 切替 (the default), so the loop runs on and only the fallback Ctrl-C (no
+    // 選択 (the default), so the loop runs on and only the fallback Ctrl-C (no
     // live session) quits. A Back-returning Esc would instead resolve to
     // `Outcome::Back` here.
     assert!(matches!(
@@ -13,7 +13,7 @@ fn escape_at_the_base_switch_is_inert_and_does_not_leave() {
 }
 
 #[test]
-fn ctrl_c_at_the_base_switch_returns_quit() {
+fn ctrl_c_at_the_base_overview_returns_quit() {
     assert!(matches!(
         run(vec![Ok(Key::CtrlC)], sample_state()).unwrap(),
         Outcome::Quit
@@ -34,23 +34,23 @@ fn ctrl_b_toggles_the_sidebar_and_keeps_the_screen_running() {
 }
 
 #[test]
-fn colon_opens_the_command_palette_from_the_base_switch() {
-    // `:` at the base 切替 summons the command palette overlay; `Esc` closes it
-    // back to 切替, where Esc is inert and the fallback Ctrl-C quits.
+fn colon_opens_the_command_palette_from_the_base_overview() {
+    // `:` at the base 選択 summons the command palette overlay; `Esc` closes it
+    // back to 選択, where Esc is inert and the fallback Ctrl-C quits.
     let keys = vec![
-        Ok(Key::Char(':')), // base Switch -> command palette
-        Ok(Key::Escape),    // close the palette -> base Switch
-        Ok(Key::Escape),    // Esc inert at the base Switch; fallback Ctrl-C quits
+        Ok(Key::Char(':')), // base Overview -> command palette
+        Ok(Key::Escape),    // close the palette -> base Overview
+        Ok(Key::Escape),    // Esc inert at the base Overview; fallback Ctrl-C quits
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn escape_in_switch_closes_the_note_before_backing_out() {
+fn escape_in_overview_closes_the_note_before_backing_out() {
     // With the highlighted session's read-only note showing, the first Esc closes
-    // the note and stays in 切替; a second Esc is then inert at the base 切替, and
+    // the note and stays in 選択; a second Esc is then inert at the base 選択, and
     // the fallback Ctrl-C quits. The note's lifecycle is owned by Esc before the
-    // mode's is. 切替 is the default, so no Ctrl-O is needed to reach it.
+    // mode's is. 選択 is the default, so no Ctrl-O is needed to reach it.
     let mut state = sample_state();
     state.restore_sessions(vec![SessionRecord {
         name: "alpha".to_string(),
@@ -67,8 +67,8 @@ fn escape_in_switch_closes_the_note_before_backing_out() {
     }]);
     let keys = vec![
         Ok(Key::ArrowDown), // root -> alpha; its note auto-shows
-        Ok(Key::Escape),    // close the note (stays in Switch)
-        Ok(Key::Escape),    // inert at the base Switch
+        Ok(Key::Escape),    // close the note (stays in Overview)
+        Ok(Key::Escape),    // inert at the base Overview
         Ok(Key::Escape),    // still inert; fallback Ctrl-C quits
     ];
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
@@ -100,7 +100,7 @@ fn text_modal_scrolls_and_dismisses() {
 fn preview_command_opens_reads_scrolls_and_dismisses_the_markdown_pane() {
     // `preview <file>` resolves and reads the file under the workspace root, opens
     // the right-pane preview, and then the arrows / j/k and PageUp/PageDown scroll
-    // it while Esc dismisses it (back to the base Switch, where Ctrl-C quits).
+    // it while Esc dismisses it (back to the base Overview, where Ctrl-C quits).
     let dir = tempfile::tempdir().unwrap();
     let body = (0..40)
         .map(|i| format!("line {i}"))
@@ -118,8 +118,8 @@ fn preview_command_opens_reads_scrolls_and_dismisses_the_markdown_pane() {
     keys.push(Ok(Key::Char(' '))); // Space also pages forward (pager convention)
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('z'))); // ignored inside the preview
-    keys.push(Ok(Key::Escape)); // dismiss -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // dismiss -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_at(keys, sample_state(), dir.path()).unwrap(),
         Outcome::Quit
@@ -133,7 +133,7 @@ fn preview_command_logs_a_failure_for_a_missing_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut keys = cmd("preview missing");
     keys.push(Ok(Key::Enter)); // run `preview` -> read fails, nothing opens
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch (no preview captured it)
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview (no preview captured it)
     assert!(matches!(
         run_at(keys, sample_state(), dir.path()).unwrap(),
         Outcome::Quit
@@ -146,11 +146,11 @@ fn overview_edits_completes_and_recalls_then_runs() {
     keys.push(Ok(Key::Backspace));
     keys.push(Ok(Key::Tab)); // "m" -> "man"
     keys.push(Ok(Key::Enter)); // run -> `man` opens its text modal
-    keys.push(Ok(Key::Escape)); // dismiss the modal -> Switch
+    keys.push(Ok(Key::Escape)); // dismiss the modal -> Overview
     keys.push(Ok(Key::ArrowUp)); // recall the previous command
     keys.push(Ok(Key::ArrowDown)); // back to empty
     keys.push(Ok(Key::Home)); // ignored
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
@@ -275,8 +275,8 @@ fn palette_refuses_session_scoped_commands() {
     keys.push(Ok(Key::Enter)); // refused
     keys.extend(typed("close")); // type `close`
     keys.push(Ok(Key::Enter)); // refused
-    keys.push(Ok(Key::Escape)); // close the palette -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // close the palette -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,

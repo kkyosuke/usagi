@@ -273,14 +273,14 @@ impl AgentState {
 /// one-column wide in the sidebar when the user's terminal font supports it.
 pub(super) const SELECTED_SESSION_GLYPH: char = '\u{f0907}';
 
-/// The far-left gutter cell used by root/action rows. In 切替 (Switch) the
+/// The far-left gutter cell used by root/action rows. In 選択 (Overview) the
 /// keyboard is on the list, so the selected non-session row shows a red `>`
 /// cursor. The **active** session — the one subsequent commands operate on — is
-/// marked by a green `▎` accent bar that runs down its row. Outside Switch there
+/// marked by a green `▎` accent bar that runs down its row. Outside Overview there
 /// is no cursor, so the gutter only ever carries the active bar; when the cursor
-/// and the active row coincide in Switch, the cursor takes the column.
-pub(super) fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> String {
-    if in_switch && selected {
+/// and the active row coincide in Overview, the cursor takes the column.
+pub(super) fn gutter_cell(selected: bool, active: bool, in_overview: bool) -> String {
+    if in_overview && selected {
         style(">").danger().bold().to_string()
     } else if active {
         style("▎").success().bold().to_string()
@@ -299,13 +299,13 @@ pub(super) fn gutter_cell(selected: bool, active: bool, in_switch: bool) -> Stri
 ///
 /// Session entries occupy three fixed rows, so the marker can span the whole
 /// entry and remain visible after the side menu has selected the session. It is
-/// red while the cursor is in 切替, then green after the session is selected. The
-/// root and the "+ new session" action keep the compact `>` cursor in 切替
+/// red while the cursor is in 選択, then green after the session is selected. The
+/// root and the "+ new session" action keep the compact `>` cursor in 選択
 /// because they are not sessions and do not have a three-row body.
 pub(super) fn session_gutter_cell(
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     row: usize,
 ) -> String {
     if selected {
@@ -314,14 +314,14 @@ pub(super) fn session_gutter_cell(
         } else {
             "▎".to_string()
         };
-        let style = if in_switch {
+        let style = if in_overview {
             Style::new().danger().bold()
         } else {
             Style::new().success().bold()
         };
         style.apply_to(mark).to_string()
     } else {
-        gutter_cell(false, active, in_switch)
+        gutter_cell(false, active, in_overview)
     }
 }
 
@@ -494,7 +494,7 @@ pub(super) fn nested_resource_line(
     detail_width: usize,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     nesting_depth: usize,
 ) -> String {
     let lineage_cols = lineage_width(nesting_depth).min(detail_width);
@@ -503,7 +503,7 @@ pub(super) fn nested_resource_line(
         .dim()
         .to_string();
     nested_detail_line(
-        &session_gutter_cell(selected, active, in_switch, 2),
+        &session_gutter_cell(selected, active, in_overview, 2),
         lineage_cols,
         detail,
     )
@@ -543,12 +543,12 @@ pub(super) fn worktree_row(
     now: DateTime<Utc>,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     live: bool,
     running: bool,
     waiting: bool,
     done: bool,
-    // While inline-renaming this (selected) session in 切替, the label being typed
+    // While inline-renaming this (selected) session in 選択, the label being typed
     // and the caret's byte offset into it: line 1's name cell becomes that
     // editable field in place, so the rename happens on the row itself rather than
     // in a separate input at the list foot.
@@ -566,7 +566,7 @@ pub(super) fn worktree_row(
         now,
         selected,
         active,
-        in_switch,
+        in_overview,
         live,
         running,
         waiting,
@@ -592,12 +592,12 @@ pub(super) fn nested_worktree_row(
     now: DateTime<Utc>,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     live: bool,
     running: bool,
     waiting: bool,
     done: bool,
-    // While inline-renaming this (selected) session in 切替, the label being typed
+    // While inline-renaming this (selected) session in 選択, the label being typed
     // and the caret's byte offset into it: line 1's name cell becomes that
     // editable field in place, so the rename happens on the row itself rather than
     // in a separate input at the list foot.
@@ -605,7 +605,7 @@ pub(super) fn nested_worktree_row(
     nesting_depth: usize,
 ) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
-    let gutter = session_gutter_cell(selected, active, in_switch, 0);
+    let gutter = session_gutter_cell(selected, active, in_overview, 0);
     let line1 = if let Some((value, cursor)) = rename {
         // Inline rename: the session's own name line turns into the editable label
         // with a block caret. The gutter cursor and kind dot stay put so the row
@@ -662,7 +662,7 @@ pub(super) fn nested_worktree_row(
     }
     let detail = detail_content(agent, &cells, detail_width);
     let line2 = nested_detail_line(
-        &session_gutter_cell(selected, active, in_switch, 1),
+        &session_gutter_cell(selected, active, in_overview, 1),
         lineage_cols,
         detail,
     );
@@ -980,7 +980,7 @@ pub(super) fn detail_content(agent: AgentState, cells: &[String], width: usize) 
 }
 
 /// Builds the root's two lines: the workspace itself, belonging to no session.
-/// The far-left gutter carries the `>` cursor (in 切替 (Switch)) or the green `▎`
+/// The far-left gutter carries the `>` cursor (in 選択 (Overview)) or the green `▎`
 /// active bar; line 1 then has a `⌂` kind icon, the [`ROOT_NAME`] label, and a
 /// memo marker (`NOTE_ICON`, when `has_note`) — the root carries its own note,
 /// like a session. Line 2 carries a `workspace root` detail.
@@ -991,11 +991,11 @@ pub(super) fn root_row(
     has_note: bool,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
 ) -> (String, String) {
     let kind = root_glyph();
     let name = name_cell(ROOT_NAME, name_width, active || selected);
-    let gutter = gutter_cell(selected, active, in_switch);
+    let gutter = gutter_cell(selected, active, in_overview);
     // The root belongs to no session, so it carries no manual-status label — but it
     // reserves the same (blank) label column as the sessions below, so the memo
     // field stays aligned.
@@ -1009,7 +1009,7 @@ pub(super) fn root_row(
     let detail = style(clip_to_width(ROOT_DETAIL, detail_width))
         .dim()
         .to_string();
-    let line2 = detail_line(&gutter_cell(false, active, in_switch), detail);
+    let line2 = detail_line(&gutter_cell(false, active, in_overview), detail);
     (line1, line2)
 }
 
@@ -1079,31 +1079,31 @@ pub(super) fn root_glyph() -> String {
 /// `label` / `agent` are blank when the session carries no manual-status label /
 /// no live agent. The active `▎` bar runs down all three rows; a selected session
 /// uses the same `󰤇` / `▎` / `▎` stack as the full sidebar, while the root keeps
-/// the compact `>` cursor in 切替.
+/// the compact `>` cursor in 選択.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn rail_entry(
     selected: bool,
     session: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     kind: &str,
     label: Option<&str>,
     agent: Option<&str>,
 ) -> (String, String, String) {
     let gutter = if session {
-        session_gutter_cell(selected, active, in_switch, 0)
+        session_gutter_cell(selected, active, in_overview, 0)
     } else {
-        gutter_cell(selected, active, in_switch)
+        gutter_cell(selected, active, in_overview)
     };
     let detail_gutter = if session {
-        session_gutter_cell(selected, active, in_switch, 1)
+        session_gutter_cell(selected, active, in_overview, 1)
     } else {
-        gutter_cell(false, active, in_switch)
+        gutter_cell(false, active, in_overview)
     };
     let resource_gutter = if session {
-        session_gutter_cell(selected, active, in_switch, 2)
+        session_gutter_cell(selected, active, in_overview, 2)
     } else {
-        gutter_cell(false, active, in_switch)
+        gutter_cell(false, active, in_overview)
     };
     // Columns: gutter @0, kind @2 — the kind dot alone on row 1.
     let top = pad_to_width(format!("{gutter} {kind}"), RAIL_WIDTH);
@@ -1124,13 +1124,13 @@ pub(super) fn rail_entry(
 }
 
 /// The persistent create row in the full sidebar. It uses the same gutter grammar
-/// as real rows (`>` only in 切替 when selected) but has no heat/status/resource
+/// as real rows (`>` only in 選択 when selected) but has no heat/status/resource
 /// lines because it is an action target rather than a session. The row is still
 /// always present at the list foot so keyboard focus and mouse clicks can enter
 /// the create input from a visible affordance.
-pub(super) fn create_row(selected: bool, in_switch: bool, width: usize) -> String {
-    let gutter = gutter_cell(selected, false, in_switch);
-    let label = if selected && in_switch {
+pub(super) fn create_row(selected: bool, in_overview: bool, width: usize) -> String {
+    let gutter = gutter_cell(selected, false, in_overview);
+    let label = if selected && in_overview {
         style(CREATE_ROW_LABEL).green().bold().to_string()
     } else {
         style(CREATE_ROW_LABEL).green().to_string()
@@ -1184,18 +1184,18 @@ pub(super) fn pending_session_rows(
     label_col: usize,
     name_width: usize,
     detail_width: usize,
-    in_switch: bool,
+    in_overview: bool,
 ) -> [String; SESSION_ROWS] {
     // The placeholder is not itself selectable; the persistent "+ new session"
     // row remains below it and keeps the cursor/activation target.
-    let gutter = session_gutter_cell(false, false, in_switch, 0);
+    let gutter = session_gutter_cell(false, false, in_overview, 0);
     let kind = super::tabs_hit::loading_chip("●", frame);
     let wave = super::tabs_hit::loading_chip(&clip_to_width(name, name_width), frame);
     let name = pad_to_width(wave, name_width);
     let status_tag = label_cell(None, label_col);
     let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
     let line2 = detail_line(
-        &session_gutter_cell(false, false, in_switch, 1),
+        &session_gutter_cell(false, false, in_overview, 1),
         String::new(),
     );
     let resource = widgets::shimmer_text(
@@ -1205,7 +1205,7 @@ pub(super) fn pending_session_rows(
         ),
         frame,
     );
-    let line3 = detail_line(&session_gutter_cell(false, false, in_switch, 2), resource);
+    let line3 = detail_line(&session_gutter_cell(false, false, in_overview, 2), resource);
     [line1, line2, line3]
 }
 
@@ -1222,9 +1222,9 @@ pub(super) fn removing_session_rows(
     detail_width: usize,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
 ) -> [String; SESSION_ROWS] {
-    let gutter = session_gutter_cell(selected, active, in_switch, 0);
+    let gutter = session_gutter_cell(selected, active, in_overview, 0);
     let kind = leaf_loading_chip("✂", frame);
     let wave = leaf_loading_chip(&clip_to_width(label, name_width), frame);
     let name = pad_to_width(wave, name_width);
@@ -1232,12 +1232,12 @@ pub(super) fn removing_session_rows(
     let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
     let detail = leaf_loading_chip("removing session", frame);
     let line2 = detail_line(
-        &session_gutter_cell(selected, active, in_switch, 1),
+        &session_gutter_cell(selected, active, in_overview, 1),
         clip_to_width(&detail, detail_width),
     );
     let prune = leaf_loading_chip("pruning worktree", frame + 1);
     let line3 = detail_line(
-        &session_gutter_cell(selected, active, in_switch, 2),
+        &session_gutter_cell(selected, active, in_overview, 2),
         clip_to_width(&prune, detail_width),
     );
     [line1, line2, line3]
@@ -1269,22 +1269,22 @@ pub(super) fn rail_removing_session_rows(
     frame: usize,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
 ) -> [String; SESSION_ROWS] {
     let cut = leaf_loading_chip("✂", frame);
     let top = pad_to_width(
         format!(
             "{} {cut}",
-            session_gutter_cell(selected, active, in_switch, 0)
+            session_gutter_cell(selected, active, in_overview, 0)
         ),
         RAIL_WIDTH,
     );
     let detail = pad_to_width(
-        session_gutter_cell(selected, active, in_switch, 1),
+        session_gutter_cell(selected, active, in_overview, 1),
         RAIL_WIDTH,
     );
     let resource = pad_to_width(
-        session_gutter_cell(selected, active, in_switch, 2),
+        session_gutter_cell(selected, active, in_overview, 2),
         RAIL_WIDTH,
     );
     [top, detail, resource]
@@ -1293,9 +1293,9 @@ pub(super) fn rail_removing_session_rows(
 /// The rail twin of [`create_row`]: the `+` glyph in the same row position. The
 /// input itself moves to the right pane while the sidebar is collapsed, but the
 /// click / focus target remains visible at the rail's bottom.
-pub(super) fn rail_create_row(selected: bool, in_switch: bool) -> String {
-    let gutter = gutter_cell(selected, false, in_switch);
-    let label = if selected && in_switch {
+pub(super) fn rail_create_row(selected: bool, in_overview: bool) -> String {
+    let gutter = gutter_cell(selected, false, in_overview);
+    let label = if selected && in_overview {
         style("+").green().bold().to_string()
     } else {
         style("+").green().to_string()
@@ -1557,7 +1557,7 @@ impl LineWindow {
 /// sidebar (kind glyph on row 1, agent state on row 2), so the rail and the full
 /// list share the exact same row layout and toggling between them only changes
 /// the width. The active session keeps its green `▎` gutter bar (down both rows)
-/// and, in 切替, the `>` cursor and the dimming of the other entries, so the rail
+/// and, in 選択, the `>` cursor and the dimming of the other entries, so the rail
 /// still shows which session is selected and what its agent is doing without
 /// spelling out their names.
 #[allow(clippy::too_many_arguments)]
@@ -1570,7 +1570,7 @@ pub(super) fn rail_pane(
     pending_sessions: &[PendingSession],
     label_master: &SessionLabelMaster,
     rows: usize,
-    in_switch: bool,
+    in_overview: bool,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let root = root_glyph();
@@ -1597,8 +1597,8 @@ pub(super) fn rail_pane(
         if list.is_collapsed(g) {
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
-            let mut row = rail_collapsed_group_row(selected, active, in_switch);
-            if in_switch && !selected {
+            let mut row = rail_collapsed_group_row(selected, active, in_overview);
+            if in_overview && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1612,12 +1612,12 @@ pub(super) fn rail_pane(
             flat_row == list.selected_index(),
             false,
             flat_row == list.active_index(),
-            in_switch,
+            in_overview,
             &root,
             None,
             None,
         );
-        if in_switch && flat_row != list.selected_index() {
+        if in_overview && flat_row != list.selected_index() {
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
@@ -1632,8 +1632,8 @@ pub(super) fn rail_pane(
                 }
             }
             let selected = flat_row == list.selected_index();
-            let mut row = rail_create_row(selected, in_switch);
-            if in_switch && !selected {
+            let mut row = rail_create_row(selected, in_overview);
+            if in_overview && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -1656,7 +1656,7 @@ pub(super) fn rail_pane(
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
             if is_removing(pending_sessions, group.root_path(), worktree_name(w)) {
-                for row in rail_removing_session_rows(skeleton, selected, active, in_switch) {
+                for row in rail_removing_session_rows(skeleton, selected, active, in_overview) {
                     win.push(row);
                 }
                 flat_row += 1;
@@ -1675,12 +1675,12 @@ pub(super) fn rail_pane(
                 selected,
                 true,
                 active,
-                in_switch,
+                in_overview,
                 &kind,
                 label.as_deref(),
                 agent.as_deref(),
             );
-            if in_switch && !selected {
+            if in_overview && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
@@ -1701,8 +1701,8 @@ pub(super) fn rail_pane(
             }
         }
         let selected = flat_row == list.selected_index();
-        let mut row = rail_create_row(selected, in_switch);
-        if in_switch && !selected {
+        let mut row = rail_create_row(selected, in_overview);
+        if in_overview && !selected {
             row = dim_row(&row);
         }
         win.push(row);
@@ -1713,7 +1713,7 @@ pub(super) fn rail_pane(
 
 /// Re-renders an already-styled row uniformly dimmed: strips its colours and
 /// wraps the plain text in `dim`. Used to fade the rows the cursor is *not* on
-/// in 切替 (Switch), so the highlighted session stands out without a box.
+/// in 選択 (Overview), so the highlighted session stands out without a box.
 pub(super) fn dim_row(line: &str) -> String {
     // `strip_ansi_codes` borrows the input when it carries no escapes (the common
     // case for a plain session row), so styling the `Cow` directly avoids the
@@ -1823,7 +1823,7 @@ pub(super) fn sidebar_row_at_line_for_sidebar_with_pending(
 }
 
 /// The 0-based body line of `group`'s own "+ new session" row — the last line of
-/// its block. 切替's inline create input replaces this row so it renders at the
+/// its block. 選択's inline create input replaces this row so it renders at the
 /// foot of the targeted workspace's sessions (before the next group's gap/header)
 /// rather than at the foot of the whole column, which matters in 統合(unite) mode
 /// where several workspaces stack. The create flow expands a folded group first,
@@ -1885,17 +1885,17 @@ pub(super) fn group_header(name: &str, width: usize) -> String {
 /// whole block: the workspace name behind a left bar with a `▸` fold marker and a
 /// `(N)` session count, so a collapsed workspace still shows what it holds. It is
 /// the group's navigable root slot, so it carries the same gutter cursor / active
-/// bar the root entry would ([`gutter_cell`]); the caller dims it in 切替 when it
+/// bar the root entry would ([`gutter_cell`]); the caller dims it in 選択 when it
 /// is not the selected row, exactly like every other row.
 pub(super) fn collapsed_group_row(
     name: &str,
     sessions: usize,
     selected: bool,
     active: bool,
-    in_switch: bool,
+    in_overview: bool,
     width: usize,
 ) -> String {
-    let gutter = gutter_cell(selected, active, in_switch);
+    let gutter = gutter_cell(selected, active, in_overview);
     // Reserve the gutter cell + its trailing space, then clip-then-style the header
     // text (matching [`group_header`], whose clip runs before styling).
     let text = format!("▸ {name}  ({sessions})");
@@ -1906,8 +1906,8 @@ pub(super) fn collapsed_group_row(
 /// The rail twin of [`collapsed_group_row`]: the fold marker `▸` in the gutter
 /// position, keeping the folded workspace visible (and its root slot clickable) in
 /// the narrow rail, which has no room for the name or count.
-pub(super) fn rail_collapsed_group_row(selected: bool, active: bool, in_switch: bool) -> String {
-    let gutter = gutter_cell(selected, active, in_switch);
+pub(super) fn rail_collapsed_group_row(selected: bool, active: bool, in_overview: bool) -> String {
+    let gutter = gutter_cell(selected, active, in_overview);
     let marker = style("▸").bold();
     pad_to_width(format!("{gutter} {marker}"), RAIL_WIDTH)
 }
@@ -1921,8 +1921,8 @@ pub(super) fn rail_collapsed_group_row(selected: bool, active: bool, in_switch: 
 /// sidebar icons `<robot> ☾`), `running` the ones working a turn (`<robot> ▶`),
 /// `waiting` the ones whose agent awaits input (`<robot> ◆`), and `done` the
 /// finished ones (`<robot> ✓`); precedence is done > waiting > running > ready.
-/// When `in_switch`
-/// is set (in 切替), the keyboard is on the list: the selected row shows a `>`
+/// When `in_overview`
+/// is set (in 選択), the keyboard is on the list: the selected row shows a `>`
 /// cursor and every other row is faded so the highlighted session reads first.
 ///
 /// When `sidebar` is [`Sidebar::Rail`] the list collapses to the compact rail
@@ -1939,10 +1939,10 @@ pub(super) fn left_pane(
     label_master: &SessionLabelMaster,
     left_w: usize,
     rows: usize,
-    in_switch: bool,
+    in_overview: bool,
     sidebar: Sidebar,
     now: DateTime<Utc>,
-    // The inline rename being typed (its label and caret offset) when 切替's rename
+    // The inline rename being typed (its label and caret offset) when 選択's rename
     // input is open, so the selected session's name line renders as that editable
     // field in place. `None` when not renaming. Only the full sidebar edits inline;
     // the rail has no room and renders the input in the right pane instead.
@@ -1960,7 +1960,7 @@ pub(super) fn left_pane(
             pending_sessions,
             label_master,
             rows,
-            in_switch,
+            in_overview,
             now,
         );
     }
@@ -2036,10 +2036,10 @@ pub(super) fn left_pane(
                 group.worktrees().len(),
                 selected,
                 active,
-                in_switch,
+                in_overview,
                 left_w,
             );
-            if in_switch && !selected {
+            if in_overview && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -2056,9 +2056,9 @@ pub(super) fn left_pane(
             group.root_has_note(),
             flat_row == list.selected_index(),
             flat_row == list.active_index(),
-            in_switch,
+            in_overview,
         );
-        if in_switch && flat_row != list.selected_index() {
+        if in_overview && flat_row != list.selected_index() {
             root_top = dim_row(&root_top);
             root_detail = dim_row(&root_detail);
         }
@@ -2081,14 +2081,14 @@ pub(super) fn left_pane(
                     label_col,
                     name_width,
                     detail_width,
-                    in_switch,
+                    in_overview,
                 ) {
                     win.push(row);
                 }
             }
             let selected = flat_row == list.selected_index();
-            let mut row = create_row(selected, in_switch, left_w);
-            if in_switch && !selected {
+            let mut row = create_row(selected, in_overview, left_w);
+            if in_overview && !selected {
                 row = dim_row(&row);
             }
             win.push(row);
@@ -2120,7 +2120,7 @@ pub(super) fn left_pane(
                     detail_width,
                     selected,
                     active,
-                    in_switch,
+                    in_overview,
                 ) {
                     win.push(row);
                 }
@@ -2141,7 +2141,7 @@ pub(super) fn left_pane(
                 now,
                 selected,
                 active,
-                in_switch,
+                in_overview,
                 live.contains(&w.path),
                 running.contains(&w.path),
                 waiting.contains(&w.path),
@@ -2161,10 +2161,10 @@ pub(super) fn left_pane(
                 detail_width,
                 selected,
                 active,
-                in_switch,
+                in_overview,
                 nesting_depth,
             );
-            if in_switch && !selected {
+            if in_overview && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);
                 resource = dim_row(&resource);
@@ -2187,14 +2187,14 @@ pub(super) fn left_pane(
                 label_col,
                 name_width,
                 detail_width,
-                in_switch,
+                in_overview,
             ) {
                 win.push(row);
             }
         }
         let selected = flat_row == list.selected_index();
-        let mut row = create_row(selected, in_switch, left_w);
-        if in_switch && !selected {
+        let mut row = create_row(selected, in_overview, left_w);
+        if in_overview && !selected {
             row = dim_row(&row);
         }
         win.push(row);

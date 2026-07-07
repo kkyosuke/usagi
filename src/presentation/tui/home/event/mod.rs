@@ -35,19 +35,20 @@ use super::update::UpdateHandle;
 mod handlers;
 
 use handlers::{
-    env_editor_key, focus_click, focus_key, note_editor_key, palette_key, switch_click, switch_key,
+    closeup_click, closeup_key, env_editor_key, note_editor_key, overview_click, overview_key,
+    palette_key,
 };
 
 /// The byte `console` reports for `Ctrl-O` on the home screen: a bare control
 /// character (`0x0f`), since `console` only special-cases a handful of control
 /// keys and passes the rest through as [`Key::Char`]. `Ctrl-O` zooms out one
-/// engagement level (没入 → 切替) on the screen.
+/// engagement level (没入 → 選択) on the screen.
 const CTRL_O: char = '\u{000f}';
 
 /// The bare control characters `console` reports for `Ctrl-N` (`0x0e`) and
 /// `Ctrl-P` (`0x10`) on the home screen — the same passthrough as [`CTRL_O`].
 /// They move between the focused session's tabs (`Ctrl-P` previous / `Ctrl-N`
-/// next) in 切替 / 在席, matching the chords 没入 uses for the same move.
+/// next) in 選択 / 集中, matching the chords 没入 uses for the same move.
 const CTRL_N: char = '\u{000e}';
 const CTRL_P: char = '\u{0010}';
 
@@ -75,7 +76,7 @@ const CTRL_S: char = '\u{0013}';
 
 /// The bare control character `console` reports for `Ctrl-E` (`0x05`) on the home
 /// screen — the same passthrough as [`CTRL_O`]. It opens the session-note editor
-/// from 在席 (Focus). 没入 (Attached) is driven inside the embedded-terminal loop,
+/// from 集中 (Closeup). 没入 (Attached) is driven inside the embedded-terminal loop,
 /// so its `Ctrl-E` is intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_E: char = '\u{0005}';
 
@@ -83,7 +84,7 @@ const CTRL_E: char = '\u{0005}';
 /// `0x1e`) on the home screen — the same passthrough as [`CTRL_O`]. It jumps to
 /// the previously focused session (vim's `Ctrl-^` / tmux's `last-window`),
 /// attaching it when live, so two sessions can be toggled between without going
-/// through 切替. 没入 (Attached) is driven inside the embedded-terminal loop, so
+/// through 選択. 没入 (Attached) is driven inside the embedded-terminal loop, so
 /// its `Ctrl-^` is intercepted there instead (see [`super::terminal::pane`]).
 const CTRL_CARET: char = '\u{001e}';
 
@@ -96,7 +97,7 @@ const CTRL_CARET: char = '\u{001e}';
 /// [`super::terminal::pane`]) and surfaces as the same modal on the way out.
 const CTRL_Q: char = '\u{0011}';
 
-/// The callback 切替 uses to read (`None`) or navigate (`Some(nav)`) the
+/// The callback 選択 uses to read (`None`) or navigate (`Some(nav)`) the
 /// highlighted session's tabs, returning the strip's labels and active index.
 /// Backed by the [`TerminalPool`](super::terminal::pool::TerminalPool) the pane
 /// driver shares, so a tab moved here is the one re-attaching reveals.
@@ -111,22 +112,22 @@ pub(super) enum TabMenuAction {
 }
 
 /// The settings-derived values re-read when the config screen closes, so an
-/// edit takes effect without reopening the home screen: the 在席 (Focus)
+/// edit takes effect without reopening the home screen: the 集中 (Closeup)
 /// right-pane surface, the 没入 key scheme, and the default Agent CLI.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigReload {
-    /// The effective Session Action UI (在席 mode's surface).
+    /// The effective Session Action UI (集中 mode's surface).
     pub session_action_ui: SessionActionUi,
     /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
     /// so the pane's key handling reflects the edit without reopening the screen.
     pub key_scheme: KeyScheme,
-    /// The effective default Agent CLI, so `agent` / `ai` (and the 在席 menu's
+    /// The effective default Agent CLI, so `agent` / `ai` (and the 集中 menu's
     /// `Launch <名前>` row) pick up a CLI switched in Config without restarting —
     /// in particular, `ai`'s "open config and choose an installed Agent CLI"
     /// refusal hint actually works in-session.
     pub agent_cli: AgentCli,
     /// Whether the local LLM is usable (enabled and its model pulled), gating the
-    /// `chat` row in the 在席 menu — re-read when Config closes so enabling the LLM
+    /// `chat` row in the 集中 menu — re-read when Config closes so enabling the LLM
     /// (or pulling its model) surfaces `chat` without restarting.
     pub ai_available: bool,
 }
@@ -266,21 +267,21 @@ pub(super) struct Wiring<'a> {
     /// (`None` when the user quit the app from it).
     pub open_config: &'a mut dyn FnMut(&Term) -> Result<Option<ConfigReload>>,
     /// Start a local-LLM chat request, returning a receiver that yields the reply
-    /// (or an error message) once. Called when the user submits a line in the 在席
+    /// (or an error message) once. Called when the user submits a line in the 集中
     /// `chat` overlay; the loop polls the receiver each tick so a slow model never
     /// blocks the screen. [`super::run`] wires it to the Ollama-backed request
     /// against the configured model; tests return a ready receiver.
     pub chat_ask: &'a mut dyn FnMut(String) -> std::sync::mpsc::Receiver<Result<String, String>>,
-    /// Snapshot a session's live terminal for the 切替 preview, or `None` when it
+    /// Snapshot a session's live terminal for the 選択 preview, or `None` when it
     /// has no running shell — also the live/idle test the focus handlers use. The
     /// snapshot is sized to the given sidebar state (the preview widens when the
     /// rail is collapsed); the liveness test passes the current state and ignores
     /// the geometry.
     pub preview: &'a mut dyn FnMut(&Path, Sidebar) -> Option<TerminalView>,
     /// Read (`None`) or navigate (`Some(nav)`) the highlighted session's tabs
-    /// from 切替.
+    /// from 選択.
     pub tab_op: &'a mut TabOp<'a>,
-    /// Close the highlighted session's active tab (pane) from 切替.
+    /// Close the highlighted session's active tab (pane) from 選択.
     pub close_tab: &'a mut dyn FnMut(&mut HomeState, &Path),
     /// Apply a tab-context-menu action to a concrete tab.
     pub tab_action: &'a mut TabActionOp<'a>,
@@ -328,27 +329,27 @@ pub enum Outcome {
 /// The screen is a three-step engagement ladder, with the workspace command
 /// line summoned on top as a `:` palette:
 ///
-/// - **切替 (Switch)** — the default: pick a session in the left pane. `↑`/`↓`
+/// - **選択 (Overview)** — the default: pick a session in the left pane. `↑`/`↓`
 ///   (or `k`/`j`) move between sessions, `←`/`→` (or `h`/`l`, or `Ctrl-P`/
 ///   `Ctrl-N`) move between the highlighted session's tabs, `Enter` focuses
 ///   (attaching when the session is live), `t` opens the action surface to add a
 ///   pane, `c` creates a session inline, `:` summons the command palette. `Esc`
-///   is inert at the base Switch (the home screen is not left by backing out).
-///   Switch is also re-entered from Focus / Attached via `Ctrl-O`, where `Esc`
+///   is inert at the base Overview (the home screen is not left by backing out).
+///   Overview is also re-entered from Closeup / Attached via `Ctrl-O`, where `Esc`
 ///   then backs out to where it was opened from.
-/// - **在席 (Focus)** — a session is selected and operated in the right pane,
+/// - **集中 (Closeup)** — a session is selected and operated in the right pane,
 ///   either as a menu of its runnable commands or a session-scoped prompt
 ///   (chosen by the [`SessionActionUi`] setting). Launching `terminal` / `agent`
-///   adds a pane and attaches it; `Esc` returns to Switch; `Ctrl-O` opens
-///   Switch; `:` summons the command palette; `Ctrl-P`/`Ctrl-N` move the focused
+///   adds a pane and attaches it; `Esc` returns to Overview; `Ctrl-O` opens
+///   Overview; `:` summons the command palette; `Ctrl-P`/`Ctrl-N` move the focused
 ///   session's active tab.
 /// - **没入 (Attached)** — the embedded shell / agent is live in the right pane
-///   and keys flow to it. The reserved keys are `Ctrl-O` (zoom out to Switch,
+///   and keys flow to it. The reserved keys are `Ctrl-O` (zoom out to Overview,
 ///   where panes are added) and `Ctrl-P`/`Ctrl-N` (switch to the previous / next
 ///   tab in place, without detaching); everything else, including `Esc`, goes to
-///   the shell. The shell exiting returns to Focus.
+///   the shell. The shell exiting returns to Closeup.
 ///
-/// The **command palette** (`:`, from Switch or Focus) floats the workspace
+/// The **command palette** (`:`, from Overview or Closeup) floats the workspace
 /// command line over the panes (`session` / `config` / `doctor` / `man` / …);
 /// results render in its own band, `Esc` closes it, and a command with a
 /// transitioning effect closes it as it acts.
@@ -378,15 +379,15 @@ fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
     (wiring.save_last_active)(&state.last_active_flush());
 }
 
-/// Whether a left click should act on the session list: in 切替 (Switch), where it
-/// is the picker, and in 在席 (Focus), where the list still shows beside the action
-/// surface so a click re-focuses onto another session (see [`focus_click`]). Not in
+/// Whether a left click should act on the session list: in 選択 (Overview), where it
+/// is the picker, and in 集中 (Closeup), where the list still shows beside the action
+/// surface so a click re-focuses onto another session (see [`closeup_click`]). Not in
 /// 没入 (Attached) — there the right pane owns the pointer. In either acting mode a
 /// click while a modal / palette / note editor / inline create / rename is open is
 /// ignored, mirroring how those overlays capture every key in the loop below — so a
 /// stray click never reaches the session list beneath them.
 fn click_selects_session(state: &HomeState) -> bool {
-    matches!(state.mode(), Mode::Switch | Mode::Focus)
+    matches!(state.mode(), Mode::Overview | Mode::Closeup)
         && !state.quit_confirm()
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
@@ -460,24 +461,24 @@ pub(super) fn event_loop(
     // first pass — by now `restore_open_panes` has re-spawned the session's panes,
     // so it is live to attach. A no-op when nothing was armed (the usual case).
     handlers::resume_attach(term, &mut state, &mut painter, wiring);
-    // What the last paint reflected, so an idle 切替 (Switch) tick whose badges
+    // What the last paint reflected, so an idle 選択 (Overview) tick whose badges
     // and update notice are unchanged can skip rebuilding and repainting the whole
     // frame. `force_paint` keeps the first frame — and the frame after any key —
     // always repainting.
     let mut last_update = None;
     let mut force_paint = true;
     // Whether the last paint drew the mascot mid-blink, so the frame that reopens
-    // its eyes (an idle tick, not a keypress) still repaints in a quiet 切替 rather
+    // its eyes (an idle tick, not a keypress) still repaints in a quiet 選択 rather
     // than being skipped — leaving the eyes stuck shut.
     let mut last_blinking = false;
     // The previous left click's session row and time, so a second click on the
-    // same row within the double-click window confirms it (see [`switch_click`]).
+    // same row within the double-click window confirms it (see [`overview_click`]).
     let mut last_click: Option<(usize, Instant)> = None;
     // The monitor snapshot version last applied to `state`. When unchanged, the
     // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
     // set on each idle/live-frame pass.
     let mut seen_badge_version = u64::MAX;
-    // The in-flight local-LLM chat reply's channel while the 在席 `chat` overlay
+    // The in-flight local-LLM chat reply's channel while the 集中 `chat` overlay
     // awaits one, or `None` when idle. Owned by the loop (it is IO) rather than the
     // pure state, which only tracks that a reply is pending. Dropped when the
     // overlay closes, abandoning the request harmlessly.
@@ -555,14 +556,14 @@ pub(super) fn event_loop(
         // once. A no-op when the feature is off or nothing is queued.
         force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
         // Flip the local-LLM `chat` menu row on once the background probe confirms
-        // it is usable (drained once); until then the 在席 menu simply omits it.
+        // it is usable (drained once); until then the 集中 menu simply omits it.
         // Force a repaint so the change is reflected without waiting for a keypress.
         if let Some(available) = ai_available.take() {
             state.set_ai_available(available);
             force_paint = true;
         }
         // Fill in the installed-agent list once the background PATH probe lands
-        // (drained once), so 在席's agent picker can offer the alternatives it found;
+        // (drained once), so 集中's agent picker can offer the alternatives it found;
         // until then the picker simply shows none. Force a repaint so the picker
         // reflects them without waiting for the next keypress.
         if let Some(agents) = installed_agents.take() {
@@ -596,7 +597,7 @@ pub(super) fn event_loop(
                 state.clear_removing_session(root, name);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
-            // A finished create/close may ask to drop into 在席 (Focus) on its
+            // A finished create/close may ask to drop into 集中 (Closeup) on its
             // landing session. Done after the refresh above so the branch is in
             // the list to match. Unlike that refresh — which deliberately keeps
             // the cursor put for background changes — this is the user's own
@@ -605,30 +606,30 @@ pub(super) fn event_loop(
             // live pane when it has one instead of forcing the "+ new" tab.
             if let Some(focus) = focus {
                 if focus.interaction_epoch == wiring.interaction_epoch {
-                    state.enter_focus_named_existing(&focus.name);
+                    state.enter_closeup_named_existing(&focus.name);
                 }
             }
         }
         state.set_tasks(tasks.view(Instant::now()));
         // Drop any stale surface every frame, then refresh it for the modes that
         // draw the embedded terminal: 没入 (driven directly by `open_pane`, which
-        // clears its own surface on the way out) and 切替, where the right pane
+        // clears its own surface on the way out) and 選択, where the right pane
         // previews the highlighted session's live terminal — with its tab strip
         // above it, so `←`/`→` has something to act on — so the user sees the
         // actual screen re-attaching reveals.
         state.clear_terminal_surface();
-        // Collapsed to the rail, 切替's create / rename input takes over the right
+        // Collapsed to the rail, 選択's create / rename input takes over the right
         // pane (no room inline in the 5-column list), so there is no preview to
         // draw then; otherwise preview the highlighted session, sized to the
         // current sidebar state so the snapshot fills the pane it is drawn into.
         let input_in_right_pane = state.sidebar() == Sidebar::Rail
             && (state.create().is_some() || state.rename().is_some());
-        // 切替 previews the highlighted session; 在席 previews the focused session's
+        // 選択 previews the highlighted session; 集中 previews the focused session's
         // selected pane — both read the same live snapshot + tab strip, so the
         // focused session's panes show as tabs and the chosen one previews live
         // (an idle session has no live snapshot, so the strip stays absent and the
         // action surface shows instead).
-        let drives_surface = matches!(state.mode(), Mode::Switch | Mode::Focus);
+        let drives_surface = matches!(state.mode(), Mode::Overview | Mode::Closeup);
         // The note editor opened from 没入 (`Ctrl-E`) floats over the attached
         // session's pane, which keeps drawing in Attached mode while the editor is
         // open. The surface was just cleared, so refresh it here too — otherwise
@@ -724,20 +725,20 @@ pub(super) fn event_loop(
         // Refresh the sidebar mascot for this paint: reopen its eyes once a blink's
         // window has passed and advance the Working paw on the live tick. Reactive,
         // not timed — it rides paints that already happen, so a settled mascot
-        // leaves `mascot_blinking` false and a truly idle 切替 still skips painting.
+        // leaves `mascot_blinking` false and a truly idle 選択 still skips painting.
         state.tick_mascot(now);
         let blink_changed = state.mascot_blinking() != last_blinking;
-        // In a quiet base 切替 (Switch) — no live preview in the right pane and no
+        // In a quiet base 選択 (Overview) — no live preview in the right pane and no
         // command palette open — an idle frame's only moving parts are the sidebar
         // badges, the update notice, and those time-animated panels. When none
         // changed since the last paint — and no key was just pressed
         // (`force_paint`) and no background task just finished — skip rebuilding
-        // and repainting the whole frame. Anything with a live pane (a 切替 preview
-        // of a running session, 在席, 没入) or the palette open repaints as before,
+        // and repainting the whole frame. Anything with a live pane (a 選択 preview
+        // of a running session, 集中, 没入) or the palette open repaints as before,
         // so a live pane is never frozen stale. The cheap per-frame state updates
         // above still run, so the next paint (when something does change) is
         // correct.
-        let skip_paint = state.mode() == Mode::Switch
+        let skip_paint = state.mode() == Mode::Overview
             && state.terminal_view().is_none()
             && !state.command_palette_open()
             // A loading tab animates on the clock, so its frames must not be skipped.
@@ -840,9 +841,9 @@ pub(super) fn event_loop(
                 bump_interaction_epoch(wiring);
                 continue;
             }
-            // A click on a session row in the left pane acts on it: in 切替 (Switch)
+            // A click on a session row in the left pane acts on it: in 選択 (Overview)
             // it selects the row (a second click on the same row confirms it, like
-            // `Enter`); in 在席 (Focus) it re-focuses onto that session (a second
+            // `Enter`); in 集中 (Closeup) it re-focuses onto that session (a second
             // click attaches its pane when live). A click on the resting sidebar
             // mascot makes it react; anywhere else it is ignored. The two hit
             // disjoint regions, so the session list is tried first and the mascot
@@ -884,14 +885,14 @@ pub(super) fn event_loop(
                     force_paint = true;
                     continue;
                 }
-                // The right-pane tab strips are active in both 切替 and 在席:
+                // The right-pane tab strips are active in both 選択 and 集中:
                 // clicking an inactive pane tab drives the same `tab_op` keyboard
                 // navigation uses, so the preview and the pane that `Enter`
                 // re-attaches move together. 没入 handles its own tab clicks
                 // inside the pane driver.
                 match state.mode() {
-                    Mode::Switch => {
-                        if let Some(index) = ui::switch_tab_at(
+                    Mode::Overview => {
+                        if let Some(index) = ui::overview_tab_at(
                             &state,
                             click.col,
                             click.row,
@@ -904,8 +905,8 @@ pub(super) fn event_loop(
                             continue;
                         }
                     }
-                    Mode::Focus => {
-                        if let Some(index) = ui::focus_tab_at(
+                    Mode::Closeup => {
+                        if let Some(index) = ui::closeup_tab_at(
                             &state,
                             click.col,
                             click.row,
@@ -913,7 +914,7 @@ pub(super) fn event_loop(
                             width as usize,
                         ) {
                             let index = state
-                                .focus_select_pane_tab(index)
+                                .closeup_select_pane_tab(index)
                                 .expect("focus tab hit selects a live pane");
                             let dir = selected_dir(&state, wiring.workspace_root);
                             (wiring.tab_op)(&dir, Some(TabNav::To(index)));
@@ -937,8 +938,8 @@ pub(super) fn event_loop(
                 match selected {
                     Some(row) => {
                         let now = Instant::now();
-                        if state.mode() == Mode::Focus {
-                            focus_click(
+                        if state.mode() == Mode::Closeup {
+                            closeup_click(
                                 term,
                                 &mut state,
                                 &mut painter,
@@ -948,7 +949,7 @@ pub(super) fn event_loop(
                                 &mut last_click,
                             );
                         } else {
-                            switch_click(
+                            overview_click(
                                 term,
                                 &mut state,
                                 &mut painter,
@@ -972,14 +973,14 @@ pub(super) fn event_loop(
                 bump_interaction_epoch(wiring);
                 state.set_pr_popup(None);
                 let hit = match state.mode() {
-                    Mode::Switch => ui::switch_tab_hit(
+                    Mode::Overview => ui::overview_tab_hit(
                         &state,
                         click.col,
                         click.row,
                         height as usize,
                         width as usize,
                     ),
-                    Mode::Focus => ui::focus_tab_hit(
+                    Mode::Closeup => ui::closeup_tab_hit(
                         &state,
                         click.col,
                         click.row,
@@ -1020,11 +1021,11 @@ pub(super) fn event_loop(
         state.set_pr_popup(None);
         // Nudge the resting mascot to blink back at the user — reactive, so the
         // rabbit reacts the moment a key lands without any idle timer. Only while
-        // it shows an open-eyed face (切替 / 在席); 没入's heads-down face has no eyes
+        // it shows an open-eyed face (選択 / 集中); 没入's heads-down face has no eyes
         // to blink and animates on the live tick instead. A fresh `now` (the read
         // may have blocked a while) so the blink's window starts from the keypress;
         // the call is a no-op when the mascot animation is turned off.
-        if matches!(state.mode(), Mode::Switch | Mode::Focus) {
+        if matches!(state.mode(), Mode::Overview | Mode::Closeup) {
             state.kick_mascot_blink(Instant::now());
         }
 
@@ -1288,7 +1289,7 @@ pub(super) fn event_loop(
         // The local-LLM chat overlay, when open, captures every key: the editing
         // keys build the line, `↑`/`↓` scroll the transcript, `Enter` submits it
         // (starting a request the loop then polls), and `Esc` closes it back to the
-        // 在席 surface. Scroll / close work even while a reply is in flight; typing
+        // 集中 surface. Scroll / close work even while a reply is in flight; typing
         // and submitting are inert until it lands, so a turn cannot be garbled.
         if state.chat().is_some() {
             match key {
@@ -1387,7 +1388,7 @@ pub(super) fn event_loop(
 
         // The workspace-env editor (`env`), when open, captures every key: it sits
         // *over* the palette (which stays open beneath it), so `Ctrl-S` saves the
-        // bindings and `Esc` cancels — either way returning to the Overview. The
+        // bindings and `Esc` cancels — either way returning to the command palette. The
         // editing keys edit the multi-line buffer.
         if state.env_editor().is_some() {
             env_editor_key(&mut state, key);
@@ -1423,15 +1424,15 @@ pub(super) fn event_loop(
         // the quit-confirm modal do — both handled above), so their `Flow` is
         // discarded rather than matched for a now-dead `Quit` arm.
         match state.mode() {
-            Mode::Switch => {
-                switch_key(term, &mut state, &mut painter, key, wiring);
+            Mode::Overview => {
+                overview_key(term, &mut state, &mut painter, key, wiring);
             }
             // 没入 (Attached) is driven inside `open_pane`, which always leaves it
-            // (for 切替 or 在席) before returning — so the loop only ever observes
-            // 在席 here. It shares the 在席 handler to keep the match total without a
+            // (for 選択 or 集中) before returning — so the loop only ever observes
+            // 集中 here. It shares the 集中 handler to keep the match total without a
             // separate, unreachable arm.
-            Mode::Focus | Mode::Attached => {
-                focus_key(term, &mut state, &mut painter, key, wiring);
+            Mode::Closeup | Mode::Attached => {
+                closeup_key(term, &mut state, &mut painter, key, wiring);
             }
         }
     }
@@ -1485,12 +1486,12 @@ fn selected_diff(state: &HomeState) -> Result<(String, String)> {
 }
 
 /// Whether a click is allowed to poke the sidebar mascot: only on the plain home
-/// view (切替 / 在席) with nothing floating over the panes. Anywhere an overlay
+/// view (選択 / 集中) with nothing floating over the panes. Anywhere an overlay
 /// sits — the quit-confirm / removal / text modals, the Markdown preview, the note
 /// editor, or the command palette — a click is meant for it (or for nothing), not
 /// the rabbit drawn beneath it.
 fn mascot_clickable(state: &HomeState) -> bool {
-    matches!(state.mode(), Mode::Switch | Mode::Focus)
+    matches!(state.mode(), Mode::Overview | Mode::Closeup)
         && !state.quit_confirm()
         && !state.update_confirm()
         && state.remove_modal().is_none()
@@ -1648,7 +1649,7 @@ pub(crate) fn event_loop_compat(
     let mut set_note_w = |_root: &Path, name: &str, note: &str| set_note(name, note);
     // The compat-shim loop tests do not drive manual-status labels; a no-op that
     // reports no session change keeps the loop's apply path a no-op. The label flow
-    // is covered directly against `switch_key` with a capturing `Wiring`.
+    // is covered directly against `overview_key` with a capturing `Wiring`.
     let mut set_label_w = |_root: &Path, _name: &str, _id: Option<&str>| SessionOutcome {
         line: super::state::LogLine::output("label"),
         sessions: None,

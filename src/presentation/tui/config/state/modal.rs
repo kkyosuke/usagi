@@ -133,7 +133,7 @@ impl EnvModal {
 }
 
 /// The open session-label editor. Each line is one `id | name | color | icon`
-/// label definition — the master 切替's `Tab` / digit keys assign from. Malformed
+/// label definition — the master 選択's `Tab` / digit keys assign from. Malformed
 /// lines (a blank id or name) are accepted while editing and dropped when applied,
 /// and a duplicate id keeps only its first definition, mirroring the coercion
 /// [`crate::domain::settings::parse_session_labels`] applies.

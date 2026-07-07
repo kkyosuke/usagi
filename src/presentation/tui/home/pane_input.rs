@@ -12,7 +12,7 @@
 //! - [`KeyScheme::Prefix`] (default) reserves only the `Ctrl-O` leader; the
 //!   action is the *next* key (`Ctrl-O o/a/n/p/g/e/s/x/q`, or `Ctrl-O →`/`←`).
 //!   Every other Ctrl key — `Ctrl-E`, `Ctrl-N`/`Ctrl-P`, `Ctrl-T`, … — flows to
-//!   the shell, and `Ctrl-O Ctrl-O` zooms out to 切替 just like `Ctrl-O o` (a
+//!   the shell, and `Ctrl-O Ctrl-O` zooms out to 選択 just like `Ctrl-O o` (a
 //!   control-char second key the IME never composes). A pending leader lapses
 //!   after [`PREFIX_TIMEOUT`] (and is cleared by a mouse / paste event), so a
 //!   forgotten `Ctrl-O` can't capture a later key.
@@ -120,7 +120,7 @@ pub(super) fn key_scroll_lines(key: &KeyEvent, geo: ui::TerminalGeometry) -> Opt
 
 /// How close two left clicks on the same session row must fall to count as a
 /// double click — the threshold separating a single click (select / arm) from a
-/// double click (confirm, like `Enter`). Shared by 切替's `switch_click` and the
+/// double click (confirm, like `Enter`). Shared by 選択's `overview_click` and the
 /// 没入 pane so a sidebar double click confirms a row the same way whether or not a
 /// session is attached.
 pub(super) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -129,8 +129,8 @@ pub(super) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// previous click on the **same** row no more than `threshold` ago. Threads the
 /// pending click through `last_click`: a completing click clears it (so a third
 /// click starts a fresh sequence rather than re-confirming), and any other click
-/// records `(row, now)` as the new pending one. The shared core of 切替's
-/// `switch_click` and the 没入 sidebar double-click-to-switch.
+/// records `(row, now)` as the new pending one. The shared core of 選択's
+/// `overview_click` and the 没入 sidebar double-click-to-switch.
 pub(super) fn is_double_click(
     last_click: &mut Option<(usize, Instant)>,
     row: usize,
@@ -258,10 +258,10 @@ fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
 /// each one depends on the active [`KeyScheme`] (see [`classify`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Reserved {
-    /// Zoom out to 切替 (Switch), leaving every pane alive in the pool.
+    /// Zoom out to 選択 (Overview), leaving every pane alive in the pool.
     Detach,
-    /// Zoom out to 在席 (Focus), the session's action menu.
-    ToFocus,
+    /// Zoom out to 集中 (Closeup), the session's action menu.
+    ToCloseup,
     /// Switch to the next tab in place.
     NextTab,
     /// Switch to the previous tab in place.
@@ -272,7 +272,7 @@ pub(super) enum Reserved {
     SwapTabLeft,
     /// Add a fresh agent tab without leaving 没入.
     NewAgentTab,
-    /// Close the active tab in place, killing its shell. Mirrors 切替's `x`, so
+    /// Close the active tab in place, killing its shell. Mirrors 選択's `x`, so
     /// closing a tab no longer means zooming out first.
     CloseTab,
     /// Open the session-note editor over the pane.
@@ -313,7 +313,7 @@ fn is_prefix(key: &KeyEvent) -> bool {
 /// How long a `Ctrl-O` leader press waits for its action key before it lapses.
 /// Without it, a leader left pending (the user pressed `Ctrl-O` then got
 /// distracted) would make the *next* key — pressed much later as a fresh command
-/// — its action key: a later `Ctrl-O` would zoom out to 切替 by surprise, and a
+/// — its action key: a later `Ctrl-O` would zoom out to 選択 by surprise, and a
 /// plain key meant for the shell would be swallowed (or fire a chord). One second
 /// is long enough to type the second key deliberately, short enough that a
 /// forgotten prefix expires before it can capture a later press.
@@ -359,7 +359,7 @@ fn alt_action(key: &KeyEvent) -> Option<Reserved> {
     }
     Some(match key.code {
         KeyCode::Char('o') => Reserved::Detach,
-        KeyCode::Char('a') => Reserved::ToFocus,
+        KeyCode::Char('a') => Reserved::ToCloseup,
         KeyCode::Char('g') => Reserved::NewAgentTab,
         KeyCode::Char('e') => Reserved::OpenNote,
         KeyCode::Char('s') => Reserved::ToggleSidebar,
@@ -378,7 +378,7 @@ fn alt_action(key: &KeyEvent) -> Option<Reserved> {
 fn prefix_action(key: &KeyEvent) -> Option<Reserved> {
     Some(match key.code {
         KeyCode::Char('o') => Reserved::Detach,
-        KeyCode::Char('a') => Reserved::ToFocus,
+        KeyCode::Char('a') => Reserved::ToCloseup,
         KeyCode::Char('n') | KeyCode::Right => Reserved::NextTab,
         KeyCode::Char('p') | KeyCode::Left => Reserved::PrevTab,
         KeyCode::Char('g') => Reserved::NewAgentTab,
@@ -415,9 +415,9 @@ pub(super) fn classify(scheme: KeyScheme, pending: bool, key: &KeyEvent) -> KeyA
             None => KeyAction::Forward,
         },
         KeyScheme::Prefix if pending => {
-            // `Ctrl-O Ctrl-O` zooms out to 切替, the same as `Ctrl-O o` — a second
+            // `Ctrl-O Ctrl-O` zooms out to 選択, the same as `Ctrl-O o` — a second
             // leader is two control chars (never an `o` the IME composes into
-            // kana), so 切替 stays reachable with a Japanese IME left on. (The
+            // kana), so 選択 stays reachable with a Japanese IME left on. (The
             // `alt` scheme keeps bare `Ctrl-O` flowing to the shell for those who
             // want its readline binding.)
             if is_prefix(key) {
@@ -800,7 +800,7 @@ mod tests {
         // After the leader, each second key maps to its action.
         let second = |ch: char| classify(Prefix, true, &key(KeyCode::Char(ch), KeyModifiers::NONE));
         assert_eq!(second('o'), KeyAction::Reserved(Reserved::Detach));
-        assert_eq!(second('a'), KeyAction::Reserved(Reserved::ToFocus));
+        assert_eq!(second('a'), KeyAction::Reserved(Reserved::ToCloseup));
         assert_eq!(second('n'), KeyAction::Reserved(Reserved::NextTab));
         assert_eq!(second('p'), KeyAction::Reserved(Reserved::PrevTab));
         assert_eq!(second('g'), KeyAction::Reserved(Reserved::NewAgentTab));
@@ -861,10 +861,10 @@ mod tests {
     }
 
     #[test]
-    fn prefix_double_leader_zooms_to_switch_and_unknown_second_key_is_swallowed() {
+    fn prefix_double_leader_zooms_to_overview_and_unknown_second_key_is_swallowed() {
         use KeyScheme::Prefix;
-        // `Ctrl-O Ctrl-O` zooms out to 切替 like `Ctrl-O o`, in both control-char
-        // forms crossterm may report (with `CONTROL`, or the raw `0x0f`) — so 切替
+        // `Ctrl-O Ctrl-O` zooms out to 選択 like `Ctrl-O o`, in both control-char
+        // forms crossterm may report (with `CONTROL`, or the raw `0x0f`) — so 選択
         // stays reachable with a Japanese IME left on, which would compose a plain
         // `o` into kana before usagi ever saw it.
         assert_eq!(
@@ -901,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             classify(Alt, false, &alt('a')),
-            KeyAction::Reserved(Reserved::ToFocus)
+            KeyAction::Reserved(Reserved::ToCloseup)
         );
         assert_eq!(
             classify(Alt, false, &alt('g')),

@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn space_on_the_path_field_browses_and_fills_the_chosen_directory() {
         let term = Term::stdout();
-        // Switch to Existing, focus the Path field, open the browser with Space,
+        // Overview to Existing, focus the Path field, open the browser with Space,
         // pick the current directory (the "/base" default) with Enter, then
         // submit the form with a second Enter.
         let mut reader = ScriptedReader::new(vec![

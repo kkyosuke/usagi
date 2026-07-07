@@ -1,6 +1,6 @@
 //! Tests for the `diff` command: the `selected_diff` gatherer (the impure git
-//! half) and the 在席 (Focus) wiring that opens the right-pane diff view (`diff`
-//! is a session-scoped command, run from the Focus menu / prompt).
+//! half) and the 集中 (Closeup) wiring that opens the right-pane diff view (`diff`
+//! is a session-scoped command, run from the Closeup menu / prompt).
 
 use super::*;
 
@@ -83,7 +83,7 @@ fn selected_diff_gathers_the_patch_for_the_highlighted_worktree() {
     let work = repo_with_feature_diff(dir.path());
 
     let mut state = state_with_worktree_at(&work);
-    state.switch_select(1); // row 0 is the root; row 1 is the feature worktree
+    state.overview_select(1); // row 0 is the root; row 1 is the feature worktree
 
     let (title, patch) = selected_diff(&state).expect("a diff is gathered");
     assert_eq!(title, "feature → main");
@@ -104,24 +104,24 @@ fn selected_diff_fails_when_the_base_ref_is_unresolvable() {
     // so no diff view opens.
     let dir = tempfile::tempdir().unwrap();
     let mut state = state_with_worktree_at(dir.path());
-    state.switch_select(1);
+    state.overview_select(1);
     let err = selected_diff(&state).unwrap_err().to_string();
     assert!(err.contains("base branch"), "err: {err}");
 }
 
 #[test]
-fn diff_command_opens_the_diff_view_from_the_focus_menu_for_a_real_repo() {
-    // Driving the 在席 (Focus) `diff` command end-to-end over a real repo opens the
+fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
+    // Driving the 集中 (Closeup) `diff` command end-to-end over a real repo opens the
     // scrollable diff view: focus the session, move the menu cursor onto `diff`
     // (agent → close → diff), and run it. The arrows scroll it and Esc dismisses
-    // it back to 在席, then out to 切替 (Ctrl-C quits).
+    // it back to 集中, then out to 選択 (Ctrl-C quits).
     let dir = tempfile::tempdir().unwrap();
     let work = repo_with_feature_diff(dir.path());
     let state = state_with_worktree_at(&work);
 
     let mut keys = vec![
         Ok(Key::ArrowDown), // cursor root -> the feature session
-        Ok(Key::Enter),     // focus it (idle -> Focus menu, "agent" highlighted)
+        Ok(Key::Enter),     // focus it (idle -> Closeup menu, "agent" highlighted)
         Ok(Key::ArrowDown), // agent -> close
         Ok(Key::ArrowDown), // close -> diff
         Ok(Key::Enter),     // run `diff` -> gathers the patch, opens the pane
@@ -136,15 +136,15 @@ fn diff_command_opens_the_diff_view_from_the_focus_menu_for_a_real_repo() {
     keys.push(Ok(Key::Char('s'))); // toggle to the split layout
     keys.push(Ok(Key::Tab)); // toggle back to unified
     keys.push(Ok(Key::Char('z'))); // ignored inside the diff view
-    keys.push(Ok(Key::Escape)); // dismiss -> back to Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // dismiss -> back to Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn diff_command_opens_the_diff_view_from_the_focus_prompt() {
-    // Typed into the 在席 prompt, `diff` opens the same view for the focused
-    // session; Esc dismisses it back to 在席, then out to 切替.
+fn diff_command_opens_the_diff_view_from_the_closeup_prompt() {
+    // Typed into the 集中 prompt, `diff` opens the same view for the focused
+    // session; Esc dismisses it back to 集中, then out to 選択.
     let dir = tempfile::tempdir().unwrap();
     let work = repo_with_feature_diff(dir.path());
     let mut state = state_with_worktree_at(&work);
@@ -152,26 +152,26 @@ fn diff_command_opens_the_diff_view_from_the_focus_prompt() {
 
     let mut keys = vec![
         Ok(Key::ArrowDown), // cursor root -> the feature session
-        Ok(Key::Enter),     // focus it (idle -> Focus prompt)
+        Ok(Key::Enter),     // focus it (idle -> Closeup prompt)
     ];
     keys.extend(typed("diff"));
     keys.push(Ok(Key::Enter)); // run `diff` -> gathers the patch, opens the pane
-    keys.push(Ok(Key::Escape)); // dismiss -> back to Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // dismiss -> back to Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]
 fn diff_command_logs_a_failure_when_no_session_is_focused() {
-    // Focused on the root row (no session) the `diff` command — typed into the 在席
+    // Focused on the root row (no session) the `diff` command — typed into the 集中
     // prompt, where it is offered even on root — gathers nothing, so it logs the
     // error and opens no view. The screen keeps running and quits on the trailing
     // Ctrl-C.
     let mut state = sample_state(); // starts on the root row
     state.set_session_action_ui(SessionActionUi::Prompt);
-    let mut keys = vec![Ok(Key::Enter)]; // focus the root row (idle -> Focus prompt)
+    let mut keys = vec![Ok(Key::Enter)]; // focus the root row (idle -> Closeup prompt)
     keys.extend(typed("diff"));
     keys.push(Ok(Key::Enter)); // run `diff` -> no session, logs and opens nothing
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch (no diff view captured it)
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview (no diff view captured it)
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }

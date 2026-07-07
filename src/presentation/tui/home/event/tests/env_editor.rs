@@ -1,7 +1,7 @@
 //! Event-loop tests for the `env` command's workspace-env editor overlay: it
 //! opens over the command palette, edits the `NAME=op://…` buffer, and on
 //! `Ctrl-S` writes the bindings to the workspace's local settings (returning to
-//! the Overview), or on `Esc` cancels without saving.
+//! the command palette), or on `Esc` cancels without saving.
 
 use super::*;
 
@@ -30,8 +30,8 @@ fn env_command_opens_an_overlay_and_ctrl_s_saves_the_bindings() {
     let dir = tempfile::tempdir().unwrap();
     let keys = env_session(vec![
         Ok(Key::Char(CTRL_S)), // save → back to the palette
-        Ok(Key::Escape),       // close the palette → base Switch
-        Ok(Key::Escape),       // inert at the base Switch
+        Ok(Key::Escape),       // close the palette → base Overview
+        Ok(Key::Escape),       // inert at the base Overview
         Ok(Key::CtrlC),        // quit
     ]);
     assert!(matches!(
@@ -53,7 +53,7 @@ fn escaping_the_env_overlay_discards_the_edits() {
     let dir = tempfile::tempdir().unwrap();
     let keys = env_session(vec![
         Ok(Key::Escape), // cancel the editor → back to the palette (no save)
-        Ok(Key::Escape), // close the palette → base Switch
+        Ok(Key::Escape), // close the palette → base Overview
         Ok(Key::CtrlC),  // quit
     ]);
     assert!(matches!(
@@ -72,7 +72,7 @@ fn a_failing_env_save_is_reported_and_the_loop_continues() {
     let file = tempfile::NamedTempFile::new().unwrap();
     let keys = env_session(vec![
         Ok(Key::Char(CTRL_S)), // save fails → error logged, editor closes
-        Ok(Key::Escape),       // close the palette → base Switch
+        Ok(Key::Escape),       // close the palette → base Overview
         Ok(Key::CtrlC),        // quit
     ]);
     assert!(matches!(

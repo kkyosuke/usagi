@@ -49,15 +49,15 @@ fn session_create_with_a_name_creates_immediately() {
 }
 
 #[test]
-fn bare_session_create_moves_to_switch_and_opens_the_inline_input() {
-    // `session create` (no name) enters 切替 and begins inline creation; the
+fn bare_session_create_moves_to_overview_and_opens_the_inline_input() {
+    // `session create` (no name) enters 選択 and begins inline creation; the
     // name is typed and confirmed there, creating the session.
     let mut keys = cmd("session create");
-    keys.push(Ok(Key::Enter)); // -> Switch + begin create
+    keys.push(Ok(Key::Enter)); // -> Overview + begin create
     keys.extend(typed("wip"));
-    keys.push(Ok(Key::Enter)); // confirm create -> Focus
-    keys.push(Ok(Key::Escape)); // Focus Esc -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // confirm create -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup Esc -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     let created = RefCell::new(Vec::new());
     let mut create = |name: &str| {
         created.borrow_mut().push(name.to_string());
@@ -163,7 +163,7 @@ fn create_row_keeps_arrow_escape_and_ignored_key_paths() {
         Ok(Key::ArrowDown), // create -> root
         Ok(Key::ArrowUp),   // root -> create
         Ok(Key::ArrowLeft), // ignored on create row
-        Ok(Key::Escape),    // handled on create row (base Switch stays put)
+        Ok(Key::Escape),    // handled on create row (base Overview stays put)
         Ok(Key::CtrlC),
     ];
     assert!(matches!(
@@ -173,15 +173,15 @@ fn create_row_keeps_arrow_escape_and_ignored_key_paths() {
 }
 
 #[test]
-fn a_finished_create_drops_into_focus_on_the_new_session() {
+fn a_finished_create_drops_into_closeup_on_the_new_session() {
     // Creating a session from 統括 dispatches the git work to a worker; when it
-    // finishes the loop drops straight into 在席 (Focus) on the new session, so the
+    // finishes the loop drops straight into 集中 (Closeup) on the new session, so the
     // user operates it without navigating over. We prove the landing by running the
-    // 在席 menu's `terminal` (the `t` key, Focus-only) and observing it opens a pane
-    // rooted at the new session's worktree — only possible if Focus is on `newx`.
+    // 集中 menu's `terminal` (the `t` key, Closeup-only) and observing it opens a pane
+    // rooted at the new session's worktree — only possible if Closeup is on `newx`.
     let mut keys = cmd("session create newx");
-    keys.push(Ok(Key::Enter)); // dispatch create; completion drains next frame -> Focus(newx)
-    keys.push(Ok(Key::Char('t'))); // 在席 menu: run `terminal` on the focused session
+    keys.push(Ok(Key::Enter)); // dispatch create; completion drains next frame -> Closeup(newx)
+    keys.push(Ok(Key::Char('t'))); // 集中 menu: run `terminal` on the focused session
                                    // reader runs out -> Ctrl-C quits
     let opened = RefCell::new(Vec::new());
     let mut open = |_: &mut HomeState, dir: &Path, _: bool, _: bool| {
@@ -236,7 +236,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
         .unwrap(),
         Outcome::Quit
     ));
-    // The pane roots at the new session's row (its session root), proving 在席
+    // The pane roots at the new session's row (its session root), proving 集中
     // landed on `newx`.
     assert_eq!(
         opened.borrow().as_slice(),
@@ -245,7 +245,7 @@ fn a_finished_create_drops_into_focus_on_the_new_session() {
 }
 
 #[test]
-fn finished_create_does_not_auto_focus_after_another_operation() {
+fn finished_create_does_not_auto_closeup_after_another_operation() {
     use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
     use std::rc::Rc;
 
@@ -325,8 +325,8 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
     let mut keys = cmd("session create newx");
     keys.push(Ok(Key::Enter)); // dispatch create, but leave the task running
     keys.push(Ok(Key::ArrowDown)); // another user operation before completion lands
-    keys.push(Ok(Key::Char('t'))); // Switch-only: focus the selected existing row
-    keys.push(Ok(Key::Char('t'))); // Focus menu: open terminal on that row
+    keys.push(Ok(Key::Char('t'))); // Overview-only: focus the selected existing row
+    keys.push(Ok(Key::Char('t'))); // Closeup menu: open terminal on that row
 
     let tasks = TaskHandle::new();
     let task_id = Rc::new(RefCell::new(None));
@@ -434,17 +434,17 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
 }
 
 #[test]
-fn finished_close_drops_into_focus_on_the_previous_session() {
+fn finished_close_drops_into_closeup_on_the_previous_session() {
     // `close` removes the focused session on a worker. When it finishes before
     // the user does anything else, the landing mirrors create's auto-focus path:
     // focus the nearest session above the closed one instead of snapping to root.
-    // Prove that by pressing Focus menu's `t` shortcut after completion — it can
-    // only open `/main` if the close landed in 在席 on `main`.
+    // Prove that by pressing Closeup menu's `t` shortcut after completion — it can
+    // only open `/main` if the close landed in 集中 on `main`.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
+    keys.push(Ok(Key::Enter)); // -> Closeup(feat), menu UI
     keys.push(Ok(Key::ArrowDown)); // agent -> close
-    keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Focus(main)
-    keys.push(Ok(Key::Char('t'))); // Focus menu shortcut: open terminal on `main`
+    keys.push(Ok(Key::Enter)); // dispatch close; completion drains next frame -> Closeup(main)
+    keys.push(Ok(Key::Char('t'))); // Closeup menu shortcut: open terminal on `main`
 
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -511,7 +511,7 @@ fn finished_close_drops_into_focus_on_the_previous_session() {
 }
 
 #[test]
-fn finished_close_does_not_auto_focus_after_another_operation() {
+fn finished_close_does_not_auto_closeup_after_another_operation() {
     use super::super::super::tasks::{AutoFocus, Completion, TaskKind};
     use std::rc::Rc;
 
@@ -563,11 +563,11 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     // Reach `close` with ArrowDown, not ArrowUp: this reader completes the
     // remove task on ArrowUp, and that must only fire *after* close is dispatched.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus(feat), menu UI
+    keys.push(Ok(Key::Enter)); // -> Closeup(feat), menu UI
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::Enter)); // dispatch close, but leave the task running
-    keys.push(Ok(Key::ArrowUp)); // another Switch operation before completion lands
-    keys.push(Ok(Key::Char('c'))); // still Switch: begin inline create
+    keys.push(Ok(Key::ArrowUp)); // another Overview operation before completion lands
+    keys.push(Ok(Key::Char('c'))); // still Overview: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
 
     let tasks = TaskHandle::new();
@@ -587,10 +587,10 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut remove = |_: &Path, name: &str, _: bool, auto_focus: Option<AutoFocus>| {
+    let mut remove = |_: &Path, name: &str, _: bool, auto_closeup: Option<AutoFocus>| {
         let id = tasks.begin(TaskKind::RemoveSession, name);
         *task_id.borrow_mut() = Some(id);
-        *focus.borrow_mut() = auto_focus;
+        *focus.borrow_mut() = auto_closeup;
     };
     let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
     let mut update = || {};
@@ -668,7 +668,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     ));
     assert_eq!(
         branches_called, 1,
-        "`c` after the delayed close completion stayed in 切替 instead of auto-focusing"
+        "`c` after the delayed close completion stayed in 選択 instead of auto-focusing"
     );
 }
 
@@ -717,18 +717,18 @@ fn session_remove_with_a_name_and_force_routes_to_remove() {
 }
 
 #[test]
-fn close_typed_on_the_root_in_focus_is_refused() {
+fn close_typed_on_the_root_in_closeup_is_refused() {
     // `close` is session-scoped, so it reaches `close_focused_session` only from
-    // the 在席 prompt (the palette refuses it — see `palette_refuses_session_scoped_commands`).
+    // the 集中 prompt (the palette refuses it — see `palette_refuses_session_scoped_commands`).
     // The focused row is the root by default, which is the workspace itself and
     // not a session, so `close` is refused outright: `remove` is never called and
     // the screen stays put.
     let mut keys = cmd("session switch root"); // focus the root row
-    keys.push(Ok(Key::Enter)); // -> 在席 prompt (root)
+    keys.push(Ok(Key::Enter)); // -> 集中 prompt (root)
     keys.extend(typed("close"));
     keys.push(Ok(Key::Enter)); // run `close` on the root -> refused
-    keys.push(Ok(Key::Escape)); // 在席 -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // 集中 -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
@@ -745,7 +745,7 @@ fn close_typed_on_the_root_in_focus_is_refused() {
     let outcome = event_loop_compat(
         &term,
         &mut reader,
-        prompt_state(), // 在席 prompt surface, so `close` can be typed on the root
+        prompt_state(), // 集中 prompt surface, so `close` can be typed on the root
         Path::new("/ws"),
         &monitor,
         &UpdateHandle::new(),
@@ -772,19 +772,19 @@ fn close_typed_on_the_root_in_focus_is_refused() {
 }
 
 #[test]
-fn focus_close_command_removes_the_focused_session_then_enters_switch() {
-    // 在席 the `feat` session, then run `close` from the prompt: it removes the
+fn closeup_close_command_removes_the_focused_session_then_enters_overview() {
+    // 集中 the `feat` session, then run `close` from the prompt: it removes the
     // focused session like `session remove feat` (no `--force`, so a dirty
     // worktree would be refused rather than discarded). Because the focused
-    // session is now gone, the screen drops into 切替 (Switch) to pick the
-    // next one. We prove the landing mode by pressing `c` — a Switch-only action
+    // session is now gone, the screen drops into 選択 (Overview) to pick the
+    // next one. We prove the landing mode by pressing `c` — a Overview-only action
     // that opens the inline create input and consults the branch-name callback;
     // in 統括 the same key would just type a character and never call it.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat)
     keys.extend(typed("close"));
-    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
-    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 選択 (Overview)
+    keys.push(Ok(Key::Char('c'))); // Overview-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -794,7 +794,7 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
     let mut removed = Vec::new();
     let mut remove = |name: &str, force: bool| {
         removed.push((name.to_string(), force));
-        // Report a refreshed list so the screen leaves 在席 for 切替.
+        // Report a refreshed list so the screen leaves 集中 for 選択.
         SessionOutcome {
             line: LogLine::output("removed"),
             sessions: Some(Vec::new()),
@@ -837,22 +837,22 @@ fn focus_close_command_removes_the_focused_session_then_enters_switch() {
     assert_eq!(removed, vec![("feat".to_string(), false)]);
     assert_eq!(
         branches_called, 1,
-        "`c` after close began inline create, so the screen is in 切替 (Switch)"
+        "`c` after close began inline create, so the screen is in 選択 (Overview)"
     );
 }
 
 #[test]
-fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
-    // The 在席 menu lists its commands in alphabetical order (`agent`, `close`,
+fn closeup_menu_close_removes_the_focused_session_then_enters_overview() {
+    // The 集中 menu lists its commands in alphabetical order (`agent`, `close`,
     // `diff`, `terminal`) with `agent` highlighted by default; ArrowDown moves onto
     // `close`. Enter removes the focused session like `session remove feat`
-    // (no `--force`), then drops into 切替 (Switch) — the `c` keypress that follows
-    // opens the inline create input (a Switch-only action), proving the landing mode.
+    // (no `--force`), then drops into 選択 (Overview) — the `c` keypress that follows
+    // opens the inline create input (a Overview-only action), proving the landing mode.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat), menu UI
     keys.push(Ok(Key::ArrowDown)); // agent -> close
-    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 切替 (Switch)
-    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Enter)); // run `close` -> session removed -> 選択 (Overview)
+    keys.push(Ok(Key::Char('c'))); // Overview-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -904,20 +904,20 @@ fn focus_menu_close_removes_the_focused_session_then_enters_switch() {
     assert_eq!(removed, vec![("feat".to_string(), false)]);
     assert_eq!(
         branches_called, 1,
-        "`c` after close began inline create, so the screen is in 切替 (Switch)"
+        "`c` after close began inline create, so the screen is in 選択 (Overview)"
     );
 }
 
 #[test]
-fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
-    // Shift+c (reported by `console` as capital `C`) is the 在席 menu's explicit
+fn closeup_menu_shift_c_force_closes_the_focused_session_then_enters_overview() {
+    // Shift+c (reported by `console` as capital `C`) is the 集中 menu's explicit
     // discard shortcut: it runs `close --force` without moving the menu cursor.
-    // The screen still lands in 切替 (Switch), proven by the following `c`
+    // The screen still lands in 選択 (Overview), proven by the following `c`
     // beginning inline creation.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat), menu UI
-    keys.push(Ok(Key::Char('C'))); // run `close --force` -> 切替 (Switch)
-    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat), menu UI
+    keys.push(Ok(Key::Char('C'))); // run `close --force` -> 選択 (Overview)
+    keys.push(Ok(Key::Char('c'))); // Overview-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel create; reader then runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -968,19 +968,19 @@ fn focus_menu_shift_c_force_closes_the_focused_session_then_enters_switch() {
     assert_eq!(removed, vec![("feat".to_string(), true)]);
     assert_eq!(
         branches_called, 1,
-        "`c` after Shift+c close began inline create, so the screen is in 切替 (Switch)"
+        "`c` after Shift+c close began inline create, so the screen is in 選択 (Overview)"
     );
 }
 
 #[test]
-fn focus_menu_close_picker_enter_runs_plain_close() {
+fn closeup_menu_close_picker_enter_runs_plain_close() {
     // `→` on the close row opens the picker; `Enter` on option 0 runs plain `close`.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat)
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // open close picker (option 0 = close)
-    keys.push(Ok(Key::Enter)); // run `close` -> 切替
-    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Enter)); // run `close` -> 選択
+    keys.push(Ok(Key::Char('c'))); // Overview-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel; reader runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -1029,19 +1029,19 @@ fn focus_menu_close_picker_enter_runs_plain_close() {
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(removed, vec![("feat".to_string(), false)]);
-    assert_eq!(branches_called, 1, "landed in 切替 after plain close");
+    assert_eq!(branches_called, 1, "landed in 選択 after plain close");
 }
 
 #[test]
-fn focus_menu_close_picker_enter_on_force_runs_force_close() {
+fn closeup_menu_close_picker_enter_on_force_runs_force_close() {
     // `→` opens the picker; `↓` selects `--force`; `Enter` runs `close --force`.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat)
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.push(Ok(Key::ArrowDown)); // option 0 -> option 1 (close --force)
-    keys.push(Ok(Key::Enter)); // run `close --force` -> 切替
-    keys.push(Ok(Key::Char('c'))); // Switch-only: begin inline create
+    keys.push(Ok(Key::Enter)); // run `close --force` -> 選択
+    keys.push(Ok(Key::Char('c'))); // Overview-only: begin inline create
     keys.push(Ok(Key::Escape)); // cancel; reader runs out -> quit
     let term = Term::stdout();
     let mut reader = ScriptedReader::new(keys);
@@ -1090,14 +1090,14 @@ fn focus_menu_close_picker_enter_on_force_runs_force_close() {
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
     assert_eq!(removed, vec![("feat".to_string(), true)]);
-    assert_eq!(branches_called, 1, "landed in 切替 after close --force");
+    assert_eq!(branches_called, 1, "landed in 選択 after close --force");
 }
 
 /// Minimal event-loop harness for close-picker navigation tests.
 fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(String, bool)>) {
     // Start: navigate to close row, open picker, then apply caller's keys.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus (feat)
+    keys.push(Ok(Key::Enter)); // -> Closeup (feat)
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // open close picker
     keys.extend(extra_keys);
@@ -1146,13 +1146,13 @@ fn run_close_picker_keys(extra_keys: Vec<io::Result<Key>>) -> (Outcome, Vec<(Str
 }
 
 #[test]
-fn focus_menu_close_picker_left_collapses_without_executing() {
+fn closeup_menu_close_picker_left_collapses_without_executing() {
     // `←` collapses the picker back to the menu without running any command.
     // An unhandled key (`t`) while the picker is open is also a no-op (catch-all arm).
     let (outcome, removed) = run_close_picker_keys(vec![
         Ok(Key::Char('t')), // no-op: unhandled key inside close picker
         Ok(Key::ArrowLeft), // collapse picker
-        Ok(Key::Escape),    // leave Focus -> 切替
+        Ok(Key::Escape),    // leave Closeup -> 選択
         Ok(Key::Escape),    // quit
     ]);
     assert!(matches!(outcome, Outcome::Quit));
@@ -1160,12 +1160,12 @@ fn focus_menu_close_picker_left_collapses_without_executing() {
 }
 
 #[test]
-fn focus_menu_close_picker_up_wraps_to_force_and_runs_it() {
+fn closeup_menu_close_picker_up_wraps_to_force_and_runs_it() {
     // `↑` from option 0 (close) wraps to option 1 (close --force); `Enter` runs it.
     let (outcome, removed) = run_close_picker_keys(vec![
         Ok(Key::ArrowUp),   // 0 -> 1 (close --force), exercises move_up close_cursor path
         Ok(Key::Enter),     // run close --force
-        Ok(Key::Char('c')), // Switch-only: begin inline create -> proves 切替
+        Ok(Key::Char('c')), // Overview-only: begin inline create -> proves 選択
         Ok(Key::Escape),    // cancel; reader runs out -> quit
     ]);
     assert!(matches!(outcome, Outcome::Quit));

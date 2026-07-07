@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
-    // 切替, `n` on a session opens the editor; the editing keys build a
+fn overview_n_opens_the_note_editor_edits_the_buffer_and_saves() {
+    // 選択, `n` on a session opens the editor; the editing keys build a
     // multi-line note, and Ctrl-S persists it through `set_note`.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -15,7 +15,7 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)),     // no-op at base Switch (cursor already on root)
+        Ok(Key::Char(CTRL_O)),     // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),        // root -> alpha
         Ok(Key::Char('n')),        // open the note editor for alpha
         Ok(Key::Tab),              // ignored inside the editor
@@ -33,7 +33,7 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
     keys.push(Ok(Key::ArrowUp));
     keys.push(Ok(Key::ArrowDown));
     keys.push(Ok(Key::Char(CTRL_S))); // save
-    keys.push(Ok(Key::Escape)); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // inert at the base Overview
     keys.push(Ok(Key::CtrlC)); // quit
 
     let outcome = run_notes(
@@ -52,8 +52,8 @@ fn switch_n_opens_the_note_editor_edits_the_buffer_and_saves() {
 }
 
 #[test]
-fn switch_n_on_the_root_row_edits_and_saves_the_workspace_root_note() {
-    // 切替, `n` on the `⌂ root` row opens the editor targeting the workspace root
+fn overview_n_on_the_root_row_edits_and_saves_the_workspace_root_note() {
+    // 選択, `n` on the `⌂ root` row opens the editor targeting the workspace root
     // (`root`); Ctrl-S persists it through `set_note` under that name.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -102,7 +102,7 @@ fn shift_arrows_select_text_and_delete_removes_the_selection() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Switch (cursor already on root)
+        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),    // root -> alpha
         Ok(Key::Char('n')),    // open the note editor for alpha
     ];
@@ -120,7 +120,7 @@ fn shift_arrows_select_text_and_delete_removes_the_selection() {
     keys.push(shift_arrow('D')); // Shift+Left: shrink to "hell"
     keys.push(Ok(Key::Del)); // delete the selection -> "o world"
     keys.push(Ok(Key::Char(CTRL_S))); // save
-    keys.push(Ok(Key::Escape)); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // inert at the base Overview
     keys.push(Ok(Key::CtrlC)); // quit
 
     let outcome = run_notes(
@@ -139,8 +139,8 @@ fn shift_arrows_select_text_and_delete_removes_the_selection() {
 }
 
 #[test]
-fn switch_ctrl_e_opens_the_note_editor_like_n() {
-    // 切替, `Ctrl-E` (matching 在席 / 没入) opens the highlighted session's note
+fn overview_ctrl_e_opens_the_note_editor_like_n() {
+    // 選択, `Ctrl-E` (matching 集中 / 没入) opens the highlighted session's note
     // editor just like `n`; Ctrl-S persists it through `set_note`.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -153,13 +153,13 @@ fn switch_ctrl_e_opens_the_note_editor_like_n() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Switch (cursor already on root)
+        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),    // root -> alpha
         Ok(Key::Char(CTRL_E)), // open the note editor for alpha
     ];
     keys.extend(typed("hi"));
     keys.push(Ok(Key::Char(CTRL_S))); // save
-    keys.push(Ok(Key::Escape)); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // inert at the base Overview
     keys.push(Ok(Key::CtrlC)); // quit
 
     let outcome = run_notes(
@@ -178,9 +178,9 @@ fn switch_ctrl_e_opens_the_note_editor_like_n() {
 }
 
 #[test]
-fn switch_end_key_opens_the_note_editor_like_ctrl_e() {
+fn overview_end_key_opens_the_note_editor_like_ctrl_e() {
     // `console` decodes Ctrl-E as `Key::End`, so on a real terminal the chord
-    // arrives as `End`; in 切替 list navigation (no caret) it opens the note just
+    // arrives as `End`; in 選択 list navigation (no caret) it opens the note just
     // like `Ctrl-E` / `n`.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -193,13 +193,13 @@ fn switch_end_key_opens_the_note_editor_like_ctrl_e() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Switch (cursor already on root)
+        Ok(Key::Char(CTRL_O)), // no-op at base Overview (cursor already on root)
         Ok(Key::ArrowDown),    // root -> alpha
         Ok(Key::End),          // Ctrl-E as console delivers it: open the note
     ];
     keys.extend(typed("hi"));
     keys.push(Ok(Key::Char(CTRL_S))); // save
-    keys.push(Ok(Key::Escape)); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // inert at the base Overview
     keys.push(Ok(Key::CtrlC)); // quit
 
     let outcome = run_notes(
@@ -218,7 +218,7 @@ fn switch_end_key_opens_the_note_editor_like_ctrl_e() {
 }
 
 #[test]
-fn switch_n_note_editor_cancel_discards_the_edit() {
+fn overview_n_note_editor_cancel_discards_the_edit() {
     // Esc closes the editor without persisting anything.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -231,13 +231,13 @@ fn switch_n_note_editor_cancel_discards_the_edit() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
 
     let mut keys = vec![
-        Ok(Key::Char(CTRL_O)), // no-op at base Switch
+        Ok(Key::Char(CTRL_O)), // no-op at base Overview
         Ok(Key::ArrowDown),    // root -> alpha
         Ok(Key::Char('n')),    // open the editor
     ];
     keys.extend(typed("draft"));
     keys.push(Ok(Key::Escape)); // cancel the editor (no save)
-    keys.push(Ok(Key::Escape)); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // inert at the base Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -280,8 +280,8 @@ fn attached_ctrl_e_opens_the_note_editor_then_re_attaches_on_save() {
     let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // focus + attach alpha -> open_terminal #1 -> OpenNote
     keys.extend(typed("hi")); // edit the note in the editor
-    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> open_terminal #2 -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> open_terminal #2 -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -328,8 +328,8 @@ fn attached_ctrl_e_re_attaches_on_cancel_without_saving() {
     let mut keys = cmd("session switch alpha");
     keys.push(Ok(Key::Enter)); // attach -> OpenNote
     keys.extend(typed("scratch"));
-    keys.push(Ok(Key::Escape)); // cancel -> re-attach -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // cancel -> re-attach -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -372,8 +372,8 @@ fn attached_ctrl_e_on_the_root_row_opens_the_editor_and_saves_the_workspace_root
     let mut keys = cmd("session switch root");
     keys.push(Ok(Key::Enter)); // focus + attach root -> OpenNote -> editor
     keys.extend(typed("ws"));
-    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> re-attach -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -397,11 +397,11 @@ fn attached_ctrl_e_on_the_root_row_opens_the_editor_and_saves_the_workspace_root
 }
 
 #[test]
-fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
-    // In 在席 (Focus), Ctrl-E opens the focused session's note editor; saving
-    // persists the note and returns to 在席 (no pane to re-attach). We prove the
-    // landing mode by pressing `t` afterwards — a 在席 menu shortcut that launches
-    // a terminal — so the pane callback runs only if we are still in Focus.
+fn closeup_ctrl_e_opens_the_note_editor_and_saves_staying_in_closeup() {
+    // In 集中 (Closeup), Ctrl-E opens the focused session's note editor; saving
+    // persists the note and returns to 集中 (no pane to re-attach). We prove the
+    // landing mode by pressing `t` afterwards — a 集中 menu shortcut that launches
+    // a terminal — so the pane callback runs only if we are still in Closeup.
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
@@ -417,12 +417,12 @@ fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
     };
 
     let mut keys = cmd("session switch alpha");
-    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
+    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 集中 menu)
     keys.push(Ok(Key::Char(CTRL_E))); // open the note editor (reattach = false)
     keys.extend(typed("todo"));
-    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 在席
-    keys.push(Ok(Key::Char('t'))); // 在席 menu: launch terminal (proves we are in Focus)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 集中
+    keys.push(Ok(Key::Char('t'))); // 集中 menu: launch terminal (proves we are in Closeup)
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -441,16 +441,16 @@ fn focus_ctrl_e_opens_the_note_editor_and_saves_staying_in_focus() {
     assert_eq!(
         *opened.borrow(),
         1,
-        "`t` after save launched a terminal, so we stayed in 在席"
+        "`t` after save launched a terminal, so we stayed in 集中"
     );
 }
 
 #[test]
-fn focus_end_key_opens_the_note_editor_on_the_menu_surface() {
+fn closeup_end_key_opens_the_note_editor_on_the_menu_surface() {
     // `console` decodes Ctrl-E as `Key::End`, so on a real terminal the chord
-    // arrives as `End`. On 在席's menu surface (the default — no caret) it opens
+    // arrives as `End`. On 集中's menu surface (the default — no caret) it opens
     // the note just like the scripted `Ctrl-E`. (The typed prompt keeps `End` as
-    // end-of-line; that path is covered by `focus_prompt_edits_*`.)
+    // end-of-line; that path is covered by `closeup_prompt_edits_*`.)
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
@@ -466,12 +466,12 @@ fn focus_end_key_opens_the_note_editor_on_the_menu_surface() {
     };
 
     let mut keys = cmd("session switch alpha");
-    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 在席 menu)
+    keys.push(Ok(Key::Enter)); // focus alpha (idle -> 集中 menu)
     keys.push(Ok(Key::End)); // Ctrl-E as console delivers it: open the note
     keys.extend(typed("todo"));
-    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 在席
-    keys.push(Ok(Key::Char('t'))); // 在席 menu: launch terminal (proves we are in Focus)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Char(CTRL_S))); // save -> back to 集中
+    keys.push(Ok(Key::Char('t'))); // 集中 menu: launch terminal (proves we are in Closeup)
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::CtrlC));
 
     let outcome = run_notes(
@@ -490,6 +490,6 @@ fn focus_end_key_opens_the_note_editor_on_the_menu_surface() {
     assert_eq!(
         *opened.borrow(),
         1,
-        "`t` after save launched a terminal, so we stayed in 在席"
+        "`t` after save launched a terminal, so we stayed in 集中"
     );
 }

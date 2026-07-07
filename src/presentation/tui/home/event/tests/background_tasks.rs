@@ -153,9 +153,9 @@ fn default_callbacks_run_through_the_harness() {
     // attaches) and `open_config` (via `config`) so both default callbacks
     // execute end to end.
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // live -> attach via noop_open -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // live -> attach via noop_open -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_live(keys, sample_state()).unwrap(),
         Outcome::Quit

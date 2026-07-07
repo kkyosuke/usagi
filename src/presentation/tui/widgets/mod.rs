@@ -1502,7 +1502,7 @@ mod tests {
 
     #[test]
     fn chooser_keeps_the_value_aligned_across_focus() {
-        // Focus changes only the colour, not the layout, so the visible width is
+        // Closeup changes only the colour, not the layout, so the visible width is
         // identical and the column never jumps.
         let focused = console::strip_ansi_codes(&chooser("On", true, false)).into_owned();
         let idle = console::strip_ansi_codes(&chooser("On", false, false)).into_owned();

@@ -1,15 +1,15 @@
 use super::*;
 
 #[test]
-fn ctrl_o_in_the_pane_zooms_out_to_switch() {
-    // Attaching to a live session; the pane returns ToSwitch (Ctrl-O), so the
-    // loop enters Switch with return=Attached. Then Ctrl-O -> Switch (fallback Ctrl-C quits).
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToSwitch);
+fn ctrl_o_in_the_pane_zooms_out_to_overview() {
+    // Attaching to a live session; the pane returns ToOverview (Ctrl-O), so the
+    // loop enters Overview with return=Attached. Then Ctrl-O -> Overview (fallback Ctrl-C quits).
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToOverview);
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToSwitch -> Switch
-    keys.push(Ok(Key::Char(CTRL_O))); // inert at the base Switch
+    keys.push(Ok(Key::Enter)); // Closeup root -> attach -> ToOverview -> Overview
+    keys.push(Ok(Key::Char(CTRL_O))); // inert at the base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -26,15 +26,15 @@ fn ctrl_o_in_the_pane_zooms_out_to_switch() {
 }
 
 #[test]
-fn pane_to_switch_then_esc_re_attaches() {
-    // ToSwitch -> Switch(return=Attached). In Switch, Esc re-attaches. The pane
-    // returns ToSwitch the first time and Closed the second so the run ends.
+fn pane_to_overview_then_esc_re_attaches() {
+    // ToOverview -> Overview(return=Attached). In Overview, Esc re-attaches. The pane
+    // returns ToOverview the first time and Closed the second so the run ends.
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         let mut n = calls.borrow_mut();
         *n += 1;
         if *n == 1 {
-            Ok(PaneExit::ToSwitch)
+            Ok(PaneExit::ToOverview)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -42,9 +42,9 @@ fn pane_to_switch_then_esc_re_attaches() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // attach -> ToSwitch -> Switch(return Attached)
-    keys.push(Ok(Key::Escape)); // Switch Esc -> re-attach -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // attach -> ToOverview -> Overview(return Attached)
+    keys.push(Ok(Key::Escape)); // Overview Esc -> re-attach -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -62,14 +62,14 @@ fn pane_to_switch_then_esc_re_attaches() {
 }
 
 #[test]
-fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
-    // ToSwitch -> Switch(return=Attached). Moving the cursor onto an idle
-    // session and pressing Esc lands in 在席 *without* spawning a second pane
+fn pane_to_overview_then_esc_onto_an_idle_session_lands_in_closeup() {
+    // ToOverview -> Overview(return=Attached). Moving the cursor onto an idle
+    // session and pressing Esc lands in 集中 *without* spawning a second pane
     // — only a live session re-attaches, mirroring how Enter behaves.
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
-        Ok(PaneExit::ToSwitch)
+        Ok(PaneExit::ToOverview)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     // Only the root (/ws) is live; the worktree rows are idle.
@@ -81,10 +81,10 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
         }
     };
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // attach root -> ToSwitch -> Switch(return Attached)
+    keys.push(Ok(Key::Enter)); // attach root -> ToOverview -> Overview(return Attached)
     keys.push(Ok(Key::ArrowDown)); // cursor -> an idle worktree row
-    keys.push(Ok(Key::Escape)); // Esc -> idle row stays in Focus (no re-attach)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Esc -> idle row stays in Closeup (no re-attach)
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -103,26 +103,26 @@ fn pane_to_switch_then_esc_onto_an_idle_session_lands_in_focus() {
 }
 
 #[test]
-fn ctrl_t_in_the_pane_zooms_out_to_focus() {
-    // Attaching to a live session; the pane returns ToFocus (Ctrl-T), so the loop
-    // leaves 没入 for 在席 (Focus) — the action menu floating over the pane's tab —
+fn ctrl_t_in_the_pane_zooms_out_to_closeup() {
+    // Attaching to a live session; the pane returns ToCloseup (Ctrl-T), so the loop
+    // leaves 没入 for 集中 (Closeup) — the action menu floating over the pane's tab —
     // leaving the pane alive *without* re-attaching: the pane opens exactly once.
-    // ToFocus arms a one-shot return-to-pane (the next Esc would re-attach), but a
+    // ToCloseup arms a one-shot return-to-pane (the next Esc would re-attach), but a
     // deliberate key (here ↓ in the menu) cancels it, so the following Escapes
-    // first dismiss the floating menu, then peel back to Switch (then the
+    // first dismiss the floating menu, then peel back to Overview (then the
     // fallback Ctrl-C quits).
     let calls = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *calls.borrow_mut() += 1;
-        Ok(PaneExit::ToFocus)
+        Ok(PaneExit::ToCloseup)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // Focus root -> attach -> ToFocus -> Focus (arm return)
+    keys.push(Ok(Key::Enter)); // Closeup root -> attach -> ToCloseup -> Closeup (arm return)
     keys.push(Ok(Key::ArrowDown)); // a menu move cancels the one-shot return arming
     keys.push(Ok(Key::Escape)); // dismiss the menu floating over the pane tab
-    keys.push(Ok(Key::Escape)); // Focus -> Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,
@@ -140,11 +140,11 @@ fn ctrl_t_in_the_pane_zooms_out_to_focus() {
 
 #[test]
 fn ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane() {
-    // The reported flow: attach an agent, zoom out with Ctrl-T / Ctrl-O a (ToFocus)
-    // to the 在席 action menu, then Esc. The immediate Esc must return to the pane
-    // the zoom started from (没入) rather than landing in Focus. A live tab strip is
-    // republished each frame (as in production), so `focus_discard_new_tab` *would*
-    // fire on Esc — the one-shot return arming has to win. The pane returns ToFocus
+    // The reported flow: attach an agent, zoom out with Ctrl-T / Ctrl-O a (ToCloseup)
+    // to the 集中 action menu, then Esc. The immediate Esc must return to the pane
+    // the zoom started from (没入) rather than landing in Closeup. A live tab strip is
+    // republished each frame (as in production), so `closeup_discard_new_tab` *would*
+    // fire on Esc — the one-shot return arming has to win. The pane returns ToCloseup
     // first, then Closed on re-attach so the run ends; it opens exactly twice (the
     // initial attach and the Esc re-attach).
     let calls = RefCell::new(0);
@@ -152,7 +152,7 @@ fn ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane() {
         let mut n = calls.borrow_mut();
         *n += 1;
         if *n == 1 {
-            Ok(PaneExit::ToFocus)
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -160,10 +160,10 @@ fn ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0usize);
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // attach -> ToFocus -> 在席 (arm return)
-    keys.push(Ok(Key::Escape)); // Esc -> re-attach -> Closed -> 在席
-    keys.push(Ok(Key::Escape)); // 在席 over the live strip -> discard new tab (preview)
-    keys.push(Ok(Key::Escape)); // 在席 -> 切替
+    keys.push(Ok(Key::Enter)); // attach -> ToCloseup -> 集中 (arm return)
+    keys.push(Ok(Key::Escape)); // Esc -> re-attach -> Closed -> 集中
+    keys.push(Ok(Key::Escape)); // 集中 over the live strip -> discard new tab (preview)
+    keys.push(Ok(Key::Escape)); // 集中 -> 選択
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_tabs(keys, sample_state(), &mut open, &mut preview, &mut tab_op).unwrap(),
@@ -173,14 +173,14 @@ fn ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane() {
 }
 
 #[test]
-fn pane_failure_is_reported_and_returns_to_focus() {
+fn pane_failure_is_reported_and_returns_to_closeup() {
     let mut open =
         |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Err(anyhow::anyhow!("no shell"));
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // attach -> Err -> Focus (logged)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // attach -> Err -> Closeup (logged)
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -200,7 +200,7 @@ fn pane_failure_is_reported_and_returns_to_focus() {
 fn a_double_click_in_an_attached_pane_switches_to_the_clicked_session() {
     // From 没入, a sidebar double click surfaces as PaneExit::ToSession(row):
     // attaching `feat` hands it back targeting focus row 1 (`main`), so the loop
-    // re-roots on `main` (re-attaching it), then `main` closes and drops to 在席.
+    // re-roots on `main` (re-attaching it), then `main` closes and drops to 集中.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
         opened.borrow_mut().push(d.to_path_buf());
@@ -236,7 +236,7 @@ fn a_double_click_in_an_attached_pane_switches_to_the_clicked_session() {
 fn a_double_click_on_the_create_row_in_an_attached_pane_opens_inline_create() {
     // From 没入, the pane reports a double click on the sidebar create row as
     // PaneExit::ToSession(create_row). The event loop leaves the pane alive,
-    // opens the same inline create editor used by 切替 / 在席, and the typed name
+    // opens the same inline create editor used by 選択 / 集中, and the typed name
     // is dispatched through the normal create callback.
     let state = sample_state();
     let create_row = state.list().create_row();

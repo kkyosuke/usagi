@@ -77,7 +77,7 @@ impl CommandRegistry {
     }
 
     /// The commands belonging exactly to `scope`, in registry order — used by the
-    /// 在席 (Focus) menu to list a session's runnable commands (`agent`, `ai`,
+    /// 集中 (Closeup) menu to list a session's runnable commands (`agent`, `ai`,
     /// `terminal`, `close`); the menu reorders them into its own fixed display
     /// order itself. Unlike
     /// completion this is an exact-scope filter, so it excludes the shared
@@ -148,7 +148,7 @@ impl CommandRegistry {
     /// Like [`dispatch_with`](Self::dispatch_with) but gated by the calling
     /// surface's `scope`: a command not offered in that scope is refused with an
     /// error line instead of run, so the workspace `:` command palette and the
-    /// 在席 (Focus) prompt each run only their own commands (plus the shared
+    /// 集中 (Closeup) prompt each run only their own commands (plus the shared
     /// [`CommandScope::Both`] utilities). This is the dispatch-time counterpart
     /// to the scope filter [`complete`](Self::complete) / [`suggest`](Self::suggest)
     /// already apply to what each surface *offers* — without it, an out-of-scope

@@ -180,25 +180,21 @@ pub(super) fn waiting_notice(count: usize) -> Vec<String> {
 /// dimmed, so the screen always shows which step the keys act on. Centred for
 /// the terminal width.
 pub(super) fn mode_ladder(width: usize, current: Mode) -> String {
-    const STEPS: [(Mode, &str); 3] = [
-        (Mode::Switch, "Switch"),
-        (Mode::Focus, "Focus"),
-        (Mode::Attached, "Attached"),
-    ];
-    let steps: Vec<String> = STEPS
+    let steps: Vec<String> = Mode::LADDER
         .iter()
-        .map(|(mode, label)| {
+        .map(|mode| {
+            let label = mode.label();
             if *mode == current {
-                style(*label).accent().bold().to_string()
+                style(label).accent().bold().to_string()
             } else {
-                style(*label).dim().to_string()
+                style(label).dim().to_string()
             }
         })
         .collect();
     // Clip to the terminal width so the ladder never overruns a very narrow
     // window (the styling is ANSI, which `clip_to_width` carries through); at any
-    // normal width the fixed `Switch › Focus › Attached` label fits and this is a
-    // no-op.
+    // normal width the fixed `Overview › Closeup › Attached` label fits and this
+    // is a no-op.
     let ladder = widgets::clip_to_width(&steps.join(&style(" › ").dim().to_string()), width);
     let pad = widgets::centered_padding(width, console::measure_text_width(&ladder));
     format!("{}{ladder}", " ".repeat(pad))
@@ -280,19 +276,19 @@ pub(super) fn hint_lines(state: &HomeState, width: usize) -> Vec<String> {
     }
 }
 
-/// The command input line, by mode: a left-pane hint in 切替 (Switch), the
-/// focused session in 在席 (Focus), and a live-terminal status in 没入
+/// The command input line, by mode: a left-pane hint in 選択 (Overview), the
+/// focused session in 集中 (Closeup), and a live-terminal status in 没入
 /// (Attached). The workspace command line is the `:` palette overlay, not this
 /// resident line.
 pub(super) fn input_line(state: &HomeState) -> String {
     match state.mode() {
-        Mode::Switch if state.list().create_row_selected() => {
+        Mode::Overview if state.list().create_row_selected() => {
             style(" Type a session name to create".to_string())
                 .green()
                 .to_string()
         }
-        Mode::Switch => style(" Pick a session".to_string()).dim().to_string(),
-        Mode::Focus => style(format!(
+        Mode::Overview => style(" Pick a session".to_string()).dim().to_string(),
+        Mode::Closeup => style(format!(
             " Operating session: {}",
             state.focused_session_name()
         ))
@@ -459,7 +455,7 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
         format!("[command{scope}]  Tab: complete / ↑↓: history / Enter: run / Esc: close")
     } else {
         match state.mode() {
-        Mode::Switch => {
+        Mode::Overview => {
             // `s sort` names the waiting-first toggle and reflects its state.
             let sort = if state.sort_waiting() {
                 "s sort:on"
@@ -467,24 +463,24 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
                 "s sort"
             };
             format!(
-                "[switch{scope}]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter focus / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
+                "[overview{scope}]  ↑↓ session / + row type/Enter new / K/J move / {sort} / ←→ tab / Enter closeup / c new / r rename / n/Ctrl-E note / x close tab / : commands / ? keys / Esc back"
             )
         }
-        // 在席 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
+        // 集中 shares the 没入 prefix grammar under the prefix scheme: `Ctrl-O` is
         // a leader, so while one is pending the footer flips to the waiting hint
         // (mirroring 没入), and otherwise it names the leader. The alt scheme keeps
         // `Ctrl-O` a direct zoom-out here, so its footer names that instead.
-        Mode::Focus => match state.key_scheme() {
+        Mode::Closeup => match state.key_scheme() {
             KeyScheme::Prefix if state.prefix_pending() => {
-                "[focus]  Ctrl-O ▸ o switch / n/p tab / g agent / e note / s sidebar / q quit · Esc cancel"
+                "[closeup]  Ctrl-O ▸ o overview / n/p tab / g agent / e note / s sidebar / q quit · Esc cancel"
                     .to_string()
             }
             KeyScheme::Prefix => format!(
-                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o switch / g agent … / Ctrl-^: last / : commands / ? keys / Esc: switch",
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O then: o overview / g agent … / Ctrl-^: last / : commands / ? keys / Esc: overview",
                 state.focused_session_name()
             ),
             KeyScheme::Alt => format!(
-                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: switch / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: switch",
+                "[session: {}{scope}]  Ctrl-N/P: tab / Enter: open/run / Ctrl-O: overview / Ctrl-^: last / Ctrl-E: note / : commands / ? keys / Esc: overview",
                 state.focused_session_name()
             ),
         },
@@ -496,15 +492,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
             // next key" rather than "ignored"; it lapses on its own after
             // `PREFIX_TIMEOUT`, or on `Esc` / any other unbound key.
             KeyScheme::Prefix if state.prefix_pending() => {
-                "[attached]  Ctrl-O ▸ o switch / a focus / n/p tab / g agent / e note / x close / q quit · Esc cancel"
+                "[attached]  Ctrl-O ▸ o overview / a closeup / n/p tab / g agent / e note / x close / q quit · Esc cancel"
                     .to_string()
             }
             KeyScheme::Prefix => {
-                "[attached]  Ctrl-O then: o switch / a focus / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
+                "[attached]  Ctrl-O then: o overview / a closeup / n/p tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
             KeyScheme::Alt => {
-                "[attached]  Alt: o switch / a focus / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
+                "[attached]  Alt: o overview / a closeup / ←→ tab / g agent / e note / x close / q quit · Ctrl-^ last"
                     .to_string()
             }
         },
@@ -513,11 +509,11 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     widgets::dim_line(width, &fit_help(width, &help))
 }
 
-/// Builds the inline create row appended to the left pane in 切替 (Switch) while
+/// Builds the inline create row appended to the left pane in 選択 (Overview) while
 /// naming a new session: `+ new: <name>` with a block caret on the character
 /// being edited (`cursor`, a byte offset into `input`) and an inline error below
 /// it. The rows are clipped to the pane width.
-pub(super) fn switch_create_rows(
+pub(super) fn overview_create_rows(
     input: &str,
     cursor: usize,
     error: Option<&str>,
@@ -770,13 +766,13 @@ pub(super) fn update_confirm_frame(
 /// space of padding [`widgets::boxed`] adds on each side.
 pub(super) const TEXT_MODAL_INNER: usize = 60;
 
-/// Inner (content) width of the floating 在席 (Focus) menu overlay modal, sized
+/// Inner (content) width of the floating 集中 (Closeup) menu overlay modal, sized
 /// to hold the widest key hint (`↑↓ move   Enter run   → pick terminal   …`)
 /// without clipping. Clamped to the right pane by [`widgets::modal_inner_width`]
 /// so a narrow pane still fits the box.
 pub(super) const FOCUS_MENU_INNER: usize = 60;
 
-/// Inner (content) width of the floating 在席 (Focus) prompt overlay modal — the
+/// Inner (content) width of the floating 集中 (Closeup) prompt overlay modal — the
 /// session-scoped command line and its `usage` / `examples` hints. Matched to
 /// [`FOCUS_MENU_INNER`] so the two action surfaces float at the same size, and
 /// clamped to the right pane by [`widgets::modal_inner_width`] like the menu.

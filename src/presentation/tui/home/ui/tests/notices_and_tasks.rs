@@ -271,11 +271,11 @@ fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
 fn render_frame_speaks_task_status_from_the_sidebar_over_a_live_terminal() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     // A live embedded terminal owns the right pane (没入's attached shell, or
-    // 切替's live preview). Session task status no longer rides the header: the
+    // 選択's live preview). Session task status no longer rides the header: the
     // target row carries the inline skeleton, and the sidebar mascot speaks the
     // label without clobbering shell output below.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_tasks(vec![TaskRow {
@@ -300,7 +300,7 @@ fn render_frame_speaks_the_update_from_the_sidebar_over_a_live_terminal() {
     // even while a live terminal fills the right pane — the shell output is never
     // overdrawn, and the notice stays off the header rows.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
@@ -321,7 +321,7 @@ fn render_frame_keeps_the_run2_loading_over_a_live_terminal() {
     // the blocking terminal / agent spawn, before the new pane draws over the
     // screen).
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
     state.step_loading("ターミナル起動中…");
@@ -334,7 +334,7 @@ fn render_frame_skips_the_big_loading_overlay_when_tabs_are_present() {
     // Pending tabs carry loading inline in their chip/body, so the legacy
     // full-pane loading overlay does not draw on top of an existing tab strip.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     state.step_loading("ターミナル起動中…");
     let joined = stripped(&render_frame(24, 100, &state));
@@ -361,11 +361,11 @@ fn render_frame_shows_the_run2_loading_while_an_action_runs() {
 }
 
 #[test]
-fn run2_loading_blanks_the_focus_action_menu() {
+fn run2_loading_blanks_the_closeup_action_menu() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
 
-    // The idle 在席 menu floats as an overlay modal composited over the frame.
+    // The idle 集中 menu floats as an overlay modal composited over the frame.
     let idle = stripped(&render_frame(24, 100, &state));
     assert!(idle.contains("Run a command:"));
     assert!(idle.contains("Open a shell"));

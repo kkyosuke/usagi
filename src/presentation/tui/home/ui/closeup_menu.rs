@@ -17,15 +17,15 @@ pub(super) fn menu_marker(selected: bool) -> String {
     }
 }
 
-/// Builds one 在席 (Focus) menu row: a `›` cursor for the highlighted command,
+/// Builds one 集中 (Closeup) menu row: a `›` cursor for the highlighted command,
 /// its name, and its dimmed description, clipped to `width`.
-pub(super) fn focus_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
+pub(super) fn closeup_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
     menu_row(info.name, info.description, selected, width)
 }
 
 /// The shared layout for an action row: a `›` cursor when `selected`, a fixed-
 /// width cyan `name`, and a dimmed `desc`, clipped to `width`. Used by the plain
-/// command rows ([`focus_menu_row`]) and the `agent` row, which substitutes a
+/// command rows ([`closeup_menu_row`]) and the `agent` row, which substitutes a
 /// "Launch <default>" description and an expand chevron.
 pub(super) fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
@@ -39,17 +39,17 @@ pub(super) fn menu_row(name: &str, desc: &str, selected: bool, width: usize) -> 
     clip_to_width(&format!("  {marker} {name}{desc}"), width)
 }
 
-/// The 在席 menu's `agent` row: like a plain command row but its description
+/// The 集中 menu's `agent` row: like a plain command row but its description
 /// names the agent a plain launch uses (the configured default) and carries an
 /// expand affordance — `▾` while the picker is open, `▸` when the cursor is on
 /// this row and it can open (more than one CLI installed). When more than one
 /// CLI is installed but the cursor is elsewhere the slot is held with blanks so
 /// the description never shifts as the cursor moves on/off the row; with a
 /// single CLI (the chevron can never show) no slot is reserved.
-pub(super) fn focus_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
-    let chevron = if state.focus_menu_agent_cursor().is_some() {
+pub(super) fn closeup_agent_command_row(state: &HomeState, selected: bool, width: usize) -> String {
+    let chevron = if state.closeup_menu_agent_cursor().is_some() {
         "▾ "
-    } else if state.focus_menu_agent_can_expand() {
+    } else if state.closeup_menu_agent_can_expand() {
         "▸ "
     } else if state.installed_agents().len() > 1 {
         "  "
@@ -60,18 +60,18 @@ pub(super) fn focus_agent_command_row(state: &HomeState, selected: bool, width: 
     menu_row("agent", &desc, selected, width)
 }
 
-/// The 在席 menu's `terminal` row: like a plain command row but it can expand
+/// The 集中 menu's `terminal` row: like a plain command row but it can expand
 /// into the `open` / `new` picker. `open` is the default and preserves the
 /// existing embedded-tab behaviour. The row always reserves the same 2-column
 /// chevron slot as `agent` and `close` so descriptions never shift (no CLS).
-pub(super) fn focus_terminal_command_row(
+pub(super) fn closeup_terminal_command_row(
     state: &HomeState,
     selected: bool,
     width: usize,
 ) -> String {
-    let chevron = if state.focus_menu_terminal_expanded() {
+    let chevron = if state.closeup_menu_terminal_expanded() {
         "▾ "
-    } else if state.focus_menu_terminal_can_expand() {
+    } else if state.closeup_menu_terminal_can_expand() {
         "▸ "
     } else {
         "  "
@@ -83,7 +83,7 @@ pub(super) fn focus_terminal_command_row(
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
 /// cursor on the highlighted CLI, its display name, and a dimmed `(default)` tag
 /// on the configured agent.
-pub(super) fn focus_agent_pick_row(
+pub(super) fn closeup_agent_pick_row(
     cli: AgentCli,
     selected: bool,
     is_default: bool,
@@ -108,21 +108,21 @@ pub(super) fn focus_agent_pick_row(
     clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
-/// The 在席 menu's `close` row: like a plain command row but carries a `▾`/`▸`
+/// The 集中 menu's `close` row: like a plain command row but carries a `▾`/`▸`
 /// expand affordance to open the close picker (plain close vs. close --force) —
 /// `▾` while the picker is open, `▸` when the cursor is on this row (it can
 /// always expand). When the cursor is elsewhere the slot is held with blanks so
 /// the description never shifts as the cursor moves on/off the row (no CLS),
 /// mirroring the `agent` row.
-pub(super) fn focus_close_command_row(
+pub(super) fn closeup_close_command_row(
     state: &HomeState,
     info: &CommandInfo,
     selected: bool,
     width: usize,
 ) -> String {
-    let chevron = if state.focus_close_expanded() {
+    let chevron = if state.closeup_close_expanded() {
         "▾ "
-    } else if state.focus_close_can_expand() {
+    } else if state.closeup_close_can_expand() {
         "▸ "
     } else {
         "  "
@@ -134,7 +134,7 @@ pub(super) fn focus_close_command_row(
 /// One close-picker sub-row, indented under the expanded `close` row: a `›`
 /// cursor on the highlighted option, the command label, and a dimmed hint.
 /// `force = false` → plain close; `force = true` → close --force.
-pub(super) fn focus_close_pick_row(force: bool, selected: bool, width: usize) -> String {
+pub(super) fn closeup_close_pick_row(force: bool, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
     let label = if force { "close --force" } else { "close" };
     let hint = if force {
@@ -154,7 +154,7 @@ pub(super) fn focus_close_pick_row(force: bool, selected: bool, width: usize) ->
 /// One terminal-picker sub-row, indented under the expanded `terminal` row:
 /// `open` adds an embedded usagi tab (the default), while `new` opens a native
 /// terminal app rooted at the same directory.
-pub(super) fn focus_terminal_pick_row(action: &str, selected: bool, width: usize) -> String {
+pub(super) fn closeup_terminal_pick_row(action: &str, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
     let name = if selected {
         style(format!("{action:<10}")).cyan().bold().to_string()
@@ -174,30 +174,30 @@ pub(super) fn focus_terminal_pick_row(action: &str, selected: bool, width: usize
     clip_to_width(&format!("      {marker} {name}{tag}"), width)
 }
 
-/// A hard floor on the 在席 (Focus) menu's command-area height, so even a tiny
+/// A hard floor on the 集中 (Closeup) menu's command-area height, so even a tiny
 /// menu keeps a usable window. The real target is the widest expansion (see
-/// [`focus_menu_target`]); this only guards degenerate menus with fewer rows.
+/// [`closeup_menu_target`]); this only guards degenerate menus with fewer rows.
 pub(super) const FOCUS_MENU_MIN_VISIBLE: usize = 5;
 
-/// The 在席 menu box's chrome rows around the windowed command area: the two box
+/// The 集中 menu box's chrome rows around the windowed command area: the two box
 /// borders plus the `Run a command:` label, the blank spacer, and the key hint.
 /// The command window may take up to `avail_rows - FOCUS_MENU_CHROME` rows before
 /// the box would overrun the right pane.
 pub(super) const FOCUS_MENU_CHROME: usize = 5;
 
-/// The command-area height the 在席 menu reserves: the row count with the *most
+/// The command-area height the 集中 menu reserves: the row count with the *most
 /// sub-menu-heavy* picker fully expanded — the command rows plus the largest
 /// picker's sub-rows. Fixing the window to this height means every picker opens in
 /// place with no `↑/↓ N more` clipping and no layout shift, whatever is expanded.
 /// Each command contributes its own picker's sub-row count when it can expand:
 /// `agent` the installed CLIs (only when more than one, so a picker actually
 /// opens), `terminal` its open/new actions, `close` its two options.
-pub(super) fn focus_menu_target(state: &HomeState, commands: &[CommandInfo]) -> usize {
+pub(super) fn closeup_menu_target(state: &HomeState, commands: &[CommandInfo]) -> usize {
     let widest_picker = commands
         .iter()
         .map(|info| match info.name {
             "agent" if state.installed_agents().len() > 1 => state.installed_agents().len(),
-            "terminal" => state.focus_menu_terminal_actions().len(),
+            "terminal" => state.closeup_menu_terminal_actions().len(),
             "close" => 2,
             _ => 0,
         })
@@ -206,23 +206,23 @@ pub(super) fn focus_menu_target(state: &HomeState, commands: &[CommandInfo]) -> 
     commands.len() + widest_picker
 }
 
-/// How many command rows the 在席 menu window shows for a pane `avail_rows` tall,
-/// given the `target` height (the widest expansion, see [`focus_menu_target`]).
+/// How many command rows the 集中 menu window shows for a pane `avail_rows` tall,
+/// given the `target` height (the widest expansion, see [`closeup_menu_target`]).
 /// It reserves the full `target` — so every picker opens without scrolling and the
 /// box never resizes as pickers open and close — capping only when the pane cannot
 /// hold it (then the window scrolls), and never below [`FOCUS_MENU_MIN_VISIBLE`].
-pub(super) fn focus_menu_visible(target: usize, avail_rows: usize) -> usize {
+pub(super) fn closeup_menu_visible(target: usize, avail_rows: usize) -> usize {
     let max_fit = avail_rows.saturating_sub(FOCUS_MENU_CHROME);
     target.min(max_fit).max(FOCUS_MENU_MIN_VISIBLE)
 }
 
-/// Windows the 在席 menu's command `rows` to exactly `visible` output rows,
+/// Windows the 集中 menu's command `rows` to exactly `visible` output rows,
 /// scrolled so the `active` row (the cursor, or the highlighted picker sub-row)
 /// stays on screen. Rows hidden past an edge are summarised with a dim `↑ N` /
 /// `↓ N` marker on the window's top / bottom row; rows that already fit are padded
 /// with blanks. Either way the result is `visible` rows, so the box keeps the same
 /// height whether or not an inline picker is expanded.
-pub(super) fn focus_menu_window(rows: Vec<String>, active: usize, visible: usize) -> Vec<String> {
+pub(super) fn closeup_menu_window(rows: Vec<String>, active: usize, visible: usize) -> Vec<String> {
     if rows.len() <= visible {
         let mut out = rows;
         out.resize(visible, String::new());
@@ -235,16 +235,16 @@ pub(super) fn focus_menu_window(rows: Vec<String>, active: usize, visible: usize
     let start = active.saturating_sub(content / 2).min(total - content);
     let end = start + content;
     let mut out = Vec::with_capacity(visible);
-    out.push(focus_menu_overflow(start, true));
+    out.push(closeup_menu_overflow(start, true));
     out.extend(rows[start..end].iter().cloned());
-    out.push(focus_menu_overflow(total - end, false));
+    out.push(closeup_menu_overflow(total - end, false));
     out
 }
 
-/// A dim overflow marker for the windowed 在席 menu: `↑ N more` (`above`) or
+/// A dim overflow marker for the windowed 集中 menu: `↑ N more` (`above`) or
 /// `↓ N more` (below) when `hidden` rows sit past the window edge, or a blank row
 /// when none do — so the window keeps its fixed height at the ends of the scroll.
-pub(super) fn focus_menu_overflow(hidden: usize, above: bool) -> String {
+pub(super) fn closeup_menu_overflow(hidden: usize, above: bool) -> String {
     if hidden == 0 {
         return String::new();
     }
@@ -252,19 +252,19 @@ pub(super) fn focus_menu_overflow(hidden: usize, above: bool) -> String {
     style(format!("  {arrow} {hidden} more")).dim().to_string()
 }
 
-/// The body of the 在席 (Focus) menu (no identity header): the `Run a command:`
+/// The body of the 集中 (Closeup) menu (no identity header): the `Run a command:`
 /// label, one row per Session-scope command (`›` cursor on the highlighted one),
-/// and a key hint. The command rows are windowed ([`focus_menu_window`]) to a
+/// and a key hint. The command rows are windowed ([`closeup_menu_window`]) to a
 /// height that grows to fill the `avail_rows`-tall right pane, so a long picker
 /// shows as many rows as fit before it scrolls rather than collapsing straight
 /// into `↑/↓ N more` markers. Rendered as the body of the floating menu overlay
-/// modal (see [`super::render_frame`] and [`HomeState::focus_action_overlay`]); the
+/// modal (see [`super::render_frame`] and [`HomeState::closeup_action_overlay`]); the
 /// `session:` identity rides the modal's title rather than a header line here.
-pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
-    let cursor = state.focus_menu_cursor();
-    let expanded = state.focus_menu_expanded();
-    let close_expanded = state.focus_close_expanded();
-    let commands = state.focus_menu_commands();
+pub(super) fn closeup_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
+    let cursor = state.closeup_menu_cursor();
+    let expanded = state.closeup_menu_expanded();
+    let close_expanded = state.closeup_close_expanded();
+    let commands = state.closeup_menu_commands();
 
     // Build the whole command area first — one row per command plus any expanded
     // picker's sub-rows — tracking the index of the *active* row (the cursor, or
@@ -276,18 +276,18 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
         if info.name == "agent" {
             // The `agent` row names the default CLI; when expanded, its installed
             // alternatives follow as indented picker sub-rows (案A).
-            let agent_cursor = state.focus_menu_agent_cursor();
+            let agent_cursor = state.closeup_menu_agent_cursor();
             if agent_cursor.is_none() && selected {
                 active = rows.len();
             }
-            rows.push(focus_agent_command_row(state, selected, width));
+            rows.push(closeup_agent_command_row(state, selected, width));
             if agent_cursor.is_some() {
                 let default = state.default_agent();
                 for (j, &cli) in state.installed_agents().iter().enumerate() {
                     if Some(j) == agent_cursor {
                         active = rows.len();
                     }
-                    rows.push(focus_agent_pick_row(
+                    rows.push(closeup_agent_pick_row(
                         cli,
                         Some(j) == agent_cursor,
                         cli == default,
@@ -301,29 +301,33 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
             if !close_expanded && selected {
                 active = rows.len();
             }
-            rows.push(focus_close_command_row(state, info, selected, width));
+            rows.push(closeup_close_command_row(state, info, selected, width));
             if close_expanded {
-                let close_cursor = state.focus_close_cursor();
+                let close_cursor = state.closeup_close_cursor();
                 for j in 0..2usize {
                     if Some(j) == close_cursor {
                         active = rows.len();
                     }
-                    rows.push(focus_close_pick_row(j == 1, Some(j) == close_cursor, width));
+                    rows.push(closeup_close_pick_row(
+                        j == 1,
+                        Some(j) == close_cursor,
+                        width,
+                    ));
                 }
             }
         } else if info.name == "terminal" {
-            let terminal_expanded = state.focus_menu_terminal_expanded();
+            let terminal_expanded = state.closeup_menu_terminal_expanded();
             if !terminal_expanded && selected {
                 active = rows.len();
             }
-            rows.push(focus_terminal_command_row(state, selected, width));
+            rows.push(closeup_terminal_command_row(state, selected, width));
             if terminal_expanded {
-                let terminal_cursor = state.focus_menu_terminal_cursor();
-                for (j, &action) in state.focus_menu_terminal_actions().iter().enumerate() {
+                let terminal_cursor = state.closeup_menu_terminal_cursor();
+                for (j, &action) in state.closeup_menu_terminal_actions().iter().enumerate() {
                     if Some(j) == terminal_cursor {
                         active = rows.len();
                     }
-                    rows.push(focus_terminal_pick_row(
+                    rows.push(closeup_terminal_pick_row(
                         action,
                         Some(j) == terminal_cursor,
                         width,
@@ -334,7 +338,7 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
             if selected {
                 active = rows.len();
             }
-            rows.push(focus_menu_row(info, selected, width));
+            rows.push(closeup_menu_row(info, selected, width));
         }
     }
 
@@ -349,9 +353,9 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
     // opens in place — its sub-rows shown, not collapsed into `↑/↓ N more` — and
     // the box never resizes as pickers open and close. Capped to the right pane so
     // it never overruns; only when the pane is too short does the window scroll.
-    let visible = focus_menu_visible(focus_menu_target(state, &commands), avail_rows);
-    let mut lines = vec![focus_menu_filter_line(state, width)];
-    lines.extend(focus_menu_window(rows, active, visible));
+    let visible = closeup_menu_visible(closeup_menu_target(state, &commands), avail_rows);
+    let mut lines = vec![closeup_menu_filter_line(state, width)];
+    lines.extend(closeup_menu_window(rows, active, visible));
     lines.push(String::new());
     // The hint is contextual: picker-navigation keys while any picker is open,
     // the `/` filter's own keys while it is live, a row-specific expand affordance
@@ -360,13 +364,13 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
         "↑↓ move   Enter run   ← back".to_string()
     } else if expanded {
         "↑↓ move   Enter launch   ← back".to_string()
-    } else if state.focus_menu_filtering() {
+    } else if state.closeup_menu_filtering() {
         "↑↓ move   Enter run   ⌫ edit   Esc clear".to_string()
-    } else if state.focus_menu_agent_can_expand() {
+    } else if state.closeup_menu_agent_can_expand() {
         "↑↓ move   Enter run   → pick agent   / filter   t terminal   a agent".to_string()
-    } else if state.focus_menu_terminal_can_expand() {
+    } else if state.closeup_menu_terminal_can_expand() {
         "↑↓ move   Enter run   → pick terminal   / filter   t terminal   a agent".to_string()
-    } else if state.focus_close_can_expand() {
+    } else if state.closeup_close_can_expand() {
         "↑↓ move   Enter run   → expand   / filter   t terminal   a agent".to_string()
     } else {
         "↑↓ move   Enter run   / filter   t terminal   a agent".to_string()
@@ -375,25 +379,25 @@ pub(super) fn focus_menu_body(state: &HomeState, width: usize, avail_rows: usize
     lines
 }
 
-/// Rows the 在席 prompt reserves for its Session-scope hint, always filled to this
+/// Rows the 集中 prompt reserves for its Session-scope hint, always filled to this
 /// height (padded with blanks) so the box keeps a **fixed height** as the hint
 /// changes while typing — no layout shift, the prompt sibling of the menu's
-/// widest-expansion window ([`focus_menu_target`]) and the palette's
+/// widest-expansion window ([`closeup_menu_target`]) and the palette's
 /// [`PALETTE_HINT_ROWS`](super::chrome). Sized to the tallest hint: a `usage` line
 /// plus up to [`HINT_MAX`] examples.
 pub(super) const FOCUS_PROMPT_HINT_ROWS: usize = HINT_MAX + 1;
 
-/// The 在席 prompt box's chrome rows around the reserved hint block: the two box
+/// The 集中 prompt box's chrome rows around the reserved hint block: the two box
 /// borders plus the `❯` command line and its blank spacer. The hint block is
 /// capped to `avail_rows - FOCUS_PROMPT_CHROME` so a short pane never overruns.
 pub(super) const FOCUS_PROMPT_CHROME: usize = 4;
 
-/// The 在席 menu's first line: the dim `Run a command:` label normally, or — while
+/// The 集中 menu's first line: the dim `Run a command:` label normally, or — while
 /// a `/` filter is live — a `Filter: <query>` line that shows the typed text as the
 /// list narrows beneath it. Mirrors the Open Project picker's filter bar (see
 /// [`crate::presentation::tui::open`]) so the two search affordances read alike.
-pub(super) fn focus_menu_filter_line(state: &HomeState, width: usize) -> String {
-    let Some(query) = state.focus_menu_filter() else {
+pub(super) fn closeup_menu_filter_line(state: &HomeState, width: usize) -> String {
+    let Some(query) = state.closeup_menu_filter() else {
         return style("Run a command:").dim().to_string();
     };
     let label = style("Filter:").dim();
@@ -405,18 +409,24 @@ pub(super) fn focus_menu_filter_line(state: &HomeState, width: usize) -> String 
     clip_to_width(&format!("{label}{value}"), width)
 }
 
-/// The body of the 在席 (Focus) prompt surface (no identity header): the
+/// The body of the 集中 (Closeup) prompt surface (no identity header): the
 /// session-scoped command line (`❯ <input>▏`) and a **fixed-height** Session-scope
 /// hint block below it, so the box never resizes as the hint changes while typing.
 /// Rendered as the body of the floating prompt overlay modal (the prompt sibling
-/// of [`focus_menu_body`]; see [`super::render_frame`] and
-/// [`HomeState::focus_action_overlay`]); the `session:` identity rides the modal's
+/// of [`closeup_menu_body`]; see [`super::render_frame`] and
+/// [`HomeState::closeup_action_overlay`]); the `session:` identity rides the modal's
 /// title rather than a header line here. `avail_rows` caps the reserved block so a
 /// short right pane never overruns (mirroring the menu's `avail_rows` window).
-pub(super) fn focus_prompt_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
+pub(super) fn closeup_prompt_body(
+    state: &HomeState,
+    width: usize,
+    avail_rows: usize,
+) -> Vec<String> {
     let prompt = style("❯").danger().bold();
     // Split at the caret so ←/→/Home/End move a visible block caret through the prompt.
-    let (before, after) = state.focus_prompt().split_at(state.focus_prompt_cursor());
+    let (before, after) = state
+        .closeup_prompt()
+        .split_at(state.closeup_prompt_cursor());
     let value = widgets::block_caret(before, after, &Style::new().accent());
     let mut lines = vec![clip_to_width(&format!("{prompt} {value}"), width)];
     lines.push(String::new());
@@ -424,14 +434,14 @@ pub(super) fn focus_prompt_body(state: &HomeState, width: usize, avail_rows: usi
     // one height whatever the hint is — commands, usage/examples, or none. Capped
     // to what the pane can hold so a short pane never pushes the box past it.
     let hint_rows = FOCUS_PROMPT_HINT_ROWS.min(avail_rows.saturating_sub(FOCUS_PROMPT_CHROME));
-    let mut hints = focus_hint_lines(state.focus_prompt_hint(), width);
+    let mut hints = closeup_hint_lines(state.closeup_prompt_hint(), width);
     hints.truncate(hint_rows);
     hints.resize(hint_rows, String::new());
     lines.extend(hints);
     lines
 }
 
-pub(super) fn focus_hint_lines(hint: Hint, width: usize) -> Vec<String> {
+pub(super) fn closeup_hint_lines(hint: Hint, width: usize) -> Vec<String> {
     match hint {
         Hint::Commands(hints) => hints
             .iter()

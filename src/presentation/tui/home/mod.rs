@@ -224,7 +224,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
     let (sessions, notice) =
         crate::usecase::workspace_state::recorded_sessions_for_display(&workspace.path);
     // The `⌂ root` row's memo, loaded from the same recorded state (no git) so the
-    // sidebar marker and the 切替 preview show it on the first paint, mirroring how
+    // sidebar marker and the 選択 preview show it on the first paint, mirroring how
     // a session's note is loaded with the session.
     let root_note = crate::usecase::workspace_state::recorded_root_note(&workspace.path);
     // Task issues back the `issue` command (list / graph / show); none on failure.
@@ -232,7 +232,7 @@ pub fn preload(workspace: &Workspace) -> Preload {
         .scan()
         .unwrap_or_default();
     // The effective settings (project-local overrides on top of the global
-    // default), reused for every setting the screen derives — the 在席 action
+    // default), reused for every setting the screen derives — the 集中 action
     // surface, the sidebar's initial state, the agent CLI / wiring, local-LLM
     // MCP wiring, and notifications. Re-read whenever the config screen closes (see
     // `open_config`) so a change takes effect without reopening this screen.
@@ -278,7 +278,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
 
     let mut state = HomeState::new(workspace.name.clone(), Vec::new(), notice);
     // The root row (`⌂ root`) operates in the workspace root; record its path so
-    // the 切替 preview can recognise the root's live embedded session (keyed by
+    // the 選択 preview can recognise the root's live embedded session (keyed by
     // this path) and show its terminal, mirroring how worktree rows are matched.
     state.set_root_path(workspace.path.clone());
     // Persist on-screen operation failures to the daily error log: the screen's
@@ -316,30 +316,30 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         state.set_extra_groups(extras);
     }
     state.set_issues(issues);
-    // Which right-pane action surface 在席 (Focus) presents — a pickable menu or a
+    // Which right-pane action surface 集中 (Closeup) presents — a pickable menu or a
     // typed prompt — and the state the left sidebar opens in (full width or the
     // collapsed rail; `Ctrl-B` toggles it from there).
     state.set_session_action_ui(settings.session_action_ui);
     state.set_sidebar(settings.sidebar);
-    // The manual-status label master 切替 assigns with `Tab` / the digit keys and
+    // The manual-status label master 選択 assigns with `Tab` / the digit keys and
     // the sidebar's status column resolves each session's `label_id` against.
     state.set_label_master(settings.session_labels.clone());
     // How the embedded terminal (没入) reserves its navigation keys — a `Ctrl-O`
     // prefix or single `Alt`-chords — so the rest reach the shell / agent.
     state.set_key_scheme(settings.key_scheme);
-    // Whether the sidebar mascot reacts to interaction (a blink in 切替 / 在席, the
+    // Whether the sidebar mascot reacts to interaction (a blink in 選択 / 集中, the
     // 没入 paw); off keeps it a still resting image.
     state.set_mascot_animation_enabled(settings.mascot_animation_enabled);
-    // The configured default agent (its display name labels 在席's `agent` row and
+    // The configured default agent (its display name labels 集中's `agent` row and
     // a bare `agent` launches it). The agents installed on this machine fill in
     // shortly after via the background probe spawned below (state opens with none).
     state.set_default_agent(settings.agent_cli);
-    // The local model the 在席 `chat` overlay talks to.
+    // The local model the 集中 `chat` overlay talks to.
     state.set_local_llm_model(settings.local_llm.model.clone());
-    // `state.ai_available` (which gates the 在席 `chat` row) stays false until the
+    // `state.ai_available` (which gates the 集中 `chat` row) stays false until the
     // background probe below lands — mirroring the installed-agent probe — so a cold
     // `ollama show` never delays the first paint.
-    // The screen opens in 切替 (Switch) — the base mode (see `HomeState::new`) —
+    // The screen opens in 選択 (Overview) — the base mode (see `HomeState::new`) —
     // so selecting a project lands on the session list the mascot animation glides
     // into; no explicit mode switch is needed here.
 
@@ -494,7 +494,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Assigning a manual status label (`Tab` / digit keys in 切替) persists the
+    // Assigning a manual status label (`Tab` / digit keys in 選択) persists the
     // label id to state.json and re-reads the sessions so the sidebar's status
     // column reflects it. The branch / identity is untouched, so the session keeps
     // its row: `select` holds its name to keep the cursor on it after the rebuild.
@@ -526,7 +526,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Reordering a session (`K` / `J` in 切替) swaps it with its neighbour in
+    // Reordering a session (`K` / `J` in 選択) swaps it with its neighbour in
     // state.json and re-reads the recorded sessions so the pane reflects the new
     // order. Like rename / note it stays synchronous (no git work) but still
     // load-modify-saves state.json, so it takes the same op-lock to serialise
@@ -552,7 +552,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Whether the 在席 (Focus) menu offers the `chat` command: only when the local
+    // Whether the 集中 (Closeup) menu offers the `chat` command: only when the local
     // LLM is enabled and its model is pulled, so it appears only when a reply would
     // actually work. The probe is an `ollama show`, which can block on a cold /
     // wedged `ollama` server, so it runs on a background thread rather than delaying
@@ -567,7 +567,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         });
     }
 
-    // The agents installed on this machine (which 在席's agent picker offers as
+    // The agents installed on this machine (which 集中's agent picker offers as
     // alternatives to the configured default). Probing them shells out to each
     // candidate CLI with `--version`, one after another, which can take longer than
     // the open→home animation — so it runs on a background thread instead of in
@@ -598,7 +598,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // The agent adapter `:agent` drives, picked from the configured CLI — the
     // single source of the launch command built per worktree below. Session
     // removal cleans up after this default agent; a launch may instead use the CLI
-    // the user picked in 在席 (resolved per-launch in `open_terminal` below).
+    // the user picked in 集中 (resolved per-launch in `open_terminal` below).
     let agent = crate::infrastructure::agent::agent_for(settings.agent_cli);
     // The configured default CLI, the fallback when a launch carries no explicit
     // agent choice (a bare `agent`, the menu's `a` shortcut / default row).
@@ -649,15 +649,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     if restore_panes_enabled {
         restore_open_panes(term, &state, &pool, &agent_wiring, default_cli);
         // Restore where the user was at the last quit — the cursor on a session
-        // (切替), focused (在席), or armed to auto-attach (没入). Done after the panes
+        // (選択), focused (集中), or armed to auto-attach (没入). Done after the panes
         // are back, so a 没入 target's pane is live for the event loop's first-pass
         // attach. Best-effort: a missing snapshot or a since-removed session simply
-        // opens in the default 切替.
+        // opens in the default 選択.
         if let Some(focus) = crate::infrastructure::resume_focus_store::load(&workspace.path) {
             use crate::infrastructure::resume_focus_store::StoredEngagement;
             let level = match focus.engagement {
-                StoredEngagement::Switch => ResumeLevel::Switch,
-                StoredEngagement::Focus => ResumeLevel::Focus,
+                StoredEngagement::Overview => ResumeLevel::Overview,
+                StoredEngagement::Closeup => ResumeLevel::Closeup,
                 StoredEngagement::Attached => ResumeLevel::Attached,
             };
             state.restore_focus(&focus.session, level);
@@ -841,17 +841,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // the switch loop are handled by the event loop around this call.
     //
     // A session can hold several panes (an agent alongside terminals): this loop
-    // drives the active pane until the user detaches (`Ctrl-O` → 切替) or every
-    // pane has closed (→ 在席). Switching tabs and adding panes now happen in 切替,
+    // drives the active pane until the user detaches (`Ctrl-O` → 選択) or every
+    // pane has closed (→ 集中). Switching tabs and adding panes now happen in 選択,
     // not here. `new_pane` distinguishes the two ways in: `false` re-attaches the
     // session's active pane (spawning the first when it is fresh); `true` adds a
-    // new pane of the requested kind and drives it (the 在席 action surface's
+    // new pane of the requested kind and drives it (the 集中 action surface's
     // `terminal` / `agent`). The attached session is declared to the monitor (so
     // it is never flagged as waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
     let mut open_terminal =
         |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
-            // Resolve which agent CLI this launch drives. Priority: the user's 在席
+            // Resolve which agent CLI this launch drives. Priority: the user's 集中
             // choice (menu picker / `agent <name>`), then the session's own pinned CLI
             // (recorded when it was created / delegated), then the configured default.
             // `take` clears the choice whether or not a fresh agent spawn follows, so a
@@ -900,7 +900,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             let mut pool = pool.borrow_mut();
             let handle = pool.monitor();
             // A session holds at most one agent *per CLI*: a request to add an agent
-            // pane (在席's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
+            // pane (集中's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
             // that already has a pane reuses it — activating its tab below — rather
             // than spawning a duplicate. A *different* CLI still spawns its own agent
             // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
@@ -957,7 +957,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // error log below.
             let result = (|| -> Result<PaneExit> {
                 // Ready the pane to drive: reuse the lone agent when a second was
-                // requested, add a fresh pane (在席's `terminal` / `agent`), or
+                // requested, add a fresh pane (集中's `terminal` / `agent`), or
                 // re-attach the session's active pane (spawning the first when the
                 // session is new).
                 if reuse_agent {
@@ -1013,12 +1013,12 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         .set_tabs(labels, active_tab);
                     let pty = match pool.active_pty(dir) {
                         Some(pty) => pty,
-                        // No live pane (every one exited): drop back to 在席.
+                        // No live pane (every one exited): drop back to 集中.
                         None => return Ok(PaneExit::Closed),
                     };
                     match terminal::pane::run(term, home, pty, &handle)? {
-                        // `Ctrl-O`: zoom out to 切替, leaving every pane alive.
-                        terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
+                        // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
+                        terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToOverview),
                         // `Ctrl-E`: leave the pane to open the note editor over it;
                         // the event loop re-attaches when the editor closes.
                         terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
@@ -1049,15 +1049,15 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         terminal::pane::PaneStep::MoveTab { from, to } => {
                             let _ = pool.move_tab(dir, from, to);
                         }
-                        // `Ctrl-T`: zoom out to 在席 (Focus) so the user picks the next
+                        // `Ctrl-T`: zoom out to 集中 (Closeup) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
                         // the pool (like `Ctrl-O`, but one level shallower).
-                        terminal::pane::PaneStep::ToFocus => return Ok(PaneExit::ToFocus),
+                        terminal::pane::PaneStep::ToCloseup => return Ok(PaneExit::ToCloseup),
                         // `Ctrl-G`: a session holds at most one agent per CLI — jump
                         // to this CLI's existing agent tab when present, else add one
                         // (then loop, so the next iteration drives it and republishes
                         // the tab strip without leaving 没入). `cli` is the launch CLI
-                        // resolved for this session drive (the 在席 choice or the
+                        // resolved for this session drive (the 集中 choice or the
                         // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
                             if !pool.activate_agent_of(dir, cli) {
@@ -1080,7 +1080,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // `Ctrl-O x` / `Alt-x`: close the active tab and keep driving
                         // the surviving pane that slides into the active slot (a
                         // different shell); when it was the last pane the session
-                        // empties, so drop back to 在席 — the same handling as a shell
+                        // empties, so drop back to 集中 — the same handling as a shell
                         // that exits on its own (`Closed`).
                         terminal::pane::PaneStep::CloseTab => {
                             if !pool.close_active(dir, &label) {
@@ -1103,7 +1103,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // the pool; the event loop raises the quit-confirmation modal.
                         terminal::pane::PaneStep::Quit => return Ok(PaneExit::Quit),
                         // The active pane's shell exited: drop it; keep driving when
-                        // a pane remains, else fall to 在席.
+                        // a pane remains, else fall to 集中.
                         terminal::pane::PaneStep::Closed => {
                             if !pool.close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
@@ -1114,7 +1114,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     }
                 }
             })();
-            // Leaving the pane (Ctrl-O → 切替, every pane closing, or an error) means
+            // Leaving the pane (Ctrl-O → 選択, every pane closing, or an error) means
             // nothing is attached any more; the shells themselves stay alive in the
             // pool. Clear the whole surface (snapshot + tab strip) here, where the
             // pane yields control, rather than relying on the event loop's next frame
@@ -1191,7 +1191,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // returns `Reused` so the caller re-attaches instead of tracking a loading tab.
     let mut start_pending_spawn =
         |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
-            // CLI priority mirrors `open_terminal`: 在席 choice, then the session's
+            // CLI priority mirrors `open_terminal`: 集中 choice, then the session's
             // pinned CLI, then the configured default; the session's pinned model
             // rides into this launch's wiring.
             let session_agent = home.session_agent_for(dir);
@@ -1368,7 +1368,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         pool.borrow_mut().snapshot(term, dir, sidebar)
     };
 
-    // Read (and optionally navigate) a session's tabs from 切替: `←`/`→` pass a
+    // Read (and optionally navigate) a session's tabs from 選択: `←`/`→` pass a
     // `TabNav` to move the active tab, and the loop reads the strip (`None`) each
     // frame to draw it above the preview. Both go through the same pool the pane
     // driver uses, so a tab moved here is the one re-attaching reveals.
@@ -1380,7 +1380,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         pool.tabs(dir)
     };
 
-    // Close the highlighted session's active tab (pane) from 切替 (`x`): kill its
+    // Close the highlighted session's active tab (pane) from 選択 (`x`): kill its
     // shell through the same pool the pane driver uses, so the next frame's tab
     // read reflects the removal. The session's display label re-registers its
     // remaining panes with the monitor under the right name.
@@ -1446,7 +1446,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let mut open_config = |t: &Term| -> Result<Option<event::ConfigReload>> {
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
             // Back to home: re-read the (possibly changed) Session Action UI,
-            // 没入 key scheme, and default Agent CLI so the 在席 surface, the
+            // 没入 key scheme, and default Agent CLI so the 集中 surface, the
             // pane's key handling, and the next `agent` / `ai` launch reflect the
             // edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
@@ -1462,7 +1462,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // A submitted line in the 在席 `chat` overlay runs against the workspace's
+    // A submitted line in the 集中 `chat` overlay runs against the workspace's
     // configured local model (resolved from the effective settings at request
     // time, so a model change in Config takes effect on the next turn). The
     // request runs on a detached thread and returns a receiver the event loop
@@ -1477,7 +1477,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // deeply they were engaged with it — so the next launch restores it alongside
     // the panes. Gated by the same setting as the pane restore (the two are one
     // "restore my session state" feature). Best-effort: a write failure just means
-    // the next launch opens in the default 切替.
+    // the next launch opens in the default 選択.
     let resume_root = workspace.path.clone();
     let mut save_resume = move |session: &str, level: ResumeLevel| {
         if !restore_panes_enabled {
@@ -1485,8 +1485,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
         use crate::infrastructure::resume_focus_store::StoredEngagement;
         let engagement = match level {
-            ResumeLevel::Switch => StoredEngagement::Switch,
-            ResumeLevel::Focus => StoredEngagement::Focus,
+            ResumeLevel::Overview => StoredEngagement::Overview,
+            ResumeLevel::Closeup => StoredEngagement::Closeup,
             ResumeLevel::Attached => StoredEngagement::Attached,
         };
         let _ = crate::infrastructure::resume_focus_store::save(&resume_root, session, engagement);
@@ -1947,7 +1947,7 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                 sessions: reload_sessions(root),
                 target_root: Some(root.to_path_buf()),
                 evict: None,
-                // Drop straight into 在席 (Focus) on the new session once the event
+                // Drop straight into 集中 (Closeup) on the new session once the event
                 // loop applies this — the user just asked for it, so operate it
                 // without making them navigate over. (MCP creates never reach here.)
                 focus: Some(tasks::AutoFocus {
@@ -2057,7 +2057,7 @@ fn effective_settings(root: &Path) -> crate::domain::settings::Settings {
 }
 
 /// Whether the local LLM is usable right now: enabled in settings and its model
-/// pulled. Gates the 在席 `chat` menu row. Probed with `ollama show` (via the
+/// pulled. Gates the 集中 `chat` menu row. Probed with `ollama show` (via the
 /// system runner), so callers run it off the first-paint path.
 fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
     settings.local_llm.enabled

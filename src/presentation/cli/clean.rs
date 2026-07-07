@@ -89,7 +89,7 @@ fn usagi_bin_path(current_exe: Option<PathBuf>) -> String {
 }
 
 /// Resolve which agent CLI to run: the `--agent <name>` override when given
-/// (accepting the same names as the 在席 prompt — launch command or display
+/// (accepting the same names as the 集中 prompt — launch command or display
 /// name), else the configured default. An unrecognised override is an error
 /// rather than a silent fallback, so a typo is surfaced.
 fn resolve_agent_cli(default: AgentCli, override_name: Option<&str>) -> Result<AgentCli> {

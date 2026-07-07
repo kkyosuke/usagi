@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn render_frame_combines_all_sections() {
         let mut state = FormState::new();
-        // Focus the URL field (default focus is the mode selector) before typing.
+        // Closeup the URL field (default focus is the mode selector) before typing.
         state.focus_next();
         for c in "https://github.com/owner/repo.git".chars() {
             state.insert_char(c);

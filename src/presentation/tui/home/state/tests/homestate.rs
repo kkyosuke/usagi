@@ -112,10 +112,10 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
     // Flat rows (each expanded workspace owns a create row):
     //   0 usagi root, 1 main, 2 usagi create, 3 wsB root, 4 b1, 5 wsB create.
     let mut state = united_state();
-    state.switch_select(0); // primary root
+    state.overview_select(0); // primary root
     assert_eq!(state.selected_workspace_root(), PathBuf::from("/usagi"));
     assert_eq!(state.selected_root_note(), Some("primary note"));
-    state.switch_select(3); // the extra group's root
+    state.overview_select(3); // the extra group's root
     assert_eq!(state.selected_workspace_root(), PathBuf::from("/wsB"));
     assert_eq!(state.selected_root_note(), Some("b note"));
 
@@ -127,7 +127,7 @@ fn selected_workspace_root_and_note_follow_the_cursor_group() {
         sessions: Vec::new(),
         issues: Vec::new(),
     }]);
-    state.switch_select(3); // wsC root (usagi root 0, main 1, usagi create 2, wsC root 3)
+    state.overview_select(3); // wsC root (usagi root 0, main 1, usagi create 2, wsC root 3)
     assert_eq!(state.selected_root_note(), None);
 }
 
@@ -136,13 +136,13 @@ fn selected_workspace_name_follows_the_cursor_group() {
     // Rows (each expanded workspace owns a create row):
     //   0 usagi root, 1 main, 2 usagi create, 3 wsB root, 4 b1, 5 wsB create.
     let mut state = united_state();
-    state.switch_select(0); // primary root
+    state.overview_select(0); // primary root
     assert_eq!(state.selected_workspace_name(), "usagi");
-    state.switch_select(1); // primary session
+    state.overview_select(1); // primary session
     assert_eq!(state.selected_workspace_name(), "usagi");
-    state.switch_select(3); // the extra group's root
+    state.overview_select(3); // the extra group's root
     assert_eq!(state.selected_workspace_name(), "wsB");
-    state.switch_select(4); // the extra group's session
+    state.overview_select(4); // the extra group's session
     assert_eq!(state.selected_workspace_name(), "wsB");
     // A single-workspace screen always reports the primary.
     let solo = HomeState::new("solo", Vec::new(), None);
@@ -181,7 +181,7 @@ fn issue_command_scopes_to_the_cursor_group() {
     // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
 
     // Cursor on the primary group: `issue list` surfaces the primary's issues.
-    state.switch_select(1); // primary session "main"
+    state.overview_select(1); // primary session "main"
     for c in "issue".chars() {
         state.push_char(c);
     }
@@ -191,7 +191,7 @@ fn issue_command_scopes_to_the_cursor_group() {
     assert!(!modal.lines.iter().any(|l| l.text.contains("extra-task")));
 
     // Cursor in the extra group: the same command now scopes to its issues.
-    state.switch_select(4); // extra group session "b1"
+    state.overview_select(4); // extra group session "b1"
     for c in "issue".chars() {
         state.push_char(c);
     }
@@ -205,7 +205,7 @@ fn issue_command_scopes_to_the_cursor_group() {
 fn toggle_selected_collapsed_folds_the_cursor_group_and_survives_a_resync() {
     // Rows: usagi root0, main1, usagi create2, wsB root3, b1 4, wsB create5.
     let mut state = united_state();
-    state.switch_select(3); // wsB root
+    state.overview_select(3); // wsB root
     state.toggle_selected_collapsed();
     assert!(state.list().is_collapsed(1));
     // The fold is recorded by name, so a background re-sync (which rebuilds the
@@ -213,7 +213,7 @@ fn toggle_selected_collapsed_folds_the_cursor_group_and_survives_a_resync() {
     state.refresh_sessions(vec![session("main")]);
     assert!(state.list().is_collapsed(1));
     // Toggling again unfolds it, and that also survives a re-sync.
-    state.switch_select(3); // wsB's folded header is its root slot
+    state.overview_select(3); // wsB's folded header is its root slot
     state.toggle_selected_collapsed();
     assert!(!state.list().is_collapsed(1));
     state.refresh_sessions(vec![session("main")]);
@@ -225,12 +225,12 @@ fn toggle_selected_collapsed_is_a_noop_off_a_root_or_in_a_single_workspace() {
     // Single workspace: never folds — that would hide the whole list.
     let mut solo = HomeState::new("solo", Vec::new(), None);
     solo.restore_sessions(vec![session("s1")]);
-    solo.switch_select(0); // root
+    solo.overview_select(0); // root
     solo.toggle_selected_collapsed();
     assert!(!solo.list().is_collapsed(0));
     // Unite, but the cursor is on a session row (not a root): no-op.
     let mut state = united_state();
-    state.switch_select(1); // main
+    state.overview_select(1); // main
     state.toggle_selected_collapsed();
     assert!(!state.list().is_collapsed(0));
 }
@@ -238,7 +238,7 @@ fn toggle_selected_collapsed_is_a_noop_off_a_root_or_in_a_single_workspace() {
 #[test]
 fn expand_selected_group_for_create_unfolds_before_creating() {
     let mut state = united_state();
-    state.switch_select(3); // wsB root
+    state.overview_select(3); // wsB root
     state.toggle_selected_collapsed(); // fold wsB
     assert!(state.list().is_collapsed(1));
     // Creating a session into a folded workspace unfolds it first (its "+ new
@@ -327,8 +327,8 @@ fn ctrl_caret_jump_back_disambiguates_same_named_sessions_across_groups() {
 
     // Focus wsB's "shared" (row 4), then focus the primary's "main" (row 1), so the
     // row left behind is wsB's "shared".
-    state.enter_focus(4);
-    state.enter_focus(1);
+    state.enter_closeup(4);
+    state.enter_closeup(1);
     // Ctrl-^ returns to wsB's "shared" at row 4 — not the primary's at row 2 that a
     // bare-name lookup would return first.
     assert_eq!(state.previous_session_row(), Some(4));
@@ -429,12 +429,12 @@ fn a_sync_outcome_routes_sessions_and_root_note_to_the_target_group() {
 }
 
 #[test]
-fn new_state_starts_in_switch_with_a_hint() {
+fn new_state_starts_in_overview_with_a_hint() {
     let state = state();
-    // The default mode is the base 切替 (Switch); the command palette is closed.
-    assert_eq!(state.mode(), Mode::Switch);
+    // The default mode is the base 選択 (Overview); the command palette is closed.
+    assert_eq!(state.mode(), Mode::Overview);
     assert!(!state.command_palette_open());
-    assert_eq!(state.switch_return(), ReturnMode::Base);
+    assert_eq!(state.overview_return(), ReturnMode::Base);
     assert_eq!(state.input(), "");
     assert_eq!(state.list().worktrees().len(), 2);
     // The seed log carries the usage hint.
@@ -948,7 +948,7 @@ fn issue_command_reads_injected_issues() {
 }
 
 #[test]
-fn session_switch_with_no_name_yields_the_enter_switch_effect() {
+fn session_switch_with_no_name_yields_the_enter_overview_effect() {
     // The screen leaves the mode transition to the event loop; submit only
     // surfaces the effect and logs no resolution line.
     let mut state = state();

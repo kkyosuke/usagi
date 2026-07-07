@@ -372,7 +372,7 @@ mod tests {
     /// point of `record_with` — never runs it, so it must not be an inline closure
     /// whose body would then read as uncovered.
     fn key_event() -> TraceEvent {
-        TraceEvent::now(TraceCategory::Tui, "key").with_detail("Switch Enter")
+        TraceEvent::now(TraceCategory::Tui, "key").with_detail("Overview Enter")
     }
 
     #[test]
@@ -409,7 +409,7 @@ mod tests {
             })
             .expect("a trace file was written");
         let contents = fs::read_to_string(entry).unwrap();
-        assert!(contents.contains("Switch Enter"), "{contents}");
+        assert!(contents.contains("Overview Enter"), "{contents}");
         assert!(contents.contains("\"tui\""), "{contents}");
 
         std::env::remove_var(TRACE_ENV);

@@ -1,11 +1,11 @@
 use super::*;
 
 #[test]
-fn right_pane_previews_the_cursor_row_in_switch() {
-    // 切替 (Switch) is the default mode: the right pane previews the would-be
+fn right_pane_previews_the_cursor_row_in_overview() {
+    // 選択 (Overview) is the default mode: the right pane previews the would-be
     // screen for the cursor row.
     let state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    assert_eq!(state.mode(), Mode::Switch);
+    assert_eq!(state.mode(), Mode::Overview);
     let preview = stripped(&right_pane_contents(&state, 40, 12));
     // The idle root row rests the mascot (the workspace-root header still shows).
     assert!(preview.contains("root"));
@@ -14,7 +14,7 @@ fn right_pane_previews_the_cursor_row_in_switch() {
 }
 
 #[test]
-fn switch_preview_shows_a_live_session_as_a_reattach() {
+fn overview_preview_shows_a_live_session_as_a_reattach() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
@@ -22,10 +22,10 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
         live: [PathBuf::from("/repo/run")].into(),
         ..Default::default()
     });
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
     // Move the cursor off the root onto the session row.
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.overview_move_down();
+    let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("feat"));
     // Header carries the git status and the agent state. The session is live but
     // has reported no turn, so it shows as `ready` (idle, awaiting input).
@@ -38,7 +38,7 @@ fn switch_preview_shows_a_live_session_as_a_reattach() {
 }
 
 #[test]
-fn switch_preview_shows_a_live_session_as_its_actual_screen() {
+fn overview_preview_shows_a_live_session_as_its_actual_screen() {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
@@ -51,9 +51,9 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
         vec!["$ echo hi".to_string(), "hi".to_string()],
         None,
     ));
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let preview = stripped(&overview_preview(&state, 40, 12));
     // The real terminal screen is shown, not the placeholder label.
     assert!(preview.contains("$ echo hi"));
     assert!(preview.contains("hi"));
@@ -62,8 +62,8 @@ fn switch_preview_shows_a_live_session_as_its_actual_screen() {
 }
 
 #[test]
-fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
-    // In 切替 the highlighted live session's tabs render on the header's own row,
+fn overview_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
+    // In 選択 the highlighted live session's tabs render on the header's own row,
     // so the identity and the `←`/`→` targets read together; the live screen
     // follows below. The event loop publishes the strip from the pool before
     // painting.
@@ -76,9 +76,9 @@ fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
     });
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let lines = switch_preview(&state, 80, 12);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let lines = overview_preview(&state, 80, 12);
     // The header (name + status + agent) and both numbered chips share the top
     // row; the live screen follows below.
     let top = console::strip_ansi_codes(&lines[0]).into_owned();
@@ -90,18 +90,18 @@ fn switch_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
 }
 
 #[test]
-fn switch_preview_shows_loading_body_for_the_selected_pending_tab() {
+fn overview_preview_shows_loading_body_for_the_selected_pending_tab() {
     let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
     pending.path = PathBuf::from("/repo/pending");
     let mut state = HomeState::new("usagi", vec![pending], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     state
         .surface_writer(super::super::super::state::SurfaceOwner::Preview)
         .set_loading_body(0);
 
-    let preview = stripped(&switch_preview(&state, 60, 12));
+    let preview = stripped(&overview_preview(&state, 60, 12));
     assert!(preview.contains("1 terminal"));
     assert!(preview.contains("(｡･-･)"));
     assert!(preview.contains("起動中…"));
@@ -113,20 +113,20 @@ fn loading_tab_body_is_blank_when_too_narrow_for_even_one_rabbit() {
     let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
     pending.path = PathBuf::from("/repo/pending");
     let mut state = HomeState::new("usagi", vec![pending], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
     state.set_terminal_tabs(vec!["terminal".to_string()], 0);
     state
         .surface_writer(super::super::super::state::SurfaceOwner::Preview)
         .set_loading_body(0);
 
-    let preview = stripped(&switch_preview(&state, 1, 6));
+    let preview = stripped(&overview_preview(&state, 1, 6));
     assert!(!preview.contains("(｡･-･)"));
     assert!(!preview.contains("起動中…"));
 }
 
 #[test]
-fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
+fn overview_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     // The header identity is a fixed width, so the divider and tabs land in the
     // same column whichever session the cursor is on — the row does not shift as
     // the cursor moves between sessions — and a long name is clipped, not spilled.
@@ -145,7 +145,7 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     });
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
 
     // The display column of the divider, used as the anchor for the tabs. Measured
     // by plain display width (the identity is padded the same way), which is where
@@ -156,12 +156,12 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
         console::measure_text_width(&top[..at])
     };
 
-    state.switch_move_down(); // cursor on the short-named session
-    let short_top = switch_preview(&state, 80, 12);
+    state.overview_move_down(); // cursor on the short-named session
+    let short_top = overview_preview(&state, 80, 12);
     let short_col = divider_col(&short_top);
 
-    state.switch_move_down(); // cursor on the long-named session
-    let long_lines = switch_preview(&state, 80, 12);
+    state.overview_move_down(); // cursor on the long-named session
+    let long_lines = overview_preview(&state, 80, 12);
     let long_col = divider_col(&long_lines);
 
     // The divider (and so the tabs beside it) sits in the same column for both.
@@ -173,9 +173,9 @@ fn switch_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
 }
 
 #[test]
-fn switch_preview_shows_the_root_live_session_as_its_screen() {
+fn overview_preview_shows_the_root_live_session_as_its_screen() {
     // Regression: the root row (`⌂ root`) hard-coded `live = false`, so a running
-    // root agent previewed its action menu in 切替 instead of its live screen —
+    // root agent previewed its action menu in 選択 instead of its live screen —
     // it only re-appeared once selected. With the workspace root recorded, the
     // root row is matched against the live set like any worktree, so its running
     // agent previews live.
@@ -191,9 +191,9 @@ fn switch_preview_shows_the_root_live_session_as_its_screen() {
         vec!["$ claude".to_string(), "How can I help?".to_string()],
         None,
     ));
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
     // The cursor starts on the root row, so no navigation is needed.
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("root"));
     // The live root agent's actual screen is shown, not the action menu.
     assert!(preview.contains("$ claude"));
@@ -202,13 +202,13 @@ fn switch_preview_shows_the_root_live_session_as_its_screen() {
 }
 
 #[test]
-fn switch_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
+fn overview_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
     // The menu UI focuses as a floating modal, so an idle root previews the
     // resting mascot and a quip — not the inline choices it once promised.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("workspace root"));
     assert!(preview.contains("(='-')"), "the mascot rests in the pane");
     assert!(preview.contains("Enter"), "the quip nods to Enter");
@@ -217,12 +217,12 @@ fn switch_preview_rests_the_mascot_for_an_idle_root_on_the_menu_ui() {
 }
 
 #[test]
-fn switch_preview_rests_the_mascot_for_an_idle_session_on_the_menu_ui() {
+fn overview_preview_rests_the_mascot_for_an_idle_session_on_the_menu_ui() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let preview = stripped(&overview_preview(&state, 40, 12));
     // An idle session rests the mascot rather than previewing the menu, whose
     // choices selecting only reveals as a floating modal.
     assert!(preview.contains("pushed"));
@@ -232,14 +232,14 @@ fn switch_preview_rests_the_mascot_for_an_idle_session_on_the_menu_ui() {
 }
 
 #[test]
-fn switch_preview_centres_the_idle_mascot_with_a_quip_below_it() {
+fn overview_preview_centres_the_idle_mascot_with_a_quip_below_it() {
     // The mascot sits in the middle of the pane (blank rows above and below) with
     // its witty English quip on the row beneath it.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let lines: Vec<String> = switch_preview(&state, 40, 12)
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let lines: Vec<String> = overview_preview(&state, 40, 12)
         .iter()
         .map(|l| console::strip_ansi_codes(l).trim_end().to_string())
         .collect();
@@ -257,8 +257,8 @@ fn switch_preview_centres_the_idle_mascot_with_a_quip_below_it() {
 }
 
 #[test]
-fn switch_right_pane_fades_the_preview_but_keeps_its_text() {
-    // In 切替 the keyboard is on the session list, so the composited right pane
+fn overview_right_pane_fades_the_preview_but_keeps_its_text() {
+    // In 選択 the keyboard is on the session list, so the composited right pane
     // fades the whole preview (each row dimmed) to signal it is not where
     // selection happens. The fade only re-styles the rows, so the right pane
     // shows exactly the preview's text. (Styling is off in non-TTY tests, so we
@@ -266,23 +266,23 @@ fn switch_right_pane_fades_the_preview_but_keeps_its_text() {
     // `dim_row_strips_existing_colour_but_keeps_the_text`.)
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let preview = stripped(&overview_preview(&state, 40, 12));
     let pane = stripped(&right_pane_contents(&state, 40, 12));
     assert_eq!(pane, preview, "the faded right pane is the preview's text");
 }
 
 #[test]
-fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
-    // The 切替 right pane no longer pins a key hint to its bottom row — the keys
+fn overview_preview_fills_the_pane_without_a_pinned_key_hint() {
+    // The 選択 right pane no longer pins a key hint to its bottom row — the keys
     // live in the footer, so the preview uses the pane's full height and does not
     // duplicate the footer's key list.
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let preview = switch_preview(&state, 60, 12);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let preview = overview_preview(&state, 60, 12);
     // The pane fills its rows, and the bottom row is no longer a key hint.
     assert_eq!(preview.len(), 12);
     let last = console::strip_ansi_codes(preview.last().unwrap()).into_owned();
@@ -293,7 +293,7 @@ fn switch_preview_fills_the_pane_without_a_pinned_key_hint() {
 }
 
 #[test]
-fn switch_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
+fn overview_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
     // Both the Menu and Prompt action UIs now float as overlay modals, so neither
     // has an inline surface to preview. An idle session in Prompt mode should
     // show the mascot just like Menu mode does, rather than previewing an inline
@@ -301,9 +301,9 @@ fn switch_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
     let idle = worktree(Some("feat"), false, BranchStatus::Pushed);
     let mut state = HomeState::new("usagi", vec![idle], None);
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down();
-    let preview = stripped(&switch_preview(&state, 40, 12));
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    let preview = stripped(&overview_preview(&state, 40, 12));
     assert!(preview.contains("pushed"));
     assert!(preview.contains("(='-')"), "the idle mascot is shown");
     assert!(!preview.contains('❯'), "no inline prompt is previewed");
@@ -311,13 +311,13 @@ fn switch_preview_shows_the_mascot_for_idle_session_in_prompt_ui_too() {
 }
 
 #[test]
-fn right_pane_shows_the_focus_menu_or_prompt() {
+fn right_pane_shows_the_closeup_menu_or_prompt() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     // Menu (the default) floats as an overlay modal over the frame: it is not
     // drawn inline in the right pane, and its title carries the identity while its
     // body lists the session commands.
-    assert!(state.focus_action_overlay());
+    assert!(state.closeup_action_overlay());
     assert!(
         !stripped(&right_pane_contents(&state, 77, 12)).contains("Run a command:"),
         "the menu is not drawn inline in the right pane"
@@ -332,11 +332,11 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
     // session-scope hint ride the floating box (title `session: main`), not the
     // inline right pane.
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     for c in "ter".chars() {
-        state.focus_prompt_mut().insert(c);
+        state.closeup_prompt_mut().insert(c);
     }
-    assert!(state.focus_action_overlay());
+    assert!(state.closeup_action_overlay());
     assert!(
         !stripped(&right_pane_contents(&state, 77, 12)).contains("❯ ter"),
         "the prompt is not drawn inline in the right pane"
@@ -349,12 +349,12 @@ fn right_pane_shows_the_focus_menu_or_prompt() {
 }
 
 #[test]
-fn focus_menu_filter_narrows_the_command_list_and_shows_the_query() {
+fn closeup_menu_filter_narrows_the_command_list_and_shows_the_query() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     // Entering filter mode swaps the "Run a command:" label for the filter bar's
     // placeholder, leaving every command listed until something is typed.
-    state.start_focus_menu_filter();
+    state.start_closeup_menu_filter();
     let empty = stripped(&render_frame(24, 120, &state));
     assert!(empty.contains("Filter:"));
     assert!(empty.contains("type to filter"));
@@ -362,27 +362,27 @@ fn focus_menu_filter_narrows_the_command_list_and_shows_the_query() {
     assert!(empty.contains("diff"));
     // Typing narrows the list to command names that start with the query
     // (case-insensitive) and echoes the query on the filter line.
-    state.push_focus_menu_filter('t');
+    state.push_closeup_menu_filter('t');
     let narrowed = stripped(&render_frame(24, 120, &state));
     assert!(narrowed.contains("Filter: t"));
     assert!(narrowed.contains("terminal"));
     assert!(!narrowed.contains("diff"), "non-matching commands drop out");
     // A query that matches nothing shows the placeholder, not a blank box.
-    state.push_focus_menu_filter('z');
+    state.push_closeup_menu_filter('z');
     let none = stripped(&render_frame(24, 120, &state));
     assert!(none.contains("No commands match the filter."));
     // Backspacing restores matches; clearing exits filter mode entirely.
-    state.focus_menu_filter_backspace();
+    state.closeup_menu_filter_backspace();
     assert!(stripped(&render_frame(24, 120, &state)).contains("terminal"));
-    assert!(state.clear_focus_menu_filter());
+    assert!(state.clear_closeup_menu_filter());
     assert!(stripped(&render_frame(24, 120, &state)).contains("Run a command:"));
 }
 
 #[test]
-fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
+fn closeup_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     use crate::domain::settings::AgentCli;
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
     // The agent row always names the default CLI a plain launch uses.
@@ -393,15 +393,15 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
     assert!(base.contains('▸'));
     assert!(base.contains("→ pick agent"));
     // Moving off the agent row hides the affordance.
-    state.focus_menu_move_down(); // agent -> terminal
+    state.closeup_menu_move_down(); // agent -> terminal
     let off_agent = stripped(&render_frame(24, 120, &state));
     assert!(off_agent.contains("Launch Claude"));
     assert!(off_agent.contains("  Launch Claude"));
     assert!(!off_agent.contains("→ pick agent"));
     // Back onto the agent row, expanding lists the installed agents.
-    state.focus_menu_move_up(); // terminal -> agent
-                                // Expanding lists every installed agent (default tagged) and swaps the hint.
-    state.focus_menu_expand_agent();
+    state.closeup_menu_move_up(); // terminal -> agent
+                                  // Expanding lists every installed agent (default tagged) and swaps the hint.
+    state.closeup_menu_expand_agent();
     let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("Codex"));
@@ -410,9 +410,9 @@ fn focus_menu_agent_row_shows_the_default_and_expands_into_a_picker() {
 }
 
 #[test]
-fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
+fn closeup_close_row_shows_chevron_and_expands_into_a_picker() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     // On entry the cursor is on `agent`, so `close` (and `terminal`) reserve the
     // 2-column chevron slot with blanks — their descriptions never shift as the
     // cursor moves on/off them (no CLS), like the `agent` row.
@@ -420,13 +420,13 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     assert!(off_close.contains("  Close the focused session"));
     assert!(off_close.contains("  Open a shell"));
     // Alphabetical order: agent is first and close is second; move down once to close.
-    state.focus_menu_move_down();
+    state.closeup_menu_move_down();
     // The close row shows ▸ and "→ expand" in the hint while cursor is on it.
     let on_close = stripped(&render_frame(24, 120, &state));
     assert!(on_close.contains('▸'));
     assert!(on_close.contains("→ expand"));
     // Expanding shows the two sub-rows (plain close and --force) and swaps the hint.
-    state.focus_menu_expand_close();
+    state.closeup_menu_expand_close();
     let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("close --force"));
@@ -434,21 +434,21 @@ fn focus_close_row_shows_chevron_and_expands_into_a_picker() {
     assert!(expanded.contains("discard uncommitted changes"));
     assert!(expanded.contains("Enter run"));
     // Collapsing hides the sub-rows.
-    state.focus_menu_collapse_close();
+    state.closeup_menu_collapse_close();
     let collapsed = stripped(&render_frame(24, 120, &state));
     assert!(!collapsed.contains("close --force"));
 }
 
 #[test]
-fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
+fn closeup_menu_terminal_row_expands_into_open_and_new_actions() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
-    state.focus_menu_move_up(); // alphabetical order: agent wraps up to terminal (last)
+    state.enter_closeup(1);
+    state.closeup_menu_move_up(); // alphabetical order: agent wraps up to terminal (last)
     let base = stripped(&render_frame(24, 120, &state));
     assert!(base.contains("terminal"));
     assert!(base.contains('▸'));
     assert!(base.contains("→ pick terminal"));
-    state.focus_menu_expand_terminal();
+    state.closeup_menu_expand_terminal();
     let expanded = stripped(&render_frame(24, 120, &state));
     assert!(expanded.contains('▾'));
     assert!(expanded.contains("open"));
@@ -459,10 +459,10 @@ fn focus_menu_terminal_row_expands_into_open_and_new_actions() {
 }
 
 #[test]
-fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
+fn closeup_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
     use crate::domain::settings::AgentCli;
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     // The most sub-menu-heavy picker: more installed agents than any other picker.
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![
@@ -476,9 +476,9 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
     // The collapsed menu already reserves the widest expansion's height, so opening
     // the agent picker neither resizes the box nor clips into a `N more` marker —
     // every agent shows in place.
-    let collapsed = focus_menu_body(&state, 60, 30);
-    state.focus_menu_expand_agent();
-    let expanded = focus_menu_body(&state, 60, 30);
+    let collapsed = closeup_menu_body(&state, 60, 30);
+    state.closeup_menu_expand_agent();
+    let expanded = closeup_menu_body(&state, 60, 30);
     assert_eq!(
         collapsed.len(),
         expanded.len(),
@@ -496,16 +496,16 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
 
     // A pane too short to hold the reserved height caps the window and the overflow
     // is summarised with a scroll marker instead.
-    let cramped = focus_menu_body(&state, 60, 11);
+    let cramped = closeup_menu_body(&state, 60, 11);
     let joined = console::strip_ansi_codes(&cramped.join("\n")).into_owned();
     assert!(joined.contains("more"), "a short pane scrolls: {joined:?}");
 
     // Moving the picker cursor down scrolls the hidden agents into view without
     // growing the capped window.
     for _ in 0..4 {
-        state.focus_menu_move_down();
+        state.closeup_menu_move_down();
     }
-    let scrolled = focus_menu_body(&state, 60, 11);
+    let scrolled = closeup_menu_body(&state, 60, 11);
     assert_eq!(scrolled.len(), cramped.len());
     let joined = console::strip_ansi_codes(&scrolled.join("\n")).into_owned();
     assert!(
@@ -515,13 +515,13 @@ fn focus_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
 }
 
 #[test]
-fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
-    // With live panes published, 在席 gains a tab strip — one chip per pane plus a
+fn closeup_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
+    // With live panes published, 集中 gains a tab strip — one chip per pane plus a
     // trailing "+ new" tab. On the "+ new" tab (the default on entry) the pane
     // preview does not show; the menu action surface floats as an overlay modal
     // over the frame while the tab strip stays inline behind it.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     // The tab strip stays inline in the right pane (identity + chips + "+ new"),
@@ -537,7 +537,7 @@ fn focus_shows_pane_tabs_with_a_trailing_new_tab_and_the_action_surface() {
     );
     // The floating menu modal carries the command surface, composited over the
     // frame; the pane preview still does not show.
-    assert!(state.focus_action_overlay());
+    assert!(state.closeup_action_overlay());
     let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("+ new"));
     assert!(out.contains("Run a command:"));
@@ -551,12 +551,12 @@ fn zoomed_out_menu_floats_over_the_pane_preview() {
     // pane's live preview keeps showing behind the floating menu, and both share
     // the frame.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.leave_attached();
-    state.focus_action_over_active_pane();
+    state.closeup_action_over_active_pane();
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
-    assert!(state.focus_action_overlay());
+    assert!(state.closeup_action_overlay());
     let pane = stripped(&right_pane_contents(&state, 77, 12));
     assert!(pane.contains("$ echo hi"), "the pane preview stays drawn");
     assert!(!pane.contains("+ new"), "no chip for an uncreated tab");
@@ -566,18 +566,18 @@ fn zoomed_out_menu_floats_over_the_pane_preview() {
 }
 
 #[test]
-fn focus_new_tab_with_panes_floats_the_prompt_surface() {
+fn closeup_new_tab_with_panes_floats_the_prompt_surface() {
     // The "+ new" tab honours the Prompt action UI just as the menu does — with
     // live panes the tab strip stays inline while the command line floats as an
     // overlay modal over it, rather than drawing below the strip.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
     for c in "ter".chars() {
-        state.focus_prompt_mut().insert(c);
+        state.closeup_prompt_mut().insert(c);
     }
-    assert!(state.focus_action_overlay());
+    assert!(state.closeup_action_overlay());
     let pane = stripped(&right_pane_contents(&state, 100, 12));
     assert!(pane.contains("+ new"), "the tab strip stays inline");
     assert!(!pane.contains("❯ ter"), "the prompt is not inline");
@@ -588,14 +588,14 @@ fn focus_new_tab_with_panes_floats_the_prompt_surface() {
 }
 
 #[test]
-fn focus_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
+fn closeup_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
     // Off the "+ new" tab (as after navigating onto a pane tab with `Ctrl-N`/`Ctrl-P`),
     // the selected pane's live snapshot previews below the strip instead of the
     // action surface, and the "+ new" chip is gone — it shows only while selected.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
-    state.focus_tab_prev(); // "+ new" -> the last (active) pane tab
+    state.closeup_tab_prev(); // "+ new" -> the last (active) pane tab
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     let out = stripped(&right_pane_contents(&state, 100, 12));
     assert!(!out.contains("+ new")); // stepping off "+ new" drops the chip
@@ -604,26 +604,26 @@ fn focus_previews_the_selected_pane_when_a_pane_tab_is_chosen() {
 }
 
 #[test]
-fn focus_pane_tab_falls_back_to_a_hint_until_the_first_snapshot() {
+fn closeup_pane_tab_falls_back_to_a_hint_until_the_first_snapshot() {
     // A pane tab is selected but no snapshot has arrived yet: a live-terminal hint
     // stands in until one does.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
-    state.focus_tab_next(); // "+ new" -> the sole pane tab
+    state.closeup_tab_next(); // "+ new" -> the sole pane tab
     let out = stripped(&right_pane_contents(&state, 60, 12));
     assert!(out.contains("live terminal"));
     assert!(out.contains("再アタッチ"));
 }
 
 #[test]
-fn focus_prompt_shows_usage_for_arguments() {
+fn closeup_prompt_shows_usage_for_arguments() {
     // The prompt floats as an overlay modal, so its usage hint rides the frame.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     for c in "terminal ".chars() {
-        state.focus_prompt_mut().insert(c);
+        state.closeup_prompt_mut().insert(c);
     }
     let prompt = stripped(&render_frame(24, 120, &state));
     assert!(prompt.contains("usage"));
@@ -631,13 +631,13 @@ fn focus_prompt_shows_usage_for_arguments() {
 }
 
 #[test]
-fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
+fn closeup_prompt_has_no_hint_for_an_unknown_command_word() {
     // An unknown word yields `Hint::None`, so no hint rows are drawn.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.set_session_action_ui(SessionActionUi::Prompt);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     for c in "zzz".chars() {
-        state.focus_prompt_mut().insert(c);
+        state.closeup_prompt_mut().insert(c);
     }
     // The prompt line rides the floating modal, but no hint rows follow it.
     let text = stripped(&render_frame(24, 120, &state));
@@ -651,7 +651,7 @@ fn focus_prompt_has_no_hint_for_an_unknown_command_word() {
 #[test]
 fn right_pane_shows_the_terminal_when_attached() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     // The active session's header tops the pane, filling the reserved tab-strip
     // rows; the terminal (or its starting hint) follows below.
@@ -669,7 +669,7 @@ fn right_pane_shows_the_terminal_when_attached() {
 #[test]
 fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
@@ -683,7 +683,7 @@ fn right_pane_shows_the_tab_strip_above_the_terminal_when_attached() {
 
 #[test]
 fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
-    // 没入 carries the same identity line as 切替: the active session's name, git
+    // 没入 carries the same identity line as 選択: the active session's name, git
     // status, and agent state on the top row, sharing it with the tab chips.
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
@@ -693,7 +693,7 @@ fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
         running: [PathBuf::from("/repo/run")].into(),
         ..Default::default()
     });
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
@@ -722,11 +722,11 @@ fn attached_header_shows_the_active_session_identity_beside_the_tabs() {
 
 #[test]
 fn attached_header_shows_the_root_note_when_the_root_is_active() {
-    // With the workspace root active, the 没入 header mirrors the 切替 root row:
+    // With the workspace root active, the 没入 header mirrors the 選択 root row:
     // the root name and its `workspace root` note (no git status / agent).
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_root_path(PathBuf::from("/repo"));
-    state.enter_focus(0);
+    state.enter_closeup(0);
     state.show_attached();
     let header = console::strip_ansi_codes(&right_pane_contents(&state, 60, 6)[0]).into_owned();
     assert!(header.contains(ROOT_NAME));

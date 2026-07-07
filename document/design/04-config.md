@@ -55,7 +55,7 @@
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
 │          Restore Panes      < On >                    │  │  起動時にペインを復旧（agent は会話を再開）
 │        ● Agent CLI          < Gemini >                │  │  変更済み：ラベル左に黄色 ● + 値も黄色
-│          Session Action UI  < Menu >                  │  │  在席の右ペイン UI（Menu / Prompt）
+│          Session Action UI  < Menu >                  │  │  集中の右ペイン UI（Menu / Prompt）
 │          Terminal Keys      < Ctrl-O prefix >         │  │  没入のキー方式（Ctrl-O prefix / Alt chords）
 │          Mascot Animation   < On >                    │  │  サイドバーうさぎの動き（On / Off）
 │          Local LLM            Install                 │  │  未導入は `Install`（緑・山かっこなし）、導入後は `< On >`/`< Off >`
@@ -78,7 +78,7 @@
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Restore Panes | 起動時に各セッションのペイン（agent / terminal）を復旧（agent は会話を再開） | `On` ⇄ `Off` をトグル（[04-orchestration.md#ペインの復旧](../04-orchestration.md#ペインの復旧)） |
 | Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` → `Antigravity` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu`、`Antigravity` は `agy` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
-| Session Action UI | 在席（Focus）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[home/02-layout.md](home/02-layout.md#在席のアクション-uimenu--prompt)） |
+| Session Action UI | 集中（Closeup）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[home/02-layout.md](home/02-layout.md#集中のアクション-uimenu--prompt)） |
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
 | Local LLM | ローカル LLM 委譲の有効化（`ollama` ランタイムの導入と on/off） | 未導入時は値が `Install`（アクション）で、`Space` / `Enter` でランタイムのインストールモーダルを開く。導入後は `On` ⇄ `Off` をトグル |
 | Local LLM Model | 委譲先の Ollama モデル | ランタイム未導入のうちは操作不可（`—` を淡色表示）。導入後はアクション行になり、`Space` / `Enter` で**モデル選択モーダル**を開く。使用中モデルが未取得なら値に `(未導入)` を併記 |
@@ -152,7 +152,7 @@
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
 | Env Vars | pane 起動時に 1Password から解決して注入する workspace 固有の環境変数（`NAME = op://vault/item/field`） | 値は `Edit (none)` / `Edit (1 var)` / `Edit (N vars)`（有効な binding 数）。`Space` / `Enter` で複数行エディタを開く。グローバル Env Vars へ追加し、同名は workspace 側が優先される |
-| Session Labels | 切替のステータスラベルマスタ（`session_labels`）のこのワークスペースでの上書き | 未上書きは `Edit (global: N labels)`（グローバルの実効値に追従）、上書き時は `Edit (N labels)`、空上書き時は `Edit (off)`。`Space` / `Enter` で複数行エディタを開く |
+| Session Labels | 選択のステータスラベルマスタ（`session_labels`）のこのワークスペースでの上書き | 未上書きは `Edit (global: N labels)`（グローバルの実効値に追従）、上書き時は `Edit (N labels)`、空上書き時は `Edit (off)`。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
 - Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
@@ -172,13 +172,13 @@
   同名は後勝ちで解決します（[`env`](../05-settings.md#設定項目) の読み取り時と同じフィルタ）。保存する値は 1Password
   reference だけで、解決した secret 本体は保存しません。同じ binding は、コマンドパレットの
   [`env`](../03-commands/02-tui.md#env) を実行して開く[オーバーレイエディタ](home/05-overlays.md#workspace-env-エディタ)からも
-  編集できます（そちらは Config 画面へ遷移せず Overview 上で完結します）。
+  編集できます（そちらは Config 画面へ遷移せず コマンドパレット上で完結します）。
 - Session Labels も action 行です。`Space` / `Enter` で複数行エディタを開き、1 行につき 1 件の
   `id | name | color | icon` を入力します（`color` 省略で `gray`、`icon` 省略で既定ビュレット。`name` に区切りの
   `|` は使えません）。`Ctrl-S` で反映するとき、`id` か `name` が空の行は破棄し、重複 `id` は最初の 1 件だけ残します
   （[`session_labels`](../05-settings.md#ステータスラベルsession_labels) の読み取り時と同じ整形）。エディタはグローバルの
   マスタ（または既存の上書き）で初期化され、内容がグローバルと同一のまま保存すると**上書きを作らずグローバルに追従**、
-  全行を空にして保存すると**このプロジェクトで機能休止**（空の上書き）になります。切替での付け方は
+  全行を空にして保存すると**このプロジェクトで機能休止**（空の上書き）になります。選択での付け方は
   [../05-settings.md#ステータスラベルsession_labels](../05-settings.md#ステータスラベルsession_labels) を参照。
 - Save を押すと、そのワークスペースのローカル設定（`<workspace>/.usagi/settings.json`）のみを保存します。
   全項目を未上書きに戻した場合もファイルは残し（中身は空に近い JSON）、「グローバルに従う」を意味します

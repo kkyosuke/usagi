@@ -77,7 +77,7 @@ impl TaskKind {
     }
 }
 
-/// A successful create/close's request to automatically land in 在席 (Focus).
+/// A successful create/close's request to automatically land in 集中 (Closeup).
 /// The `interaction_epoch` is the user-input counter from the moment the task
 /// was dispatched; the event loop only honors it when no later input has
 /// arrived.
@@ -109,7 +109,7 @@ pub struct Completion {
     /// successful removal so a session later recreated at the same path starts
     /// fresh. `None` for creations and failures.
     pub evict: Option<PathBuf>,
-    /// The branch to drop into 在席 (Focus) once the refreshed list lands, plus
+    /// The branch to drop into 集中 (Closeup) once the refreshed list lands, plus
     /// the interaction epoch that must still be current. Set on successful
     /// TUI-initiated creates and on successful `close` removals that have a
     /// neighbouring session, so the user starts operating the intended session

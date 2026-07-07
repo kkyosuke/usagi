@@ -177,7 +177,7 @@ fn toggle_mode_switches_between_the_two_modes() {
     assert_eq!(state.mode(), Mode::Clone);
     state.toggle_mode();
     assert_eq!(state.mode(), Mode::Existing);
-    // Focus returns to the mode selector so repeated toggles work.
+    // Closeup returns to the mode selector so repeated toggles work.
     assert_eq!(state.focus(), Field::Mode);
     state.toggle_mode();
     assert_eq!(state.mode(), Mode::Clone);

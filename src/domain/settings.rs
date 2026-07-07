@@ -38,10 +38,10 @@ pub enum AgentCli {
     Antigravity,
 }
 
-/// How the **在席 (Focus)** mode presents a session's runnable commands in the
+/// How the **集中 (Closeup)** mode presents a session's runnable commands in the
 /// right pane: as a pickable menu, or as a typed command prompt.
 ///
-/// In the home screen's Focus mode the right pane is the session's action
+/// In the home screen's Closeup mode the right pane is the session's action
 /// surface. `Menu` lists the runnable commands (`terminal` / `agent`) for the
 /// user to pick; `Prompt` offers a session-scoped command line to type into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -200,7 +200,7 @@ impl AgentCli {
     /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini` / `agy`),
     /// the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu), and
     /// the on-disk serde label (`codex_fugu`) that `usagi config` prints — all
-    /// case-insensitively. Used by the 在席 prompt's `agent <name>` and
+    /// case-insensitively. Used by the 集中 prompt's `agent <name>` and
     /// `clean --agent`. Returns `None` for an unrecognised name.
     ///
     /// `-` and `_` are treated as the same separator so the serde label resolves:
@@ -353,7 +353,7 @@ impl LabelColor {
 pub const DEFAULT_LABEL_ICON: char = '●';
 
 /// One user-defined **manual session status** — a label the user assigns to a
-/// session in the home screen's 切替 (Switch) mode (`Tab` cycles through them,
+/// session in the home screen's 選択 (Overview) mode (`Tab` cycles through them,
 /// `1`–`9` jump straight to one). Distinct from the git-derived
 /// [`BranchStatus`](crate::domain::workspace_state::BranchStatus) and the runtime
 /// agent state: this is a human-assigned tag (todo / doing / review …), stored on
@@ -395,7 +395,7 @@ impl SessionLabelDef {
 }
 
 /// The set of [`SessionLabelDef`]s a user can assign — the **master** the
-/// config screen and a hand-edited `settings.json` define, and 切替's `Tab` /
+/// config screen and a hand-edited `settings.json` define, and 選択's `Tab` /
 /// digit keys cycle through.
 ///
 /// Global by default ([`Settings::session_labels`]); a project may replace the
@@ -553,7 +553,7 @@ pub struct Settings {
     /// Which agent CLI usagi drives.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: AgentCli,
-    /// How the home screen's 在席 (Focus) mode presents a session's runnable
+    /// How the home screen's 集中 (Closeup) mode presents a session's runnable
     /// commands in the right pane.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub session_action_ui: SessionActionUi,
@@ -565,8 +565,8 @@ pub struct Settings {
     /// toggles it at runtime).
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub sidebar: Sidebar,
-    /// Whether the sidebar mascot reacts to interaction — a quick blink in 切替 /
-    /// 在席 and the 没入 working rabbit's idle paw motion. Purely cosmetic and
+    /// Whether the sidebar mascot reacts to interaction — a quick blink in 選択 /
+    /// 集中 and the 没入 working rabbit's idle paw motion. Purely cosmetic and
     /// driven by paints that already happen (no idle timer), so turning it off
     /// just keeps the mascot perfectly still. On unless the user disables it.
     pub mascot_animation_enabled: bool,
@@ -596,7 +596,7 @@ pub struct Settings {
     /// secret. Read the valid bindings through [`env`](Self::env).
     #[serde(default)]
     pub env: SecretEnv,
-    /// The user-defined manual session-status labels 切替 (Switch) assigns with
+    /// The user-defined manual session-status labels 選択 (Overview) assigns with
     /// `Tab` / the digit keys, resolved onto the sidebar's status column. Ships a
     /// generic set by default (see [`SessionLabelMaster`]); an empty set leaves
     /// the feature dormant. A project may replace it wholesale

@@ -583,7 +583,7 @@ impl WorktreeList {
         self.groups.iter().all(|g| g.worktrees.is_empty())
     }
 
-    /// Total rows the 切替 cursor can rest on across every group: each expanded
+    /// Total rows the 選択 cursor can rest on across every group: each expanded
     /// group's root row, one per worktree, and its trailing **"+ new session"**
     /// row — or, for a collapsed group, just its single folded header line.
     /// Navigation ([`move_up`](Self::move_up) / [`move_down`](Self::move_down) /

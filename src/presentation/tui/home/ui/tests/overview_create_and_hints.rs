@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn switch_create_rows_show_the_input_and_an_error() {
+fn overview_create_rows_show_the_input_and_an_error() {
     // Caret at the end of the name: the whole name precedes it, and the block
     // caret adds one trailing cell.
-    let rows = switch_create_rows("wip", 3, None, 30);
+    let rows = overview_create_rows("wip", 3, None, 30);
     assert_eq!(rows.len(), 1);
     let plain = console::strip_ansi_codes(&rows[0]).into_owned();
     assert!(plain.contains("+ new: wip"));
@@ -15,11 +15,11 @@ fn switch_create_rows_show_the_input_and_an_error() {
 
     // Caret in the middle: the block caret sits on a character, so the name reads
     // intact without an inserted glyph.
-    let mid = switch_create_rows("wip", 2, None, 30);
+    let mid = overview_create_rows("wip", 2, None, 30);
     let plain_mid = console::strip_ansi_codes(&mid[0]).into_owned();
     assert!(plain_mid.contains("+ new: wip"));
 
-    let with_error = switch_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
+    let with_error = overview_create_rows("feature", 7, Some("\"feature\" already exists."), 40);
     assert_eq!(with_error.len(), 2);
     let err = console::strip_ansi_codes(&with_error[1]).into_owned();
     assert!(err.contains("already exists"));
@@ -27,17 +27,17 @@ fn switch_create_rows_show_the_input_and_an_error() {
 }
 
 #[test]
-fn render_frame_shows_the_inline_create_row_in_switch() {
+fn render_frame_shows_the_inline_create_row_in_overview() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_begin_create(Vec::new());
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
     }
     let frame = render_frame(24, 80, &state);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     assert!(joined.contains("+ new: wip"));
-    assert!(joined.contains("switch"));
+    assert!(joined.contains("overview"));
 }
 
 #[test]
@@ -62,8 +62,8 @@ fn render_frame_inserts_the_inline_create_row_before_the_next_unite_group() {
         }],
         issues: Vec::new(),
     }]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_begin_create(Vec::new());
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
     }
@@ -99,13 +99,13 @@ fn render_frame_reuses_the_unite_gap_for_inline_create_without_shifting_lower_wo
         }],
         issues: Vec::new(),
     }]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
     let before = render_frame(24, 80, &state)
         .iter()
         .position(|line| console::strip_ansi_codes(line).contains("▌ wsB"))
         .unwrap();
 
-    state.switch_begin_create(Vec::new());
+    state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
     }
@@ -148,11 +148,11 @@ fn replace_one_with_rows_pads_when_the_target_line_is_below_the_built_rows() {
 }
 
 #[test]
-fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_switch() {
+fn render_frame_edits_the_selected_row_name_in_place_when_renaming_in_overview() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down(); // cursor onto "main"
-    assert!(state.switch_begin_rename());
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down(); // cursor onto "main"
+    assert!(state.overview_begin_rename());
     for c in " 2".chars() {
         state.rename_mut().unwrap().push_char(c);
     }
@@ -206,10 +206,10 @@ fn hint_lines_are_empty_while_the_palette_is_closed() {
         vec![worktree(Some("m"), true, BranchStatus::Local)],
         None,
     );
-    // 在席 with the palette closed: no hints.
-    state.enter_focus(1);
+    // 集中 with the palette closed: no hints.
+    state.enter_closeup(1);
     assert!(hint_lines(&state, 80).is_empty());
-    // The default base 切替 likewise has no hints until the palette opens.
+    // The default base 選択 likewise has no hints until the palette opens.
     let closed = HomeState::new("usagi", Vec::new(), None);
     assert!(hint_lines(&closed, 80).is_empty());
 }

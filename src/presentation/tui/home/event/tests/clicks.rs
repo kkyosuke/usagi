@@ -1,4 +1,4 @@
-//! 切替 (Switch) left-pane mouse-click handling: a single click selects the
+//! 選択 (Overview) left-pane mouse-click handling: a single click selects the
 //! session row, a second click on it confirms (focus / attach), and clicks off
 //! the list — or while an overlay is open — are ignored.
 //!
@@ -85,9 +85,9 @@ fn a_click_on_the_create_row_opens_the_inline_create_input() {
 }
 
 #[test]
-fn a_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
-    // The same visible row also works while the right pane is in 在席: clicking it
-    // zooms back to 切替 and opens the create input.
+fn a_click_on_the_create_row_from_closeup_opens_the_inline_create_input() {
+    // The same visible row also works while the right pane is in 集中: clicking it
+    // zooms back to 選択 and opens the create input.
     let mut inputs = vec![click(0, CREATE_ROW)];
     inputs.extend(typed("focus").into_iter().map(|key| key.map(Input::Key)));
     inputs.push(Ok(Input::Key(Key::Enter)));
@@ -97,8 +97,8 @@ fn a_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
 }
 
 #[test]
-fn a_double_click_on_the_create_row_from_focus_opens_the_inline_create_input() {
-    // Users may naturally double-click the action row in 在席 as they do for
+fn a_double_click_on_the_create_row_from_closeup_opens_the_inline_create_input() {
+    // Users may naturally double-click the action row in 集中 as they do for
     // confirming session rows. The first click opens the create input and the
     // second click is swallowed by that overlay, so creation still proceeds.
     let mut inputs = vec![click(0, CREATE_ROW), click(0, CREATE_ROW)];
@@ -125,16 +125,16 @@ fn a_click_while_the_command_palette_is_open_is_ignored() {
     assert_eq!(dirs, vec![PathBuf::from("/ws")]);
 }
 
-/// A `sample_state` already in 在席 (Focus) on the root row, so a click on another
-/// session row exercises [`focus_click`] rather than 切替's `switch_click`.
+/// A `sample_state` already in 集中 (Closeup) on the root row, so a click on another
+/// session row exercises [`closeup_click`] rather than 選択's `overview_click`.
 fn focused_state() -> HomeState {
     let mut state = sample_state();
-    state.enter_focus(0);
+    state.enter_closeup(0);
     state
 }
 
 #[test]
-fn a_single_click_in_focus_switches_the_focused_session() {
+fn a_single_click_in_closeup_switches_the_focused_session() {
     // Focused on the root row, one click on `feat` re-focuses onto it without
     // attaching; the following `t` (the menu's terminal shortcut) then attaches the
     // now-focused session — `/r/feat`, proving the click moved the focus there
@@ -147,9 +147,9 @@ fn a_single_click_in_focus_switches_the_focused_session() {
 }
 
 #[test]
-fn a_double_click_in_focus_attaches_the_clicked_session() {
+fn a_double_click_in_closeup_attaches_the_clicked_session() {
     // Two clicks on `feat`'s row attach it without any keypress — the second click
-    // on the same row confirms it, exactly like a 切替 double click.
+    // on the same row confirms it, exactly like a 選択 double click.
     let dirs = run_capturing_attached_dirs_for_inputs(
         vec![click(0, FEAT_ROW), click(0, FEAT_ROW)],
         focused_state(),
@@ -158,7 +158,7 @@ fn a_double_click_in_focus_attaches_the_clicked_session() {
 }
 
 #[test]
-fn a_click_off_the_list_in_focus_is_ignored() {
+fn a_click_off_the_list_in_closeup_is_ignored() {
     // A click in the right pane (column 70 is past the left pane at any width)
     // re-focuses nothing, so `t` attaches the still-focused root (`/ws`), not `feat`.
     let dirs = run_capturing_attached_dirs_for_inputs(
@@ -169,13 +169,13 @@ fn a_click_off_the_list_in_focus_is_ignored() {
 }
 
 #[test]
-fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
-    // With live panes published, 在席's right-pane tab strip is clickable: a click
+fn a_click_on_a_closeup_right_pane_tab_switches_that_live_pane() {
+    // With live panes published, 集中's right-pane tab strip is clickable: a click
     // on the inactive pane chip selects that pane through `tab_op(To(index))`.
     let term = Term::stdout();
     let (height, width) = term.size();
     let mut state = sample_state();
-    state.enter_focus(2); // feat
+    state.enter_closeup(2); // feat
     state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
     let geo = crate::presentation::tui::home::ui::terminal_geometry(
         height as usize,
@@ -184,7 +184,7 @@ fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
     );
     let col = (geo.origin_col..geo.origin_col + geo.cols)
         .find(|&col| {
-            crate::presentation::tui::home::ui::focus_tab_at(
+            crate::presentation::tui::home::ui::closeup_tab_at(
                 &state,
                 col,
                 geo.origin_row,
@@ -240,8 +240,8 @@ fn a_click_on_a_focus_right_pane_tab_switches_that_live_pane() {
 }
 
 #[test]
-fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
-    // 切替 also draws a live session's pane tabs in the right pane. Clicking an
+fn a_click_on_a_overview_right_pane_tab_switches_the_previewed_live_pane() {
+    // 選択 also draws a live session's pane tabs in the right pane. Clicking an
     // inactive chip should drive `tab_op(To(index))`, just like ←/→ keyboard
     // navigation, without treating the click as a left-pane row selection.
     let term = Term::stdout();
@@ -251,8 +251,8 @@ fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
         live: [PathBuf::from("/r/feat")].into(),
         ..Default::default()
     });
-    state.switch_move_down(); // root -> main
-    state.switch_move_down(); // main -> feat
+    state.overview_move_down(); // root -> main
+    state.overview_move_down(); // main -> feat
     state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
     let geo = crate::presentation::tui::home::ui::terminal_geometry(
         height as usize,
@@ -261,7 +261,7 @@ fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
     );
     let col = (geo.origin_col..geo.origin_col + geo.cols)
         .find(|&col| {
-            crate::presentation::tui::home::ui::switch_tab_at(
+            crate::presentation::tui::home::ui::overview_tab_at(
                 &state,
                 col,
                 geo.origin_row,
@@ -321,7 +321,7 @@ fn a_click_on_a_switch_right_pane_tab_switches_the_previewed_live_pane() {
 }
 
 #[test]
-fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
+fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
     let term = Term::stdout();
     let (height, width) = term.size();
     let mut state = sample_state();
@@ -329,8 +329,8 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
         live: [PathBuf::from("/r/feat")].into(),
         ..Default::default()
     });
-    state.switch_move_down();
-    state.switch_move_down(); // feat
+    state.overview_move_down();
+    state.overview_move_down(); // feat
     state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 1);
     let geo = crate::presentation::tui::home::ui::terminal_geometry(
         height as usize,
@@ -339,7 +339,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     );
     let col = (geo.origin_col..geo.origin_col + geo.cols)
         .find(|&col| {
-            crate::presentation::tui::home::ui::switch_tab_hit(
+            crate::presentation::tui::home::ui::overview_tab_hit(
                 &state,
                 col,
                 geo.origin_row,
@@ -446,7 +446,7 @@ fn a_right_click_on_a_switch_tab_opens_a_menu_and_runs_the_selected_action() {
     );
 }
 
-fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenuAction> {
+fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenuAction> {
     let term = Term::stdout();
     let (height, width) = term.size();
     let mut state = sample_state();
@@ -454,8 +454,8 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
         live: [PathBuf::from("/r/feat")].into(),
         ..Default::default()
     });
-    state.switch_move_down();
-    state.switch_move_down(); // feat
+    state.overview_move_down();
+    state.overview_move_down(); // feat
     state.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 1);
     let geo = crate::presentation::tui::home::ui::terminal_geometry(
         height as usize,
@@ -464,7 +464,7 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
     );
     let col = (geo.origin_col..geo.origin_col + geo.cols)
         .find(|&col| {
-            crate::presentation::tui::home::ui::switch_tab_hit(
+            crate::presentation::tui::home::ui::overview_tab_hit(
                 &state,
                 col,
                 geo.origin_row,
@@ -565,9 +565,9 @@ fn run_switch_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMenu
 }
 
 #[test]
-fn switch_tab_menu_runs_move_right_close_and_rename_actions() {
+fn overview_tab_menu_runs_move_right_close_and_rename_actions() {
     assert_eq!(
-        run_switch_tab_menu_inputs(vec![
+        run_overview_tab_menu_inputs(vec![
             Ok(Input::Key(Key::ArrowDown)),
             Ok(Input::Key(Key::Enter)),
         ]),
@@ -575,7 +575,7 @@ fn switch_tab_menu_runs_move_right_close_and_rename_actions() {
     );
 
     assert_eq!(
-        run_switch_tab_menu_inputs(vec![
+        run_overview_tab_menu_inputs(vec![
             Ok(Input::Key(Key::ArrowUp)),
             Ok(Input::Key(Key::Enter)),
         ]),
@@ -583,7 +583,7 @@ fn switch_tab_menu_runs_move_right_close_and_rename_actions() {
     );
 
     assert_eq!(
-        run_switch_tab_menu_inputs(vec![
+        run_overview_tab_menu_inputs(vec![
             Ok(Input::Key(Key::ArrowDown)),
             Ok(Input::Key(Key::ArrowDown)),
             Ok(Input::Key(Key::Enter)),
@@ -603,12 +603,12 @@ fn switch_tab_menu_runs_move_right_close_and_rename_actions() {
 
 #[test]
 fn tab_menu_escape_and_right_click_miss_dismiss_the_menu() {
-    assert!(run_switch_tab_menu_inputs(vec![
+    assert!(run_overview_tab_menu_inputs(vec![
         Ok(Input::Key(Key::PageUp)),
         Ok(Input::Key(Key::Escape)),
     ])
     .is_empty());
-    assert!(run_switch_tab_menu_inputs(vec![
+    assert!(run_overview_tab_menu_inputs(vec![
         Ok(Input::Key(Key::ArrowDown)),
         Ok(Input::Key(Key::ArrowDown)),
         Ok(Input::Key(Key::Enter)),
@@ -616,15 +616,15 @@ fn tab_menu_escape_and_right_click_miss_dismiss_the_menu() {
         Ok(Input::Key(Key::Escape)),
     ])
     .is_empty());
-    assert!(run_switch_tab_menu_inputs(vec![right_click(0, 0)]).is_empty());
+    assert!(run_overview_tab_menu_inputs(vec![right_click(0, 0)]).is_empty());
 }
 
 #[test]
-fn right_click_tab_paths_cover_focus_and_attached_modes() {
+fn right_click_tab_paths_cover_closeup_and_attached_modes() {
     let term = Term::stdout();
     let (height, width) = term.size();
     let mut focus = sample_state();
-    focus.enter_focus(2);
+    focus.enter_closeup(2);
     focus.set_terminal_tabs(vec!["a".to_string(), "b".to_string()], 0);
     let geo = crate::presentation::tui::home::ui::terminal_geometry(
         height as usize,
@@ -633,7 +633,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
     );
     let col = (geo.origin_col..geo.origin_col + geo.cols)
         .find(|&col| {
-            crate::presentation::tui::home::ui::focus_tab_hit(
+            crate::presentation::tui::home::ui::closeup_tab_hit(
                 &focus,
                 col,
                 geo.origin_row,
@@ -642,7 +642,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
             ) == Some(1)
         })
         .expect("focus tab chip is visible");
-    // In Focus, the right click opens the same tab menu, and Enter executes the
+    // In Closeup, the right click opens the same tab menu, and Enter executes the
     // default Move-left action for the clicked tab.
     let actions = {
         let actions = RefCell::new(Vec::new());
@@ -743,7 +743,7 @@ fn right_click_tab_paths_cover_focus_and_attached_modes() {
     // Attached mode is not driven by this event loop, but the defensive branch is
     // still harmless: a right click does not open a home-level menu.
     let mut attached = sample_state();
-    attached.enter_focus(2);
+    attached.enter_closeup(2);
     attached.show_attached();
     let outcome = run_capturing_attached_dirs_for_inputs(
         vec![click(col, geo.origin_row), right_click(col, geo.origin_row)],

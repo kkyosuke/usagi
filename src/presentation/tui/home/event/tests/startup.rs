@@ -34,7 +34,7 @@ fn a_restored_attached_engagement_auto_attaches_on_the_first_pass() {
 #[test]
 fn no_restored_engagement_leaves_the_first_pass_untouched() {
     // With nothing armed (the usual launch) the entry attach is a no-op: the loop
-    // opens in 切替 and never drives a pane before the terminating Ctrl-C.
+    // opens in 選択 and never drives a pane before the terminating Ctrl-C.
     let attached = RefCell::new(false);
     let mut open = |_: &mut HomeState, _: &Path, _: bool, _: bool| -> Result<PaneExit> {
         *attached.borrow_mut() = true;
@@ -70,7 +70,7 @@ fn a_key_press_is_traced_when_tracing_is_enabled() {
     std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
     std::env::set_var(crate::infrastructure::trace_log::TRACE_ENV, "1");
 
-    // One inert key (Esc at the base Switch) routes through the trace, then
+    // One inert key (Esc at the base Overview) routes through the trace, then
     // Ctrl-C quits (no live session, so it exits at once).
     let outcome = run(vec![Ok(Key::Escape), Ok(Key::CtrlC)], sample_state()).unwrap();
     assert!(matches!(outcome, Outcome::Quit));
@@ -139,20 +139,20 @@ fn a_populated_update_handle_is_read_before_painting() {
     assert!(matches!(outcome, Outcome::Quit));
 }
 
-/// 切替 (Switch) reached from the 在席 prompt surface via `Ctrl-O`, then a
+/// 選択 (Overview) reached from the 集中 prompt surface via `Ctrl-O`, then a
 /// different session focused: the session changes as expected. Guards the
-/// prompt-mode path of `focus_key`'s `Ctrl-O` handling (the menu path is covered
-/// by [`focus_ctrl_o_opens_switch_then_esc_re_focuses`]).
+/// prompt-mode path of `closeup_key`'s `Ctrl-O` handling (the menu path is covered
+/// by [`closeup_ctrl_o_opens_overview_then_esc_re_focuses`]).
 #[test]
-fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
+fn prompt_closeup_ctrl_o_opens_overview_and_can_change_session() {
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
         Ok(PaneExit::Closed)
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
-    // Only `feat` has a live terminal, so focusing the idle root stays in 在席
-    // (no auto-attach) until Ctrl-O reaches Switch and `feat` is selected.
+    // Only `feat` has a live terminal, so focusing the idle root stays in 集中
+    // (no auto-attach) until Ctrl-O reaches Overview and `feat` is selected.
     let mut preview = |p: &Path, _: Sidebar| {
         if p.to_string_lossy().contains("feat") {
             Some(TerminalView::from_rows(vec!["live".to_string()], None))
@@ -161,9 +161,9 @@ fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
         }
     };
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // Focus root (idle -> 在席 prompt, no attach)
-    keys.push(Ok(Key::Char(CTRL_O))); // 在席 leader
-    keys.push(Ok(Key::Char('o'))); // -> 切替
+    keys.push(Ok(Key::Enter)); // Closeup root (idle -> 集中 prompt, no attach)
+    keys.push(Ok(Key::Char(CTRL_O))); // 集中 leader
+    keys.push(Ok(Key::Char('o'))); // -> 選択
     keys.push(Ok(Key::ArrowDown)); // root -> main
     keys.push(Ok(Key::ArrowDown)); // main -> feat
     keys.push(Ok(Key::Enter)); // focus feat (live) -> attach
@@ -179,7 +179,7 @@ fn prompt_focus_ctrl_o_opens_switch_and_can_change_session() {
     assert_eq!(
         *opened.borrow(),
         1,
-        "Ctrl-O from the prompt surface must reach Switch so focusing the live feat attaches"
+        "Ctrl-O from the prompt surface must reach Overview so focusing the live feat attaches"
     );
 }
 

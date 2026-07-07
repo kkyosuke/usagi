@@ -159,7 +159,7 @@ const READER_STACK_BYTES: usize = 256 * 1024;
 /// Configure `cmd` to run `command` in `shell` and then exit, so the launch
 /// line is passed as an argument (never echoed) rather than typed into the
 /// shell's stdin. The shell exits when `command` does, so leaving the agent
-/// drops the pane back to 在席 (Focus) instead of a bare shell prompt. See
+/// drops the pane back to 集中 (Closeup) instead of a bare shell prompt. See
 /// [`PtySession::spawn`].
 #[cfg(not(windows))]
 fn configure_initial_command(cmd: &mut CommandBuilder, _shell: &str, command: &str) {
@@ -190,7 +190,7 @@ impl PtySession {
     /// line editor, which would splash the long `:agent` launch line (with its
     /// `--append-system-prompt`) across the pane before the agent draws over it.
     /// Passed as an argument it is never echoed. The shell exits once the
-    /// command does, so leaving the agent returns to 在席 (Focus) rather than
+    /// command does, so leaving the agent returns to 集中 (Closeup) rather than
     /// dropping the user at a bare shell prompt.
     ///
     /// `env` is a map of effective (global plus workspace-local) secret

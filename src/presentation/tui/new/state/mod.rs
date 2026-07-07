@@ -218,7 +218,7 @@ impl FormState {
         }
     }
 
-    /// Switch to the other mode, keeping focus on the mode selector so the next
+    /// Overview to the other mode, keeping focus on the mode selector so the next
     /// arrow press keeps toggling without first having to move focus.
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.other();

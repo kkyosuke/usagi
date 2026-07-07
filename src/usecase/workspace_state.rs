@@ -126,7 +126,7 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
 /// the badges immediately: [`sync`] persists the result, and the git-free
 /// [`recorded_sessions`] / [`recorded_sessions_for_display`] surface it on first
 /// paint and on every mtime-driven refresh, so a session's badge reads the same in
-/// 切替 (Switch) as when its pane is attached. The merge is **additive**: an empty
+/// 選択 (Overview) as when its pane is attached. The merge is **additive**: an empty
 /// store leaves the caller's own `wt.pr` (state.json's persisted badges) untouched
 /// rather than wiping it — so a reader that trusts state.json (e.g. the workspace
 /// overview's PR count) keeps working. In [`sync`] the preceding git refresh has

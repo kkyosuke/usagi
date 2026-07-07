@@ -38,7 +38,7 @@
 │                    New Project                                  │  ← タイトル（緑・太字）
 │   Clone a repository or register an existing directory          │ ← サブタイトル（淡色）
 │                                                                 │
-│        Type  (←→ to switch)                                     │  ← モード選択ラベル（淡色）
+│        Type  (←→ to overview)                                     │  ← モード選択ラベル（淡色）
 │      > [Clone]   Existing                                       │  ← タブ（選択中: 角括弧＋シアン太字／フォーカス時: 赤">"）
 │                                                                 │
 │        Repository URL                                           │  ← ラベル（淡色）
@@ -55,12 +55,12 @@
 │                                                                 │
 │        that does not look like a repository URL                 │  ← 通知行（任意・赤太字／バリデーション失敗時）
 │                                                                 │
-│ ←→: switch type / ↑↓/Tab: move field / Enter: create / Esc: back │ ← フッター（淡色・フォーカス依存）
+│ ←→: overview type / ↑↓/Tab: move field / Enter: create / Esc: back │ ← フッター（淡色・フォーカス依存）
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 > **フッターはフォーカス中のフィールドで内容が変わります**。`←/→` と `Space` はフィールドによって
-> 意味が異なる（モードセレクタでは `←→` が Clone/Existing の切替、テキスト欄ではキャレット移動。
+> 意味が異なる（モードセレクタでは `←→` が Clone/Existing の選択、テキスト欄ではキャレット移動。
 > `Space` はディレクトリ欄でのみブラウザを開き、他の欄では空白入力）ため、その時点のフィールドで
 > 実際に効くキーだけを案内します。上の例はモードセレクタにフォーカスがある状態。ディレクトリ欄
 > （Location など）では `Space: browse dir / ←→: move caret / …`、URL/Name/Branch では

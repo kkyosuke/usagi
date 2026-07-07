@@ -48,7 +48,7 @@ pub use modal::{
 pub use mode::{Mode, PaneExit, ResumeLevel, ReturnMode};
 
 use list::{session_row, session_tree_layout};
-use modal::{FocusMenu, FocusSubmenu, Overlay};
+use modal::{CloseupMenu, CloseupSubmenu, Overlay};
 
 /// The terminal row's inline choices, in display/default order. `open` preserves
 /// the existing fast path: add an embedded usagi pane/tab. `new` opens a native
@@ -57,7 +57,7 @@ const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
 
 use crate::presentation::tui::chat::state::Chat;
 
-/// The 在席 (Focus) menu commands in alphabetical order by name, independent of
+/// The 集中 (Closeup) menu commands in alphabetical order by name, independent of
 /// registry order, so the menu is predictable regardless of how the registry is
 /// built.
 fn sorted_session_menu_commands(registry: &CommandRegistry) -> Vec<CommandInfo> {
@@ -123,7 +123,7 @@ pub struct SessionOutcome {
     pub root_note: Option<Option<String>>,
 }
 
-/// The outcome of a 切替 reorder (`K` / `J`): moving the selected session one
+/// The outcome of a 選択 reorder (`K` / `J`): moving the selected session one
 /// row up or down. Distinct from [`SessionOutcome`] because a successful move is
 /// **silent** — reordering is navigation-like and a per-keypress log line would
 /// flood the log — and it must **not** re-activate the moved session (the active
@@ -287,7 +287,7 @@ impl PendingSession {
 /// snapshot" path any more — the asymmetry that let a stale view linger after the
 /// pane yielded control (it cleared its tabs but left the view for the event
 /// loop's next frame to mop up). Exactly one party drives the surface at a time:
-/// the event loop while previewing a session in 切替 (Switch) / 在席 (Focus), and
+/// the event loop while previewing a session in 選択 (Overview) / 集中 (Closeup), and
 /// the embedded-terminal driver while a session is 没入 (Attached).
 ///
 /// Which party that is is no longer a bare convention: the surface can only be
@@ -303,12 +303,12 @@ struct TerminalSurface {
     /// taking over from the other party (drop its snapshot) or refreshing its own.
     owner: Option<SurfaceOwner>,
     /// The latest snapshot of the embedded terminal's screen, set while a session
-    /// is 没入 (Attached) or previewed in 切替 (Switch) and rendered in the right
+    /// is 没入 (Attached) or previewed in 選択 (Overview) and rendered in the right
     /// pane.
     view: Option<TerminalView>,
     /// The tab strip shown above the embedded terminal: the session's panes and
     /// which one is active. Published alongside the snapshot by whichever party
-    /// owns the surface; `None` outside 没入 / a 切替 preview.
+    /// owns the surface; `None` outside 没入 / a 選択 preview.
     tabs: Option<TabStrip>,
     /// While the active tab is still launching, the tab strip is already
     /// published but the pane has no stable screen to preview yet. This frame
@@ -334,15 +334,15 @@ impl TerminalSurface {
 
 /// Which party is currently publishing the embedded-terminal surface (the
 /// right-pane screen snapshot + tab strip). Exactly one drives it at a time — the
-/// home event loop while it previews the highlighted / focused session (切替 /
-/// 在席), and the embedded-terminal driver while a session is 没入 (Attached) — and
+/// home event loop while it previews the highlighted / focused session (選択 /
+/// 集中), and the embedded-terminal driver while a session is 没入 (Attached) — and
 /// [`HomeState::surface_writer`] is the only way to publish to it. Naming the
 /// owner at the write is what makes the single-owner rule enforced rather than
 /// merely documented: taking over from the other party drops its leftovers (see
 /// [`TerminalSurface::claim`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SurfaceOwner {
-    /// The home event loop, previewing the highlighted (切替) / focused (在席)
+    /// The home event loop, previewing the highlighted (選択) / focused (集中)
     /// session's live terminal in the right pane.
     Preview,
     /// The embedded-terminal driver, while a session is 没入 (Attached).
@@ -354,15 +354,15 @@ pub enum SurfaceOwner {
 /// is what enforces single-owner publishing: a party cannot set the screen
 /// snapshot or the tab strip without first naming itself the owner, and doing so
 /// drops a *different* owner's snapshot up front — so no stale frame survives the
-/// hand-off between 切替 / 在席 previews and 没入.
+/// hand-off between 選択 / 集中 previews and 没入.
 pub struct SurfaceWriter<'a> {
     surface: &'a mut TerminalSurface,
 }
 
 impl SurfaceWriter<'_> {
     /// Publish the latest embedded-terminal screen snapshot, shown in the right
-    /// pane while the session is 没入 (Attached) or previewed in 切替 (Switch) /
-    /// 在席 (Focus).
+    /// pane while the session is 没入 (Attached) or previewed in 選択 (Overview) /
+    /// 集中 (Closeup).
     pub fn set_view(&mut self, view: TerminalView) {
         self.surface.view = Some(view);
     }
@@ -416,7 +416,7 @@ const MAX_LOG_LINES: usize = 5_000;
 /// Extracted from [`HomeState`] so the editing, history-append, and ↑/↓ recall
 /// behaviour — together with the invariant that *any* edit cancels an
 /// in-progress recall — live on one focused type instead of being maintained by
-/// hand at every field access. Both the 切替/在席 command line and the `:`
+/// hand at every field access. Both the 選択/集中 command line and the `:`
 /// palette drive the same instance.
 #[derive(Default)]
 struct CommandLine {
@@ -588,12 +588,12 @@ pub struct HomeState {
     /// The commands available in command mode (the extension point for the
     /// follow-up command features).
     registry: CommandRegistry,
-    /// Sorted Session-scope commands used by the 在席 menu. This static part is
+    /// Sorted Session-scope commands used by the 集中 menu. This static part is
     /// derived once from [`registry`](Self::registry); each render then only
     /// applies the dynamic gates (`close`, `agent`) instead of cloning and
     /// sorting the registry metadata again.
     session_menu_commands: Vec<CommandInfo>,
-    /// Which right-pane action surface 在席 (Focus) presents — a pickable menu
+    /// Which right-pane action surface 集中 (Closeup) presents — a pickable menu
     /// or a typed prompt. Injected from the effective settings by `mod.rs`.
     session_action_ui: SessionActionUi,
     /// How the left session sidebar is sized — its full-width list or the
@@ -601,7 +601,7 @@ pub struct HomeState {
     /// the effective settings by `mod.rs`. Independent of [`mode`](Self::mode),
     /// so zooming between modes never resets it.
     sidebar: Sidebar,
-    /// The effective manual-status label master 切替 (Switch) cycles with `Tab` /
+    /// The effective manual-status label master 選択 (Overview) cycles with `Tab` /
     /// the digit keys and the sidebar resolves each session's
     /// [`label_id`](crate::domain::workspace_state::SessionRecord::label_id)
     /// against. Injected from the effective settings by `mod.rs`; defaults to the
@@ -620,24 +620,24 @@ pub struct HomeState {
     /// footer ([`super::ui`]). Always `false` outside 没入 / the prefix scheme.
     prefix_pending: bool,
     /// The configured agent CLI launched by `agent` with no explicit choice (the
-    /// 在席 menu's `agent` row / `a` shortcut and a bare `agent` prompt). Injected
+    /// 集中 menu's `agent` row / `a` shortcut and a bare `agent` prompt). Injected
     /// from the effective settings by `mod.rs`; its display name labels the menu's
     /// `agent` row. Defaults to [`AgentCli::Claude`].
     default_agent: AgentCli,
-    /// The configured local-LLM model name (Ollama) the 在席 `chat` overlay talks
+    /// The configured local-LLM model name (Ollama) the 集中 `chat` overlay talks
     /// to. Injected from the effective settings by `mod.rs`; defaults to
     /// [`DEFAULT_LOCAL_LLM_MODEL`](crate::domain::settings::DEFAULT_LOCAL_LLM_MODEL).
     local_llm_model: String,
     /// Whether the local LLM is usable (enabled and its model pulled) — gates the
-    /// `chat` row in the 在席 (Focus) menu so it only appears when a reply would
+    /// `chat` row in the 集中 (Closeup) menu so it only appears when a reply would
     /// actually work. Injected from the effective settings (and a runtime probe)
     /// by `mod.rs`; false by default.
     ai_available: bool,
     /// The agent CLIs installed on this machine (PATH-probed), in canonical order,
-    /// offered by the 在席 menu's agent picker. Injected by `mod.rs`; empty by
+    /// offered by the 集中 menu's agent picker. Injected by `mod.rs`; empty by
     /// default (tests that do not set it never expand the picker).
     installed_agents: Vec<AgentCli>,
-    /// The agent CLI the next agent launch should use, set by the 在席 menu picker
+    /// The agent CLI the next agent launch should use, set by the 集中 menu picker
     /// or the `agent <name>` prompt just before launching and consumed by the
     /// terminal-pool wiring on a fresh agent spawn. `None` means "use
     /// [`default_agent`](Self::default_agent)".
@@ -647,9 +647,9 @@ pub struct HomeState {
     /// separate from [`agent_choice`](Self::agent_choice) because `ai` always uses
     /// the configured default CLI rather than an ad-hoc override.
     agent_initial_prompt: Option<String>,
-    /// Where a 切替 (Switch) returns to on `Esc`; only meaningful in
-    /// [`Mode::Switch`].
-    switch_return: ReturnMode,
+    /// Where a 選択 (Overview) returns to on `Esc`; only meaningful in
+    /// [`Mode::Overview`].
+    overview_return: ReturnMode,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
     /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
     /// badge (in any mode, on the full sidebar) and held open across pointer moves —
@@ -657,7 +657,7 @@ pub struct HomeState {
     /// `#<number>`; cleared by a click outside it, a keypress, or `Esc`. The
     /// renderer floats the session's `#<number>` list beside its row.
     pr_popup: Option<usize>,
-    /// The transient overlay that captures the keyboard while open (the 切替
+    /// The transient overlay that captures the keyboard while open (the 選択
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
     /// field per kind, so at most one can be open by construction and the screen
@@ -679,9 +679,9 @@ pub struct HomeState {
     update_confirm: bool,
     /// The engagement to persist for restore when the next quit is confirmed,
     /// armed only when the live mode would otherwise be lost. A quit from 没入
-    /// (Attached) drops to [`Mode::Focus`] on its way to the quit modal, so the
+    /// (Attached) drops to [`Mode::Closeup`] on its way to the quit modal, so the
     /// pane driver arms [`ResumeLevel::Attached`] here before that downgrade; for
-    /// 切替 / 在席 the level is read straight off [`mode`](Self::mode) at save time,
+    /// 選択 / 集中 the level is read straight off [`mode`](Self::mode) at save time,
     /// so it stays `None`. Cleared when the quit modal is cancelled, so a later
     /// quit from a shallower mode is recorded accurately.
     pending_resume: Option<ResumeLevel>,
@@ -692,45 +692,45 @@ pub struct HomeState {
     /// it), but attaching needs the loop's terminal wiring — and taken once there.
     resume_attach: bool,
     /// Whether the workspace command palette overlay is open. Summoned with `:`
-    /// from 切替 (Switch) and 在席 (Focus), it reuses the workspace command-line
+    /// from 選択 (Overview) and 集中 (Closeup), it reuses the workspace command-line
     /// state ([`input`](Self::input) / [`recall`](Self::recall) /
     /// [`history`](Self::history) / [`log`](Self::log) /
     /// [`response_start`](Self::response_start)) and floats over the panes while
     /// open. Separate from [`overlay`](Self::overlay) because a text dump (`man`
     /// / `session list`) it runs can layer its modal on top of the palette.
     command_open: bool,
-    /// The 在席 (Focus) menu cursor: which Session-scope command is highlighted.
-    focus_menu: FocusMenu,
-    /// The 在席 (Focus) menu's live filter (`/`): `None` when the menu lists every
+    /// The 集中 (Closeup) menu cursor: which Session-scope command is highlighted.
+    closeup_menu: CloseupMenu,
+    /// The 集中 (Closeup) menu's live filter (`/`): `None` when the menu lists every
     /// command, `Some(query)` while the user narrows the list by typing. An empty
     /// `Some` is filter mode with nothing typed yet (every command still shows), so
     /// key routing knows to treat letters as filter input rather than shortcuts.
-    focus_menu_filter: Option<String>,
-    /// The 在席 (Focus) prompt buffer (the session-scoped command line).
-    focus_prompt: TextInput,
-    /// Whether 在席's tab selector sits on the trailing "+ new" tab (the action
+    closeup_menu_filter: Option<String>,
+    /// The 集中 (Closeup) prompt buffer (the session-scoped command line).
+    closeup_prompt: TextInput,
+    /// Whether 集中's tab selector sits on the trailing "+ new" tab (the action
     /// surface that launches a pane) rather than an existing live pane. The
     /// session's live panes (from the published [`TabStrip`]) form the leading
     /// tabs and the "+ new" tab is appended after them; this flag picks between
     /// "an existing pane is selected" (its preview shows) and "the + new tab is
     /// selected" (the menu / prompt shows). It is forced on whenever the session
     /// has no live panes, so an idle session always shows the action surface.
-    focus_new_tab: bool,
-    /// Whether the 在席 (Focus) action surface (Menu or Prompt) floats over the
+    closeup_new_tab: bool,
+    /// Whether the 集中 (Closeup) action surface (Menu or Prompt) floats over the
     /// *selected pane tab* rather than the trailing "+ new" tab — the state after
     /// zooming out of a live pane (`Ctrl-T` / `Ctrl-O a`): the selector stays on
     /// the pane the zoom left, its live preview keeps showing behind the floating
     /// box, and the strip never grows a "+ new" chip for a tab that was never
     /// created. Dropped when the surface is dismissed (`Esc`), when the tab
     /// selector moves (the user is browsing previews), or when the mode changes.
-    focus_action_over_pane: bool,
-    /// A one-shot arming bit: 在席 (Focus) was reached by zooming *out* of a live
-    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToFocus`), so the very next
+    closeup_action_over_pane: bool,
+    /// A one-shot arming bit: 集中 (Closeup) was reached by zooming *out* of a live
+    /// pane with `Ctrl-T` / `Ctrl-O a` (`PaneExit::ToCloseup`), so the very next
     /// `Esc` re-attaches that pane — returning to the 没入 (Attached) tab the zoom
-    /// started from rather than peeling back toward 切替. Armed in that zoom-out
+    /// started from rather than peeling back toward 選択. Armed in that zoom-out
     /// path and cleared the moment any other key is handled (or the mode changes),
     /// so it only ever turns one immediate `Esc` into a return-to-pane.
-    focus_return_attach: bool,
+    closeup_return_attach: bool,
     /// Sessions recorded for this workspace (from `state.json`), shown by
     /// `session list` and kept current as sessions are created.
     sessions: Vec<SessionRecord>,
@@ -753,7 +753,7 @@ pub struct HomeState {
     badge_owner: Option<SurfaceOwner>,
     /// When set, the left pane lists the sessions whose agent is waiting for
     /// input (◆) first, so the next session to touch is at the top. Toggled with
-    /// `s` in 切替. The order is a *display* concern only: `sessions` stays in its
+    /// `s` in 選択. The order is a *display* concern only: `sessions` stays in its
     /// canonical (manual `K`/`J`) order, and the waiting-first ordering is applied
     /// when the pane is built ([`rebuild_list`](Self::rebuild_list)) — a stable
     /// partition, so within each group the manual order is preserved and a session
@@ -780,7 +780,7 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the right
     /// pane shows the launch loader.
     loading: Option<LoadingIndicator>,
-    /// A pane launched in the background (在席's `terminal` / `agent` on a session
+    /// A pane launched in the background (集中's `terminal` / `agent` on a session
     /// that already shows tabs) whose tab is loading in the strip. While `Some`
     /// the event loop polls it each frame, animating its chip and — once ready —
     /// moving to it unless the user acted meanwhile. See [`PendingPane`].
@@ -797,7 +797,7 @@ pub struct HomeState {
     tasks: Vec<TaskRow>,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
-    /// sidebar reads it for the root row's memo marker; the 切替 preview and the
+    /// sidebar reads it for the root row's memo marker; the 選択 preview and the
     /// note editor read it the way they read a session's [`SessionRecord::note`].
     /// Only the user editing it changes it — background re-syncs leave it as is —
     /// so it is carried separately from the re-synced `sessions`.
@@ -834,7 +834,7 @@ pub struct HomeState {
     mascot_animation_enabled: bool,
     /// When set, the mascot is mid-blink until this instant — the eyes stay shut
     /// while `now` is before it. [`kick_mascot_blink`](Self::kick_mascot_blink)
-    /// arms it the moment the user interacts (in 切替 / 在席), and
+    /// arms it the moment the user interacts (in 選択 / 集中), and
     /// [`tick_mascot`](Self::tick_mascot) clears it once the instant passes, so the
     /// rabbit blinks back without any idle timer — the blink rides paints that
     /// already happen.
@@ -914,7 +914,7 @@ impl HomeState {
         let session_menu_commands = sorted_session_menu_commands(&registry);
         Self {
             list: WorktreeList::new(workspace_name, worktrees),
-            mode: Mode::Switch,
+            mode: Mode::Overview,
             cmdline: CommandLine::new(),
             log,
             registry,
@@ -930,7 +930,7 @@ impl HomeState {
             installed_agents: Vec::new(),
             agent_choice: None,
             agent_initial_prompt: None,
-            switch_return: ReturnMode::Base,
+            overview_return: ReturnMode::Base,
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
@@ -938,12 +938,12 @@ impl HomeState {
             pending_resume: None,
             resume_attach: false,
             command_open: false,
-            focus_menu: FocusMenu::default(),
-            focus_menu_filter: None,
-            focus_prompt: TextInput::new(),
-            focus_new_tab: true,
-            focus_action_over_pane: false,
-            focus_return_attach: false,
+            closeup_menu: CloseupMenu::default(),
+            closeup_menu_filter: None,
+            closeup_prompt: TextInput::new(),
+            closeup_new_tab: true,
+            closeup_action_over_pane: false,
+            closeup_return_attach: false,
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
@@ -1015,13 +1015,13 @@ impl HomeState {
         self.list.root_path()
     }
 
-    /// Set which right-pane action surface 在席 (Focus) presents (injected from
+    /// Set which right-pane action surface 集中 (Closeup) presents (injected from
     /// the effective settings by `mod.rs` at construction).
     pub fn set_session_action_ui(&mut self, ui: SessionActionUi) {
         self.session_action_ui = ui;
     }
 
-    /// Which right-pane action surface 在席 (Focus) presents.
+    /// Which right-pane action surface 集中 (Closeup) presents.
     pub fn session_action_ui(&self) -> SessionActionUi {
         self.session_action_ui
     }
@@ -1057,7 +1057,7 @@ impl HomeState {
     }
 
     /// The name of the session under the cursor and the label id to store next
-    /// when 切替's `Tab` (`forward`) / `Shift-Tab` cycles its manual status — the
+    /// when 選択's `Tab` (`forward`) / `Shift-Tab` cycles its manual status — the
     /// next entry in the master, ringing through the "unset" slot — or `None` when
     /// the cursor is not on a session or no labels are defined. Pure: the caller
     /// persists it (and the reload refreshes the row); the inner `None` clears the
@@ -1203,7 +1203,7 @@ impl HomeState {
 
     /// Start a click reaction: pick one of the [`MascotReaction`](crate::presentation::tui::widgets::MascotReaction)s
     /// pseudo-randomly and play it until [`MASCOT_REACTION`] from `now`. The event
-    /// loop calls this when the user clicks the sidebar rabbit in 切替 / 在席, so the
+    /// loop calls this when the user clicks the sidebar rabbit in 選択 / 集中, so the
     /// usagi does something cute back. A no-op when the mascot animation is
     /// disabled, so a toggled-off mascot stays a still resting image.
     pub fn kick_mascot_reaction(&mut self, now: Instant) {
@@ -1227,7 +1227,7 @@ impl HomeState {
     }
 
     /// Start a blink: shut the mascot's eyes until [`MASCOT_BLINK`] from `now`. The
-    /// event loop calls this the moment the user interacts in 切替 / 在席, so the
+    /// event loop calls this the moment the user interacts in 選択 / 集中, so the
     /// resting rabbit blinks back. A no-op when the mascot animation is disabled.
     pub fn kick_mascot_blink(&mut self, now: Instant) {
         if self.mascot_animation_enabled {
@@ -1279,7 +1279,7 @@ impl HomeState {
         self.sidebar = self.sidebar.toggled();
     }
 
-    /// Inject the configured default agent CLI (its display name labels the 在席
+    /// Inject the configured default agent CLI (its display name labels the 集中
     /// menu's `agent` row, and a bare `agent` / the `a` shortcut launch it).
     pub fn set_default_agent(&mut self, cli: AgentCli) {
         self.default_agent = cli;
@@ -1291,14 +1291,14 @@ impl HomeState {
     }
 
     /// Inject the configured local-LLM model name (Ollama), used when opening the
-    /// 在席 `chat` overlay. Injected at startup and re-applied when Config changes
+    /// 集中 `chat` overlay. Injected at startup and re-applied when Config changes
     /// it, so the next chat uses the current model without restarting.
     pub fn set_local_llm_model(&mut self, model: impl Into<String>) {
         self.local_llm_model = model.into();
     }
 
     /// Set whether the local LLM is usable (enabled and its model pulled), gating
-    /// the `chat` row in the 在席 menu. Injected from the effective settings and a
+    /// the `chat` row in the 集中 menu. Injected from the effective settings and a
     /// runtime probe by `mod.rs`.
     pub fn set_ai_available(&mut self, available: bool) {
         self.ai_available = available;
@@ -1309,19 +1309,19 @@ impl HomeState {
         &self.local_llm_model
     }
 
-    /// Inject the installed agent CLIs (PATH-probed, canonical order) the 在席
+    /// Inject the installed agent CLIs (PATH-probed, canonical order) the 集中
     /// menu's agent picker offers.
     pub fn set_installed_agents(&mut self, agents: Vec<AgentCli>) {
         self.installed_agents = agents;
     }
 
-    /// The installed agent CLIs offered by the 在席 menu's agent picker.
+    /// The installed agent CLIs offered by the 集中 menu's agent picker.
     pub fn installed_agents(&self) -> &[AgentCli] {
         &self.installed_agents
     }
 
     /// Record which agent CLI the next agent launch should use (`None` = the
-    /// configured default). Set by the 在席 picker / `agent <name>` just before
+    /// configured default). Set by the 集中 picker / `agent <name>` just before
     /// launching; consumed by [`take_agent_choice`](Self::take_agent_choice).
     pub fn set_agent_choice(&mut self, cli: Option<AgentCli>) {
         self.agent_choice = cli;
@@ -1376,7 +1376,7 @@ impl HomeState {
     }
 
     /// Seed the workspace root's note (from `state.json`) at startup, so the `⌂
-    /// root` row's memo marker, the 切替 preview, and the note editor all reflect
+    /// root` row's memo marker, the 選択 preview, and the note editor all reflect
     /// what is on disk.
     pub fn restore_root_note(&mut self, note: Option<String>) {
         self.root_note = note;
@@ -1646,7 +1646,7 @@ impl HomeState {
         // (unite) mode every workspace contributes a synthetic root row named
         // `ROOT_NAME`, and several workspaces may also share a branch name; using
         // the old name-only lookup would resolve those ambiguous rows to the first
-        // group and snap 切替 back to the top when a background refresh landed.
+        // group and snap 選択 back to the top when a background refresh landed.
         let resolve = |list: &WorktreeList, anchor: &RowAnchor| match anchor {
             RowAnchor::Create => list.create_row(),
             RowAnchor::Root(group) => list.group_root_row(*group).unwrap_or(0),
@@ -1690,7 +1690,7 @@ impl HomeState {
             .map(|(i, _)| self.sessions[*i].display_name.clone())
             .collect();
         // Carry each session's note-presence onto its row so the pane can show a
-        // memo marker; the note text itself is read on demand (Switch preview /
+        // memo marker; the note text itself is read on demand (Overview preview /
         // editor), never stored on the row.
         let notes = layout
             .iter()
@@ -1760,7 +1760,7 @@ impl HomeState {
         self.sort_waiting
     }
 
-    /// Toggle the waiting-first ordering of the left pane (`s` in 切替) and rebuild
+    /// Toggle the waiting-first ordering of the left pane (`s` in 選択) and rebuild
     /// the rows, keeping the cursor on the same session by name so it follows its
     /// row to the new position.
     pub fn toggle_sort_waiting(&mut self) {
@@ -1801,7 +1801,7 @@ impl HomeState {
         }
     }
 
-    /// Touch the active session (the one 在席/没入 acts on), refreshing its heat dot
+    /// Touch the active session (the one 集中/没入 acts on), refreshing its heat dot
     /// immediately. A no-op when the root row is active (it is no session).
     fn touch_active(&mut self, now: DateTime<Utc>) {
         let Some(root) = self.list.active().map(|w| w.path.clone()) else {
@@ -1983,7 +1983,7 @@ impl HomeState {
         }
     }
 
-    // --- 在席 chat (local LLM) --------------------------------------------
+    // --- 集中 chat (local LLM) --------------------------------------------
 
     /// Open the local-LLM chat overlay in the right pane, bound to the configured
     /// local model. Replaces any other open overlay (only one is ever open).
@@ -2009,7 +2009,7 @@ impl HomeState {
     }
 
     /// Close the chat overlay (the user pressed `Esc`), returning the right pane
-    /// to the 在席 surface beneath it. A no-op unless the chat is the open overlay.
+    /// to the 集中 surface beneath it. A no-op unless the chat is the open overlay.
     pub fn close_chat(&mut self) {
         if matches!(self.overlay, Overlay::Chat(_)) {
             self.overlay = Overlay::None;
@@ -2096,9 +2096,9 @@ impl HomeState {
 
     /// Which command scope the command palette (`:`) operates in: always the
     /// whole workspace, since the palette is workspace-only (the session-scoped
-    /// surface lives in the 在席 right pane instead). Completion, hints, and `man`
-    /// grouping follow this. The 在席 prompt calls the registry with
-    /// [`CommandScope::Session`] directly via [`Self::focus_prompt_hint`] etc.
+    /// surface lives in the 集中 right pane instead). Completion, hints, and `man`
+    /// grouping follow this. The 集中 prompt calls the registry with
+    /// [`CommandScope::Session`] directly via [`Self::closeup_prompt_hint`] etc.
     pub fn command_scope(&self) -> CommandScope {
         CommandScope::Workspace
     }
@@ -2126,7 +2126,7 @@ impl HomeState {
     }
 
     /// Test-only: register an extra command into the registry (re-deriving the
-    /// 在席 menu's static command list), so tests can exercise how the menu and
+    /// 集中 menu's static command list), so tests can exercise how the menu and
     /// its dispatch treat a Session-scope entry the built-ins do not cover.
     #[cfg(test)]
     pub fn register_command(&mut self, command: Box<dyn super::command::Command>) {
@@ -2135,7 +2135,7 @@ impl HomeState {
     }
 
     /// The current embedded-terminal snapshot, when a session is 没入 (Attached)
-    /// or previewed in 切替 (Switch).
+    /// or previewed in 選択 (Overview).
     pub fn terminal_view(&self) -> Option<&TerminalView> {
         self.terminal.view.as_ref()
     }
@@ -2147,32 +2147,32 @@ impl HomeState {
     pub fn show_attached(&mut self) {
         self.mode = Mode::Attached;
         // Attaching consumes any action surface still floating over a pane tab, so
-        // a later return to 在席 starts fresh rather than over a stale float.
-        self.focus_action_over_pane = false;
+        // a later return to 集中 starts fresh rather than over a stale float.
+        self.closeup_action_over_pane = false;
     }
 
-    /// Leave 没入 for 在席 (Focus): the embedded session was closed or detached,
+    /// Leave 没入 for 集中 (Closeup): the embedded session was closed or detached,
     /// so drop the surface and return to the focused session's action surface.
     /// The tab selector lands on the trailing "+ new" tab — the launch surface.
     /// A deliberate zoom-out (`Ctrl-T` / `Ctrl-O a`) instead keeps the pane's
     /// own tab selected with the action surface floating over its preview — the
-    /// caller follows up with [`focus_action_over_active_pane`] — and arms
-    /// [`arm_focus_return_attach`], so the next `Esc` re-attaches the pane
-    /// rather than stepping back onto its preview (see [`focus_discard_new_tab`]).
+    /// caller follows up with [`closeup_action_over_active_pane`] — and arms
+    /// [`arm_closeup_return_attach`], so the next `Esc` re-attaches the pane
+    /// rather than stepping back onto its preview (see [`closeup_discard_new_tab`]).
     ///
-    /// [`focus_action_over_active_pane`]: Self::focus_action_over_active_pane
-    /// [`arm_focus_return_attach`]: Self::arm_focus_return_attach
-    /// [`focus_discard_new_tab`]: Self::focus_discard_new_tab
+    /// [`closeup_action_over_active_pane`]: Self::closeup_action_over_active_pane
+    /// [`arm_closeup_return_attach`]: Self::arm_closeup_return_attach
+    /// [`closeup_discard_new_tab`]: Self::closeup_discard_new_tab
     pub fn leave_attached(&mut self) {
-        self.mode = Mode::Focus;
-        self.focus_new_tab = true;
-        self.focus_action_over_pane = false;
+        self.mode = Mode::Closeup;
+        self.closeup_new_tab = true;
+        self.closeup_action_over_pane = false;
         // Returning to the menu from a pane presents its full listing: a filter
         // typed before the launch does not linger over the surface it left.
-        self.focus_menu_filter = None;
+        self.closeup_menu_filter = None;
         self.clear_terminal_surface();
         // The 没入 drive loop may have left its `Ctrl-O` leader bit set when it
-        // exited on the second key; clear it so 在席 starts without one pending.
+        // exited on the second key; clear it so 集中 starts without one pending.
         self.prefix_pending = false;
     }
 
@@ -2605,7 +2605,7 @@ impl HomeState {
 
     /// Arm [`ResumeLevel::Attached`] to be persisted when the next quit is
     /// confirmed. Called by the pane driver when `Ctrl-Q` leaves 没入, before the
-    /// mode drops to [`Mode::Focus`] on the way to the quit modal — otherwise the
+    /// mode drops to [`Mode::Closeup`] on the way to the quit modal — otherwise the
     /// recorded engagement would lose that the user was attached.
     pub fn arm_resume_attached(&mut self) {
         self.pending_resume = Some(ResumeLevel::Attached);
@@ -2613,34 +2613,34 @@ impl HomeState {
 
     /// The engagement to persist for restore, consuming any arm. An armed level
     /// (a 没入 quit) wins; otherwise it is read off the current [`mode`](Self::mode)
-    /// — 切替 → [`ResumeLevel::Switch`], 在席 → [`ResumeLevel::Focus`]. The live
+    /// — 選択 → [`ResumeLevel::Overview`], 集中 → [`ResumeLevel::Closeup`]. The live
     /// event loop never observes [`Mode::Attached`] (the pane driver arms instead),
-    /// so that arm maps to Focus as a defensive fallback.
+    /// so that arm maps to Closeup as a defensive fallback.
     pub fn resume_level(&mut self) -> ResumeLevel {
         self.pending_resume.take().unwrap_or(match self.mode {
-            Mode::Switch => ResumeLevel::Switch,
-            Mode::Focus | Mode::Attached => ResumeLevel::Focus,
+            Mode::Overview => ResumeLevel::Overview,
+            Mode::Closeup | Mode::Attached => ResumeLevel::Closeup,
         })
     }
 
     /// Restore the engagement recorded at the last quit: move the cursor to
-    /// `session` (切替), focus it (在席), or focus it and arm an auto-attach (没入).
+    /// `session` (選択), focus it (集中), or focus it and arm an auto-attach (没入).
     /// A no-op when the session no longer exists (it was removed since), so a
     /// stale snapshot never strands the cursor on a missing row. Called at startup
     /// after the panes are restored, so a 没入 target's pane is already live for
     /// the event loop's first-pass attach.
     pub fn restore_focus(&mut self, session: &str, level: ResumeLevel) {
         match level {
-            ResumeLevel::Switch => {
-                // Move the 切替 cursor onto the session (root stays at the default
+            ResumeLevel::Overview => {
+                // Move the 選択 cursor onto the session (root stays at the default
                 // cursor, which `select_by_name` leaves put by not matching it).
                 self.list.select_by_name(session);
             }
-            ResumeLevel::Focus => {
-                self.enter_focus_named(session);
+            ResumeLevel::Closeup => {
+                self.enter_closeup_named(session);
             }
             ResumeLevel::Attached => {
-                if self.enter_focus_named(session) {
+                if self.enter_closeup_named(session) {
                     self.resume_attach = true;
                 }
             }
@@ -2667,7 +2667,7 @@ impl HomeState {
     /// Open the workspace command palette overlay (`:`), clearing any half-typed
     /// command line so it starts fresh. The palette reuses the workspace
     /// command-line state ([`input`](Self::input) / [`recall`](Self::recall)),
-    /// floating over the current 切替 / 在席 panes while open.
+    /// floating over the current 選択 / 集中 panes while open.
     pub fn open_command_palette(&mut self) {
         self.command_open = true;
         self.cmdline.clear();
@@ -2684,41 +2684,41 @@ impl HomeState {
         self.command_open
     }
 
-    // --- 切替 (Switch) -----------------------------------------------------
+    // --- 選択 (Overview) -----------------------------------------------------
 
-    /// Enter 切替 (Switch): move keyboard focus to the left pane to pick a
+    /// Enter 選択 (Overview): move keyboard focus to the left pane to pick a
     /// session, remembering where to return on `Esc`.
-    pub fn enter_switch(&mut self, return_to: ReturnMode) {
-        self.mode = Mode::Switch;
-        self.switch_return = return_to;
+    pub fn enter_overview(&mut self, return_to: ReturnMode) {
+        self.mode = Mode::Overview;
+        self.overview_return = return_to;
         self.overlay.clear_create();
-        // Any 在席 `Ctrl-O` leader is abandoned by leaving the surface.
+        // Any 集中 `Ctrl-O` leader is abandoned by leaving the surface.
         self.prefix_pending = false;
     }
 
-    /// Where the current 切替 returns to on `Esc`.
-    pub fn switch_return(&self) -> ReturnMode {
-        self.switch_return
+    /// Where the current 選択 returns to on `Esc`.
+    pub fn overview_return(&self) -> ReturnMode {
+        self.overview_return
     }
 
-    /// Move the Switch cursor up one row, wrapping (delegates to the list).
-    pub fn switch_move_up(&mut self) {
+    /// Move the Overview cursor up one row, wrapping (delegates to the list).
+    pub fn overview_move_up(&mut self) {
         self.list.move_up();
     }
 
-    /// Move the Switch cursor down one row, wrapping (delegates to the list).
-    pub fn switch_move_down(&mut self) {
+    /// Move the Overview cursor down one row, wrapping (delegates to the list).
+    pub fn overview_move_down(&mut self) {
         self.list.move_down();
     }
 
-    /// Move the Switch cursor straight to a selectable `row` (0 is the root row),
+    /// Move the Overview cursor straight to a selectable `row` (0 is the root row),
     /// clamped to the rows that exist — used when a left click selects a session
     /// row directly.
-    pub fn switch_select(&mut self, row: usize) {
+    pub fn overview_select(&mut self, row: usize) {
         self.list.focus_index(row);
     }
 
-    /// Begin inline session creation in 切替: open an empty name input that
+    /// Begin inline session creation in 選択: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
     ///
     /// `taken` is the set of branch names that already exist across the
@@ -2726,11 +2726,11 @@ impl HomeState {
     /// [`crate::usecase::session::existing_branch_names`]); the typed name is
     /// validated against it live so a duplicate or branch-namespace clash is
     /// flagged before Enter.
-    pub fn switch_begin_create(&mut self, taken: Vec<String>) {
+    pub fn overview_begin_create(&mut self, taken: Vec<String>) {
         self.overlay = Overlay::Create(CreateInput::new(taken));
     }
 
-    /// Whether an inline create input is open in 切替.
+    /// Whether an inline create input is open in 選択.
     pub fn is_creating(&self) -> bool {
         matches!(self.overlay, Overlay::Create(_))
     }
@@ -2745,7 +2745,7 @@ impl HomeState {
     }
 
     /// The inline create input for editing, when open: the event loop routes the
-    /// 切替 keys to its own methods ([`CreateInput::push_char`] etc.).
+    /// 選択 keys to its own methods ([`CreateInput::push_char`] etc.).
     pub fn create_mut(&mut self) -> Option<&mut CreateInput> {
         match &mut self.overlay {
             Overlay::Create(input) => Some(input),
@@ -2753,7 +2753,7 @@ impl HomeState {
         }
     }
 
-    /// Cancel inline creation, staying in 切替.
+    /// Cancel inline creation, staying in 選択.
     pub fn create_cancel(&mut self) {
         self.overlay.clear_create();
     }
@@ -2763,7 +2763,7 @@ impl HomeState {
     /// session); on an invalid name the input stays open with the inline error
     /// shown live and `None` is returned (see [`CreateInput::confirm`]). A no-op
     /// (returning `None`) when not creating.
-    pub fn switch_confirm_create(&mut self) -> Option<String> {
+    pub fn overview_confirm_create(&mut self) -> Option<String> {
         let Overlay::Create(input) = &mut self.overlay else {
             return None;
         };
@@ -2774,12 +2774,12 @@ impl HomeState {
         Some(name)
     }
 
-    /// Begin inline rename of the selected session's sidebar label in 切替: open
+    /// Begin inline rename of the selected session's sidebar label in 選択: open
     /// an input pre-filled with its current label that captures the mode's keys
     /// until confirmed (Enter) or cancelled (Esc). A no-op on the root row (which
     /// is not a session and has no label to change) and when an input is already
     /// open. Returns whether the input opened.
-    pub fn switch_begin_rename(&mut self) -> bool {
+    pub fn overview_begin_rename(&mut self) -> bool {
         if matches!(self.overlay, Overlay::Create(_) | Overlay::Rename(_)) {
             return false;
         }
@@ -2797,7 +2797,7 @@ impl HomeState {
         true
     }
 
-    /// Whether an inline rename input is open in 切替.
+    /// Whether an inline rename input is open in 選択.
     pub fn is_renaming(&self) -> bool {
         matches!(self.overlay, Overlay::Rename(_))
     }
@@ -2885,7 +2885,7 @@ impl HomeState {
     }
 
     /// The inline rename input for editing, when open: the event loop routes the
-    /// 切替 keys to its own methods ([`RenameInput::push_char`] etc.).
+    /// 選択 keys to its own methods ([`RenameInput::push_char`] etc.).
     pub fn rename_mut(&mut self) -> Option<&mut RenameInput> {
         match &mut self.overlay {
             Overlay::Rename(input) => Some(input),
@@ -2893,7 +2893,7 @@ impl HomeState {
         }
     }
 
-    /// Cancel inline renaming, staying in 切替. Called only while the rename input
+    /// Cancel inline renaming, staying in 選択. Called only while the rename input
     /// is the open overlay, so it clears the overlay outright.
     pub fn rename_cancel(&mut self) {
         self.overlay = Overlay::None;
@@ -2903,7 +2903,7 @@ impl HomeState {
     /// name together with the typed label (trimmed), for the event loop to
     /// persist (see [`RenameInput::confirm`]). A no-op (returning `None`) when
     /// not renaming.
-    pub fn switch_confirm_rename(&mut self) -> Option<(String, String)> {
+    pub fn overview_confirm_rename(&mut self) -> Option<(String, String)> {
         match std::mem::take(&mut self.overlay) {
             Overlay::Rename(input) => Some(input.confirm()),
             // Not renaming: leave whatever was open (if anything) untouched.
@@ -2930,7 +2930,7 @@ impl HomeState {
             .and_then(|s| s.note())
     }
 
-    /// The note of the row highlighted in 切替 (the cursor row): the workspace
+    /// The note of the row highlighted in 選択 (the cursor row): the workspace
     /// root's note on the root row, the session's note otherwise — `None` when the
     /// highlighted row carries no note. Read by the right-pane renderer so the
     /// highlighted row's note (its next-time TODO) shows the moment it is selected
@@ -2940,13 +2940,13 @@ impl HomeState {
     }
 
     /// The highlighted session's read-only note when its overlay is currently
-    /// shown in 切替 (Switch), else `None`: it shows when the cursor is on a
+    /// shown in 選択 (Overview), else `None`: it shows when the cursor is on a
     /// session that has a note and no note *editor* is open (the editor takes
     /// over the overlay). The right-pane renderer draws the note exactly when
     /// this is `Some` — so its absence is a genuine path, not a dead branch
     /// behind a separate predicate.
-    pub fn visible_switch_note(&self) -> Option<&str> {
-        if self.mode != Mode::Switch || matches!(self.overlay, Overlay::Note(_)) {
+    pub fn visible_overview_note(&self) -> Option<&str> {
+        if self.mode != Mode::Overview || matches!(self.overlay, Overlay::Note(_)) {
             return None;
         }
         self.selected_session_note()
@@ -2970,17 +2970,17 @@ impl HomeState {
 
     /// Open the note editor for `target`, pre-filled with its current note.
     /// `reattach` records whether closing it should re-attach the session's pane
-    /// (没入's `Ctrl-E`); `false` for 切替's `n`.
+    /// (没入's `Ctrl-E`); `false` for 選択's `n`.
     fn open_note_for(&mut self, target: String, reattach: bool) {
         let initial = self.session_note(&target).unwrap_or_default().to_string();
         self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
     }
 
-    /// Begin editing the selected row's note in 切替 (Switch): open the note editor
+    /// Begin editing the selected row's note in 選択 (Overview): open the note editor
     /// pre-filled with its current note. Works on the `⌂ root` row too (it edits
     /// the workspace root's note), as well as a session row. A no-op only when an
     /// editor is already open. Returns whether the editor opened.
-    pub fn switch_begin_note(&mut self) -> bool {
+    pub fn overview_begin_note(&mut self) -> bool {
         if matches!(self.overlay, Overlay::Note(_)) {
             return false;
         }
@@ -2990,9 +2990,9 @@ impl HomeState {
     }
 
     /// Open the note editor for the focused (active) row — the `Ctrl-E` action in
-    /// 在席 (Focus) and 没入 (Attached). `reattach` records whether closing the
+    /// 集中 (Closeup) and 没入 (Attached). `reattach` records whether closing the
     /// editor should re-attach the row's pane: `true` from 没入 (drop back into the
-    /// live terminal), `false` from 在席 (return to the action surface). Works on
+    /// live terminal), `false` from 集中 (return to the action surface). Works on
     /// the `⌂ root` row too (it edits the workspace root's note). A no-op only when
     /// an editor is already open. Returns whether the editor opened.
     pub fn open_focused_note(&mut self, reattach: bool) -> bool {
@@ -3071,7 +3071,7 @@ impl HomeState {
         }
     }
 
-    /// Cancel the env editor, discarding the edits and returning to the Overview.
+    /// Cancel the env editor, discarding the edits and returning to the command palette.
     /// Called only while the env editor is the open overlay, so it clears the
     /// overlay outright (the palette stays open beneath it).
     pub fn env_editor_cancel(&mut self) {
@@ -3090,79 +3090,79 @@ impl HomeState {
         }
     }
 
-    // --- 在席 (Focus) ------------------------------------------------------
+    // --- 集中 (Closeup) ------------------------------------------------------
 
-    /// Enter 在席 (Focus) on the session at `row` (0 is the root row): make it the
+    /// Enter 集中 (Closeup) on the session at `row` (0 is the root row): make it the
     /// active and selected row, switch to the right-pane action surface, and reset
     /// the menu cursor and prompt buffer.
-    pub fn enter_focus(&mut self, row: usize) {
+    pub fn enter_closeup(&mut self, row: usize) {
         self.list.focus_index(row);
         self.list.activate_selected();
         self.touch_active(Utc::now());
-        self.enter_focus_surface();
+        self.enter_closeup_surface();
     }
 
-    /// Switch into 在席 (Focus) on the already-positioned session: enter the mode
+    /// Switch into 集中 (Closeup) on the already-positioned session: enter the mode
     /// and reset the right-pane action surface (close any inline create input,
     /// reset the menu cursor and prompt, land on the "+ new" tab). The cursor must
-    /// already point at the target session; [`enter_focus`](Self::enter_focus) and
-    /// [`enter_focus_named`](Self::enter_focus_named) differ only in how they get
+    /// already point at the target session; [`enter_closeup`](Self::enter_closeup) and
+    /// [`enter_closeup_named`](Self::enter_closeup_named) differ only in how they get
     /// there.
-    fn enter_focus_surface(&mut self) {
-        self.mode = Mode::Focus;
+    fn enter_closeup_surface(&mut self) {
+        self.mode = Mode::Closeup;
         self.overlay.clear_create();
-        self.focus_menu.reset();
-        self.focus_menu_filter = None;
-        self.focus_prompt.clear();
-        self.focus_new_tab = true;
-        self.focus_action_over_pane = false;
-        // A fresh 在席 entry is not the zoom-out-from-没入 path, so the one-shot
+        self.closeup_menu.reset();
+        self.closeup_menu_filter = None;
+        self.closeup_prompt.clear();
+        self.closeup_new_tab = true;
+        self.closeup_action_over_pane = false;
+        // A fresh 集中 entry is not the zoom-out-from-没入 path, so the one-shot
         // return-to-pane arming never carries into it.
-        self.focus_return_attach = false;
-        // Enter 在席 with no `Ctrl-O` leader pending, so the first key is read
+        self.closeup_return_attach = false;
+        // Enter 集中 with no `Ctrl-O` leader pending, so the first key is read
         // as itself rather than as a stale prefix's second key.
         self.prefix_pending = false;
     }
 
-    /// Enter 在席 (Focus) on the session named `name`, returning whether one
-    /// matched. Like [`enter_focus`](Self::enter_focus) but addressing the session
+    /// Enter 集中 (Closeup) on the session named `name`, returning whether one
+    /// matched. Like [`enter_closeup`](Self::enter_closeup) but addressing the session
     /// by branch rather than row, so a freshly created session can be focused
     /// against the just-refreshed list without computing its row. A no-op
     /// (returning `false`, leaving the mode untouched) when no session matches.
-    pub fn enter_focus_named(&mut self, name: &str) -> bool {
+    pub fn enter_closeup_named(&mut self, name: &str) -> bool {
         if !self.list.select_by_name(name) {
             return false;
         }
         self.touch_active(Utc::now());
-        self.enter_focus_surface();
+        self.enter_closeup_surface();
         true
     }
 
-    /// Enter 在席 (Focus) on the session named `name`, landing on its **existing**
+    /// Enter 集中 (Closeup) on the session named `name`, landing on its **existing**
     /// live pane (whatever tab the pool has active) rather than the trailing
-    /// "+ new" action surface — the mirror of [`enter_focus_named`] used when the
+    /// "+ new" action surface — the mirror of [`enter_closeup_named`] used when the
     /// user did not ask for a fresh tab. Falls back to the "+ new" surface for an
-    /// idle session (no live pane), where [`focus_on_new_tab`](Self::focus_on_new_tab)
+    /// idle session (no live pane), where [`closeup_on_new_tab`](Self::closeup_on_new_tab)
     /// is forced on anyway. Returns whether a session matched.
     ///
     /// Used by the auto-focus a finished `close` requests: the neighbouring
     /// session opens in the state it was left in (its running agent/terminal),
     /// not a new-tab prompt.
-    pub fn enter_focus_named_existing(&mut self, name: &str) -> bool {
-        if !self.enter_focus_named(name) {
+    pub fn enter_closeup_named_existing(&mut self, name: &str) -> bool {
+        if !self.enter_closeup_named(name) {
             return false;
         }
-        // `enter_focus_surface` lands on the "+ new" tab; drop that so the
+        // `enter_closeup_surface` lands on the "+ new" tab; drop that so the
         // session's existing pane shows (an idle one has no pane, so
-        // `focus_on_new_tab` stays true and the action surface shows regardless).
-        self.focus_new_tab = false;
+        // `closeup_on_new_tab` stays true and the action surface shows regardless).
+        self.closeup_new_tab = false;
         true
     }
 
     /// The row the previously focused session now sits at — the target `Ctrl-^`
     /// jumps to (vim's `Ctrl-^` / tmux's `last-window`) — or `None` when no other
     /// session has been focused yet or the previous one has since been removed.
-    /// Delegates to the list, which records it whenever [`enter_focus`] moves the
+    /// Delegates to the list, which records it whenever [`enter_closeup`] moves the
     /// active row to a different session.
     pub fn previous_session_row(&self) -> Option<usize> {
         self.list.previous_row()
@@ -3193,12 +3193,12 @@ impl HomeState {
             .map(|r| r.name.clone())
     }
 
-    /// Leave 在席 for the base 切替 (Switch) — the default mode.
-    pub fn leave_focus(&mut self) {
-        self.enter_switch(ReturnMode::Base);
+    /// Leave 集中 for the base 選択 (Overview) — the default mode.
+    pub fn leave_closeup(&mut self) {
+        self.enter_overview(ReturnMode::Base);
     }
 
-    /// The Session-scope commands the 在席 menu lists, in alphabetical order
+    /// The Session-scope commands the 集中 menu lists, in alphabetical order
     /// (see [`sorted_session_menu_commands`]). The prompt-taking `ai <prompt>` is kept out of
     /// the pickable menu (it needs typed arguments; use the Prompt UI). `chat` is
     /// filtered out unless the local LLM is usable (enabled and its model pulled),
@@ -3206,23 +3206,27 @@ impl HomeState {
     /// filtered out on the root row, which belongs to no session. `agent` always
     /// stays: a session can hold one agent pane per CLI.
     ///
-    /// Resolved for the **active** row: 在席 acts on the session it focused. When
+    /// Resolved for the **active** row: 集中 acts on the session it focused. When
     /// the menu filter (`/`) is active the list is narrowed by
-    /// [`filter_focus_menu`](Self::filter_focus_menu) so both the renderer and key
+    /// [`filter_closeup_menu`](Self::filter_closeup_menu) so both the renderer and key
     /// routing operate on the same surviving commands.
-    pub fn focus_menu_commands(&self) -> Vec<CommandInfo> {
+    pub fn closeup_menu_commands(&self) -> Vec<CommandInfo> {
         let commands = self.menu_commands_for_root(self.list.root_active());
-        self.filter_focus_menu(commands)
+        self.filter_closeup_menu(commands)
     }
 
-    /// Narrow a Session-scope command list by the live 在席 menu filter (`/`): an
+    /// Narrow a Session-scope command list by the live 集中 menu filter (`/`): an
     /// absent or empty filter keeps every command; otherwise only the commands
     /// whose name starts with the typed text (case-insensitive) survive, mirroring
-    /// the command registry's prefix completion. The 切替 preview
+    /// the command registry's prefix completion. The 選択 preview
     /// ([`preview_menu_commands`](Self::preview_menu_commands)) deliberately skips
-    /// this — the filter is a 在席 interaction and is cleared on every 在席 entry.
-    fn filter_focus_menu(&self, commands: Vec<CommandInfo>) -> Vec<CommandInfo> {
-        let Some(query) = self.focus_menu_filter.as_deref().filter(|q| !q.is_empty()) else {
+    /// this — the filter is a 集中 interaction and is cleared on every 集中 entry.
+    fn filter_closeup_menu(&self, commands: Vec<CommandInfo>) -> Vec<CommandInfo> {
+        let Some(query) = self
+            .closeup_menu_filter
+            .as_deref()
+            .filter(|q| !q.is_empty())
+        else {
             return commands;
         };
         let needle = query.to_lowercase();
@@ -3232,7 +3236,7 @@ impl HomeState {
             .collect()
     }
 
-    /// Shared body of [`focus_menu_commands`]: the
+    /// Shared body of [`closeup_menu_commands`]: the
     /// Session-scope commands in alphabetical order (see
     /// [`sorted_session_menu_commands`]): the prompt-taking `ai` is kept out of the menu,
     /// `chat` is gated on local-LLM availability, and the session-only `close` /
@@ -3261,37 +3265,37 @@ impl HomeState {
         })
     }
 
-    /// How many live panes the focused session publishes (the leading 在席 tabs),
+    /// How many live panes the focused session publishes (the leading 集中 tabs),
     /// from the surface's tab strip — `0` when none are live (an idle session).
-    fn focus_pane_count(&self) -> usize {
+    fn closeup_pane_count(&self) -> usize {
         self.terminal.tabs.as_ref().map_or(0, |t| t.labels.len())
     }
 
     /// The active pane index the focused session's tab strip publishes (`0` when
     /// no panes are live). The pane preview shows this pane, so the tab selector
     /// rides it rather than tracking a duplicate index of its own.
-    fn focus_active_pane(&self) -> usize {
+    fn closeup_active_pane(&self) -> usize {
         self.terminal.tabs.as_ref().map_or(0, |t| t.active)
     }
 
-    /// Whether 在席's tab selector is on the trailing "+ new" tab — the action
+    /// Whether 集中's tab selector is on the trailing "+ new" tab — the action
     /// surface (menu / prompt) that launches a pane — rather than an existing
     /// live pane. Always true when the session has no live panes, since the
     /// "+ new" tab is then the only one.
-    pub fn focus_on_new_tab(&self) -> bool {
-        self.focus_new_tab || self.focus_pane_count() == 0
+    pub fn closeup_on_new_tab(&self) -> bool {
+        self.closeup_new_tab || self.closeup_pane_count() == 0
     }
 
-    /// Whether the 在席 (Focus) action surface — the [Menu or the
+    /// Whether the 集中 (Closeup) action surface — the [Menu or the
     /// Prompt](SessionActionUi) — is currently presented as a floating overlay
     /// modal (centred over the right pane) rather than drawn inline in the pane.
     ///
     /// Both surfaces float: the setting only picks *which* surface the box holds
     /// (a command list or a command line), not whether it floats. It holds only
-    /// while 在席 actually shows that surface: on the trailing "+ new" tab (which
-    /// [`focus_on_new_tab`] also reports for an idle session with no live panes),
+    /// while 集中 actually shows that surface: on the trailing "+ new" tab (which
+    /// [`closeup_on_new_tab`] also reports for an idle session with no live panes),
     /// or floating over the selected pane tab after a zoom-out (see
-    /// [`focus_action_over_active_pane`](Self::focus_action_over_active_pane)).
+    /// [`closeup_action_over_active_pane`](Self::closeup_action_over_active_pane)).
     ///
     /// It yields to whatever else has claimed the screen so the floating box
     /// never fights another surface for the pane: the momentary loading indicator,
@@ -3299,266 +3303,266 @@ impl HomeState {
     /// command opened, the Markdown preview / diff view, …) or the `:` command
     /// palette, each of which captures the keyboard and draws its own box.
     ///
-    /// The renderer floats the surface when this holds and [`focus_pane`] leaves
+    /// The renderer floats the surface when this holds and [`closeup_pane`] leaves
     /// the pane behind it clear, so the two read the one predicate and never
     /// disagree on where the surface is drawn.
     ///
-    /// [`focus_on_new_tab`]: Self::focus_on_new_tab
-    /// [`focus_pane`]: super::ui::panes
-    pub fn focus_action_overlay(&self) -> bool {
-        self.mode == Mode::Focus
-            && (self.focus_on_new_tab() || self.focus_action_over_pane)
+    /// [`closeup_on_new_tab`]: Self::closeup_on_new_tab
+    /// [`closeup_pane`]: super::ui::panes
+    pub fn closeup_action_overlay(&self) -> bool {
+        self.mode == Mode::Closeup
+            && (self.closeup_on_new_tab() || self.closeup_action_over_pane)
             && self.loading().is_none()
             && matches!(self.overlay, Overlay::None)
             && !self.command_palette_open()
     }
 
-    /// Whether the 在席 action surface currently floats over the selected pane tab
+    /// Whether the 集中 action surface currently floats over the selected pane tab
     /// (rather than living on the "+ new" tab) — the zoomed-out-from-没入 state
-    /// set by [`focus_action_over_active_pane`](Self::focus_action_over_active_pane).
+    /// set by [`closeup_action_over_active_pane`](Self::closeup_action_over_active_pane).
     /// Key routing reads this so the floating surface keeps the keyboard while a
     /// pane tab is selected beneath it.
-    pub fn focus_action_over_pane(&self) -> bool {
-        self.focus_action_over_pane
+    pub fn closeup_action_over_pane(&self) -> bool {
+        self.closeup_action_over_pane
     }
 
-    /// Keep the 在席 action surface (Menu or Prompt) floating over the pane tab a
+    /// Keep the 集中 action surface (Menu or Prompt) floating over the pane tab a
     /// zoom-out left (`Ctrl-T` / `Ctrl-O a`): step the selector off the "+ new"
     /// tab [`leave_attached`](Self::leave_attached) landed on, so the pane's own
     /// tab stays selected — its live preview keeps showing behind the floating
     /// box and the strip never grows a "+ new" chip for a tab that was never
     /// created.
-    pub fn focus_action_over_active_pane(&mut self) {
-        self.focus_new_tab = false;
-        self.focus_action_over_pane = true;
+    pub fn closeup_action_over_active_pane(&mut self) {
+        self.closeup_new_tab = false;
+        self.closeup_action_over_pane = true;
     }
 
-    /// Select the currently active pane tab in 在席 without showing the action
+    /// Select the currently active pane tab in 集中 without showing the action
     /// surface over it. Used when launching a new tab: the pending tab becomes the
     /// selected tab immediately, and its body is the loading indicator rather than
     /// the `+ new` launch surface.
-    pub fn focus_select_active_pane_tab(&mut self) {
-        self.focus_new_tab = false;
-        self.focus_action_over_pane = false;
+    pub fn closeup_select_active_pane_tab(&mut self) {
+        self.closeup_new_tab = false;
+        self.closeup_action_over_pane = false;
     }
 
     /// Dismiss the action surface floating over a pane tab, returning whether it
-    /// was up. The 在席 `Esc` handler consumes this after the one-shot re-attach
+    /// was up. The 集中 `Esc` handler consumes this after the one-shot re-attach
     /// bit: a dismissed surface leaves the selected pane's preview showing, one
-    /// step short of leaving 在席.
-    pub fn close_focus_action_over_pane(&mut self) -> bool {
-        std::mem::take(&mut self.focus_action_over_pane)
+    /// step short of leaving 集中.
+    pub fn close_closeup_action_over_pane(&mut self) -> bool {
+        std::mem::take(&mut self.closeup_action_over_pane)
     }
 
-    /// Move 在席's tab selector to the next tab, wrapping through the live panes
+    /// Move 集中's tab selector to the next tab, wrapping through the live panes
     /// and the trailing "+ new" tab (`[pane 0 … pane n-1, + new]`). Returns the
     /// pane index to make active (for the caller to apply to the terminal pool) on
     /// landing on a pane tab, or `None` when it lands on the "+ new" tab (or the
     /// session has no panes, leaving the selector on "+ new").
-    pub fn focus_tab_next(&mut self) -> Option<usize> {
+    pub fn closeup_tab_next(&mut self) -> Option<usize> {
         // Walking the strip is browsing previews: any floating menu steps aside.
-        self.focus_action_over_pane = false;
-        let panes = self.focus_pane_count();
+        self.closeup_action_over_pane = false;
+        let panes = self.closeup_pane_count();
         if panes == 0 {
-            self.focus_new_tab = true;
+            self.closeup_new_tab = true;
             return None;
         }
-        if self.focus_on_new_tab() {
+        if self.closeup_on_new_tab() {
             // "+ new" wraps to the first pane.
-            self.focus_new_tab = false;
+            self.closeup_new_tab = false;
             Some(0)
-        } else if self.focus_active_pane() + 1 >= panes {
+        } else if self.closeup_active_pane() + 1 >= panes {
             // The last pane steps onto the "+ new" tab.
-            self.focus_new_tab = true;
+            self.closeup_new_tab = true;
             None
         } else {
-            Some(self.focus_active_pane() + 1)
+            Some(self.closeup_active_pane() + 1)
         }
     }
 
-    /// Move 在席's tab selector to the previous tab, wrapping through the live
-    /// panes and the trailing "+ new" tab (the mirror of [`focus_tab_next`]).
+    /// Move 集中's tab selector to the previous tab, wrapping through the live
+    /// panes and the trailing "+ new" tab (the mirror of [`closeup_tab_next`]).
     /// Returns the pane index to make active on landing on a pane tab, or `None`
     /// when it lands on the "+ new" tab.
     ///
-    /// [`focus_tab_next`]: Self::focus_tab_next
-    pub fn focus_tab_prev(&mut self) -> Option<usize> {
+    /// [`closeup_tab_next`]: Self::closeup_tab_next
+    pub fn closeup_tab_prev(&mut self) -> Option<usize> {
         // Walking the strip is browsing previews: any floating menu steps aside.
-        self.focus_action_over_pane = false;
-        let panes = self.focus_pane_count();
+        self.closeup_action_over_pane = false;
+        let panes = self.closeup_pane_count();
         if panes == 0 {
-            self.focus_new_tab = true;
+            self.closeup_new_tab = true;
             return None;
         }
-        if self.focus_on_new_tab() {
+        if self.closeup_on_new_tab() {
             // "+ new" wraps back to the last pane.
-            self.focus_new_tab = false;
+            self.closeup_new_tab = false;
             Some(panes - 1)
-        } else if self.focus_active_pane() == 0 {
+        } else if self.closeup_active_pane() == 0 {
             // The first pane steps back onto the "+ new" tab.
-            self.focus_new_tab = true;
+            self.closeup_new_tab = true;
             None
         } else {
-            Some(self.focus_active_pane() - 1)
+            Some(self.closeup_active_pane() - 1)
         }
     }
 
-    /// Select a concrete live-pane tab in 在席 (Focus), returning the clamped
+    /// Select a concrete live-pane tab in 集中 (Closeup), returning the clamped
     /// pane index the terminal pool should activate. Used by right-pane mouse
-    /// clicks; keyboard navigation uses [`focus_tab_next`](Self::focus_tab_next)
-    /// / [`focus_tab_prev`](Self::focus_tab_prev).
-    pub fn focus_select_pane_tab(&mut self, index: usize) -> Option<usize> {
+    /// clicks; keyboard navigation uses [`closeup_tab_next`](Self::closeup_tab_next)
+    /// / [`closeup_tab_prev`](Self::closeup_tab_prev).
+    pub fn closeup_select_pane_tab(&mut self, index: usize) -> Option<usize> {
         // Clicking a tab is browsing previews: any floating menu steps aside.
-        self.focus_action_over_pane = false;
-        let panes = self.focus_pane_count();
+        self.closeup_action_over_pane = false;
+        let panes = self.closeup_pane_count();
         if panes == 0 {
-            self.focus_new_tab = true;
+            self.closeup_new_tab = true;
             return None;
         }
-        self.focus_new_tab = false;
+        self.closeup_new_tab = false;
         Some(index.min(panes - 1))
     }
 
-    /// Discard 在席's "+ new" launch surface when it sits over live panes — the
+    /// Discard 集中's "+ new" launch surface when it sits over live panes — the
     /// state after zooming out with `Ctrl-T` (or navigating onto "+ new") — by
     /// stepping the selector back onto the active pane's tab, so that pane
     /// previews again. Returns whether it moved: `false` (a no-op) when "+ new"
     /// is the only tab (an idle session, nothing to step back to), leaving the
-    /// caller to back out of 在席 instead.
-    pub fn focus_discard_new_tab(&mut self) -> bool {
-        if self.focus_on_new_tab() && self.focus_pane_count() > 0 {
-            self.focus_new_tab = false;
+    /// caller to back out of 集中 instead.
+    pub fn closeup_discard_new_tab(&mut self) -> bool {
+        if self.closeup_on_new_tab() && self.closeup_pane_count() > 0 {
+            self.closeup_new_tab = false;
             true
         } else {
             false
         }
     }
 
-    /// Arm the one-shot "next `Esc` re-attaches" bit, set when 在席 (Focus) is
+    /// Arm the one-shot "next `Esc` re-attaches" bit, set when 集中 (Closeup) is
     /// entered by zooming *out* of a live pane (`Ctrl-T` / `Ctrl-O a`). The next
-    /// `Esc` then returns to that pane (没入) instead of peeling back toward 切替.
-    pub fn arm_focus_return_attach(&mut self) {
-        self.focus_return_attach = true;
+    /// `Esc` then returns to that pane (没入) instead of peeling back toward 選択.
+    pub fn arm_closeup_return_attach(&mut self) {
+        self.closeup_return_attach = true;
     }
-    /// Take (read and clear) the one-shot return-to-pane bit. The 在席 `Esc`
+    /// Take (read and clear) the one-shot return-to-pane bit. The 集中 `Esc`
     /// handler consumes it to decide whether to re-attach; any other key clears it
-    /// first via [`clear_focus_return_attach`](Self::clear_focus_return_attach), so
+    /// first via [`clear_closeup_return_attach`](Self::clear_closeup_return_attach), so
     /// only an immediate `Esc` after the zoom-out re-attaches.
-    pub fn take_focus_return_attach(&mut self) -> bool {
-        std::mem::take(&mut self.focus_return_attach)
+    pub fn take_closeup_return_attach(&mut self) -> bool {
+        std::mem::take(&mut self.closeup_return_attach)
     }
     /// Clear the one-shot return-to-pane bit. Called for every non-`Esc` key
-    /// handled in 在席 so any deliberate action cancels the pending re-attach.
-    pub fn clear_focus_return_attach(&mut self) {
-        self.focus_return_attach = false;
+    /// handled in 集中 so any deliberate action cancels the pending re-attach.
+    pub fn clear_closeup_return_attach(&mut self) {
+        self.closeup_return_attach = false;
     }
 
-    /// The 在席 menu cursor (which Session-scope command is highlighted).
-    pub fn focus_menu_cursor(&self) -> usize {
-        self.focus_menu.cursor()
+    /// The 集中 menu cursor (which Session-scope command is highlighted).
+    pub fn closeup_menu_cursor(&self) -> usize {
+        self.closeup_menu.cursor()
     }
 
-    /// The live 在席 menu filter (`/`) text, or `None` when the menu lists every
+    /// The live 集中 menu filter (`/`) text, or `None` when the menu lists every
     /// command. The renderer draws a filter line (rather than the `Run a command:`
     /// label) while this is `Some`.
-    pub fn focus_menu_filter(&self) -> Option<&str> {
-        self.focus_menu_filter.as_deref()
+    pub fn closeup_menu_filter(&self) -> Option<&str> {
+        self.closeup_menu_filter.as_deref()
     }
 
-    /// Whether the 在席 menu is in filter mode (`/`): typed characters narrow the
+    /// Whether the 集中 menu is in filter mode (`/`): typed characters narrow the
     /// command list rather than driving the single-key shortcuts (`t` / `a` / `C`).
-    pub fn focus_menu_filtering(&self) -> bool {
-        self.focus_menu_filter.is_some()
+    pub fn closeup_menu_filtering(&self) -> bool {
+        self.closeup_menu_filter.is_some()
     }
 
-    /// Enter 在席 menu filter mode (`/`) from an empty query, homing the cursor on
+    /// Enter 集中 menu filter mode (`/`) from an empty query, homing the cursor on
     /// the first command. A no-op while already filtering, so a stray `/` typed
     /// into an active filter is ignored rather than wiping what was typed.
-    pub fn start_focus_menu_filter(&mut self) {
-        if self.focus_menu_filter.is_none() {
-            self.focus_menu_filter = Some(String::new());
-            self.focus_menu.reset_cursor();
+    pub fn start_closeup_menu_filter(&mut self) {
+        if self.closeup_menu_filter.is_none() {
+            self.closeup_menu_filter = Some(String::new());
+            self.closeup_menu.reset_cursor();
         }
     }
 
-    /// Append a character to the 在席 menu filter and re-home the cursor on the
+    /// Append a character to the 集中 menu filter and re-home the cursor on the
     /// first surviving match. A no-op when the menu is not filtering.
-    pub fn push_focus_menu_filter(&mut self, c: char) {
-        if let Some(query) = self.focus_menu_filter.as_mut() {
+    pub fn push_closeup_menu_filter(&mut self, c: char) {
+        if let Some(query) = self.closeup_menu_filter.as_mut() {
             query.push(c);
-            self.focus_menu.reset_cursor();
+            self.closeup_menu.reset_cursor();
         }
     }
 
-    /// Delete the last character of the 在席 menu filter (`Backspace`), re-homing
+    /// Delete the last character of the 集中 menu filter (`Backspace`), re-homing
     /// the cursor. A no-op when not filtering or the query is already empty; filter
-    /// mode is left with `Esc` ([`clear_focus_menu_filter`]), not by backspacing
+    /// mode is left with `Esc` ([`clear_closeup_menu_filter`]), not by backspacing
     /// past the start.
     ///
-    /// [`clear_focus_menu_filter`]: Self::clear_focus_menu_filter
-    pub fn focus_menu_filter_backspace(&mut self) {
-        if let Some(query) = self.focus_menu_filter.as_mut() {
+    /// [`clear_closeup_menu_filter`]: Self::clear_closeup_menu_filter
+    pub fn closeup_menu_filter_backspace(&mut self) {
+        if let Some(query) = self.closeup_menu_filter.as_mut() {
             query.pop();
-            self.focus_menu.reset_cursor();
+            self.closeup_menu.reset_cursor();
         }
     }
 
-    /// Leave 在席 menu filter mode (`Esc`), returning whether it was filtering — so
+    /// Leave 集中 menu filter mode (`Esc`), returning whether it was filtering — so
     /// the `Esc` handler treats the key as consumed only then, peeling the filter
-    /// before it steps back out of 在席. The list returns to its full listing.
-    pub fn clear_focus_menu_filter(&mut self) -> bool {
-        self.focus_menu_filter.take().is_some()
+    /// before it steps back out of 集中. The list returns to its full listing.
+    pub fn clear_closeup_menu_filter(&mut self) -> bool {
+        self.closeup_menu_filter.take().is_some()
     }
 
-    /// Whether any 在席 menu row is expanded into an inline picker (agent /
+    /// Whether any 集中 menu row is expanded into an inline picker (agent /
     /// terminal / close).
-    pub fn focus_menu_expanded(&self) -> bool {
-        self.focus_menu.is_expanded()
+    pub fn closeup_menu_expanded(&self) -> bool {
+        self.closeup_menu.is_expanded()
     }
 
-    /// The highlighted agent in the 在席 menu's agent picker, or `None` when the
+    /// The highlighted agent in the 集中 menu's agent picker, or `None` when the
     /// picker is collapsed (or there are no installed agents to pick from).
-    pub fn focus_menu_agent_cursor(&self) -> Option<usize> {
-        self.focus_menu
+    pub fn closeup_menu_agent_cursor(&self) -> Option<usize> {
+        self.closeup_menu
             .agent_cursor()
             .filter(|_| !self.installed_agents.is_empty())
     }
 
-    /// Whether the 在席 menu's `terminal` row is expanded into the open/new
+    /// Whether the 集中 menu's `terminal` row is expanded into the open/new
     /// picker.
-    pub fn focus_menu_terminal_expanded(&self) -> bool {
-        self.focus_menu.terminal_cursor().is_some()
+    pub fn closeup_menu_terminal_expanded(&self) -> bool {
+        self.closeup_menu.terminal_cursor().is_some()
     }
 
-    /// The highlighted terminal action in the 在席 menu's terminal picker, or
+    /// The highlighted terminal action in the 集中 menu's terminal picker, or
     /// `None` when the picker is collapsed.
-    pub fn focus_menu_terminal_cursor(&self) -> Option<usize> {
-        self.focus_menu.terminal_cursor()
+    pub fn closeup_menu_terminal_cursor(&self) -> Option<usize> {
+        self.closeup_menu.terminal_cursor()
     }
 
-    /// Whether the 在席 menu's `agent` row can expand into the picker: the cursor
+    /// Whether the 集中 menu's `agent` row can expand into the picker: the cursor
     /// is on `agent` and more than one CLI is installed (so there is a choice).
-    pub fn focus_menu_agent_can_expand(&self) -> bool {
+    pub fn closeup_menu_agent_can_expand(&self) -> bool {
         self.installed_agents.len() > 1
             && self
-                .focus_selected_command()
+                .closeup_selected_command()
                 .is_some_and(|info| info.name == "agent")
     }
 
-    /// Whether the 在席 menu's `terminal` row can expand into the open/new
+    /// Whether the 集中 menu's `terminal` row can expand into the open/new
     /// picker. It always has two choices; expansion is gated only by the cursor.
-    pub fn focus_menu_terminal_can_expand(&self) -> bool {
-        self.focus_selected_command()
+    pub fn closeup_menu_terminal_can_expand(&self) -> bool {
+        self.closeup_selected_command()
             .is_some_and(|info| info.name == "terminal")
     }
 
-    /// Expand the 在席 menu's agent picker, highlighting the configured default
+    /// Expand the 集中 menu's agent picker, highlighting the configured default
     /// agent's position in the installed list (or the top when it is not
-    /// installed). No-op unless [`focus_menu_agent_can_expand`] holds.
+    /// installed). No-op unless [`closeup_menu_agent_can_expand`] holds.
     ///
-    /// [`focus_menu_agent_can_expand`]: Self::focus_menu_agent_can_expand
-    pub fn focus_menu_expand_agent(&mut self) {
-        if !self.focus_menu_agent_can_expand() {
+    /// [`closeup_menu_agent_can_expand`]: Self::closeup_menu_agent_can_expand
+    pub fn closeup_menu_expand_agent(&mut self) {
+        if !self.closeup_menu_agent_can_expand() {
             return;
         }
         let default_index = self
@@ -3566,172 +3570,176 @@ impl HomeState {
             .iter()
             .position(|&cli| cli == self.default_agent)
             .unwrap_or(0);
-        self.focus_menu.expand(FocusSubmenu::Agent, default_index);
+        self.closeup_menu
+            .expand(CloseupSubmenu::Agent, default_index);
     }
 
-    /// Expand the 在席 menu's terminal picker, highlighting `open` (the default
+    /// Expand the 集中 menu's terminal picker, highlighting `open` (the default
     /// embedded-pane action).
-    pub fn focus_menu_expand_terminal(&mut self) {
-        if !self.focus_menu_terminal_can_expand() {
+    pub fn closeup_menu_expand_terminal(&mut self) {
+        if !self.closeup_menu_terminal_can_expand() {
             return;
         }
-        self.focus_menu.expand(FocusSubmenu::Terminal, 0);
+        self.closeup_menu.expand(CloseupSubmenu::Terminal, 0);
     }
 
-    /// Collapse the 在席 menu's inline picker, returning whether one was expanded
+    /// Collapse the 集中 menu's inline picker, returning whether one was expanded
     /// (so the caller treats `←` / `Esc` as consumed only then).
-    pub fn focus_menu_collapse_agent(&mut self) -> bool {
-        self.focus_menu.collapse()
+    pub fn closeup_menu_collapse_agent(&mut self) -> bool {
+        self.closeup_menu.collapse()
     }
 
-    /// Whether the 在席 menu's `close` row is expanded into the close picker.
-    pub fn focus_close_expanded(&self) -> bool {
-        self.focus_menu.is_close_expanded()
+    /// Whether the 集中 menu's `close` row is expanded into the close picker.
+    pub fn closeup_close_expanded(&self) -> bool {
+        self.closeup_menu.is_close_expanded()
     }
 
-    /// The highlighted option in the 在席 menu's close picker, or `None` collapsed.
+    /// The highlighted option in the 集中 menu's close picker, or `None` collapsed.
     /// `Some(0)` = plain close, `Some(1)` = close --force.
-    pub fn focus_close_cursor(&self) -> Option<usize> {
-        self.focus_menu.close_cursor()
+    pub fn closeup_close_cursor(&self) -> Option<usize> {
+        self.closeup_menu.close_cursor()
     }
 
-    /// Whether the 在席 menu's `close` row can expand: the cursor is on `close`.
-    pub fn focus_close_can_expand(&self) -> bool {
-        self.focus_selected_command()
+    /// Whether the 集中 menu's `close` row can expand: the cursor is on `close`.
+    pub fn closeup_close_can_expand(&self) -> bool {
+        self.closeup_selected_command()
             .is_some_and(|info| info.name == "close")
     }
 
-    /// Expand the 在席 menu's close picker, starting at option 0 (plain close).
+    /// Expand the 集中 menu's close picker, starting at option 0 (plain close).
     /// No-op unless the cursor is on the `close` row.
-    pub fn focus_menu_expand_close(&mut self) {
-        if !self.focus_close_can_expand() {
+    pub fn closeup_menu_expand_close(&mut self) {
+        if !self.closeup_close_can_expand() {
             return;
         }
-        self.focus_menu.expand_close();
+        self.closeup_menu.expand_close();
     }
 
-    /// Collapse the 在席 menu's close picker, returning whether it was expanded.
-    pub fn focus_menu_collapse_close(&mut self) -> bool {
-        self.focus_menu.collapse_close()
+    /// Collapse the 集中 menu's close picker, returning whether it was expanded.
+    pub fn closeup_menu_collapse_close(&mut self) -> bool {
+        self.closeup_menu.collapse_close()
     }
 
     /// Whether the selected close-picker option is `--force`. Call only while
-    /// the close picker is expanded ([`focus_close_expanded`] is true), which
+    /// the close picker is expanded ([`closeup_close_expanded`] is true), which
     /// guarantees `close_cursor` is `Some`.
     ///
-    /// [`focus_close_expanded`]: Self::focus_close_expanded
-    pub fn focus_menu_selected_close_force(&self) -> bool {
-        self.focus_menu.close_selected() == 1
+    /// [`closeup_close_expanded`]: Self::closeup_close_expanded
+    pub fn closeup_menu_selected_close_force(&self) -> bool {
+        self.closeup_menu.close_selected() == 1
     }
 
     /// The agent CLI highlighted in the picker, or `None` when collapsed / there
     /// are none installed. Used to launch the chosen CLI on `Enter`.
-    pub fn focus_menu_selected_agent(&self) -> Option<AgentCli> {
-        self.focus_menu.agent_cursor()?;
+    pub fn closeup_menu_selected_agent(&self) -> Option<AgentCli> {
+        self.closeup_menu.agent_cursor()?;
         self.installed_agents
-            .get(self.focus_menu.agent_selected(self.installed_agents.len()))
+            .get(
+                self.closeup_menu
+                    .agent_selected(self.installed_agents.len()),
+            )
             .copied()
     }
 
     /// The terminal action highlighted in the picker (`open` / `new`), or `None`
     /// when the picker is collapsed.
-    pub fn focus_menu_selected_terminal_action(&self) -> Option<&'static str> {
-        self.focus_menu.terminal_cursor()?;
+    pub fn closeup_menu_selected_terminal_action(&self) -> Option<&'static str> {
+        self.closeup_menu.terminal_cursor()?;
         TERMINAL_MENU_ACTIONS
             .get(
-                self.focus_menu
+                self.closeup_menu
                     .terminal_selected(TERMINAL_MENU_ACTIONS.len()),
             )
             .copied()
     }
 
     /// The terminal actions shown below the expanded terminal row.
-    pub fn focus_menu_terminal_actions(&self) -> &'static [&'static str] {
+    pub fn closeup_menu_terminal_actions(&self) -> &'static [&'static str] {
         &TERMINAL_MENU_ACTIONS
     }
 
-    /// Move the 在席 menu cursor up one row, wrapping (delegated to [`FocusMenu`],
+    /// Move the 集中 menu cursor up one row, wrapping (delegated to [`CloseupMenu`],
     /// which keeps it underflow-safe). Acts on the active picker while expanded.
-    pub fn focus_menu_move_up(&mut self) {
-        let count = self.focus_menu_nav_count();
-        self.focus_menu.move_up(count);
+    pub fn closeup_menu_move_up(&mut self) {
+        let count = self.closeup_menu_nav_count();
+        self.closeup_menu.move_up(count);
     }
 
-    /// Move the 在席 menu cursor down one row, wrapping (delegated to [`FocusMenu`]).
-    pub fn focus_menu_move_down(&mut self) {
-        let count = self.focus_menu_nav_count();
-        self.focus_menu.move_down(count);
+    /// Move the 集中 menu cursor down one row, wrapping (delegated to [`CloseupMenu`]).
+    pub fn closeup_menu_move_down(&mut self) {
+        let count = self.closeup_menu_nav_count();
+        self.closeup_menu.move_down(count);
     }
 
     /// The row count the menu cursor wraps against: the installed agents while the
     /// agent picker is expanded, 2 while the close picker is expanded, otherwise
     /// the Session-scope commands.
-    fn focus_menu_nav_count(&self) -> usize {
-        if self.focus_menu.is_expanded() {
-            if self.focus_menu_terminal_expanded() {
+    fn closeup_menu_nav_count(&self) -> usize {
+        if self.closeup_menu.is_expanded() {
+            if self.closeup_menu_terminal_expanded() {
                 TERMINAL_MENU_ACTIONS.len()
-            } else if self.focus_menu.is_close_expanded() {
+            } else if self.closeup_menu.is_close_expanded() {
                 2
             } else {
                 self.installed_agents.len()
             }
         } else {
-            self.focus_menu_commands().len()
+            self.closeup_menu_commands().len()
         }
     }
 
-    /// The 在席 command under the menu cursor, clamped to the available commands,
+    /// The 集中 command under the menu cursor, clamped to the available commands,
     /// or `None` when no Session-scope command is available.
     ///
-    /// `FocusMenu::selected` clamps to `len - 1`, which is `0` for an empty list
+    /// `CloseupMenu::selected` clamps to `len - 1`, which is `0` for an empty list
     /// — so indexing directly would panic if the registry ever yielded no
     /// Session-scope commands. Returning `Option` keeps the caller a no-op in
     /// that case instead of crashing (and unwinding) the TUI.
-    pub fn focus_selected_command(&self) -> Option<CommandInfo> {
-        let commands = self.focus_menu_commands();
+    pub fn closeup_selected_command(&self) -> Option<CommandInfo> {
+        let commands = self.closeup_menu_commands();
         commands
-            .get(self.focus_menu.selected(commands.len()))
+            .get(self.closeup_menu.selected(commands.len()))
             .copied()
     }
 
-    /// The 在席 prompt buffer (the session-scoped command line).
-    pub fn focus_prompt(&self) -> &str {
-        self.focus_prompt.value()
+    /// The 集中 prompt buffer (the session-scoped command line).
+    pub fn closeup_prompt(&self) -> &str {
+        self.closeup_prompt.value()
     }
 
-    /// Whether the 在席 Prompt is the surface currently capturing keys: the
+    /// Whether the 集中 Prompt is the surface currently capturing keys: the
     /// action UI is [`SessionActionUi::Prompt`] and its floating command line is
     /// up — on the trailing "+ new" tab or floating over a pane after a zoom-out
-    /// (the two states [`focus_action_overlay`](Self::focus_action_overlay) draws
+    /// (the two states [`closeup_action_overlay`](Self::closeup_action_overlay) draws
     /// the box in). In that state `End` and `?` are literal edits to the command
     /// line rather than their usual note / cheat-sheet bindings, so a
     /// session-scoped command can contain them.
-    pub fn focus_prompt_capturing(&self) -> bool {
+    pub fn closeup_prompt_capturing(&self) -> bool {
         self.session_action_ui == SessionActionUi::Prompt
-            && (self.focus_on_new_tab() || self.focus_action_over_pane)
+            && (self.closeup_on_new_tab() || self.closeup_action_over_pane)
     }
 
-    /// The caret position in the 在席 prompt, so the renderer can draw the caret
+    /// The caret position in the 集中 prompt, so the renderer can draw the caret
     /// where editing happens.
-    pub fn focus_prompt_cursor(&self) -> usize {
-        self.focus_prompt.cursor()
+    pub fn closeup_prompt_cursor(&self) -> usize {
+        self.closeup_prompt.cursor()
     }
 
-    /// The 在席 prompt's editable buffer: the event loop routes its keys straight
+    /// The 集中 prompt's editable buffer: the event loop routes its keys straight
     /// to the [`TextInput`]'s own editing methods (`insert` / `backspace` /
     /// `move_left` …), so the prompt has no per-key forwarders of its own.
-    pub fn focus_prompt_mut(&mut self) -> &mut TextInput {
-        &mut self.focus_prompt
+    pub fn closeup_prompt_mut(&mut self) -> &mut TextInput {
+        &mut self.closeup_prompt
     }
 
-    /// Tab-complete the 在席 prompt's command word against the Session-scope
+    /// Tab-complete the 集中 prompt's command word against the Session-scope
     /// commands, returning the candidates when ambiguous (so the caller can log
     /// them, mirroring the palette line's `complete`).
-    pub fn focus_prompt_complete(&mut self) -> Completion {
+    pub fn closeup_prompt_complete(&mut self) -> Completion {
         let completion = self
             .registry
-            .complete(self.focus_prompt.value(), CommandScope::Session);
-        self.focus_prompt.set_value(completion.input.clone());
+            .complete(self.closeup_prompt.value(), CommandScope::Session);
+        self.closeup_prompt.set_value(completion.input.clone());
         if !completion.candidates.is_empty() {
             self.log
                 .push(LogLine::output(completion.candidates.join("  ")));
@@ -3739,19 +3747,19 @@ impl HomeState {
         completion
     }
 
-    /// The advisory hint for the 在席 prompt, computed in the Session scope.
-    pub fn focus_prompt_hint(&self) -> Hint {
+    /// The advisory hint for the 集中 prompt, computed in the Session scope.
+    pub fn closeup_prompt_hint(&self) -> Hint {
         self.registry
-            .suggest(self.focus_prompt.value(), CommandScope::Session)
+            .suggest(self.closeup_prompt.value(), CommandScope::Session)
     }
 
-    /// Run the 在席 prompt as a Session-scope command: dispatch it, append its
+    /// Run the 集中 prompt as a Session-scope command: dispatch it, append its
     /// produced lines to the log, clear the prompt, and return the resulting
     /// [`Submission`] (so the event loop can act on `OpenTerminal` / `OpenAgent`).
     /// Empty input is a no-op.
-    pub fn focus_prompt_submit(&mut self) -> Submission {
-        let entry = self.focus_prompt.value().trim().to_string();
-        self.focus_prompt.clear();
+    pub fn closeup_prompt_submit(&mut self) -> Submission {
+        let entry = self.closeup_prompt.value().trim().to_string();
+        self.closeup_prompt.clear();
         if entry.is_empty() {
             return Submission {
                 effect: Effect::None,
@@ -3874,7 +3882,7 @@ impl HomeState {
     /// Dispatch `entry` as a `scope`-scoped command and record it in command
     /// history, returning the raw result. The shared core of [`submit`](Self::submit)
     /// (palette line, [`CommandScope::Workspace`]) and
-    /// [`focus_prompt_submit`](Self::focus_prompt_submit) (在席 prompt,
+    /// [`closeup_prompt_submit`](Self::closeup_prompt_submit) (集中 prompt,
     /// [`CommandScope::Session`]) so both record history identically and refuse
     /// commands outside their surface's scope; folding the result into the log is
     /// [`record_response`](Self::record_response).

@@ -94,7 +94,7 @@ pub fn open_home(term: &Term, wss: &[Workspace]) -> Result<home::Outcome> {
     // probe / history) on a background thread, then play the mascot animation on
     // this thread while it runs. By the time the rabbit lands at the bottom-left
     // the load is almost always already done, so joining it is near-instant and
-    // the home screen (切替) paints with no perceptible delay. Any extra unite
+    // the home screen (選択) paints with no perceptible delay. Any extra unite
     // workspaces are loaded inside `home::run`, after the animation, since they
     // only seed display snapshots.
     let loader = {

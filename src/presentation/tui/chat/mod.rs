@@ -1,7 +1,7 @@
 //! Local-LLM chat.
 //!
 //! A chat with the workspace's configured local LLM (served through Ollama),
-//! shown in 在席's **right pane** — the same rectangle the embedded terminal /
+//! shown in 集中's **right pane** — the same rectangle the embedded terminal /
 //! agent use — so it reads like the other per-session surfaces. The conversation
 //! state ([`state`]) and rendering ([`ui`]) are pure and unit-tested; the home
 //! event loop owns the overlay, keyboard, and reply polling.

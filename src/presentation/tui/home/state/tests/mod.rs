@@ -76,14 +76,14 @@ fn state_on_alpha() -> HomeState {
     let mut alpha = session_record("alpha", 1);
     alpha.note = Some("existing".to_string());
     state.restore_sessions(vec![alpha, session_record("beta", 1)]);
-    state.switch_move_down(); // root -> alpha
+    state.overview_move_down(); // root -> alpha
     state
 }
 
 mod attached;
 mod caret_switch;
+mod closeup;
 mod env_editor;
-mod focus;
 mod homestate;
 mod labels;
 mod note_editor;
