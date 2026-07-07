@@ -40,7 +40,7 @@
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`）。`codex_fugu` は Codex 互換 CLI で `codex-fugu` を起動する。`antigravity` は Gemini CLI の後継で `agy` を起動する |
 | セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[集中](design/home/02-layout.md#集中closeup)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
-| 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
+| 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/home/02-layout.md#ライブ端末closeup-内部状態)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
 | マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/home/02-layout.md#レイアウト)が操作に反応するかどうか。`true` で、選択 / 集中では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
@@ -235,7 +235,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)）。**セッション単位の上書き**が優先する: `session_create` / `session_delegate_issue`（MCP）で `agent_cli` / `model` を指定すると、そのセッションだけ別 CLI・別モデルで起動する（[4. オーケストレーション#アクティブなセッションと AI 連携](04-orchestration.md#アクティブなセッションと-ai-連携)、[data/02-workspace.md](data/02-workspace.md#セッションごとsessionrecord)） |
 | `session_action_ui` | ホーム画面の[集中](design/home/02-layout.md#集中closeup)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
-| `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
+| `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#ライブ端末closeup-内部状態)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
 | `local_llm.enabled` / `local_llm.model` | 有効時、`agent` 起動コマンドに `usagi-llm` MCP サーバを追加し、軽量タスクをローカル LLM に委譲する（[3.4 ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)） |
 | `env` / ローカル設定 `env` | workspace の `agent` / `terminal` 起動時に、グローバル `env` と workspace ローカル `env`（同名はローカル優先）をマージして `op://...` reference を解決し、`GH_TOKEN` などの環境変数として子プロセスへ注入する |
@@ -243,7 +243,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて
 > ホームに戻った時点で実効設定を読み直し、[集中](design/home/02-layout.md#集中closeup)の右ペインや
-> [没入](design/home/02-layout.md#没入attached)のキー処理に反映します（ホーム画面を開き直す必要はありません）。
+> [没入](design/home/02-layout.md#ライブ端末closeup-内部状態)のキー処理に反映します（ホーム画面を開き直す必要はありません）。
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と
 > `infrastructure/storage.rs`（`Storage`）に実装されています。
