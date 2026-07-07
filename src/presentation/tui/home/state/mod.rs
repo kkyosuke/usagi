@@ -166,16 +166,14 @@ impl LoadingIndicator {
     }
 }
 
-/// A pane spawned in the background — 集中's `terminal` / `agent` chosen on a
-/// session that already shows tabs — whose tab is loading in the strip. Unlike
-/// the blocking [`LoadingIndicator`] (which owns the whole right pane while the
-/// *first* pane starts), this keeps the current pane on screen: the new tab
-/// appears immediately and animates in place while its shell starts. The event
-/// loop polls it each frame and, once the pane is ready, moves to it (没入) —
-/// but only if the user has not acted since it was dispatched
-/// (`interaction_epoch` unchanged), the same auto-focus rule background session
-/// create / close already use. Any interaction before it is ready cancels the
-/// move and leaves the new tab as an ordinary background pane.
+/// A pane being added to the focused session whose tab is loading in the strip.
+/// The selected tab moves to this launch immediately — even before the pool has a
+/// real pane — and the event loop polls it each frame until its shell paints,
+/// then attaches it (没入). While the pending tab is selected the right-pane body
+/// shows the same launch rabbits, so the tab bar and the tab contents describe
+/// the same in-flight pane. User input no longer cancels the move: adding a tab
+/// commits to that tab at dispatch time, and readiness only swaps the loading
+/// body for the live terminal.
 /// It advances through two phases the event loop drives (see
 /// [`HomeState::advance_pending_pane`]):
 ///
@@ -190,9 +188,6 @@ impl LoadingIndicator {
 pub struct PendingPane {
     /// The session (worktree) the pane is being opened in.
     dir: PathBuf,
-    /// The interaction counter captured at dispatch; the move happens only while
-    /// it still matches [`Wiring`](super::event)'s live counter.
-    interaction_epoch: u64,
     /// The animation tick for the loading chip, advanced on each poll.
     frame: usize,
     /// The chip's current tab index, refreshed each poll (a concurrent close can
@@ -211,16 +206,76 @@ impl PendingPane {
         &self.dir
     }
 
-    /// The interaction counter captured when the pane was dispatched.
-    pub fn interaction_epoch(&self) -> u64 {
-        self.interaction_epoch
-    }
-
     /// The placeholder chip label to draw at the strip's end while the launch's
     /// environment is still resolving (no pool pane yet); `None` once the pane has
     /// spawned and carries its own tab label.
     pub fn placeholder(&self) -> Option<&str> {
         self.placeholder.as_deref()
+    }
+
+    /// The loading animation tick, advanced on each poll — drives the launch
+    /// rabbits floated over the selected loading tab's body.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+}
+
+/// Which background lifecycle operation a sidebar skeleton is visualising.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSessionKind {
+    /// A session is being created; its row does not exist yet, so the skeleton is
+    /// inserted above the workspace's persistent "+ new session" row.
+    Create,
+    /// A session is being removed; its row still exists until the worker
+    /// finishes, so the skeleton replaces that existing row in place.
+    Remove,
+}
+
+/// A session lifecycle operation currently visualised by an inline sidebar
+/// skeleton.
+///
+/// Creating and removing a session shell out to git (worktree add / submodule
+/// init / worktree remove) on a worker thread, so the sidebar keeps the
+/// operation visible where the row belongs while the worker runs. Creates insert
+/// a placeholder above the target workspace's "+ new session" row; removals
+/// replace the existing session row until the refreshed list lands (or the
+/// failure clears the placeholder). Tracked per `(kind, root, name)` so
+/// concurrent workspace operations stay routed to the row they affect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSession {
+    /// The lifecycle operation being visualised.
+    kind: PendingSessionKind,
+    /// The workspace root the session operation targets.
+    root: PathBuf,
+    /// The session (branch) name being created or removed — shown inside the
+    /// skeleton.
+    name: String,
+}
+
+impl PendingSession {
+    /// The lifecycle operation being visualised.
+    pub fn kind(&self) -> PendingSessionKind {
+        self.kind
+    }
+
+    /// Whether this pending row is a create placeholder.
+    pub fn is_create(&self) -> bool {
+        self.kind == PendingSessionKind::Create
+    }
+
+    /// Whether this pending row is a remove placeholder.
+    pub fn is_remove(&self) -> bool {
+        self.kind == PendingSessionKind::Remove
+    }
+
+    /// The workspace root the pending session lands in.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The session name being created.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -255,6 +310,10 @@ struct TerminalSurface {
     /// which one is active. Published alongside the snapshot by whichever party
     /// owns the surface; `None` outside 没入 / a 選択 preview.
     tabs: Option<TabStrip>,
+    /// While the active tab is still launching, the tab strip is already
+    /// published but the pane has no stable screen to preview yet. This frame
+    /// drives the right-pane body loader for that selected loading tab.
+    loading_body_frame: Option<usize>,
 }
 
 impl TerminalSurface {
@@ -267,6 +326,7 @@ impl TerminalSurface {
         if self.owner != Some(owner) {
             self.view = None;
             self.tabs = None;
+            self.loading_body_frame = None;
             self.owner = Some(owner);
         }
     }
@@ -311,6 +371,13 @@ impl SurfaceWriter<'_> {
     /// pane `labels` and which one is `active`.
     pub fn set_tabs(&mut self, labels: Vec<String>, active: usize) {
         self.surface.tabs = Some(TabStrip { labels, active });
+    }
+
+    /// Mark the active tab's body as launching for this frame. The tab strip
+    /// still identifies the selected tab; the pane body renders a loader instead
+    /// of stale terminal output until the launch is ready to attach.
+    pub fn set_loading_body(&mut self, frame: usize) {
+        self.surface.loading_body_frame = Some(frame);
     }
 }
 
@@ -718,10 +785,15 @@ pub struct HomeState {
     /// the event loop polls it each frame, animating its chip and — once ready —
     /// moving to it unless the user acted meanwhile. See [`PendingPane`].
     pending_pane: Option<PendingPane>,
-    /// The rows of the background-task panel (session create / remove running off
-    /// the event-loop thread), refreshed each frame from the shared task handle.
-    /// While non-empty the top-right corner stacks them instead of the update
-    /// notice, so the user sees in-flight work without the screen freezing.
+    /// Session lifecycle operations currently shown as animated sidebar
+    /// skeletons: creates inserted above the target workspace's "+ new session"
+    /// row, removals replacing the target session row until the worker reports
+    /// success or failure.
+    pending_sessions: Vec<PendingSession>,
+    /// The rows of the background-task board (session create / remove running
+    /// off the event-loop thread), refreshed each frame from the shared task
+    /// handle. The renderer may filter rows by kind when a task has its own
+    /// inline affordance; the mascot still speaks the leading task label.
     tasks: Vec<TaskRow>,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
@@ -883,6 +955,7 @@ impl HomeState {
             update: None,
             loading: None,
             pending_pane: None,
+            pending_sessions: Vec::new(),
             tasks: Vec::new(),
             root_note: None,
             extra_groups: Vec::new(),
@@ -2096,6 +2169,12 @@ impl HomeState {
         self.terminal.tabs.as_ref()
     }
 
+    /// Animation frame for the selected loading tab's body, when the current
+    /// surface explicitly published one.
+    pub fn terminal_loading_body_frame(&self) -> Option<usize> {
+        self.terminal.loading_body_frame
+    }
+
     /// Claim the embedded-terminal surface for `owner` and return the only handle
     /// that can publish a view or tab strip to it. Claiming from a different owner
     /// first drops that owner's snapshot as a unit, so the right pane cannot be
@@ -2292,22 +2371,14 @@ impl HomeState {
         self.loading.as_ref()
     }
 
-    /// Begin tracking a background pane launch whose tab loads in the strip: `dir`
-    /// is the session and `interaction_epoch` is the counter captured at dispatch
-    /// (the move to the new tab happens only while it stays unchanged). It starts
-    /// in the **Resolving** phase — no pool pane exists yet while the launch's
+    /// Begin tracking a pane launch whose tab loads in the strip. It starts in
+    /// the **Resolving** phase — no pool pane exists yet while the launch's
     /// environment resolves — so `placeholder` is the synthetic chip label to draw
-    /// at the strip's end. The chip starts un-placed (`tab: None`) and un-animated
-    /// (`frame: 0`) until the first poll.
-    pub fn begin_pending_pane(
-        &mut self,
-        dir: PathBuf,
-        interaction_epoch: u64,
-        placeholder: String,
-    ) {
+    /// at the strip's end. The chip starts un-placed (`tab: None`) and
+    /// un-animated (`frame: 0`) until the first poll.
+    pub fn begin_pending_pane(&mut self, dir: PathBuf, placeholder: String) {
         self.pending_pane = Some(PendingPane {
             dir,
-            interaction_epoch,
             frame: 0,
             tab: None,
             placeholder: Some(placeholder),
@@ -2329,8 +2400,8 @@ impl HomeState {
         }
     }
 
-    /// Stop tracking the background pane — because it became ready and was
-    /// attached, the user acted (cancelling the move), or its shell vanished.
+    /// Stop tracking the pending pane — because it became ready (attached when it
+    /// was still selected, left as a normal tab otherwise), or its shell vanished.
     /// Returns the dropped tracker so the caller can read what it was.
     pub fn clear_pending_pane(&mut self) -> Option<PendingPane> {
         self.pending_pane.take()
@@ -2350,14 +2421,75 @@ impl HomeState {
             .and_then(|p| p.tab.map(|tab| (tab, p.frame)))
     }
 
+    fn begin_pending_session_kind(
+        &mut self,
+        kind: PendingSessionKind,
+        root: PathBuf,
+        name: String,
+    ) {
+        if self
+            .pending_sessions
+            .iter()
+            .any(|p| p.kind == kind && p.root == root && p.name == name)
+        {
+            return;
+        }
+        self.pending_sessions
+            .push(PendingSession { kind, root, name });
+    }
+
+    fn clear_pending_session_kind(
+        &mut self,
+        kind: PendingSessionKind,
+        root: &Path,
+        name: &str,
+    ) -> bool {
+        let before = self.pending_sessions.len();
+        self.pending_sessions
+            .retain(|p| !(p.kind == kind && p.root.as_path() == root && p.name == name));
+        self.pending_sessions.len() != before
+    }
+
+    /// Begin showing an inline skeleton for a session create targeting `root`.
+    /// Duplicate begins for the same `(root, name)` are ignored so repeated
+    /// dispatch paths cannot stack identical skeletons.
+    pub fn begin_pending_session(&mut self, root: PathBuf, name: String) {
+        self.begin_pending_session_kind(PendingSessionKind::Create, root, name);
+    }
+
+    /// Begin showing an inline skeleton for a session removal targeting `root`.
+    /// Duplicate begins for the same `(root, name)` are ignored so repeated
+    /// dispatch paths cannot stack identical skeletons.
+    pub fn begin_removing_session(&mut self, root: PathBuf, name: String) {
+        self.begin_pending_session_kind(PendingSessionKind::Remove, root, name);
+    }
+
+    /// Clear the inline create skeleton for `name` under `root`, returning
+    /// whether one was present.
+    pub fn clear_pending_session(&mut self, root: &Path, name: &str) -> bool {
+        self.clear_pending_session_kind(PendingSessionKind::Create, root, name)
+    }
+
+    /// Clear the inline removal skeleton for `name` under `root`, returning
+    /// whether one was present.
+    pub fn clear_removing_session(&mut self, root: &Path, name: &str) -> bool {
+        self.clear_pending_session_kind(PendingSessionKind::Remove, root, name)
+    }
+
+    /// Pending session lifecycle skeletons currently shown in the sidebar.
+    pub fn pending_sessions(&self) -> &[PendingSession] {
+        &self.pending_sessions
+    }
+
     /// Swap in the current background-task rows (session create / remove running
     /// off the event-loop thread), read from the shared task handle each frame.
-    /// While non-empty the top-right corner stacks them.
+    /// The UI decides per row kind whether it belongs in the sidebar skeleton or
+    /// the top-right status block.
     pub fn set_tasks(&mut self, tasks: Vec<TaskRow>) {
         self.tasks = tasks;
     }
 
-    /// The background-task panel rows to render in the top-right corner.
+    /// The background-task rows the UI renders by kind.
     pub fn tasks(&self) -> &[TaskRow] {
         &self.tasks
     }
@@ -3191,6 +3323,15 @@ impl HomeState {
     pub fn closeup_action_over_active_pane(&mut self) {
         self.closeup_new_tab = false;
         self.closeup_action_over_pane = true;
+    }
+
+    /// Select the currently active pane tab in 集中 without showing the action
+    /// surface over it. Used when launching a new tab: the pending tab becomes the
+    /// selected tab immediately, and its body is the loading indicator rather than
+    /// the `+ new` launch surface.
+    pub fn closeup_select_active_pane_tab(&mut self) {
+        self.closeup_new_tab = false;
+        self.closeup_action_over_pane = false;
     }
 
     /// Dismiss the action surface floating over a pane tab, returning whether it

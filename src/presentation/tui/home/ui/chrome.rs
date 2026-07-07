@@ -10,6 +10,7 @@ use super::super::command::{CommandHint, Hint};
 use super::super::state::{
     EnvEditor, HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList,
 };
+#[cfg(test)]
 use super::super::tasks::{TaskMark, TaskRow};
 use super::panes::log_line;
 use super::{
@@ -72,20 +73,24 @@ pub(super) fn title_bar(width: usize, list: &WorktreeList) -> String {
 /// terminal size, never the label text, the block stays the same size every
 /// frame and never shifts as the label changes (`作成中…` → `作成完了`) or the
 /// spinner ticks.
+#[cfg(test)]
 const TASK_LABEL_MIN_W: usize = 16;
+#[cfg(test)]
 const TASK_LABEL_MAX_W: usize = 32;
 
 /// Display width of the `done/total` count field, left-padded so the progress
 /// row stays right-flush. Wide enough for two-digit batches (`12/12`).
+#[cfg(test)]
 const TASK_COUNT_W: usize = 5;
 
 /// The top-right background-task status block: two fixed-width rows showing the
-/// in-flight (or just-finished) session create / remove work. The first row is a
-/// mark plus a representative label; the second, indented under the label, is a
+/// task rows the caller chooses for the corner (currently session removals; a
+/// create is shown inline as a sidebar skeleton). The first row is a mark plus a
+/// representative label; the second, indented under the label, is a
 /// batch-progress bar plus a `done/total` count. The mark leads with a spinning
 /// braille glyph (cyan) while anything runs, or `✓` (green) / `✗` (red) once
 /// everything has settled. Returns no lines when nothing is tracked, so the
-/// corner falls back to the update notice.
+/// corner falls back to the waiting notice.
 ///
 /// Anchored to the **two header rows** (the centred title bar and mode ladder,
 /// whose right columns are blank) by [`overlay_top_right`](super::overlay_top_right)
@@ -96,6 +101,7 @@ const TASK_COUNT_W: usize = 5;
 /// percentage git cannot report. Both rows are the same width (the icon column
 /// plus the label field) so the block right-aligns cleanly and never changes
 /// size frame to frame.
+#[cfg(test)]
 pub(super) fn task_status_line(rows: &[TaskRow], width: usize) -> Vec<String> {
     if rows.is_empty() {
         return Vec::new();

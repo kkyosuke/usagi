@@ -116,6 +116,16 @@ pub struct Completion {
     /// without navigating to it when they have waited for the background work.
     /// `None` for failures, bulk removals, and MCP-driven creates/removals.
     pub focus: Option<AutoFocus>,
+    /// The name of the session a create task targeted, so the event loop can
+    /// clear its inline sidebar skeleton (`HomeState::begin_pending_session`)
+    /// whether the create succeeded or failed. `Some(name)` for both outcomes of
+    /// a create; `None` for removals.
+    pub created: Option<String>,
+    /// The name of the session a remove task targeted, so the event loop can
+    /// clear its inline removal skeleton (`HomeState::begin_removing_session`)
+    /// whether the removal succeeded, failed, or panicked. `Some(name)` for both
+    /// outcomes of a removal; `None` for creates.
+    pub removed: Option<String>,
 }
 
 /// Decode the message a worker thread panicked with, from the payload
@@ -164,6 +174,9 @@ pub fn panic_outcome(
         target_root: None,
         evict: None,
         focus: None,
+        // A panicked task still needs its inline skeleton cleared.
+        created: matches!(kind, TaskKind::CreateSession).then(|| target.to_string()),
+        removed: matches!(kind, TaskKind::RemoveSession).then(|| target.to_string()),
     };
     (log_line, completion)
 }
@@ -182,6 +195,10 @@ pub enum TaskMark {
 /// One row of the task panel: the label to show and its leading mark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
+    /// Which session operation this row describes, so a renderer can treat
+    /// create and remove rows differently (the top-right corner drops create
+    /// rows now that a create shows as an inline sidebar skeleton).
+    pub kind: TaskKind,
     pub label: String,
     pub mark: TaskMark,
 }
@@ -221,6 +238,7 @@ impl Task {
             Phase::Done { ok, .. } => {
                 let suffix = if ok { "完了" } else { "失敗" };
                 TaskRow {
+                    kind: self.kind,
                     label: format!("{}{} {}", self.kind.verb(), suffix, self.target),
                     mark: TaskMark::Done(ok),
                 }
@@ -234,6 +252,7 @@ impl Task {
         let frame =
             (now.saturating_duration_since(started).as_millis() / SPIN_TICK.as_millis()) as usize;
         TaskRow {
+            kind: self.kind,
             label: format!("{}中… {}", self.kind.verb(), self.target),
             mark: TaskMark::Running(frame),
         }
@@ -368,6 +387,8 @@ mod tests {
             target_root: None,
             evict: None,
             focus: None,
+            created: None,
+            removed: None,
         }
     }
 
@@ -412,6 +433,7 @@ mod tests {
         assert_eq!(
             handle.view(t0),
             vec![TaskRow {
+                kind: TaskKind::CreateSession,
                 label: "作成中… main".to_string(),
                 mark: TaskMark::Running(0),
             }]
@@ -420,6 +442,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + Duration::from_millis(330)),
             vec![TaskRow {
+                kind: TaskKind::CreateSession,
                 label: "作成中… main".to_string(),
                 mark: TaskMark::Running(3),
             }]
@@ -436,6 +459,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + MIN_SPIN),
             vec![TaskRow {
+                kind: TaskKind::RemoveSession,
                 label: "削除完了 feat/x".to_string(),
                 mark: TaskMark::Done(true),
             }]
@@ -456,6 +480,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + MIN_SPIN),
             vec![TaskRow {
+                kind: TaskKind::CreateSession,
                 label: "作成失敗 dup".to_string(),
                 mark: TaskMark::Done(false),
             }]
@@ -475,6 +500,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + Duration::from_millis(330)),
             vec![TaskRow {
+                kind: TaskKind::CreateSession,
                 label: "作成中… fast".to_string(),
                 mark: TaskMark::Running(3),
             }]
@@ -485,6 +511,7 @@ mod tests {
         assert_eq!(
             handle.view(t0 + MIN_SPIN),
             vec![TaskRow {
+                kind: TaskKind::CreateSession,
                 label: "作成完了 fast".to_string(),
                 mark: TaskMark::Done(true),
             }]

@@ -124,6 +124,8 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 作業ディレクトリにします。引数なし、または `terminal open` は、対話型シェルを**右ペインに埋め込んで**起動し**没入**へ移ります（疑似ターミナル: portable-pty + vt100）。
 左ペインの一覧は表示したままなので、シェルを操作しながらセッションを見渡せます。
 
+埋め込みタブは、1 個目でも 2 個目以降でも同じ流れで追加します。実行直後に新しいタブを選択し、タブバーのチップをローディング表示にします。そのタブが選択されている間は右ペイン本体にも起動中のローディングを表示し、`op://` 環境変数の解決と PTY 起動が終わるとライブ端末へ置き換えて没入します。準備完了時に改めてタブを選択し直す処理はありません。
+
 `terminal new` は、同じ作業ディレクトリを OS ネイティブの新規ターミナルアプリで開きます。usagi の右ペインには埋め込まず、実行後も集中に留まります。集中 Menu では `terminal` 行を `→` / `Tab` で展開して `open`（既定）/ `new` を選べます。
 
 没入中のキー操作（選択・集中へのズームアウト、タブの追加/切替/クローズ、メモ編集、終了など）は**[キー方式（`key_scheme`）](../05-settings.md#設定項目)**で決まり、既定の `prefix` 方式ではリーダー `Ctrl-O` の次キーで操作します。予約キーの全一覧・`alt` 方式・スクロール・マウスでのテキスト選択とコピー・端末ごとの差異・[直前のセッションへ切り替え](../design/home/03-sidebar.md#直前のセッションへ切り替えctrl-)は [design/home/04-keys.md](../design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中) が正本です。シェルは画面を開いている間プールに常駐し、行き来しても終了しません。
@@ -147,7 +149,7 @@ issue が 1 件も無いときは「No issues yet.」を 1 行だけログに出
 Agent CLI ごとの組み込み方法（Claude は `--mcp-config` / `--append-system-prompt`、Codex（および Codex 互換の `codex-fugu`）は `-c` 設定上書き（MCP＋ライフサイクルフック）、Gemini・Antigravity はインライン注入フラグが無いため MCP・フック・system prompt は組み込まず、再開と初期プロンプトのみ配線）は
 [3.4 ローカル LLM MCP サーバ](04-llm-mcp.md#起動と登録)を参照してください。
 Codex / `codex-fugu` では、usagi が組み込む MCP サーバに `default_tools_approval_mode = "approve"` も渡すため、MCP tool 呼び出しごとの確認は出ません（シェルコマンドの承認は `--ask-for-approval on-request` のままです）。
-また Codex / `codex-fugu` の `workspace-write` sandbox には、usagi のグローバルデータディレクトリ（`USAGI_HOME` または `~/.usagi`）を `writable_roots` として追加します。これにより、セッション worktree 内の agent でも `session_prompt` のキュー、Agent phase、live prompt などの MCP 永続化（`~/.usagi/agent-*`）を書き込めます。
+また Codex / `codex-fugu` の `workspace-write` sandbox には、usagi のグローバルデータディレクトリ（`USAGI_HOME` または `~/.usagi`）と、起動対象 worktree の Git 共通ディレクトリ（`git rev-parse --path-format=absolute --git-common-dir`）を `writable_roots` として追加します。これにより、セッション worktree 内の agent でも `session_prompt` のキュー、Agent phase、live prompt などの MCP 永続化（`~/.usagi/agent-*`）を書き込め、`git commit` などの通常の Git 操作は同じ `workspace-write` sandbox 内で実行できます。Git 共通ディレクトリを解決できない場合も起動は継続し、usagi のグローバルデータディレクトリだけを追加します。
 
 対象 worktree に前回の会話が残っている場合は、**前回セッションの続きから**起動します（Claude は `claude --continue`、
 Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume --last`）、Gemini は `gemini -r latest`、Antigravity は `agy -c`。中断・離席後も文脈を引き継いで再開できます）。過去の会話が無ければ通常起動になります。判定は worktree ごとに行い、

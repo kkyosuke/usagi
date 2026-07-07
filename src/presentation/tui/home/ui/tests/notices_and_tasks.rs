@@ -1,4 +1,5 @@
 use super::*;
+use crate::presentation::tui::home::tasks::TaskKind;
 
 #[test]
 fn render_frame_speaks_the_update_notice_from_the_sidebar_rabbit() {
@@ -57,7 +58,7 @@ fn render_frame_shows_waiting_count_on_the_header() {
 }
 
 #[test]
-fn render_frame_hides_waiting_notice_while_task_status_has_the_corner() {
+fn render_frame_keeps_waiting_notice_while_a_create_runs() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
     waiting.path = PathBuf::from("/repo/wait");
@@ -67,14 +68,43 @@ fn render_frame_hides_waiting_notice_while_task_status_has_the_corner() {
         waiting: [PathBuf::from("/repo/wait")].into(),
         ..Default::default()
     });
+    // A create no longer steals the corner — it shows as an inline sidebar
+    // skeleton instead — so the waiting notice keeps the top-right corner and the
+    // create label is not drawn there.
     state.set_tasks(vec![TaskRow {
+        kind: TaskKind::CreateSession,
         label: "作成中… main".to_string(),
         mark: TaskMark::Running(0),
     }]);
     let frame = render_frame(24, 100, &state);
     let header = stripped(&[frame[0].clone()]);
-    assert!(header.contains("作成中… main"));
-    assert!(!header.contains(" 1 waiting"));
+    assert!(header.contains(" 1 waiting"));
+    assert!(!header.contains("作成中… main"));
+}
+
+#[test]
+fn render_frame_keeps_waiting_notice_while_a_remove_runs() {
+    use super::super::super::tasks::{TaskMark, TaskRow};
+    let mut waiting = worktree(Some("fix"), false, BranchStatus::Pushed);
+    waiting.path = PathBuf::from("/repo/wait");
+    let mut state = state_with(vec![waiting]);
+    state.apply_badges(MonitorSnapshot {
+        live: [PathBuf::from("/repo/wait")].into(),
+        waiting: [PathBuf::from("/repo/wait")].into(),
+        ..Default::default()
+    });
+    // A removal no longer steals the corner — it replaces the target row with an
+    // inline sidebar skeleton — so the waiting notice keeps the top-right corner
+    // and the remove label is not drawn there.
+    state.set_tasks(vec![TaskRow {
+        kind: TaskKind::RemoveSession,
+        label: "削除中… old".to_string(),
+        mark: TaskMark::Running(0),
+    }]);
+    let frame = render_frame(24, 100, &state);
+    let header = stripped(&[frame[0].clone()]);
+    assert!(header.contains(" 1 waiting"));
+    assert!(!header.contains("削除中… old"));
 }
 
 // --- background-task panel ---------------------------------------------
@@ -87,14 +117,17 @@ fn task_status_line_shows_the_running_lead_its_bar_and_count() {
     // partial bar.
     let rows = vec![
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "削除完了 feat".to_string(),
             mark: TaskMark::Done(true),
         },
         TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成中… main".to_string(),
             mark: TaskMark::Running(0),
         },
         TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成失敗 dup".to_string(),
             mark: TaskMark::Done(false),
         },
@@ -118,10 +151,12 @@ fn task_status_line_settles_on_the_last_result_once_all_finish() {
     // fills the bar to 2/2.
     let rows = vec![
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "作成完了 a".to_string(),
             mark: TaskMark::Done(true),
         },
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "削除完了 b".to_string(),
             mark: TaskMark::Done(true),
         },
@@ -140,10 +175,12 @@ fn task_status_line_leads_with_a_failure_when_the_last_task_failed() {
     // failure (the `✗` mark) rather than an earlier success.
     let rows = vec![
         TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成完了 a".to_string(),
             mark: TaskMark::Done(true),
         },
         TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成失敗 dup".to_string(),
             mark: TaskMark::Done(false),
         },
@@ -162,6 +199,7 @@ fn task_status_line_holds_one_fixed_width_however_the_label_changes() {
     // changes. Both rows of the block also share a single width.
     let short = task_status_line(
         &[TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成中… a".to_string(),
             mark: TaskMark::Running(0),
         }],
@@ -169,6 +207,7 @@ fn task_status_line_holds_one_fixed_width_however_the_label_changes() {
     );
     let long = task_status_line(
         &[TaskRow {
+            kind: TaskKind::CreateSession,
             label: "作成完了 a-very-long-session-name".to_string(),
             mark: TaskMark::Done(true),
         }],
@@ -197,6 +236,7 @@ fn render_frame_speaks_task_status_before_the_update_notice() {
     // workspace is idle.
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
     state.set_tasks(vec![TaskRow {
+        kind: TaskKind::CreateSession,
         label: "作成中… main".to_string(),
         mark: TaskMark::Running(0),
     }]);
@@ -212,10 +252,12 @@ fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
     let mut state = state_with(Vec::new());
     state.set_tasks(vec![
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "作成中… main".to_string(),
             mark: TaskMark::Running(0),
         },
         TaskRow {
+            kind: TaskKind::RemoveSession,
             label: "削除中… old".to_string(),
             mark: TaskMark::Running(1),
         },
@@ -226,26 +268,30 @@ fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
 }
 
 #[test]
-fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
+fn render_frame_speaks_task_status_from_the_sidebar_over_a_live_terminal() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     // A live embedded terminal owns the right pane (没入's attached shell, or
-    // 選択's live preview). The task status now rides the header's title-bar row,
-    // outside the pane, so it shows without clobbering the shell output below.
+    // 選択's live preview). Session task status no longer rides the header: the
+    // target row carries the inline skeleton, and the sidebar mascot speaks the
+    // label without clobbering shell output below.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_tasks(vec![TaskRow {
-        label: "作成中… main".to_string(),
+        kind: TaskKind::RemoveSession,
+        label: "削除中… old".to_string(),
         mark: TaskMark::Running(0),
     }]);
     let frame = render_frame(24, 100, &state);
     let joined = stripped(&frame);
-    // The status shows on the header row and the shell output stays intact.
-    assert!(joined.contains("作成中… main"));
+    // The status is still explained by the sidebar mascot and the shell output
+    // stays intact.
+    assert!(joined.contains("削除中… old"));
     assert!(joined.contains("$ echo hi"));
-    // The status rides row 0 (the title bar), not the body where the shell is.
-    assert!(stripped(&[frame[0].clone()]).contains("作成中… main"));
+    // The status no longer rides row 0 (the title bar); row 0 remains available
+    // for title/waiting chrome.
+    assert!(!stripped(&[frame[0].clone()]).contains("削除中… old"));
 }
 
 #[test]
@@ -281,6 +327,18 @@ fn render_frame_keeps_the_run2_loading_over_a_live_terminal() {
     state.step_loading("ターミナル起動中…");
     let joined = stripped(&render_frame(24, 100, &state));
     assert!(joined.contains("(｡･-･)"));
+}
+
+#[test]
+fn render_frame_skips_the_big_loading_overlay_when_tabs_are_present() {
+    // Pending tabs carry loading inline in their chip/body, so the legacy
+    // full-pane loading overlay does not draw on top of an existing tab strip.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.enter_closeup(1);
+    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
+    state.step_loading("ターミナル起動中…");
+    let joined = stripped(&render_frame(24, 100, &state));
+    assert!(!joined.contains("(｡･-･)"));
 }
 
 #[test]
@@ -361,6 +419,39 @@ fn run2_loading_centers_in_the_right_pane_while_an_action_runs() {
     // row spans several rabbits, proving the whole `usagi run 2` block is
     // centred in the right pane rather than anchored to the far right edge.
     assert!(col < pane_mid);
+}
+
+#[test]
+fn run2_loading_grows_rightward_without_shifting_or_looping() {
+    let first = launch_loading_block!(0, 100);
+    let grown = launch_loading_block!(RUN2_LOADING_GROW * 3, 100);
+    let later = launch_loading_block!(RUN2_LOADING_GROW * 99, 100);
+    let plain_first = console::strip_ansi_codes(&first.join("\n")).into_owned();
+    let plain_grown = console::strip_ansi_codes(&grown.join("\n")).into_owned();
+    let plain_later = console::strip_ansi_codes(&later.join("\n")).into_owned();
+
+    for (before, after) in plain_first.lines().zip(plain_grown.lines()) {
+        assert!(
+            after.starts_with(before.trim_end()),
+            "existing rabbits stay anchored while new ones appear to the right"
+        );
+    }
+    assert!(
+        plain_grown.matches("(｡･-･)").count() > plain_first.matches("(｡･-･)").count(),
+        "the warren grows"
+    );
+    assert_eq!(
+        plain_later.matches("(｡･-･)").count(),
+        RUN2_LOADING_MAX_RABBITS,
+        "growth saturates at the maximum instead of looping back smaller"
+    );
+    assert!(
+        first
+            .iter()
+            .zip(grown.iter())
+            .all(|(a, b)| console::measure_text_width(a) == console::measure_text_width(b)),
+        "every frame reserves the same block width so the centred overlay is stable"
+    );
 }
 
 #[test]

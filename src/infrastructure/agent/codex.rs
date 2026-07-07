@@ -29,8 +29,11 @@
 //!   every command or edit. usagi's data directory (`$USAGI_HOME` or
 //!   `~/.usagi`) is added to Codex's `writable_roots`, because the bundled MCP
 //!   server stores prompt queues, agent phases, and other orchestration state
-//!   there even when the agent itself works in a session worktree. (Codex
-//!   dropped the older `--full-auto` shorthand for this pair.) Headless runs use
+//!   there even when the agent itself works in a session worktree. The current
+//!   worktree's git common directory is added too when it can be resolved, so
+//!   ordinary git operations can update `.git` under the same sandbox without an
+//!   approval prompt. (Codex dropped the older `--full-auto` shorthand for this
+//!   pair.) Headless runs use
 //!   Codex's stronger `--dangerously-bypass-approvals-and-sandbox` because no
 //!   user is present.
 //!
@@ -109,14 +112,16 @@ fn config_override(key: &str, value: &str) -> String {
 }
 
 /// A `-c sandbox_workspace_write.writable_roots=[…]` override that lets an
-/// attended Codex session write usagi's own data directory while keeping the
-/// rest of `--sandbox workspace-write` in force.
-fn sandbox_writable_roots_override(data_dir: &Path) -> String {
-    let data_dir = data_dir.to_string_lossy();
-    config_override(
-        SANDBOX_WRITABLE_ROOTS_KEY,
-        &format!("[{}]", toml_basic_string(data_dir.as_ref())),
-    )
+/// attended Codex session write usagi's own data directory and any launch-specific
+/// roots (for example the worktree's git common dir) while keeping the rest of
+/// `--sandbox workspace-write` in force.
+fn sandbox_writable_roots_override<'a>(roots: impl IntoIterator<Item = &'a Path>) -> String {
+    let rendered = roots
+        .into_iter()
+        .map(|root| toml_basic_string(root.to_string_lossy().as_ref()))
+        .collect::<Vec<_>>()
+        .join(",");
+    config_override(SANDBOX_WRITABLE_ROOTS_KEY, &format!("[{rendered}]"))
 }
 
 /// Resolve usagi's data dir and render the Codex writable-roots override.
@@ -124,11 +129,16 @@ fn sandbox_writable_roots_override(data_dir: &Path) -> String {
 /// `storage::data_dir` honours `$USAGI_HOME` and otherwise falls back to
 /// `~/.usagi`. If the home directory cannot be resolved, keep launching Codex
 /// rather than failing session startup; the MCP calls that need persistence will
-/// then report their own errors.
-fn resolved_sandbox_writable_roots_override() -> Option<String> {
-    crate::infrastructure::storage::data_dir()
-        .ok()
-        .map(|dir| sandbox_writable_roots_override(&dir))
+/// then report their own errors. Additional roots are best-effort inputs already
+/// resolved by the caller; they are rendered only when the fixed data dir is
+/// available so Codex receives one complete array override.
+fn resolved_sandbox_writable_roots_override(extra_roots: &[PathBuf]) -> Option<String> {
+    crate::infrastructure::storage::data_dir().ok().map(|dir| {
+        let mut roots = Vec::with_capacity(1 + extra_roots.len());
+        roots.push(dir);
+        roots.extend(extra_roots.iter().cloned());
+        sandbox_writable_roots_override(roots.iter().map(PathBuf::as_path))
+    })
 }
 
 /// The Codex config overrides for one usagi-owned MCP server. Besides transport
@@ -367,7 +377,9 @@ impl Agent for CodexAgent {
                 "on-request".to_string(),
             ]
         };
-        if let Some(writable_roots) = resolved_sandbox_writable_roots_override() {
+        if let Some(writable_roots) =
+            resolved_sandbox_writable_roots_override(&wiring.sandbox_writable_roots)
+        {
             parts.push(writable_roots);
         }
         // An explicit model rides in as Codex's `-m`; absent, Codex uses its own
@@ -444,33 +456,60 @@ mod tests {
             local_llm_model: local_llm_model.map(str::to_string),
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         }
     }
 
     #[test]
     fn sandbox_writable_roots_override_renders_a_toml_string_array() {
         assert_eq!(
-            sandbox_writable_roots_override(Path::new("/Users/usagi/.usagi")),
+            sandbox_writable_roots_override([Path::new("/Users/usagi/.usagi")]),
             r#"-c 'sandbox_workspace_write.writable_roots=["/Users/usagi/.usagi"]'"#
         );
         assert_eq!(
-            sandbox_writable_roots_override(Path::new(r#"/tmp/usagi "home"/dir\leaf"#)),
+            sandbox_writable_roots_override([Path::new(r#"/tmp/usagi "home"/dir\leaf"#)]),
             r#"-c 'sandbox_workspace_write.writable_roots=["/tmp/usagi \"home\"/dir\\leaf"]'"#
+        );
+        assert_eq!(
+            sandbox_writable_roots_override([
+                Path::new("/Users/usagi/.usagi"),
+                Path::new("/repo/.git"),
+            ]),
+            r#"-c 'sandbox_workspace_write.writable_roots=["/Users/usagi/.usagi","/repo/.git"]'"#
+        );
+        assert_eq!(
+            sandbox_writable_roots_override([
+                Path::new(r"C:\Users\usagi\.usagi"),
+                Path::new(r"C:\repo\.git"),
+            ]),
+            r#"-c 'sandbox_workspace_write.writable_roots=["C:\\Users\\usagi\\.usagi","C:\\repo\\.git"]'"#
         );
     }
 
     #[test]
-    fn interactive_launches_add_usagi_data_dir_to_writable_roots() {
-        let expected = resolved_sandbox_writable_roots_override().unwrap();
+    fn interactive_launches_add_usagi_data_dir_and_git_dir_to_writable_roots() {
+        let git_dir = PathBuf::from("/repo/.git");
+        let expected =
+            resolved_sandbox_writable_roots_override(std::slice::from_ref(&git_dir)).unwrap();
+        let mut wiring = wiring("usagi", None);
+        wiring.sandbox_writable_roots.push(git_dir);
+
+        let fresh = CodexAgent::new().launch_command(&wiring, false, None);
+        assert!(fresh.contains(&expected), "{fresh}");
+
+        let resumed = CodexAgent::new().launch_command(&wiring, true, None);
+        assert!(resumed.contains(&expected), "{resumed}");
+
+        let headless = CodexAgent::new().headless_command(&wiring, "clean up");
+        assert!(!headless.contains(SANDBOX_WRITABLE_ROOTS_KEY), "{headless}");
+    }
+
+    #[test]
+    fn interactive_launches_fall_back_to_usagi_data_dir_without_git_dir() {
+        let expected = resolved_sandbox_writable_roots_override(&[]).unwrap();
 
         let fresh = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(fresh.contains(&expected), "{fresh}");
-
-        let resumed = CodexAgent::new().launch_command(&wiring("usagi", None), true, None);
-        assert!(resumed.contains(&expected), "{resumed}");
-
-        let headless = CodexAgent::new().headless_command(&wiring("usagi", None), "clean up");
-        assert!(!headless.contains(SANDBOX_WRITABLE_ROOTS_KEY), "{headless}");
     }
 
     #[test]

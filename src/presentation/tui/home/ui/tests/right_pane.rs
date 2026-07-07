@@ -90,6 +90,42 @@ fn overview_preview_shows_the_tab_strip_beside_the_header_for_a_live_session() {
 }
 
 #[test]
+fn overview_preview_shows_loading_body_for_the_selected_pending_tab() {
+    let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
+    pending.path = PathBuf::from("/repo/pending");
+    let mut state = HomeState::new("usagi", vec![pending], None);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
+    state
+        .surface_writer(super::super::super::state::SurfaceOwner::Preview)
+        .set_loading_body(0);
+
+    let preview = stripped(&overview_preview(&state, 60, 12));
+    assert!(preview.contains("1 terminal"));
+    assert!(preview.contains("(｡･-･)"));
+    assert!(preview.contains("起動中…"));
+    assert!(!preview.contains("live terminal"));
+}
+
+#[test]
+fn loading_tab_body_is_blank_when_too_narrow_for_even_one_rabbit() {
+    let mut pending = worktree(Some("feat"), false, BranchStatus::Local);
+    pending.path = PathBuf::from("/repo/pending");
+    let mut state = HomeState::new("usagi", vec![pending], None);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down();
+    state.set_terminal_tabs(vec!["terminal".to_string()], 0);
+    state
+        .surface_writer(super::super::super::state::SurfaceOwner::Preview)
+        .set_loading_body(0);
+
+    let preview = stripped(&overview_preview(&state, 1, 6));
+    assert!(!preview.contains("(｡･-･)"));
+    assert!(!preview.contains("起動中…"));
+}
+
+#[test]
 fn overview_preview_keeps_a_fixed_identity_width_so_tabs_do_not_jitter() {
     // The header identity is a fixed width, so the divider and tabs land in the
     // same column whichever session the cursor is on — the row does not shift as

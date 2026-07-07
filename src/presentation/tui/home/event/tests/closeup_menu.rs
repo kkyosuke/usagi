@@ -142,7 +142,7 @@ fn closeup_menu_shortcut_keys_launch_terminal_and_agent() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![false, true]);
+    assert_eq!(*opened.borrow(), vec![false, false]);
 }
 
 #[test]
@@ -178,7 +178,7 @@ fn closeup_menu_agent_picker_launches_the_chosen_cli() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Codex))]);
+    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::Codex))]);
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn typed_agent_name_launches_an_installed_cli_but_refuses_an_uninstalled_one() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Codex))]);
+    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::Codex))]);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::Claude))]);
+    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::Claude))]);
 }
 
 #[test]
@@ -706,7 +706,7 @@ fn closeup_ctrl_o_g_launches_an_agent() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/feat"), true)]);
+    assert_eq!(*opened.borrow(), vec![(PathBuf::from("/r/feat"), false)]);
 }
 
 #[test]
@@ -1186,7 +1186,7 @@ fn closeup_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     ));
     assert_eq!(
         *opened.borrow(),
-        vec![(PathBuf::from("/r/feat"), false, true)]
+        vec![(PathBuf::from("/r/feat"), false, false)]
     );
     assert_eq!(*external.borrow(), vec![PathBuf::from("/r/feat")]);
 }

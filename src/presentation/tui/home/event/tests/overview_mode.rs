@@ -151,7 +151,7 @@ fn overview_t_opens_the_action_surface_and_adds_a_new_pane() {
         Outcome::Quit
     ));
     assert_eq!(*opened.borrow(), 1);
-    assert_eq!(*new_pane_seen.borrow(), Some(true));
+    assert_eq!(*new_pane_seen.borrow(), Some(false));
 }
 
 #[test]
@@ -479,6 +479,8 @@ fn overview_reorder_applies_a_moved_result_and_logs_a_failure() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/ws/.usagi/sessions/feat"),
             worktrees: vec![worktree(Some("feat"), "/ws/feat")],
             created_at: Utc::now(),
@@ -490,6 +492,8 @@ fn overview_reorder_applies_a_moved_result_and_logs_a_failure() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/ws/.usagi/sessions/main"),
             worktrees: vec![worktree(Some("main"), "/ws/main")],
             created_at: Utc::now(),
@@ -551,6 +555,8 @@ fn overview_space_folds_the_cursor_workspace_and_hides_its_sessions() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree(Some("b1"), "/wsB/b1")],
             created_at: Utc::now(),

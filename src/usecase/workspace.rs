@@ -284,6 +284,8 @@ mod tests {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: repo.path().join(".usagi/sessions").join(name),
             worktrees: vec![worktree(name, prs)],
             created_at: now,

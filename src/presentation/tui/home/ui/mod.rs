@@ -17,6 +17,48 @@
 //! right-pane dispatcher; the surrounding chrome (title, ladder, input, footer,
 //! the command palette, modals) lives in [`chrome`].
 
+/// How often the loading indicator gains another rabbit.
+pub(crate) const RUN2_LOADING_GROW: usize = 3;
+/// It starts with three rabbits so it reads as the `usagi run 2` visual even
+/// though the event loop paints it only once before spawning the PTY.
+pub(crate) const RUN2_LOADING_MIN_RABBITS: usize = 3;
+/// The gallery's `usagi run 2` animation tops out at eight rabbits.
+pub(crate) const RUN2_LOADING_MAX_RABBITS: usize = 8;
+
+macro_rules! launch_loading_block {
+    ($frame:expr, $right_w:expr) => {{
+        let right_w = $right_w;
+        let mut max_count = 0usize;
+        let mut max_w = 0usize;
+        for count in (1..=$crate::presentation::tui::home::ui::RUN2_LOADING_MAX_RABBITS).rev() {
+            let block = $crate::presentation::tui::widgets::multiplying_rabbits(count);
+            let mut block_w = 0usize;
+            for line in &block {
+                block_w = block_w.max(console::measure_text_width(line));
+            }
+            if block_w <= right_w {
+                max_count = count;
+                max_w = block_w;
+                break;
+            }
+        }
+        if max_count == 0 {
+            Vec::new()
+        } else {
+            let count = $crate::presentation::tui::home::ui::RUN2_LOADING_MIN_RABBITS
+                .saturating_add($frame / $crate::presentation::tui::home::ui::RUN2_LOADING_GROW)
+                .min(max_count);
+            let block = $crate::presentation::tui::widgets::multiplying_rabbits(count);
+            let mut padded = Vec::with_capacity(block.len());
+            for row in block {
+                let row_w = console::measure_text_width(&row);
+                padded.push(format!("{row}{}", " ".repeat(max_w.saturating_sub(row_w))));
+            }
+            padded
+        }
+    }};
+}
+
 mod chrome;
 mod closeup_menu;
 pub mod content;
@@ -33,13 +75,12 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
     overview_create_rows, quit_confirm_frame, remove_modal_body, tab_menu_box, tab_rename_body,
-    task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
-    ENV_MODAL_INNER, FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER,
-    TEXT_MODAL_INNER,
+    text_modal_body, title_bar, update_confirm_frame, waiting_notice, ENV_MODAL_INNER,
+    FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER, TEXT_MODAL_INNER,
 };
 use closeup_menu::{closeup_menu_body, closeup_prompt_body};
 use panes::right_pane_contents;
-use sidebar::{group_inline_insert_line, left_pane};
+use sidebar::{group_inline_insert_line_with_pending, left_pane};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use tabs_hit::{
     attached_tab_at, attached_tab_hit, closeup_tab_at, closeup_tab_hit, overview_tab_at,
@@ -50,12 +91,9 @@ pub(super) use pr_popup::sidebar_pr_badge_at;
 // …and a click anywhere to the pinned PR popup: open a `#<number>`, or dismiss it.
 pub(super) use pr_popup::{pr_popup_click, PopupClick};
 
-use super::state::{HomeState, ModalSize, Mode, WorktreeList};
+use super::state::{HomeState, ModalSize, Mode, PendingSession, WorktreeList};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
-
-/// Shown below the root row when the workspace has no recorded worktrees.
-const EMPTY_MESSAGE: &str = "no sessions";
 
 /// The detail shown on the root row's second line (it has no git status).
 const ROOT_DETAIL: &str = "workspace root";
@@ -287,8 +325,19 @@ pub(super) fn left_pane_session_at(
     if line >= body_rows {
         return None;
     }
-    let scroll = sidebar::sidebar_scroll(state.list(), state.sidebar() == Sidebar::Full, body_rows);
-    sidebar::sidebar_row_at_line_for_sidebar(state.list(), line, state.sidebar(), scroll)
+    let scroll = sidebar::sidebar_scroll_with_pending(
+        state.list(),
+        state.sidebar() == Sidebar::Full,
+        body_rows,
+        state.pending_sessions(),
+    );
+    sidebar::sidebar_row_at_line_for_sidebar_with_pending(
+        state.list(),
+        line,
+        state.sidebar(),
+        scroll,
+        state.pending_sessions(),
+    )
 }
 
 /// Rows the tab strip reserves at the top of the right pane in 没入 (Attached).
@@ -323,35 +372,6 @@ pub fn attached_geometry(
 /// overlay), so the preview's scroll clamp agrees with what is actually drawn.
 fn body_rows_for(height: usize) -> usize {
     height.saturating_sub(5).max(1)
-}
-
-/// Frames each new rabbit takes to join the `usagi run 2`-style launch loader.
-const RUN2_LOADING_GROW: usize = 3;
-/// Keep the one-frame terminal / agent launch flash recognisably "run 2" even
-/// though the event loop paints it only once before spawning the PTY.
-const RUN2_LOADING_MIN_RABBITS: usize = 3;
-/// The gallery's `usagi run 2` animation tops out at eight rabbits.
-const RUN2_LOADING_MAX_RABBITS: usize = 8;
-
-/// The launch overlay body: the same multiplying-rabbit visual as
-/// `usagi run 2`, clamped to the right pane so narrow terminals degrade to fewer
-/// rabbits instead of dropping the indicator while at least one can fit.
-fn launch_loading_block(frame: usize, right_w: usize) -> Vec<String> {
-    let span = RUN2_LOADING_MAX_RABBITS - RUN2_LOADING_MIN_RABBITS + 1;
-    let mut count = RUN2_LOADING_MIN_RABBITS + (frame / RUN2_LOADING_GROW) % span;
-    while count > 0 {
-        let block = widgets::multiplying_rabbits(count);
-        let block_w = block
-            .iter()
-            .map(|line| console::measure_text_width(line))
-            .max()
-            .unwrap_or(0);
-        if block_w <= right_w {
-            return block;
-        }
-        count -= 1;
-    }
-    Vec::new()
 }
 
 /// The home frame with the 1Password env-resolution indicator floated in the
@@ -396,7 +416,7 @@ pub fn env_resolve_loading_frame(
 /// sits under the rabbits, and `label` is clipped to `right_w` so a long label
 /// never widens the block past the pane (which would drop the whole indicator).
 fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<String> {
-    let rabbits = launch_loading_block(frame, right_w);
+    let rabbits = launch_loading_block!(frame, right_w);
     if rabbits.is_empty() {
         return Vec::new();
     }
@@ -423,7 +443,7 @@ fn env_resolve_loading_block(frame: usize, right_w: usize, label: &str) -> Vec<S
 /// display columns wide with its content centred — the alignment
 /// [`overlay_region_centered`] needs, since it composites each block row at a
 /// fixed column and every row must therefore span the block's full width.
-fn center_row(row: &str, width: usize) -> String {
+pub(super) fn center_row(row: &str, width: usize) -> String {
     let row_w = console::measure_text_width(row);
     let left = widgets::centered_padding(width, row_w);
     let right = width.saturating_sub(left + row_w);
@@ -620,10 +640,11 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
 
     // Overlay status affordances in priority order: a momentary blocking action
     // (terminal / agent launch) shows the loading rabbit centred in the right
-    // pane; otherwise any in-flight background session work (create / remove)
-    // shows the task status line in the top-right corner; otherwise a `◆ N
-    // waiting` notice appears while at least one session is waiting for the
-    // user's input. The task status and waiting notice ride the header rows. The
+    // pane; otherwise the top-right corner stays available for a `◆ N waiting`
+    // notice while session create/remove work lives inline in the sidebar as
+    // skeleton rows; otherwise a `◆ N waiting` notice appears while at least
+    // one session is waiting for the user's input. The task status and waiting
+    // notice ride the header rows. The
     // "update available" notice is no longer a corner overlay — the sidebar
     // mascot speaks it (above) instead. The mascot also speaks the current
     // loading / background-task label, so the left-bottom usagi explains what is
@@ -632,7 +653,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         // Tabs carry their own inline loading indicator (see [`panes::header_tab_rows`]),
         // so we only draw the big centred overlay if there are no tabs.
         if state.terminal_tabs().is_none_or(|s| s.labels.is_empty()) {
-            let loading_block = launch_loading_block(loading.frame(), right_w);
+            let loading_block = launch_loading_block!(loading.frame(), right_w);
             widgets::overlay_region_centered(
                 &mut lines,
                 width,
@@ -643,20 +664,13 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
                 &loading_block,
             );
         }
-    } else if !state.tasks().is_empty() {
-        // Background session work (create / remove) running off the event-loop
-        // thread. It rides the two header rows (row 0 the title bar, row 1 the
-        // mode ladder), whose centred content leaves the right columns blank —
-        // so it never collides with the right pane (preview / menu / live
-        // terminal) the way the old body-row panel did, and needs no
-        // live-terminal suppression. Two rows give the label more width.
-        widgets::overlay_top_right(
-            &mut lines,
-            0,
-            width,
-            &task_status_line(state.tasks(), width),
-        );
     } else {
+        // Background session work (running off the event-loop thread) no longer
+        // rides the header corner: **creates** animate as inline placeholders
+        // above the target workspace's "+ new session" row, and **removals**
+        // replace the target session row with an inline pruning skeleton. The
+        // corner is therefore left free for the `◆ N waiting` notice the way the
+        // tab strip freed it for launching panes.
         widgets::overlay_top_right(
             &mut lines,
             0,
@@ -774,6 +788,7 @@ fn left_column(
         state.running_paths(),
         state.waiting_paths(),
         state.done_paths(),
+        state.pending_sessions(),
         state.resource_usages(),
         state.label_master(),
         left_w,
@@ -801,10 +816,21 @@ fn left_column(
             // `left_pane` draws each workspace's own persistent "+ new session"
             // affordance; while the input is open it *becomes* the targeted
             // workspace's affordance, so [`place_create_rows`] replaces that row.
-            let scroll = sidebar::sidebar_scroll(state.list(), true, body_rows);
+            let scroll = sidebar::sidebar_scroll_with_pending(
+                state.list(),
+                true,
+                body_rows,
+                state.pending_sessions(),
+            );
             let rows =
                 overview_create_rows(create.value(), create.cursor(), create.error(), left_w);
-            place_create_rows(&mut left, state.list(), rows, scroll);
+            place_create_rows(
+                &mut left,
+                state.list(),
+                state.pending_sessions(),
+                rows,
+                scroll,
+            );
             left.truncate(body_rows);
         }
         // The inline rename is not spliced here: unlike create (a *new* row), it
@@ -825,6 +851,7 @@ fn left_column(
 fn place_create_rows(
     column: &mut Vec<String>,
     list: &WorktreeList,
+    pending_sessions: &[PendingSession],
     rows: Vec<String>,
     scroll: usize,
 ) {
@@ -833,7 +860,8 @@ fn place_create_rows(
     let group = list.selected_group();
     // The create row's line is a full-column line; the window may be scrolled, so
     // pull it back into the visible column the caller passed.
-    let line = group_inline_insert_line(list, group).saturating_sub(scroll);
+    let line =
+        group_inline_insert_line_with_pending(list, group, pending_sessions).saturating_sub(scroll);
     if group + 1 < list.group_count() {
         replace_rows(column, line, rows);
     } else {
@@ -971,7 +999,8 @@ fn place_mascot(
 /// Operational status wins over informational news: when a blocking action is in
 /// progress, the launch loader animates in the right pane while the mascot says
 /// the action's label; otherwise background session tasks (create / remove) are
-/// spoken from the same bubble that used to carry only update notices. Update
+/// spoken from the same bubble that used to carry only update notices (even
+/// creates whose visual progress lives inline in the sidebar). Update
 /// availability remains the fallback when no active work needs explaining.
 fn mascot_speech(state: &HomeState) -> Option<Vec<String>> {
     if let Some(loading) = state.loading() {

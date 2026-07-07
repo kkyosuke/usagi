@@ -506,6 +506,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         agent.provision(&wiring).unwrap();
@@ -534,6 +535,7 @@ mod tests {
             local_llm_model: None,
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         };
 
         let err = agent.provision(&wiring).unwrap_err();

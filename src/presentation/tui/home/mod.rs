@@ -119,13 +119,15 @@ fn complete_or_record_panic(
     handle: &tasks::TaskHandle,
     id: u64,
     kind: tasks::TaskKind,
+    target_root: &Path,
     target: &str,
     work: impl FnOnce() -> (bool, tasks::Completion),
 ) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
         Ok((ok, completion)) => handle.complete(id, ok, completion),
         Err(payload) => {
-            let (log_line, completion) = tasks::panic_outcome(kind, target, payload);
+            let (log_line, mut completion) = tasks::panic_outcome(kind, target, payload);
+            completion.target_root = Some(target_root.to_path_buf());
             crate::infrastructure::error_log::ErrorLog::record(&log_line);
             handle.complete(id, false, completion);
         }
@@ -166,7 +168,7 @@ fn resolve_pane_env(
 /// environment-resolver thread fills. Held on the UI thread across frames (the
 /// pool spawn is not `Send`) — the per-worktree environment (`op://` secrets)
 /// resolves off-thread so the tab bar keeps animating, and once it lands the pane
-/// is spawned inactive (its tab starts loading). See `start_pending_spawn` /
+/// is spawned as the selected tab. See `start_pending_spawn` /
 /// `poll_pending_spawn` in [`run`].
 struct PendingSpawn {
     /// Whether it opens an agent CLI pane or a plain terminal.
@@ -352,7 +354,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     };
 
     // The background session tasks (create / remove) the event loop dispatches
-    // and renders in the top-right task panel, shared with the worker threads.
+    // and renders by kind (create as an inline sidebar skeleton, remove in the
+    // top-right task block), shared with the worker threads.
     let tasks = tasks::TaskHandle::new();
     // Serialises the session-mutating git work across worker threads: both
     // create and remove load-modify-save `state.json`, so concurrent runs would
@@ -386,10 +389,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         let name = name.to_string();
         let lock = create_lock.clone();
         let worker = std::thread::spawn(move || {
-            complete_or_record_panic(&handle, id, tasks::TaskKind::CreateSession, &name, || {
-                let _guard = lock_session_ops(&lock);
-                run_create(&root, &name, interaction_epoch)
-            });
+            complete_or_record_panic(
+                &handle,
+                id,
+                tasks::TaskKind::CreateSession,
+                &root,
+                &name,
+                || {
+                    let _guard = lock_session_ops(&lock);
+                    run_create(&root, &name, interaction_epoch)
+                },
+            );
         });
         track_worker(&create_workers, worker);
     };
@@ -682,24 +692,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let remove_workers = workers.clone();
     // `root` is the workspace the targeted session lives in (the cursor's group in
     // 統合/unite mode), resolved by the handler before dispatch.
-    let mut dispatch_remove = move |root: &Path,
-                                    name: &str,
-                                    force: bool,
-                                    focus: Option<tasks::AutoFocus>| {
-        let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
-        let handle = remove_tasks.clone();
-        let root = root.to_path_buf();
-        let name = name.to_string();
-        let lock = remove_lock.clone();
-        let agent = remove_agent.clone();
-        let worker = std::thread::spawn(move || {
-            complete_or_record_panic(&handle, id, tasks::TaskKind::RemoveSession, &name, || {
-                let _guard = lock_session_ops(&lock);
-                run_remove(&root, &name, force, agent.as_ref(), focus)
+    let mut dispatch_remove =
+        move |root: &Path, name: &str, force: bool, focus: Option<tasks::AutoFocus>| {
+            let id = remove_tasks.begin(tasks::TaskKind::RemoveSession, name);
+            let handle = remove_tasks.clone();
+            let root = root.to_path_buf();
+            let name = name.to_string();
+            let lock = remove_lock.clone();
+            let agent = remove_agent.clone();
+            let worker = std::thread::spawn(move || {
+                complete_or_record_panic(
+                    &handle,
+                    id,
+                    tasks::TaskKind::RemoveSession,
+                    &root,
+                    &name,
+                    || {
+                        let _guard = lock_session_ops(&lock);
+                        run_remove(&root, &name, force, agent.as_ref(), focus)
+                    },
+                );
             });
-        });
-        track_worker(&remove_workers, worker);
-    };
+            track_worker(&remove_workers, worker);
+        };
 
     // Evict a removed session's still-running shell from the pool so a session
     // later recreated at the same path starts fresh instead of re-attaching to
@@ -1154,25 +1169,26 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             result
         };
 
-    // Spawn a new pane for `dir` in the background — the 集中 `terminal` / `agent`
-    // path when the session already shows tabs — without attaching. Mirrors the
+    // Spawn a new pane for `dir` through the unified pending-tab path. Mirrors the
     // launch resolution `open_terminal` does (agent CLI choice, resume, opening
-    // prompt, per-worktree env), but pushes the pane *inactive* via
-    // `TerminalPool::add_pane_inactive` and returns its stable id so the event
-    // loop can poll it and move to it once ready. Reusing an existing agent tab
-    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
-    // returns `None` so the caller re-attaches instead of tracking a loading tab.
+    // prompt, per-worktree env), but defers the actual pool spawn until the
+    // off-thread environment resolution lands. The tab is selected at dispatch
+    // time (as a placeholder while resolving, then as a real pool tab once
+    // spawned); readiness only decides whether to attach the still-selected tab.
+    // Reusing an existing agent tab opens no new pane: it activates that tab,
+    // delivers any `ai <prompt>`, and returns `None` so the caller re-attaches
+    // instead of tracking a loading tab.
     // The single background pane launch in flight (see [`PendingSpawn`]); held on
     // the UI thread across frames and driven by the three hooks below.
     let pending_spawn = std::cell::RefCell::new(None::<PendingSpawn>);
 
-    // Dispatch a background pane launch: resolve the launch spec on the UI thread
+    // Dispatch a pending pane launch: resolve the launch spec on the UI thread
     // (consuming the one-shot agent choice / opening prompt) and kick the
     // per-worktree environment resolution off-thread, WITHOUT spawning a pane yet —
     // so nothing blocks and no centre loader is painted. `poll_pending_spawn` spawns
-    // the pane once the environment lands. Reusing an existing agent tab opens no
-    // new pane: it activates that tab, delivers any `ai <prompt>`, and returns
-    // `Reused` so the caller re-attaches instead of tracking a loading tab.
+    // the selected pane once the environment lands. Reusing an existing agent tab
+    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
+    // returns `Reused` so the caller re-attaches instead of tracking a loading tab.
     let mut start_pending_spawn =
         |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
             // CLI priority mirrors `open_terminal`: 集中 choice, then the session's
@@ -1272,7 +1288,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         };
 
     // Drive the in-flight launch one frame. While its environment is still
-    // resolving, report `Resolving`; on the frame it lands, spawn the pane inactive
+    // resolving, report `Resolving`; on the frame it lands, spawn the pane selected
     // (on this — the UI — thread, since the pool is not `Send`) and report
     // `Starting`; then `Ready` once the pane's shell has painted, or `Gone` if the
     // spawn failed / the pane vanished.
@@ -1288,7 +1304,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     return event::PendingPoll::Resolving;
                 };
                 let mut pool = pool.borrow_mut();
-                match pool.add_pane_inactive(
+                match pool.add_pane_selected(
                     term,
                     dir,
                     ps.kind,
@@ -1315,7 +1331,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     None => event::PendingPoll::Gone,
                     Some(tab) => {
                         if pool.pane_ready(dir, id) {
-                            event::PendingPoll::Ready
+                            event::PendingPoll::Ready {
+                                selected: pool.pane_is_active(dir, id),
+                            }
                         } else {
                             event::PendingPoll::Starting(tab)
                         }
@@ -1325,8 +1343,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Make the spawned background pane the active tab (so the following re-attach
-    // drives it) and consume the launch.
+    // Consume the launch and defensively re-select its pane. The normal path
+    // already selected the tab at spawn time; this is only a guard before
+    // attaching a ready pane that still reports itself active.
     let mut activate_pending = |dir: &Path| -> bool {
         let id = pending_spawn.borrow_mut().take().and_then(|ps| ps.pane_id);
         match id {
@@ -1645,23 +1664,24 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     outcome
 }
 
-/// Layer a session's model override onto the base wiring for one launch, so the
-/// agent CLI runs the session's chosen model (the adapter renders it as `--model`
-/// / `-m`). `None` keeps the base wiring untouched — the CLI uses its own default
-/// model. The rest of the wiring (usagi binary, local-LLM offload model) is
-/// carried over unchanged. Used at every agent launch site so a session created /
-/// delegated with a pinned model launches with it (see
-/// [`SessionRecord::agent`](crate::domain::workspace_state::SessionRecord::agent)).
+/// Layer per-directory launch data onto the base wiring for one attended agent
+/// pane. Besides the session's model override, this resolves the worktree's git
+/// common directory and carries it as an extra writable root for sandboxed Codex
+/// launches. Resolution is best-effort: if `git rev-parse --git-common-dir`
+/// fails, the launch continues with the base wiring (Codex still adds usagi's
+/// data directory).
 fn wiring_for_launch(
     base: &crate::domain::agent::AgentWiring,
     model: Option<String>,
     dir: &std::path::Path,
 ) -> crate::domain::agent::AgentWiring {
-    crate::domain::agent::AgentWiring {
+    crate::usecase::agent::wiring_for_launch(
+        base,
         model,
-        is_root: !crate::usecase::workspace_guard::is_session_worktree(dir),
-        ..base.clone()
-    }
+        dir,
+        crate::domain::agent::LaunchMode::Interactive,
+        crate::infrastructure::git::git_common_dir,
+    )
 }
 
 /// Restore each session's persisted panes into the pool on startup, in the
@@ -1934,6 +1954,8 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                     name: created.name.clone(),
                     interaction_epoch,
                 }),
+                created: Some(created.name.clone()),
+                removed: None,
             },
         ),
         // The failure line is recorded to the daily log when the event loop applies
@@ -1947,6 +1969,8 @@ fn run_create(root: &Path, name: &str, interaction_epoch: u64) -> (bool, tasks::
                 target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
+                created: Some(name.to_string()),
+                removed: None,
             },
         ),
     }
@@ -1977,6 +2001,8 @@ fn run_remove(
                         .join(name),
                 ),
                 focus,
+                created: None,
+                removed: Some(name.to_string()),
             },
         ),
         Ok(outcome) => {
@@ -1997,6 +2023,8 @@ fn run_remove(
                     target_root: Some(root.to_path_buf()),
                     evict: None,
                     focus: None,
+                    created: None,
+                    removed: Some(name.to_string()),
                 },
             )
         }
@@ -2011,6 +2039,8 @@ fn run_remove(
                 target_root: Some(root.to_path_buf()),
                 evict: None,
                 focus: None,
+                created: None,
+                removed: Some(name.to_string()),
             },
         ),
     }

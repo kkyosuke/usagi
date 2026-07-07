@@ -612,6 +612,15 @@ mod tests {
             .map(|s| s["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"issue-1"));
+        // A delegated session is created through the MCP server, so its recorded
+        // origin marks it agent-launched.
+        let delegated = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "issue-1")
+            .unwrap();
+        assert_eq!(delegated["origin"], "mcp");
     }
 
     #[test]

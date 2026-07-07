@@ -107,7 +107,7 @@ fn closeup_prompt_runs_agent_and_ignores_empty() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![true]);
+    assert_eq!(*opened.borrow(), vec![false]);
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn closeup_prompt_ai_launches_the_configured_agent_with_a_prompt() {
     ));
     assert_eq!(
         *opened.borrow(),
-        vec![(true, None, Some("fix the failing test".to_string()))]
+        vec![(false, None, Some("fix the failing test".to_string()))]
     );
 }
 
@@ -271,5 +271,5 @@ fn closeup_prompt_agent_with_a_name_launches_that_cli() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(true, Some(AgentCli::CodexFugu))]);
+    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::CodexFugu))]);
 }

@@ -126,6 +126,8 @@ fn a_finished_removal_evicts_the_pooled_shell() {
             target_root: None,
             evict: Some(path.clone()),
             focus: None,
+            created: None,
+            removed: Some("feat".to_string()),
         },
     );
     let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);

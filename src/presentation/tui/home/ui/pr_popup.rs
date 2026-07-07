@@ -3,8 +3,10 @@
 use crate::presentation::theme::Palette;
 use console::style;
 
-use super::super::state::{HomeState, WorktreeList};
-use super::sidebar::{digits, pr_width, sidebar_scroll, SESSION_ROWS, UNITE_WORKSPACE_GAP_ROWS};
+use super::super::state::{HomeState, PendingSession, WorktreeList};
+use super::sidebar::{
+    digits, pr_width, sidebar_scroll_with_pending, SESSION_ROWS, UNITE_WORKSPACE_GAP_ROWS,
+};
 use super::{widgets, NAME_PREFIX};
 use crate::domain::settings::Sidebar;
 use crate::domain::workspace_state::PrLink;
@@ -12,11 +14,14 @@ use crate::domain::workspace_state::PrLink;
 /// starts on. Walks the same layout [`left_pane`] builds — in single-workspace
 /// mode and 統合(unite) mode (the [`UNITE_WORKSPACE_GAP_ROWS`]-row gap and the
 /// one-row group header before each later workspace, the two-row root entry, the
-/// divider, then either the empty-workspace message or the worktree rows) — so
+/// divider, then the worktree rows) — so
 /// the PR badge hit-test and popup anchor agree with what is drawn without ever
 /// drifting from the renderer. The global index is what the PR popup pins, so a
 /// badge in any workspace (not just the first group) can open its popup.
-pub(super) fn full_sidebar_worktree_entries(list: &WorktreeList) -> Vec<(usize, usize)> {
+pub(super) fn full_sidebar_worktree_entries_with_pending(
+    list: &WorktreeList,
+    pending_sessions: &[PendingSession],
+) -> Vec<(usize, usize)> {
     let united = list.group_count() > 1;
     let mut cur = 0usize; // body line being walked
     let mut global = 0usize; // worktree index across all groups
@@ -29,15 +34,17 @@ pub(super) fn full_sidebar_worktree_entries(list: &WorktreeList) -> Vec<(usize, 
             cur += 1; // the unite group header
         }
         cur += ROOT_ENTRY_LINES; // root entry (two rows) + divider
-        if group.worktrees().is_empty() {
-            cur += 1; // the empty-workspace message
-            continue;
-        }
         for _ in group.worktrees() {
             out.push((global, cur));
             cur += SESSION_ROWS;
             global += 1;
         }
+        cur += SESSION_ROWS
+            * pending_sessions
+                .iter()
+                .filter(|p| p.is_create() && p.root() == group.root_path())
+                .count();
+        cur += 1; // the group's persistent "+ new session" row
     }
     out
 }
@@ -83,12 +90,14 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     }
     // Lift the screen line back into the full-column layout the entries are walked
     // in, so the badge resolves correctly when the list is scrolled.
-    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let scroll =
+        sidebar_scroll_with_pending(state.list(), true, body_rows, state.pending_sessions());
     let line = screen_line + scroll;
     // The badge only lives on each entry's detail line.
-    let (idx, _) = full_sidebar_worktree_entries(state.list())
-        .into_iter()
-        .find(|&(_, start)| line == start + DETAIL_LINE)?;
+    let (idx, _) =
+        full_sidebar_worktree_entries_with_pending(state.list(), state.pending_sessions())
+            .into_iter()
+            .find(|&(_, start)| line == start + DETAIL_LINE)?;
     let wt = state.list().worktree_by_global_index(idx)?;
     if wt.pr.is_empty() {
         return None;
@@ -227,14 +236,16 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     // The body line the pinned session's entry starts on — walked the same way the
     // sidebar is drawn so the box floats beside it even in 統合(unite) mode, where
     // gaps, headers, and earlier groups push it down.
-    let (_, entry_line) = full_sidebar_worktree_entries(state.list())
-        .into_iter()
-        .find(|&(global, _)| global == idx)?;
+    let (_, entry_line) =
+        full_sidebar_worktree_entries_with_pending(state.list(), state.pending_sessions())
+            .into_iter()
+            .find(|&(global, _)| global == idx)?;
     // Lift the entry into screen space by the sidebar's scroll offset; if the
     // session's row has scrolled off the top of the pane, its badge is not on
     // screen, so pin nothing rather than float the box over an unrelated row.
     let body_rows = super::body_rows_for(height);
-    let scroll = sidebar_scroll(state.list(), true, body_rows);
+    let scroll =
+        sidebar_scroll_with_pending(state.list(), true, body_rows, state.pending_sessions());
     let screen_line = entry_line.checked_sub(scroll).filter(|&l| l < body_rows)?;
     // `render_frame` overlays the box while `lines` holds only the chrome above the
     // body (`BODY_TOP` rows) and the body itself, so the anchor clamps against that

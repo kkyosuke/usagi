@@ -13,7 +13,129 @@
 //! handed. How that policy is rendered into a CLI's invocation lives in the
 //! adapters (the infrastructure layer).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Which launch surface an adapter is planning for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchMode {
+    /// A human-facing session pane that stays open and can receive further input.
+    Interactive,
+    /// A one-shot, non-interactive run used for autonomous background work.
+    Headless,
+}
+
+/// A normalized request to build an agent launch.
+///
+/// Existing adapters still receive the historical trait methods
+/// ([`Agent::launch_command`] and [`Agent::headless_command`]) and may migrate to
+/// this request shape one at a time. The shape is intentionally small: it carries
+/// the common wiring policy plus the mode-specific prompt/resume knobs without
+/// committing adapters to a shared rendering implementation yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchRequest<'a> {
+    /// usagi's wiring policy for MCP servers, hooks, model flags, and root/session
+    /// context.
+    pub wiring: &'a AgentWiring,
+    /// Whether an interactive launch should resume prior conversation history.
+    /// Ignored for headless launches.
+    pub resume: bool,
+    /// Opening message for an interactive launch, when the CLI supports one.
+    pub initial_prompt: Option<&'a str>,
+    /// One-shot prompt for a headless launch.
+    pub prompt: Option<&'a str>,
+    /// Which launch surface is requested.
+    pub mode: LaunchMode,
+}
+
+impl<'a> LaunchRequest<'a> {
+    /// Build an interactive launch request equivalent to [`Agent::launch_command`].
+    pub fn interactive(
+        wiring: &'a AgentWiring,
+        resume: bool,
+        initial_prompt: Option<&'a str>,
+    ) -> Self {
+        Self {
+            wiring,
+            resume,
+            initial_prompt,
+            prompt: None,
+            mode: LaunchMode::Interactive,
+        }
+    }
+
+    /// Build a headless launch request equivalent to [`Agent::headless_command`].
+    pub fn headless(wiring: &'a AgentWiring, prompt: &'a str) -> Self {
+        Self {
+            wiring,
+            resume: false,
+            initial_prompt: None,
+            prompt: Some(prompt),
+            mode: LaunchMode::Headless,
+        }
+    }
+}
+
+/// A shell-neutral command plan: one program plus its argv vector.
+///
+/// Current adapters still return shell strings directly. This type is the shared
+/// migration target for future adapter work: build a `LaunchPlan` first, then
+/// render it to the legacy `sh -c`-ready string with [`shell_escaped`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlan {
+    /// Program/executable name (for example `claude`, `codex`, or `gemini`).
+    pub program: String,
+    /// Arguments passed to `program`, excluding argv[0].
+    pub args: Vec<String>,
+}
+
+impl LaunchPlan {
+    /// Start a plan for `program`.
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append one argument and return the updated plan.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Append many arguments and return the updated plan.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Render the plan as a single `sh -c`-ready command line.
+    ///
+    /// Every token, including the program name, is single-quoted via
+    /// [`shell_single_quote`], so spaces, newlines, `$`, backticks, and embedded
+    /// quotes inside model names, paths, or prompts cannot escape their argument.
+    pub fn shell_escaped(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .map(shell_single_quote)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Wrap `text` as one POSIX-shell argument using single-quote escaping.
+///
+/// This is the canonical shell-argument escaper for agent launch planning. The
+/// infrastructure adapters expose their existing helper as a thin wrapper around
+/// this function so future `LaunchPlan` migration and current command rendering
+/// share one escaping rule.
+pub fn shell_single_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
 
 /// What usagi requires of the agent CLI it drives, as one interface.
 ///
@@ -111,4 +233,67 @@ pub struct AgentWiring {
     /// Whether the agent is launched at the workspace root (the coordinator row)
     /// rather than inside a session worktree.
     pub is_root: bool,
+    /// Extra filesystem roots the adapter may make writable for an attended
+    /// sandboxed launch.
+    ///
+    /// This is data only: callers resolve any tool-specific or git-specific
+    /// paths before constructing the wiring, while each adapter decides whether
+    /// and how to render them. Codex uses these alongside usagi's own data
+    /// directory in `sandbox_workspace_write.writable_roots`; other adapters may
+    /// ignore them.
+    pub sandbox_writable_roots: Vec<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wiring() -> AgentWiring {
+        AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: Some("qwen2.5-coder".to_string()),
+            model: Some("large model".to_string()),
+            is_root: false,
+            sandbox_writable_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_one_shell_argument() {
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+        assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
+        assert_eq!(shell_single_quote("$x `y` \"z\""), "'$x `y` \"z\"'");
+    }
+
+    #[test]
+    fn launch_plan_renders_a_shell_escaped_legacy_command_line() {
+        let plan = LaunchPlan::new("codex")
+            .arg("--model")
+            .arg("gpt with spaces")
+            .args(["exec", "say 'hello'"]);
+
+        assert_eq!(
+            plan.shell_escaped(),
+            r"'codex' '--model' 'gpt with spaces' 'exec' 'say '\''hello'\'''"
+        );
+    }
+
+    #[test]
+    fn launch_request_constructors_encode_interactive_and_headless_modes() {
+        let wiring = wiring();
+
+        let interactive = LaunchRequest::interactive(&wiring, true, Some("start here"));
+        assert_eq!(interactive.mode, LaunchMode::Interactive);
+        assert_eq!(interactive.wiring, &wiring);
+        assert!(interactive.resume);
+        assert_eq!(interactive.initial_prompt, Some("start here"));
+        assert_eq!(interactive.prompt, None);
+
+        let headless = LaunchRequest::headless(&wiring, "clean stale sessions");
+        assert_eq!(headless.mode, LaunchMode::Headless);
+        assert_eq!(headless.wiring, &wiring);
+        assert!(!headless.resume);
+        assert_eq!(headless.initial_prompt, None);
+        assert_eq!(headless.prompt, Some("clean stale sessions"));
+    }
 }

@@ -621,7 +621,7 @@ fn worktree_row_truncates_a_long_branch() {
         "",
         None,
         0,
-        8,
+        7,
         8,
         DetailCols::default(),
         false,
@@ -713,10 +713,11 @@ fn left_pane_marks_the_root_row_when_it_carries_a_note() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
-        6,
+        5,
         false,
         Sidebar::Full,
         Utc::now(),
@@ -734,6 +735,7 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
@@ -743,15 +745,207 @@ fn left_pane_renders_the_root_entry_then_the_empty_message() {
         Utc::now(),
         None,
     );
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].contains(ROOT_NAME));
     assert!(lines[1].contains("workspace root"));
     assert!(lines[2].contains('─'));
-    assert!(lines[3].contains("no sessions"));
-    assert!(console::strip_ansi_codes(&lines[4]).contains("+ new session"));
-    let hint = console::strip_ansi_codes(&lines[3]);
-    assert!(hint.starts_with(&" ".repeat(NAME_PREFIX)));
-    assert!(hint[NAME_PREFIX..].starts_with("no sessions"));
+    assert!(console::strip_ansi_codes(&lines[3]).contains("+ new session"));
+}
+
+#[test]
+fn left_pane_inserts_a_three_row_pending_session_above_the_create_row() {
+    let mut state = state_with(Vec::new());
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        8,
+        true,
+        Sidebar::Full,
+        chrono::DateTime::parse_from_rfc3339("2026-06-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        None,
+    );
+    let name = console::strip_ansi_codes(&lines[3]);
+    let detail = console::strip_ansi_codes(&lines[4]);
+    let resource = console::strip_ansi_codes(&lines[5]);
+    let create = console::strip_ansi_codes(&lines[6]);
+    assert!(name.contains("newx"));
+    // The detail row is blank height only; the resource row keeps the CPU/MEM
+    // shape but shimmers instead of resting.
+    assert!(!detail.contains("creating session"));
+    assert!(detail.trim().is_empty());
+    assert!(resource.contains("0%"));
+    assert!(resource.contains("0MB"));
+    assert!(create.contains("+ new session"));
+}
+
+#[test]
+fn left_pane_inserts_the_pending_session_at_the_foot_with_a_session_present() {
+    // A workspace that already has a session draws its "+ new session" row at the
+    // foot; a pending create reserves a three-line skeleton immediately above it.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        10,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    // Root(2) + divider(1) + session(3) = 6, so the pending skeleton is 6..=8
+    // and the persistent create row remains selectable at line 9.
+    assert!(console::strip_ansi_codes(&lines[6]).contains("newx"));
+    assert!(console::strip_ansi_codes(&lines[7]).trim().is_empty()); // height-only detail row
+    assert!(console::strip_ansi_codes(&lines[8]).contains("0MB"));
+    assert!(console::strip_ansi_codes(&lines[9]).contains("+ new session"));
+}
+
+#[test]
+fn left_pane_replaces_a_removing_session_with_a_leaf_skeleton_in_place() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        80,
+        7,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    // Root(2) + divider(1) + the replacing removal skeleton(3) + create(1).
+    let name = console::strip_ansi_codes(&lines[3]);
+    let detail = console::strip_ansi_codes(&lines[4]);
+    let prune = console::strip_ansi_codes(&lines[5]);
+    let create = console::strip_ansi_codes(&lines[6]);
+    assert!(name.contains("old"));
+    assert!(name.contains('✂'));
+    assert!(detail.contains("removing session"));
+    assert!(prune.contains("pruning worktree"));
+    assert!(create.contains("+ new session"));
+}
+
+#[test]
+fn removal_skeletons_do_not_move_hit_tests_or_the_create_row() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar_with_pending(
+            state.list(),
+            3,
+            Sidebar::Full,
+            0,
+            state.pending_sessions(),
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        group_inline_insert_line_with_pending(state.list(), 0, state.pending_sessions()),
+        6
+    );
+}
+
+#[test]
+fn rail_pending_session_rows_reserve_three_rows() {
+    let rows = rail_pending_session_rows(0);
+    assert_eq!(rows.len(), SESSION_ROWS);
+    assert!(console::strip_ansi_codes(&rows[0]).contains('+'));
+}
+
+#[test]
+fn rail_removing_session_rows_use_a_pruning_glyph_in_place() {
+    let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_removing_session(PathBuf::from("/repo"), "old".to_string());
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        state.pending_sessions(),
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        30,
+        7,
+        false,
+        Sidebar::Rail,
+        Utc::now(),
+        None,
+    );
+    assert!(console::strip_ansi_codes(&lines[3]).contains('✂'));
+    assert!(console::strip_ansi_codes(&lines[6]).contains('+'));
+}
+
+#[test]
+fn rail_pane_inserts_three_pending_rows_before_the_create_slot() {
+    // The rail draws only the pulsing `+` glyph (no room for the name), so it
+    // keeps the same plain `+` affordance text while reserving the three rows a
+    // real session will occupy before the still-selectable create slot.
+    let render_rail = |state: &HomeState| {
+        left_pane(
+            state.list(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            state.pending_sessions(),
+            &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
+            30,
+            10,
+            false,
+            Sidebar::Rail,
+            Utc::now(),
+            None,
+        )
+    };
+
+    // Empty workspace: the create slot sits under the pending skeleton.
+    let mut empty = state_with(Vec::new());
+    empty.set_root_path("/repo");
+    empty.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let empty_rail = render_rail(&empty);
+    assert!(console::strip_ansi_codes(&empty_rail[3]).contains('+'));
+    assert!(console::strip_ansi_codes(&empty_rail[6]).contains('+'));
+
+    // Populated workspace: the create slot sits at the foot of the sessions.
+    let mut full = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    full.set_root_path("/repo");
+    full.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    let full_rail = render_rail(&full);
+    assert!(console::strip_ansi_codes(&full_rail[6]).contains('+'));
+    assert!(console::strip_ansi_codes(&full_rail[9]).contains('+'));
 }
 
 #[test]
@@ -769,6 +963,7 @@ fn left_pane_shows_each_sessions_relative_update_time_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -800,6 +995,7 @@ fn left_pane_shows_the_ahead_behind_marker_on_the_detail_line() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         40,
@@ -855,6 +1051,7 @@ fn left_pane_lines_the_detail_fields_up_across_sessions_of_different_sizes() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
@@ -908,6 +1105,7 @@ fn left_pane_freshness_column_does_not_shift_the_detail_line_as_a_session_ages()
             &agent, // running — the `▶` agent icon
             &HashSet::new(),
             &HashSet::new(),
+            &[],
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
             18,
@@ -944,6 +1142,7 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -982,6 +1181,7 @@ fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1036,6 +1236,7 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1058,9 +1259,9 @@ fn rail_pane_in_unite_mode_separates_each_workspace() {
 }
 
 #[test]
-fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
+fn left_pane_in_unite_mode_shows_an_empty_workspace_create_row() {
     // A stacked workspace with no sessions still shows its header, root, divider,
-    // and the empty message under it.
+    // and create row under it.
     let list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new(
             "wsA",
@@ -1074,6 +1275,7 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1086,7 +1288,8 @@ fn left_pane_in_unite_mode_shows_an_empty_workspaces_message() {
     let rendered = stripped(&full);
     assert!(rendered.contains("a1")); // wsA's session
     assert!(rendered.contains("▌ wsB")); // the empty workspace still gets a header
-    assert!(rendered.contains(EMPTY_MESSAGE)); // and the "no sessions" message
+    assert!(rendered.contains("+ new session")); // and a create row
+    assert!(!rendered.contains("no sessions"));
 }
 
 fn unite_pair() -> WorktreeList {
@@ -1109,6 +1312,7 @@ fn full_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1155,6 +1359,7 @@ fn overview_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1240,6 +1445,7 @@ fn left_pane_stops_at_a_later_group_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1272,6 +1478,7 @@ fn rail_pane_stops_at_a_later_group_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1376,16 +1583,15 @@ fn sidebar_row_at_line_skips_an_empty_workspaces_message() {
         ),
     ]);
     let at = |line| sidebar_row_at_line_for_sidebar(&list, line, Sidebar::Full, 0);
-    // wsA (empty): 0 hdr, 1-2 root(flat0), 3 div, 4 empty message, 5 create(flat1),
-    //   6-7 gap. wsB: 8 hdr, 9-10 root(flat2), 11 div, 12-14 b1(flat3), 15 create.
+    // wsA (empty): 0 hdr, 1-2 root(flat0), 3 div, 4 create(flat1),
+    //   5-6 gap. wsB: 7 hdr, 8-9 root(flat2), 10 div, 11-13 b1(flat3), 14 create.
     assert_eq!(at(1), Some(0)); // wsA root
-    assert_eq!(at(4), None); // empty-workspace message
-    assert_eq!(at(5), Some(1)); // wsA create row (empty workspace)
-    assert_eq!(at(6), None); // first gap row
-    assert_eq!(at(7), None); // second gap row
+    assert_eq!(at(4), Some(1)); // wsA create row (empty workspace)
+    assert_eq!(at(5), None); // first gap row
+    assert_eq!(at(6), None); // second gap row
 
-    assert_eq!(at(9), Some(2)); // wsB root
-    assert_eq!(at(12), Some(3)); // b1
+    assert_eq!(at(8), Some(2)); // wsB root
+    assert_eq!(at(11), Some(3)); // b1
 }
 
 #[test]
@@ -1422,6 +1628,8 @@ fn row_select_click_works_in_unite_mode() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: Vec::new(),
             created_at: Utc::now(),
@@ -1449,6 +1657,8 @@ fn unite_with_prs() -> HomeState {
         note: None,
         label_id: None,
         agent: Default::default(),
+        origin: Default::default(),
+        started_from: None,
         root: PathBuf::from("/ws/main"),
         worktrees: vec![worktree_with_pr(412)],
         created_at: Utc::now(),
@@ -1464,6 +1674,8 @@ fn unite_with_prs() -> HomeState {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1478,21 +1690,22 @@ fn unite_with_prs() -> HomeState {
 fn sidebar_pr_badge_at_maps_badges_across_unite_groups() {
     let state = unite_with_prs();
     // The primary workspace's badge (detail row 8) maps to global index 0, and the
-    // extra workspace's badge (detail row 17, past the gap and header) to global
+    // extra workspace's badge (detail row 18, past the create row, gap, and header) to global
     // index 1 — the popup reaches a session in any group, not just the first.
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 8), Some(0));
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), Some(1));
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 18), Some(1));
     // The identity line (row 7 / 16) above each detail line carries no badge.
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 7), None);
-    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 16), None);
+    assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 17), None);
 }
 
 #[test]
 fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
-    // An empty primary workspace contributes only its one-row "no sessions" line,
-    // which the walk steps over so the extra workspace's badge still resolves. `b1`
-    // starts on body line 11 (empty primary: header 0, root 1-2, divider 3, message
-    // 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → detail row 15.
+    // An empty primary workspace contributes root/divider/create (no "no
+    // sessions" message), then the extra workspace's badge still resolves. `b1`
+    // starts on body line 11 (empty primary: header 0, root 1-2, divider 3,
+    // create 4; then the gap 5-6, wsB header 7, root 8-9, divider 10) → screen
+    // detail row 15.
     let mut state = HomeState::new("usagi", Vec::new(), None);
     state.set_extra_groups(vec![GroupSource {
         name: "wsB".to_string(),
@@ -1504,6 +1717,8 @@ fn sidebar_pr_badge_at_skips_an_empty_earlier_unite_group() {
             note: None,
             label_id: None,
             agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
             root: PathBuf::from("/wsB/.usagi/sessions/b1"),
             worktrees: vec![worktree_with_pr(777)],
             created_at: Utc::now(),
@@ -1523,17 +1738,17 @@ fn pr_popup_floats_and_opens_across_unite_groups() {
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 0");
     assert_eq!((top, left), (7, 43));
     assert!(stripped(&popup).contains("#412"));
-    // The extra workspace's PR (global 1) floats lower, past the gap and header
-    // (entry starts on body line 13 → screen row 16).
+    // The extra workspace's PR (global 1) floats lower, past the first group's
+    // create row, gap, and header (entry starts on body line 14 → screen row 17).
     state.set_pr_popup(Some(1));
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 1");
-    assert_eq!((top, left), (16, 43));
+    assert_eq!((top, left), (17, 43));
     assert!(stripped(&popup).contains("#777"));
-    // Clicking `#777` in that box (content row 17, the token flush at left+2 = 45)
+    // Clicking `#777` in that box (content row 18, the token flush at left+2 = 45)
     // opens the extra workspace's PR — the click resolves the right session's URL
     // across groups.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 17),
+        pr_popup_click(&state, 24, 120, 45, 18),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/777"
     ));
 }
@@ -1556,6 +1771,7 @@ fn left_pane_stops_building_rows_once_the_pane_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1592,6 +1808,7 @@ fn rail_pane_stops_building_rows_once_the_rail_is_full() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         8,
@@ -1617,6 +1834,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1635,6 +1853,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1653,6 +1872,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &path,
         &path,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1671,6 +1891,7 @@ fn left_pane_marks_the_agent_state_through_its_lifecycle() {
         &empty,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1710,6 +1931,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &path,
         &empty,
         &empty,
+        &[],
         &resources,
         &crate::domain::settings::SessionLabelMaster::default(),
         40,
@@ -1736,6 +1958,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &path,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         40,
@@ -1758,6 +1981,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         &path,
         &empty,
         &empty,
+        &[],
         &resources,
         &crate::domain::settings::SessionLabelMaster::default(),
         40,
@@ -1783,6 +2007,7 @@ fn left_pane_is_trimmed_to_available_rows() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1812,6 +2037,7 @@ fn left_pane_marks_the_active_worktree_with_a_gutter_bar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1843,6 +2069,7 @@ fn left_pane_marks_the_selected_session_with_a_rabbit_stack() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -1875,6 +2102,7 @@ fn rail_collapses_each_entry_to_three_rows_without_names_or_numbers() {
         &empty,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
@@ -1924,6 +2152,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &[],
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
             30,
@@ -1945,6 +2174,7 @@ fn rail_keeps_the_same_row_count_as_the_full_sidebar() {
             &empty,
             &empty,
             &empty,
+            &[],
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
             30,
@@ -1977,6 +2207,7 @@ fn rail_shows_the_active_bar_down_all_rows_and_the_agent_glyph_on_row_two() {
         &path,
         &empty,
         &empty,
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         RAIL_WIDTH,
@@ -2015,6 +2246,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
             running,
             waiting,
             done,
+            &[],
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
@@ -2046,6 +2278,7 @@ fn rail_sidebar_marks_the_overview_cursor() {
             &empty,
             &empty,
             &empty,
+            &[],
             &HashMap::new(),
             &crate::domain::settings::SessionLabelMaster::default(),
             RAIL_WIDTH,
@@ -2100,6 +2333,7 @@ fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         left_w,
@@ -2149,6 +2383,7 @@ fn left_pane_fades_every_row_but_the_cursor_when_asked() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -2179,6 +2414,7 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -2260,6 +2496,25 @@ fn sidebar_pr_badge_at_ignores_clicks_off_the_sidebar() {
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 1), None);
     // A row below the two-pane body (past `body_rows`).
     assert_eq!(sidebar_pr_badge_at(&state, 24, 120, 38, 22), None);
+}
+
+#[test]
+fn pr_popup_worktree_entries_count_pending_skeletons_before_later_groups() {
+    let mut a = WorkspaceGroup::new(
+        "wsA",
+        vec![worktree(Some("a1"), true, BranchStatus::Pushed)],
+    );
+    a.set_root_path("/a");
+    let mut b = WorkspaceGroup::new("wsB", vec![worktree_with_pr(7)]);
+    b.set_root_path("/b");
+    let list = WorktreeList::from_groups(vec![a, b]);
+    let mut state = state_with(Vec::new());
+    state.begin_pending_session(PathBuf::from("/a"), "newx".to_string());
+
+    let without = full_sidebar_worktree_entries_with_pending(&list, &[]);
+    let with = full_sidebar_worktree_entries_with_pending(&list, state.pending_sessions());
+    assert_eq!(with[0], without[0]);
+    assert_eq!(with[1].1, without[1].1 + SESSION_ROWS);
 }
 
 #[test]
@@ -2469,6 +2724,7 @@ fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         80,
@@ -2494,6 +2750,7 @@ fn rail_pane_draws_the_create_row_glyph() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         5,
@@ -2526,6 +2783,47 @@ fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
 }
 
 #[test]
+fn sidebar_row_at_line_skips_pending_skeleton_and_maps_create_after_it() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    // root(0,1), divider(2), main(3,4,5), pending skeleton(6,7,8), create(9).
+    for line in 6..=8 {
+        assert_eq!(
+            sidebar_row_at_line_for_sidebar_with_pending(
+                state.list(),
+                line,
+                Sidebar::Full,
+                0,
+                state.pending_sessions(),
+            ),
+            None
+        );
+    }
+    assert_eq!(
+        sidebar_row_at_line_for_sidebar_with_pending(
+            state.list(),
+            9,
+            Sidebar::Full,
+            0,
+            state.pending_sessions(),
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn group_inline_insert_line_counts_pending_skeleton_rows() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
+    state.set_root_path("/repo");
+    state.begin_pending_session(PathBuf::from("/repo"), "newx".to_string());
+    assert_eq!(
+        group_inline_insert_line_with_pending(state.list(), 0, state.pending_sessions()),
+        9
+    );
+}
+
+#[test]
 fn overview_preview_prompts_to_create_when_the_create_row_is_selected() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     state.enter_overview(super::super::super::state::ReturnMode::Base);
@@ -2551,6 +2849,7 @@ fn full_pane(list: &WorktreeList, rows: usize) -> Vec<String> {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
@@ -2628,6 +2927,7 @@ fn rail_pane_scrolls_the_selected_session_into_view() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &[],
         &HashMap::new(),
         &crate::domain::settings::SessionLabelMaster::default(),
         8,
@@ -2662,8 +2962,8 @@ fn sidebar_row_click_maps_through_the_scroll_offset() {
 
 #[test]
 fn sidebar_scroll_walks_past_an_empty_workspace_group() {
-    // Unite mode with an empty leading workspace forces the span walk through the
-    // empty-workspace message row before it reaches the selected session in the
+    // Unite mode with an empty leading workspace still walks that workspace's
+    // root/divider/create block before it reaches the selected session in the
     // second group.
     let mut list = WorktreeList::from_groups(vec![
         WorkspaceGroup::new("wsA", Vec::new()),
@@ -2678,10 +2978,10 @@ fn sidebar_scroll_walks_past_an_empty_workspace_group() {
     // Flat rows (each expanded workspace owns a create row): wsA root 0, wsA create
     // 1, wsB root 2, b0 3, b1 4, wsB create 5. Select b1.
     list.focus_index(4);
-    // Group A block (header 1 + root 2 + divider 1 + empty 1 + create 1 = 6), then
-    // group B (gap 2 + header 1 + root 2 + divider 1 + 2×3 + create 1 = 13) = 19.
-    // b1's block spans lines 15-17, so a 9-row pane scrolls by 9 (18 − 9).
-    assert_eq!(sidebar_scroll(&list, true, 9), 9);
+    // Group A block (header 1 + root 2 + divider 1 + create 1 = 5), then group B
+    // (gap 2 + header 1 + root 2 + divider 1 + 2×3 + create 1 = 13) = 18. b1's
+    // block spans lines 14-16, so a 9-row pane scrolls by 8 (17 − 9).
+    assert_eq!(sidebar_scroll(&list, true, 9), 8);
 }
 
 #[test]
