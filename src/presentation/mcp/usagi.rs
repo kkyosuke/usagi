@@ -184,8 +184,8 @@ struct DelegateIssueArgs {
     #[serde(default)]
     name: Option<String>,
     /// Optional agent CLI the delegated session launches with, overriding the
-    /// workspace effective `agent_cli`. Accepts `claude` / `codex` / `codex-fugu`
-    /// / `gemini` / `agy` (case-insensitive).
+    /// workspace effective `agent_cli`. Accepts `claude` / `codex` / `sakana.ai`
+    /// / `gemini` / `antigravity` (case-insensitive).
     #[serde(default)]
     agent_cli: Option<String>,
     /// Optional model the session's agent CLI runs (rendered as `--model` / `-m`).
@@ -216,7 +216,7 @@ fn delegate_issue_schema() -> Value {
                 "name": { "type": "string", "description": "Session name to create (default: issue-<number>)" },
                 "agent_cli": {
                     "type": "string",
-                    "enum": ["claude", "codex", "codex-fugu", "gemini", "agy"],
+                    "enum": ["claude", "codex", "sakana.ai", "gemini", "antigravity"],
                     "description": "Agent CLI the delegated session launches (default: the workspace effective agent_cli)"
                 },
                 "model": {

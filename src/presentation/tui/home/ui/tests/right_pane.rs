@@ -468,7 +468,7 @@ fn closeup_menu_reserves_the_widest_expansion_then_scrolls_a_short_pane() {
     state.set_installed_agents(vec![
         AgentCli::Claude,
         AgentCli::Codex,
-        AgentCli::CodexFugu,
+        AgentCli::SakanaAi,
         AgentCli::Gemini,
         AgentCli::Antigravity,
     ]);

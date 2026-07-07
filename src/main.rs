@@ -250,7 +250,7 @@ enum Commands {
         /// Report the worktrees the agent would remove without deleting anything
         #[arg(long)]
         dry_run: bool,
-        /// Override the configured agent CLI for this run (claude / codex / codex-fugu / gemini / agy)
+        /// Override the configured agent CLI for this run (claude / codex / sakana.ai / gemini / antigravity)
         #[arg(long, value_name = "NAME")]
         agent: Option<String>,
     },

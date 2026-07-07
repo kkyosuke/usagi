@@ -142,7 +142,7 @@ fn resolved_sandbox_writable_roots_override(extra_roots: &[PathBuf]) -> Option<S
 }
 
 /// The Codex config overrides for one usagi-owned MCP server. Besides transport
-/// wiring, mark the server's tools as pre-approved so `agent codex-fugu` does not
+/// wiring, mark the server's tools as pre-approved so `agent sakana.ai` does not
 /// stop for a confirmation before every `issue_*` / `memory_*` / `session_*`
 /// call.
 fn mcp_server_overrides(name: &str, bin: &str, args: &[&str]) -> Vec<String> {
@@ -220,7 +220,7 @@ fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
 
 /// Where Codex stores each session's rollout transcript:
 /// `~/<home_subdir>/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` (`home_subdir` is
-/// `.codex` for Codex, `.codex-fugu` for the codex-fugu variant). `None` when the
+/// `.codex` for Codex, `.codex-fugu` for SakanaAi). `None` when the
 /// home directory can't be determined, so usagi simply launches fresh rather than
 /// guessing.
 fn codex_sessions_root(home_subdir: &str) -> Option<PathBuf> {
@@ -293,7 +293,7 @@ fn forget_session_in(root: &Path, dir: &Path) {
     }
 }
 
-/// The Codex CLI adapter, shared by Codex and the codex-fugu variant.
+/// The Codex CLI adapter, shared by Codex and SakanaAi.
 ///
 /// Both speak the same invocation surface (the `-c` overrides, lifecycle hooks,
 /// and `resume --last` built above); they differ only in the program launched and
@@ -317,10 +317,10 @@ impl CodexAgent {
         }
     }
 
-    /// The codex-fugu adapter (`codex-fugu`, transcripts under `~/.codex-fugu`).
+    /// The SakanaAi adapter (`codex-fugu`, transcripts under `~/.codex-fugu`).
     pub fn fugu() -> Self {
         Self {
-            program: AgentCli::CodexFugu.command(),
+            program: AgentCli::SakanaAi.command(),
             home_subdir: ".codex-fugu",
         }
     }
@@ -768,7 +768,7 @@ mod tests {
 
     #[test]
     fn headless_command_uses_the_fugu_program_and_escapes_the_prompt() {
-        // codex-fugu reuses the adapter, so its headless command launches
+        // SakanaAi reuses the adapter, so its headless command launches
         // `codex-fugu exec`. The prompt is arbitrary text, escaped for the
         // single-quoted shell context.
         let launch = CodexAgent::fugu().headless_command(&wiring("usagi", None), "don't stop");
@@ -913,8 +913,8 @@ mod tests {
     }
 
     #[test]
-    fn fugu_launches_the_codex_fugu_program_with_the_same_wiring() {
-        // The codex-fugu adapter is Codex with a different program name: the launch
+    fn sakana_ai_launches_the_codex_fugu_program_with_the_same_wiring() {
+        // The SakanaAi adapter is Codex with a different program name: the launch
         // starts with `codex-fugu` but carries the identical `-c` wiring and hooks.
         let agent = CodexAgent::fugu();
         assert_eq!(agent.program(), "codex-fugu");
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn fugu_resumes_from_its_own_sessions_root() {
-        // codex-fugu's rollout store is `~/.codex-fugu/sessions`, distinct from
+        // SakanaAi's rollout store is `~/.codex-fugu/sessions`, distinct from
         // Codex's `~/.codex/sessions`. A transcript under one root resumes only the
         // matching adapter.
         let home = tempfile::tempdir().unwrap();

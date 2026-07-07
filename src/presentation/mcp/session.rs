@@ -113,14 +113,16 @@ pub(crate) fn resolve_session_agent(
             let parsed = AgentCli::from_name(name).ok_or_else(|| {
                 format!(
                     "unknown agent_cli {name:?}: expected one of \
-                     claude, codex, codex-fugu, gemini, agy"
+                     claude, codex, sakana.ai, gemini, antigravity"
                 )
             })?;
 
             let capable = crate::usecase::agent::mcp_capable_clis(runner);
             if !capable.contains(&parsed) {
-                let capable_names: Vec<String> =
-                    capable.iter().map(|c| c.command().to_string()).collect();
+                let capable_names: Vec<String> = capable
+                    .iter()
+                    .map(|c| c.display_name().to_lowercase())
+                    .collect();
                 return Err(format!(
                     "agent_cli {name:?} is not installed or not MCP-capable. \
                      Available installed MCP-capable agents: {capable_names:?}"
@@ -434,8 +436,8 @@ impl McpService for SessionMcpServer {
 struct CreateArgs {
     name: String,
     /// Optional agent CLI this session launches with, overriding the workspace
-    /// effective `agent_cli`. Accepts `claude` / `codex` / `codex-fugu` /
-    /// `gemini` / `agy` (case-insensitive). Absent defers to the workspace setting.
+    /// effective `agent_cli`. Accepts `claude` / `codex` / `sakana.ai` /
+    /// `gemini` / `antigravity` (case-insensitive). Absent defers to the workspace setting.
     #[serde(default)]
     agent_cli: Option<String>,
     /// Optional model the session's agent CLI runs (rendered as `--model` / `-m`).
@@ -595,7 +597,7 @@ fn session_tool_schemas() -> Value {
                     },
                     "agent_cli": {
                         "type": "string",
-                        "enum": ["claude", "codex", "codex-fugu", "gemini", "agy"],
+                        "enum": ["claude", "codex", "sakana.ai", "gemini", "antigravity"],
                         "description": "Agent CLI this session launches (default: the workspace effective agent_cli)"
                     },
                     "model": {
@@ -993,12 +995,19 @@ mod tests {
         .expect("known cli");
         assert_eq!(agent.cli, Some(AgentCli::Claude));
         assert_eq!(agent.model.as_deref(), Some("claude-3-5-sonnet"));
-        // The codex-fugu launch command resolves too.
+        // The user-facing SakanaAi label resolves.
+        assert_eq!(
+            resolve_session_agent(&runner, Some("sakana.ai"), None)
+                .unwrap()
+                .cli,
+            Some(AgentCli::SakanaAi)
+        );
+        // The old launch-command spelling remains a compatibility alias.
         assert_eq!(
             resolve_session_agent(&runner, Some("codex-fugu"), None)
                 .unwrap()
                 .cli,
-            Some(AgentCli::CodexFugu)
+            Some(AgentCli::SakanaAi)
         );
         // Neither argument yields the default (follow the workspace settings).
         assert!(resolve_session_agent(&runner, None, None)

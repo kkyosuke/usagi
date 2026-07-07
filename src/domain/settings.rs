@@ -25,10 +25,12 @@ pub enum AgentCli {
     Claude,
     /// OpenAI's Codex CLI.
     Codex,
-    /// A Codex-compatible CLI invoked as `codex-fugu` (same invocation surface as
-    /// Codex — `-c` overrides, lifecycle hooks, `resume --last` — with its own
-    /// rollout store under `~/.codex-fugu`).
-    CodexFugu,
+    /// Sakana AI's Codex-compatible CLI. Presented as `sakana.ai` and invoked as
+    /// `codex-fugu` (same invocation surface as Codex — `-c` overrides, lifecycle
+    /// hooks, `resume --last` — with its own rollout store under `~/.codex-fugu`).
+    /// The `codex_fugu` alias keeps configs written before the rename readable.
+    #[serde(alias = "codex_fugu")]
+    SakanaAi,
     /// Google's Gemini CLI.
     Gemini,
     /// Google's Antigravity CLI, invoked as `agy` (the successor to the Gemini
@@ -159,7 +161,7 @@ impl AgentCli {
     pub const ALL: [AgentCli; 5] = [
         AgentCli::Claude,
         AgentCli::Codex,
-        AgentCli::CodexFugu,
+        AgentCli::SakanaAi,
         AgentCli::Gemini,
         AgentCli::Antigravity,
     ];
@@ -175,7 +177,7 @@ impl AgentCli {
         match self {
             AgentCli::Claude => "claude",
             AgentCli::Codex => "codex",
-            AgentCli::CodexFugu => "codex-fugu",
+            AgentCli::SakanaAi => "codex-fugu",
             AgentCli::Gemini => "gemini",
             AgentCli::Antigravity => "agy",
         }
@@ -183,36 +185,49 @@ impl AgentCli {
 
     /// The human-facing display name shown wherever the CLI is presented to the
     /// user (the config-screen selector, the `usagi feature` table, `doctor`).
-    /// Distinct from [`command`](Self::command): the codex-fugu variant launches
+    /// Distinct from [`command`](Self::command): SakanaAi launches
     /// `codex-fugu` but is presented as `sakana.ai`. The single source of truth
     /// for these labels.
     pub fn display_name(self) -> &'static str {
         match self {
             AgentCli::Claude => "Claude",
             AgentCli::Codex => "Codex",
-            AgentCli::CodexFugu => "sakana.ai",
+            AgentCli::SakanaAi => "sakana.ai",
             AgentCli::Gemini => "Gemini",
             AgentCli::Antigravity => "Antigravity",
         }
     }
 
+    /// The stable snake_case label written to settings files and shown by
+    /// `usagi config`. Kept separate from [`command`](Self::command) because
+    /// `SakanaAi` launches the `codex-fugu` binary but should persist as the
+    /// user-facing variant name.
+    pub fn config_label(self) -> &'static str {
+        match self {
+            AgentCli::Claude => "claude",
+            AgentCli::Codex => "codex",
+            AgentCli::SakanaAi => "sakana_ai",
+            AgentCli::Gemini => "gemini",
+            AgentCli::Antigravity => "antigravity",
+        }
+    }
+
     /// Resolve a user-typed agent name to its variant, accepting the launch
-    /// [`command`](Self::command) (`claude` / `codex` / `codex-fugu` / `gemini` / `agy`),
-    /// the [`display_name`](Self::display_name) (`sakana.ai` for codex-fugu), and
-    /// the on-disk serde label (`codex_fugu`) that `usagi config` prints — all
-    /// case-insensitively. Used by the 集中 prompt's `agent <name>` and
+    /// [`command`](Self::command), the [`display_name`](Self::display_name), and
+    /// the on-disk [`config_label`](Self::config_label) — all case-insensitively.
+    /// Used by the 集中 prompt's `agent <name>` and
     /// `clean --agent`. Returns `None` for an unrecognised name.
     ///
-    /// `-` and `_` are treated as the same separator so the serde label resolves:
-    /// `codex_fugu` (what `config` shows) and `codex-fugu` (the launch command)
-    /// differ only there, and a user copying the displayed name would otherwise
-    /// hit "unknown agent CLI".
+    /// `-` and `_` are treated as the same separator, keeping old `codex_fugu`
+    /// config values and copied labels readable after the `SakanaAi` rename.
     pub fn from_name(name: &str) -> Option<AgentCli> {
         let normalize = |s: &str| s.trim().to_ascii_lowercase().replace('_', "-");
         let name = normalize(name);
-        AgentCli::ALL
-            .into_iter()
-            .find(|cli| normalize(cli.command()) == name || normalize(cli.display_name()) == name)
+        AgentCli::ALL.into_iter().find(|cli| {
+            normalize(cli.command()) == name
+                || normalize(cli.display_name()) == name
+                || normalize(cli.config_label()) == name
+        })
     }
 }
 
@@ -1391,7 +1406,7 @@ mod tests {
     fn agent_cli_maps_to_its_program_command() {
         assert_eq!(AgentCli::Claude.command(), "claude");
         assert_eq!(AgentCli::Codex.command(), "codex");
-        assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
+        assert_eq!(AgentCli::SakanaAi.command(), "codex-fugu");
         assert_eq!(AgentCli::Gemini.command(), "gemini");
         assert_eq!(AgentCli::Antigravity.command(), "agy");
     }
@@ -1404,19 +1419,19 @@ mod tests {
             [
                 AgentCli::Claude,
                 AgentCli::Codex,
-                AgentCli::CodexFugu,
+                AgentCli::SakanaAi,
                 AgentCli::Gemini,
                 AgentCli::Antigravity
             ]
         );
-        // Each has a non-empty display name; the codex-fugu variant shows as
+        // Each has a non-empty display name; SakanaAi shows as
         // `sakana.ai` even though its launch command is `codex-fugu`.
         for cli in AgentCli::ALL {
             assert!(!cli.display_name().is_empty());
         }
         assert_eq!(AgentCli::Claude.display_name(), "Claude");
         assert_eq!(AgentCli::Codex.display_name(), "Codex");
-        assert_eq!(AgentCli::CodexFugu.display_name(), "sakana.ai");
+        assert_eq!(AgentCli::SakanaAi.display_name(), "sakana.ai");
         assert_eq!(AgentCli::Gemini.display_name(), "Gemini");
         // Antigravity launches `agy` but is presented as `Antigravity`.
         assert_eq!(AgentCli::Antigravity.display_name(), "Antigravity");
@@ -1427,7 +1442,7 @@ mod tests {
         // The launch command resolves each variant.
         assert_eq!(AgentCli::from_name("claude"), Some(AgentCli::Claude));
         assert_eq!(AgentCli::from_name("codex"), Some(AgentCli::Codex));
-        assert_eq!(AgentCli::from_name("codex-fugu"), Some(AgentCli::CodexFugu));
+        assert_eq!(AgentCli::from_name("codex-fugu"), Some(AgentCli::SakanaAi));
         assert_eq!(AgentCli::from_name("gemini"), Some(AgentCli::Gemini));
         // Antigravity resolves from both its launch command (`agy`) and its
         // display name (`Antigravity`).
@@ -1436,19 +1451,16 @@ mod tests {
             AgentCli::from_name("antigravity"),
             Some(AgentCli::Antigravity)
         );
-        // The display name resolves too — `sakana.ai` is codex-fugu's label.
-        assert_eq!(AgentCli::from_name("sakana.ai"), Some(AgentCli::CodexFugu));
-        // The on-disk serde label (`codex_fugu`) that `usagi config` prints
-        // resolves as well — `-`/`_` are the same separator — so copying what
-        // `config` shows into `agent` / `clean --agent` works.
-        assert_eq!(AgentCli::from_name("codex_fugu"), Some(AgentCli::CodexFugu));
-        assert_eq!(
-            AgentCli::from_name(" Codex_Fugu "),
-            Some(AgentCli::CodexFugu)
-        );
+        // The display name resolves too — `sakana.ai` is SakanaAi's label.
+        assert_eq!(AgentCli::from_name("sakana.ai"), Some(AgentCli::SakanaAi));
+        // The on-disk label that `usagi config` prints resolves as well, and
+        // the previous `codex_fugu` label remains accepted for compatibility.
+        assert_eq!(AgentCli::from_name("sakana_ai"), Some(AgentCli::SakanaAi));
+        assert_eq!(AgentCli::from_name("codex_fugu"), Some(AgentCli::SakanaAi));
+        assert_eq!(AgentCli::from_name(" Sakana_Ai "), Some(AgentCli::SakanaAi));
         // Case and surrounding whitespace are ignored.
         assert_eq!(AgentCli::from_name("  Claude "), Some(AgentCli::Claude));
-        assert_eq!(AgentCli::from_name("SAKANA.AI"), Some(AgentCli::CodexFugu));
+        assert_eq!(AgentCli::from_name("SAKANA.AI"), Some(AgentCli::SakanaAi));
         // An unrecognised name resolves to nothing.
         assert_eq!(AgentCli::from_name("emacs"), None);
         assert_eq!(AgentCli::from_name(""), None);
@@ -1456,17 +1468,22 @@ mod tests {
 
     #[test]
     fn agent_cli_serializes_in_snake_case() {
-        // The persisted (on-disk) form is snake_case, so `CodexFugu` is stored as
-        // `codex_fugu` even though the launched program is `codex-fugu`.
+        // The persisted (on-disk) form is snake_case, so `SakanaAi` is stored
+        // by its variant name even though the launched program is `codex-fugu`.
         assert_eq!(
-            serde_json::to_string(&AgentCli::CodexFugu).unwrap(),
-            "\"codex_fugu\""
+            serde_json::to_string(&AgentCli::SakanaAi).unwrap(),
+            "\"sakana_ai\""
         );
+        assert_eq!(
+            serde_json::from_str::<AgentCli>("\"sakana_ai\"").unwrap(),
+            AgentCli::SakanaAi
+        );
+        // Configs written before the rename still deserialize.
         assert_eq!(
             serde_json::from_str::<AgentCli>("\"codex_fugu\"").unwrap(),
-            AgentCli::CodexFugu
+            AgentCli::SakanaAi
         );
-        assert_eq!(AgentCli::CodexFugu.command(), "codex-fugu");
+        assert_eq!(AgentCli::SakanaAi.command(), "codex-fugu");
     }
 
     #[test]
