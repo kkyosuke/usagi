@@ -555,6 +555,10 @@ fn agent_completes_available_cli_names() {
     let completion = registry().complete("agent ", CommandScope::Session);
     assert!(completion.candidates.contains(&"claude".to_string()));
     assert!(completion.candidates.contains(&"sakana.ai".to_string()));
+    assert!(
+        !completion.candidates.contains(&"codex-fugu".to_string()),
+        "codex-fugu should be offered as the user-facing sakana.ai label"
+    );
     assert!(completion.candidates.contains(&"agy".to_string()));
     assert!(completion.candidates.contains(&"antigravity".to_string()));
 

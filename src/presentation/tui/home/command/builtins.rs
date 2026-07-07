@@ -547,6 +547,14 @@ impl Command for AgentCommand {
             for cli in crate::domain::settings::AgentCli::ALL {
                 let cmd = cli.command().to_string();
                 let display = cli.display_name().to_lowercase();
+                // codex-fugu is branded as `sakana.ai`: surface only the
+                // display name so the internal `codex-fugu` command never
+                // appears as a completion choice. Other CLIs keep both their
+                // command and display name as selectable aliases.
+                if cli == crate::domain::settings::AgentCli::CodexFugu {
+                    names.push(display);
+                    continue;
+                }
                 names.push(cmd.clone());
                 if display != cmd.to_lowercase() {
                     names.push(display);
