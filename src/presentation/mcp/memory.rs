@@ -4,9 +4,9 @@
 //! The surface is intentionally narrower than the `usagi memory` CLI: a single
 //! `memory_save` upsert covers both creating and (partially) updating a memory,
 //! so there is no separate update tool for the agent to choose between. They are
-//! merged into the same server that exposes the issue tools (see [`super::issue`]),
-//! so a single `usagi mcp` process gives an agent both task issues and memories
-//! for one repository.
+//! composed by the unified server alongside the issue tools (see
+//! [`super::usagi`]), so a single `usagi mcp` process gives an agent both task
+//! issues and memories for one repository.
 //!
 //! Each tool delegates to [`crate::usecase::memory`], keeping this an MCP
 //! protocol adapter over the same business logic the CLI uses.
@@ -16,20 +16,61 @@ use std::path::Path;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{parse_args, to_pretty};
-use crate::domain::memory::MemoryType;
+use super::{parse_args, to_pretty, McpService};
 use crate::usecase::memory::{
     self, MemoryChanges, MemoryFilter, MemorySummaryView, MemoryView, NewMemory,
 };
 
 /// The tool names this module serves.
+pub const TOOL_NAMES: [&str; 4] = [
+    "memory_save",
+    "memory_get",
+    "memory_search",
+    "memory_delete",
+];
+
+/// Names of the memory tools this module serves.
 pub fn tool_names() -> &'static [&'static str] {
-    &[
-        "memory_save",
-        "memory_get",
-        "memory_search",
-        "memory_delete",
-    ]
+    &TOOL_NAMES
+}
+
+/// A JSON-RPC server exposing memory tools for one repository.
+pub struct MemoryMcpServer {
+    repo: std::path::PathBuf,
+}
+
+impl MemoryMcpServer {
+    /// Build a server operating on the repository at `repo`.
+    pub fn new(repo: impl AsRef<Path>) -> Self {
+        Self {
+            repo: repo.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Handle one JSON-RPC message (a single line of input). Returns the JSON
+    /// response to write back, or `None` for notifications (which take no
+    /// reply).
+    pub fn handle_line(&self, line: &str) -> Option<String> {
+        super::dispatch_line(self, line)
+    }
+}
+
+impl McpService for MemoryMcpServer {
+    fn server_name(&self) -> &str {
+        "usagi-memory"
+    }
+
+    fn tool_names(&self) -> &'static [&'static str] {
+        &TOOL_NAMES
+    }
+
+    fn tool_schemas(&self) -> Value {
+        tool_schemas()
+    }
+
+    fn call_tool(&self, name: &str, arguments: Value) -> Result<String, String> {
+        call_tool(&self.repo, name, arguments)
+    }
 }
 
 /// Run a memory tool by name against the repository at `repo`.
@@ -60,30 +101,31 @@ fn tool_save(repo: &Path, arguments: Value) -> Result<String, String> {
 /// write logic stays single-sourced; `update` returning `None` is the "does not
 /// exist yet" signal that routes to creation.
 fn save_upsert(repo: &Path, args: SaveArgs) -> anyhow::Result<crate::domain::memory::Memory> {
+    let SaveArgs { name, changes } = args;
     if let Some(updated) = memory::update(
         repo,
-        &args.name,
+        &name,
         MemoryChanges {
-            title: args.title.clone(),
-            kind: args.kind,
-            related: args.related.clone(),
-            body: args.body.clone(),
+            title: changes.title.clone(),
+            kind: changes.kind,
+            related: changes.related.clone(),
+            body: changes.body.clone(),
         },
     )? {
         return Ok(updated);
     }
     // No memory by this name yet: create it. A title is required to open one.
-    let title = args
+    let title = changes
         .title
         .ok_or_else(|| anyhow::anyhow!("`title` is required when creating a new memory"))?;
     memory::save(
         repo,
         NewMemory {
-            name: args.name,
+            name,
             title,
-            kind: args.kind.unwrap_or_default(),
-            related: args.related.unwrap_or_default(),
-            body: args.body.unwrap_or_default(),
+            kind: changes.kind.unwrap_or_default(),
+            related: changes.related.unwrap_or_default(),
+            body: changes.body.unwrap_or_default(),
         },
     )
 }
@@ -100,8 +142,8 @@ fn tool_search(repo: &Path, arguments: Value) -> Result<String, String> {
     let SearchArgs { query, filter } = parse_args(arguments)?;
     // An omitted `query` lists every memory: an empty needle matches all, so one
     // code path (`search`) subsumes what a separate `list` tool would do.
-    let items = memory::search(repo, query.as_deref().unwrap_or(""), &filter.filter())
-        .map_err(|e| e.to_string())?;
+    let items =
+        memory::search(repo, query.as_deref().unwrap_or(""), &filter).map_err(|e| e.to_string())?;
     Ok(to_pretty(&summary_views(&items)))
 }
 
@@ -119,31 +161,13 @@ struct SaveArgs {
     // All content fields are optional so `memory_save` can act as a partial
     // upsert: on an existing memory only the provided fields change, while
     // creating a new one requires a `title` (enforced in the handler).
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default, rename = "type")]
-    kind: Option<MemoryType>,
-    #[serde(default)]
-    related: Option<Vec<String>>,
-    #[serde(default)]
-    body: Option<String>,
+    #[serde(flatten)]
+    changes: MemoryChanges,
 }
 
 #[derive(Deserialize)]
 struct NameArgs {
     name: String,
-}
-
-#[derive(Deserialize)]
-struct FilterArgs {
-    #[serde(default, rename = "type")]
-    kind: Option<MemoryType>,
-}
-
-impl FilterArgs {
-    fn filter(self) -> MemoryFilter {
-        MemoryFilter { kind: self.kind }
-    }
 }
 
 #[derive(Deserialize)]
@@ -153,7 +177,7 @@ struct SearchArgs {
     #[serde(default)]
     query: Option<String>,
     #[serde(flatten)]
-    filter: FilterArgs,
+    filter: MemoryFilter,
 }
 
 // --- JSON serialisation ----------------------------------------------------

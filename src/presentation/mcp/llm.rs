@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 
 use super::McpService;
 
+const TOOL_NAMES: [&str; 1] = ["local_llm_ask"];
+
 /// Runs a prompt against the local model. Abstracted so the server's protocol
 /// handling can be tested with a fake backend that never shells out.
 pub trait LlmBackend {
@@ -60,6 +62,10 @@ impl LlmMcpServer {
 impl McpService for LlmMcpServer {
     fn server_name(&self) -> &str {
         "usagi-llm"
+    }
+
+    fn tool_names(&self) -> &'static [&'static str] {
+        &TOOL_NAMES
     }
 
     fn tool_schemas(&self) -> Value {

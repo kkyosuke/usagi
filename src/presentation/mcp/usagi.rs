@@ -1,11 +1,11 @@
 //! The unified `usagi` MCP server.
 //!
 //! A single `usagi mcp` process exposes everything an agent needs for one
-//! workspace: a repository's task issues and durable memories (from
-//! [`super::issue`], which already merges [`super::memory`]) plus session
-//! orchestration (from [`super::session`]). This composite holds both servers
-//! and merges their tool surfaces, so agents register a single `usagi` server
-//! instead of one per concern.
+//! workspace: a repository's task issues (from [`super::issue`]), durable
+//! memories (from [`super::memory`]) plus session orchestration (from
+//! [`super::session`]). This composite holds those sub-servers and merges their
+//! tool surfaces, so agents register a single `usagi` server instead of one per
+//! concern.
 //!
 //! Issue/memory operations and session operations have very different
 //! dependencies — the former are pure repository reads/writes, the latter needs
@@ -23,9 +23,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::issue::McpServer as IssueServer;
-use super::session::{
-    resolve_session_agent, AgentBackend, PromptMode, SessionMcpServer, TOOL_NAMES as SESSION_TOOLS,
-};
+use super::memory::MemoryMcpServer;
+use super::session::{resolve_session_agent, AgentBackend, PromptMode, SessionMcpServer};
 use super::McpService;
 
 /// The composite-only orchestration tool this server adds on top of the merged
@@ -61,8 +60,10 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// A JSON-RPC server exposing the full `usagi` tool surface (issue + memory +
 /// session) for one workspace.
 pub struct UsagiMcpServer {
-    /// Issue and memory tools for the workspace's repository.
+    /// Issue tools for the workspace's repository.
     issue: IssueServer,
+    /// Memory tools for the workspace's repository.
+    memory: MemoryMcpServer,
     /// Session orchestration tools for the workspace.
     session: SessionMcpServer,
     /// True when the process runs from the workspace root (`worktree` and
@@ -91,6 +92,7 @@ impl UsagiMcpServer {
         let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
+            memory: MemoryMcpServer::new(&worktree),
             session: SessionMcpServer::new(workspace_root.clone(), &worktree, backend, runner),
             at_workspace_root,
             workspace_root,
@@ -102,6 +104,12 @@ impl UsagiMcpServer {
     /// reply).
     pub fn handle_line(&self, line: &str) -> Option<String> {
         super::dispatch_line(self, line)
+    }
+
+    /// Sub-servers in schema and routing order. Keeping the list in one helper
+    /// makes `tools/list` and `tools/call` follow the same one-level registry.
+    fn subservers(&self) -> [&dyn McpService; 3] {
+        [&self.issue, &self.memory, &self.session]
     }
 
     /// Delegate an issue to a fresh session in one call: render the issue as an
@@ -234,13 +242,19 @@ impl McpService for UsagiMcpServer {
         "usagi"
     }
 
+    fn tool_names(&self) -> &'static [&'static str] {
+        &[DELEGATE_ISSUE_TOOL]
+    }
+
     fn tool_schemas(&self) -> Value {
-        // Advertise the issue/memory tools followed by the session tools, then the
-        // composite's own orchestration tool, so a single `usagi` server exposes
-        // all of them. `into_schema_array` keeps a malformed sub-schema from
-        // panicking `tools/list` (see its docs).
-        let mut tools = super::into_schema_array(self.issue.tool_schemas());
-        tools.extend(super::into_schema_array(self.session.tool_schemas()));
+        // Advertise sub-server tools in registry order, then the composite's own
+        // orchestration tool. `into_schema_array` keeps a malformed sub-schema
+        // from panicking `tools/list` (see its docs).
+        let mut tools: Vec<Value> = self
+            .subservers()
+            .into_iter()
+            .flat_map(|server| super::into_schema_array(server.tool_schemas()))
+            .collect();
         tools.push(delegate_issue_schema());
         Value::Array(tools)
     }
@@ -260,15 +274,19 @@ impl McpService for UsagiMcpServer {
                  session_delegate_issue) so the change rides that session's branch."
             ));
         }
-        // The composite owns `session_delegate_issue` (it spans both sub-servers);
-        // session tools go to the session server; everything else (issue, memory,
-        // and unknown-tool errors) is handled by the issue server.
+        // The composite owns `session_delegate_issue` (it spans issue + session);
+        // every other call is delegated to the first sub-server that advertises
+        // the tool name. Unknown tools become ordinary MCP tool errors.
         if name == DELEGATE_ISSUE_TOOL {
             self.tool_delegate_issue(arguments)
-        } else if SESSION_TOOLS.contains(&name) {
-            self.session.call_tool(name, arguments)
         } else {
-            self.issue.call_tool(name, arguments)
+            self.subservers()
+                .into_iter()
+                .find(|server| server.tool_names().contains(&name))
+                .map_or_else(
+                    || Err(format!("unknown tool: {name}")),
+                    |server| server.call_tool(name, arguments),
+                )
         }
     }
 }
@@ -450,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_tools_route_to_the_issue_server() {
+    fn memory_tools_route_to_the_memory_server() {
         let tmp = tempfile::tempdir().unwrap();
         let result = call(&server_at(tmp.path()), "memory_search", json!({}));
         assert_eq!(result["isError"], false);

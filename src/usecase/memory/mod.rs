@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::domain::memory::{slugify, Memory, MemorySummary, MemoryType};
 use crate::infrastructure::memory_store::MemoryStore;
@@ -21,19 +22,25 @@ pub use view::{MemorySummaryView, MemoryView};
 
 /// Fields needed to save a memory. The name is normalised to a slug and the
 /// timestamps are assigned by [`save`].
+#[derive(Deserialize)]
 pub struct NewMemory {
     pub name: String,
     pub title: String,
+    #[serde(default, rename = "type")]
     pub kind: MemoryType,
+    #[serde(default)]
     pub related: Vec<String>,
+    #[serde(default)]
     pub body: String,
 }
 
 /// A partial update to an existing memory: every `Some` field is applied, every
 /// `None` field is left unchanged.
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct MemoryChanges {
     pub title: Option<String>,
+    #[serde(rename = "type")]
     pub kind: Option<MemoryType>,
     pub related: Option<Vec<String>>,
     pub body: Option<String>,
@@ -47,8 +54,10 @@ impl MemoryChanges {
 }
 
 /// Filters applied to listings and searches. An unset field matches everything.
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct MemoryFilter {
+    #[serde(rename = "type")]
     pub kind: Option<MemoryType>,
 }
 

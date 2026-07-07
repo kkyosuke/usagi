@@ -1,6 +1,13 @@
 use super::*;
 use serde_json::json;
 
+/// Parse a handler reply back into JSON for assertions.
+fn reply(server: &MemoryMcpServer, request: Value) -> Value {
+    let line = serde_json::to_string(&request).unwrap();
+    let response = server.handle_line(&line).expect("expected a reply");
+    serde_json::from_str(&response).unwrap()
+}
+
 fn save(repo: &Path, name: &str, title: &str) -> String {
     call_tool(
         repo,
@@ -8,6 +15,30 @@ fn save(repo: &Path, name: &str, title: &str) -> String {
         json!({ "name": name, "title": title, "type": "project", "body": "b" }),
     )
     .unwrap()
+}
+
+#[test]
+fn server_advertises_memory_identity_and_routes_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = MemoryMcpServer::new(tmp.path());
+
+    let init = reply(
+        &server,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize"}),
+    );
+    assert_eq!(init["result"]["serverInfo"]["name"], "usagi-memory");
+
+    let tools = reply(
+        &server,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    );
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 4);
+
+    let saved = reply(
+        &server,
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_save","arguments":{"name":"fact","title":"Fact"}}}),
+    );
+    assert_eq!(saved["result"]["isError"], false);
 }
 
 #[test]
