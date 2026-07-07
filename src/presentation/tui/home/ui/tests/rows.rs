@@ -244,6 +244,25 @@ fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
 }
 
 #[test]
+fn nested_inline_field_applies_the_lineage_prefix_by_depth() {
+    // Depth 0 is not nested, so the field is returned clipped without a prefix.
+    let flat = nested_inline_field("edit", 10, 0);
+    assert_eq!(console::strip_ansi_codes(&flat), "edit");
+
+    // A nested field carries the dim `↳ ` marker and clips the body to the width
+    // left after it, so the whole entry line stays within its cell.
+    let nested = console::strip_ansi_codes(&nested_inline_field("edit", 10, 1)).into_owned();
+    assert!(nested.starts_with("↳ "));
+    assert!(nested.contains("edit"));
+
+    // When the width cannot even hold the prefix, only the (clipped) prefix is
+    // drawn — the body drops rather than overrunning the cell.
+    let tiny = nested_inline_field("edit", 1, 1);
+    assert_eq!(console::measure_text_width(&tiny), 1);
+    assert!(!console::strip_ansi_codes(&tiny).contains("edit"));
+}
+
+#[test]
 fn worktree_row_marks_the_selected_session_in_overview_and_shows_detached() {
     // The selected session in 選択 (Overview) uses the one-line usagi glyph on line
     // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
