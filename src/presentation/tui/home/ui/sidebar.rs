@@ -341,12 +341,64 @@ pub(super) fn name_cell(text: &str, width: usize, emphasised: bool) -> String {
     }
 }
 
+/// Columns a single lineage level occupies in the sidebar. Two columns (`↳ `)
+/// are enough to make a child session visibly belong under its parent without
+/// crowding the already-dense session row.
+pub(super) const LINEAGE_INDENT_WIDTH: usize = 2;
+
+/// Display columns consumed by `depth` levels of session lineage.
+pub(super) fn lineage_width(depth: usize) -> usize {
+    depth.saturating_mul(LINEAGE_INDENT_WIDTH)
+}
+
+/// The dim tree prefix drawn in front of a child session's name. A depth-1 child
+/// reads `↳ child`; deeper descendants add two spaces per level (`  ↳ grandchild`).
+pub(super) fn lineage_prefix(depth: usize) -> String {
+    if depth == 0 {
+        String::new()
+    } else {
+        format!("{}↳ ", " ".repeat(lineage_width(depth - 1)))
+    }
+}
+
+/// A branch / root name cell with an optional lineage prefix reserved inside the
+/// same `width` the plain [`name_cell`] uses. The prefix is dim and the session
+/// name keeps the normal accent styling, so child rows read as subordinate while
+/// preserving the existing active/selected emphasis on the name itself.
+pub(super) fn nested_name_cell(
+    text: &str,
+    width: usize,
+    emphasised: bool,
+    nesting_depth: usize,
+) -> String {
+    let prefix = lineage_prefix(nesting_depth);
+    let prefix_width = console::measure_text_width(&prefix);
+    if prefix_width == 0 {
+        return name_cell(text, width, emphasised);
+    }
+    if prefix_width >= width {
+        return style(clip_to_width(&prefix, width)).dim().to_string();
+    }
+    format!(
+        "{}{}",
+        style(prefix).dim(),
+        name_cell(text, width - prefix_width, emphasised)
+    )
+}
+
 /// Builds a row's second (detail) line: the row's `gutter` cell at the far-left
 /// column (so the active accent bar runs down both lines), padded to sit under
 /// the branch name, then the already-styled, already-clipped `detail`.
 pub(super) fn detail_line(gutter: &str, detail: String) -> String {
+    nested_detail_line(gutter, 0, detail)
+}
+
+/// A detail/resource line shifted by `lineage_width` columns so the second and
+/// third line of a child session sit under its indented name.
+pub(super) fn nested_detail_line(gutter: &str, lineage_width: usize, detail: String) -> String {
     let indent = " ".repeat(NAME_PREFIX - 1);
-    format!("{gutter}{indent}{detail}")
+    let lineage = " ".repeat(lineage_width);
+    format!("{gutter}{indent}{lineage}{detail}")
 }
 
 /// Display width the CPU figure is left-padded to inside the `<cpu icon> … <mem
@@ -437,17 +489,24 @@ pub(super) fn tint_by_load(field: String, load: Load) -> String {
 /// cell. Every session draws this row at a fixed height, so an unsampled or idle
 /// session reads `0%` / `0MB` (the caller passes a default usage) rather than
 /// dropping the row and reflowing the list.
-pub(super) fn resource_line(
+pub(super) fn nested_resource_line(
     usage: ResourceUsage,
     detail_width: usize,
     selected: bool,
     active: bool,
     in_switch: bool,
+    nesting_depth: usize,
 ) -> String {
+    let lineage_cols = lineage_width(nesting_depth).min(detail_width);
+    let detail_width = detail_width.saturating_sub(lineage_cols);
     let detail = style(clip_to_width(&resource_inline_label(usage), detail_width))
         .dim()
         .to_string();
-    detail_line(&session_gutter_cell(selected, active, in_switch, 2), detail)
+    nested_detail_line(
+        &session_gutter_cell(selected, active, in_switch, 2),
+        lineage_cols,
+        detail,
+    )
 }
 
 /// The line-1 memo cell at the row's right edge: a yellow [`NOTE_ICON`] when the
@@ -471,6 +530,7 @@ pub(super) fn note_cell(has_note: bool) -> String {
 /// agent is in use, carries its icons (`<robot> ☾` / `<robot> ▶` / `<robot> ◆` /
 /// `<robot> ✓`).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn worktree_row(
     worktree: &WorktreeState,
     label: &str,
@@ -494,6 +554,56 @@ pub(super) fn worktree_row(
     // in a separate input at the list foot.
     rename: Option<(&str, usize)>,
 ) -> (String, String) {
+    nested_worktree_row(
+        worktree,
+        label,
+        status_label,
+        label_col,
+        name_width,
+        detail_width,
+        cols,
+        has_note,
+        now,
+        selected,
+        active,
+        in_switch,
+        live,
+        running,
+        waiting,
+        done,
+        rename,
+        0,
+    )
+}
+
+/// [`worktree_row`] with a visual lineage depth. Depth `0` is the regular
+/// top-level session row; depth `1+` draws the row as a child of a visible parent
+/// session created by an agent through MCP.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn nested_worktree_row(
+    worktree: &WorktreeState,
+    label: &str,
+    status_label: Option<&SessionLabelDef>,
+    label_col: usize,
+    name_width: usize,
+    detail_width: usize,
+    cols: DetailCols,
+    has_note: bool,
+    now: DateTime<Utc>,
+    selected: bool,
+    active: bool,
+    in_switch: bool,
+    live: bool,
+    running: bool,
+    waiting: bool,
+    done: bool,
+    // While inline-renaming this (selected) session in 切替, the label being typed
+    // and the caret's byte offset into it: line 1's name cell becomes that
+    // editable field in place, so the rename happens on the row itself rather than
+    // in a separate input at the list foot.
+    rename: Option<(&str, usize)>,
+    nesting_depth: usize,
+) -> (String, String) {
     let kind = kind_dot(heat_of(worktree.updated_at, now));
     let gutter = session_gutter_cell(selected, active, in_switch, 0);
     let line1 = if let Some((value, cursor)) = rename {
@@ -513,7 +623,7 @@ pub(super) fn worktree_row(
         } else {
             label
         };
-        let branch = name_cell(name, name_width, active || selected);
+        let branch = nested_name_cell(name, name_width, active || selected, nesting_depth);
         // The manual-status label sits between the branch name and the memo marker
         // in its own fixed-width column (blank when this row has none, dropped
         // entirely when no visible session carries a label — `label_col == 0`), so
@@ -535,6 +645,8 @@ pub(super) fn worktree_row(
     // bar runs down to it — the `>` cursor stays a single point on line 1, so the
     // detail-line gutter ignores the cursor.
     let agent = AgentState::from_flags(live, running, waiting, done);
+    let lineage_cols = lineage_width(nesting_depth).min(detail_width);
+    let detail_width = detail_width.saturating_sub(lineage_cols);
     let mut cells = Vec::new();
     if cols.time > 0 {
         cells.push(rpad(&relative_time(now, worktree.updated_at), cols.time));
@@ -549,7 +661,11 @@ pub(super) fn worktree_row(
         cells.push(pr_cell(&worktree.pr, cols.pr));
     }
     let detail = detail_content(agent, &cells, detail_width);
-    let line2 = detail_line(&session_gutter_cell(selected, active, in_switch, 1), detail);
+    let line2 = nested_detail_line(
+        &session_gutter_cell(selected, active, in_switch, 1),
+        lineage_cols,
+        detail,
+    );
     (line1, line2)
 }
 
@@ -1759,6 +1875,14 @@ pub(super) fn left_pane(
     // Size the detail line's right-cluster columns once across every group's
     // worktrees, so a field lands in the same column on every row regardless of
     // which workspace (group) it belongs to.
+    let max_lineage_w = list
+        .groups()
+        .iter()
+        .flat_map(|g| (0..g.worktrees().len()).map(|i| lineage_width(g.nesting_depth(i))))
+        .max()
+        .unwrap_or(0)
+        .min(detail_width);
+    let detail_width_for_cols = detail_width.saturating_sub(max_lineage_w);
     let mut max_agent_w = 0;
     let cluster_data: Vec<_> = list
         .groups()
@@ -1771,13 +1895,13 @@ pub(super) fn left_pane(
                 waiting.contains(&w.path),
                 done.contains(&w.path),
             );
-            if let Some(label) = agent.icon_label(detail_width) {
+            if let Some(label) = agent.icon_label(detail_width_for_cols) {
                 max_agent_w = max_agent_w.max(console::measure_text_width(&label));
             }
             (w.updated_at, w.diff, w.ahead_behind, pr_width(&w.pr))
         })
         .collect();
-    let cols = detail_cols(&cluster_data, now, max_agent_w, detail_width);
+    let cols = detail_cols(&cluster_data, now, max_agent_w, detail_width_for_cols);
 
     // A divider separating each workspace root from its sessions — indented to
     // start under the `root` label (past the cursor and kind-icon cells).
@@ -1887,7 +2011,8 @@ pub(super) fn left_pane(
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
             let status_label = group.row_label_id(i).and_then(|id| label_master.get(id));
-            let (mut top, mut detail) = worktree_row(
+            let nesting_depth = group.nesting_depth(i);
+            let (mut top, mut detail) = nested_worktree_row(
                 w,
                 group.display_label(i),
                 status_label,
@@ -1907,13 +2032,21 @@ pub(super) fn left_pane(
                 // The rename input targets the selected session, so its editable
                 // label rides that row only; every other row renders normally.
                 if selected { rename } else { None },
+                nesting_depth,
             );
             // Every session draws a third CPU / memory line at a fixed height, so
             // the list never reflows as a session goes live or idle. An unsampled
             // session shows `CPU 0%  MEM 0MB` (a default usage) rather than dropping
             // the row.
             let usage = resources.get(&w.path).copied().unwrap_or_default();
-            let mut resource = resource_line(usage, detail_width, selected, active, in_switch);
+            let mut resource = nested_resource_line(
+                usage,
+                detail_width,
+                selected,
+                active,
+                in_switch,
+                nesting_depth,
+            );
             if in_switch && !selected {
                 top = dim_row(&top);
                 detail = dim_row(&detail);

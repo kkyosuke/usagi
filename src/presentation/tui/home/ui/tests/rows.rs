@@ -1082,6 +1082,62 @@ fn left_pane_renders_the_root_entry_then_one_entry_per_worktree() {
 }
 
 #[test]
+fn left_pane_draws_child_sessions_nested_under_the_parent_that_created_them() {
+    let record = |name: &str, parent: Option<&str>| SessionRecord {
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: parent.map(str::to_string),
+        root: PathBuf::from(format!("/repo/.usagi/sessions/{name}")),
+        worktrees: vec![worktree(Some(name), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    // Stored child-first to prove the sidebar uses the parent link, not only the
+    // persisted flat order, to make the relationship visible.
+    state.restore_sessions(vec![
+        record("child", Some("parent")),
+        record("parent", None),
+        record("sibling", None),
+    ]);
+
+    let lines = left_pane(
+        state.list(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &[],
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        34,
+        13,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let rendered = stripped(&lines);
+    let parent = rendered.find("parent").unwrap();
+    let child = rendered.find("↳ child").unwrap();
+    let sibling = rendered.find("sibling").unwrap();
+    assert!(parent < child);
+    assert!(child < sibling);
+    // The child's detail/resource lines are shifted under the indented name, so
+    // the whole three-line entry reads as nested rather than only the first line.
+    let plain: Vec<_> = lines
+        .iter()
+        .map(|line| console::strip_ansi_codes(line).into_owned())
+        .collect();
+    assert!(plain[7].starts_with("     ")); // child detail row
+    assert!(plain[8].starts_with("     ")); // child resource row
+}
+
+#[test]
 fn left_pane_in_unite_mode_heads_each_workspace_with_its_name() {
     // Two stacked workspaces (統合): each gets a name header, its own root row, a
     // divider, and its sessions, in the flat order the cursor navigates.

@@ -458,6 +458,49 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
 }
 
 #[test]
+fn workspace_group_nests_sessions_under_their_started_from_parent() {
+    use crate::domain::workspace_state::SessionRecord;
+    let session = |name: &str, parent: Option<&str>| SessionRecord {
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: parent.map(str::to_string),
+        name: name.to_string(),
+        display_name: None,
+        note: None,
+        root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
+        worktrees: Vec::new(),
+        created_at: chrono::Utc::now(),
+        last_active: None,
+    };
+    // The child is stored before its parent, but the visual layout should make
+    // the lineage obvious by placing it immediately under that visible parent.
+    let group = WorkspaceGroup::from_sessions(
+        "ws",
+        "/ws",
+        &[
+            session("child", Some("parent")),
+            session("parent", None),
+            session("sibling", None),
+            session("orphan", Some("missing")),
+        ],
+        false,
+    );
+
+    let names: Vec<_> = group
+        .worktrees()
+        .iter()
+        .map(|w| w.branch.as_deref().unwrap())
+        .collect();
+    assert_eq!(names, vec!["parent", "child", "sibling", "orphan"]);
+    assert_eq!(group.nesting_depth(0), 0);
+    assert_eq!(group.nesting_depth(1), 1);
+    assert_eq!(group.nesting_depth(2), 0);
+    // A missing parent is not visible in the list, so the session stays root-level.
+    assert_eq!(group.nesting_depth(3), 0);
+}
+
+#[test]
 fn workspace_group_carries_per_row_labels_and_notes() {
     let mut group = WorkspaceGroup::with_labels(
         "wsA",
