@@ -29,6 +29,10 @@ fn empty_group_list_accessors_are_safe_noops() {
     assert_eq!(list.display_label(0), "");
     assert!(!list.has_note(0));
     assert_eq!(list.row_label_id(0), None);
+    assert_eq!(
+        list.origin(0),
+        crate::domain::workspace_state::SessionOrigin::Unknown
+    );
     assert!(!list.root_has_note());
     assert!(list.selected().is_none());
     assert!(list.active().is_none());
@@ -38,6 +42,7 @@ fn empty_group_list_accessors_are_safe_noops() {
     list.set_root_path("/ignored");
     list.set_notes(vec![true]);
     list.set_label_ids(vec![Some("todo".to_string())]);
+    list.set_origins(vec![crate::domain::workspace_state::SessionOrigin::Human]);
     list.set_nesting_depths(vec![1]);
     list.set_root_note_marker(true);
 
@@ -94,6 +99,37 @@ fn notes_default_to_absent_and_set_notes_aligns_to_the_worktrees() {
     assert!(!list.has_note(0));
     assert!(list.has_note(2));
     assert!(!list.has_note(3)); // truncated away
+}
+
+#[test]
+fn origins_default_to_unknown_and_set_origins_aligns_to_the_worktrees() {
+    use crate::domain::workspace_state::SessionOrigin;
+
+    let mut list = WorktreeList::with_labels(
+        "usagi",
+        vec![worktree("main"), worktree("feature"), worktree("fix")],
+        vec![],
+    );
+    // A fresh list treats every session as legacy / unrecorded until rebuilt from
+    // SessionRecord metadata.
+    assert_eq!(list.origin(0), SessionOrigin::Unknown);
+    assert_eq!(list.origin(2), SessionOrigin::Unknown);
+    // A shorter slice is padded with Unknown; a longer one is truncated to the
+    // worktree count, mirroring the other row metadata columns.
+    list.set_origins(vec![SessionOrigin::Human, SessionOrigin::Mcp]);
+    assert_eq!(list.origin(0), SessionOrigin::Human);
+    assert_eq!(list.origin(1), SessionOrigin::Mcp);
+    assert_eq!(list.origin(2), SessionOrigin::Unknown); // padded
+    assert_eq!(list.origin(9), SessionOrigin::Unknown); // out of range
+    list.set_origins(vec![
+        SessionOrigin::Unknown,
+        SessionOrigin::Human,
+        SessionOrigin::Mcp,
+        SessionOrigin::Human,
+    ]);
+    assert_eq!(list.origin(0), SessionOrigin::Unknown);
+    assert_eq!(list.origin(2), SessionOrigin::Mcp);
+    assert_eq!(list.origin(3), SessionOrigin::Unknown); // truncated away
 }
 
 #[test]
@@ -449,26 +485,28 @@ fn set_pr_links_finds_the_row_in_any_group() {
 
 #[test]
 fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
-    use crate::domain::workspace_state::SessionRecord;
-    let session = |name: &str, label: Option<&str>, note: Option<&str>| SessionRecord {
-        label_id: None,
-        agent: Default::default(),
-        origin: Default::default(),
-        started_from: None,
-        name: name.to_string(),
-        display_name: label.map(str::to_string),
-        note: note.map(str::to_string),
-        root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
-        worktrees: Vec::new(),
-        created_at: chrono::Utc::now(),
-        last_active: None,
+    use crate::domain::workspace_state::{SessionOrigin, SessionRecord};
+    let session = |name: &str, label: Option<&str>, note: Option<&str>, origin: SessionOrigin| {
+        SessionRecord {
+            label_id: None,
+            agent: Default::default(),
+            origin,
+            started_from: None,
+            name: name.to_string(),
+            display_name: label.map(str::to_string),
+            note: note.map(str::to_string),
+            root: std::path::PathBuf::from(format!("/ws/.usagi/sessions/{name}")),
+            worktrees: Vec::new(),
+            created_at: chrono::Utc::now(),
+            last_active: None,
+        }
     };
     let group = WorkspaceGroup::from_sessions(
         "wsB",
         "/wsB",
         &[
-            session("main", None, None),
-            session("feat", Some("Feature"), Some("a note")),
+            session("main", None, None, SessionOrigin::Human),
+            session("feat", Some("Feature"), Some("a note"), SessionOrigin::Mcp),
         ],
         true,
     );
@@ -479,6 +517,8 @@ fn workspace_group_from_sessions_collapses_rows_with_labels_and_notes() {
     assert_eq!(group.display_label(1), "Feature"); // display-name override
     assert!(!group.has_note(0));
     assert!(group.has_note(1)); // the session with a note
+    assert_eq!(group.origin(0), SessionOrigin::Human);
+    assert_eq!(group.origin(1), SessionOrigin::Mcp);
     assert!(group.root_has_note()); // the workspace root note marker
 }
 

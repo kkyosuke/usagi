@@ -244,6 +244,19 @@ fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
 }
 
 #[test]
+fn nested_name_cell_covers_flat_and_nested_paths() {
+    let flat = nested_name_cell("child", 8, false, 0);
+    let flat_plain = console::strip_ansi_codes(&flat).into_owned();
+    assert_eq!(console::measure_text_width(&flat), 8);
+    assert_eq!(flat_plain, "child   ");
+
+    let nested = nested_name_cell("child", 8, false, 1);
+    let nested_plain = console::strip_ansi_codes(&nested).into_owned();
+    assert_eq!(console::measure_text_width(&nested), 8);
+    assert_eq!(nested_plain, "↳ child ");
+}
+
+#[test]
 fn nested_session_name_cell_prefixes_human_mcp_and_unknown_origins_without_shifting_width() {
     let cases = [
         (SessionOrigin::Human, Some(HUMAN_ORIGIN_ICON)),
@@ -274,6 +287,32 @@ fn nested_session_name_cell_keeps_lineage_before_the_origin_field() {
         "{plain:?}"
     );
     assert!(plain.contains("grandch…"), "{plain:?}");
+}
+
+#[test]
+fn nested_session_name_cell_respects_tiny_widths() {
+    let zero = nested_session_name_cell("child", 0, false, 0, SessionOrigin::Human);
+    assert_eq!(console::measure_text_width(&zero), 0);
+
+    let one = nested_session_name_cell("child", 1, false, 0, SessionOrigin::Human);
+    let one_plain = console::strip_ansi_codes(&one).into_owned();
+    assert_eq!(console::measure_text_width(&one), 1);
+    assert_eq!(one_plain, HUMAN_ORIGIN_ICON.to_string());
+    assert!(!one_plain.contains("child"));
+
+    let one_mcp = nested_session_name_cell("child", 1, false, 0, SessionOrigin::Mcp);
+    let one_mcp_plain = console::strip_ansi_codes(&one_mcp).into_owned();
+    assert_eq!(one_mcp_plain, MCP_ORIGIN_ICON.to_string());
+
+    let prefix_only = nested_session_name_cell("child", 1, false, 1, SessionOrigin::Mcp);
+    assert_eq!(console::measure_text_width(&prefix_only), 1);
+    assert!(!console::strip_ansi_codes(&prefix_only).contains(MCP_ORIGIN_ICON));
+    assert!(!console::strip_ansi_codes(&prefix_only).contains("child"));
+
+    let origin_only = nested_session_name_cell("child", 2, false, 0, SessionOrigin::Mcp);
+    let origin_only_plain = console::strip_ansi_codes(&origin_only).into_owned();
+    assert_eq!(origin_only_plain, format!("{MCP_ORIGIN_ICON} "));
+    assert!(!origin_only_plain.contains("child"));
 }
 
 #[test]

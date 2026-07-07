@@ -413,7 +413,7 @@ pub(super) fn nested_name_cell(
     if prefix_width == 0 {
         return name_cell(text, width, emphasised);
     }
-    if prefix_width >= width {
+    if prefix_width > width {
         return style(clip_to_width(&prefix, width)).dim().to_string();
     }
     format!(
@@ -448,7 +448,7 @@ pub(super) fn nested_session_name_cell(
 ) -> String {
     let prefix = lineage_prefix(nesting_depth);
     let prefix_width = console::measure_text_width(&prefix);
-    if prefix_width >= width {
+    if prefix_width > width {
         return style(clip_to_width(&prefix, width)).dim().to_string();
     }
     let name_area = width.saturating_sub(prefix_width);
