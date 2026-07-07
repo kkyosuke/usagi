@@ -2804,20 +2804,20 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
 fn pr_popup_click_on_the_box_borders_stays_pinned() {
     let mut state = attached_with_pr_sidebar();
     state.set_pr_popup(Some(0));
-    // The box spans columns 43–54 (left 43, `#412 #98` → width 12) on content row 7.
+    // The box spans columns 43–54 (left 43, `#412 #98` → width 12) on content row 6.
     // Its left border / pad (43, 44) and right border (54) are inside the rectangle
     // but on no `#<number>`, as is a content column past the last token — all keep
     // the popup pinned rather than opening or dismissing.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 43, 7),
+        pr_popup_click(&state, 24, 120, 43, 6),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 44, 7),
+        pr_popup_click(&state, 24, 120, 44, 6),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 54, 7),
+        pr_popup_click(&state, 24, 120, 54, 6),
         PopupClick::Inside
     ));
 }
