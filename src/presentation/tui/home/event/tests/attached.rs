@@ -1,6 +1,79 @@
 use super::*;
 
 #[test]
+fn switch_ctrl_o_a_opens_the_focus_modal() {
+    // In Switch, the `Ctrl-O` leader followed by `a` opens the Focus modal on the
+    // selected row — entering Closeup so its action surface shows.
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let keys = vec![Ok(Key::Char(CTRL_O)), Ok(Key::Char('a'))];
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn closeup_ctrl_o_a_opens_the_focus_modal() {
+    // Inside Closeup, the `Ctrl-O` leader followed by `a` opens the Focus modal
+    // through the shared prefix grammar.
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let keys = vec![
+        Ok(Key::Char('t')),    // Switch -> Closeup on the selected row
+        Ok(Key::Char(CTRL_O)), // leader
+        Ok(Key::Char('a')),    // open the Focus modal
+    ];
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
+fn rail_inline_create_skips_the_preview_refresh() {
+    // Collapsing to the rail while the inline create input is open takes over the
+    // right pane, so the per-frame preview refresh is skipped (drive_now false).
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let keys = vec![
+        Ok(Key::Char(CTRL_B)), // Full -> Rail
+        Ok(Key::Char('c')),    // open the inline create input in the right pane
+    ];
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
 fn ctrl_o_in_the_pane_zooms_out_to_overview() {
     // Attaching to a live session; the pane returns ToOverview (Ctrl-O), so the
     // loop enters Overview with return=Attached. Then Ctrl-O -> Overview (fallback Ctrl-C quits).

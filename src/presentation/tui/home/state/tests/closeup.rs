@@ -34,6 +34,19 @@ fn focus_modal_opens_from_switch_and_from_a_closeup_pane_preview() {
 }
 
 #[test]
+fn focus_modal_is_a_noop_while_already_attached() {
+    let mut state = state();
+    state.enter_closeup(1);
+    state.show_attached();
+
+    state.open_focus_modal();
+
+    assert_eq!(state.mode(), Mode::Closeup);
+    assert!(state.closeup_attached());
+    assert!(!state.closeup_action_overlay());
+}
+
+#[test]
 fn closeup_action_overlay_holds_for_both_surfaces_on_the_action_tab() {
     let mut state = state(); // root, main, feature
                              // Not in 集中: nothing floats.
