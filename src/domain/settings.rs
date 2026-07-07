@@ -754,6 +754,7 @@ impl Settings {
             // change here alone.
             model: None,
             is_root: true,
+            sandbox_writable_roots: Vec::new(),
         }
     }
 }
@@ -1478,6 +1479,7 @@ mod tests {
         // No agent-model source yet: the wiring leaves the agent CLI on its own
         // default. The adapters render this when it is `Some`.
         assert_eq!(off.model, None);
+        assert!(off.sandbox_writable_roots.is_empty());
 
         // Enabled: the configured model rides along for the adapter to wire in.
         settings.local_llm.enabled = true;

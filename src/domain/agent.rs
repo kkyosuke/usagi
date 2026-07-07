@@ -13,7 +13,7 @@
 //! handed. How that policy is rendered into a CLI's invocation lives in the
 //! adapters (the infrastructure layer).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Which launch surface an adapter is planning for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +233,15 @@ pub struct AgentWiring {
     /// Whether the agent is launched at the workspace root (the coordinator row)
     /// rather than inside a session worktree.
     pub is_root: bool,
+    /// Extra filesystem roots the adapter may make writable for an attended
+    /// sandboxed launch.
+    ///
+    /// This is data only: callers resolve any tool-specific or git-specific
+    /// paths before constructing the wiring, while each adapter decides whether
+    /// and how to render them. Codex uses these alongside usagi's own data
+    /// directory in `sandbox_workspace_write.writable_roots`; other adapters may
+    /// ignore them.
+    pub sandbox_writable_roots: Vec<PathBuf>,
 }
 
 #[cfg(test)]
@@ -245,6 +254,7 @@ mod tests {
             local_llm_model: Some("qwen2.5-coder".to_string()),
             model: Some("large model".to_string()),
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         }
     }
 

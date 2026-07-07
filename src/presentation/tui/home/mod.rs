@@ -1650,23 +1650,24 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     outcome
 }
 
-/// Layer a session's model override onto the base wiring for one launch, so the
-/// agent CLI runs the session's chosen model (the adapter renders it as `--model`
-/// / `-m`). `None` keeps the base wiring untouched — the CLI uses its own default
-/// model. The rest of the wiring (usagi binary, local-LLM offload model) is
-/// carried over unchanged. Used at every agent launch site so a session created /
-/// delegated with a pinned model launches with it (see
-/// [`SessionRecord::agent`](crate::domain::workspace_state::SessionRecord::agent)).
+/// Layer per-directory launch data onto the base wiring for one attended agent
+/// pane. Besides the session's model override, this resolves the worktree's git
+/// common directory and carries it as an extra writable root for sandboxed Codex
+/// launches. Resolution is best-effort: if `git rev-parse --git-common-dir`
+/// fails, the launch continues with the base wiring (Codex still adds usagi's
+/// data directory).
 fn wiring_for_launch(
     base: &crate::domain::agent::AgentWiring,
     model: Option<String>,
     dir: &std::path::Path,
 ) -> crate::domain::agent::AgentWiring {
-    crate::domain::agent::AgentWiring {
+    crate::usecase::agent::wiring_for_launch(
+        base,
         model,
-        is_root: !crate::usecase::workspace_guard::is_session_worktree(dir),
-        ..base.clone()
-    }
+        dir,
+        crate::domain::agent::LaunchMode::Interactive,
+        crate::infrastructure::git::git_common_dir,
+    )
 }
 
 /// Restore each session's persisted panes into the pool on startup, in the

@@ -338,6 +338,7 @@ mod tests {
             local_llm_model: local_llm_model.map(str::to_string),
             model: None,
             is_root: false,
+            sandbox_writable_roots: Vec::new(),
         }
     }
 
