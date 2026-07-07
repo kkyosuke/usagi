@@ -386,6 +386,26 @@ pub(super) fn nested_name_cell(
     )
 }
 
+/// Prefix an already-styled inline field with the same dim lineage marker used
+/// by [`nested_name_cell`]. Unlike [`nested_name_cell`], the caller owns the body
+/// styling (rename fields carry a block caret; removal skeletons shimmer), so we
+/// only clip the body to the remaining width after the prefix.
+pub(super) fn nested_inline_field(content: &str, width: usize, nesting_depth: usize) -> String {
+    let prefix = lineage_prefix(nesting_depth);
+    let prefix_width = console::measure_text_width(&prefix);
+    if prefix_width == 0 {
+        return clip_to_width(content, width);
+    }
+    if prefix_width >= width {
+        return style(clip_to_width(&prefix, width)).dim().to_string();
+    }
+    format!(
+        "{}{}",
+        style(prefix).dim(),
+        clip_to_width(content, width - prefix_width)
+    )
+}
+
 /// Builds a row's second (detail) line: the row's `gutter` cell at the far-left
 /// column (so the active accent bar runs down both lines), padded to sit under
 /// the branch name, then the already-styled, already-clipped `detail`.
@@ -614,7 +634,8 @@ pub(super) fn nested_worktree_row(
         let (before, after) = value.split_at(cursor);
         let field = widgets::block_caret(before, after, &Style::new().accent().bold());
         let field_width = name_width + label_col + ACTIVE_COL + 1;
-        format!("{gutter} {kind} {}", clip_to_width(&field, field_width))
+        let field = nested_inline_field(&field, field_width, nesting_depth);
+        format!("{gutter} {kind} {field}")
     } else {
         // The session's sidebar label (its custom display name, or the branch when
         // unset); a detached worktree with no label falls back to the placeholder.
@@ -1223,22 +1244,28 @@ pub(super) fn removing_session_rows(
     selected: bool,
     active: bool,
     in_overview: bool,
+    nesting_depth: usize,
 ) -> [String; SESSION_ROWS] {
     let gutter = session_gutter_cell(selected, active, in_overview, 0);
     let kind = leaf_loading_chip("✂", frame);
     let wave = leaf_loading_chip(&clip_to_width(label, name_width), frame);
-    let name = pad_to_width(wave, name_width);
+    let name = nested_inline_field(&wave, name_width, nesting_depth);
+    let name = pad_to_width(name, name_width);
     let status_tag = label_cell(None, label_col);
     let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
     let detail = leaf_loading_chip("removing session", frame);
-    let line2 = detail_line(
+    let lineage_cols = lineage_width(nesting_depth).min(detail_width);
+    let nested_detail_width = detail_width.saturating_sub(lineage_cols);
+    let line2 = nested_detail_line(
         &session_gutter_cell(selected, active, in_overview, 1),
-        clip_to_width(&detail, detail_width),
+        lineage_cols,
+        clip_to_width(&detail, nested_detail_width),
     );
     let prune = leaf_loading_chip("pruning worktree", frame + 1);
-    let line3 = detail_line(
+    let line3 = nested_detail_line(
         &session_gutter_cell(selected, active, in_overview, 2),
-        clip_to_width(&prune, detail_width),
+        lineage_cols,
+        clip_to_width(&prune, nested_detail_width),
     );
     [line1, line2, line3]
 }
@@ -2112,6 +2139,7 @@ pub(super) fn left_pane(
             let selected = flat_row == list.selected_index();
             let active = flat_row == list.active_index();
             if is_removing(pending_sessions, group.root_path(), worktree_name(w)) {
+                let nesting_depth = group.nesting_depth(i);
                 for row in removing_session_rows(
                     group.display_label(i),
                     skeleton,
@@ -2121,6 +2149,7 @@ pub(super) fn left_pane(
                     selected,
                     active,
                     in_overview,
+                    nesting_depth,
                 ) {
                     win.push(row);
                 }
