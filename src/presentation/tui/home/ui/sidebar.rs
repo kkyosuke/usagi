@@ -1232,8 +1232,8 @@ pub(super) fn pending_session_rows(
 
 /// The full-sidebar skeleton that replaces a session row while that session is
 /// being removed. It keeps the same three-row footprint as the real row but uses
-/// a leaf-green wave and pruning language, visually separating deletion from the
-/// blue/cyan create skeleton.
+/// a leaf-green wave on the name line, visually separating deletion from the
+/// blue/cyan create skeleton while leaving the lower two rows height-only.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn removing_session_rows(
     label: &str,
@@ -1253,19 +1253,16 @@ pub(super) fn removing_session_rows(
     let name = pad_to_width(name, name_width);
     let status_tag = label_cell(None, label_col);
     let line1 = format!("{gutter} {kind} {name}{status_tag}{}", note_cell(false));
-    let detail = leaf_loading_chip("removing session", frame);
     let lineage_cols = lineage_width(nesting_depth).min(detail_width);
-    let nested_detail_width = detail_width.saturating_sub(lineage_cols);
     let line2 = nested_detail_line(
         &session_gutter_cell(selected, active, in_overview, 1),
         lineage_cols,
-        clip_to_width(&detail, nested_detail_width),
+        String::new(),
     );
-    let prune = leaf_loading_chip("pruning worktree", frame + 1);
     let line3 = nested_detail_line(
         &session_gutter_cell(selected, active, in_overview, 2),
         lineage_cols,
-        clip_to_width(&prune, nested_detail_width),
+        String::new(),
     );
     [line1, line2, line3]
 }
