@@ -6,7 +6,7 @@ use console::style;
 use super::super::state::HomeState;
 use super::super::terminal::tabs::TabStrip;
 use super::clip_to_width;
-use super::panes::{active_session_header, switch_preview_header, FOCUS_NEW_TAB_LABEL};
+use super::panes::{active_session_header, overview_preview_header, FOCUS_NEW_TAB_LABEL};
 
 pub(super) fn tab_strip_parts(
     strip: &TabStrip,
@@ -78,9 +78,9 @@ pub(super) const HEADER_TAB_DIVIDER: &str = " │ ";
 /// numbered chips, with the active-tab underline marker on the row below
 /// re-indented to sit under the chips. Because the identity is a constant width,
 /// the divider and the chips land in the same column whichever session is shown,
-/// so the row does not jitter as the 切替 cursor moves between sessions. With no
+/// so the row does not jitter as the 選択 cursor moves between sessions. With no
 /// `strip` (or an empty one) the identity stands alone on one row. Used by both
-/// the 切替 (Switch) preview and 没入 (Attached).
+/// the 選択 (Overview) preview and 没入 (Attached).
 pub(super) fn header_tab_rows(
     header: String,
     strip: Option<&TabStrip>,
@@ -185,17 +185,17 @@ pub(in crate::presentation::tui::home) fn attached_tab_at(
 }
 
 /// The live-pane tab (0-based, matching [`TabStrip::labels`]) a left click at the
-/// 0-based screen (`col`, `row`) lands on while 在席 (Focus), or `None` when the
+/// 0-based screen (`col`, `row`) lands on while 集中 (Closeup), or `None` when the
 /// click is not on a changeable pane tab.
 ///
-/// 在席 draws the same two-row header/tab block as 没入 at the top of the right
+/// 集中 draws the same two-row header/tab block as 没入 at the top of the right
 /// pane, but the terminal body is only a preview and the selector may also sit on
 /// the trailing `+ new` tab. The `+ new` chip is only rendered while it is the
 /// selected tab, so a click can never land on it (clicking the active tab is a
 /// no-op); only the live pane chips are selectable here. This hit-test
 /// reconstructs that rendered strip so the event loop can make right-pane pane
 /// tabs mouse-selectable, mirroring the keyboard `Ctrl-N` / `Ctrl-P` path.
-pub(in crate::presentation::tui::home) fn focus_tab_at(
+pub(in crate::presentation::tui::home) fn closeup_tab_at(
     state: &HomeState,
     col: u16,
     row: u16,
@@ -212,7 +212,7 @@ pub(in crate::presentation::tui::home) fn focus_tab_at(
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
     let mut labels = strip.labels.clone();
-    let active = if state.focus_on_new_tab() {
+    let active = if state.closeup_on_new_tab() {
         labels.push(FOCUS_NEW_TAB_LABEL.to_string());
         labels.len().saturating_sub(1)
     } else {
@@ -228,17 +228,17 @@ pub(in crate::presentation::tui::home) fn focus_tab_at(
     (target != combined.active).then_some(target)
 }
 
-pub(in crate::presentation::tui::home) fn focus_tab_hit(
+pub(in crate::presentation::tui::home) fn closeup_tab_hit(
     state: &HomeState,
     col: u16,
     row: u16,
     raw_height: usize,
     raw_width: usize,
 ) -> Option<usize> {
-    focus_tab_hit_inner(state, col, row, raw_height, raw_width)
+    closeup_tab_hit_inner(state, col, row, raw_height, raw_width)
 }
 
-pub(super) fn focus_tab_hit_inner(
+pub(super) fn closeup_tab_hit_inner(
     state: &HomeState,
     col: u16,
     row: u16,
@@ -255,7 +255,7 @@ pub(super) fn focus_tab_hit_inner(
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
     let mut labels = strip.labels.clone();
-    let active = if state.focus_on_new_tab() {
+    let active = if state.closeup_on_new_tab() {
         labels.push(FOCUS_NEW_TAB_LABEL.to_string());
         labels.len().saturating_sub(1)
     } else {
@@ -270,14 +270,14 @@ pub(super) fn focus_tab_hit_inner(
 }
 
 /// The live-pane tab (0-based, matching [`TabStrip::labels`]) a left click at the
-/// 0-based screen (`col`, `row`) lands on while 切替 (Switch), or `None` when the
+/// 0-based screen (`col`, `row`) lands on while 選択 (Overview), or `None` when the
 /// click is not on a changeable pane tab.
 ///
-/// 切替's right pane draws the highlighted session's preview and exposes the
+/// 選択's right pane draws the highlighted session's preview and exposes the
 /// same tab strip that `←`/`→` navigate by keyboard. This mirrors the renderer's
 /// header/geometry so a click on an inactive chip moves the preview — and the
-/// pane that `Enter` re-attaches — to that tab without entering 在席 first.
-pub(in crate::presentation::tui::home) fn switch_tab_at(
+/// pane that `Enter` re-attaches — to that tab without entering 集中 first.
+pub(in crate::presentation::tui::home) fn overview_tab_at(
     state: &HomeState,
     col: u16,
     row: u16,
@@ -288,7 +288,7 @@ pub(in crate::presentation::tui::home) fn switch_tab_at(
     if strip.labels.is_empty() {
         return None;
     }
-    let (header, live) = switch_preview_header(state);
+    let (header, live) = overview_preview_header(state);
     if !live {
         return None;
     }
@@ -304,7 +304,7 @@ pub(in crate::presentation::tui::home) fn switch_tab_at(
     (target != strip.active).then_some(target)
 }
 
-pub(in crate::presentation::tui::home) fn switch_tab_hit(
+pub(in crate::presentation::tui::home) fn overview_tab_hit(
     state: &HomeState,
     col: u16,
     row: u16,
@@ -315,7 +315,7 @@ pub(in crate::presentation::tui::home) fn switch_tab_hit(
     if strip.labels.is_empty() {
         return None;
     }
-    let (header, live) = switch_preview_header(state);
+    let (header, live) = overview_preview_header(state);
     if !live {
         return None;
     }

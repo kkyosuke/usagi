@@ -43,10 +43,10 @@ fn config_opens_the_settings_screen_and_can_quit() {
 
 #[test]
 fn returning_from_config_refreshes_the_session_action_ui() {
-    // The config screen flipped the 在席 (Focus) surface from the default Menu to
-    // Prompt; on returning to home the state must adopt it, so Focus renders the
+    // The config screen flipped the 集中 (Closeup) surface from the default Menu to
+    // Prompt; on returning to home the state must adopt it, so Closeup renders the
     // new surface without reopening the screen. Focusing the root then running
-    // `terminal` from the (now Prompt) 在席 surface attaches a pane, letting us
+    // `terminal` from the (now Prompt) 集中 surface attaches a pane, letting us
     // observe the live state's setting.
     let mut config = |_: &Term| Ok(Some(reload(SessionActionUi::Prompt)));
     let seen = RefCell::new(None);
@@ -57,9 +57,9 @@ fn returning_from_config_refreshes_the_session_action_ui() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("config");
-    keys.push(Ok(Key::Enter)); // open config -> returns Prompt -> back to Switch
-    keys.push(Ok(Key::Enter)); // focus root (idle) -> 在席 prompt (the new surface)
-    keys.extend(typed("terminal")); // type into the 在席 prompt
+    keys.push(Ok(Key::Enter)); // open config -> returns Prompt -> back to Overview
+    keys.push(Ok(Key::Enter)); // focus root (idle) -> 集中 prompt (the new surface)
+    keys.extend(typed("terminal")); // type into the 集中 prompt
     keys.push(Ok(Key::Enter)); // run terminal -> attach root, observing the setting
     run_full(
         keys,
@@ -76,7 +76,7 @@ fn returning_from_config_refreshes_the_session_action_ui() {
 #[test]
 fn returning_from_config_reapplies_the_default_agent_cli() {
     // The config screen switched the default Agent CLI; on returning to home the
-    // state must adopt it so the next `agent` / `ai` launch (and the 在席 menu's
+    // state must adopt it so the next `agent` / `ai` launch (and the 集中 menu's
     // `Launch <名前>` row) reflect the edit without restarting — in particular,
     // `ai`'s "open config and choose an installed Agent CLI" hint only works if
     // this re-apply happens. The launch callback observes the live state's
@@ -98,7 +98,7 @@ fn returning_from_config_reapplies_the_default_agent_cli() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("config");
     keys.push(Ok(Key::Enter)); // open config -> returns Gemini as default -> back
-    keys.push(Ok(Key::Enter)); // focus root (idle) -> 在席 prompt
+    keys.push(Ok(Key::Enter)); // focus root (idle) -> 集中 prompt
     keys.extend(typed("agent")); // bare `agent` launches the (new) default
     keys.push(Ok(Key::Enter)); // attach, observing the re-applied default
     run_full(
@@ -145,18 +145,18 @@ fn session_switch_unknown_name_logs_an_error_and_keeps_the_palette_open() {
 
 #[test]
 fn session_switch_known_idle_name_enters_focus() {
-    // "feat" resolves but is idle (no live preview), so it just enters Focus.
+    // "feat" resolves but is idle (no live preview), so it just enters Closeup.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
 fn session_switch_known_live_name_attaches_then_returns_to_focus() {
     // "root" resolves and is live, so it attaches; noop_open closes the pane,
-    // returning to Focus, then Esc -> Switch (fallback Ctrl-C quits).
+    // returning to Closeup, then Esc -> Overview (fallback Ctrl-C quits).
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opened.borrow_mut() += 1;
@@ -165,9 +165,9 @@ fn session_switch_known_live_name_attaches_then_returns_to_focus() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch root");
-    keys.push(Ok(Key::Enter)); // -> Focus -> attach -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // -> Closeup -> attach -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
             keys,
@@ -218,8 +218,8 @@ fn note_editor_opened_while_attached_refreshes_the_attached_terminal_surface() {
     let term = Term::stdout();
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // focus feat (live) -> attach -> OpenNote -> editor
-    keys.push(Ok(Key::Char(CTRL_S))); // save & close -> re-attach -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Char(CTRL_S))); // save & close -> re-attach -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview; fallback Ctrl-C quits
     let mut reader = ScriptedReader::new(keys);
     let monitor = MonitorHandle::detached();
     let mut persist: fn(&str) = noop_persist;

@@ -11,7 +11,7 @@ fn ctrl_c_quits_outright_when_no_session_is_live() {
 }
 
 #[test]
-fn ctrl_q_at_the_base_switch_confirms_before_quitting() {
+fn ctrl_q_at_the_base_overview_confirms_before_quitting() {
     // Unlike Ctrl-C, Ctrl-Q always raises the quit-confirmation modal first —
     // even with nothing live — so a lone Ctrl-Q does not quit; `y` then confirms.
     assert!(matches!(
@@ -26,12 +26,12 @@ fn ctrl_q_at_the_base_switch_confirms_before_quitting() {
 
 #[test]
 fn ctrl_q_modal_can_be_cancelled_then_re_raised_and_confirmed() {
-    // Ctrl-Q raises the modal on an idle screen; `n` cancels back to 切替 (proving
+    // Ctrl-Q raises the modal on an idle screen; `n` cancels back to 選択 (proving
     // it did not quit, since the loop reads on); a second Ctrl-Q raises it again
     // and a third Ctrl-Q inside the modal confirms the close.
     let keys = vec![
         Ok(Key::Char(CTRL_Q)), // raise the modal (idle)
-        Ok(Key::Char('n')),    // cancel -> 切替
+        Ok(Key::Char('n')),    // cancel -> 選択
         Ok(Key::Char(CTRL_Q)), // raise again
         Ok(Key::Char(CTRL_Q)), // confirm via a second Ctrl-Q inside the modal
     ];
@@ -82,12 +82,12 @@ fn ctrl_c_with_a_live_session_quits_only_after_confirming() {
 #[test]
 fn confirm_modal_cancel_keeps_the_screen_running() {
     // Ctrl-C raises the modal (a session is live); an ignored key is a no-op
-    // in it; 'n' cancels back to 切替, where a palette command still runs (proving
+    // in it; 'n' cancels back to 選択, where a palette command still runs (proving
     // the first Ctrl-C did not quit). Esc also cancels; Enter finally confirms.
     let mut keys = vec![
         Ok(Key::CtrlC),     // raise the modal
         Ok(Key::Home),      // ignored inside the modal
-        Ok(Key::Char('n')), // cancel -> 切替
+        Ok(Key::Char('n')), // cancel -> 選択
     ];
     keys.extend(cmd("man")); // open the palette and type `man`
     keys.push(Ok(Key::Enter)); // runs `man` -> persisted (opens a text modal)

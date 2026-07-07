@@ -11,14 +11,14 @@
 //! purely by [`classify`](super::super::pane_input::classify): the default prefix
 //! scheme claims only the `Ctrl-O` leader (the action is the next key), while the
 //! `Alt` scheme claims a single `Alt`-chord per action and no bare Ctrl key. The
-//! navigation actions, however the scheme spells them, are: zoom out to 切替
-//! (Switch) ([`PaneStep::Detach`]) — leaving the pane on the left pane while every
+//! navigation actions, however the scheme spells them, are: zoom out to 選択
+//! (Overview) ([`PaneStep::Detach`]) — leaving the pane on the left pane while every
 //! pane stays alive in the pool, where the user moves between sessions (`↑`/`↓`),
 //! between this session's tabs (`←`/`→`), re-attaches (`Enter`), adds a pane
 //! (`t`), or summons the `:` command palette; next / previous tab in place
 //! ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), as does a left click on a tab
-//! chip ([`PaneStep::ToTab`]); zoom out to 在席 (Focus) — the session's action menu
-//! — ([`PaneStep::ToFocus`]); add an agent tab ([`PaneStep::NewAgentTab`]) without
+//! chip ([`PaneStep::ToTab`]); zoom out to 集中 (Closeup) — the session's action menu
+//! — ([`PaneStep::ToCloseup`]); add an agent tab ([`PaneStep::NewAgentTab`]) without
 //! leaving 没入; close the active tab in place ([`PaneStep::CloseTab`]); open the
 //! session-note editor ([`PaneStep::OpenNote`]); and collapse
 //! / expand the left sidebar in place (it never leaves 没入). `Ctrl-^` jumps to the
@@ -26,7 +26,7 @@
 //! scheme) / `Alt-q` leaves 没入 to quit usagi ([`PaneStep::Quit`]), raising the
 //! quit-confirmation modal on the home screen. `Esc` and `Ctrl-W` (the universal
 //! shell "delete previous word") always flow to the shell; closing a tab is
-//! `Ctrl-O x` / `Alt-x` here, or `x` from 切替. The shell exiting on its own
+//! `Ctrl-O x` / `Alt-x` here, or `x` from 選択. The shell exiting on its own
 //! reports [`PaneStep::Closed`].
 //!
 //! `agent` reuses the same machinery: the pool sends the configured agent CLI to
@@ -70,13 +70,13 @@ use super::selection::{Cell, Selection};
 use super::view::TerminalView;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
-/// in [`super::super::run`](super) can act on it: the user zoomed out (to 切替 or 在席),
+/// in [`super::super::run`](super) can act on it: the user zoomed out (to 選択 or 集中),
 /// switched tabs, added / closed a tab, or the shell closed. Tab switching and
 /// agent-tab / close management are handled in place without leaving 没入 — the
-/// same actions are also reachable from 切替 (Switch) via `Detach`.
+/// same actions are also reachable from 選択 (Overview) via `Detach`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneStep {
-    /// `Ctrl-O`: zoom out one level (→ 切替), leaving every pane alive in the pool.
+    /// `Ctrl-O`: zoom out one level (→ 選択), leaving every pane alive in the pool.
     Detach,
     /// `Ctrl-E`: leave the pane to open the session-note editor over it. The
     /// caller re-attaches the pane once the editor closes.
@@ -97,13 +97,13 @@ pub enum PaneStep {
     /// A drag/drop from one tab chip to another: move the source tab to the
     /// target slot and keep that moved pane active.
     MoveTab { from: usize, to: usize },
-    /// `Ctrl-T`: zoom out to 在席 (Focus) — the session's action menu — leaving
+    /// `Ctrl-T`: zoom out to 集中 (Closeup) — the session's action menu — leaving
     /// every pane alive in the pool. Adding a terminal is then a menu choice.
-    ToFocus,
+    ToCloseup,
     /// `Ctrl-G`: add a new agent tab and make it active, without leaving 没入.
     NewAgentTab,
     /// `Ctrl-O x` / `Alt-x`: close the active tab in place, killing its shell.
-    /// The caller drives the next surviving tab, or drops back to 在席 when this
+    /// The caller drives the next surviving tab, or drops back to 集中 when this
     /// was the last one (the same handling as a shell that exits on its own).
     CloseTab,
     /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
@@ -316,7 +316,7 @@ fn drive(
     let mut last_shape: Option<u16> = None;
     // The previous left click on a sidebar session row and when it landed, so a
     // second click on the same row within [`DOUBLE_CLICK`] confirms it (switching
-    // to that session) — the same double-click-to-confirm 切替 uses. Held across
+    // to that session) — the same double-click-to-confirm 選択 uses. Held across
     // `pump_input` calls; `None` when no click is pending a partner.
     let mut last_click: Option<(usize, Instant)> = None;
     // The mouse pointer shape (OSC 22) last written to the host terminal, so it is
@@ -646,14 +646,14 @@ fn wait(
 /// [`classify`](super::super::pane_input::classify)) — the prefix scheme reserves
 /// only the `Ctrl-O` leader (tracked across calls via `pending_prefix`), the
 /// `Alt` scheme a single `Alt`-chord each — and resolve to the steps the
-/// pool-driven loop acts on: detach to 切替 ([`PaneStep::Detach`]), next / previous
-/// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 在席
-/// ([`PaneStep::ToFocus`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
+/// pool-driven loop acts on: detach to 選択 ([`PaneStep::Detach`]), next / previous
+/// tab in place ([`PaneStep::NextTab`] / [`PaneStep::PrevTab`]), zoom out to 集中
+/// ([`PaneStep::ToCloseup`]), add an agent tab ([`PaneStep::NewAgentTab`]), open the
 /// note editor ([`PaneStep::OpenNote`]), jump to the previous session
 /// ([`PaneStep::PrevSession`]), switch to a sidebar-clicked session, or open
 /// creation from the sidebar create row ([`PaneStep::ToSession`]); toggling the
 /// sidebar stays in 没入. `Esc` and
-/// `Ctrl-W` always reach the shell; tabs are closed from 切替 (`x`). Other events
+/// `Ctrl-W` always reach the shell; tabs are closed from 選択 (`x`). Other events
 /// are ignored so the next redraw picks up any new size.
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
@@ -715,7 +715,7 @@ fn pump_input(
                     // the new pane width. Bare `Ctrl-B` never reaches here —
                     // `classify` only maps the leader / `Alt` chords, so it is
                     // forwarded to the shell; `Ctrl-B` toggles the sidebar on
-                    // usagi's own surfaces (切替 / 在席), not in 没入.
+                    // usagi's own surfaces (選択 / 集中), not in 没入.
                     KeyAction::Reserved(Reserved::ToggleSidebar) => {
                         *pending_prefix = None;
                         state.toggle_sidebar();
@@ -730,7 +730,7 @@ fn pump_input(
                         flush_pending_input(pty, &mut pending_bytes)?;
                         return Ok(Some(match action {
                             Reserved::Detach => PaneStep::Detach,
-                            Reserved::ToFocus => PaneStep::ToFocus,
+                            Reserved::ToCloseup => PaneStep::ToCloseup,
                             Reserved::NextTab => PaneStep::NextTab,
                             Reserved::PrevTab => PaneStep::PrevTab,
                             Reserved::SwapTabRight => PaneStep::SwapTabRight,
@@ -894,7 +894,7 @@ fn pump_input(
                         // `DOUBLE_CLICK` switches to that session (attaching when
                         // live), or opens inline creation when the row is the
                         // persistent `+ new session` affordance — the same
-                        // confirm 切替 / 在席 expose without first zooming out. A
+                        // confirm 選択 / 集中 expose without first zooming out. A
                         // single click only arms.
                         let session = (badge.is_none() && !dragged)
                             .then(|| {

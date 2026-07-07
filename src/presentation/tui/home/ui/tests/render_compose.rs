@@ -10,8 +10,8 @@ fn render_frame_combines_all_sections_at_full_height() {
     // (with its `│` divider) starts at row 3.
     assert!(frame[2].trim().is_empty());
     assert!(frame[3].contains('│'));
-    // The default mode is 切替, so the footer carries its tag.
-    assert!(frame.last().unwrap().contains("switch"));
+    // The default mode is 選択, so the footer carries its tag.
+    assert!(frame.last().unwrap().contains("overview"));
     let joined = frame.join("\n");
     assert!(joined.contains("main"));
 }
@@ -245,7 +245,7 @@ fn render_frame_survives_a_short_terminal() {
     let state = state_with(Vec::new());
     let frame = render_frame(3, 80, &state);
     assert!(frame[0].contains("usagi"));
-    assert!(frame.last().unwrap().contains("switch"));
+    assert!(frame.last().unwrap().contains("overview"));
     assert!(frame.len() >= 4);
 }
 
@@ -270,13 +270,13 @@ fn render_frame_clips_body_rows_to_a_narrow_terminal() {
 }
 
 #[test]
-fn render_frame_focus_menu_keeps_its_height() {
+fn render_frame_closeup_menu_keeps_its_height() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     let frame = render_frame(24, 80, &state);
     assert_eq!(frame.len(), 24);
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
-    // The right pane carries the action menu; no results band in Focus.
+    // The right pane carries the action menu; no results band in Closeup.
     assert!(joined.contains("terminal"));
     assert!(joined.contains("session: main"));
 }
@@ -335,7 +335,7 @@ fn preview_pane_scrolls_to_the_offset_and_clips_a_long_title() {
 #[test]
 fn right_pane_shows_the_preview_over_every_mode() {
     // The preview captures the right pane regardless of mode; opened here from the
-    // default 切替.
+    // default 選択.
     let state = preview_state("notes.md", "# Notes\nhello");
     let out = stripped(&right_pane_contents(&state, 50, 12));
     assert!(out.contains("notes.md"));
@@ -403,15 +403,15 @@ fn preview_visible_tracks_the_body_height() {
     // input line), so the visible window matches the body rows less the header
     // and does not change with the mode.
     let switch = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    let switch_visible = preview_visible(24, 80, &switch);
+    let overview_visible = preview_visible(24, 80, &switch);
 
     let mut focus = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    focus.enter_focus(1);
-    let focus_visible = preview_visible(24, 80, &focus);
+    focus.enter_closeup(1);
+    let closeup_visible = preview_visible(24, 80, &focus);
 
     // Both are positive and equal (same body height in either mode).
-    assert!(switch_visible >= 1);
-    assert_eq!(switch_visible, focus_visible);
+    assert!(overview_visible >= 1);
+    assert_eq!(overview_visible, closeup_visible);
     // A short terminal floors at one visible row.
     assert_eq!(preview_visible(4, 80, &switch), 1);
 }
@@ -435,9 +435,9 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
         last_active: None,
     };
     state.restore_sessions(vec![session]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down(); // root -> alpha
-    assert!(state.switch_begin_note());
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down(); // root -> alpha
+    assert!(state.overview_begin_note());
 
     let frame = stripped(&render_frame(24, 80, &state));
     // The right-pane editor: a `note` box (the session is named in the sidebar) +
@@ -457,7 +457,7 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     assert!(frame.contains("Ctrl-S: save"));
     // The chrome and sidebar are still drawn (not replaced by a modal): the mode
     // ladder and the root row's `workspace root` line are present.
-    assert!(frame.contains("Switch"), "the mode ladder stays visible");
+    assert!(frame.contains("Overview"), "the mode ladder stays visible");
     assert!(
         frame.contains("workspace root"),
         "the sidebar stays visible"
@@ -472,8 +472,8 @@ fn note_overlay_editor_windows_around_the_caret() {
         .map(|i| format!("L{i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut state = switch_state_with_note(&note);
-    assert!(state.switch_begin_note()); // caret parks at the end (last line, "L9")
+    let mut state = overview_state_with_note(&note);
+    assert!(state.overview_begin_note()); // caret parks at the end (last line, "L9")
 
     // A short pane: only a window of the last lines fits in the editor box.
     let pane = stripped(&right_pane_contents(&state, 40, 8));
@@ -487,8 +487,8 @@ fn note_editor_renders_a_multi_line_selection_without_corrupting_the_text() {
     // A selection spanning two lines reverses the cells in the editor box. The
     // highlight only recolours existing cells, so every line still reads intact —
     // and lines outside the span (before it and after it) render unchanged.
-    let mut state = switch_state_with_note("one\ntwo\nthree\nfour");
-    assert!(state.switch_begin_note()); // caret parks at the end ("four")
+    let mut state = overview_state_with_note("one\ntwo\nthree\nfour");
+    assert!(state.overview_begin_note()); // caret parks at the end ("four")
     let area = state.note_editor_mut().unwrap().area_mut();
     // Anchor at the end of "three", then extend the selection up to the start of
     // "two": the span is (line 1, col 0)..(line 2, col 5), caret on line 1.
@@ -507,8 +507,8 @@ fn note_editor_renders_a_multi_line_selection_without_corrupting_the_text() {
 }
 
 #[test]
-fn right_pane_overlays_the_read_only_note_in_switch() {
-    let mut state = switch_state_with_note("do X\ndo Y");
+fn right_pane_overlays_the_read_only_note_in_overview() {
+    let mut state = overview_state_with_note("do X\ndo Y");
     // The selected session's note shows in the right pane (overlaid on top).
     let pane = stripped(&right_pane_contents(&state, 40, 12));
     assert!(pane.contains("─ note"), "the overlay is titled");
@@ -520,7 +520,7 @@ fn right_pane_overlays_the_read_only_note_in_switch() {
     assert!(pane.contains("do Y"));
 
     // Back on the root row there is no session note, so no overlay shows.
-    state.switch_move_up();
+    state.overview_move_up();
     let root = stripped(&right_pane_contents(&state, 40, 12));
     assert!(!root.contains("do X"));
 }
@@ -531,7 +531,7 @@ fn read_only_note_overlay_elides_a_long_note() {
         .map(|i| format!("todo {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let state = switch_state_with_note(&note);
+    let state = overview_state_with_note(&note);
     let pane = stripped(&right_pane_contents(&state, 40, 16));
     // The first lines show; the overflow is elided with a `… (N more)` line.
     assert!(pane.contains("todo 0"));
@@ -546,7 +546,7 @@ fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
     // preview underneath is an idle session's action menu or a live terminal, so
     // its box top border lands on the same row either way — moving the cursor never
     // shifts where the note reads (no CLS).
-    let idle = switch_state_with_note("todo");
+    let idle = overview_state_with_note("todo");
     let idle_rows = right_pane_contents(&idle, 40, 12);
     let idle_box_top = idle_rows
         .iter()
@@ -554,7 +554,7 @@ fn note_overlay_anchors_at_the_top_for_both_idle_and_live_previews() {
         .expect("the read-only box has a top border");
 
     // Make the same session live (a running shell with a snapshot).
-    let mut live = switch_state_with_note("todo");
+    let mut live = overview_state_with_note("todo");
     live.apply_badges(MonitorSnapshot {
         live: [PathBuf::from("/repo/wt")].into(),
         ..Default::default()
@@ -581,7 +581,7 @@ fn note_overlay_keeps_the_session_header_visible_beside_the_box() {
     // The note box is a top-right column: it overwrites only its own columns, so
     // the session header on the top row keeps its leading columns to the box's
     // left — the session identity stays readable right beside the note.
-    let mut live = switch_state_with_note("next: ship it");
+    let mut live = overview_state_with_note("next: ship it");
     live.apply_badges(MonitorSnapshot {
         live: [PathBuf::from("/repo/wt")].into(),
         ..Default::default()
@@ -611,7 +611,7 @@ fn note_overlay_shows_fully_when_the_preview_is_sparse() {
         .map(|i| format!("todo {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut state = switch_state_with_note(&note);
+    let mut state = overview_state_with_note(&note);
     // A live session whose terminal snapshot is a single line — a very short base.
     state.apply_badges(MonitorSnapshot {
         live: [PathBuf::from("/repo/wt")].into(),
@@ -677,8 +677,8 @@ fn render_frame_keeps_the_pane_divider_straight_across_commit_stat_rows() {
 fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
     // Editing is a floating box at the top, so the preview/terminal underneath
     // stays visible below it (the screen never switches).
-    let mut state = switch_state_with_note("hi");
-    assert!(state.switch_begin_note());
+    let mut state = overview_state_with_note("hi");
+    assert!(state.overview_begin_note());
     let pane = stripped(&right_pane_contents(&state, 40, 16));
     assert!(pane.contains("─ note"), "the editor box shows");
     // The idle session's resting mascot still shows behind the box.

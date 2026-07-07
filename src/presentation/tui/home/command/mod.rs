@@ -54,7 +54,7 @@ pub enum Effect {
     /// name) to pick one or more sessions to delete at once. `force` carries the
     /// `--force` flag so the confirmed removal can discard uncommitted changes.
     OpenRemoveModal { force: bool },
-    /// Enter 切替 (Switch) to pick a session in the left pane (the user ran
+    /// Enter 選択 (Overview) to pick a session in the left pane (the user ran
     /// `session switch` with no name).
     EnterSwitch,
     /// Focus the session named by the string (the user ran `session switch
@@ -82,19 +82,19 @@ pub enum Effect {
     /// event loop resolves the directory and configured CLI, queues the prompt for
     /// the fresh agent spawn, and launches the pane.
     OpenAgentPrompt(String),
-    /// Open the local-LLM chat screen (the user ran `chat` in 在席, or picked its
+    /// Open the local-LLM chat screen (the user ran `chat` in 集中, or picked its
     /// menu row). Unlike [`OpenAgent`](Self::OpenAgent) / [`OpenAgentPrompt`](Self::OpenAgentPrompt),
     /// which launch an external agent CLI in the worktree, this hands off to a
     /// dedicated screen that converses with the workspace's configured local LLM
     /// (via Ollama). The event loop owns the screen and repaints over it on return.
     OpenChat,
-    /// Close (remove) the focused session (the user ran `close` in 在席). It is the
+    /// Close (remove) the focused session (the user ran `close` in 集中). It is the
     /// session equivalent of `session remove <name>`: a clean session's
     /// worktrees/branches are deleted. `force` mirrors `session remove`'s
     /// `--force` flag — `false` (the default `close`) refuses a session with
     /// uncommitted changes (the removal logs the `--force` hint), while `true`
-    /// (`close --force`, the 在席 menu's `Shift`+`c`) discards them. Either way 在席
-    /// is left for the base 切替 (Switch). The focused session's name is resolved by
+    /// (`close --force`, the 集中 menu's `Shift`+`c`) discards them. Either way 集中
+    /// is left for the base 選択 (Overview). The focused session's name is resolved by
     /// the event loop, which owns the worktree list and the removal callback.
     CloseSession { force: bool },
     /// Open the configuration screen to edit this workspace's local overrides.
@@ -103,7 +103,7 @@ pub enum Effect {
     OpenConfig,
     /// Open the workspace-env editor (the `env` command) as an overlay over the
     /// command palette, so editing the 1Password-backed environment bindings
-    /// stays in the Overview and returns to it on save / cancel. The event loop
+    /// stays in the command palette and returns to it on save / cancel. The event loop
     /// seeds it from — and saves it to — this workspace's local settings.
     OpenEnvEditor,
     /// Show the result lines in a scrollable text modal (rather than the results
@@ -120,10 +120,10 @@ pub enum Effect {
     /// resolves and reads it (under the workspace root) and renders it.
     OpenPreview(String),
     /// Open the right-pane diff view of the focused session (the user ran the
-    /// 在席 `diff` command): the session worktree's cumulative diff against the
+    /// 集中 `diff` command): the session worktree's cumulative diff against the
     /// base branch. The event loop resolves the highlighted worktree, shells out
     /// to git, and renders the patch — like [`OpenPreview`], it takes over the
-    /// right pane. Session-scoped, so it fires from the 在席 menu / prompt, not
+    /// right pane. Session-scoped, so it fires from the 集中 menu / prompt, not
     /// the workspace palette.
     OpenDiff,
     /// Stack another registered workspace into the 統合(unite) view (the user ran
@@ -224,10 +224,10 @@ impl CommandResult {
 
 /// Which of the home screen's command scopes a command belongs to.
 ///
-/// The two surfaces are *physically separate* in the home screen (切替 / 在席 /
+/// The two surfaces are *physically separate* in the home screen (選択 / 集中 /
 /// 没入 with the `:` command palette over them, see `document/design/05-home.md`):
 /// the `:` command palette operates the whole workspace
-/// ([`CommandScope::Workspace`]), while the *在席 (Focus)* right pane operates one
+/// ([`CommandScope::Workspace`]), while the *集中 (Closeup)* right pane operates one
 /// session ([`CommandScope::Session`]). Because the two never share a line, the
 /// scopes do not nest — a command is offered only in its own scope (plus the
 /// shared utilities). Commands are offered (completion, hints, `man` grouping)
@@ -238,7 +238,7 @@ pub enum CommandScope {
     /// Operating the whole workspace, the `:` command palette: `session`,
     /// `config`, `doctor`.
     Workspace,
-    /// Operating a single session, the *在席 (Focus)* right pane: `terminal`,
+    /// Operating a single session, the *集中 (Closeup)* right pane: `terminal`,
     /// `agent`, `ai`.
     Session,
     /// A utility available in every scope: `man`, `history`, `clear`, `quit`.

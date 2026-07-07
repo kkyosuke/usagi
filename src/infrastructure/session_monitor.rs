@@ -24,7 +24,7 @@
 //! Display vs. notification are kept separate. The displayed state always
 //! reflects the agent's true phase, **including the attached session** — so a
 //! session shows the same state whether the user is looking at it or has switched
-//! away (this is what keeps 切替 and 没入 consistent). Being attached suppresses
+//! away (this is what keeps 選択 and 没入 consistent). Being attached suppresses
 //! the bell heuristic (its bells are seen live, so they never mark it waiting) and
 //! the *done* notice (`Stop` fires at every turn end, so notifying the foreground
 //! session would ding on each reply). A *waiting* transition still notifies even
@@ -101,7 +101,7 @@ impl SessionMonitor {
     ///
     /// This only changes which session is exempt from the bell heuristic and from
     /// the *done* notice; it does **not** touch the displayed state, which keeps
-    /// reflecting the agent's true phase so 切替 and 没入 agree. The next
+    /// reflecting the agent's true phase so 選択 and 没入 agree. The next
     /// [`observe`](Self::observe) reconciles a bell-only session that was flagged
     /// waiting before it was attached.
     pub fn set_attached(&mut self, path: Option<PathBuf>) {

@@ -1,6 +1,6 @@
-//! The background loading-tab flow: 在席's `terminal` / `agent` on a session that
+//! The background loading-tab flow: 集中's `terminal` / `agent` on a session that
 //! already shows tabs dispatches the pane through `start_pending_spawn` (no attach,
-//! no centre loader), stays in 在席 with a loading tab in the strip, and the loop
+//! no centre loader), stays in 集中 with a loading tab in the strip, and the loop
 //! moves to it once ready — unless the user acts first. These drive the loop with
 //! capturing background hooks (the pool-less [`super::event_loop_compat`] only
 //! no-ops them). Each test pins one loop branch: the fake `poll_pending_spawn`
@@ -9,7 +9,7 @@
 use super::*;
 use std::cell::RefCell;
 
-/// Drive the loop with capturing background-pane hooks. Reaching 在席 on a live
+/// Drive the loop with capturing background-pane hooks. Reaching 集中 on a live
 /// session and pressing `t` dispatches a background terminal; the hooks then
 /// decide how the loading tab resolves.
 #[allow(clippy::too_many_arguments)]
@@ -38,7 +38,7 @@ fn run_bg(
     let mut evict = |_: &Path| {};
     let mut branches: fn() -> Vec<String> = no_branches;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
-    // A live tab strip so 在席's `terminal` reads the session as already showing
+    // A live tab strip so 集中's `terminal` reads the session as already showing
     // tabs (the background path) and its preview has a strip to animate on.
     let mut tab_op = |_: &Path, _: Option<TabNav>| (vec!["terminal".to_string()], 0usize);
     let mut close: fn(&mut HomeState, &Path) = noop_close;
@@ -97,11 +97,11 @@ fn run_bg(
     )
 }
 
-/// Keys that reach 在席 on live `feat` and run its `terminal` command: switch to
-/// feat, `Enter` to re-attach (zooming out to 在席 via `ToFocus`), then `t`.
-fn reach_focus_and_launch_terminal() -> Vec<io::Result<Key>> {
+/// Keys that reach 集中 on live `feat` and run its `terminal` command: switch to
+/// feat, `Enter` to re-attach (zooming out to 集中 via `ToCloseup`), then `t`.
+fn reach_closeup_and_launch_terminal() -> Vec<io::Result<Key>> {
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // re-attach live feat -> ToFocus -> 在席 menu
+    keys.push(Ok(Key::Enter)); // re-attach live feat -> ToCloseup -> 集中 menu
     keys.push(Ok(Key::Char('t'))); // run `terminal`: dispatched in the background
     keys
 }
@@ -123,7 +123,7 @@ fn a_ready_background_tab_is_attached_when_the_user_stays_idle() {
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, n: bool| {
         opens.borrow_mut().push((a, n));
         if opens.borrow().len() == 1 {
-            Ok(PaneExit::ToFocus) // the initial re-attach zooms out to 在席
+            Ok(PaneExit::ToCloseup) // the initial re-attach zooms out to 集中
         } else {
             Ok(PaneExit::Closed) // the ready background tab, once attached
         }
@@ -137,7 +137,7 @@ fn a_ready_background_tab_is_attached_when_the_user_stays_idle() {
     };
     let mut clear = || {};
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,
@@ -158,7 +158,7 @@ fn a_starting_background_tab_animates_without_moving() {
     // While the pane is starting (spawned, shell not yet painted) the loop animates
     // its chip but does not move to it.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Starting(1);
@@ -168,7 +168,7 @@ fn a_starting_background_tab_animates_without_moving() {
     };
     let mut clear = || {};
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,
@@ -191,7 +191,7 @@ fn a_resolving_background_tab_shows_a_placeholder_chip() {
     // While the environment resolves there is no pool pane yet, so the loop shows a
     // synthetic placeholder chip; nothing is activated.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Resolving;
@@ -201,7 +201,7 @@ fn a_resolving_background_tab_shows_a_placeholder_chip() {
     };
     let mut clear = || {};
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,
@@ -221,7 +221,7 @@ fn acting_before_the_tab_is_ready_cancels_the_move() {
     // the tracker (and the in-flight launch) without moving to the tab.
     let activated = RefCell::new(0usize);
     let cleared = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Resolving;
@@ -232,7 +232,7 @@ fn acting_before_the_tab_is_ready_cancels_the_move() {
     let mut clear = || {
         *cleared.borrow_mut() += 1;
     };
-    let mut keys = reach_focus_and_launch_terminal();
+    let mut keys = reach_closeup_and_launch_terminal();
     keys.push(Ok(Key::ArrowDown)); // acts while loading -> cancels the auto-move
     let outcome = run_bg(
         keys,
@@ -256,7 +256,7 @@ fn a_vanished_background_launch_is_dropped() {
     // tracker without attaching.
     let activated = RefCell::new(0usize);
     let cleared = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
     let mut poll = |_d: &Path| PendingPoll::Gone;
@@ -268,7 +268,7 @@ fn a_vanished_background_launch_is_dropped() {
         *cleared.borrow_mut() += 1;
     };
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,
@@ -292,7 +292,7 @@ fn reusing_an_agent_tab_re_attaches_without_a_loading_tab() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
         *opens.borrow_mut() += 1;
         if *opens.borrow() == 1 {
-            Ok(PaneExit::ToFocus)
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -306,7 +306,7 @@ fn reusing_an_agent_tab_re_attaches_without_a_loading_tab() {
     };
     let mut clear = || {};
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,
@@ -334,7 +334,7 @@ fn a_failed_dispatch_is_logged_and_tracks_nothing() {
     // When `start_pending_spawn` errors, the launch is logged and no pending tab is
     // tracked — the loop never polls or activates anything.
     let activated = RefCell::new(0usize);
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = |_: &mut HomeState, _: &Path, _: bool| Err(anyhow::anyhow!("no shell"));
     let mut poll = |_d: &Path| PendingPoll::Ready;
@@ -344,7 +344,7 @@ fn a_failed_dispatch_is_logged_and_tracks_nothing() {
     };
     let mut clear = || {};
     let outcome = run_bg(
-        reach_focus_and_launch_terminal(),
+        reach_closeup_and_launch_terminal(),
         sample_state(),
         &mut open,
         &mut preview,

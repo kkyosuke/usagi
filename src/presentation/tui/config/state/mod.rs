@@ -23,7 +23,7 @@ pub use modal::{
 /// The themes in the order they cycle through.
 const THEMES: [Theme; 3] = [Theme::Light, Theme::Dark, Theme::System];
 
-/// The 在席 (Focus) action UIs in the order they cycle through.
+/// The 集中 (Closeup) action UIs in the order they cycle through.
 pub(super) const SESSION_ACTION_UIS: [SessionActionUi; 2] =
     [SessionActionUi::Menu, SessionActionUi::Prompt];
 
@@ -44,7 +44,7 @@ pub enum Field {
     /// Whether a prompt queued for a pane-less session auto-starts its agent.
     AutostartQueued,
     AgentCli,
-    /// How 在席 (Focus) mode presents a session's runnable commands.
+    /// How 集中 (Closeup) mode presents a session's runnable commands.
     SessionActionUi,
     /// How the embedded terminal (没入) reserves its navigation keys.
     KeyScheme,
@@ -116,7 +116,7 @@ pub enum LocalField {
     /// Environment variables resolved from 1Password references and injected into
     /// panes launched in this workspace.
     EnvVars,
-    /// The manual-status label master (切替's `Tab` / digit keys) for this
+    /// The manual-status label master (選択's `Tab` / digit keys) for this
     /// project, replacing the global set wholesale when overridden.
     SessionLabels,
 }
@@ -872,7 +872,7 @@ fn on_off(enabled: bool) -> &'static str {
     }
 }
 
-/// The human-readable label for a 在席 (Focus) action UI style.
+/// The human-readable label for a 集中 (Closeup) action UI style.
 fn session_action_ui_label(ui: SessionActionUi) -> &'static str {
     match ui {
         SessionActionUi::Menu => "Menu",

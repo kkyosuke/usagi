@@ -3,7 +3,7 @@
 //!
 //! Where [`super::open_panes_store`] records *which panes* each session had open
 //! (so they re-spawn on the next launch), this records *where the user was* — the
-//! session they were on and how deeply they were engaged with it (切替 / 在席 /
+//! session they were on and how deeply they were engaged with it (選択 / 集中 /
 //! 没入). On quit the home screen writes it; on startup it reads the snapshot and,
 //! after the panes are restored, moves the cursor to that session, focuses it, or
 //! re-attaches its pane. Gated by the same [`Settings::restore_panes_enabled`]
@@ -41,10 +41,14 @@ const RESUME_FOCUS_SUBDIR: &str = "resume-focus";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StoredEngagement {
-    /// 切替 (Switch): the session picker, with the cursor on the session.
-    Switch,
-    /// 在席 (Focus): the session's right-pane action surface.
-    Focus,
+    /// 選択 (Overview): the session picker, with the cursor on the session. The
+    /// `switch` alias reads snapshots written before the mode was renamed.
+    #[serde(alias = "switch")]
+    Overview,
+    /// 集中 (Closeup): the session's right-pane action surface. The `focus` alias
+    /// reads snapshots written before the mode was renamed.
+    #[serde(alias = "focus")]
+    Closeup,
     /// 没入 (Attached): an embedded pane was live and driven.
     Attached,
 }
@@ -132,11 +136,11 @@ mod tests {
     fn save_replaces_a_previous_snapshot() {
         with_data_dir(|| {
             let ws = tempfile::tempdir().unwrap();
-            save(ws.path(), "feature", StoredEngagement::Switch).unwrap();
-            save(ws.path(), "root", StoredEngagement::Focus).unwrap();
+            save(ws.path(), "feature", StoredEngagement::Overview).unwrap();
+            save(ws.path(), "root", StoredEngagement::Closeup).unwrap();
             let loaded = load(ws.path()).unwrap();
             assert_eq!(loaded.session, "root");
-            assert_eq!(loaded.engagement, StoredEngagement::Focus);
+            assert_eq!(loaded.engagement, StoredEngagement::Closeup);
         });
     }
 
@@ -145,7 +149,7 @@ mod tests {
         with_data_dir(|| {
             let a = tempfile::tempdir().unwrap();
             let b = tempfile::tempdir().unwrap();
-            save(a.path(), "one", StoredEngagement::Switch).unwrap();
+            save(a.path(), "one", StoredEngagement::Overview).unwrap();
             save(b.path(), "two", StoredEngagement::Attached).unwrap();
             assert_eq!(load(a.path()).unwrap().session, "one");
             assert_eq!(load(b.path()).unwrap().session, "two");
@@ -167,7 +171,7 @@ mod tests {
                 &ResumeFocus {
                     workspace: key(other.path()),
                     session: "feature".to_string(),
-                    engagement: StoredEngagement::Switch,
+                    engagement: StoredEngagement::Overview,
                 },
             )
             .unwrap();
@@ -188,5 +192,25 @@ mod tests {
             assert_eq!(load(ws.path()), None);
             assert!(!path.exists());
         });
+    }
+
+    #[test]
+    fn legacy_switch_focus_engagements_deserialize_via_aliases() {
+        // Snapshots written before the 選択/集中 rename stored the engagement as
+        // `"switch"` / `"focus"`; the serde aliases keep those readable so a user
+        // upgrading is dropped back where they left off rather than at the base.
+        let overview: StoredEngagement = serde_json::from_str("\"switch\"").unwrap();
+        assert_eq!(overview, StoredEngagement::Overview);
+        let closeup: StoredEngagement = serde_json::from_str("\"focus\"").unwrap();
+        assert_eq!(closeup, StoredEngagement::Closeup);
+        // The current names round-trip too.
+        assert_eq!(
+            serde_json::to_string(&StoredEngagement::Overview).unwrap(),
+            "\"overview\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StoredEngagement::Closeup).unwrap(),
+            "\"closeup\""
+        );
     }
 }

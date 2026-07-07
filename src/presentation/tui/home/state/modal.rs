@@ -1,5 +1,5 @@
-//! The home screen's transient sub-mode state: the 切替 (Switch) inline
-//! create/rename inputs, the 在席 (Focus) menu cursor, the scrollable text
+//! The home screen's transient sub-mode state: the 選択 (Overview) inline
+//! create/rename inputs, the 集中 (Closeup) menu cursor, the scrollable text
 //! modal, and the session-removal checklist.
 //!
 //! Each sub-mode is its own type owning its editing/navigation logic and
@@ -33,9 +33,9 @@ pub(super) enum Overlay {
     /// No overlay open — the normal panes have the keyboard.
     #[default]
     None,
-    /// The inline session-name input open while creating a session from 切替.
+    /// The inline session-name input open while creating a session from 選択.
     Create(CreateInput),
-    /// The inline display-name input open while renaming a session from 切替.
+    /// The inline display-name input open while renaming a session from 選択.
     Rename(RenameInput),
     /// A context menu opened by right-clicking a live-pane tab chip.
     TabMenu(TabMenu),
@@ -47,7 +47,7 @@ pub(super) enum Overlay {
     Text(TextModal),
     /// The right-pane Markdown preview.
     Preview(Preview),
-    /// The right-pane local-LLM chat surface (在席's `chat`). Like
+    /// The right-pane local-LLM chat surface (集中's `chat`). Like
     /// [`Preview`](Self::Preview) it takes over the right pane and captures the
     /// keyboard while open, but it is interactive: the conversation state lives
     /// here while the event loop drives the (async) model request.
@@ -277,7 +277,7 @@ impl TabRenameInput {
 
 impl Overlay {
     /// Drop an open inline create input, leaving any other overlay untouched.
-    /// The mode transitions (entering 切替 / 在席) call this to clear a
+    /// The mode transitions (entering 選択 / 集中) call this to clear a
     /// half-typed session name without disturbing an unrelated overlay — the
     /// faithful translation of the old per-field `create = None`.
     pub fn clear_create(&mut self) {
@@ -288,7 +288,7 @@ impl Overlay {
 }
 
 /// The inline session-name input shown in the left pane while creating a session
-/// from 切替 (Switch): the name being typed, the existing branch names it is
+/// from 選択 (Overview): the name being typed, the existing branch names it is
 /// validated against, and an optional inline validation error (e.g. an empty,
 /// duplicate, or branch-namespace-clashing name). The name is re-validated on
 /// every keystroke so the error appears live.
@@ -390,7 +390,7 @@ impl CreateInput {
 }
 
 /// The inline display-name input shown in the left pane while renaming a session
-/// from 切替 (Switch): the session whose sidebar label is being edited
+/// from 選択 (Overview): the session whose sidebar label is being edited
 /// (`target`, its branch name / identity, which never changes) and the label
 /// being typed (`input`, pre-filled with the current label). An empty input — or
 /// one equal to `target` — clears the override on confirm.
@@ -468,7 +468,7 @@ impl RenameInput {
     }
 }
 
-/// The session-note editor modal, opened with `n` in 切替 (Switch) or `Ctrl-E`
+/// The session-note editor modal, opened with `n` in 選択 (Overview) or `Ctrl-E`
 /// in 没入 (Attached). It holds the session whose note is being edited
 /// (`target`, its branch name / identity), the multi-line text buffer
 /// (pre-filled with the existing note), and `reattach` — whether closing it
@@ -526,12 +526,12 @@ impl NoteEditor {
 }
 
 /// The workspace-env editor modal, opened by the `env` command as an overlay
-/// over the command palette (Overview). It holds the multi-line buffer of
+/// over the command palette. It holds the multi-line buffer of
 /// `NAME=op://vault/item/field` bindings, seeded from the workspace's current
 /// settings. Editing and caret movement live on [`TextArea`] (the event loop
 /// routes keys straight to it, like the note editor); the modal bundles it and
 /// parses the valid bindings on confirm. Because it overlays the palette rather
-/// than replacing it, closing it (save or cancel) returns to the Overview.
+/// than replacing it, closing it (save or cancel) returns to the command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvEditor {
     area: TextArea,
@@ -763,9 +763,9 @@ impl RemoveModal {
     }
 }
 
-/// Which inline sub-picker is expanded under a 在席 (Focus) menu row.
+/// Which inline sub-picker is expanded under a 集中 (Closeup) menu row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FocusSubmenu {
+pub(super) enum CloseupSubmenu {
     /// The `agent` row's installed-CLI picker.
     Agent,
     /// The `terminal` row's `open` / `new` picker.
@@ -774,7 +774,7 @@ pub(super) enum FocusSubmenu {
     Close,
 }
 
-/// The 在席 (Focus) menu cursor: which Session-scope command is highlighted, and
+/// The 集中 (Closeup) menu cursor: which Session-scope command is highlighted, and
 /// — when the `agent` or `terminal` row is expanded into a picker — which
 /// sub-action is highlighted. The Session-scope command list is always non-empty,
 /// so the navigation methods take the current `count` and keep the cursor
@@ -787,14 +787,14 @@ pub(super) enum FocusSubmenu {
 /// expanded, `agent_cursor` is `Some(index)` and the move/`selected` methods act
 /// on the picker instead of the command list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct FocusMenu {
+pub(super) struct CloseupMenu {
     cursor: usize,
     /// The expanded inline picker and its sub-cursor, or `None` when the menu is
     /// in its normal (collapsed) state.
-    expanded: Option<(FocusSubmenu, usize)>,
+    expanded: Option<(CloseupSubmenu, usize)>,
 }
 
-impl FocusMenu {
+impl CloseupMenu {
     /// The highlighted command row.
     pub(super) fn cursor(self) -> usize {
         self.cursor
@@ -813,7 +813,7 @@ impl FocusMenu {
     /// The agent picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn agent_cursor(self) -> Option<usize> {
         match self.expanded {
-            Some((FocusSubmenu::Agent, cursor)) => Some(cursor),
+            Some((CloseupSubmenu::Agent, cursor)) => Some(cursor),
             _ => None,
         }
     }
@@ -822,7 +822,7 @@ impl FocusMenu {
     /// collapsed.
     pub(super) fn terminal_cursor(self) -> Option<usize> {
         match self.expanded {
-            Some((FocusSubmenu::Terminal, cursor)) => Some(cursor),
+            Some((CloseupSubmenu::Terminal, cursor)) => Some(cursor),
             _ => None,
         }
     }
@@ -830,19 +830,19 @@ impl FocusMenu {
     /// The close picker's highlighted index while expanded, or `None` collapsed.
     pub(super) fn close_cursor(self) -> Option<usize> {
         match self.expanded {
-            Some((FocusSubmenu::Close, cursor)) => Some(cursor),
+            Some((CloseupSubmenu::Close, cursor)) => Some(cursor),
             _ => None,
         }
     }
 
-    /// Reset to the top, collapsed (entering 在席 / leaving for 切替).
+    /// Reset to the top, collapsed (entering 集中 / leaving for 選択).
     pub(super) fn reset(&mut self) {
         self.cursor = 0;
         self.expanded = None;
     }
 
     /// Re-home the cursor on the first row without touching any open picker — used
-    /// when the 在席 menu filter (`/`) changes and the match list shifts under it,
+    /// when the 集中 menu filter (`/`) changes and the match list shifts under it,
     /// so the highlight lands on the first surviving command rather than a now
     /// out-of-range row.
     pub(super) fn reset_cursor(&mut self) {
@@ -851,7 +851,7 @@ impl FocusMenu {
 
     /// Expand an inline picker, highlighting `default_index` (clamped by the
     /// renderer).
-    pub(super) fn expand(&mut self, submenu: FocusSubmenu, default_index: usize) {
+    pub(super) fn expand(&mut self, submenu: CloseupSubmenu, default_index: usize) {
         self.expanded = Some((submenu, default_index));
     }
 
@@ -863,7 +863,7 @@ impl FocusMenu {
 
     /// Expand the close picker, starting at option 0 (plain close).
     pub(super) fn expand_close(&mut self) {
-        self.expanded = Some((FocusSubmenu::Close, 0));
+        self.expanded = Some((CloseupSubmenu::Close, 0));
     }
 
     /// Collapse the close picker back to the normal menu. Returns whether it was
@@ -967,8 +967,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn focus_menu_moves_and_selects_the_command_cursor_when_collapsed() {
-        let mut menu = FocusMenu::default();
+    fn closeup_menu_moves_and_selects_the_command_cursor_when_collapsed() {
+        let mut menu = CloseupMenu::default();
         assert_eq!(menu.cursor(), 0);
         assert!(!menu.is_expanded());
         // Down wraps within the command count; up wraps back.
@@ -981,17 +981,17 @@ mod tests {
         // `selected` clamps to the available count.
         assert_eq!(menu.selected(2), 1);
         // A zero count is clamped to 1 so navigation never divides by zero.
-        let mut empty = FocusMenu::default();
+        let mut empty = CloseupMenu::default();
         empty.move_down(0);
         assert_eq!(empty.cursor(), 0);
     }
 
     #[test]
-    fn focus_menu_expand_collapse_drives_the_agent_picker() {
-        let mut menu = FocusMenu::default();
+    fn closeup_menu_expand_collapse_drives_the_agent_picker() {
+        let mut menu = CloseupMenu::default();
         // Expanding highlights the given default index and routes navigation to
         // the picker, leaving the command cursor untouched.
-        menu.expand(FocusSubmenu::Agent, 2);
+        menu.expand(CloseupSubmenu::Agent, 2);
         assert!(menu.is_expanded());
         assert_eq!(menu.agent_cursor(), Some(2));
         assert_eq!(menu.cursor(), 0);
@@ -1014,18 +1014,18 @@ mod tests {
     }
 
     #[test]
-    fn focus_menu_reset_clears_both_cursors() {
-        let mut menu = FocusMenu::default();
+    fn closeup_menu_reset_clears_both_cursors() {
+        let mut menu = CloseupMenu::default();
         menu.move_down(3);
-        menu.expand(FocusSubmenu::Agent, 1);
+        menu.expand(CloseupSubmenu::Agent, 1);
         menu.reset();
         assert_eq!(menu.cursor(), 0);
         assert!(!menu.is_expanded());
     }
 
     #[test]
-    fn focus_menu_reset_cursor_rehomes_without_touching_the_picker() {
-        let mut menu = FocusMenu::default();
+    fn closeup_menu_reset_cursor_rehomes_without_touching_the_picker() {
+        let mut menu = CloseupMenu::default();
         menu.move_down(3);
         assert_eq!(menu.cursor(), 1);
         menu.reset_cursor();
@@ -1033,9 +1033,9 @@ mod tests {
     }
 
     #[test]
-    fn focus_menu_expand_can_drive_the_terminal_picker() {
-        let mut menu = FocusMenu::default();
-        menu.expand(FocusSubmenu::Terminal, 0);
+    fn closeup_menu_expand_can_drive_the_terminal_picker() {
+        let mut menu = CloseupMenu::default();
+        menu.expand(CloseupSubmenu::Terminal, 0);
         assert!(menu.is_expanded());
         assert_eq!(menu.agent_cursor(), None);
         assert_eq!(menu.terminal_cursor(), Some(0));

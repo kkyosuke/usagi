@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn focus_menu_moves_and_runs_terminal_via_enter() {
-    // Switch -> focus "main" (idle, so just Focus). The menu lists its commands
+fn closeup_menu_moves_and_runs_terminal_via_enter() {
+    // Overview -> focus "main" (idle, so just Closeup). The menu lists its commands
     // in alphabetical order (agent, close, diff, terminal) and highlights "agent"
     // by default; move down to "terminal" (the last row), then Enter runs it
     // (attaches).
@@ -14,12 +14,12 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // Switch
+    keys.push(Ok(Key::Enter)); // Overview
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
     keys.push(Ok(Key::Char('k'))); // agent wraps up to "terminal" (the last row)
-    keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -37,7 +37,7 @@ fn focus_menu_moves_and_runs_terminal_via_enter() {
 }
 
 #[test]
-fn focus_menu_filter_narrows_the_list_then_enter_runs_the_sole_match() {
+fn closeup_menu_filter_narrows_the_list_then_enter_runs_the_sole_match() {
     // `/` enters filter mode, so the letters that follow narrow the list instead of
     // firing the bare-letter shortcuts; once one command remains, Enter runs it.
     // Nothing launches until Enter, proving `t` was filter input, not the shortcut.
@@ -49,13 +49,13 @@ fn focus_menu_filter_narrows_the_list_then_enter_runs_the_sole_match() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // Switch
+    keys.push(Ok(Key::Enter)); // Overview
     keys.push(Ok(Key::ArrowDown)); // cursor "main" (/r/main)
     keys.push(Ok(Key::Enter)); // focus main (idle)
     keys.push(Ok(Key::Char('/'))); // enter filter mode
     keys.push(Ok(Key::Char('t'))); // filter -> only "terminal" survives
-    keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // run terminal (attach) -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -73,9 +73,9 @@ fn focus_menu_filter_narrows_the_list_then_enter_runs_the_sole_match() {
 }
 
 #[test]
-fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
+fn closeup_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
     // A live `/` filter absorbs Esc (restoring the full list) rather than leaving
-    // 在席; Backspace edits the query, Enter on a no-match is inert, and once the
+    // 集中; Backspace edits the query, Enter on a no-match is inert, and once the
     // filter is cleared the bare-letter shortcuts (`t`) work again.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
@@ -85,7 +85,7 @@ fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // Switch
+    keys.push(Ok(Key::Enter)); // Overview
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Enter)); // focus main (idle)
     keys.push(Ok(Key::Char('/'))); // enter filter mode
@@ -94,9 +94,9 @@ fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
     keys.push(Ok(Key::Char('z')));
     keys.push(Ok(Key::Enter)); // no match -> inert (nothing opened)
     keys.push(Ok(Key::Backspace)); // "zz" -> "z" (still no match)
-    keys.push(Ok(Key::Escape)); // clears the filter, staying in Focus
+    keys.push(Ok(Key::Escape)); // clears the filter, staying in Closeup
     keys.push(Ok(Key::Char('t'))); // not filtering now -> `t` runs terminal
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -115,7 +115,7 @@ fn focus_menu_filter_esc_peels_before_leaving_and_restores_the_shortcuts() {
 }
 
 #[test]
-fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
+fn closeup_menu_shortcut_keys_launch_terminal_and_agent() {
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -124,11 +124,11 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char('t'))); // terminal
     keys.push(Ok(Key::Char('k'))); // a menu move (no-op effect here)
     keys.push(Ok(Key::Char('a'))); // agent
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -146,7 +146,7 @@ fn focus_menu_shortcut_keys_launch_terminal_and_agent() {
 }
 
 #[test]
-fn focus_menu_agent_picker_launches_the_chosen_cli() {
+fn closeup_menu_agent_picker_launches_the_chosen_cli() {
     use crate::domain::settings::AgentCli;
     // The fake pane reads the recorded choice the way the real wiring does.
     let opened = RefCell::new(Vec::new());
@@ -160,11 +160,11 @@ fn focus_menu_agent_picker_launches_the_chosen_cli() {
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Enter)); // Closeup feat ("agent" highlighted by default)
     keys.push(Ok(Key::ArrowRight)); // expand picker (default Claude highlighted)
     keys.push(Ok(Key::ArrowDown)); // Claude -> Codex
     keys.push(Ok(Key::Enter)); // launch Codex
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -182,7 +182,7 @@ fn focus_menu_agent_picker_launches_the_chosen_cli() {
 }
 
 #[test]
-fn focus_menu_agent_picker_collapses_on_left_and_esc_without_launching() {
+fn closeup_menu_agent_picker_collapses_on_left_and_esc_without_launching() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
@@ -194,15 +194,15 @@ fn focus_menu_agent_picker_collapses_on_left_and_esc_without_launching() {
     let mut state = sample_state();
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::Codex]);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Enter)); // Closeup feat ("agent" highlighted by default)
     keys.push(Ok(Key::ArrowRight)); // expand
     keys.push(Ok(Key::ArrowUp)); // move within the picker (wraps)
     keys.push(Ok(Key::Char('k'))); // move within the picker (vim up)
     keys.push(Ok(Key::Home)); // an unhandled picker key: inert
     keys.push(Ok(Key::ArrowLeft)); // collapse (no launch)
     keys.push(Ok(Key::ArrowRight)); // expand again
-    keys.push(Ok(Key::Escape)); // Esc collapses (no launch, stays in Focus)
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // Esc collapses (no launch, stays in Closeup)
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -230,20 +230,20 @@ fn typed_agent_name_launches_an_installed_cli_but_refuses_an_uninstalled_one() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut state = prompt_state(); // 在席 prompt is where `agent <name>` is typed
+    let mut state = prompt_state(); // 集中 prompt is where `agent <name>` is typed
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Codex]);
-    // Focus an idle session to reach its 在席 prompt, then type `agent` there.
+    // Closeup an idle session to reach its 集中 prompt, then type `agent` there.
     // `agent gemini` (not installed, not the default) is refused — no launch — and
     // the prompt stays open, so `agent codex` (installed) can be typed next and
     // launches Codex.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt)
     keys.extend(typed("agent gemini"));
-    keys.push(Ok(Key::Enter)); // refused -> stays in the 在席 prompt
+    keys.push(Ok(Key::Enter)); // refused -> stays in the 集中 prompt
     keys.extend(typed("agent codex"));
-    keys.push(Ok(Key::Enter)); // launches Codex -> Closed -> 在席 prompt
-    keys.push(Ok(Key::Escape)); // -> 切替
+    keys.push(Ok(Key::Enter)); // launches Codex -> Closed -> 集中 prompt
+    keys.push(Ok(Key::Escape)); // -> 選択
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -270,14 +270,14 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut state = prompt_state(); // 在席 prompt is where `agent <name>` is typed
+    let mut state = prompt_state(); // 集中 prompt is where `agent <name>` is typed
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(Vec::new()); // nothing probed as installed
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt)
     keys.extend(typed("agent claude")); // the configured default by name
     keys.push(Ok(Key::Enter));
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // quit
     assert!(matches!(
         run_full(
@@ -295,7 +295,7 @@ fn typed_agent_name_allows_the_default_cli_even_when_not_probed_as_installed() {
 }
 
 #[test]
-fn focus_menu_agent_default_refuses_when_not_installed() {
+fn closeup_menu_agent_default_refuses_when_not_installed() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());
     let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
@@ -308,9 +308,9 @@ fn focus_menu_agent_default_refuses_when_not_installed() {
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Codex]); // default Claude is not installed
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Enter)); // Closeup feat ("agent" highlighted by default)
     keys.push(Ok(Key::Enter)); // attempt to launch default agent (Claude) -> refused
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // quit
     assert!(matches!(
         run_full(
@@ -328,7 +328,7 @@ fn focus_menu_agent_default_refuses_when_not_installed() {
     assert!(opened.borrow().is_empty());
 }
 
-/// A zero-argument Session-scope command with no `run_focus_command` arm, for
+/// A zero-argument Session-scope command with no `run_closeup_command` arm, for
 /// proving the menu's dispatch fails loudly instead of falling back to an agent
 /// launch.
 struct MenuOnlyTestCommand;
@@ -359,9 +359,9 @@ impl crate::presentation::tui::home::command::Command for MenuOnlyTestCommand {
 }
 
 #[test]
-fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
-    // A Session-scope command registered without a `run_focus_command` arm appears
-    // in the 在席 menu (sorted alphabetically, so `zzz` lands last), but Enter on
+fn closeup_menu_refuses_a_session_command_without_a_menu_arm() {
+    // A Session-scope command registered without a `run_closeup_command` arm appears
+    // in the 集中 menu (sorted alphabetically, so `zzz` lands last), but Enter on
     // it must not silently launch the default agent — the catch-all just logs and
     // stays put. With the local LLM unavailable the menu lists agent (0), close
     // (1), diff (2), terminal (3), zzz (4); ArrowUp from the default "agent" wraps
@@ -376,11 +376,11 @@ fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
     let mut state = sample_state();
     state.register_command(Box::new(MenuOnlyTestCommand));
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat ("agent" highlighted by default)
+    keys.push(Ok(Key::Enter)); // Closeup feat ("agent" highlighted by default)
     keys.push(Ok(Key::Home)); // ignored in the menu (the key fallthrough arm)
     keys.push(Ok(Key::ArrowUp)); // agent wraps up to "zzz"
     keys.push(Ok(Key::Enter)); // run zzz -> catch-all logs, no launch
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -398,40 +398,40 @@ fn focus_menu_refuses_a_session_command_without_a_menu_arm() {
 }
 
 #[test]
-fn focus_ctrl_o_o_opens_switch_then_esc_re_focuses() {
-    // Under the prefix scheme `Ctrl-O` is the leader in 在席 too, so `Ctrl-O o`
-    // zooms out to Switch(return=Focus) — matching 没入. Esc re-enters Focus; Esc
-    // -> base Switch; Esc inert, fallback Ctrl-C quits.
+fn closeup_ctrl_o_o_opens_overview_then_esc_re_focuses() {
+    // Under the prefix scheme `Ctrl-O` is the leader in 集中 too, so `Ctrl-O o`
+    // zooms out to Overview(return=Closeup) — matching 没入. Esc re-enters Closeup; Esc
+    // -> base Overview; Esc inert, fallback Ctrl-C quits.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader (no visible change yet)
-    keys.push(Ok(Key::Char('o'))); // -> Switch(return Focus)
-    keys.push(Ok(Key::Escape)); // back -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Char('o'))); // -> Overview(return Closeup)
+    keys.push(Ok(Key::Escape)); // back -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_ctrl_o_double_leader_also_opens_switch() {
-    // `Ctrl-O Ctrl-O` zooms out to Switch just like `Ctrl-O o`, the same as 没入 —
+fn closeup_ctrl_o_double_leader_also_opens_overview() {
+    // `Ctrl-O Ctrl-O` zooms out to Overview just like `Ctrl-O o`, the same as 没入 —
     // a control-char second key, so it works with a Japanese IME left on.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::Char(CTRL_O))); // double leader -> Switch
-    keys.push(Ok(Key::Escape)); // back -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Char(CTRL_O))); // double leader -> Overview
+    keys.push(Ok(Key::Escape)); // back -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_ctrl_o_q_raises_the_quit_modal() {
-    // `Ctrl-O q` raises the quit-confirmation modal from 在席, mirroring 没入's
+fn closeup_ctrl_o_q_raises_the_quit_modal() {
+    // `Ctrl-O q` raises the quit-confirmation modal from 集中, mirroring 没入's
     // `Ctrl-O q`. Confirming it with `y` quits.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader
     keys.push(Ok(Key::Char('q'))); // -> quit modal
     keys.push(Ok(Key::Char('y'))); // confirm quit
@@ -439,40 +439,40 @@ fn focus_ctrl_o_q_raises_the_quit_modal() {
 }
 
 #[test]
-fn focus_ctrl_o_s_and_e_drive_the_sidebar_and_note() {
+fn closeup_ctrl_o_s_and_e_drive_the_sidebar_and_note() {
     // `Ctrl-O s` toggles the sidebar and `Ctrl-O e` opens the note editor from
-    // 在席, mirroring 没入. Both are driven through the loop (the editor is then
+    // 集中, mirroring 没入. Both are driven through the loop (the editor is then
     // dismissed) before quitting.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader
     keys.push(Ok(Key::Char('s'))); // toggle sidebar
     keys.push(Ok(Key::Char(CTRL_O))); // leader
     keys.push(Ok(Key::Char('e'))); // open note editor
-    keys.push(Ok(Key::Escape)); // close note editor -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Escape)); // close note editor -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_ctrl_o_then_unknown_key_is_swallowed() {
+fn closeup_ctrl_o_then_unknown_key_is_swallowed() {
     // An unrecognised key right after the leader is swallowed (it clears the
     // leader and does nothing), exactly as in 没入 — so a following `Esc` still
-    // leaves Focus for Switch rather than acting on the stale leader.
+    // leaves Closeup for Overview rather than acting on the stale leader.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader
     keys.push(Ok(Key::Char('z'))); // unknown -> swallowed, leader cleared
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch (leader is gone)
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview (leader is gone)
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_colon_opens_the_command_palette_then_esc_returns_to_focus() {
-    // `:` in 在席 summons the command palette over the focus surface; `Esc` closes
-    // it back to 在席, where `Esc` again leaves for the base 切替.
+fn closeup_colon_opens_the_command_palette_then_esc_returns_to_closeup() {
+    // `:` in 集中 summons the command palette over the focus surface; `Esc` closes
+    // it back to 集中, where `Esc` again leaves for the base 選択.
     let opened = RefCell::new(0);
     let mut config = |_: &Term| {
         *opened.borrow_mut() += 1;
@@ -482,11 +482,11 @@ fn focus_colon_opens_the_command_palette_then_esc_returns_to_focus() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
-    keys.push(Ok(Key::Char(':'))); // -> command palette over Focus
+    keys.push(Ok(Key::Enter)); // Closeup feat
+    keys.push(Ok(Key::Char(':'))); // -> command palette over Closeup
     keys.extend(typed("config")); // type into the palette
-    keys.push(Ok(Key::Enter)); // run config (palette closes) -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Enter)); // run config (palette closes) -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -504,11 +504,11 @@ fn focus_colon_opens_the_command_palette_then_esc_returns_to_focus() {
 }
 
 #[test]
-fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
-    // In 在席 with live panes, Ctrl-N / Ctrl-P walk the focused session's pane
+fn closeup_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
+    // In 集中 with live panes, Ctrl-N / Ctrl-P walk the focused session's pane
     // tabs by making the chosen pane active through `tab_op` (`To(index)`), so its
-    // preview shows and a re-attach lands on it — and they stay in Focus. The
-    // session is reached live (a pane open, then `Ctrl-T` zooms out to Focus
+    // preview shows and a re-attach lands on it — and they stay in Closeup. The
+    // session is reached live (a pane open, then `Ctrl-T` zooms out to Closeup
     // keeping the panes alive), so the tab strip is published.
     let term = Term::stdout();
     let navs = RefCell::new(Vec::new());
@@ -527,11 +527,11 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
             *active.borrow(),
         )
     };
-    // Entering Focus on a live session attaches; `Ctrl-T` (ToFocus) zooms back out
-    // to Focus with the panes still alive, which is where the tab strip shows.
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    // Entering Closeup on a live session attaches; `Ctrl-T` (ToCloseup) zooms back out
+    // to Closeup with the panes still alive, which is where the tab strip shows.
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on the pane's own tab (pane 0)
+    keys.push(Ok(Key::Enter)); // attach feat; ToCloseup -> Closeup on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_N))); // pane 0 -> pane 1: To(1)
     keys.push(Ok(Key::Char(CTRL_N))); // pane 1 (last) -> "+ new": no tab_op
     keys.push(Ok(Key::Char(CTRL_P))); // "+ new" wraps back to pane 1: To(1)
@@ -542,7 +542,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
     let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
-    // A live preview so the surface drive publishes the tab strip while in Focus.
+    // A live preview so the surface drive publishes the tab strip while in Closeup.
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut branches: fn() -> Vec<String> = no_branches;
     let outcome = event_loop_compat(
@@ -572,7 +572,7 @@ fn focus_ctrl_n_and_ctrl_p_walk_the_tab_strip_via_tab_op() {
 }
 
 #[test]
-fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
+fn closeup_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
     // Under the prefix scheme `Ctrl-O n`/`p` (and `Ctrl-O →`/`←`) walk the tab
     // strip exactly as the direct Ctrl-N/P do — the same prefix grammar as 没入.
     let term = Term::stdout();
@@ -590,9 +590,9 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
             *active.borrow(),
         )
     };
-    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToCloseup);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; ToFocus -> Focus on the pane's own tab (pane 0)
+    keys.push(Ok(Key::Enter)); // attach feat; ToCloseup -> Closeup on the pane's own tab (pane 0)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
     keys.push(Ok(Key::Char('n'))); // pane 0 -> pane 1: To(1)
     keys.push(Ok(Key::Char(CTRL_O))); // leader
@@ -641,7 +641,7 @@ fn focus_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
 
 #[test]
 fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
-    // Zooming out of a live pane (ToFocus) keeps the pane's own tab selected with
+    // Zooming out of a live pane (ToCloseup) keeps the pane's own tab selected with
     // the action menu floating over its preview — and the menu, not the preview,
     // owns the keyboard there: ↓ moves its cursor (cancelling the one-shot
     // re-attach) and Enter runs the highlighted command — proof the Enter drove
@@ -653,7 +653,7 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, n: bool| {
         opened.borrow_mut().push(n);
         if opened.borrow().len() == 1 {
-            Ok(PaneExit::ToFocus)
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -661,11 +661,11 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut tab_op = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0usize);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat -> ToFocus: menu floats over the pane tab
+    keys.push(Ok(Key::Enter)); // attach feat -> ToCloseup: menu floats over the pane tab
     keys.push(Ok(Key::ArrowUp)); // menu cursor agent wraps up to terminal (cancels the re-attach arming)
-    keys.push(Ok(Key::Enter)); // run terminal: a fresh pane -> Closed -> 在席 on "+ new"
+    keys.push(Ok(Key::Enter)); // run terminal: a fresh pane -> Closed -> 集中 on "+ new"
     keys.push(Ok(Key::Escape)); // discard "+ new" -> the pane's preview
-    keys.push(Ok(Key::Escape)); // 在席 -> 切替
+    keys.push(Ok(Key::Escape)); // 集中 -> 選択
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_tabs(keys, sample_state(), &mut open, &mut preview, &mut tab_op).unwrap(),
@@ -678,8 +678,8 @@ fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
 }
 
 #[test]
-fn focus_ctrl_o_g_launches_an_agent() {
-    // `Ctrl-O g` launches an agent from 在席 — the analogue of 没入's "add an
+fn closeup_ctrl_o_g_launches_an_agent() {
+    // `Ctrl-O g` launches an agent from 集中 — the analogue of 没入's "add an
     // agent tab" — driving the open callback (attach) for the focused session.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, _n: bool| {
@@ -689,10 +689,10 @@ fn focus_ctrl_o_g_launches_an_agent() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.push(Ok(Key::Char(CTRL_O))); // leader
-    keys.push(Ok(Key::Char('g'))); // launch agent (attach) -> Closed -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Char('g'))); // launch agent (attach) -> Closed -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -710,21 +710,21 @@ fn focus_ctrl_o_g_launches_an_agent() {
 }
 
 #[test]
-fn focus_ctrl_o_prefix_jumps_to_the_previous_session() {
+fn closeup_ctrl_o_prefix_jumps_to_the_previous_session() {
     // `Ctrl-O Ctrl-^` jumps to the previously focused session, like the direct
-    // `Ctrl-^` (and like 没入). Focus feat, then main, then `Ctrl-O Ctrl-^` toggles
+    // `Ctrl-^` (and like 没入). Closeup feat, then main, then `Ctrl-O Ctrl-^` toggles
     // back to feat.
     let dirs = run_capturing_attached_dirs({
         let mut keys = cmd("session switch feat");
         keys.push(Ok(Key::Enter)); // attach feat
         keys.push(Ok(Key::Char(CTRL_O))); // leader
-        keys.push(Ok(Key::Char('o'))); // -> Switch
+        keys.push(Ok(Key::Char('o'))); // -> Overview
         keys.push(Ok(Key::ArrowUp)); // cursor main
         keys.push(Ok(Key::Enter)); // attach main
         keys.push(Ok(Key::Char(CTRL_O))); // leader
         keys.push(Ok(Key::Char(CTRL_CARET))); // jump back to feat
         keys.push(Ok(Key::Char(CTRL_O))); // leader
-        keys.push(Ok(Key::Char('o'))); // -> Switch
+        keys.push(Ok(Key::Char('o'))); // -> Overview
         keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
         keys
     });
@@ -733,23 +733,23 @@ fn focus_ctrl_o_prefix_jumps_to_the_previous_session() {
 }
 
 #[test]
-fn focus_alt_scheme_keeps_ctrl_o_a_direct_zoom_out() {
+fn closeup_alt_scheme_keeps_ctrl_o_a_direct_zoom_out() {
     // Under the alt scheme 没入 navigates with `Alt`-chords and leaves bare
-    // `Ctrl-O` to the shell, so in 在席 `Ctrl-O` keeps its single-key zoom-out to
-    // Switch (no leader). Mirrors the prefix `Ctrl-O o` test, one key shorter.
+    // `Ctrl-O` to the shell, so in 集中 `Ctrl-O` keeps its single-key zoom-out to
+    // Overview (no leader). Mirrors the prefix `Ctrl-O o` test, one key shorter.
     let mut state = sample_state();
     state.set_key_scheme(crate::domain::settings::KeyScheme::Alt);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
-    keys.push(Ok(Key::Char(CTRL_O))); // direct -> Switch(return Focus)
-    keys.push(Ok(Key::Escape)); // back -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> base Switch
+    keys.push(Ok(Key::Enter)); // Closeup feat
+    keys.push(Ok(Key::Char(CTRL_O))); // direct -> Overview(return Closeup)
+    keys.push(Ok(Key::Escape)); // back -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_tab_nav_is_inert_without_live_panes() {
+fn closeup_tab_nav_is_inert_without_live_panes() {
     // An idle focused session (no live panes, so only the "+ new" tab) has nothing
     // to walk: Ctrl-N / Ctrl-P make no `tab_op` call and stay on the action surface.
     let term = Term::stdout();
@@ -761,7 +761,7 @@ fn focus_tab_nav_is_inert_without_live_panes() {
         (Vec::new(), 0)
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // -> Focus feat (idle: noop_preview is not live)
+    keys.push(Ok(Key::Enter)); // -> Closeup feat (idle: noop_preview is not live)
     keys.push(Ok(Key::Char(CTRL_N)));
     keys.push(Ok(Key::Char(CTRL_P)));
     keys.push(Ok(Key::CtrlC));
@@ -801,8 +801,8 @@ fn focus_tab_nav_is_inert_without_live_panes() {
 }
 
 #[test]
-fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
-    // In 在席 on a pane tab (reached by `Ctrl-T` from 没入, which lands on "+ new",
+fn closeup_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
+    // In 集中 on a pane tab (reached by `Ctrl-T` from 没入, which lands on "+ new",
     // then `Ctrl-N` onto a pane tab), `Enter` re-attaches the selected pane
     // (`open_terminal` with `new_pane = false`); a non-`Enter` key there is inert
     // (the action surface only drives the "+ new" tab).
@@ -814,10 +814,10 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
             o.push((agent, new_pane));
             o.len()
         };
-        // The first attach (from focusing the live session) zooms out to Focus with
+        // The first attach (from focusing the live session) zooms out to Closeup with
         // the panes kept alive; the re-attach then drops straight back out.
         if count == 1 {
-            Ok(PaneExit::ToFocus)
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -826,7 +826,7 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new"
+    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToCloseup -> Closeup on "+ new"
     keys.push(Ok(Key::Char(CTRL_N))); // "+ new" -> pane 0: now a pane tab is selected
     keys.push(Ok(Key::Char('j'))); // on a pane tab: inert, no open
     keys.push(Ok(Key::Enter)); // re-attach the selected pane; open #2 (false, false)
@@ -868,14 +868,14 @@ fn focus_enter_on_a_pane_tab_reattaches_while_other_keys_are_inert() {
 }
 
 #[test]
-fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
-    // In 在席 on the "+ new" tab opened over live panes, `Esc` discards the launch
-    // surface and steps back onto the active pane's tab — staying in Focus, not
-    // zooming out to 切替. A following `Enter` re-attaches that pane, proving the
+fn closeup_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
+    // In 集中 on the "+ new" tab opened over live panes, `Esc` discards the launch
+    // surface and steps back onto the active pane's tab — staying in Closeup, not
+    // zooming out to 選択. A following `Enter` re-attaches that pane, proving the
     // selector landed on a pane tab (not "+ new", whose `Enter` would open a fresh
     // pane with `new_pane = true`).
     //
-    // Reaching here via `Ctrl-T` (ToFocus) arms a one-shot "next Esc re-attaches",
+    // Reaching here via `Ctrl-T` (ToCloseup) arms a one-shot "next Esc re-attaches",
     // so a `j` (menu move) is pressed first to cancel that arming — this test
     // covers the *unarmed* discard path; the armed re-attach is covered by
     // `attached::ctrl_t_then_esc_re_attaches_to_the_zoomed_out_pane`.
@@ -888,7 +888,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
             o.len()
         };
         if count == 1 {
-            Ok(PaneExit::ToFocus)
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
@@ -897,7 +897,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToFocus -> Focus on "+ new" (arm return)
+    keys.push(Ok(Key::Enter)); // attach feat; open #1 -> ToCloseup -> Closeup on "+ new" (arm return)
     keys.push(Ok(Key::Char('j'))); // a menu move cancels the one-shot return arming
     keys.push(Ok(Key::Escape)); // discard "+ new" -> step onto the active pane tab
     keys.push(Ok(Key::Enter)); // re-attach the pane; open #2 (false, false)
@@ -933,7 +933,7 @@ fn focus_esc_on_the_new_tab_over_panes_steps_back_onto_the_pane() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    // The `Esc` opened nothing (it stayed in Focus); the trailing `Enter`
+    // The `Esc` opened nothing (it stayed in Closeup); the trailing `Enter`
     // re-attached the pane it stepped onto, both with `new_pane = false`.
     assert_eq!(*opens.borrow(), vec![(false, false), (false, false)]);
 }
@@ -1031,7 +1031,7 @@ fn run_with_chat(
 }
 
 /// A `sample_state` focused on `feat` with the local LLM marked usable, so the
-/// 在席 menu offers the `chat` row.
+/// 集中 menu offers the `chat` row.
 fn chat_ready_state() -> HomeState {
     let mut state = sample_state();
     state.set_ai_available(true);
@@ -1039,38 +1039,38 @@ fn chat_ready_state() -> HomeState {
 }
 
 #[test]
-fn focus_menu_chat_row_opens_the_chat_overlay() {
+fn closeup_menu_chat_row_opens_the_chat_overlay() {
     // With the local LLM available, the menu lists agent, terminal, diff, chat,
     // close; three ArrowDowns land on `chat` and Enter opens the right-pane chat
-    // overlay (sidebar stays). Esc closes it back to Focus.
+    // overlay (sidebar stays). Esc closes it back to Closeup.
     let mut ask = ready_chat_ask;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (menu)
+    keys.push(Ok(Key::Enter)); // Closeup feat (menu)
     keys.push(Ok(Key::ArrowDown)); // agent -> terminal
     keys.push(Ok(Key::ArrowDown)); // terminal -> diff
     keys.push(Ok(Key::ArrowDown)); // diff -> chat
     keys.push(Ok(Key::Enter)); // open the chat overlay
-    keys.push(Ok(Key::Escape)); // close chat -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // close chat -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     let outcome = run_with_chat(keys, chat_ready_state(), &mut ask);
     assert!(matches!(outcome, Outcome::Quit));
 }
 
 #[test]
-fn focus_prompt_chat_opens_and_converses() {
-    // Typing `chat` in the 在席 prompt opens the overlay (regardless of the menu
+fn closeup_prompt_chat_opens_and_converses() {
+    // Typing `chat` in the 集中 prompt opens the overlay (regardless of the menu
     // gate); typing a line + Enter submits it, the echoed reply drains on the next
     // pass, and Esc closes it. Routed through the default wiring so the compat
     // `chat_ask` echo is exercised end to end.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt UI)
     keys.extend(typed("chat"));
     keys.push(Ok(Key::Enter)); // run `chat` -> overlay
     keys.extend(typed("hi"));
     keys.push(Ok(Key::Enter)); // submit -> echoed reply
     keys.push(Ok(Key::ArrowUp)); // a pass so the reply drains (and a scroll)
-    keys.push(Ok(Key::Escape)); // close chat -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // close chat -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, prompt_state()).unwrap(), Outcome::Quit));
 }
@@ -1089,7 +1089,7 @@ fn chat_overlay_editing_pending_guard_and_close_mid_request() {
         rx
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt UI)
     keys.extend(typed("chat"));
     keys.push(Ok(Key::Enter)); // open the chat overlay
     keys.push(Ok(Key::Enter)); // blank line: no request
@@ -1106,8 +1106,8 @@ fn chat_overlay_editing_pending_guard_and_close_mid_request() {
     keys.push(Ok(Key::Char('x'))); // ignored while pending
     keys.push(Ok(Key::ArrowUp)); // scroll up works while pending
     keys.push(Ok(Key::ArrowDown)); // scroll down works while pending
-    keys.push(Ok(Key::Escape)); // close mid-request -> Focus (receiver dropped)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // close mid-request -> Closeup (receiver dropped)
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     let outcome = run_with_chat(keys, prompt_state(), &mut ask);
     assert!(matches!(outcome, Outcome::Quit));
 }
@@ -1122,20 +1122,20 @@ fn chat_overlay_reports_a_failed_request() {
         rx
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt UI)
     keys.extend(typed("chat"));
     keys.push(Ok(Key::Enter)); // open the chat overlay
     keys.extend(typed("q"));
     keys.push(Ok(Key::Enter)); // submit -> disconnected reply
     keys.push(Ok(Key::ArrowUp)); // a pass so the failure drains
-    keys.push(Ok(Key::Escape)); // close chat -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // close chat -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     let outcome = run_with_chat(keys, prompt_state(), &mut ask);
     assert!(matches!(outcome, Outcome::Quit));
 }
 
 #[test]
-fn focus_ctrl_c_quits() {
+fn closeup_ctrl_c_quits() {
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
@@ -1143,23 +1143,23 @@ fn focus_ctrl_c_quits() {
 }
 
 #[test]
-fn cheatsheet_opens_from_the_focus_menu_and_dismisses() {
-    // `t` enters 在席 (the new-pane action menu) on the selected session; `?`
+fn cheatsheet_opens_from_the_closeup_menu_and_dismisses() {
+    // `t` enters 集中 (the new-pane action menu) on the selected session; `?`
     // there opens the cheat sheet, Esc dismisses it back to the menu, and a
-    // further Esc backs out to 切替 where Ctrl-C quits.
+    // further Esc backs out to 選択 where Ctrl-C quits.
     let keys = vec![
-        Ok(Key::Char('t')), // base 切替 -> 在席 action menu
+        Ok(Key::Char('t')), // base 選択 -> 集中 action menu
         Ok(Key::Char('?')), // open the cheat sheet over the menu
         Ok(Key::Char('j')), // scroll it
-        Ok(Key::Escape),    // dismiss -> back on the 在席 menu
-        Ok(Key::Escape),    // 在席 -> 切替
+        Ok(Key::Escape),    // dismiss -> back on the 集中 menu
+        Ok(Key::Escape),    // 集中 -> 選択
         Ok(Key::CtrlC),     // quit
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
+fn closeup_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
     let opened = RefCell::new(Vec::new());
     let external = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, n: bool| {
@@ -1171,14 +1171,14 @@ fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
         Ok(())
     };
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
+    keys.push(Ok(Key::Enter)); // Closeup feat (agent highlighted)
     keys.push(Ok(Key::ArrowUp)); // agent wraps up to terminal (the last row)
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker, default open
     keys.push(Ok(Key::Enter)); // open = embedded pane/tab
     keys.push(Ok(Key::ArrowRight)); // expand terminal picker again
     keys.push(Ok(Key::ArrowDown)); // open -> new
-    keys.push(Ok(Key::Enter)); // new = native terminal, then leaves 在席 -> Switch
-    keys.push(Ok(Key::Escape)); // Switch -> Base
+    keys.push(Ok(Key::Enter)); // new = native terminal, then leaves 集中 -> Overview
+    keys.push(Ok(Key::Escape)); // Overview -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, sample_state(), &mut open, &mut open_external).unwrap(),
@@ -1192,7 +1192,7 @@ fn focus_menu_terminal_picker_open_adds_tab_and_new_opens_native_terminal() {
 }
 
 #[test]
-fn focus_prompt_terminal_new_opens_native_terminal() {
+fn closeup_prompt_terminal_new_opens_native_terminal() {
     let opened = RefCell::new(Vec::new());
     let external = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, a: bool, n: bool| {
@@ -1206,10 +1206,10 @@ fn focus_prompt_terminal_new_opens_native_terminal() {
     let mut state = sample_state();
     state.set_session_action_ui(SessionActionUi::Prompt);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter)); // native terminal, then leaves 在席 -> Switch
-    keys.push(Ok(Key::Escape)); // Switch -> Base
+    keys.push(Ok(Key::Enter)); // native terminal, then leaves 集中 -> Overview
+    keys.push(Ok(Key::Escape)); // Overview -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1220,16 +1220,16 @@ fn focus_prompt_terminal_new_opens_native_terminal() {
 }
 
 #[test]
-fn focus_prompt_terminal_new_reports_native_terminal_errors() {
+fn closeup_prompt_terminal_new_reports_native_terminal_errors() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::Closed);
     let mut open_external = |_d: &Path| Err("no terminal app".to_string());
     let mut state = sample_state();
     state.set_session_action_ui(SessionActionUi::Prompt);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat
+    keys.push(Ok(Key::Enter)); // Closeup feat
     keys.extend(typed("terminal new"));
-    keys.push(Ok(Key::Enter)); // native terminal (errors), then leaves 在席 -> Switch
-    keys.push(Ok(Key::Escape)); // Switch -> Base
+    keys.push(Ok(Key::Enter)); // native terminal (errors), then leaves 集中 -> Overview
+    keys.push(Ok(Key::Escape)); // Overview -> Base
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full_external(keys, state, &mut open, &mut open_external).unwrap(),
@@ -1238,13 +1238,13 @@ fn focus_prompt_terminal_new_reports_native_terminal_errors() {
 }
 
 #[test]
-fn focus_menu_close_picker_runs_the_selected_close_action() {
+fn closeup_menu_close_picker_runs_the_selected_close_action() {
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (agent highlighted)
+    keys.push(Ok(Key::Enter)); // Closeup feat (agent highlighted)
     keys.push(Ok(Key::ArrowDown)); // agent -> close
     keys.push(Ok(Key::ArrowRight)); // expand close picker (safe close selected)
     keys.push(Ok(Key::ArrowDown)); // close -> close --force
-    keys.push(Ok(Key::Enter)); // run close --force -> Switch
+    keys.push(Ok(Key::Enter)); // run close --force -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }

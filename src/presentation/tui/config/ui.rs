@@ -329,7 +329,7 @@ fn session_labels_modal_frame(
     // the number of rendered rows (and thus the box height / position).
     let offset = cursor_row.saturating_sub(EDITOR_MODAL_VISIBLE_LINES - 1);
     let mut body = vec![
-        "切替でセッションに付けるステータスラベル".to_string(),
+        "選択でセッションに付けるステータスラベル".to_string(),
         "id | name | color | icon（1 行 1 件）".to_string(),
         String::new(),
     ];

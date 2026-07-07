@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn focus_prompt_edits_completes_and_runs_terminal() {
+fn closeup_prompt_edits_completes_and_runs_terminal() {
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         assert!(!a);
@@ -11,7 +11,7 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt UI)
     keys.extend(typed("ter"));
     keys.push(Ok(Key::Insert)); // unhandled in the prompt: the `_` arm
     keys.push(Ok(Key::Home)); // caret to the start
@@ -24,7 +24,7 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
     keys.push(Ok(Key::Backspace)); // "te"
     keys.push(Ok(Key::Tab)); // -> "terminal"
     keys.push(Ok(Key::Enter)); // run terminal (attach)
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -42,7 +42,7 @@ fn focus_prompt_edits_completes_and_runs_terminal() {
 }
 
 #[test]
-fn focus_prompt_drops_control_chars() {
+fn closeup_prompt_drops_control_chars() {
     // A control char that surfaces as `Key::Char` (e.g. Ctrl-S -> '\x13') must not
     // be inserted into the prompt. Were it, the typed "ter" would become "ter\x13"
     // and Tab-completion to "terminal" would no longer match, so the terminal would
@@ -56,12 +56,12 @@ fn focus_prompt_drops_control_chars() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus feat (prompt UI)
+    keys.push(Ok(Key::Enter)); // Closeup feat (prompt UI)
     keys.extend(typed("ter"));
     keys.push(Ok(Key::Char('\u{13}'))); // Ctrl-S: dropped, not inserted
     keys.push(Ok(Key::Tab)); // completes "ter" -> "terminal"
     keys.push(Ok(Key::Enter)); // run terminal (attach)
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -79,7 +79,7 @@ fn focus_prompt_drops_control_chars() {
 }
 
 #[test]
-fn focus_prompt_runs_agent_and_ignores_empty() {
+fn closeup_prompt_runs_agent_and_ignores_empty() {
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
         opened.borrow_mut().push(a);
@@ -88,12 +88,12 @@ fn focus_prompt_runs_agent_and_ignores_empty() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup (prompt)
     keys.push(Ok(Key::Home)); // ignored in the prompt
     keys.push(Ok(Key::Enter)); // empty prompt -> no-op
     keys.extend(typed("agent"));
     keys.push(Ok(Key::Enter)); // attach agent
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -111,7 +111,7 @@ fn focus_prompt_runs_agent_and_ignores_empty() {
 }
 
 #[test]
-fn focus_prompt_ai_launches_the_configured_agent_with_a_prompt() {
+fn closeup_prompt_ai_launches_the_configured_agent_with_a_prompt() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());
     let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
@@ -126,10 +126,10 @@ fn focus_prompt_ai_launches_the_configured_agent_with_a_prompt() {
     state.set_default_agent(AgentCli::Claude);
     state.set_installed_agents(vec![AgentCli::Claude]);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup (prompt)
     keys.extend(typed("ai fix the failing test"));
     keys.push(Ok(Key::Enter)); // attach configured agent carrying the prompt
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -150,7 +150,7 @@ fn focus_prompt_ai_launches_the_configured_agent_with_a_prompt() {
 }
 
 #[test]
-fn focus_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
+fn closeup_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(0);
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
@@ -163,10 +163,10 @@ fn focus_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
     state.set_default_agent(AgentCli::Gemini);
     state.set_installed_agents(vec![AgentCli::Claude]);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup (prompt)
     keys.extend(typed("ai fix it"));
     keys.push(Ok(Key::Enter)); // refused because Gemini was not probed installed
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -184,7 +184,7 @@ fn focus_prompt_ai_refuses_when_the_configured_agent_is_not_installed() {
 }
 
 #[test]
-fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
+fn closeup_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
     // The installed-CLI gate guards only a *fresh spawn* of the configured
     // default. When the session already shows a live `agent` tab, `ai <prompt>`
     // delivers the prompt to that pane (whatever CLI it runs) and launches
@@ -203,22 +203,22 @@ fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
             o.len()
         };
         if count == 1 {
-            // The first attach (Enter on the live session in 切替) zooms out to
-            // 在席, landing on the "+ new" action surface where `ai` is typed.
-            Ok(PaneExit::ToFocus)
+            // The first attach (Enter on the live session in 選択) zooms out to
+            // 集中, landing on the "+ new" action surface where `ai` is typed.
+            Ok(PaneExit::ToCloseup)
         } else {
             Ok(PaneExit::Closed)
         }
     };
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    // The focused session publishes a live `agent` tab each frame, as 在席 does
+    // The focused session publishes a live `agent` tab each frame, as 集中 does
     // for a session whose agent pane is running.
     let mut tabs = |_: &Path, _: Option<TabNav>| (vec!["agent".to_string()], 0);
     let mut state = prompt_state();
     state.set_default_agent(AgentCli::Gemini);
     state.set_installed_agents(vec![AgentCli::Claude]); // default not installed
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // re-attach live feat; open #1 -> ToFocus (prompt)
+    keys.push(Ok(Key::Enter)); // re-attach live feat; open #1 -> ToCloseup (prompt)
     keys.extend(typed("ai fix it"));
     keys.push(Ok(Key::Enter)); // agent tab is live -> gate skipped -> launch #2
     keys.push(Ok(Key::CtrlC)); // quit (nothing live in the monitor)
@@ -242,7 +242,7 @@ fn focus_prompt_ai_skips_the_installed_gate_when_an_agent_pane_is_live() {
 }
 
 #[test]
-fn focus_prompt_agent_with_a_name_launches_that_cli() {
+fn closeup_prompt_agent_with_a_name_launches_that_cli() {
     use crate::domain::settings::AgentCli;
     let opened = RefCell::new(Vec::new());
     let mut open = |h: &mut HomeState, _d: &Path, a: bool, _n: bool| {
@@ -254,10 +254,10 @@ fn focus_prompt_agent_with_a_name_launches_that_cli() {
     let mut state = prompt_state();
     state.set_installed_agents(vec![AgentCli::Claude, AgentCli::CodexFugu]);
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // Focus (prompt)
+    keys.push(Ok(Key::Enter)); // Closeup (prompt)
     keys.extend(typed("agent sakana.ai")); // pick the codex-fugu CLI by display name
     keys.push(Ok(Key::Enter)); // attach that agent
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(

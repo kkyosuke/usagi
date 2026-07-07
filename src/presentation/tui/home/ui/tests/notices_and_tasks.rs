@@ -229,10 +229,10 @@ fn render_frame_summarises_multiple_task_rows_in_the_mascot_bubble() {
 fn render_frame_shows_the_task_status_on_the_header_over_a_live_terminal() {
     use super::super::super::tasks::{TaskMark, TaskRow};
     // A live embedded terminal owns the right pane (没入's attached shell, or
-    // 切替's live preview). The task status now rides the header's title-bar row,
+    // 選択's live preview). The task status now rides the header's title-bar row,
     // outside the pane, so it shows without clobbering the shell output below.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_tasks(vec![TaskRow {
@@ -254,7 +254,7 @@ fn render_frame_speaks_the_update_from_the_sidebar_over_a_live_terminal() {
     // even while a live terminal fills the right pane — the shell output is never
     // overdrawn, and the notice stays off the header rows.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ echo hi".to_string()], None));
     state.set_update(crate::domain::version::Version::parse("9.9.9"));
@@ -275,7 +275,7 @@ fn render_frame_keeps_the_run2_loading_over_a_live_terminal() {
     // the blocking terminal / agent spawn, before the new pane draws over the
     // screen).
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["$ ".to_string()], None));
     state.step_loading("ターミナル起動中…");
@@ -303,11 +303,11 @@ fn render_frame_shows_the_run2_loading_while_an_action_runs() {
 }
 
 #[test]
-fn run2_loading_blanks_the_focus_action_menu() {
+fn run2_loading_blanks_the_closeup_action_menu() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
 
-    // The idle 在席 menu floats as an overlay modal composited over the frame.
+    // The idle 集中 menu floats as an overlay modal composited over the frame.
     let idle = stripped(&render_frame(24, 100, &state));
     assert!(idle.contains("Run a command:"));
     assert!(idle.contains("Open a shell"));

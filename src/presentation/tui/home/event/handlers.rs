@@ -1,7 +1,7 @@
 //! The home screen's per-mode key handlers. The event loop in [`super`]
 //! dispatches each key to one of the entry handlers — `palette_key` (the `:`
-//! command palette overlay) / `switch_key` / `focus_key` — by overlay and mode;
-//! those delegate to the helpers here (`focus_and_attach`, `leave_switch`, the
+//! command palette overlay) / `overview_key` / `closeup_key` — by overlay and mode;
+//! those delegate to the helpers here (`focus_and_attach`, `leave_overview`, the
 //! focus-surface handlers, …) and to `open_pane`, which drives the embedded
 //! terminal (没入). All are pure aside from the injected callbacks, which they
 //! reach through the shared [`Wiring`] bundle.
@@ -67,10 +67,10 @@ pub(super) fn palette_key(
             match submission.effect {
                 Effect::Quit => return Ok(Flow::Quit),
                 // `session switch` with no name moves keyboard focus to the base
-                // 切替 to pick a session.
-                Effect::EnterSwitch => state.enter_switch(ReturnMode::Base),
+                // 選択 to pick a session.
+                Effect::EnterSwitch => state.enter_overview(ReturnMode::Base),
                 // `session switch <name>` focuses that session: if it resolves,
-                // close the palette and enter 在席 (attaching when it is live);
+                // close the palette and enter 集中 (attaching when it is live);
                 // an unknown name keeps the palette open so the error shows.
                 Effect::Activate(name) => match resolve_row(state, &name) {
                     Some(row) => {
@@ -88,12 +88,12 @@ pub(super) fn palette_key(
                     let interaction_epoch = wiring.interaction_epoch;
                     (wiring.dispatch_create)(&root, &name, interaction_epoch);
                 }
-                // `session create` with no name moves to 切替 and opens the inline
-                // name input there (creation lives in Switch).
+                // `session create` with no name moves to 選択 and opens the inline
+                // name input there (creation lives in Overview).
                 Effect::OpenSessionModal => {
-                    state.enter_switch(ReturnMode::Base);
+                    state.enter_overview(ReturnMode::Base);
                     let branches = (wiring.existing_branches)();
-                    state.switch_begin_create(branches);
+                    state.overview_begin_create(branches);
                 }
                 // `session list`: the state holds the sessions but not their
                 // wording — the ui layer formats them into the empty-state line
@@ -126,9 +126,9 @@ pub(super) fn palette_key(
                     // The user quit the app from the settings screen.
                     None => return Ok(Flow::Quit),
                     // Back to home: the config screen may have changed the Session
-                    // Action UI (在席 mode's surface), the pane key scheme, or the
+                    // Action UI (集中 mode's surface), the pane key scheme, or the
                     // default Agent CLI, so apply the re-read settings — otherwise
-                    // Focus / 没入 keep rendering with the old settings and
+                    // Closeup / 没入 keep rendering with the old settings and
                     // `agent` / `ai` keep launching the old CLI.
                     Some(reload) => {
                         state.set_session_action_ui(reload.session_action_ui);
@@ -173,7 +173,7 @@ pub(super) fn palette_key(
                 }
                 // `env`: open the workspace-env editor as an overlay *over* the
                 // palette (the palette stayed open — `OpenEnvEditor` does not
-                // close it), so saving / cancelling returns to the Overview. Seed
+                // close it), so saving / cancelling returns to the command palette. Seed
                 // it from the cursor group's workspace bindings (統合/unite mode
                 // edits whichever workspace the cursor is in, not just the primary).
                 Effect::OpenEnvEditor => {
@@ -190,8 +190,8 @@ pub(super) fn palette_key(
                 // `OpenDiff` / `CloseSession` are session-scoped (`terminal` /
                 // `agent` / `diff` / `close`): the palette is a workspace surface,
                 // so `dispatch_in_scope` refuses them before they reach here — they
-                // only fire from the 在席 menu / prompt (see `focus_prompt_key` and
-                // `run_focus_command`). Listed so the match stays exhaustive; they
+                // only fire from the 集中 menu / prompt (see `closeup_prompt_key` and
+                // `run_closeup_command`). Listed so the match stays exhaustive; they
                 // are unreachable here.
                 Effect::None
                 | Effect::Clear
@@ -239,9 +239,9 @@ fn resolve_row(state: &HomeState, name: &str) -> Option<usize> {
         .map(|i| i + 1)
 }
 
-/// Handle one key in 切替 (Switch): move the left-pane cursor, focus / attach a
+/// Handle one key in 選択 (Overview): move the left-pane cursor, focus / attach a
 /// session, drive the inline create input, or back out one level.
-pub(super) fn switch_key(
+pub(super) fn overview_key(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -254,9 +254,9 @@ pub(super) fn switch_key(
     if state.is_creating() {
         match key {
             Key::Enter => {
-                if let Some(name) = state.switch_confirm_create() {
+                if let Some(name) = state.overview_confirm_create() {
                     // Dispatch the git work to a background worker and stay in
-                    // 切替 so the user keeps navigating; the new session appears in
+                    // 選択 so the user keeps navigating; the new session appears in
                     // the list when the task finishes (tracked in the task panel).
                     // It lands in the cursor's group's workspace (統合/unite mode).
                     let root = state.selected_workspace_root();
@@ -295,7 +295,7 @@ pub(super) fn switch_key(
     if state.is_renaming() {
         match key {
             Key::Enter => {
-                if let Some((target, label)) = state.switch_confirm_rename() {
+                if let Some((target, label)) = state.overview_confirm_rename() {
                     let root = state.selected_workspace_root();
                     state.set_op_target(root.clone());
                     let outcome = (wiring.rename_display)(&root, &target, &label);
@@ -333,14 +333,14 @@ pub(super) fn switch_key(
             // clicking it or pressing Enter starts the inline create editor, while
             // typing a printable character starts the editor and inserts that
             // character as the first byte of the session name.
-            Key::Enter | Key::Home => begin_switch_create(state, wiring, None),
-            Key::Char(c) if !c.is_control() => begin_switch_create(state, wiring, Some(c)),
+            Key::Enter | Key::Home => begin_overview_create(state, wiring, None),
+            Key::Char(c) if !c.is_control() => begin_overview_create(state, wiring, Some(c)),
             // Keep keyboard escape hatches on the row: arrows still navigate away
             // (the create row carries no session, so it needs no note / tab keys),
-            // and Esc backs out of Switch just as it does on real session rows.
-            Key::ArrowUp => state.switch_move_up(),
-            Key::ArrowDown => state.switch_move_down(),
-            Key::Escape => leave_switch(term, state, painter, wiring),
+            // and Esc backs out of Overview just as it does on real session rows.
+            Key::ArrowUp => state.overview_move_up(),
+            Key::ArrowDown => state.overview_move_down(),
+            Key::Escape => leave_overview(term, state, painter, wiring),
             _ => {}
         }
         return Flow::Continue;
@@ -348,8 +348,8 @@ pub(super) fn switch_key(
 
     match key {
         // ↑/↓ (k/j) move between sessions.
-        Key::ArrowUp | Key::Char('k') => state.switch_move_up(),
-        Key::ArrowDown | Key::Char('j') => state.switch_move_down(),
+        Key::ArrowUp | Key::Char('k') => state.overview_move_up(),
+        Key::ArrowDown | Key::Char('j') => state.overview_move_down(),
         // K/J (Shift+k/j) move the *selected session itself* up/down, persisting
         // the new order — capital mirrors the lower-case cursor move. The cursor
         // follows the moved session; a no-op on the root row and at the ends.
@@ -372,21 +372,21 @@ pub(super) fn switch_key(
             (wiring.tab_op)(&dir, Some(TabNav::Next));
         }
         // Enter focuses the selected session: attach its active pane when live,
-        // else just enter 在席.
+        // else just enter 集中.
         Key::Enter => {
             let row = state.list().selected_index();
             focus_and_attach(term, state, painter, wiring, row);
         }
-        // `t` opens the session's action surface (在席) — a menu or prompt, per the
+        // `t` opens the session's action surface (集中) — a menu or prompt, per the
         // setting — to add a new pane (`terminal` / `agent`), without attaching the
         // existing one first.
         Key::Char('t') => {
             let row = state.list().selected_index();
-            state.enter_focus(row);
+            state.enter_closeup(row);
         }
         // `x` closes the highlighted session's active tab (pane), killing its
         // shell. The next frame re-reads the session's tabs — landing on the next
-        // pane, or previewing its 在席 action menu once the last pane is gone.
+        // pane, or previewing its 集中 action menu once the last pane is gone.
         Key::Char('x') => {
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
@@ -395,11 +395,11 @@ pub(super) fn switch_key(
         // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
         // bare letter `c` composes into kana and never reaches usagi, but a
         // control chord still does — mirroring the note editor's `Ctrl-E` below.
-        // It is unambiguous here, as 切替 list navigation has no caret to move
+        // It is unambiguous here, as 選択 list navigation has no caret to move
         // (the inline create / rename inputs consume `Home` earlier and return
         // before this match).
         Key::Char('c') | Key::Home => {
-            begin_switch_create(state, wiring, None);
+            begin_overview_create(state, wiring, None);
         }
         // `Space` folds / unfolds the workspace under the cursor in 統合(unite)
         // mode, hiding its sessions behind a single header line so a long list of
@@ -409,17 +409,17 @@ pub(super) fn switch_key(
         // `r` begins inline rename of the selected session's sidebar label
         // (a no-op on the root row, which is not a session).
         Key::Char('r') => {
-            state.switch_begin_rename();
+            state.overview_begin_rename();
         }
-        // `n` (or `Ctrl-E`, matching 在席 / 没入) opens the selected session's note
+        // `n` (or `Ctrl-E`, matching 集中 / 没入) opens the selected session's note
         // editor (a no-op on the root row). `console` decodes Ctrl-E as `Key::End`
-        // (see 在席's `Ctrl-E`), so accept that too — it doubles as an IME-safe
+        // (see 集中's `Ctrl-E`), so accept that too — it doubles as an IME-safe
         // alias for `n` (a control chord reaches usagi even with a Japanese IME
-        // left on). Unambiguous here, as 切替 list navigation has no caret to move
+        // left on). Unambiguous here, as 選択 list navigation has no caret to move
         // (the inline create / rename inputs consume `End` earlier and return
         // before this match).
         Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
-            state.switch_begin_note();
+            state.overview_begin_note();
         }
         // `:` summons the workspace command palette overlay (the `session` /
         // `config` / `doctor` / `man` commands). It is placed after the inline
@@ -435,10 +435,10 @@ pub(super) fn switch_key(
             ui::content::cheatsheet(state.key_scheme()),
             ModalSize::Large,
         ),
-        // Esc backs out to where Switch was opened from (inert at the base
-        // Switch). The highlighted session's read-only note overlay stays put —
+        // Esc backs out to where Overview was opened from (inert at the base
+        // Overview). The highlighted session's read-only note overlay stays put —
         // it follows the cursor, not a dismissal.
-        Key::Escape => leave_switch(term, state, painter, wiring),
+        Key::Escape => leave_overview(term, state, painter, wiring),
         // `Tab` / `Shift-Tab` cycle the selected session's manual status label
         // forward / back through the effective master, ringing through the "unset"
         // slot. A no-op on the root row or when no labels are defined.
@@ -477,15 +477,15 @@ fn apply_label_change(
     state.apply_session_outcome(outcome);
 }
 
-/// Open 切替's inline create input, seeded with `first` when the visible
+/// Open 選択's inline create input, seeded with `first` when the visible
 /// `+ new session` affordance was typed into directly. The branch-name snapshot is
 /// taken exactly when the editor opens so validation sees the current workspace.
-fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
+fn begin_overview_create(state: &mut HomeState, wiring: &mut Wiring, first: Option<char>) {
     // A folded workspace hides its "+ new session" row, so unfold the cursor's
     // group first — the input needs that row to render into.
     state.expand_selected_group_for_create();
     let branches = (wiring.existing_branches)();
-    state.switch_begin_create(branches);
+    state.overview_begin_create(branches);
     if let Some(c) = first {
         if let Some(create) = state.create_mut() {
             create.push_char(c);
@@ -494,7 +494,7 @@ fn begin_switch_create(state: &mut HomeState, wiring: &mut Wiring, first: Option
 }
 
 /// Move the selected session one row up (`up`) or down in the list (`K` / `J` in
-/// 切替), persisting the new order through the wiring and refreshing the pane so
+/// 選択), persisting the new order through the wiring and refreshing the pane so
 /// the cursor follows it. A no-op on the root row, which is not a reorderable
 /// session.
 fn reorder_selected(state: &mut HomeState, wiring: &mut Wiring, up: bool) {
@@ -506,36 +506,36 @@ fn reorder_selected(state: &mut HomeState, wiring: &mut Wiring, up: bool) {
     state.apply_reorder(outcome);
 }
 
-/// Back out of 切替 on `Esc`: return to the mode it was opened from. At the base
-/// Switch (the default) `Esc` is inert — the home screen is not left by backing
-/// out. From 在席 it restores Focus; from 没入 it re-attaches the focused
+/// Back out of 選択 on `Esc`: return to the mode it was opened from. At the base
+/// Overview (the default) `Esc` is inert — the home screen is not left by backing
+/// out. From 集中 it restores Closeup; from 没入 it re-attaches the focused
 /// session's pane when that session is still live, mirroring how `Enter` only
-/// attaches a live session (so backing out onto an idle row lands in 在席 rather
+/// attaches a live session (so backing out onto an idle row lands in 集中 rather
 /// than spawning a surprise shell).
-fn leave_switch(
+fn leave_overview(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
     wiring: &mut Wiring,
 ) {
-    match state.switch_return() {
-        // The base Switch is the default mode: `Esc` stays put.
+    match state.overview_return() {
+        // The base Overview is the default mode: `Esc` stays put.
         ReturnMode::Base => {}
-        ReturnMode::Focus => {
+        ReturnMode::Closeup => {
             let row = state.list().selected_index();
-            state.enter_focus(row);
+            state.enter_closeup(row);
         }
         ReturnMode::Attached => {
             let row = state.list().selected_index();
             // Re-attach only when the focused session is live (it always is when
             // the cursor never left the just-detached session); an idle row stays
-            // in 在席.
+            // in 集中.
             focus_and_attach(term, state, painter, wiring, row);
         }
     }
 }
 
-/// Handle one key in the session-note editor overlay (opened with `n` in 切替 or
+/// Handle one key in the session-note editor overlay (opened with `n` in 選択 or
 /// `Ctrl-E` in 没入). It captures every key: `Ctrl-S` saves the note (persisted
 /// through the wiring), `Esc` cancels, `Enter` inserts a newline, and the usual
 /// editing keys edit the multi-line buffer. Closing it — saved or cancelled —
@@ -616,7 +616,7 @@ pub(super) fn note_editor_key(
 /// Handle one key in the workspace-env editor overlay (the `env` command), which
 /// sits over the command palette. `Ctrl-S` parses the buffer's valid bindings,
 /// writes them into this workspace's local settings (preserving the other
-/// overrides), and closes back to the Overview; `Esc` cancels; every other key
+/// overrides), and closes back to the command palette; `Esc` cancels; every other key
 /// edits the multi-line `NAME=op://…` buffer in place. Saving touches the
 /// settings file, so this is a handler rather than inline in the loop.
 pub(super) fn env_editor_key(state: &mut HomeState, key: Key) {
@@ -707,7 +707,7 @@ fn shift_select(key: &Key) -> Option<Select> {
 
 /// Re-attach the selected session's pane after the note editor closes (没入's
 /// `Ctrl-E` flow): focus its row and attach it when live, mirroring how `Enter`
-/// in 切替 only attaches a live session.
+/// in 選択 only attaches a live session.
 fn reattach_focused(
     term: &Term,
     state: &mut HomeState,
@@ -719,9 +719,9 @@ fn reattach_focused(
 }
 
 /// Focus the list row `row` and, when its session is already live, attach its
-/// active pane (没入); an idle row just lands in 在席. Shared by the three entries
-/// that focus an existing session — `session switch <name>`, `Enter` in 切替, and
-/// backing out of 切替 onto a just-detached session — so the "enter focus → attach
+/// active pane (没入); an idle row just lands in 集中. Shared by the three entries
+/// that focus an existing session — `session switch <name>`, `Enter` in 選択, and
+/// backing out of 選択 onto a just-detached session — so the "enter focus → attach
 /// if live" decision lives in one place.
 fn focus_and_attach(
     term: &Term,
@@ -730,7 +730,7 @@ fn focus_and_attach(
     wiring: &mut Wiring,
     row: usize,
 ) {
-    state.enter_focus(row);
+    state.enter_closeup(row);
     let dir = selected_dir(state, wiring.workspace_root);
     // A liveness test only — the snapshot geometry is irrelevant here, so it is
     // sized to the current sidebar state and the result is just tested for `Some`.
@@ -739,8 +739,8 @@ fn focus_and_attach(
     }
 }
 
-/// Handle a left click that landed on the selectable session `row` in 切替
-/// (Switch): a single click selects the row (moves the cursor onto it), and a
+/// Handle a left click that landed on the selectable session `row` in 選択
+/// (Overview): a single click selects the row (moves the cursor onto it), and a
 /// second click on the same row within [`DOUBLE_CLICK`] confirms it — focusing
 /// the session and attaching its pane when live, exactly like `Enter`.
 ///
@@ -748,7 +748,7 @@ fn focus_and_attach(
 /// iterations so the double click can be detected (via [`is_double_click`], the
 /// shared core the 没入 pane reuses); a confirm clears it so a third click starts
 /// a fresh single click rather than re-confirming.
-pub(super) fn switch_click(
+pub(super) fn overview_click(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -759,9 +759,9 @@ pub(super) fn switch_click(
 ) {
     // Always land the cursor on the clicked row first, so a double click confirms
     // the row it lands on and a single click just leaves it selected.
-    state.switch_select(row);
+    state.overview_select(row);
     if state.list().create_row_selected() {
-        begin_switch_create(state, wiring, None);
+        begin_overview_create(state, wiring, None);
         return;
     }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
@@ -769,17 +769,17 @@ pub(super) fn switch_click(
     }
 }
 
-/// Handle a left click on a session `row` in the left pane while in 在席 (Focus):
+/// Handle a left click on a session `row` in the left pane while in 集中 (Closeup):
 /// re-focus onto that session — its right-pane action surface rebuilds for the
 /// clicked session (menu cursor and prompt reset) — so the list stays a live
 /// session switcher even after a session has been entered. A second click on the
 /// same row within [`DOUBLE_CLICK`] attaches its pane when live, exactly like
-/// `Enter` / a 切替 double click ([`switch_click`]).
+/// `Enter` / a 選択 double click ([`overview_click`]).
 ///
-/// `last_click` is the same cross-iteration click memory `switch_click` threads
+/// `last_click` is the same cross-iteration click memory `overview_click` threads
 /// through [`is_double_click`], so the double-click grammar is identical in both
 /// modes; a confirm clears it so a third click starts a fresh single click.
-pub(super) fn focus_click(
+pub(super) fn closeup_click(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -789,21 +789,21 @@ pub(super) fn focus_click(
     last_click: &mut Option<(usize, Instant)>,
 ) {
     if state.list().is_create_row(row) {
-        // The create row lives in 切替: a click on it from 在席 zooms back to the
-        // picker and opens the same inline input a 切替 click would.
-        state.enter_switch(ReturnMode::Focus);
-        state.switch_select(row);
-        begin_switch_create(state, wiring, None);
+        // The create row lives in 選択: a click on it from 集中 zooms back to the
+        // picker and opens the same inline input a 選択 click would.
+        state.enter_overview(ReturnMode::Closeup);
+        state.overview_select(row);
+        begin_overview_create(state, wiring, None);
         return;
     }
     if is_double_click(last_click, row, now, DOUBLE_CLICK) {
-        // `focus_and_attach` re-enters 在席 on the row and attaches when live, so a
+        // `focus_and_attach` re-enters 集中 on the row and attaches when live, so a
         // double click on a running session drops straight into 没入.
         focus_and_attach(term, state, painter, wiring, row);
     } else {
         // A single click switches the focused session, rebuilding the action
-        // surface for it; an idle row just stays in 在席, like `Enter` would.
-        state.enter_focus(row);
+        // surface for it; an idle row just stays in 集中, like `Enter` would.
+        state.enter_closeup(row);
     }
 }
 
@@ -812,7 +812,7 @@ pub(super) fn focus_click(
 /// session synchronously at startup and armed it here; attaching needs the
 /// terminal wiring, so it happens now rather than at startup. A no-op when
 /// nothing was armed, the session has since gone, or it has no live pane (it then
-/// stays in 在席, exactly as `Enter` on an idle row would).
+/// stays in 集中, exactly as `Enter` on an idle row would).
 ///
 /// [`HomeState::restore_focus`]: super::super::state::HomeState::restore_focus
 pub(super) fn resume_attach(
@@ -823,7 +823,7 @@ pub(super) fn resume_attach(
 ) {
     if state.take_resume_attach() {
         // `restore_focus` already focused the session, so the cursor is on it;
-        // attach the focused row, landing in 在席 when it has no live pane.
+        // attach the focused row, landing in 集中 when it has no live pane.
         let row = state.list().selected_index();
         focus_and_attach(term, state, painter, wiring, row);
     }
@@ -846,10 +846,10 @@ fn jump_to_previous(
     }
 }
 
-/// Handle one key in 在席 (Focus): drive the right-pane action surface (a menu
+/// Handle one key in 集中 (Closeup): drive the right-pane action surface (a menu
 /// of the session's commands or a session-scoped prompt), launching `terminal` /
-/// `agent` into 没入, or back out to 切替.
-pub(super) fn focus_key(
+/// `agent` into 没入, or back out to 選択.
+pub(super) fn closeup_key(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -857,28 +857,28 @@ pub(super) fn focus_key(
     wiring: &mut Wiring,
 ) -> Flow {
     // A pending `Ctrl-O` leader makes this key the second key of the chord — the
-    // same prefix grammar as 没入, so `Ctrl-O o` zooms out to 切替 from 在席 exactly
-    // as it does from the live terminal. Unlike 没入 this needs no timeout: 在席 has
+    // same prefix grammar as 没入, so `Ctrl-O o` zooms out to 選択 from 集中 exactly
+    // as it does from the live terminal. Unlike 没入 this needs no timeout: 集中 has
     // no shell a forgotten leader could leak a literal `Ctrl-O` into, and the very
     // next key always resolves it.
     // Any deliberate key other than `Esc` cancels the one-shot return-to-pane
-    // arming (set when 在席 was reached by zooming out of a live pane with
+    // arming (set when 集中 was reached by zooming out of a live pane with
     // `Ctrl-T` / `Ctrl-O a`), so only an *immediate* `Esc` returns to that pane.
     if !matches!(key, Key::Escape) {
-        state.clear_focus_return_attach();
+        state.clear_closeup_return_attach();
     }
 
     if state.prefix_pending() {
         state.set_prefix_pending(false);
-        return focus_prefix_action(term, state, painter, key, wiring);
+        return closeup_prefix_action(term, state, painter, key, wiring);
     }
 
-    // `Esc` peels back one step. When 在席 was reached by zooming out of a live
+    // `Esc` peels back one step. When 集中 was reached by zooming out of a live
     // pane (`Ctrl-T` / `Ctrl-O a`) the first `Esc` returns straight to that pane
     // (没入) — back to the tab the zoom started from; otherwise, on a "+ new"
     // launch surface opened over live panes it discards the surface and steps onto
     // the pane's tab so that pane previews again, and everywhere else (a pane tab,
-    // or an idle session with no pane behind "+ new") it leaves 在席 for 切替.
+    // or an idle session with no pane behind "+ new") it leaves 集中 for 選択.
     // `Ctrl-O` is the leader for that prefix grammar (the action is the next key);
     // `Ctrl-P` / `Ctrl-N` also move the tab selector directly across the session's
     // live panes and the trailing "+ new" tab. These bind the same whichever tab
@@ -887,47 +887,47 @@ pub(super) fn focus_key(
         Key::Escape => {
             // A first `Esc` collapses an open agent or close picker back to the
             // menu; only when none is open does it peel back a step.
-            if state.focus_menu_collapse_agent() || state.focus_menu_collapse_close() {
+            if state.closeup_menu_collapse_agent() || state.closeup_menu_collapse_close() {
                 return Flow::Continue;
             }
             // With a `/` filter live the first `Esc` peels it (restoring the full
             // menu); only once the menu lists everything again does `Esc` step back
-            // out of 在席.
-            if state.clear_focus_menu_filter() {
+            // out of 集中.
+            if state.clear_closeup_menu_filter() {
                 return Flow::Continue;
             }
-            // When 在席 was reached by zooming out of a live pane (`Ctrl-T` /
+            // When 集中 was reached by zooming out of a live pane (`Ctrl-T` /
             // `Ctrl-O a`), the first `Esc` returns to that pane (没入) — back to the
-            // tab the zoom started from — rather than peeling back toward 切替.
-            if state.take_focus_return_attach() {
+            // tab the zoom started from — rather than peeling back toward 選択.
+            if state.take_closeup_return_attach() {
                 open_pane(term, state, painter, wiring, false, false, true);
                 return Flow::Continue;
             }
             // An action surface (menu / prompt) floating over a pane tab (the
             // zoomed-out state once another key cancelled the re-attach): `Esc`
             // dismisses it, leaving the pane's preview showing — one step short of
-            // leaving 在席.
-            if state.close_focus_action_over_pane() {
+            // leaving 集中.
+            if state.close_closeup_action_over_pane() {
                 return Flow::Continue;
             }
-            if !state.focus_discard_new_tab() {
-                state.leave_focus();
+            if !state.closeup_discard_new_tab() {
+                state.leave_closeup();
             }
             return Flow::Continue;
         }
         Key::Char(CTRL_O) => {
             // Under the prefix scheme `Ctrl-O` is the leader (the action is the
-            // next key), matching 没入 — `Esc` stays the one-key exit to 切替. The
+            // next key), matching 没入 — `Esc` stays the one-key exit to 選択. The
             // alt scheme drives 没入 with `Alt`-chords and leaves bare `Ctrl-O` to
-            // the shell, so there `Ctrl-O` keeps its direct zoom-out to 切替.
+            // the shell, so there `Ctrl-O` keeps its direct zoom-out to 選択.
             if state.key_scheme() == KeyScheme::Prefix {
                 state.set_prefix_pending(true);
             } else {
-                state.enter_switch(ReturnMode::Focus);
+                state.enter_overview(ReturnMode::Closeup);
             }
             return Flow::Continue;
         }
-        // `:` summons the workspace command palette overlay from 在席. Handled
+        // `:` summons the workspace command palette overlay from 集中. Handled
         // before the action-surface dispatch so it fires whether the menu or the
         // prompt is showing (in the prompt `:` would otherwise be typed).
         Key::Char(':') => {
@@ -940,7 +940,7 @@ pub(super) fn focus_key(
             return Flow::Continue;
         }
         // `Ctrl-E` edits the focused session's note (a no-op on the root row).
-        // Closing it returns here to 在席 — there is no pane to re-attach, so
+        // Closing it returns here to 集中 — there is no pane to re-attach, so
         // `reattach` is false (unlike 没入's `Ctrl-E`).
         //
         // `console` decodes Ctrl-E as `Key::End` (its readline-style end-of-line),
@@ -953,7 +953,7 @@ pub(super) fn focus_key(
             state.open_focused_note(false);
             return Flow::Continue;
         }
-        Key::End if !state.focus_prompt_capturing() => {
+        Key::End if !state.closeup_prompt_capturing() => {
             state.open_focused_note(false);
             return Flow::Continue;
         }
@@ -962,7 +962,7 @@ pub(super) fn focus_key(
         // command line `?` stays a literal character (so a session-scoped command
         // can contain it) — whether that command line is on the "+ new" tab or
         // floating over a pane after a zoom-out.
-        Key::Char('?') if !state.focus_prompt_capturing() => {
+        Key::Char('?') if !state.closeup_prompt_capturing() => {
             state.open_text_modal(
                 "Keys",
                 ui::content::cheatsheet(state.key_scheme()),
@@ -975,14 +975,14 @@ pub(super) fn focus_key(
         // lands on it); landing on the "+ new" tab is a pure state move with no
         // pool tab to activate.
         Key::Char(CTRL_P) => {
-            if let Some(index) = state.focus_tab_prev() {
+            if let Some(index) = state.closeup_tab_prev() {
                 let dir = selected_dir(state, wiring.workspace_root);
                 (wiring.tab_op)(&dir, Some(TabNav::To(index)));
             }
             return Flow::Continue;
         }
         Key::Char(CTRL_N) => {
-            if let Some(index) = state.focus_tab_next() {
+            if let Some(index) = state.closeup_tab_next() {
                 let dir = selected_dir(state, wiring.workspace_root);
                 (wiring.tab_op)(&dir, Some(TabNav::To(index)));
             }
@@ -995,10 +995,10 @@ pub(super) fn focus_key(
     // pane), and so does that surface floating over a pane tab after a zoom-out; a
     // bare pane tab is a preview, so its only action is `Enter` to re-attach the
     // selected (now-active) pane — every other key is inert there.
-    if state.focus_on_new_tab() || state.focus_action_over_pane() {
+    if state.closeup_on_new_tab() || state.closeup_action_over_pane() {
         match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu_key(term, state, painter, key, wiring),
-            SessionActionUi::Prompt => focus_prompt_key(term, state, painter, key, wiring),
+            SessionActionUi::Menu => closeup_menu_key(term, state, painter, key, wiring),
+            SessionActionUi::Prompt => closeup_prompt_key(term, state, painter, key, wiring),
         }
     } else if key == Key::Enter {
         open_pane(term, state, painter, wiring, false, false, true);
@@ -1006,22 +1006,22 @@ pub(super) fn focus_key(
     Flow::Continue
 }
 
-/// Dispatch the key *after* the `Ctrl-O` leader in 在席 (Focus), mirroring the
+/// Dispatch the key *after* the `Ctrl-O` leader in 集中 (Closeup), mirroring the
 /// 没入 prefix grammar (see [`pane_input::prefix_action`]) so the same chords
 /// navigate from either surface:
 ///
 /// - `o` (and a double leader `Ctrl-O Ctrl-O`, a control-char second key that
-///   works with a Japanese IME on) zooms out to 切替, returning to 在席 on cancel.
+///   works with a Japanese IME on) zooms out to 選択, returning to 集中 on cancel.
 /// - `n`/`→` and `p`/`←` walk the tab strip, like the direct `Ctrl-N`/`Ctrl-P`.
-/// - `g` launches an agent — 在席's analogue of 没入's "add an agent tab".
+/// - `g` launches an agent — 集中's analogue of 没入's "add an agent tab".
 /// - `e` edits the note, `s` toggles the sidebar, `q` raises the quit modal.
 /// - `Ctrl-^` jumps to the previous session (a direct key in 没入 too).
 ///
-/// `a` (zoom to 在席) is a no-op — we are already here — and every other key is
+/// `a` (zoom to 集中) is a no-op — we are already here — and every other key is
 /// swallowed, exactly as an unrecognised key is after the leader in 没入.
 ///
 /// [`pane_input::prefix_action`]: super::super::pane_input
-fn focus_prefix_action(
+fn closeup_prefix_action(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -1029,20 +1029,20 @@ fn focus_prefix_action(
     wiring: &mut Wiring,
 ) -> Flow {
     match key {
-        Key::Char('o') | Key::Char(CTRL_O) => state.enter_switch(ReturnMode::Focus),
+        Key::Char('o') | Key::Char(CTRL_O) => state.enter_overview(ReturnMode::Closeup),
         Key::Char('n') | Key::ArrowRight => {
-            if let Some(index) = state.focus_tab_next() {
+            if let Some(index) = state.closeup_tab_next() {
                 let dir = selected_dir(state, wiring.workspace_root);
                 (wiring.tab_op)(&dir, Some(TabNav::To(index)));
             }
         }
         Key::Char('p') | Key::ArrowLeft => {
-            if let Some(index) = state.focus_tab_prev() {
+            if let Some(index) = state.closeup_tab_prev() {
                 let dir = selected_dir(state, wiring.workspace_root);
                 (wiring.tab_op)(&dir, Some(TabNav::To(index)));
             }
         }
-        Key::Char('g') => run_focus_command(term, state, painter, "agent", wiring),
+        Key::Char('g') => run_closeup_command(term, state, painter, "agent", wiring),
         Key::Char('e') => {
             state.open_focused_note(false);
         }
@@ -1057,21 +1057,21 @@ fn focus_prefix_action(
 /// Close the focused session — the `close` command's effect. Dispatches a
 /// background removal like `session remove <name>`: a clean session is removed,
 /// while a dirty one is refused unless `force` is true. This keeps bare `close`
-/// safe, while `close --force` and the 在席 menu's `Shift`+`c` deliberately mirror
+/// safe, while `close --force` and the 集中 menu's `Shift`+`c` deliberately mirror
 /// `session remove <name> --force`.
 ///
-/// Either way the user asked to leave this session, so 在席 yields to the base
-/// 切替 (Switch) at once (`Esc` is inert there). If removal finishes before any
+/// Either way the user asked to leave this session, so 集中 yields to the base
+/// 選択 (Overview) at once (`Esc` is inert there). If removal finishes before any
 /// other operation, the task then lands on the neighbouring session instead of
 /// root; otherwise the refreshed list preserves the user's current operation.
 /// The removal's result — success or the dirty refusal — is logged and the list
 /// refreshed when the background task finishes. The root row is the workspace
-/// itself, not a session, so closing it is refused outright and stays in 在席.
+/// itself, not a session, so closing it is refused outright and stays in 集中.
 fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool) {
     let name = state.focused_session_name();
     // The root row is the workspace itself, not a session, so it cannot be
-    // closed. The 在席 menu hides `close` here, but the prompt could still be
-    // typed, so refuse it explicitly and stay in 在席.
+    // closed. The 集中 menu hides `close` here, but the prompt could still be
+    // typed, so refuse it explicitly and stay in 集中.
     if name == ROOT_NAME {
         state.log_error("the root row is the workspace and cannot be closed");
         return;
@@ -1085,47 +1085,47 @@ fn close_focused_session(state: &mut HomeState, wiring: &mut Wiring, force: bool
             interaction_epoch: wiring.interaction_epoch,
         });
     (wiring.dispatch_remove)(&root, &name, force, focus);
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
 }
 
-/// 在席 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
+/// 集中 menu surface: `↑`/`↓` move the cursor, `Enter` runs the highlighted
 /// command, `t` / `a` are shortcuts for `terminal` / `agent`, and `Shift`+`c`
 /// runs the deliberate discard path (`close --force`).
 ///
 /// On the `agent` row, `→` / `Tab` expands the agent picker (案A) when more than
 /// one CLI is installed; while it is expanded the keys drive the picker instead —
 /// `↑`/`↓` move within it, `Enter` launches the highlighted CLI, and `←` collapses
-/// it (as does `Esc`, handled one level up in [`focus_key`]).
+/// it (as does `Esc`, handled one level up in [`closeup_key`]).
 ///
 /// On the `close` row, `→` / `Tab` expands the close picker (plain close vs.
 /// close --force); the same `↑`/`↓` / `Enter` / `←` pattern drives it.
-fn focus_menu_key(
+fn closeup_menu_key(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
     key: Key,
     wiring: &mut Wiring,
 ) {
-    if state.focus_menu_expanded() {
+    if state.closeup_menu_expanded() {
         match key {
-            Key::ArrowUp | Key::Char('k') => state.focus_menu_move_up(),
-            Key::ArrowDown | Key::Char('j') => state.focus_menu_move_down(),
+            Key::ArrowUp | Key::Char('k') => state.closeup_menu_move_up(),
+            Key::ArrowDown | Key::Char('j') => state.closeup_menu_move_down(),
             Key::ArrowLeft => {
-                state.focus_menu_collapse_agent();
+                state.closeup_menu_collapse_agent();
             }
             Key::Enter => {
-                if let Some(cli) = state.focus_menu_selected_agent() {
-                    state.focus_menu_collapse_agent();
+                if let Some(cli) = state.closeup_menu_selected_agent() {
+                    state.closeup_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
-                } else if let Some(action) = state.focus_menu_selected_terminal_action() {
-                    state.focus_menu_collapse_agent();
+                } else if let Some(action) = state.closeup_menu_selected_terminal_action() {
+                    state.closeup_menu_collapse_agent();
                     if action == "new" {
                         open_external_terminal(state, wiring);
                     } else {
                         launch_pane(term, state, painter, wiring, false);
                     }
                 } else {
-                    run_focus_close_picker(term, state, painter, wiring);
+                    run_closeup_close_picker(term, state, painter, wiring);
                 }
             }
             _ => {}
@@ -1136,60 +1136,60 @@ fn focus_menu_key(
     // whether or not a `/` filter is live; the letter keys below split, since under
     // a filter they are the query rather than shortcuts.
     match key {
-        Key::ArrowUp => state.focus_menu_move_up(),
-        Key::ArrowDown => state.focus_menu_move_down(),
+        Key::ArrowUp => state.closeup_menu_move_up(),
+        Key::ArrowDown => state.closeup_menu_move_down(),
         // On the `agent` / `terminal` / `close` rows, open their inline pickers.
         Key::ArrowRight | Key::Tab => {
-            if state.focus_menu_agent_can_expand() {
-                state.focus_menu_expand_agent();
-            } else if state.focus_menu_terminal_can_expand() {
-                state.focus_menu_expand_terminal();
-            } else if state.focus_close_can_expand() {
-                state.focus_menu_expand_close();
+            if state.closeup_menu_agent_can_expand() {
+                state.closeup_menu_expand_agent();
+            } else if state.closeup_menu_terminal_can_expand() {
+                state.closeup_menu_expand_terminal();
+            } else if state.closeup_close_can_expand() {
+                state.closeup_menu_expand_close();
             }
         }
         Key::Enter => {
-            if let Some(command) = state.focus_selected_command() {
-                run_focus_command(term, state, painter, command.name, wiring);
+            if let Some(command) = state.closeup_selected_command() {
+                run_closeup_command(term, state, painter, command.name, wiring);
             }
         }
-        _ if state.focus_menu_filtering() => match key {
+        _ if state.closeup_menu_filtering() => match key {
             // Filter mode: characters narrow the list, Backspace edits the query.
-            Key::Backspace => state.focus_menu_filter_backspace(),
-            Key::Char(c) if !c.is_control() => state.push_focus_menu_filter(c),
+            Key::Backspace => state.closeup_menu_filter_backspace(),
+            Key::Char(c) if !c.is_control() => state.push_closeup_menu_filter(c),
             _ => {}
         },
         // `/` narrows the list by typing (leaving command input to the Prompt UI);
         // `j`/`k` keep the vim navigation the list always had.
-        Key::Char('/') => state.start_focus_menu_filter(),
-        Key::Char('k') => state.focus_menu_move_up(),
-        Key::Char('j') => state.focus_menu_move_down(),
-        Key::Char('t') => run_focus_command(term, state, painter, "terminal", wiring),
-        Key::Char('a') => run_focus_command(term, state, painter, "agent", wiring),
+        Key::Char('/') => state.start_closeup_menu_filter(),
+        Key::Char('k') => state.closeup_menu_move_up(),
+        Key::Char('j') => state.closeup_menu_move_down(),
+        Key::Char('t') => run_closeup_command(term, state, painter, "terminal", wiring),
+        Key::Char('a') => run_closeup_command(term, state, painter, "agent", wiring),
         // `Shift`+`c` is the deliberate discard shortcut: run `close --force`
         // instead of the safe `close`, matching the existing capital-letter
-        // convention for shifted actions in 切替 (`K`/`J` reorder).
-        Key::Char('C') => run_focus_command(term, state, painter, "close --force", wiring),
+        // convention for shifted actions in 選択 (`K`/`J` reorder).
+        Key::Char('C') => run_closeup_command(term, state, painter, "close --force", wiring),
         _ => {}
     }
 }
 
-fn run_focus_close_picker(
+fn run_closeup_close_picker(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
     wiring: &mut Wiring,
 ) {
-    let force = state.focus_menu_selected_close_force();
-    state.focus_menu_collapse_close();
+    let force = state.closeup_menu_selected_close_force();
+    state.closeup_menu_collapse_close();
     let cmd = if force { "close --force" } else { "close" };
-    run_focus_command(term, state, painter, cmd, wiring);
+    run_closeup_command(term, state, painter, cmd, wiring);
 }
 
-/// 在席 prompt surface: edit / complete the session-scoped command line and run
+/// 集中 prompt surface: edit / complete the session-scoped command line and run
 /// it on `Enter`, attaching the pane on `terminal` / `agent`, and launching the
 /// configured agent with an opening prompt on `ai <prompt>`.
-fn focus_prompt_key(
+fn closeup_prompt_key(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -1201,10 +1201,10 @@ fn focus_prompt_key(
             // `terminal` / `agent` attach the pane; `ai <prompt>` attaches the
             // configured agent and hands it that prompt; `chat` opens the local-LLM
             // overlay; `diff` opens the right-pane diff view; `close` removes the
-            // session and leaves 在席; anything else only logs, staying in Focus. The
+            // session and leaves 集中; anything else only logs, staying in Closeup. The
             // command is persisted (with its session) so per-session history
             // survives across launches, like the palette line.
-            let submission = state.focus_prompt_submit();
+            let submission = state.closeup_prompt_submit();
             if let Some(entry) = submission.recorded.as_ref() {
                 (wiring.persist)(entry);
             }
@@ -1223,33 +1223,33 @@ fn focus_prompt_key(
             }
         }
         Key::Tab => {
-            let _ = state.focus_prompt_complete();
+            let _ = state.closeup_prompt_complete();
         }
         // Editing keys route straight to the prompt's own TextInput methods.
         Key::Backspace => {
-            state.focus_prompt_mut().backspace();
+            state.closeup_prompt_mut().backspace();
         }
         Key::Del => {
-            state.focus_prompt_mut().delete_forward();
+            state.closeup_prompt_mut().delete_forward();
         }
         // ←/→/Home/End move the caret so the prompt can be edited mid-string.
-        Key::ArrowLeft => state.focus_prompt_mut().move_left(),
-        Key::ArrowRight => state.focus_prompt_mut().move_right(),
-        Key::Home => state.focus_prompt_mut().move_home(),
-        Key::End => state.focus_prompt_mut().move_end(),
-        // Filter control chars (see the create-input arm in `switch_key`).
-        Key::Char(c) if !c.is_control() => state.focus_prompt_mut().insert(c),
+        Key::ArrowLeft => state.closeup_prompt_mut().move_left(),
+        Key::ArrowRight => state.closeup_prompt_mut().move_right(),
+        Key::Home => state.closeup_prompt_mut().move_home(),
+        Key::End => state.closeup_prompt_mut().move_end(),
+        // Filter control chars (see the create-input arm in `overview_key`).
+        Key::Char(c) if !c.is_control() => state.closeup_prompt_mut().insert(c),
         _ => {}
     }
 }
 
 /// Run a named session command (`terminal` / `agent` / `diff` / `chat` /
-/// `close` / `close --force`) from the 在席 menu: the launch commands attach
-/// the pane (没入), `diff` opens the right-pane diff view over 在席, `chat` opens
-/// the local-LLM chat overlay, `close` variants remove the session and leave 在席.
+/// `close` / `close --force`) from the 集中 menu: the launch commands attach
+/// the pane (没入), `diff` opens the right-pane diff view over 集中, `chat` opens
+/// the local-LLM chat overlay, `close` variants remove the session and leave 集中.
 /// The prompt-taking `ai <prompt>` is kept out of the menu (typed in the Prompt
 /// UI); a command with no arm here logs its coming-soon line.
-fn run_focus_command(
+fn run_closeup_command(
     term: &Term,
     state: &mut HomeState,
     painter: &mut FramePainter,
@@ -1258,20 +1258,20 @@ fn run_focus_command(
 ) {
     // Running a command dismisses any `/` filter so the menu — whether re-shown
     // after a `diff` / `chat` overlay closes or re-entered later — lists in full.
-    state.clear_focus_menu_filter();
+    state.clear_closeup_menu_filter();
     match name {
         "terminal" => launch_pane(term, state, painter, wiring, false),
         // The menu's `agent` row / `a` shortcut launch the configured default.
         "agent" => launch_agent(term, state, painter, wiring, None),
         // `diff` opens the right-pane diff view of the focused session (the same
-        // effect the 在席 prompt / palette `diff` produced): resolve its worktree
+        // effect the 集中 prompt / palette `diff` produced): resolve its worktree
         // and shell out to git, then render / store the patch (or log a failure).
         "diff" => state.open_diff_result(selected_diff(state)),
         // `chat` opens the local-LLM chat overlay in the right pane.
         "chat" => state.open_chat(),
-        // `close` removes the focused session safely and leaves 在席.
+        // `close` removes the focused session safely and leaves 集中.
         "close" => close_focused_session(state, wiring, false),
-        // `close --force` is exposed as `Shift`+`c` on the 在席 menu for the
+        // `close --force` is exposed as `Shift`+`c` on the 集中 menu for the
         // explicit discard path.
         "close --force" => close_focused_session(state, wiring, true),
         // Any future coming-soon command just logs its line.
@@ -1281,8 +1281,8 @@ fn run_focus_command(
 
 /// Open a native terminal application at the focused row's directory. Unlike
 /// [`launch_pane`], this does not enter 没入: the OS owns the new terminal. Once it
-/// is launched the 在席 menu has nothing more to act on, so — like `close` — this
-/// leaves 在席 for 切替, dismissing the menu overlay rather than leaving it floating
+/// is launched the 集中 menu has nothing more to act on, so — like `close` — this
+/// leaves 集中 for 選択, dismissing the menu overlay rather than leaving it floating
 /// over the session it just spawned a terminal for.
 fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
     let dir = selected_dir(state, wiring.workspace_root);
@@ -1290,7 +1290,7 @@ fn open_external_terminal(state: &mut HomeState, wiring: &mut Wiring) {
         Ok(()) => state.log_output(format!("Opened a new terminal in {}.", dir.display())),
         Err(e) => state.log_error(e),
     }
-    state.leave_focus();
+    state.leave_closeup();
 }
 
 /// Launch an agent pane, recording which CLI to spawn: `None` uses the
@@ -1317,7 +1317,7 @@ fn launch_agent(
 
 /// Launch the configured agent with an opening prompt from `ai <prompt>`.
 ///
-/// The prompt belongs to the worktree currently focused in 在席. The terminal
+/// The prompt belongs to the worktree currently focused in 集中. The terminal
 /// pool consumes it only for a fresh agent-pane spawn; when the session already
 /// has a live agent pane, it is sent directly to that pane as interactive input —
 /// whatever CLI that pane runs, so the installed-CLI gate is skipped (nothing is
@@ -1352,7 +1352,7 @@ fn launch_agent_with_prompt(
 /// Add a fresh `terminal` / `agent` pane to the focused session and drive it
 /// (没入). `agent` launches the AI agent CLI inside the pane; otherwise a plain
 /// shell. Shared by the three surfaces that launch a pane on command — the `:`
-/// palette's typed `terminal` / `agent`, the 在席 menu, and the 在席 prompt — each of which
+/// palette's typed `terminal` / `agent`, the 集中 menu, and the 集中 prompt — each of which
 /// has already focused the target row.
 fn launch_pane(
     term: &Term,
@@ -1379,12 +1379,12 @@ fn launch_pane(
         Ok(StartPending::Pending { label }) => {
             let epoch = wiring.interaction_epoch;
             state.begin_pending_pane(dir, epoch, label);
-            // Close the 在席 action surface and drop back onto the current pane's
+            // Close the 集中 action surface and drop back onto the current pane's
             // tab, so its preview stays on screen with the new tab loading in the
             // strip above it. Any keypress here cancels the auto-move (it bumps the
-            // epoch); staying in 在席 keeps the loop monitoring the launch.
-            state.focus_discard_new_tab();
-            state.close_focus_action_over_pane();
+            // epoch); staying in 集中 keeps the loop monitoring the launch.
+            state.closeup_discard_new_tab();
+            state.close_closeup_action_over_pane();
         }
         Ok(StartPending::Reused) => reattach_pane(term, state, painter, wiring),
         Err(e) => state.log_error(format!("failed to launch: {e}")),
@@ -1453,18 +1453,18 @@ fn paint_launch_loading(
 ///
 /// `agent` governs the shell opened here (`agent` launches the AI agent CLI
 /// inside it; `terminal` opens a plain shell). `new_pane` chooses whether to add
-/// a fresh pane (the 在席 action surface's `terminal` / `agent`, so a session can
+/// a fresh pane (the 集中 action surface's `terminal` / `agent`, so a session can
 /// hold several) or re-attach the session's active pane (`Enter` on a live
-/// session in 切替). The pane is driven by the impure `open_terminal` callback,
+/// session in 選択). The pane is driven by the impure `open_terminal` callback,
 /// which returns:
 ///
-/// - [`PaneExit::Closed`] — the shell exited: return to 在席 (Focus).
-/// - [`PaneExit::ToSwitch`] — `Ctrl-O`: zoom out to 切替 (Switch), remembering to
+/// - [`PaneExit::Closed`] — the shell exited: return to 集中 (Closeup).
+/// - [`PaneExit::ToOverview`] — `Ctrl-O`: zoom out to 選択 (Overview), remembering to
 ///   re-attach (`ReturnMode::Attached`) if the user backs out.
-/// - [`PaneExit::ToFocus`] — `Ctrl-T`: zoom out to 在席 (Focus), the session's
+/// - [`PaneExit::ToCloseup`] — `Ctrl-T`: zoom out to 集中 (Closeup), the session's
 ///   action menu, leaving every pane alive in the pool.
 /// - [`PaneExit::ToPreviousSession`] — `Ctrl-^`: jump to the previously focused
-///   session, re-attaching it when live (or 在席 when none was recorded).
+///   session, re-attaching it when live (or 集中 when none was recorded).
 /// - [`PaneExit::ToSession`] — a double click on a selectable sidebar row: switch
 ///   to that focus row (re-attaching it when live) or open inline creation for
 ///   the create row.
@@ -1519,7 +1519,7 @@ fn open_pane(
     // back on the workspace screen. Queue these bytes into the next forced repaint
     // rather than flushing them now: re-entering the alternate screen clears it,
     // and a separate flush would leave a one-frame black flash before the event
-    // loop redraws Switch / Focus.
+    // loop redraws Overview / Closeup.
     let mut repaint_prefix = screen::input_mode_sequence();
     // Leaving the embedded pane returns the pointer to management chrome. The
     // pane itself keeps the last OSC 22 pointer shape across in-pane tab hops so
@@ -1532,10 +1532,10 @@ fn open_pane(
     // is stale: force a full repaint on the next pass.
     painter.reset_with_prefix(repaint_prefix);
     match outcome {
-        Ok(PaneExit::ToSwitch) => {
+        Ok(PaneExit::ToOverview) => {
             // `Ctrl-O` zooms out: pick a session in the left pane, re-attaching
             // this one if the user backs out.
-            state.enter_switch(ReturnMode::Attached);
+            state.enter_overview(ReturnMode::Attached);
         }
         Ok(PaneExit::OpenNote) => {
             // `Ctrl-E` opens the focused row's note editor over the (now detached)
@@ -1544,46 +1544,46 @@ fn open_pane(
             // overlay already open, so this always opens.
             state.open_focused_note(true);
         }
-        Ok(PaneExit::ToFocus) => {
-            // `Ctrl-T` zooms out one level to 在席: the session's action surface,
+        Ok(PaneExit::ToCloseup) => {
+            // `Ctrl-T` zooms out one level to 集中: the session's action surface,
             // where the user picks the next action (terminal / agent / …). Every
             // pane stays alive in the pool, so re-launching re-attaches them. The
             // selector stays on the tab the zoom left — its live preview keeps
             // showing behind the floating action surface — instead of jumping to a
             // "+ new" chip for a tab that was never created. Arm the one-shot
             // return-to-pane bit so an immediate `Esc` bounces back to the pane
-            // this zoom started from (没入) rather than peeling back to 切替.
+            // this zoom started from (没入) rather than peeling back to 選択.
             state.leave_attached();
-            state.focus_action_over_active_pane();
-            state.arm_focus_return_attach();
+            state.closeup_action_over_active_pane();
+            state.arm_closeup_return_attach();
         }
         Ok(PaneExit::ToPreviousSession) => {
             // `Ctrl-^` jumps to the previously focused session, re-attaching it
-            // when live (like `Enter` in 切替, via `focus_and_attach`); focusing it
+            // when live (like `Enter` in 選択, via `focus_and_attach`); focusing it
             // records the session being left, so a second `Ctrl-^` toggles back.
-            // With no previous session recorded, fall back to 在席 on the current
+            // With no previous session recorded, fall back to 集中 on the current
             // one (like `Ctrl-T`), so the pane never lingers in 没入 with no driver.
             match state.previous_session_row() {
                 Some(row) => focus_and_attach(term, state, painter, wiring, row),
                 None => {
                     state.leave_attached();
-                    state.focus_action_over_active_pane();
+                    state.closeup_action_over_active_pane();
                 }
             }
         }
         Ok(PaneExit::ToSession(row)) => {
             if state.list().is_create_row(row) {
                 // A double click on the sidebar create row in 没入: leave the pane
-                // to the picker and open the same inline create editor that 切替 /
-                // 在席 expose. ReturnMode::Attached preserves the usual `Esc`
-                // path: if the user cancels creation and backs out of 切替, the
+                // to the picker and open the same inline create editor that 選択 /
+                // 集中 expose. ReturnMode::Attached preserves the usual `Esc`
+                // path: if the user cancels creation and backs out of 選択, the
                 // live pane re-attaches.
-                state.enter_switch(ReturnMode::Attached);
-                state.switch_select(row);
-                begin_switch_create(state, wiring, None);
+                state.enter_overview(ReturnMode::Attached);
+                state.overview_select(row);
+                begin_overview_create(state, wiring, None);
             } else {
                 // A double click on a sidebar session row in 没入: switch to that
-                // focus row, re-attaching it when live (like `Enter` in 切替, via
+                // focus row, re-attaching it when live (like `Enter` in 選択, via
                 // `focus_and_attach`) — focusing records the session being left,
                 // so `Ctrl-^` can toggle back.
                 focus_and_attach(term, state, painter, wiring, row);
@@ -1595,13 +1595,13 @@ fn open_pane(
             // The event loop renders it on the next frame; confirming quits, which
             // then drops the pool — so a live agent is never closed by one keystroke.
             // Arm the 没入 engagement for restore *before* `leave_attached` drops the
-            // mode to 在席, so a confirmed quit records that the user was attached.
+            // mode to 集中, so a confirmed quit records that the user was attached.
             state.arm_resume_attached();
             state.leave_attached();
             state.open_quit_confirm();
         }
         Ok(PaneExit::Closed) => {
-            // The shell exited: drop back to 在席 on the same session.
+            // The shell exited: drop back to 集中 on the same session.
             state.leave_attached();
             state.log_output(format!("{label} in {} closed.", dir.display()));
         }

@@ -22,15 +22,15 @@
 install ─▶ cd <project> ─▶ usagi init ─▶ usagi hop ─▶ [Open でワークスペースを選ぶ]
                                                           │
                                                           ▼
-                                              切替(Switch) ─ : ─▶ パレットで session create
+                                              選択(Overview) ─ : ─▶ パレットで session create
                                                           │  ┌─ c ─▶ 別セッションをその場で作成
                                                           ▼  │
-                                              在席(Focus) で agent ─▶ 没入(Attached) で claude を操作
+                                              集中(Closeup) で agent ─▶ 没入(Attached) で claude を操作
 ```
 
-下の手順はこのまま順に実行できます。モード（**切替・在席・没入**）とキーの考え方は
-[design/home/01-modes.md](design/home/01-modes.md#モードと状態遷移切替在席没入) が正本です（切替へズームアウト＝在席・没入とも[キー方式](design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中)に従い既定 `Ctrl-O o`。在席は `Esc` でも戻れる、
-`Esc`＝一段戻る、`:`＝[コマンドパレット（統括）](design/home/01-modes.md#コマンドパレット統括overview)、終了は `Ctrl+C`）。
+下の手順はこのまま順に実行できます。モード（**選択・集中・没入**）とキーの考え方は
+[design/home/01-modes.md](design/home/01-modes.md#モードと状態遷移選択集中没入) が正本です（選択へズームアウト＝集中・没入とも[キー方式](design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中)に従い既定 `Ctrl-O o`。集中は `Esc` でも戻れる、
+`Esc`＝一段戻る、`:`＝[コマンドパレット（統括）](design/home/01-modes.md#コマンドパレット統括)、終了は `Ctrl+C`）。
 
 ## 1. インストール
 
@@ -71,7 +71,7 @@ usagi hop
 ```
 
 起動画面（Welcome）が開きます。`Open`（`o`）を選び、先ほど初期化したワークスペースを選択すると
-**ホーム画面**に入り、既定の**切替（Switch）**モードになります。
+**ホーム画面**に入り、既定の**選択（Overview）**モードになります。
 
 - 左ペイン … セッション一覧（先頭は常設の **ルート行 `⌂ root`**）。キーボードが乗り `↑↓` で選びます。
 - コマンドパレット … `:`（コロン）で開き、`session` / `issue` / `config` などワークスペース全体のコマンドを実行する入力面。
@@ -89,7 +89,7 @@ session create feature-login      （または短縮形：session c feature-logi
 ```
 
 作成すると `.usagi/sessions/feature-login/` 配下に worktree が構築され、そのセッションが
-アクティブになって**在席（Focus）**へ移ります。右ペインにアクション UI（既定は Menu）が出るので、
+アクティブになって**集中（Closeup）**へ移ります。右ペインにアクション UI（既定は Menu）が出るので、
 `agent` を選びます（メニューでは `a`、Prompt なら `agent` と入力）。
 
 ```text
@@ -102,9 +102,9 @@ Run a command:
 **没入（Attached）**に入ります。起動時に usagi の issue MCP サーバ（`usagi mcp`）が組み込まれるので、
 エージェントは起動直後から `issue_*` tool でタスクを操作できます。
 
-- 没入中にナビゲーション用に予約するキーは**[キー方式（`key_scheme`）](05-settings.md#設定項目)**で決まります。既定の **`prefix` 方式**ではリーダー `Ctrl-O` の次キーで操作し（`Ctrl-O o` で**切替**へズームアウト、`Ctrl-O a` で**在席へ**）、`Ctrl-O` 以外のキーはシェルへ流れます。予約キーの全一覧と `alt` 方式は [design/home/04-keys.md](design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中) が正本です。
-- 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま「在席へ」（既定 `Ctrl-O a`）で在席のアクションメニューを開き、
-  そこから terminal を選べば同じセッションに terminal タブが増え（切替へ抜けて `t` でも可）、タブ前後キー（既定 `Ctrl-O n`/`p`、または切替の `←`/`→`）でタブを行き来できます。
+- 没入中にナビゲーション用に予約するキーは**[キー方式（`key_scheme`）](05-settings.md#設定項目)**で決まります。既定の **`prefix` 方式**ではリーダー `Ctrl-O` の次キーで操作し（`Ctrl-O o` で**選択**へズームアウト、`Ctrl-O a` で**集中へ**）、`Ctrl-O` 以外のキーはシェルへ流れます。予約キーの全一覧と `alt` 方式は [design/home/04-keys.md](design/home/04-keys.md#没入のキー操作attached--terminal--agent-実行中) が正本です。
+- 素のシェルだけ欲しいときは `agent` の代わりに `terminal` を使います。Agent を動かしたまま「集中へ」（既定 `Ctrl-O a`）で集中のアクションメニューを開き、
+  そこから terminal を選べば同じセッションに terminal タブが増え（選択へ抜けて `t` でも可）、タブ前後キー（既定 `Ctrl-O n`/`p`、または選択の `←`/`→`）でタブを行き来できます。
 - `agent` / `terminal` の仕様は [03-commands/02-tui.md](03-commands/02-tui.md#agent)、MCP の組み込みは
   [03-commands/03-mcp.md](03-commands/03-mcp.md) を参照。
 
@@ -112,18 +112,18 @@ Run a command:
 
 別のタスクを並行で進めたいときは、いまの Agent を**止めずに**新しいセッションを作れます。
 
-1. 没入中に**切替へズームアウト**（既定の `prefix` 方式なら **`Ctrl-O` → `o`**、`alt` 方式なら **`Alt-o`**）して**切替（Switch）**へ移ります（キーボードが左ペインへ移ります）。
+1. 没入中に**選択へズームアウト**（既定の `prefix` 方式なら **`Ctrl-O` → `o`**、`alt` 方式なら **`Alt-o`**）して**選択（Overview）**へ移ります（キーボードが左ペインへ移ります）。
 2. 左ペインで **`c`** を押すと、その場でインラインの名前入力が開きます。新しいセッション名（例 `feature-search`）を
-   入力して `Enter` で作成 → そのセッションの**在席**へ移ります。
-3. 在席で再び **`agent`** を起動すれば、2 つ目のセッションでもエージェントが走ります。
+   入力して `Enter` で作成 → そのセッションの**集中**へ移ります。
+3. 集中で再び **`agent`** を起動すれば、2 つ目のセッションでもエージェントが走ります。
 
 ```text
-没入 ──Ctrl-O o──▶ 切替(Switch) ──c──▶ 名前入力 ──Enter──▶ 在席(Focus) ──agent──▶ 没入(Attached)
+没入 ──Ctrl-O o──▶ 選択(Overview) ──c──▶ 名前入力 ──Enter──▶ 集中(Closeup) ──agent──▶ 没入(Attached)
 ```
 
 各セッションのシェルは画面を開いている間「ターミナルプール」に常駐するので、行き来しても終了しません。
-切替で別のセッションを選んで `Enter`（または `l`）すれば、ライブなセッションへはそのまま再アタッチ、
-アイドルなら在席へ移ります。セッションの破棄は `:` で開くコマンドパレットの `session remove <name>`（名前を省くと選択モーダル）。
+選択で別のセッションを選んで `Enter`（または `l`）すれば、ライブなセッションへはそのまま再アタッチ、
+アイドルなら集中へ移ります。セッションの破棄は `:` で開くコマンドパレットの `session remove <name>`（名前を省くと選択モーダル）。
 ライフサイクルの概念は [04-orchestration.md](04-orchestration.md) を参照。
 
 ## 6. 行き来と入力待ちの通知

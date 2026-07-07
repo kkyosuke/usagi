@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn attached_holds_a_terminal_view_and_leaving_drops_it() {
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     assert_eq!(state.mode(), Mode::Attached);
     state.set_terminal_view(TerminalView::from_rows(
@@ -13,16 +13,16 @@ fn attached_holds_a_terminal_view_and_leaving_drops_it() {
         Some((0, 2)),
     ));
     assert_eq!(state.terminal_view().unwrap().rows(), ["$ "]);
-    // Leaving 没入 returns to 在席 and drops the snapshot.
+    // Leaving 没入 returns to 集中 and drops the snapshot.
     state.leave_attached();
-    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.mode(), Mode::Closeup);
     assert!(state.terminal_view().is_none());
 }
 
 #[test]
 fn clear_terminal_surface_drops_the_snapshot_without_changing_the_mode() {
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(vec!["x".to_string()], None));
     state.clear_terminal_surface();
@@ -34,7 +34,7 @@ fn clear_terminal_surface_drops_the_snapshot_without_changing_the_mode() {
 #[test]
 fn tab_strip_is_published_and_cleared_with_the_view() {
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 1);
     let strip = state.terminal_tabs().expect("the strip is published");
@@ -51,7 +51,7 @@ fn tab_strip_is_published_and_cleared_with_the_view() {
 #[test]
 fn surface_owner_claim_drops_the_previous_owners_snapshot() {
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     {
         let mut surface = state.surface_writer(SurfaceOwner::Attached);
@@ -114,7 +114,7 @@ fn badge_snapshot_is_replaced_through_an_owner_writer() {
 #[test]
 fn leaving_attached_drops_the_tab_strip() {
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string()], 0);
     state.leave_attached();
@@ -122,22 +122,22 @@ fn leaving_attached_drops_the_tab_strip() {
 }
 
 #[test]
-fn leave_focus_returns_to_base_switch_clearing_the_create_input() {
+fn leave_closeup_returns_to_base_overview_clearing_the_create_input() {
     let mut state = state();
-    state.enter_focus(1);
-    state.switch_begin_create(Vec::new());
-    // Leaving 在席 returns to the base 切替 (via `enter_switch(Base)`), which clears
-    // the inline create input. Re-entering 在席 later resets the prompt / menu.
-    state.leave_focus();
-    assert_eq!(state.mode(), Mode::Switch);
-    assert_eq!(state.switch_return(), ReturnMode::Base);
+    state.enter_closeup(1);
+    state.overview_begin_create(Vec::new());
+    // Leaving 集中 returns to the base 選択 (via `enter_overview(Base)`), which clears
+    // the inline create input. Re-entering 集中 later resets the prompt / menu.
+    state.leave_closeup();
+    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.overview_return(), ReturnMode::Base);
     assert!(!state.is_creating());
-    // Re-entering 在席 resets the focus surface (prompt cleared, cursor at top).
-    state.enter_focus(1);
-    state.focus_prompt_mut().insert('x');
-    state.enter_focus(1);
-    assert_eq!(state.focus_prompt(), "");
-    assert_eq!(state.focus_menu_cursor(), 0);
+    // Re-entering 集中 resets the focus surface (prompt cleared, cursor at top).
+    state.enter_closeup(1);
+    state.closeup_prompt_mut().insert('x');
+    state.enter_closeup(1);
+    assert_eq!(state.closeup_prompt(), "");
+    assert_eq!(state.closeup_menu_cursor(), 0);
 }
 
 #[test]
@@ -224,8 +224,8 @@ fn apply_task_completion_logs_and_refreshes_keeping_the_cursor() {
         session_record("main", 1),
         session_record("feature", 1),
     ]);
-    state.switch_move_down();
-    state.switch_move_down();
+    state.overview_move_down();
+    state.overview_move_down();
     let selected = state.list().selected_name().to_string();
     assert_eq!(selected, "feature");
 
@@ -347,11 +347,11 @@ fn refresh_sessions_updates_statuses_and_keeps_the_cursor_in_place() {
 }
 
 #[test]
-fn refresh_sessions_keeps_the_switch_cursor_on_the_create_row() {
+fn refresh_sessions_keeps_the_overview_cursor_on_the_create_row() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
-    state.enter_switch(ReturnMode::Base);
-    state.switch_select(state.list().create_row());
+    state.enter_overview(ReturnMode::Base);
+    state.overview_select(state.list().create_row());
     assert!(state.list().create_row_selected());
 
     // The persistent "+ new session" row is not a session name, so preserving
@@ -369,7 +369,7 @@ fn refresh_sessions_keeps_the_switch_cursor_on_the_create_row() {
 fn refresh_sessions_normalizes_a_corrupt_active_create_row_to_root() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // The active row is command-facing and should never point at the create
     // affordance, but older/corrupt state must be normalized safely if it does.
     state.list.activate_index(state.list.create_row());
@@ -380,7 +380,7 @@ fn refresh_sessions_normalizes_a_corrupt_active_create_row_to_root() {
 }
 
 #[test]
-fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
+fn refresh_sessions_keeps_the_overview_cursor_on_an_extra_unite_root() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
     state.set_extra_groups(vec![GroupSource {
@@ -390,14 +390,14 @@ fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
         sessions: vec![session_record("beta", 1)],
         issues: Vec::new(),
     }]);
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // Rows (each expanded group owns a create row): primary root0, alpha1, primary
     // create2, tools root3, beta4, tools create5.
-    state.switch_select(3); // tools' root row.
+    state.overview_select(3); // tools' root row.
     assert_eq!(state.list().selected_group(), 1);
     assert!(state.list().root_selected());
 
-    // A primary-workspace re-sync landing while the user is in 切替 must not
+    // A primary-workspace re-sync landing while the user is in 選択 must not
     // resolve the ambiguous `ROOT_NAME` to the first workspace's root row.
     state.refresh_sessions(vec![session_record("alpha", 1)]);
     assert_eq!(state.list().selected_index(), 3);
@@ -406,7 +406,7 @@ fn refresh_sessions_keeps_the_switch_cursor_on_an_extra_unite_root() {
 }
 
 #[test]
-fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate_names() {
+fn refresh_sessions_keeps_the_overview_cursor_in_the_same_unite_group_on_duplicate_names() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
     state.set_extra_groups(vec![GroupSource {
@@ -416,10 +416,10 @@ fn refresh_sessions_keeps_the_switch_cursor_in_the_same_unite_group_on_duplicate
         sessions: vec![session_record("alpha", 1)],
         issues: Vec::new(),
     }]);
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // Rows (each expanded group owns a create row): primary root0, primary alpha1,
     // primary create2, tools root3, tools alpha4, tools create5.
-    state.switch_select(4); // tools' alpha.
+    state.overview_select(4); // tools' alpha.
     assert_eq!(state.list().selected_group(), 1);
     assert_eq!(state.list().selected_name(), "alpha");
 
@@ -757,8 +757,8 @@ fn toggle_sort_waiting_lifts_waiting_sessions_to_the_top_then_restores() {
     // beta and gamma are waiting; alpha is not.
     state.apply_badges(waiting_snapshot(&["beta", "gamma"]));
     // Land the cursor on beta so we can confirm it follows its row.
-    state.switch_move_down();
-    state.switch_move_down();
+    state.overview_move_down();
+    state.overview_move_down();
     assert_eq!(state.list().selected_name(), "beta");
 
     // Toggling on lifts beta + gamma above alpha, each group keeping its canonical
@@ -813,25 +813,25 @@ fn quit_confirm_opens_and_cancels() {
 
 #[test]
 fn resume_level_reads_off_the_current_mode_when_nothing_is_armed() {
-    // 切替 (the default) records Switch.
+    // 選択 (the default) records Overview.
     let mut switch = state();
-    assert_eq!(switch.resume_level(), ResumeLevel::Switch);
-    // 在席 records Focus.
+    assert_eq!(switch.resume_level(), ResumeLevel::Overview);
+    // 集中 records Closeup.
     let mut focus = state();
-    focus.enter_focus(1);
-    assert_eq!(focus.resume_level(), ResumeLevel::Focus);
+    focus.enter_closeup(1);
+    assert_eq!(focus.resume_level(), ResumeLevel::Closeup);
 }
 
 #[test]
 fn arming_attached_overrides_the_mode_for_one_quit() {
-    // A 没入 quit drops to 在席 before the modal, so the level is armed beforehand;
-    // it then wins over the (now Focus) mode, and is consumed once.
+    // A 没入 quit drops to 集中 before the modal, so the level is armed beforehand;
+    // it then wins over the (now Closeup) mode, and is consumed once.
     let mut state = state();
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.arm_resume_attached();
     assert_eq!(state.resume_level(), ResumeLevel::Attached);
     // Consumed: a second read falls back to the current mode.
-    assert_eq!(state.resume_level(), ResumeLevel::Focus);
+    assert_eq!(state.resume_level(), ResumeLevel::Closeup);
 }
 
 #[test]
@@ -841,15 +841,15 @@ fn cancelling_the_quit_modal_drops_an_armed_level() {
     let mut state = state();
     state.arm_resume_attached();
     state.cancel_quit_confirm();
-    assert_eq!(state.resume_level(), ResumeLevel::Switch);
+    assert_eq!(state.resume_level(), ResumeLevel::Overview);
 }
 
 #[test]
-fn restore_focus_switch_moves_the_cursor_without_focusing() {
+fn restore_focus_overview_moves_the_cursor_without_focusing() {
     let mut state = state(); // root, main, feature
-    state.restore_focus("feature", ResumeLevel::Switch);
-    // The cursor lands on the session, but the screen stays in 切替.
-    assert_eq!(state.mode(), Mode::Switch);
+    state.restore_focus("feature", ResumeLevel::Overview);
+    // The cursor lands on the session, but the screen stays in 選択.
+    assert_eq!(state.mode(), Mode::Overview);
     assert_eq!(state.list().selected_name(), "feature");
     assert!(!state.take_resume_attach());
 }
@@ -857,8 +857,8 @@ fn restore_focus_switch_moves_the_cursor_without_focusing() {
 #[test]
 fn restore_focus_focus_enters_the_session_without_arming_attach() {
     let mut state = state();
-    state.restore_focus("feature", ResumeLevel::Focus);
-    assert_eq!(state.mode(), Mode::Focus);
+    state.restore_focus("feature", ResumeLevel::Closeup);
+    assert_eq!(state.mode(), Mode::Closeup);
     assert_eq!(state.focused_session_name(), "feature");
     assert!(!state.take_resume_attach());
 }
@@ -868,7 +868,7 @@ fn restore_focus_attached_focuses_and_arms_a_one_shot_attach() {
     let mut state = state();
     state.restore_focus("feature", ResumeLevel::Attached);
     // Focused synchronously; the attach is armed for the event loop's first pass.
-    assert_eq!(state.mode(), Mode::Focus);
+    assert_eq!(state.mode(), Mode::Closeup);
     assert_eq!(state.focused_session_name(), "feature");
     assert!(state.take_resume_attach());
     // Consumed: only one attach is performed.
@@ -879,8 +879,8 @@ fn restore_focus_attached_focuses_and_arms_a_one_shot_attach() {
 fn restore_focus_is_a_no_op_for_a_since_removed_session() {
     let mut state = state();
     state.restore_focus("gone", ResumeLevel::Attached);
-    // No matching row: the screen opens in the default 切替 with nothing armed.
-    assert_eq!(state.mode(), Mode::Switch);
+    // No matching row: the screen opens in the default 選択 with nothing armed.
+    assert_eq!(state.mode(), Mode::Overview);
     assert!(state.list().root_selected());
     assert!(!state.take_resume_attach());
 }
@@ -1058,11 +1058,11 @@ fn apply_badges_ignores_activity_on_paths_with_no_session() {
 }
 
 #[test]
-fn entering_focus_touches_the_active_session() {
+fn entering_closeup_touches_the_active_session() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1), session_record("beta", 1)]);
     // Row 1 is the first session (row 0 is the workspace root).
-    state.enter_focus(1);
+    state.enter_closeup(1);
     assert!(state.sessions()[0].last_active.is_some());
     assert!(state.sessions()[1].last_active.is_none());
 }
@@ -1072,7 +1072,7 @@ fn focusing_the_root_row_touches_no_session() {
     let mut state = state();
     state.restore_sessions(vec![session_record("alpha", 1)]);
     // The root row belongs to no session, so focusing it stamps nothing.
-    state.enter_focus(0);
+    state.enter_closeup(0);
     assert!(state.sessions().iter().all(|s| s.last_active.is_none()));
 }
 

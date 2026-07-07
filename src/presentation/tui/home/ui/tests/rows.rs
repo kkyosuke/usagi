@@ -237,8 +237,8 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
-fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
-    // The selected session in 切替 (Switch) uses the one-line usagi glyph on line
+fn worktree_row_marks_the_selected_session_in_overview_and_shows_detached() {
+    // The selected session in 選択 (Overview) uses the one-line usagi glyph on line
     // 1 and a vertical continuation on line 2. (The kind dot reflects freshness —
     // a just-built fixture is fresh `●`; heat fading is covered in its own test.)
     let (top, detail) = worktree_row(
@@ -266,9 +266,9 @@ fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
     assert!(top.contains('●'));
     assert!(top.contains("main"));
 
-    // The same selected row outside Switch keeps the session marker so it remains
+    // The same selected row outside Overview keeps the session marker so it remains
     // visible after the side menu has selected the session.
-    let (top_no_switch, _) = worktree_row(
+    let (top_no_overview, _) = worktree_row(
         &worktree(Some("main"), true, BranchStatus::Pushed),
         "",
         None,
@@ -287,11 +287,11 @@ fn worktree_row_marks_the_selected_session_in_switch_and_shows_detached() {
         false,
         None,
     );
-    assert!(!top_no_switch.contains('>'));
-    assert!(top_no_switch.contains('󰤇'));
+    assert!(!top_no_overview.contains('>'));
+    assert!(top_no_overview.contains('󰤇'));
     assert!(
-        top_no_switch.starts_with(&Style::new().success().bold().apply_to("󰤇").to_string()),
-        "selected marker after side-menu selection should be green: {top_no_switch:?}"
+        top_no_overview.starts_with(&Style::new().success().bold().apply_to("󰤇").to_string()),
+        "selected marker after side-menu selection should be green: {top_no_overview:?}"
     );
 
     let (other_top, _) = worktree_row(
@@ -665,15 +665,15 @@ fn worktree_row_shows_the_label_override_instead_of_the_branch() {
 
 #[test]
 fn root_row_marks_selected_and_active() {
-    // The `>` cursor shows on the selected root only in 切替 (Switch).
+    // The `>` cursor shows on the selected root only in 選択 (Overview).
     let (top, detail) = root_row(10, 0, 20, false, true, false, true);
     assert!(top.contains('>'));
     assert!(top.contains('⌂'));
     assert!(top.contains(ROOT_NAME));
     assert!(detail.contains("workspace root"));
-    // The same selected root outside Switch shows no cursor.
-    let (top_no_switch, _) = root_row(10, 0, 20, false, true, false, false);
-    assert!(!top_no_switch.contains('>'));
+    // The same selected root outside Overview shows no cursor.
+    let (top_no_overview, _) = root_row(10, 0, 20, false, true, false, false);
+    assert!(!top_no_overview.contains('>'));
 
     // The active root carries the green `▎` bar down both lines, not a `*`.
     let (active_top, active_detail) = root_row(10, 0, 20, false, false, true, false);
@@ -1148,7 +1148,7 @@ fn rail_pane_folds_a_collapsed_workspace_to_a_marker_line() {
     assert!(plain.iter().any(|l| l.contains('○') || l.contains('●')));
 }
 
-fn switch_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
+fn overview_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
     left_pane(
         list,
         &HashSet::new(),
@@ -1159,7 +1159,7 @@ fn switch_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
         &crate::domain::settings::SessionLabelMaster::default(),
         30,
         40,
-        true, // in 切替
+        true, // in 選択
         sidebar,
         Utc::now(),
         None,
@@ -1167,15 +1167,15 @@ fn switch_left_pane(list: &WorktreeList, sidebar: Sidebar) -> Vec<String> {
 }
 
 #[test]
-fn a_folded_workspace_dims_when_it_is_not_the_selected_row_in_switch() {
+fn a_folded_workspace_dims_when_it_is_not_the_selected_row_in_overview() {
     let mut list = unite_pair();
     list.toggle_collapsed(0); // fold wsA
     list.focus_index(1); // cursor on wsB's root, so wsA's folded row is unselected
                          // Full sidebar: the folded header still renders (dimmed) while wsB is selected.
-    let full = switch_left_pane(&list, Sidebar::Full);
+    let full = overview_left_pane(&list, Sidebar::Full);
     assert!(stripped(&full).contains("▸ wsA  (1)"));
     // Rail: the folded marker still renders (dimmed) at the top.
-    let rail = switch_left_pane(&list, Sidebar::Rail);
+    let rail = overview_left_pane(&list, Sidebar::Rail);
     let plain0 = console::strip_ansi_codes(&rail[0]).into_owned();
     assert!(plain0.contains('▸'));
 }
@@ -1750,9 +1750,9 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
     assert!(idle_resource.contains("0%"));
     assert!(idle_resource.contains("0MB"));
 
-    // In 切替 the unselected rows (the cursor rests on the root) are dimmed — the
+    // In 選択 the unselected rows (the cursor rests on the root) are dimmed — the
     // resource line is faded along with the rest of its entry, but its text stays.
-    let in_switch = left_pane(
+    let in_overview = left_pane(
         &list,
         &path,
         &path,
@@ -1767,7 +1767,7 @@ fn left_pane_always_draws_a_fixed_three_line_resource_row() {
         Utc::now(),
         None,
     );
-    assert!(console::strip_ansi_codes(&in_switch[5]).contains("12%"));
+    assert!(console::strip_ansi_codes(&in_overview[5]).contains("12%"));
 }
 
 #[test]
@@ -2036,7 +2036,7 @@ fn rail_shows_each_agent_state_glyph_on_the_detail_row() {
 }
 
 #[test]
-fn rail_sidebar_marks_the_switch_cursor() {
+fn rail_sidebar_marks_the_overview_cursor() {
     let mut list = list_with(vec![worktree(Some("feature"), false, BranchStatus::Local)]);
     let empty = HashSet::new();
     let rail = |list: &WorktreeList| {
@@ -2056,7 +2056,7 @@ fn rail_sidebar_marks_the_switch_cursor() {
             None,
         )
     };
-    // In 切替 the cursor row shows the `>` marker on non-session rows; here the
+    // In 選択 the cursor row shows the `>` marker on non-session rows; here the
     // cursor is on the root.
     let on_root = rail(&list);
     assert!(console::strip_ansi_codes(&on_root[0]).contains('>'));
@@ -2210,7 +2210,7 @@ fn attached_with_pr_sidebar() -> HomeState {
         wt,
         worktree(Some("plain"), false, BranchStatus::Local),
     ]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state
 }
@@ -2460,7 +2460,7 @@ fn left_pane_session_at_maps_clicks_on_the_collapsed_rail() {
 #[test]
 fn left_pane_draws_the_create_row_at_the_foot_and_marks_the_cursor() {
     // The persistent "+ new session" row is always the last built list row; in
-    // 切替 the cursor on it shows the `>` gutter while the other rows fade.
+    // 選択 the cursor on it shows the `>` gutter while the other rows fade.
     let mut list = list_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
     list.focus_index(list.create_row());
     let lines = left_pane(
@@ -2526,11 +2526,11 @@ fn sidebar_row_at_line_maps_the_create_row_after_the_sessions() {
 }
 
 #[test]
-fn switch_preview_prompts_to_create_when_the_create_row_is_selected() {
+fn overview_preview_prompts_to_create_when_the_create_row_is_selected() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_select(state.list().create_row());
-    let lines = switch_preview(&state, 60, 10);
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_select(state.list().create_row());
+    let lines = overview_preview(&state, 60, 10);
     let text = console::strip_ansi_codes(&lines.join("\n")).into_owned();
     assert!(text.contains("+ new session"));
     assert!(text.contains("Type a name"));

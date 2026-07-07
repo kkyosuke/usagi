@@ -1,7 +1,7 @@
 //! Thin dispatcher for the home screen right pane.
 //!
 //! The larger pane-specific renderers live in sibling modules (`sidebar`,
-//! `focus_menu`, `tabs_hit`, `pr_popup`, `diff_render`, and
+//! `closeup_menu`, `tabs_hit`, `pr_popup`, `diff_render`, and
 //! `markdown_render`) so this file stays focused on mode dispatch and shared
 //! right-pane composition.
 
@@ -50,7 +50,7 @@ const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
 /// [`HEADER_NAME_COL`]), then either its git `status` label and `agent` state (a
 /// real session) or the workspace-root note (the root row, no status). Each field
 /// is padded to a constant width so the block is the same size for every session.
-/// Shared by 切替 (Switch) and 没入 (Attached) so both carry the same identity.
+/// Shared by 選択 (Overview) and 没入 (Attached) so both carry the same identity.
 fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String>) -> String {
     // Measure by plain display width (matching [`name_cell`]) so a name carrying
     // wide characters keeps the identity block a constant width instead of pushing
@@ -82,8 +82,8 @@ fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String
 
 /// The header line for the active (focused) session: its name, git status, and
 /// agent state — or the workspace-root note when the root row is active. Shared
-/// by 没入 (Attached), where it sits above the embedded terminal, and 在席
-/// (Focus), where it sits above the session's pane tabs.
+/// by 没入 (Attached), where it sits above the embedded terminal, and 集中
+/// (Closeup), where it sits above the session's pane tabs.
 pub(super) fn active_session_header(state: &HomeState) -> String {
     match state.list().active() {
         Some(w) => {
@@ -114,32 +114,32 @@ pub(super) fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) ->
         .collect()
 }
 
-/// The label of 在席's trailing "+ new" tab — the action surface that launches a
+/// The label of 集中's trailing "+ new" tab — the action surface that launches a
 /// pane. ASCII so the underline marker in [`tab_strip_parts`] (which measures
 /// width in `chars`) lands exactly under it, as it does for the pane labels.
 pub(super) const FOCUS_NEW_TAB_LABEL: &str = "+ new";
 
 /// A blank right pane of exactly `rows` rows — the pane behind a floating overlay
-/// that owns the surface (the 在席 action modal), so the modal reads against an
+/// that owns the surface (the 集中 action modal), so the modal reads against an
 /// empty pane rather than stale content showing through.
 fn blank_pane(rows: usize) -> Vec<String> {
     vec![String::new(); rows]
 }
 
-/// Builds the 在席 (Focus) right pane. With no live panes it is a blank pane
+/// Builds the 集中 (Closeup) right pane. With no live panes it is a blank pane
 /// behind the session's floating action surface — the Menu or the Prompt, both
 /// composited as overlay modals by [`render_frame`] (see
-/// [`HomeState::focus_action_overlay`]). With live panes it gains a **tab strip**:
+/// [`HomeState::closeup_action_overlay`]). With live panes it gains a **tab strip**:
 /// one chip per live pane followed by a "+ new" chip while that launch surface is
 /// selected, the session identity beside it (shared with 没入), and below it the
 /// selected pane's live preview — on the "+ new" tab the pane stays blank because
 /// the action surface again floats as an overlay. After a zoom-out that surface
 /// floats over the selected pane tab instead: the preview drawn here keeps
 /// showing behind it.
-fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+fn closeup_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     // No live panes: the action surface (Menu or Prompt) floats as an overlay
     // modal centred over the pane (composited by [`render_frame`] when
-    // [`HomeState::focus_action_overlay`] holds), so the pane behind it stays
+    // [`HomeState::closeup_action_overlay`] holds), so the pane behind it stays
     // blank — neither surface renders inline.
     let Some(strip) = state.terminal_tabs().filter(|s| !s.labels.is_empty()) else {
         return blank_pane(rows);
@@ -150,7 +150,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     // so stepping off it (e.g. `Esc` after `Ctrl-T`) drops the chip rather than
     // leaving a stale "+ new" sitting on the strip. The identity rides the
     // strip's row (as in 没入), so the body below carries no header of its own.
-    let on_new = state.focus_on_new_tab();
+    let on_new = state.closeup_on_new_tab();
     let mut labels = strip.labels.clone();
     let active = if on_new {
         labels.push(FOCUS_NEW_TAB_LABEL.to_string());
@@ -166,7 +166,7 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     let mut lines = header_tab_rows(header, Some(&combined), state.loading_tab(), width);
 
     // On the "+ new" tab the launch surface (Menu or Prompt) floats as an overlay
-    // modal (see [`HomeState::focus_action_overlay`]), so only the tab strip shows
+    // modal (see [`HomeState::closeup_action_overlay`]), so only the tab strip shows
     // behind it here. On a pane tab, preview the pane's live screen (the snapshot
     // taken before painting) so the selection shows what re-attaching reveals,
     // falling back to a label until the first snapshot is available.
@@ -189,7 +189,12 @@ fn focus_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
 }
 
 /// Pad `lines` to fill the right pane and pin `hint` to its bottom row.
-fn switch_input_pane(mut lines: Vec<String>, hint: &str, width: usize, rows: usize) -> Vec<String> {
+fn overview_input_pane(
+    mut lines: Vec<String>,
+    hint: &str,
+    width: usize,
+    rows: usize,
+) -> Vec<String> {
     let body_rows = rows.saturating_sub(1);
     lines.truncate(body_rows);
     lines.resize(body_rows, String::new());
@@ -197,12 +202,12 @@ fn switch_input_pane(mut lines: Vec<String>, hint: &str, width: usize, rows: usi
     lines
 }
 
-/// The 切替 (Switch) name input rendered in the **right pane** while creating a
+/// The 選択 (Overview) name input rendered in the **right pane** while creating a
 /// session with the sidebar collapsed to the rail: a header, the typed name in a
 /// bordered box with a block caret, the live validation error (or a hint) below
 /// it, and the key hint pinned to the bottom row. At full width the input rides
-/// the left pane inline instead (see [`super::switch_create_rows`]).
-fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<String> {
+/// the left pane inline instead (see [`super::overview_create_rows`]).
+fn overview_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<String> {
     // The box draws two borders and a space of padding on each side, so its
     // content area is the pane width less those four columns.
     let inner = width.saturating_sub(4).max(1);
@@ -220,16 +225,16 @@ fn switch_create_pane(create: &CreateInput, width: usize, rows: usize) -> Vec<St
                 .to_string(),
         ),
     }
-    switch_input_pane(lines, "Enter 作成 / Esc 取消", width, rows)
+    overview_input_pane(lines, "Enter 作成 / Esc 取消", width, rows)
 }
 
-/// The 切替 (Switch) display-name input rendered in the **right pane** while
+/// The 選択 (Overview) display-name input rendered in the **right pane** while
 /// renaming a session with the sidebar collapsed to the rail: a header naming the
 /// session, the typed label in a bordered box with a block caret, a hint, and the
 /// key hint pinned to the bottom row. At full width there is room to edit on the
 /// row itself, so the session's own name line becomes the editable label in place
 /// (see the `rename` branch of [`worktree_row`]) and this pane is not used.
-fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
+fn overview_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
     let value = widgets::block_caret(rename.value(), "", &Style::new().accent());
     let mut lines = vec![clip_to_width(
@@ -241,10 +246,10 @@ fn switch_rename_pane(rename: &RenameInput, width: usize, rows: usize) -> Vec<St
     )];
     lines.extend(widgets::boxed("", inner, &[value]));
     lines.push(style("空にすると既定の表示名に戻す").dim().to_string());
-    switch_input_pane(lines, "Enter 確定 / Esc 取消", width, rows)
+    overview_input_pane(lines, "Enter 確定 / Esc 取消", width, rows)
 }
 
-/// Most note lines the read-only 切替 note overlay shows before eliding the rest
+/// Most note lines the read-only 選択 note overlay shows before eliding the rest
 /// with a `… (N more)` line — the full text lives in the editor (`n` / `Ctrl-E`).
 const SWITCH_NOTE_MAX_LINES: usize = 6;
 
@@ -367,8 +372,8 @@ fn selection_on_line(
 
 /// The floating note overlay for the right pane, or `None` when none applies. The
 /// **editor** (when open, in any mode) wins; otherwise the highlighted session's
-/// **read-only** note shows while browsing in 切替 (see
-/// [`HomeState::visible_switch_note`]). The box is a narrow top-right column (see
+/// **read-only** note shows while browsing in 選択 (see
+/// [`HomeState::visible_overview_note`]). The box is a narrow top-right column (see
 /// [`note_box_width`]) composited over the pane by [`right_pane_contents`], so
 /// the preview underneath — the session header, the live terminal — stays
 /// readable to its left and below it. `rows` caps the box height so the pane
@@ -386,7 +391,7 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
             cap,
         ));
     }
-    if let Some(note) = state.visible_switch_note() {
+    if let Some(note) = state.visible_overview_note() {
         let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
         let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
         return Some(note_box(&note_lines, None, None, box_w, cap));
@@ -394,8 +399,8 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
     None
 }
 
-/// Witty English one-liners rested beneath the idle mascot in the 切替 preview
-/// (and [`idle_quip`] picks one per session). They stand in for the 在席 menu's
+/// Witty English one-liners rested beneath the idle mascot in the 選択 preview
+/// (and [`idle_quip`] picks one per session). They stand in for the 集中 menu's
 /// choices — which selecting reveals only as a floating modal, never inline — so
 /// the preview says "nothing is running here yet" without promising a surface that
 /// never appears. Each nods to the usagi and to `Enter` as the way in.
@@ -437,7 +442,7 @@ fn idle_rabbit_body(quip: &str, width: usize, rows: usize) -> Vec<String> {
     lines
 }
 
-/// The 切替 (Switch) right pane: a **preview of the screen that selecting the
+/// The 選択 (Overview) right pane: a **preview of the screen that selecting the
 /// session under the cursor will open**, so the choice is informed by what comes
 /// next. A live session (an embedded shell / agent already running) previews the
 /// live-terminal re-attach; an idle session with no live pane rests the mascot
@@ -446,7 +451,7 @@ fn idle_rabbit_body(quip: &str, width: usize, rows: usize) -> Vec<String> {
 /// state. The key hints live in the footer, so the preview uses the pane's full
 /// height. The highlighted session's note is drawn over the top by [`note_overlay`]
 /// (not inline), so it never pushes this preview around.
-pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
+pub(super) fn overview_preview(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     if state.list().create_row_selected() {
         let mut lines = vec![
             style(clip_to_width("+ new session", width))
@@ -473,9 +478,9 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     let body_rows = rows;
     // The highlighted row's identity plus whether it has a live pane. The header
     // and the `live` flag drive both this preview and the tab hit-test
-    // ([`switch_tab_at`]), so they are built once in [`switch_preview_header`]
+    // ([`overview_tab_at`]), so they are built once in [`overview_preview_header`]
     // and shared — the strip a click lands on is exactly the one drawn here.
-    let (header, live) = switch_preview_header(state);
+    let (header, live) = overview_preview_header(state);
 
     // A live session's tabs share the header's row (the `←`/`→` — and click —
     // targets), so the identity and the tabs read together on one line; the
@@ -484,7 +489,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         header,
         if live { state.terminal_tabs() } else { None },
         // A background pane starting in this session animates its chip here (the
-        // 切替 preview is where the user waits while it loads).
+        // 選択 preview is where the user waits while it loads).
         if live { state.loading_tab() } else { None },
         width,
     );
@@ -506,7 +511,7 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
         }
     } else {
         // An idle session (no live pane, so no tab) has no screen to mirror.
-        // Selecting opens 在席's action surface (which floats as an overlay modal for
+        // Selecting opens 集中's action surface (which floats as an overlay modal for
         // both Menu and Prompt), so nothing is drawn inline. Previewing it here would
         // promise an inline surface that never appears, so rest the mascot in the
         // middle of the pane with a light English quip instead.
@@ -520,10 +525,10 @@ pub(super) fn switch_preview(state: &HomeState, width: usize, rows: usize) -> Ve
     lines
 }
 
-/// Header text for 切替's right-pane preview, plus whether the highlighted row is
-/// live. `switch_preview` and `switch_tab_at` share this so tab chips are measured
+/// Header text for 選択's right-pane preview, plus whether the highlighted row is
+/// live. `overview_preview` and `overview_tab_at` share this so tab chips are measured
 /// from the same header text the renderer puts beside them.
-pub(super) fn switch_preview_header(state: &HomeState) -> (String, bool) {
+pub(super) fn overview_preview_header(state: &HomeState) -> (String, bool) {
     // Identify the highlighted row. `selected()` is `Some` for a real session
     // row and `None` on the root row (which carries no git status / tracked
     // path), so the match doubles as the root/session split.
@@ -557,13 +562,13 @@ pub(super) fn switch_preview_header(state: &HomeState) -> (String, bool) {
 }
 
 /// The right pane's contents, by mode. A preview of the would-be session screen
-/// in 切替 (the default); the session's action surface — a menu or a prompt, per
-/// [`SessionActionUi`] — in 在席; and the live embedded terminal in 没入 (a
+/// in 選択 (the default); the session's action surface — a menu or a prompt, per
+/// [`SessionActionUi`] — in 集中; and the live embedded terminal in 没入 (a
 /// starting hint until the first snapshot arrives).
 pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize) -> Vec<String> {
     // A momentary launch (terminal / agent spawn) blanks the right pane so the
     // centred loading rabbit (composited over the frame in [`super::frame`])
-    // reads as a dedicated loading screen. Without this the 在席 action menu
+    // reads as a dedicated loading screen. Without this the 集中 action menu
     // (agent / terminal / … の選択肢) stays painted behind the rabbit, so the
     // choices would show through while the spawn blocks. Return an empty pane of
     // the right height and let the overlay own the whole surface.
@@ -577,7 +582,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
         return preview_pane(preview, right_w, rows);
     }
     // The local-LLM chat, when open, likewise takes over the right pane
-    // regardless of mode (opened from 在席's `chat`, it captures the keyboard
+    // regardless of mode (opened from 集中's `chat`, it captures the keyboard
     // while shown). The sidebar to its left keeps rendering as usual.
     if let Some(chat) = state.chat() {
         return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
@@ -588,38 +593,38 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
         return diff_pane(diff, right_w, rows);
     }
     // The base pane for the current mode. The session-note overlay (the editor,
-    // or the read-only note while browsing in 切替) is composited over its top
+    // or the read-only note while browsing in 選択) is composited over its top
     // below, so editing / reading the note never switches the screen — the
     // preview / terminal stays visible behind the floating box.
     let mut base = match state.mode() {
-        Mode::Switch => {
-            // Collapsed to the rail, 切替's name input has no room inline in the
+        Mode::Overview => {
+            // Collapsed to the rail, 選択's name input has no room inline in the
             // (5-column) list, so it takes over the wide right pane; at full width
             // it rides the left pane inline and the right pane keeps previewing the
             // highlighted session.
             if state.sidebar() == Sidebar::Rail {
                 if let Some(create) = state.create() {
-                    return switch_create_pane(create, right_w, rows);
+                    return overview_create_pane(create, right_w, rows);
                 }
                 if let Some(rename) = state.rename() {
-                    return switch_rename_pane(rename, right_w, rows);
+                    return overview_rename_pane(rename, right_w, rows);
                 }
             }
-            // Fade the whole preview in 切替: the keyboard is on the session list
+            // Fade the whole preview in 選択: the keyboard is on the session list
             // to the left, so dimming the right pane signals it is not the focus —
             // the highlighted session and its tabs are browsed there, not selected
             // from here. The note box (when open) is composited bright on top below,
             // so the deliberately-opened note still reads against the faded preview.
-            switch_preview(state, right_w, rows)
+            overview_preview(state, right_w, rows)
                 .iter()
                 .map(|row| dim_row(row))
                 .collect()
         }
-        Mode::Focus => focus_pane(state, right_w, rows),
+        Mode::Closeup => closeup_pane(state, right_w, rows),
         Mode::Attached => {
             // The active session's identity shares the top row with its tab chips
             // (the underline marker below them), so the header reads beside the
-            // tabs just as it does in 切替. This header + tab block always fills
+            // tabs just as it does in 選択. This header + tab block always fills
             // exactly `TAB_BAR_ROWS`, matching `attached_geometry`, so the embedded
             // terminal below never shifts whether or not a strip is published. A
             // starting hint stands in until the first screen snapshot arrives.
@@ -628,7 +633,7 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
             let mut head = header_tab_rows(
                 header,
                 state.terminal_tabs(),
-                // A background pane loads while the user waits in the 切替 preview,
+                // A background pane loads while the user waits in the 選択 preview,
                 // not while 没入; so the attached strip carries no loading chip.
                 None,
                 right_w,

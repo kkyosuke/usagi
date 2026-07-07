@@ -9,14 +9,14 @@ fn ctrl_caret_in_overview_with_no_previous_session_is_a_no_op() {
 }
 
 #[test]
-fn ctrl_caret_on_the_base_switch_jumps_back_to_the_previous_session() {
-    // Focus feat, then main; Ctrl-^ from the base 切替 re-attaches feat.
+fn ctrl_caret_on_the_base_overview_jumps_back_to_the_previous_session() {
+    // Closeup feat, then main; Ctrl-^ from the base 選択 re-attaches feat.
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat -> Focus
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // attach feat -> Closeup
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.extend(cmd("session switch main"));
-    keys.push(Ok(Key::Enter)); // attach main (previous = feat) -> Focus
-    keys.push(Ok(Key::Escape)); // -> Switch
+    keys.push(Ok(Key::Enter)); // attach main (previous = feat) -> Closeup
+    keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Char(CTRL_CARET))); // jump back to feat
     let dirs = run_capturing_attached_dirs(keys);
     assert_eq!(
@@ -30,14 +30,14 @@ fn ctrl_caret_on_the_base_switch_jumps_back_to_the_previous_session() {
 }
 
 #[test]
-fn ctrl_caret_in_switch_jumps_back_to_the_previous_session() {
-    // Same setup, but the jump is issued from 切替 (reached via Ctrl-O from Focus).
+fn ctrl_caret_in_overview_jumps_back_to_the_previous_session() {
+    // Same setup, but the jump is issued from 選択 (reached via Ctrl-O from Closeup).
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     keys.extend(cmd("session switch main"));
-    keys.push(Ok(Key::Enter)); // Focus main (previous = feat)
-    keys.push(Ok(Key::Char(CTRL_O))); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // Closeup main (previous = feat)
+    keys.push(Ok(Key::Char(CTRL_O))); // Closeup -> Overview
     keys.push(Ok(Key::Char(CTRL_CARET))); // jump back to feat
     let dirs = run_capturing_attached_dirs(keys);
     assert_eq!(
@@ -51,13 +51,13 @@ fn ctrl_caret_in_switch_jumps_back_to_the_previous_session() {
 }
 
 #[test]
-fn ctrl_caret_in_focus_jumps_back_to_the_previous_session() {
-    // The jump is issued directly from 在席 (Focus) on the current session.
+fn ctrl_caret_in_closeup_jumps_back_to_the_previous_session() {
+    // The jump is issued directly from 集中 (Closeup) on the current session.
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Escape));
     keys.extend(cmd("session switch main"));
-    keys.push(Ok(Key::Enter)); // Focus main (previous = feat)
+    keys.push(Ok(Key::Enter)); // Closeup main (previous = feat)
     keys.push(Ok(Key::Char(CTRL_CARET))); // jump back to feat
     let dirs = run_capturing_attached_dirs(keys);
     assert_eq!(
@@ -86,7 +86,7 @@ fn ctrl_caret_from_an_attached_pane_jumps_back_to_the_previous_session() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch feat");
-    keys.push(Ok(Key::Enter)); // attach feat -> Focus
+    keys.push(Ok(Key::Enter)); // attach feat -> Closeup
     keys.push(Ok(Key::Escape));
     keys.extend(cmd("session switch main"));
     keys.push(Ok(Key::Enter)); // attach main -> ToPreviousSession -> re-attach feat
@@ -113,9 +113,9 @@ fn ctrl_caret_from_an_attached_pane_jumps_back_to_the_previous_session() {
 }
 
 #[test]
-fn ctrl_caret_from_an_attached_pane_with_no_previous_falls_back_to_focus() {
+fn ctrl_caret_from_an_attached_pane_with_no_previous_falls_back_to_closeup() {
     // Attaching the root (the first focus, recording no previous) and handing back
-    // ToPreviousSession finds no target, so the pane drops to 在席 — exactly one
+    // ToPreviousSession finds no target, so the pane drops to 集中 — exactly one
     // attach, no re-rooting.
     let opened = RefCell::new(Vec::new());
     let mut open = |_h: &mut HomeState, d: &Path, _a: bool, _n: bool| {
@@ -124,9 +124,9 @@ fn ctrl_caret_from_an_attached_pane_with_no_previous_falls_back_to_focus() {
     };
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
-    // The root previews live (`live_preview`), so focusing it from Switch attaches
+    // The root previews live (`live_preview`), so focusing it from Overview attaches
     // its pane directly — the first focus, recording no previous.
-    let keys = vec![Ok(Key::Enter)]; // focus + attach root -> ToPreviousSession -> no target -> Focus
+    let keys = vec![Ok(Key::Enter)]; // focus + attach root -> ToPreviousSession -> no target -> Closeup
     assert!(matches!(
         run_full(
             keys,
@@ -169,8 +169,8 @@ fn ctrl_q_from_an_attached_pane_raises_the_confirm_modal_instead_of_quitting() {
     keys.push(Ok(Key::Enter)); // attach main -> Quit -> leave + modal
     keys.push(Ok(Key::Char('n'))); // cancel the modal (keeps running)
     keys.extend(cmd("session switch main"));
-    keys.push(Ok(Key::Enter)); // attach main again -> Closed -> Focus
-    keys.push(Ok(Key::Char(CTRL_Q))); // raise the modal again from Focus
+    keys.push(Ok(Key::Enter)); // attach main again -> Closed -> Closeup
+    keys.push(Ok(Key::Char(CTRL_Q))); // raise the modal again from Closeup
     keys.push(Ok(Key::Char('y'))); // confirm -> quit
     assert!(matches!(
         run_full(

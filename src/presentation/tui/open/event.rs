@@ -173,7 +173,7 @@ pub fn event_loop(
                     }
                     // Opening is wired by the caller: it hides the list, plays the
                     // mascot animation while loading the workspaces off-thread, then
-                    // shows the home screen (切替). See [`super::run`].
+                    // shows the home screen (選択). See [`super::run`].
                     match open_home(term, &chosen)? {
                         // The home screen drew over the list; force a full repaint of
                         // it on the next pass. The list itself stays alphabetical;

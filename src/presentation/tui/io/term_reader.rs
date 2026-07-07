@@ -62,7 +62,7 @@ impl KeyReader for TermKeyReader {
         // never saw. Each keypress in the animate path was swallowed by crossterm
         // and only surfaced when the *next* press happened to wake a blocking
         // `console` read, a one-key lag that froze the task spinner, delayed
-        // applying finished work, and made `c` need two presses in 切替. We instead
+        // applying finished work, and made `c` need two presses in 選択. We instead
         // poll the fd directly ([`input_ready`]) — readiness only, never a read —
         // so every key is decoded by `console` on the first press.
         //
@@ -74,7 +74,7 @@ impl KeyReader for TermKeyReader {
         // "ready", and this would tick to `None` forever without ever seeing it.
         // That stranded every non-`Enter` key whenever the loop animates (i.e.
         // whenever a session is live — exactly the state `Ctrl-O` out of an
-        // attached pane lands in: 切替 with the just-detached session still
+        // attached pane lands in: 選択 with the just-detached session still
         // running). Entering raw mode for the wait *and* the decode makes each
         // keypress deliverable at once, mirroring the per-read raw mode `console`
         // already uses on the blocking path; the guard restores cooked mode on the

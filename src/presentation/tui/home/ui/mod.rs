@@ -3,8 +3,8 @@
 //! Top to bottom: a title bar, the engagement-ladder mode indicator, a blank
 //! separator row, a body split into the worktree list (left) and a
 //! mode-dependent right pane, the command input, and a footer. The right pane is
-//! a preview of the highlighted session in 切替 (Switch); the session's action
-//! surface (a menu or a prompt) in 在席 (Focus); and the live embedded terminal
+//! a preview of the highlighted session in 選択 (Overview); the session's action
+//! surface (a menu or a prompt) in 集中 (Closeup); and the live embedded terminal
 //! in 没入 (Attached). The workspace command line is the `:` command palette
 //! overlay, drawn as a centred modal over the panes. All functions take plain
 //! data and return styled lines, so the layout is rendered without any terminal
@@ -12,15 +12,15 @@
 //!
 //! This module owns the shared text/layout helpers and the top-level
 //! [`render_frame`] that stitches the screen together. The pane-specific bodies
-//! are split by responsibility (`sidebar`, `focus_menu`, `tabs_hit`,
+//! are split by responsibility (`sidebar`, `closeup_menu`, `tabs_hit`,
 //! `pr_popup`, `diff_render`, `markdown_render`) while [`panes`] keeps the
 //! right-pane dispatcher; the surrounding chrome (title, ladder, input, footer,
 //! the command palette, modals) lives in [`chrome`].
 
 mod chrome;
+mod closeup_menu;
 pub mod content;
 mod diff_render;
-mod focus_menu;
 mod markdown_render;
 mod panes;
 mod pr_popup;
@@ -32,17 +32,18 @@ use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
 use chrome::{
     command_palette_body, env_editor_body, footer_line, input_line, mode_ladder,
-    quit_confirm_frame, remove_modal_body, switch_create_rows, tab_menu_box, tab_rename_body,
+    overview_create_rows, quit_confirm_frame, remove_modal_body, tab_menu_box, tab_rename_body,
     task_status_line, text_modal_body, title_bar, update_confirm_frame, waiting_notice,
     ENV_MODAL_INNER, FOCUS_MENU_INNER, FOCUS_PROMPT_INNER, PALETTE_INNER, REMOVE_MODAL_INNER,
     TEXT_MODAL_INNER,
 };
-use focus_menu::{focus_menu_body, focus_prompt_body};
+use closeup_menu::{closeup_menu_body, closeup_prompt_body};
 use panes::right_pane_contents;
 use sidebar::{group_inline_insert_line, left_pane};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use tabs_hit::{
-    attached_tab_at, attached_tab_hit, focus_tab_at, focus_tab_hit, switch_tab_at, switch_tab_hit,
+    attached_tab_at, attached_tab_hit, closeup_tab_at, closeup_tab_hit, overview_tab_at,
+    overview_tab_hit,
 };
 // …a click on a sidebar session's PR badge to that session (to pin its PR popup).
 pub(super) use pr_popup::sidebar_pr_badge_at;
@@ -301,7 +302,7 @@ pub const TAB_BAR_ROWS: usize = 2;
 /// the tab strip ([`TAB_BAR_ROWS`]) reserved above it, with the origin pushed
 /// down by the same so the cursor tracks the shell below the strip. The pane and
 /// the pool both size / place the live terminal through this, while the
-/// tab-less previews in 切替 use [`terminal_geometry`].
+/// tab-less previews in 選択 use [`terminal_geometry`].
 pub fn attached_geometry(
     raw_height: usize,
     raw_width: usize,
@@ -442,8 +443,8 @@ pub fn preview_visible(raw_height: usize, raw_width: usize, _state: &HomeState) 
 /// what the user is doing without coupling the widget to the screen's enum.
 fn rabbit_mood(mode: Mode) -> widgets::RabbitMood {
     match mode {
-        Mode::Switch => widgets::RabbitMood::Browsing,
-        Mode::Focus => widgets::RabbitMood::Attentive,
+        Mode::Overview => widgets::RabbitMood::Browsing,
+        Mode::Closeup => widgets::RabbitMood::Attentive,
         Mode::Attached => widgets::RabbitMood::Working,
     }
 }
@@ -519,12 +520,12 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // there while browsing.
 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    // The left sidebar honours the `Ctrl-B` toggle on every usagi surface — 切替
-    // (Switch) included, so the picker works collapsed to the rail (the cursor `>`
-    // and the dimming still render there). 切替's inline create / rename name needs
+    // The left sidebar honours the `Ctrl-B` toggle on every usagi surface — 選択
+    // (Overview) included, so the picker works collapsed to the rail (the cursor `>`
+    // and the dimming still render there). 選択's inline create / rename name needs
     // room: at full width it rides the left pane inline (below), but collapsed to
     // the rail there is none, so it moves to the right pane instead (see
-    // [`right_pane_contents`]). The pool sizes the 切替 preview to this same state,
+    // [`right_pane_contents`]). The pool sizes the 選択 preview to this same state,
     // so the previewed terminal always fills the pane it is drawn into.
     let sidebar = state.sidebar();
     let (left_w, right_w) = layout(width, sidebar);
@@ -538,7 +539,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     // footer at the bottom. Everything between is the two-pane body.
     let body_rows = body_rows_for(height);
 
-    // Build the worktree column (list + 切替's inline create / rename input) and
+    // Build the worktree column (list + 選択's inline create / rename input) and
     // rest the mode-aware mascot at its foot. Both steps are shared with
     // [`mascot_hit_rect`], so the drawn rabbit and the click target stay one
     // computation.
@@ -664,26 +665,26 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
         );
     }
 
-    // Float the 在席 (Focus) action surface — the Menu or the Prompt — as a box
+    // Float the 集中 (Closeup) action surface — the Menu or the Prompt — as a box
     // centred over the **right pane** (not the whole screen), so the session
     // sidebar stays visible around it. It shows only when that surface is the
-    // active thing on screen (see [`HomeState::focus_action_overlay`] — no loading
+    // active thing on screen (see [`HomeState::closeup_action_overlay`] — no loading
     // indicator, open overlay, or `:` palette is up), so it never collides with
     // those. The session identity rides the box title; the body is the header-less
-    // surface ([`focus_menu_body`] or [`focus_prompt_body`]), each sized to the
+    // surface ([`closeup_menu_body`] or [`closeup_prompt_body`]), each sized to the
     // pane's available rows (`body_rows`) so the box keeps a fixed height. On the
-    // "+ new" tab [`panes::focus_pane`] leaves the pane behind it blank; over a
+    // "+ new" tab [`panes::closeup_pane`] leaves the pane behind it blank; over a
     // pane tab (the zoomed-out-from-没入 state) the pane's live preview keeps
     // showing behind the box, so zooming out never blanks the terminal.
-    if state.focus_action_overlay() {
+    if state.closeup_action_overlay() {
         let desired = match state.session_action_ui() {
             SessionActionUi::Menu => FOCUS_MENU_INNER,
             SessionActionUi::Prompt => FOCUS_PROMPT_INNER,
         };
         let inner = widgets::modal_inner_width(right_w, desired);
         let body = match state.session_action_ui() {
-            SessionActionUi::Menu => focus_menu_body(state, inner, body_rows),
-            SessionActionUi::Prompt => focus_prompt_body(state, inner, body_rows),
+            SessionActionUi::Menu => closeup_menu_body(state, inner, body_rows),
+            SessionActionUi::Prompt => closeup_prompt_body(state, inner, body_rows),
         };
         let title = format!("session: {}", state.focused_session_name());
         widgets::overlay_region_modal(
@@ -711,7 +712,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     }
 
     // Float the workspace-env editor (`env`) over the palette, so editing the
-    // 1Password bindings stays in the Overview. Its body is a fixed height, so the
+    // 1Password bindings stays in the command palette. Its body is a fixed height, so the
     // box never resizes as bindings are added (no layout shift).
     if let Some(editor) = state.env_editor() {
         let inner = widgets::modal_inner_width(width, ENV_MODAL_INNER);
@@ -757,7 +758,7 @@ const HEADER_ROWS: usize = 3;
 const RABBIT_INDENT: usize = 1;
 
 /// Build the worktree column exactly as [`render_frame`] does, before the mascot
-/// is rested at its foot: the session list, plus 切替's inline create / rename
+/// is rested at its foot: the session list, plus 選択's inline create / rename
 /// input when one is open at full width (collapsed to the rail there is no room,
 /// so the input renders in the right pane instead). Shared with
 /// [`mascot_hit_rect`] so the two always agree on the column the mascot sits in.
@@ -777,8 +778,8 @@ fn left_column(
         state.label_master(),
         left_w,
         body_rows,
-        // In 切替 the keyboard is on the list: fade the rows the cursor is not on.
-        state.mode() == Mode::Switch,
+        // In 選択 the keyboard is on the list: fade the rows the cursor is not on.
+        state.mode() == Mode::Overview,
         sidebar,
         state.now(),
         // While renaming, the selected session's name line is drawn as the inline
@@ -788,7 +789,7 @@ fn left_column(
             .map(|rename| (rename.value(), rename.cursor())),
     );
     if sidebar == Sidebar::Full {
-        // While naming a new session in 切替, insert the inline create row(s) into
+        // While naming a new session in 選択, insert the inline create row(s) into
         // the selected workspace's own block: directly after that workspace's
         // session rows in the regular sidebar flow. In 統合(unite) mode this keeps
         // the "+ new" input attached to the workspace that `c` targets, instead
@@ -801,7 +802,8 @@ fn left_column(
             // affordance; while the input is open it *becomes* the targeted
             // workspace's affordance, so [`place_create_rows`] replaces that row.
             let scroll = sidebar::sidebar_scroll(state.list(), true, body_rows);
-            let rows = switch_create_rows(create.value(), create.cursor(), create.error(), left_w);
+            let rows =
+                overview_create_rows(create.value(), create.cursor(), create.error(), left_w);
             place_create_rows(&mut left, state.list(), rows, scroll);
             left.truncate(body_rows);
         }
@@ -812,7 +814,7 @@ fn left_column(
     left
 }
 
-/// Replace the targeted workspace's "+ new session" row with 切替's inline create
+/// Replace the targeted workspace's "+ new session" row with 選択's inline create
 /// input, without moving the workspaces below it. The create flow expands a folded
 /// group first, so the cursor's group always has a create row to replace. In
 /// 統合(unite) mode every following workspace has a fixed two-row gap after this
@@ -878,7 +880,7 @@ struct MascotSpot {
 /// are one computation.
 ///
 /// The full-width sidebar rests the mood mascot — its face and colour follow the
-/// current mode (browsing in 切替, attentive in 在席, heads-down in 没入), it
+/// current mode (browsing in 選択, attentive in 集中, heads-down in 没入), it
 /// *speaks* the update notice from a bubble above when one is pending, and it plays
 /// a click reaction in the foreground while one is in flight. The collapsed rail
 /// shows a tiny static chibi instead. A blank row sits above the art (so it reads

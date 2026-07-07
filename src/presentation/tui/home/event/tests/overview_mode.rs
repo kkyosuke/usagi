@@ -1,13 +1,13 @@
 use super::*;
 
 #[test]
-fn switch_navigates_and_backs_out_to_overview() {
-    // `session switch` enters Switch; ↑/↓ (jk) move between sessions and ←/→ (hl)
+fn overview_navigates_and_backs_out_to_overview() {
+    // `session switch` enters Overview; ↑/↓ (jk) move between sessions and ←/→ (hl)
     // between the highlighted session's tabs (a no-op with no panes here); Esc
-    // returns to the base Switch (the origin); Esc is then inert, so the fallback Ctrl-C
+    // returns to the base Overview (the origin); Esc is then inert, so the fallback Ctrl-C
     // quits.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch (origin: the base Switch)
+    keys.push(Ok(Key::Enter)); // -> Overview (origin: the base Overview)
     keys.push(Ok(Key::ArrowDown));
     keys.push(Ok(Key::ArrowUp));
     keys.push(Ok(Key::Char('j')));
@@ -16,32 +16,32 @@ fn switch_navigates_and_backs_out_to_overview() {
     keys.push(Ok(Key::ArrowRight)); // tab next (no-op)
     keys.push(Ok(Key::Char('h'))); // tab prev via vim key (no-op)
     keys.push(Ok(Key::Char('l'))); // tab next via vim key (no-op)
-    keys.push(Ok(Key::Escape)); // back to the base Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // back to the base Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn switch_ctrl_o_is_inert_at_the_base_switch() {
-    // 統括 (Overview) is gone, so `Ctrl-O` at the base 切替 has nowhere further out
-    // to zoom: it is a no-op and the screen stays in Switch (exhausting the script
+fn overview_ctrl_o_is_inert_at_the_base_overview() {
+    // The workspace command palette is not on the ladder, so `Ctrl-O` at the base 選択 has nowhere further out
+    // to zoom: it is a no-op and the screen stays in Overview (exhausting the script
     // falls back to Ctrl-C, which quits with nothing live).
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> base Switch
-    keys.push(Ok(Key::Char(CTRL_O))); // no-op at the base Switch
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Enter)); // -> base Overview
+    keys.push(Ok(Key::Char(CTRL_O))); // no-op at the base Overview
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
-    // In 切替 the render loop snapshots the highlighted session's live
+fn overview_snapshots_the_highlighted_live_session_for_the_preview() {
+    // In 選択 the render loop snapshots the highlighted session's live
     // terminal so the right pane previews the actual screen. Under the live
     // harness `preview` returns a snapshot, exercising that surface-drive path.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::ArrowDown)); // move onto a live session row
-    keys.push(Ok(Key::Escape)); // Esc inert at the base Switch; fallback Ctrl-C quits
+    keys.push(Ok(Key::Escape)); // Esc inert at the base Overview; fallback Ctrl-C quits
     assert!(matches!(
         run_live(keys, sample_state()).unwrap(),
         Outcome::Quit
@@ -49,13 +49,13 @@ fn switch_snapshots_the_highlighted_live_session_for_the_preview() {
 }
 
 #[test]
-fn switch_manual_status_keys_run_through_the_compat_loop() {
+fn overview_manual_status_keys_run_through_the_compat_loop() {
     // Tab / Shift-Tab / digit / 0 on a session row drive the manual-status label
-    // through the compat-shim wiring (a no-op persist), covering the switch_key
+    // through the compat-shim wiring (a no-op persist), covering the overview_key
     // branches and the shim's `set_label` hook end to end. `sample_state` opens
     // with the default (non-empty) label master, so the keys are live.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::ArrowDown)); // cursor onto a session row
     keys.push(Ok(Key::Tab)); // cycle forward
     keys.push(Ok(Key::BackTab)); // cycle backward
@@ -66,7 +66,7 @@ fn switch_manual_status_keys_run_through_the_compat_loop() {
 }
 
 #[test]
-fn switch_ctrl_c_quits() {
+fn overview_ctrl_c_quits() {
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::CtrlC));
@@ -74,18 +74,18 @@ fn switch_ctrl_c_quits() {
 }
 
 #[test]
-fn switch_enter_on_an_idle_session_just_focuses_it() {
+fn overview_enter_on_an_idle_session_just_focuses_it() {
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::ArrowDown)); // cursor on "main"
     keys.push(Ok(Key::Enter)); // focus (idle -> no attach)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
 
 #[test]
-fn switch_enter_on_a_live_session_re_attaches_its_active_pane() {
+fn overview_enter_on_a_live_session_re_attaches_its_active_pane() {
     // Enter on a live session re-attaches (no new pane), so `open_terminal` is
     // called once with `new_pane == false`.
     let opened = RefCell::new(0);
@@ -98,9 +98,9 @@ fn switch_enter_on_a_live_session_re_attaches_its_active_pane() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::Enter)); // focus + attach (live)
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -119,8 +119,8 @@ fn switch_enter_on_a_live_session_re_attaches_its_active_pane() {
 }
 
 #[test]
-fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
-    // `t` in 切替 opens the selected session's action surface (在席) instead of
+fn overview_t_opens_the_action_surface_and_adds_a_new_pane() {
+    // `t` in 選択 opens the selected session's action surface (集中) instead of
     // attaching; running `terminal` there adds a *new* pane, so `open_terminal`
     // is called with new_pane == true.
     let opened = RefCell::new(0);
@@ -133,10 +133,10 @@ fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
-    keys.push(Ok(Key::Char('t'))); // -> 在席 action surface (Menu)
+    keys.push(Ok(Key::Enter)); // -> Overview
+    keys.push(Ok(Key::Char('t'))); // -> 集中 action surface (Menu)
     keys.push(Ok(Key::Char('t'))); // menu: run terminal -> adds a new pane
-    keys.push(Ok(Key::Escape)); // 在席 -> Switch
+    keys.push(Ok(Key::Escape)); // 集中 -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(
         run_full(
@@ -155,9 +155,9 @@ fn switch_t_opens_the_action_surface_and_adds_a_new_pane() {
 }
 
 #[test]
-fn switch_arrows_move_the_active_tab_via_tab_op() {
+fn overview_arrows_move_the_active_tab_via_tab_op() {
     // ←/→ (and the vim h/l, and Ctrl-N/Ctrl-P) drive `tab_op` with a `TabNav`,
-    // moving the highlighted session's active tab without leaving 切替.
+    // moving the highlighted session's active tab without leaving 選択.
     let term = Term::stdout();
     let navs = RefCell::new(Vec::new());
     let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
@@ -167,7 +167,7 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
         (vec!["agent".to_string(), "terminal".to_string()], 0)
     };
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::ArrowRight)); // tab next
     keys.push(Ok(Key::ArrowLeft)); // tab prev
     keys.push(Ok(Key::Char('l'))); // tab next (vim)
@@ -221,8 +221,8 @@ fn switch_arrows_move_the_active_tab_via_tab_op() {
 }
 
 #[test]
-fn switch_x_closes_the_highlighted_sessions_active_tab() {
-    // `x` in 切替 drives `close_tab` with the highlighted session's path, closing
+fn overview_x_closes_the_highlighted_sessions_active_tab() {
+    // `x` in 選択 drives `close_tab` with the highlighted session's path, closing
     // its active tab (pane) without leaving the picker.
     let term = Term::stdout();
     let closed = RefCell::new(Vec::new());
@@ -230,7 +230,7 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
         closed.borrow_mut().push(dir.to_path_buf());
     };
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch (cursor on the root row)
+    keys.push(Ok(Key::Enter)); // -> Overview (cursor on the root row)
     keys.push(Ok(Key::ArrowDown)); // -> the first session (main, /r/main)
     keys.push(Ok(Key::Char('x'))); // close its active tab
     keys.push(Ok(Key::CtrlC)); // quit
@@ -270,9 +270,9 @@ fn switch_x_closes_the_highlighted_sessions_active_tab() {
 }
 
 #[test]
-fn switch_inline_create_makes_and_focuses_the_new_session() {
+fn overview_inline_create_makes_and_focuses_the_new_session() {
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::Char('c'))); // begin create
     keys.push(Ok(Key::Insert)); // unhandled inside create: the `_` arm
     keys.extend(typed("Xwip")); // a stray leading 'X' to edit out
@@ -283,8 +283,8 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
     keys.push(Ok(Key::ArrowRight)); // caret after 'p' (end)
     keys.push(Ok(Key::Backspace)); // "wi"
     keys.push(Ok(Key::Char('p'))); // "wip"
-    keys.push(Ok(Key::Enter)); // confirm -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // confirm -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     let created = RefCell::new(Vec::new());
     let mut create = |name: &str| {
@@ -309,20 +309,20 @@ fn switch_inline_create_makes_and_focuses_the_new_session() {
 }
 
 #[test]
-fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
-    // `console` decodes Ctrl-A as `Key::Home`. In the base Switch list that has
+fn overview_ctrl_a_alias_begins_inline_create_for_ime_users() {
+    // `console` decodes Ctrl-A as `Key::Home`. In the base Overview list that has
     // no caret to move, so the key is an IME-safe alias for `c` (create): a
     // Japanese IME may compose bare `c`, but the control chord still reaches
     // usagi. Once the inline input is open, Home keeps its normal caret meaning.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::Home)); // Ctrl-A alias -> begin create
     keys.extend(typed("Xwip"));
     keys.push(Ok(Key::Home)); // inside create: caret to start
     keys.push(Ok(Key::Del)); // delete the stray X, proving Home was not re-triggering create
     keys.push(Ok(Key::End));
-    keys.push(Ok(Key::Enter)); // confirm -> Focus
-    keys.push(Ok(Key::Escape)); // Focus -> Switch
+    keys.push(Ok(Key::Enter)); // confirm -> Closeup
+    keys.push(Ok(Key::Escape)); // Closeup -> Overview
     let created = RefCell::new(Vec::new());
     let mut create = |name: &str| {
         created.borrow_mut().push(name.to_string());
@@ -346,14 +346,14 @@ fn switch_ctrl_a_alias_begins_inline_create_for_ime_users() {
 }
 
 #[test]
-fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
-    // Cancel path: Esc closes the input, staying in Switch; then Ctrl-O -> Switch (fallback Ctrl-C quits).
+fn overview_inline_create_can_be_cancelled_and_ctrl_c_quits() {
+    // Cancel path: Esc closes the input, staying in Overview; then Ctrl-O -> Overview (fallback Ctrl-C quits).
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::Char('c'))); // begin create
     keys.push(Ok(Key::Char('x')));
-    keys.push(Ok(Key::Escape)); // cancel create (stay in Switch)
-    keys.push(Ok(Key::Char(CTRL_O))); // inert at the base Switch
+    keys.push(Ok(Key::Escape)); // cancel create (stay in Overview)
+    keys.push(Ok(Key::Char(CTRL_O))); // inert at the base Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 
@@ -366,7 +366,7 @@ fn switch_inline_create_can_be_cancelled_and_ctrl_c_quits() {
 }
 
 #[test]
-fn switch_create_invalid_name_keeps_the_input_open() {
+fn overview_create_invalid_name_keeps_the_input_open() {
     // An empty confirm keeps the input open; then Ctrl-C ends the run.
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
@@ -377,12 +377,12 @@ fn switch_create_invalid_name_keeps_the_input_open() {
 }
 
 #[test]
-fn switch_inline_rename_edits_then_confirms_the_label() {
-    // Switch -> cursor onto "main" -> `r` (prefills "main") -> mid-string edit
+fn overview_inline_rename_edits_then_confirms_the_label() {
+    // Overview -> cursor onto "main" -> `r` (prefills "main") -> mid-string edit
     // exercising the same caret keys as create (Home/End/←/→/Del/Backspace) ->
     // type "Top" -> Enter persists via the rename callback.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch
+    keys.push(Ok(Key::Enter)); // -> Overview
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Char('r'))); // begin rename (prefilled "main", caret at end)
     keys.push(Ok(Key::ArrowUp)); // a non-edit key is ignored while renaming
@@ -403,14 +403,14 @@ fn switch_inline_rename_edits_then_confirms_the_label() {
 }
 
 #[test]
-fn switch_inline_rename_can_be_cancelled_with_no_persist() {
+fn overview_inline_rename_can_be_cancelled_with_no_persist() {
     // `r` opens the input, Esc closes it without calling the rename callback.
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Char('r'))); // begin rename
     keys.push(Ok(Key::Char('x'))); // type something
-    keys.push(Ok(Key::Escape)); // cancel (stay in Switch)
+    keys.push(Ok(Key::Escape)); // cancel (stay in Overview)
     keys.push(Ok(Key::CtrlC));
     let (renamed, outcome) = run_recording_rename(keys);
     assert!(matches!(outcome, Outcome::Quit));
@@ -418,10 +418,10 @@ fn switch_inline_rename_can_be_cancelled_with_no_persist() {
 }
 
 #[test]
-fn switch_rename_on_the_root_row_is_a_noop() {
+fn overview_rename_on_the_root_row_is_a_noop() {
     // `r` on the root row (no session) opens nothing; the run just quits.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::Enter)); // -> Overview (cursor on root)
     keys.push(Ok(Key::Char('r'))); // no-op on root
     keys.push(Ok(Key::CtrlC));
     let (renamed, outcome) = run_recording_rename(keys);
@@ -429,15 +429,15 @@ fn switch_rename_on_the_root_row_is_a_noop() {
     assert!(renamed.is_empty());
 }
 
-// --- 切替 (Switch) reorder (K / J) -------------------------------------
+// --- 選択 (Overview) reorder (K / J) -------------------------------------
 
 #[test]
-fn switch_reorder_moves_the_selected_session_up_and_down() {
+fn overview_reorder_moves_the_selected_session_up_and_down() {
     // J moves the selected session down, K moves it up. With a Stationary
     // response the cursor is undisturbed, so the scripted navigation reaches the
     // next session as written.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::Enter)); // -> Overview (cursor on root)
     keys.push(Ok(Key::ArrowDown)); // cursor "main"
     keys.push(Ok(Key::Char('J'))); // move "main" down
     keys.push(Ok(Key::ArrowDown)); // cursor "feat"
@@ -452,10 +452,10 @@ fn switch_reorder_moves_the_selected_session_up_and_down() {
 }
 
 #[test]
-fn switch_reorder_on_the_root_row_is_a_noop() {
+fn overview_reorder_on_the_root_row_is_a_noop() {
     // K / J on the root row (not a session) never reach the reorder callback.
     let mut keys = cmd("session switch");
-    keys.push(Ok(Key::Enter)); // -> Switch (cursor on root)
+    keys.push(Ok(Key::Enter)); // -> Overview (cursor on root)
     keys.push(Ok(Key::Char('K')));
     keys.push(Ok(Key::Char('J')));
     keys.push(Ok(Key::CtrlC));
@@ -465,7 +465,7 @@ fn switch_reorder_on_the_root_row_is_a_noop() {
 }
 
 #[test]
-fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
+fn overview_reorder_applies_a_moved_result_and_logs_a_failure() {
     // A Moved result refreshes the pane (the reordered list is applied).
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter));
@@ -513,7 +513,7 @@ fn switch_reorder_applies_a_moved_result_and_logs_a_failure() {
 }
 
 #[test]
-fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
+fn overview_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
     // `feat` (the second session) is waiting for input. `s` turns on the
     // waiting-first sort, lifting `feat` above `main`, so the first row the cursor
     // steps onto — and previews — is now `feat` rather than `main`.
@@ -536,7 +536,7 @@ fn switch_s_lifts_the_waiting_session_to_the_top_of_the_pane() {
 }
 
 #[test]
-fn switch_space_folds_the_cursor_workspace_and_hides_its_sessions() {
+fn overview_space_folds_the_cursor_workspace_and_hides_its_sessions() {
     // Unite: primary "usagi" [main] plus extra "wsB" [b1]. Space on wsB's root
     // folds it, so its session b1 leaves the flat row space and the cursor never
     // previews it, while "main" (in the still-expanded primary) is reachable.
@@ -580,9 +580,9 @@ fn switch_space_folds_the_cursor_workspace_and_hides_its_sessions() {
 }
 
 #[test]
-fn cheatsheet_opens_from_the_base_switch_and_dismisses() {
-    // `?` at the base 切替 opens the keybinding cheat sheet (a scrollable text
-    // modal); the arrows / j/k scroll it and Esc dismisses it (back to Switch,
+fn cheatsheet_opens_from_the_base_overview_and_dismisses() {
+    // `?` at the base 選択 opens the keybinding cheat sheet (a scrollable text
+    // modal); the arrows / j/k scroll it and Esc dismisses it (back to Overview,
     // where the trailing Ctrl-C quits).
     let keys = vec![
         Ok(Key::Char('?')), // open the cheat sheet
@@ -590,7 +590,7 @@ fn cheatsheet_opens_from_the_base_switch_and_dismisses() {
         Ok(Key::Char('j')),
         Ok(Key::ArrowUp), // scroll up a line
         Ok(Key::Char('k')),
-        Ok(Key::Escape), // dismiss -> Switch
+        Ok(Key::Escape), // dismiss -> Overview
         Ok(Key::CtrlC),  // nothing live: quits outright
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));

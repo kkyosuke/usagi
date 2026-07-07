@@ -111,7 +111,7 @@
 
 | フィールド | 型 | 意味 |
 |---|---|---|
-| `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、切替（Switch）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#切替switch既定)）。古いファイルには無く、その場合は空として扱う |
+| `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、選択（Overview）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#選択overview既定)）。古いファイルには無く、その場合は空として扱う |
 | `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
 | `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
 
@@ -129,15 +129,15 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `name` | string | セッション名。セッションの識別子で、作成後は変わらない。各リポジトリで作成するブランチは `usagi/<name>`（`usagi/` 名前空間に収め、手で切ったブランチと衝突させない） |
 | `display_name` | string? | サイドメニューでの表示名（任意）。設定時は一覧の `name` の代わりに表示する**見た目だけ**の上書きで、ブランチ名・識別子は変えない。未設定（既定）なら省略され、`name` を表示する |
 | `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
-| `label_id` | string? | ユーザーが切替（Switch）で手で付けた**ステータスラベルの ID**（任意）。[`session_labels` マスタ](../05-settings.md#ステータスラベルsession_labels)の要素 `id` を指し、表示時にマスタへ解決される（マスタから消えた ID は未設定扱い）。`status` と違い git からは導出されない純粋なユーザー付与タグで、ワークスペース同期では書き換えない。未設定（既定）なら省略される |
-| `agent` | object? | このセッション単位のエージェント CLI・モデルの上書き（任意）。`{ "cli": <AgentCli>?, "model": string? }` で、`session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成・委譲するときに指定する。このセッションのエージェントペイン起動（自動 spawn・ペイン復旧・在席からの起動）時に、ワークスペースの実効設定 `agent_cli` より**優先**して適用される。`cli` は `claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`（未知の値は `null` に劣化し、その場を含む記録全体は読める）、`model` は各 CLI のモデル指定フラグ（claude `--model`、codex / gemini `-m`）に素通しで展開される（allowlist 無し）。両方未設定（既定）なら省略され、セッションはワークスペースの実効設定と各 CLI の既定モデルに従う |
+| `label_id` | string? | ユーザーが選択（Overview）で手で付けた**ステータスラベルの ID**（任意）。[`session_labels` マスタ](../05-settings.md#ステータスラベルsession_labels)の要素 `id` を指し、表示時にマスタへ解決される（マスタから消えた ID は未設定扱い）。`status` と違い git からは導出されない純粋なユーザー付与タグで、ワークスペース同期では書き換えない。未設定（既定）なら省略される |
+| `agent` | object? | このセッション単位のエージェント CLI・モデルの上書き（任意）。`{ "cli": <AgentCli>?, "model": string? }` で、`session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成・委譲するときに指定する。このセッションのエージェントペイン起動（自動 spawn・ペイン復旧・集中からの起動）時に、ワークスペースの実効設定 `agent_cli` より**優先**して適用される。`cli` は `claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`（未知の値は `null` に劣化し、その場を含む記録全体は読める）、`model` は各 CLI のモデル指定フラグ（claude `--model`、codex / gemini `-m`）に素通しで展開される（allowlist 無し）。両方未設定（既定）なら省略され、セッションはワークスペースの実効設定と各 CLI の既定モデルに従う |
 | `root` | path | セッションツリーのルート（`<workspace>/.usagi/sessions/<name>`） |
 | `worktrees` | array&lt;WorktreeState&gt; | worktree を作成した各リポジトリの状態（下記） |
 | `created_at` | RFC3339(UTC) | セッションの作成日時 |
-| `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（切替・在席でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/home/02-layout.md](../design/home/02-layout.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
+| `last_active` | RFC3339(UTC)? | このセッションを最後に触った日時（選択・集中でアクティブにした、または端末／Agent の活動を観測した）。ホーム画面の鮮度ドット（[design/home/02-layout.md](../design/home/02-layout.md#レイアウト)）の基準時刻で、放置するほど淡く沈む。未設定（既定。一度も触っていない）なら省略され、`created_at` にフォールバックする |
 
 セッション作成（`usecase/session`）はこの `SessionRecord` を `state.json` に追記します。
-表示名の変更（`usecase/session::set_display_name`、ホーム画面の[切替モードの `r`](../design/home/01-modes.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[切替モードの `n` / 没入の `Ctrl-E`](../design/home/05-overlays.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
+表示名の変更（`usecase/session::set_display_name`、ホーム画面の[選択モードの `r`](../design/home/01-modes.md#各モードの説明)）は `display_name` だけを、メモの編集（`usecase/session::set_note`、ホーム画面の[選択モードの `n` / 没入の `Ctrl-E`](../design/home/05-overlays.md#セッションメモの編集)）は `note` だけを書き換えます。ルート行（`⌂ root`）のメモも同じ操作で編集でき、こちらはトップレベルの `root_note`（`usecase/session::set_root_note`）を書き換えます。`state.json` はマシンローカル（git 管理外）なので、メモはこの環境にだけ保存され、ブランチや PR では共有されません。
 再同期（`usecase/workspace_state::sync`）は各セッション worktree の git ステータスを
 読み直して更新します。
 

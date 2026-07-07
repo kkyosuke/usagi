@@ -431,7 +431,7 @@ fn session_subcommand(sub: &str) -> &str {
     }
 }
 
-/// `session switch [name]`: enter 切替 (Switch) to pick a session in the left
+/// `session switch [name]`: enter 選択 (Overview) to pick a session in the left
 /// pane when no name is given ([`Effect::EnterSwitch`]), or focus the named one
 /// directly ([`Effect::Activate`]).
 ///
@@ -655,11 +655,11 @@ impl Command for ChatCommand {
     }
 }
 
-/// `close`: remove the focused session and return to 切替 (Switch). It is the
-/// 在席 equivalent of `session remove <name>`: a clean session's worktrees and
+/// `close`: remove the focused session and return to 選択 (Overview). It is the
+/// 集中 equivalent of `session remove <name>`: a clean session's worktrees and
 /// branches are deleted. Bare `close` (no `--force`) **refuses a session with
 /// uncommitted changes** — the removal logs how to discard them — so it can
-/// never silently throw away unsaved work; `close --force` (alias `-f`, the 在席
+/// never silently throw away unsaved work; `close --force` (alias `-f`, the 集中
 /// menu's `Shift`+`c`) discards them, mirroring `session remove <name> --force`.
 /// The removal is a side effect ([`Effect::CloseSession`]) performed by the
 /// event loop, which owns the worktree list and the session-removal callback.
@@ -906,8 +906,8 @@ impl Command for PreviewCommand {
 
 /// `diff`: open the focused session's diff against the base branch in the
 /// right pane — the whole patch behind the sidebar's `+N -M` badge, scrollable
-/// like the Markdown preview. A 在席 (Focus) command, so it runs against the
-/// session under the cursor from the Focus menu / prompt. Gathering the diff
+/// like the Markdown preview. A 集中 (Closeup) command, so it runs against the
+/// session under the cursor from the Closeup menu / prompt. Gathering the diff
 /// (resolving the highlighted worktree and shelling out to git) is the event
 /// loop's job, so this command only requests the view via [`Effect::OpenDiff`].
 pub(super) struct DiffCommand;
@@ -964,7 +964,7 @@ impl Command for ConfigCommand {
 /// `env`: edit this workspace's 1Password-backed environment bindings
 /// (`NAME=op://vault/item/field`), resolved and injected into panes launched in
 /// this workspace. It opens an editor as an overlay over the command palette
-/// ([`Effect::OpenEnvEditor`]) — staying in the Overview and returning to it on
+/// ([`Effect::OpenEnvEditor`]) — staying in the command palette and returning to it on
 /// save / cancel — rather than handing off to the full Config screen (the same
 /// bindings are also editable from `config` → Env Vars).
 pub(super) struct EnvCommand;

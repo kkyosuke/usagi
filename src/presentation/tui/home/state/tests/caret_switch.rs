@@ -85,40 +85,40 @@ fn recall_and_submit_place_the_caret_at_the_end() {
     assert_eq!(state.cursor(), 0);
 }
 
-// --- 切替 (Switch) -----------------------------------------------------
+// --- 選択 (Overview) -----------------------------------------------------
 
 #[test]
-fn enter_switch_remembers_its_return_mode_and_moves_the_cursor() {
+fn enter_overview_remembers_its_return_mode_and_moves_the_cursor() {
     let mut state = state(); // root, main, feature
-    state.enter_switch(ReturnMode::Base);
-    assert_eq!(state.mode(), Mode::Switch);
-    assert_eq!(state.switch_return(), ReturnMode::Base);
-    state.switch_move_down();
+    state.enter_overview(ReturnMode::Base);
+    assert_eq!(state.mode(), Mode::Overview);
+    assert_eq!(state.overview_return(), ReturnMode::Base);
+    state.overview_move_down();
     assert_eq!(state.list().selected_index(), 1);
-    state.switch_move_up();
+    state.overview_move_up();
     assert_eq!(state.list().selected_index(), 0);
     // Up from the root wraps to the bottom — the persistent "+ new session" row
     // (index 3, just past the two worktrees).
-    state.switch_move_up();
+    state.overview_move_up();
     assert_eq!(state.list().selected_index(), 3);
     assert!(state.list().create_row_selected());
 }
 
 #[test]
-fn switch_return_carries_each_origin() {
+fn overview_return_carries_each_origin() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Focus);
-    assert_eq!(state.switch_return(), ReturnMode::Focus);
-    state.enter_switch(ReturnMode::Attached);
-    assert_eq!(state.switch_return(), ReturnMode::Attached);
+    state.enter_overview(ReturnMode::Closeup);
+    assert_eq!(state.overview_return(), ReturnMode::Closeup);
+    state.enter_overview(ReturnMode::Attached);
+    assert_eq!(state.overview_return(), ReturnMode::Attached);
 }
 
 #[test]
-fn switch_inline_create_edits_then_confirms_a_fresh_name() {
+fn overview_inline_create_edits_then_confirms_a_fresh_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     assert!(!state.is_creating());
-    state.switch_begin_create(Vec::new());
+    state.overview_begin_create(Vec::new());
     assert!(state.is_creating());
     assert_eq!(state.create().unwrap().value(), "");
     {
@@ -129,22 +129,22 @@ fn switch_inline_create_edits_then_confirms_a_fresh_name() {
         input.backspace(); // drop a trailing space
     }
     // A fresh, trimmed name is accepted and the input closes.
-    assert_eq!(state.switch_confirm_create().as_deref(), Some("wip"));
+    assert_eq!(state.overview_confirm_create().as_deref(), Some("wip"));
     assert!(!state.is_creating());
 }
 
 #[test]
-fn switch_inline_create_rejects_empty_and_duplicate_names() {
+fn overview_inline_create_rejects_empty_and_duplicate_names() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // The session "feature" would cut `usagi/feature`, which already exists, so
     // it is in the taken set (a bare `feature` would not collide).
-    state.switch_begin_create(vec!["usagi/feature".to_string()]);
+    state.overview_begin_create(vec!["usagi/feature".to_string()]);
     // Whitespace only is empty after trimming: no live error (it does not nag),
     // but Enter rejects it.
     state.create_mut().unwrap().push_char(' ');
     assert!(state.create().unwrap().error().is_none());
-    assert!(state.switch_confirm_create().is_none());
+    assert!(state.overview_confirm_create().is_none());
     assert!(state
         .create()
         .unwrap()
@@ -156,18 +156,18 @@ fn switch_inline_create_rejects_empty_and_duplicate_names() {
         state.create_mut().unwrap().push_char(c);
     }
     assert!(state.create().unwrap().error().unwrap().contains("feature"));
-    assert!(state.switch_confirm_create().is_none());
+    assert!(state.overview_confirm_create().is_none());
     assert!(state.create().unwrap().error().unwrap().contains("feature"));
     assert!(state.is_creating());
 }
 
 #[test]
-fn switch_inline_create_flags_a_branch_namespace_clash_live() {
+fn overview_inline_create_flags_a_branch_namespace_clash_live() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // Branches nested under the session's namespaced branch `usagi/test/` make a
     // `test` session impossible.
-    state.switch_begin_create(vec!["usagi/test/home-ui-e2e".to_string()]);
+    state.overview_begin_create(vec!["usagi/test/home-ui-e2e".to_string()]);
     for c in "test".chars() {
         state.create_mut().unwrap().push_char(c);
     }
@@ -175,7 +175,7 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
     let err = state.create().unwrap().error().unwrap().to_string();
     assert!(err.contains("conflicts with branch"), "{err}");
     assert!(err.contains("usagi/test/home-ui-e2e"), "{err}");
-    assert!(state.switch_confirm_create().is_none());
+    assert!(state.overview_confirm_create().is_none());
     // Backspacing to "tes" (no longer a clash) clears the error.
     state.create_mut().unwrap().backspace();
     assert!(state.create().unwrap().error().is_none());
@@ -190,10 +190,10 @@ fn switch_inline_create_flags_a_branch_namespace_clash_live() {
 }
 
 #[test]
-fn switch_inline_create_can_be_cancelled() {
+fn overview_inline_create_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
-    state.switch_begin_create(Vec::new());
+    state.enter_overview(ReturnMode::Base);
+    state.overview_begin_create(Vec::new());
     state.create_mut().unwrap().push_char('x');
     state.create_cancel();
     assert!(!state.is_creating());
@@ -206,7 +206,7 @@ fn create_accessors_are_none_when_not_creating() {
     assert!(!state.is_creating());
     assert!(state.create().is_none());
     assert!(state.create_mut().is_none());
-    assert!(state.switch_confirm_create().is_none());
+    assert!(state.overview_confirm_create().is_none());
     state.create_cancel();
     assert!(!state.is_creating());
 }
@@ -214,8 +214,8 @@ fn create_accessors_are_none_when_not_creating() {
 #[test]
 fn create_caret_moves_and_edits_mid_name() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
-    state.switch_begin_create(Vec::new());
+    state.enter_overview(ReturnMode::Base);
+    state.overview_begin_create(Vec::new());
     for c in "wip".chars() {
         state.create_mut().unwrap().push_char(c);
     }
@@ -237,14 +237,14 @@ fn create_caret_moves_and_edits_mid_name() {
     assert_eq!(state.create().unwrap().cursor(), 2);
 }
 
-// --- 切替 (Switch) inline rename ---------------------------------------
+// --- 選択 (Overview) inline rename ---------------------------------------
 
 #[test]
-fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
+fn overview_inline_rename_prefills_edits_then_confirms_a_label() {
     let mut state = state(); // sessions: main, feature
-    state.enter_switch(ReturnMode::Base);
-    state.switch_move_down(); // cursor onto "main"
-    assert!(state.switch_begin_rename());
+    state.enter_overview(ReturnMode::Base);
+    state.overview_move_down(); // cursor onto "main"
+    assert!(state.overview_begin_rename());
     assert!(state.is_renaming());
     assert_eq!(state.rename().unwrap().target(), "main");
     // The input is pre-filled with the current label (the session name).
@@ -261,30 +261,30 @@ fn switch_inline_rename_prefills_edits_then_confirms_a_label() {
     }
     // Confirm returns the target and the trimmed label, and closes the input.
     assert_eq!(
-        state.switch_confirm_rename(),
+        state.overview_confirm_rename(),
         Some(("main".to_string(), "My main".to_string()))
     );
     assert!(!state.is_renaming());
 }
 
 #[test]
-fn switch_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
+fn overview_begin_rename_is_a_noop_on_the_root_row_and_when_already_open() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
+    state.enter_overview(ReturnMode::Base);
     // Cursor on the root row: there is no session to rename.
     assert!(state.list().root_selected());
-    assert!(!state.switch_begin_rename());
+    assert!(!state.overview_begin_rename());
     assert!(!state.is_renaming());
 
     // On a session it opens, and a second begin while open is a no-op.
-    state.switch_move_down();
-    assert!(state.switch_begin_rename());
-    assert!(!state.switch_begin_rename());
+    state.overview_move_down();
+    assert!(state.overview_begin_rename());
+    assert!(!state.overview_begin_rename());
 
     // It also refuses to open while a create input is up.
     state.rename_cancel();
-    state.switch_begin_create(Vec::new());
-    assert!(!state.switch_begin_rename());
+    state.overview_begin_create(Vec::new());
+    assert!(!state.overview_begin_rename());
 }
 
 #[test]
@@ -293,15 +293,15 @@ fn rename_accessors_are_none_when_not_renaming() {
     assert!(!state.is_renaming());
     assert!(state.rename().is_none());
     assert!(state.rename_mut().is_none());
-    assert!(state.switch_confirm_rename().is_none());
+    assert!(state.overview_confirm_rename().is_none());
 }
 
 #[test]
 fn rename_can_be_cancelled() {
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
-    state.switch_move_down();
-    state.switch_begin_rename();
+    state.enter_overview(ReturnMode::Base);
+    state.overview_move_down();
+    state.overview_begin_rename();
     state.rename_mut().unwrap().push_char('x');
     state.rename_cancel();
     assert!(!state.is_renaming());
@@ -312,9 +312,9 @@ fn rename_input_supports_caret_movement_and_forward_delete() {
     // The rename input has the same mid-string editing affordances as create: the
     // caret can move and a character can be deleted forward, not only at the end.
     let mut state = state();
-    state.enter_switch(ReturnMode::Base);
-    state.switch_move_down();
-    assert!(state.switch_begin_rename());
+    state.enter_overview(ReturnMode::Base);
+    state.overview_move_down();
+    assert!(state.overview_begin_rename());
     let rename = state.rename_mut().unwrap();
     // The input opens pre-filled with the session's current label; clear it so
     // the editing sequence starts from a known empty state.

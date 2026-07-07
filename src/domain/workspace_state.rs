@@ -359,7 +359,7 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The [`id`](crate::domain::settings::SessionLabelDef::id) of the manual
-    /// status label the user has assigned to this session in 切替 (Switch), or
+    /// status label the user has assigned to this session in 選択 (Overview), or
     /// `None` when unset. Resolved back to a
     /// [`SessionLabelDef`](crate::domain::settings::SessionLabelDef) through the
     /// effective [`SessionLabelMaster`](crate::domain::settings::SessionLabelMaster)

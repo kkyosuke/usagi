@@ -1,4 +1,4 @@
-//! 切替 (Switch) manual-status label cycling ([`HomeState::cycle_selected_label`]
+//! 選択 (Overview) manual-status label cycling ([`HomeState::cycle_selected_label`]
 //! / [`select_label_index`](HomeState::select_label_index) /
 //! [`clear_selected_label`](HomeState::clear_selected_label)) and row resolution
 //! ([`HomeState::row_label`]).
@@ -33,7 +33,7 @@ fn state_with_label(current: Option<&str>, master: SessionLabelMaster) -> HomeSt
     let mut state = state();
     state.set_label_master(master);
     state.restore_sessions(vec![alpha, session_record("beta", 1)]);
-    state.switch_move_down(); // root -> alpha
+    state.overview_move_down(); // root -> alpha
     state
 }
 
@@ -88,7 +88,7 @@ fn cycle_treats_a_stale_id_as_unset() {
 
 #[test]
 fn cycle_is_a_no_op_on_the_root_row_and_with_no_labels() {
-    // Cursor left on the root row (no `switch_move_down`).
+    // Cursor left on the root row (no `overview_move_down`).
     let mut root = state();
     root.set_label_master(master());
     root.restore_sessions(vec![session_record("alpha", 1)]);

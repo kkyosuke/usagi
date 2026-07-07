@@ -526,7 +526,7 @@ pub struct TerminalPool {
     /// authority that clears it, so a removal need not touch it (the next locked
     /// tick observes the empty map and clears it itself).
     has_sessions: Arc<AtomicBool>,
-    /// The last 切替 preview built by [`snapshot`](TerminalPool::snapshot), so a
+    /// The last 選択 preview built by [`snapshot`](TerminalPool::snapshot), so a
     /// frame whose previewed session, geometry, and output are all unchanged
     /// returns the cached view without re-resizing or re-snapshotting the grid.
     preview_cache: Option<PreviewCache>,
@@ -661,7 +661,7 @@ impl TerminalPool {
     }
 
     /// Spawn a new pane of `kind` for `dir` **without** making it active — the
-    /// background-tab path (在席's `terminal` / `agent` when the session already
+    /// background-tab path (集中's `terminal` / `agent` when the session already
     /// shows tabs). The new tab appears in the strip while the previously active
     /// pane stays attached; the caller switches to it (via [`activate_pane_id`])
     /// only once it is ready and the user has not acted in the meantime. Returns
@@ -872,7 +872,7 @@ impl TerminalPool {
     /// Close `dir`'s active pane, killing its shell (its [`PtySession`] drops).
     /// Returns whether any pane remains: `true` leaves the next tab active so the
     /// caller keeps driving, `false` means the session is empty and the caller
-    /// drops back to 在席. The whole session entry is removed when it empties.
+    /// drops back to 集中. The whole session entry is removed when it empties.
     pub fn close_active(&mut self, dir: &Path, label: &str) -> bool {
         let key = dir.to_path_buf();
         let remains = match self.sessions.get_mut(&key) {
@@ -912,7 +912,7 @@ impl TerminalPool {
 
     /// Whether `dir` already holds an agent pane running `cli`. A session keeps
     /// at most one agent *per CLI*, so a request to add another of the same CLI
-    /// (在席's `agent`, or `Ctrl-G`) reads this to jump to the existing tab
+    /// (集中's `agent`, or `Ctrl-G`) reads this to jump to the existing tab
     /// instead of spawning a duplicate — while a *different* CLI still opens a
     /// new agent pane alongside (see [`activate_agent_of`](Self::activate_agent_of)).
     pub fn has_agent_pane_of(&self, dir: &Path, cli: AgentCli) -> bool {
@@ -1189,7 +1189,7 @@ impl TerminalPool {
         // geometry — otherwise the grid is `TAB_BAR_ROWS` taller than the area it
         // is drawn into and the bottom rows (the live cursor) clip off, only to
         // reappear once the session is selected and reflowed to this same size.
-        // 切替 honours the `Ctrl-B` sidebar toggle, so the snapshot is sized to the
+        // 選択 honours the `Ctrl-B` sidebar toggle, so the snapshot is sized to the
         // current sidebar state — collapsing the rail widens the preview to match.
         let geo = ui::attached_geometry(height as usize, width as usize, sidebar);
         let generation = session.generation();

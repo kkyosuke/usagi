@@ -184,15 +184,15 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   （各リポジトリで切るブランチは `usagi/<name>`）。空・パス区切り文字を含む名前は拒否し、
   既存のセッション名は重複エラーになります（CLI と同じ検証）。`session_list` は `state.json` を読むだけの
   軽量クエリで、on-disk の reconcile は行いません。
-- `session_create` は worktree を生成するだけで、動作中の TUI の[在席](../design/home/02-layout.md#在席focus)には
+- `session_create` は worktree を生成するだけで、動作中の TUI の[集中](../design/home/02-layout.md#集中closeup)には
   入りません（`usagi mcp` は TUI を操作できない別プロセスのため）。TUI から作成したときは作成完了後にその
-  セッションへ自動で在席しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
+  セッションへ自動で集中しますが、MCP 経由の作成はホーム画面の一覧にバックグラウンドで反映されるだけで
   カーソルは動きません。
 - **`session_create` / `session_delegate_issue` は任意で `agent_cli` / `model` を受け取り、そのセッション単位で
   起動するエージェント CLI・モデルを固定できます**（ワークスペースの実効設定 `agent_cli` より優先）。コーディネータが
   「軽いタスクは小さいモデル、重い設計は大きいモデル」とタスクごとに振り分けるための口です。指定は `state.json` の
   `SessionRecord.agent`（`cli` / `model`）に記録され（正本は [data/02-workspace.md](../data/02-workspace.md#statejson)）、
-  そのセッションのエージェントペイン起動（自動 spawn・ペイン復旧・在席からの起動）時に適用されます。
+  そのセッションのエージェントペイン起動（自動 spawn・ペイン復旧・集中からの起動）時に適用されます。
   - `agent_cli` は `claude` / `codex` / `codex-fugu` / `gemini` / `agy`（大文字小文字・表示名も可、`AgentCli::from_name`）。
     未知の値は実行エラー（`isError: true`）で、セッションは作成されません。
   - `model` は CLI ごとのモデル指定フラグ（claude `--model`、codex / gemini `-m`）にそのまま展開されます。**allowlist は
@@ -294,7 +294,7 @@ push で報告**するための経路です。ポーリング（[`session_status
   を自分で呼ぶだけです（`mode` は既定の `auto` でよい）。報告文面は子エージェントが決められるため、完了した issue 番号・
   開いた PR 番号・残課題などをコーディネータにそのまま伝えられます。
 
-- **起動時キュー**にキューしたプロンプトは、[在席](../design/home/02-layout.md#在席focus)から `agent` を実行して
+- **起動時キュー**にキューしたプロンプトは、[集中](../design/home/02-layout.md#集中closeup)から `agent` を実行して
   **エージェントペインを新規 spawn する**ときに 1 回だけ消費されます（再アタッチや 2 枚目のエージェントタブには
   再送されません）。フレッシュ起動が起きるまではキューに残ります。引き渡し方はエージェント CLI 依存で、Claude は
   起動時の位置引数（`claude … '<prompt>'`）として受け取り、対話モードのままそのプロンプトに着手します。Gemini は

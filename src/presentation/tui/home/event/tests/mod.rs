@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// A [`ConfigReload`] carrying `ui` — the shape the config-close callback returns
-/// in tests that only care about the 在席 surface.
+/// in tests that only care about the 集中 surface.
 fn reload(ui: SessionActionUi) -> ConfigReload {
     ConfigReload {
         session_action_ui: ui,
@@ -89,7 +89,7 @@ impl ScriptedReader {
 impl KeyReader for ScriptedReader {
     fn read_key(&mut self) -> io::Result<Key> {
         // Default to Ctrl-C so a test can never spin forever: Esc is inert at the
-        // base 切替, so Ctrl-C (which quits when no session is live, as in these
+        // base 選択, so Ctrl-C (which quits when no session is live, as in these
         // tests) is the terminator the loop falls back to.
         self.keys.pop_front().unwrap_or(Ok(Key::CtrlC))
     }
@@ -196,7 +196,7 @@ fn noop_tab_op(_: &Path, _: Option<TabNav>) -> (Vec<String>, usize) {
 }
 
 /// A `close_tab` callback that does nothing, for the tests that never close a
-/// tab from 切替.
+/// tab from 選択.
 fn noop_close(_: &mut HomeState, _: &Path) {}
 
 /// A `reorder_session` callback reporting nothing moved, for the tests that never
@@ -439,7 +439,7 @@ fn run_full_external(
 }
 
 /// Like [`run_full`] but with a custom `tab_op`, so a test can mirror production
-/// where 切替 / 在席 republish the focused session's live pane strip each frame
+/// where 選択 / 集中 republish the focused session's live pane strip each frame
 /// (the default [`run_full`] uses [`noop_tab_op`], which never publishes a strip).
 fn run_full_tabs(
     keys: Vec<io::Result<Key>>,
@@ -524,9 +524,9 @@ fn typed(s: &str) -> Vec<io::Result<Key>> {
     s.chars().map(|c| Ok(Key::Char(c))).collect()
 }
 
-/// A scripted run of a workspace command from the (now default) 切替: a leading
+/// A scripted run of a workspace command from the (now default) 選択: a leading
 /// `:` opens the command palette, then `s` is typed into it. Without the `:` the
-/// characters would hit Switch navigation instead of the command line.
+/// characters would hit Overview navigation instead of the command line.
 fn cmd(s: &str) -> Vec<io::Result<Key>> {
     let mut keys = vec![Ok(Key::Char(':'))];
     keys.extend(typed(s));
@@ -1317,13 +1317,13 @@ fn selected_dir_roots_at_the_cursor_groups_workspace() {
         issues: Vec::new(),
     }]);
     // The primary group's root row uses the screen's base workspace root.
-    state.switch_select(0);
+    state.overview_select(0);
     assert_eq!(
         selected_dir(&state, Path::new("/primary")),
         PathBuf::from("/primary")
     );
     // An extra group's root row roots at that group's own workspace.
-    state.switch_select(2);
+    state.overview_select(2);
     assert_eq!(
         selected_dir(&state, Path::new("/primary")),
         PathBuf::from("/wsB")
@@ -1374,19 +1374,19 @@ mod attached;
 mod background_tab;
 mod background_tasks;
 mod clicks;
+mod closeup_menu;
+mod closeup_prompt;
 mod config_switch;
 mod ctrl_caret;
 mod diff;
 mod env_editor;
-mod focus_menu;
-mod focus_prompt;
 mod labels;
 mod mascot_click;
 mod notes;
+mod overview_mode;
 mod palette;
 mod pr_popup;
 mod quit_modal;
 mod session_lifecycle;
 mod startup;
-mod switch_mode;
 mod update_modal;

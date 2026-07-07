@@ -1,5 +1,5 @@
 //! End-to-end UI tests for the home screen's *main use case*: the engagement
-//! ladder 切替 (Switch) → 在席 (Focus) → 没入 (Attached).
+//! ladder 選択 (Overview) → 集中 (Closeup) → 没入 (Attached).
 //!
 //! Where [`ui::tests`](super::ui) checks individual rendered components and
 //! [`event::tests`](super::event) checks how keys drive the loop, these tie the
@@ -85,9 +85,9 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         ..Default::default()
     });
 
-    // --- 切替 (Switch): the landing screen, pick a session -----------------
+    // --- 選択 (Overview): the landing screen, pick a session -----------------
     // The default screen: the workspace title, both sessions in the left pane
-    // with the live agent surfaced, the picker prompt, and the Switch footer.
+    // with the live agent surfaced, the picker prompt, and the Overview footer.
     let landing = plain(&render_frame(ROWS, COLS, &state));
     assert!(landing.contains("usagi"), "title bar names the workspace");
     assert!(landing.contains("main") && landing.contains("feat"));
@@ -95,7 +95,7 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         landing.contains('▶'),
         "the live agent is surfaced (icon only)"
     );
-    assert!(landing.contains("switch"), "footer reports Switch");
+    assert!(landing.contains("overview"), "footer reports Overview");
     assert!(
         landing.contains("Pick a session"),
         "the picker prompt shows"
@@ -111,8 +111,8 @@ fn walking_the_engagement_ladder_renders_each_rung() {
     // The cursor moves down onto the live `feat` row. The event loop feeds the
     // highlighted session's live screen into the right-pane preview, so mirror
     // that here.
-    state.switch_move_down(); // root -> main
-    state.switch_move_down(); // main -> feat
+    state.overview_move_down(); // root -> main
+    state.overview_move_down(); // main -> feat
     state.set_terminal_view(TerminalView::from_rows(
         vec!["agent: thinking…".to_string()],
         None,
@@ -124,11 +124,11 @@ fn walking_the_engagement_ladder_renders_each_rung() {
         "the right pane previews the highlighted session's live screen"
     );
 
-    // --- 在席 (Focus): operate the session ---------------------------------
+    // --- 集中 (Closeup): operate the session ---------------------------------
     // Focusing the session opens its action surface in the right pane — the
     // menu of runnable commands (`terminal` / `agent`).
     state.clear_terminal_surface();
-    state.enter_focus(state.list().selected_index());
+    state.enter_closeup(state.list().selected_index());
     let focus = plain(&render_frame(ROWS, COLS, &state));
     assert!(
         focus.contains("session: feat"),
@@ -180,11 +180,11 @@ fn event_loop_attaches_a_live_session_end_to_end() {
     let term = Term::stdout();
     let mut reader = ScriptedReader {
         keys: [
-            // 切替 is the default landing mode, so no Ctrl-O is needed to reach it.
+            // 選択 is the default landing mode, so no Ctrl-O is needed to reach it.
             Key::ArrowDown, // root -> main
             Key::ArrowDown, // main -> feat
             Key::Enter,     // focus feat; live -> attach the pane
-            Key::Escape,    // pane closed -> Focus -> Switch
+            Key::Escape,    // pane closed -> Closeup -> Overview
             Key::CtrlC,     // nothing live -> quit
         ]
         .into_iter()

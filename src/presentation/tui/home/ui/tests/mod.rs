@@ -1,6 +1,6 @@
 use super::chrome::*;
+use super::closeup_menu::*;
 use super::diff_render::*;
-use super::focus_menu::*;
 use super::markdown_render::*;
 use super::panes::*;
 use super::pr_popup::*;
@@ -66,7 +66,7 @@ fn stripped(lines: &[String]) -> String {
 /// tests share.
 fn attached_with_tabs(active: usize) -> (HomeState, TerminalGeometry) {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], active);
     (state, attached_geometry(24, 120, Sidebar::Full))
@@ -125,10 +125,10 @@ fn preview_state(title: &str, content: &str) -> HomeState {
     state
 }
 
-/// A 切替 state with one session named `alpha` carrying `note`, the cursor moved
+/// A 選択 state with one session named `alpha` carrying `note`, the cursor moved
 /// onto it. `state_with` seeds an unrelated `main` worktree so the root row is
 /// distinct.
-fn switch_state_with_note(note: &str) -> HomeState {
+fn overview_state_with_note(note: &str) -> HomeState {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     state.restore_sessions(vec![SessionRecord {
         name: "alpha".to_string(),
@@ -141,8 +141,8 @@ fn switch_state_with_note(note: &str) -> HomeState {
         created_at: Utc::now(),
         last_active: None,
     }]);
-    state.enter_switch(super::super::state::ReturnMode::Base);
-    state.switch_move_down(); // root -> alpha
+    state.enter_overview(super::super::state::ReturnMode::Base);
+    state.overview_move_down(); // root -> alpha
     state
 }
 
@@ -151,9 +151,9 @@ mod diff;
 mod env_editor;
 mod input_footer;
 mod notices_and_tasks;
+mod overview_create_and_hints;
 mod pane_helpers;
 mod removal_modal;
 mod render_compose;
 mod right_pane;
 mod rows;
-mod switch_create_and_hints;

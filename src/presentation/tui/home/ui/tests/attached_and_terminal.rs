@@ -62,7 +62,7 @@ fn attached_tab_at_ignores_clicks_off_the_chips() {
 fn attached_tab_at_is_none_without_a_published_strip() {
     // Attached but no tabs published yet: there is nothing to click.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     let geo = attached_geometry(24, 80, Sidebar::Full);
     let chips_row = geo.origin_row - super::TAB_BAR_ROWS as u16;
@@ -87,36 +87,42 @@ fn attached_tab_at_is_none_when_the_strip_has_no_room_above_the_body() {
 }
 
 #[test]
-fn focus_tab_at_switches_from_new_tab_to_a_clicked_pane_tab() {
+fn closeup_tab_at_switches_from_new_tab_to_a_clicked_pane_tab() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     let col = chip_column(&state, geo, "2 terminal");
-    assert_eq!(focus_tab_at(&state, col, geo.origin_row, 24, 120), Some(1));
+    assert_eq!(
+        closeup_tab_at(&state, col, geo.origin_row, 24, 120),
+        Some(1)
+    );
     // The underline row is part of the same tab target.
     assert_eq!(
-        focus_tab_at(&state, col, geo.origin_row + 1, 24, 120),
+        closeup_tab_at(&state, col, geo.origin_row + 1, 24, 120),
         Some(1)
     );
 }
 
 #[test]
-fn focus_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
+fn closeup_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
     let geo = terminal_geometry(24, 120, Sidebar::Full);
-    // While Focus opens on "+ new", clicking that already-active tab is a no-op.
+    // While Closeup opens on "+ new", clicking that already-active tab is a no-op.
     let new_col = chip_column(&state, geo, "3 + new");
-    assert_eq!(focus_tab_at(&state, new_col, geo.origin_row, 24, 120), None);
+    assert_eq!(
+        closeup_tab_at(&state, new_col, geo.origin_row, 24, 120),
+        None
+    );
     // Off the chip columns, and below the two tab rows, miss.
     assert_eq!(
-        focus_tab_at(&state, geo.origin_col, geo.origin_row, 24, 120),
+        closeup_tab_at(&state, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     assert_eq!(
-        focus_tab_at(
+        closeup_tab_at(
             &state,
             new_col,
             geo.origin_row + TAB_BAR_ROWS as u16,
@@ -128,41 +134,44 @@ fn focus_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
 }
 
 #[test]
-fn focus_tab_at_switches_between_pane_tabs_while_off_the_new_tab() {
+fn closeup_tab_at_switches_between_pane_tabs_while_off_the_new_tab() {
     // Off the "+ new" tab (stepped onto a pane tab, where the "+ new" chip is
     // dropped) a click on the other, inactive pane chip selects that pane — the
     // branch that reads the strip's own active index rather than the appended
     // "+ new" slot.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
-    state.focus_tab_prev(); // leave "+ new"; pane 0 ("agent") stays active.
-    assert!(!state.focus_on_new_tab());
+    state.closeup_tab_prev(); // leave "+ new"; pane 0 ("agent") stays active.
+    assert!(!state.closeup_on_new_tab());
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     // Clicking the inactive "terminal" chip selects pane 1.
     let col = chip_column(&state, geo, "2 terminal");
-    assert_eq!(focus_tab_at(&state, col, geo.origin_row, 24, 120), Some(1));
+    assert_eq!(
+        closeup_tab_at(&state, col, geo.origin_row, 24, 120),
+        Some(1)
+    );
     // Clicking the already-active "agent" chip is a no-op.
     let active_col = chip_column(&state, geo, "1 agent");
     assert_eq!(
-        focus_tab_at(&state, active_col, geo.origin_row, 24, 120),
+        closeup_tab_at(&state, active_col, geo.origin_row, 24, 120),
         None
     );
     assert_eq!(
-        focus_tab_hit(&state, active_col, geo.origin_row, 24, 120),
+        closeup_tab_hit(&state, active_col, geo.origin_row, 24, 120),
         Some(0)
     );
 }
 
 #[test]
 fn header_tab_rows_number_each_pane_beside_the_header_and_clip_to_width() {
-    switch_tab_marker();
+    overview_tab_marker();
 }
 
-/// A 切替 (Switch) state highlighting a live `feat` session with a two-tab strip
+/// A 選択 (Overview) state highlighting a live `feat` session with a two-tab strip
 /// (`agent` / `terminal`) whose active tab is `active` — the fixture the
-/// `switch_tab_at` click tests share.
-fn switch_with_tabs(active: usize) -> HomeState {
+/// `overview_tab_at` click tests share.
+fn overview_with_tabs(active: usize) -> HomeState {
     let mut running = worktree(Some("feat"), false, BranchStatus::Local);
     running.path = PathBuf::from("/repo/run");
     let mut state = HomeState::new("usagi", vec![running], None);
@@ -172,84 +181,87 @@ fn switch_with_tabs(active: usize) -> HomeState {
     });
     state.set_terminal_view(TerminalView::from_rows(vec!["$".to_string()], None));
     state.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], active);
-    state.enter_switch(super::super::super::state::ReturnMode::Base);
-    state.switch_move_down(); // root -> feat
+    state.enter_overview(super::super::super::state::ReturnMode::Base);
+    state.overview_move_down(); // root -> feat
     state
 }
 
 #[test]
-fn switch_tab_at_switches_to_a_clicked_inactive_tab() {
-    let state = switch_with_tabs(0);
+fn overview_tab_at_switches_to_a_clicked_inactive_tab() {
+    let state = overview_with_tabs(0);
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     let col = chip_column(&state, geo, "2 terminal");
     // A click on the inactive chip selects tab index 1.
-    assert_eq!(switch_tab_at(&state, col, geo.origin_row, 24, 120), Some(1));
+    assert_eq!(
+        overview_tab_at(&state, col, geo.origin_row, 24, 120),
+        Some(1)
+    );
     // The underline marker row below the chips is part of the same target.
     assert_eq!(
-        switch_tab_at(&state, col, geo.origin_row + 1, 24, 120),
+        overview_tab_at(&state, col, geo.origin_row + 1, 24, 120),
         Some(1)
     );
 }
 
 #[test]
-fn switch_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
-    let state = switch_with_tabs(0);
+fn overview_tab_at_ignores_the_active_tab_and_clicks_off_the_strip() {
+    let state = overview_with_tabs(0);
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     // Clicking the already-active "agent" chip is a no-op.
     let active_col = chip_column(&state, geo, "1 agent");
     assert_eq!(
-        switch_tab_at(&state, active_col, geo.origin_row, 24, 120),
+        overview_tab_at(&state, active_col, geo.origin_row, 24, 120),
         None
     );
     // The indent before the first chip (the pane's left edge) hits no tab.
     assert_eq!(
-        switch_tab_at(&state, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_at(&state, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     // A column left of the pane, and rows above / below the two tab rows, miss.
     let col = chip_column(&state, geo, "2 terminal");
-    assert_eq!(switch_tab_at(&state, 0, geo.origin_row, 24, 120), None);
+    assert_eq!(overview_tab_at(&state, 0, geo.origin_row, 24, 120), None);
     assert_eq!(
-        switch_tab_at(&state, col, geo.origin_row - 1, 24, 120),
+        overview_tab_at(&state, col, geo.origin_row - 1, 24, 120),
         None
     );
     assert_eq!(
-        switch_tab_at(&state, col, geo.origin_row + TAB_BAR_ROWS as u16, 24, 120),
+        overview_tab_at(&state, col, geo.origin_row + TAB_BAR_ROWS as u16, 24, 120),
         None
     );
     // The context-menu hit-test includes the active tab, unlike the left-click
     // selection helper.
     assert_eq!(
-        switch_tab_hit(&state, active_col, geo.origin_row, 24, 120),
+        overview_tab_hit(&state, active_col, geo.origin_row, 24, 120),
         Some(0)
     );
 }
 
 #[test]
-fn switch_tab_at_is_none_for_a_non_live_row_or_without_a_strip() {
+fn overview_tab_at_is_none_for_a_non_live_row_or_without_a_strip() {
     let geo = terminal_geometry(24, 120, Sidebar::Full);
     // A non-live row draws its action menu, not a tab strip, so a click never
     // lands on a tab even if a strip is still published in the surface.
     let mut idle = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     idle.set_terminal_tabs(vec!["agent".to_string(), "terminal".to_string()], 0);
-    idle.enter_switch(super::super::super::state::ReturnMode::Base);
-    idle.switch_move_down(); // root -> main (not live)
+    idle.enter_overview(super::super::super::state::ReturnMode::Base);
+    idle.overview_move_down(); // root -> main (not live)
     assert_eq!(
-        switch_tab_at(&idle, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_at(&idle, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     // No strip published at all: nothing to hit.
-    let mut cleared = switch_with_tabs(0);
+    let mut cleared = overview_with_tabs(0);
     cleared.clear_terminal_surface();
     assert_eq!(
-        switch_tab_at(&cleared, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_at(&cleared, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     // An empty strip (no panes) is likewise inert.
-    let mut empty = switch_with_tabs(0);
+    let mut empty = overview_with_tabs(0);
     empty.set_terminal_tabs(Vec::new(), 0);
     assert_eq!(
-        switch_tab_at(&empty, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_at(&empty, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
 }
@@ -259,48 +271,48 @@ fn tab_context_hit_tests_cover_empty_and_off_row_paths() {
     let geo = terminal_geometry(24, 120, Sidebar::Full);
 
     let mut focus = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
-    focus.enter_focus(1);
+    focus.enter_closeup(1);
     focus.set_terminal_tabs(Vec::new(), 0);
     assert_eq!(
-        focus_tab_hit(&focus, geo.origin_col, geo.origin_row, 24, 120),
+        closeup_tab_hit(&focus, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     focus.set_terminal_tabs(vec!["agent".to_string()], 0);
     assert_eq!(
-        focus_tab_hit(&focus, geo.origin_col, geo.origin_row - 1, 24, 120),
+        closeup_tab_hit(&focus, geo.origin_col, geo.origin_row - 1, 24, 120),
         None
     );
-    // While Focus is on "+ new", that chip is part of the rendered strip but not
+    // While Closeup is on "+ new", that chip is part of the rendered strip but not
     // a live pane target for the context menu.
     let new_col = chip_column(&focus, geo, "2 + new");
     assert_eq!(
-        focus_tab_hit(&focus, new_col, geo.origin_row, 24, 120),
+        closeup_tab_hit(&focus, new_col, geo.origin_row, 24, 120),
         None
     );
 
     let mut switch = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
-    switch.enter_switch(super::super::super::state::ReturnMode::Base);
-    switch.switch_move_down();
+    switch.enter_overview(super::super::super::state::ReturnMode::Base);
+    switch.overview_move_down();
     switch.set_terminal_tabs(Vec::new(), 0);
     assert_eq!(
-        switch_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
     switch.set_terminal_tabs(vec!["agent".to_string()], 0);
     assert_eq!(
-        switch_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
+        overview_tab_hit(&switch, geo.origin_col, geo.origin_row, 24, 120),
         None
     );
 
-    let live = switch_with_tabs(0);
+    let live = overview_with_tabs(0);
     let col = chip_column(&live, geo, "1 agent");
     assert_eq!(
-        switch_tab_hit(&live, col, geo.origin_row - 1, 24, 120),
+        overview_tab_hit(&live, col, geo.origin_row - 1, 24, 120),
         None
     );
 }
 
-fn switch_tab_marker() {
+fn overview_tab_marker() {
     use super::super::super::terminal::tabs::TabStrip;
     // Styling is stripped in the (non-TTY) test environment, so assert on content.
     let strip = TabStrip {
@@ -363,7 +375,7 @@ fn header_tab_rows_animate_a_loading_chip_without_the_active_marker() {
 }
 
 #[test]
-fn focus_menu_row_marks_the_cursor() {
+fn closeup_menu_row_marks_the_cursor() {
     let info = CommandInfo {
         name: "terminal",
         description: "Open a shell",
@@ -371,10 +383,10 @@ fn focus_menu_row_marks_the_cursor() {
         examples: &[],
         scope: super::super::super::command::CommandScope::Session,
     };
-    let selected = console::strip_ansi_codes(&focus_menu_row(&info, true, 60)).into_owned();
+    let selected = console::strip_ansi_codes(&closeup_menu_row(&info, true, 60)).into_owned();
     assert!(selected.contains('›'));
     assert!(selected.contains("terminal"));
-    let idle = console::strip_ansi_codes(&focus_menu_row(&info, false, 60)).into_owned();
+    let idle = console::strip_ansi_codes(&closeup_menu_row(&info, false, 60)).into_owned();
     assert!(!idle.contains('›'));
 }
 
@@ -471,7 +483,7 @@ fn cursor_screen_pos_clamps_a_deferred_wrap_onto_the_last_cell() {
 #[test]
 fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     state.set_terminal_view(TerminalView::from_rows(
         vec!["$ cargo test".to_string()],
@@ -489,14 +501,14 @@ fn render_frame_draws_the_terminal_in_the_right_pane_when_attached() {
 fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
     // With the full sidebar and a short list there is room at the bottom of the
     // sidebar for the resting mascot, whose face follows the current mode:
-    // browsing in 切替 (the default), attentive in 在席, heads-down in 没入.
+    // browsing in 選択 (the default), attentive in 集中, heads-down in 没入.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     let switch = stripped(&render_frame(24, 80, &state));
-    assert!(switch.contains("(o.o)?"), "browsing face in 切替: {switch}");
+    assert!(switch.contains("(o.o)?"), "browsing face in 選択: {switch}");
 
-    state.enter_focus(1);
+    state.enter_closeup(1);
     let focus = stripped(&render_frame(24, 80, &state));
-    assert!(focus.contains("(^.^)/"), "attentive face in 在席: {focus}");
+    assert!(focus.contains("(^.^)/"), "attentive face in 集中: {focus}");
 
     state.show_attached();
     let attached = stripped(&render_frame(24, 80, &state));
@@ -510,7 +522,7 @@ fn render_frame_rests_the_mascot_in_the_bottom_left_with_a_mode_face() {
 fn render_frame_blinks_the_resting_mascot_after_an_interaction() {
     use std::time::Instant;
     // A kicked blink shuts the resting rabbit's eyes on the painted frame, so the
-    // mascot reacts to the user (here in the default 切替 browsing face).
+    // mascot reacts to the user (here in the default 選択 browsing face).
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
     let now = Instant::now();
     state.kick_mascot_blink(now);
@@ -655,7 +667,7 @@ fn note_editor_box_keeps_its_bottom_border_over_a_short_pane() {
     // it falls back to a one-line hint — the box must render its bottom border in
     // full as the note grows with each newline, never clipping it off.
     let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Pushed)]);
-    state.enter_focus(1);
+    state.enter_closeup(1);
     state.show_attached();
     // No snapshot set: the attached pane is the one-line starting hint.
     // `true` = opened from 没入 (`Ctrl-E`), re-attaching on close.

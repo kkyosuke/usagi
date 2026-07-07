@@ -1,7 +1,7 @@
 //! The mascot's flight from the Open screen into the home screen.
 //!
 //! When a project is opened the control flow is: select the project → hide the
-//! project list → play this animation → show the home screen in 切替 (Switch).
+//! project list → play this animation → show the home screen in 選択 (Overview).
 //! The usagi the Open screen showed centred at the top lifts off and glides down
 //! to the bottom-left corner — coming to rest just above where the home screen's
 //! status line sits — over a now-blank screen (the list is hidden the instant the

@@ -1,4 +1,4 @@
-//! 切替 (Switch) manual-status label keys: `Tab` / `Shift-Tab` cycle, `1`–`9`
+//! 選択 (Overview) manual-status label keys: `Tab` / `Shift-Tab` cycle, `1`–`9`
 //! select, `0` clears — driven through the real event loop with a capturing
 //! `set_label` wiring so both the branch and the persisted `(name, id)` are
 //! covered.

@@ -56,7 +56,7 @@ fn dispatch_in_scope_refuses_a_command_outside_the_surface_scope() {
         assert_eq!(result.lines[0].kind, LineKind::Error);
         assert!(result.lines[0].text.contains("not available here"));
     }
-    // Symmetrically, the 在席 prompt ([`CommandScope::Session`]) refuses the
+    // Symmetrically, the 集中 prompt ([`CommandScope::Session`]) refuses the
     // workspace-scoped `config` / `session`.
     for cmd in ["config", "session list"] {
         let result = registry().dispatch_in_scope(cmd, CommandScope::Session, &[], &[], &[]);
@@ -447,13 +447,13 @@ fn session_switch_with_a_name_requests_activation() {
 }
 
 #[test]
-fn session_switch_without_a_name_enters_switch_mode() {
-    // `session switch` with no name hands off to 切替 (Switch); the event loop
+fn session_switch_without_a_name_enters_overview_mode() {
+    // `session switch` with no name hands off to 選択 (Overview); the event loop
     // owns the mode transition, so no lines are produced here.
     let result = registry().dispatch("session switch", &[], &worktree_refs());
     assert_eq!(result.effect, Effect::EnterSwitch);
     assert!(result.lines.is_empty());
-    // Even with no sessions it still enters Switch (the left pane has the root
+    // Even with no sessions it still enters Overview (the left pane has the root
     // row to pick or create from).
     assert_eq!(
         registry().dispatch("session switch", &[], &[]).effect,
@@ -880,7 +880,7 @@ fn complete_leaves_arguments_to_an_unknown_command_untouched() {
 #[test]
 fn complete_respects_scope_for_arguments() {
     // `session` is a workspace command, so its arguments do not complete in the
-    // session scope (the 在席 prompt). `man`, a shared utility, still does.
+    // session scope (the 集中 prompt). `man`, a shared utility, still does.
     let out_of_scope = registry().complete("session cr", CommandScope::Session);
     assert_eq!(out_of_scope.input, "session cr");
     assert!(out_of_scope.candidates.is_empty());
@@ -931,7 +931,7 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(!has(&workspace, "ai"));
     assert!(!has(&workspace, "diff"));
 
-    // The 在席 (Focus) prompt offers the session-specific commands and the
+    // The 集中 (Closeup) prompt offers the session-specific commands and the
     // shared utilities, but never the workspace ones — the two surfaces are
     // physically separate, so they do not nest.
     let session = suggested_names(CommandScope::Session);
@@ -1010,7 +1010,7 @@ fn command_scope_visibility_is_same_scope_or_both() {
 #[test]
 fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
     // `commands_in_scope` returns exactly the Session-scope commands, in
-    // registry order, excluding the shared utilities. (The 在席 menu reorders
+    // registry order, excluding the shared utilities. (The 集中 menu reorders
     // these into its own fixed display order before displaying them.)
     let session: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Session)
@@ -1228,7 +1228,7 @@ fn diff_requests_opening_the_diff_view() {
 
 #[test]
 fn diff_is_a_session_command() {
-    // `diff` operates the focused session (the 在席 surface), so it is offered in
+    // `diff` operates the focused session (the 集中 surface), so it is offered in
     // the session scope and refused from the workspace `:` palette.
     let session = suggested_names(CommandScope::Session);
     assert!(session.iter().any(|n| n == "diff"));
@@ -1238,7 +1238,7 @@ fn diff_is_a_session_command() {
 
 #[test]
 fn preview_does_not_treat_diff_as_a_special_argument() {
-    // `diff` is its own 在席 command now, so `preview diff` just previews a file
+    // `diff` is its own 集中 command now, so `preview diff` just previews a file
     // named `diff` (resolved to `diff.md`) rather than opening the diff view.
     let result = registry().dispatch("preview diff", &[], &[]);
     assert!(result.lines.is_empty());

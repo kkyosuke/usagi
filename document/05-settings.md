@@ -35,19 +35,19 @@
 | 既定ワークスペース | `default_workspace` | string? | `null` | 既定で開くワークスペース名。未設定なら `null` |
 | クローン先ベース | `workspace_root` | string? | `null`（→ `~/git`） | 新規プロジェクトのクローン先ベースディレクトリ。未設定時は `~/git` にフォールバック |
 | デスクトップ通知 | `notifications_enabled` | bool | `true` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の ON/OFF |
-| ペイン復旧 | `restore_panes_enabled` | bool | `true` | 起動時に各セッションの前回開いていたペイン（agent / terminal）をバックグラウンドで復旧し、終了時にいたセッションとエンゲージメント段階（切替 / 在席 / 没入）へ復帰する。agent は会話の続きから再開する（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
+| ペイン復旧 | `restore_panes_enabled` | bool | `true` | 起動時に各セッションの前回開いていたペイン（agent / terminal）をバックグラウンドで復旧し、終了時にいたセッションとエンゲージメント段階（選択 / 集中 / 没入）へ復帰する。agent は会話の続きから再開する（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | キュー済みプロンプトの自動起動 | `autostart_queued_prompts` | bool | `true` | ホーム画面が、ライブペインを持たないセッションに[起動時キュー](03-commands/03-mcp.md#session_prompt-の挙動)されたプロンプト（MCP `session_delegate_issue` / `session_prompt`）を検知したら、そのセッションの agent ペインをバックグラウンドで自動起動し、キュー済みプロンプトを最初のメッセージとして着手させる。人がペインを開かなくても子エージェントが走り出す。`false` にすると従来どおり「次にペインをフレッシュ起動したときに消費」へ戻る（[4. オーケストレーション#キュー済みプロンプトの自動起動](04-orchestration.md#キュー済みプロンプトの自動起動)） |
 | Agent CLI | `agent_cli` | enum | `claude` | 起動する AI エージェント CLI（`claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`）。`codex_fugu` は Codex 互換 CLI で `codex-fugu` を起動する。`antigravity` は Gemini CLI の後継で `agy` を起動する |
-| セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
+| セッションアクション UI | `session_action_ui` | enum | `menu` | ホーム画面の[集中](design/home/02-layout.md#集中closeup)で右ペインに出すアクション UI のスタイル。`menu`（選べるリスト）/ `prompt`（セッションスコープのコマンドライン） |
 | サイドバー | `sidebar` | enum | `full` | ホーム画面の左セッション一覧を開く初期状態。`full`（全幅の一覧）/ `rail`（幅 5 桁に畳んだレール）。実行時は `Ctrl-B` で随時切り替えられる（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
 | 端末キー方式 | `key_scheme` | enum | `prefix` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキーの方式。`prefix`（`Ctrl-O` リーダー：`Ctrl-O` の次キーで操作。`Ctrl-O` 以外の Ctrl キーはシェル/エージェントへ流れる）/ `alt`（`Alt` 単打：bare Ctrl キーを一切奪わない。macOS は端末の Option=Meta 設定が前提） |
-| マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/home/02-layout.md#レイアウト)が操作に反応するかどうか。`true` で、切替 / 在席では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
+| マスコットの動き | `mascot_animation_enabled` | bool | `true` | ホーム画面サイドバーの[マスコットのうさぎ](design/home/02-layout.md#レイアウト)が操作に反応するかどうか。`true` で、選択 / 集中では操作のたびにまばたきし、没入では作業中の手をぴくぴく動かす。`false` にすると一切動かず静止画になる（うさぎ自体は表示される）。再描画はもともと起きる操作に乗せるだけでアイドル時のタイマーは持たない |
 | 端末スクロールバック | `terminal_scrollback_lines` | usize | `2000` | 埋め込み端末ペインが保持するスクロールバック行数。**ライブなペインごとに 1 つ**確保されるため、セッション・ペインを多数開いたときの TUI メモリの主因。深い履歴が欲しければ上げ、メモリを抑えたければ下げる（上限 `50000`） |
 | ローカル LLM 有効化 | `local_llm.enabled` | bool | `false` | 有効にすると `agent` 起動時に [ローカル LLM MCP サーバ](03-commands/04-llm-mcp.md)（`usagi-llm`）を wire し、軽量タスクをローカル LLM に委譲できる |
 | ローカル LLM モデル | `local_llm.model` | string | `qwen2.5-coder:7b` | 委譲先の Ollama モデル名（`qwen2.5-coder:7b` / `:3b` / `:1.5b` / `qwen2.5:7b`） |
 | secret 環境変数 | `env` | map<string, string> | `{}` | 全 workspace の `agent` / `terminal` 起動時に解決・注入する環境変数。キーは環境変数名、値は `op://...` など `op read` が解決できる reference。workspace ローカル設定の `env` で追加・同名上書きできる |
 | 同梱スキル機能 | `skill_features` | map<string, bool> | `{}` | usagi が各セッションに配布する[同梱スキル](04-orchestration.md#スキルの配布)を**機能（feature）単位**で ON/OFF する。キーは機能 ID（現状 `pull-request`：PR 作成・更新・修正の 3 スキルをまとめたもの）、値が有効・無効。既定値（ON）と同じ機能はマップに残さない（未記載 = 既定）。`usagi-session` は usagi 固有の常時 ON スキルで、この設定の対象外 |
-| ステータスラベル | `session_labels` | array | 既定 5 件（下記） | ホーム画面の[切替](design/home/02-layout.md#切替switch既定)で `Tab` / 数字キーによりセッションへ手で付ける**ステータスラベルのマスタ（選択肢一覧）**。空配列にすると機能が休止（`Tab` は無反応）。下の[ステータスラベル](#ステータスラベルsession_labels)節を参照 |
+| ステータスラベル | `session_labels` | array | 既定 5 件（下記） | ホーム画面の[選択](design/home/02-layout.md#選択overview既定)で `Tab` / 数字キーによりセッションへ手で付ける**ステータスラベルのマスタ（選択肢一覧）**。空配列にすると機能が休止（`Tab` は無反応）。下の[ステータスラベル](#ステータスラベルsession_labels)節を参照 |
 
 > **同梱スキル機能（`skill_features`）**: usagi はビルド時に埋め込んだ Claude Code スキルを、起動する
 > エージェントへ配布します（[スキルの配布](04-orchestration.md#スキルの配布)）。このうち**機能ごとにまとめた
@@ -57,7 +57,7 @@
 
 ### ステータスラベル（session_labels）
 
-ホーム画面の[切替](design/home/02-layout.md#切替switch既定)では、選択中のセッションに**手でステータスラベルを付けられます**（todo / 作業中 / レビュー中 …のようなカンバン的な意味づけ）。git 由来のブランチ状態（[`status`](data/02-workspace.md#status-ブランチのライフサイクル状態)）やエージェント実行状態とは別レイヤーの、**ユーザーが割り当てる第 3 のステータス**です。付けた値は各セッションに[`label_id`](data/02-workspace.md#statejson) として保存され、サイドバーの専用カラムに色付きで表示されます（[サイドバー](design/home/03-sidebar.md)）。
+ホーム画面の[選択](design/home/02-layout.md#選択overview既定)では、選択中のセッションに**手でステータスラベルを付けられます**（todo / 作業中 / レビュー中 …のようなカンバン的な意味づけ）。git 由来のブランチ状態（[`status`](data/02-workspace.md#status-ブランチのライフサイクル状態)）やエージェント実行状態とは別レイヤーの、**ユーザーが割り当てる第 3 のステータス**です。付けた値は各セッションに[`label_id`](data/02-workspace.md#statejson) として保存され、サイドバーの専用カラムに色付きで表示されます（[サイドバー](design/home/03-sidebar.md)）。
 
 `session_labels` は、そこで選べる**ラベルのマスタ（選択肢一覧）**です。配列として並べた順が `Tab` の巡回順・数字キーの割り当て順（`1` が先頭）になります。各要素は次のフィールドを持ちます。
 
@@ -86,7 +86,7 @@
 }
 ```
 
-**付け方（切替モードでの操作）**は[キー操作](design/home/04-keys.md)が正本。`Tab` / `Shift-Tab` でマスタを順送り／逆送り（未設定スロットを含めて巡回）、`1`〜`9` でマスタの N 番目を直接指定、`0` で解除する。
+**付け方（選択モードでの操作）**は[キー操作](design/home/04-keys.md)が正本。`Tab` / `Shift-Tab` でマスタを順送り／逆送り（未設定スロットを含めて巡回）、`1`〜`9` でマスタの N 番目を直接指定、`0` で解除する。
 
 **Config 画面での編集（プロジェクト単位）**: ワークスペース Config 画面（[design/04-config.md](design/04-config.md)）の `Session Labels` 行を `Space` / `Enter` で開くと、`id | name | color | icon`（1 行 1 件）のテキストエディタになる。`Ctrl-S` で保存、`Esc` で取消。`color` を省くと `gray`、`icon` を省くと既定ビュレットになる。`name` に `|` は使えない（区切り文字のため）。編集内容はこのプロジェクトの[ローカル設定](#ローカル設定プロジェクト単位の上書き)（`session_labels`）に保存される。未編集（グローバルのマスタと同一）ならローカル上書きを作らずグローバルに追従したままになり、全行を空にして保存するとこのプロジェクトで機能を休止（空配列）にできる。
 
@@ -174,7 +174,7 @@
   Notifications / Restore Panes と各スキル機能は **「グローバルに従う / ローカルで上書き（On/Off）」**、Default
   Branch は **`auto`（検出済み既定）／ リポジトリの各ブランチ**、Branch Source は **`local` / `remote`** を
   切り替えられます。Setup Commands・Env Vars（`NAME=op://...`）はモーダルで複数行を編集します。Env Vars は
-  コマンドパレットの `env` からも編集でき、そちらは Config 画面へ遷移せず Overview に重なる
+  コマンドパレットの `env` からも編集でき、そちらは Config 画面へ遷移せず コマンドパレットに重なる
   [オーバーレイエディタ](design/home/05-overlays.md#workspace-env-エディタ)で完結します。詳細は
   [design/04-config.md](design/04-config.md) を参照。
 - JSON 例・フィールド詳細は [data/02-workspace.md](data/02-workspace.md#settingsjson-プロジェクト固有の設定上書きローカル設定) を参照。
@@ -233,7 +233,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `notifications_enabled` | バックグラウンドの `agent` が入力待ち・完了になった時のデスクトップ通知の表示可否 |
 | `restore_panes_enabled` | 起動時に各セッションのペイン（agent / terminal）を復旧し、終了時にいたセッション・エンゲージメント段階へ復帰するかどうか（[4. オーケストレーション#ペインの復旧](04-orchestration.md#ペインの復旧)） |
 | `agent_cli` | `agent` コマンドが起動する AI エージェント CLI の選択（[4. オーケストレーション](04-orchestration.md)）。**セッション単位の上書き**が優先する: `session_create` / `session_delegate_issue`（MCP）で `agent_cli` / `model` を指定すると、そのセッションだけ別 CLI・別モデルで起動する（[4. オーケストレーション#アクティブなセッションと AI 連携](04-orchestration.md#アクティブなセッションと-ai-連携)、[data/02-workspace.md](data/02-workspace.md#セッションごとsessionrecord)） |
-| `session_action_ui` | ホーム画面の[在席](design/home/02-layout.md#在席focus)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
+| `session_action_ui` | ホーム画面の[集中](design/home/02-layout.md#集中closeup)で右ペインに出すアクション UI（`menu` / `prompt`）の選択 |
 | `sidebar` | ホーム画面の左セッション一覧を開く初期状態（`full` / `rail`）。実行時は `Ctrl-B` で切り替え（[サイドバーの開閉](design/home/03-sidebar.md#サイドバーの開閉ctrl-b)） |
 | `key_scheme` | 埋め込み端末（[没入](design/home/02-layout.md#没入attached)）がナビゲーション用に予約するキー方式（`prefix` / `alt`）の選択 |
 | `terminal_scrollback_lines` | 埋め込み端末ペインが保持するスクロールバック行数。ライブなペインごとに確保されるため、多数のセッションを開いたときのメモリ使用量を左右する |
@@ -242,7 +242,7 @@ CLI からも設定を確認・編集できます（[3. コマンドリファレ
 | `skill_features` | `session create` 時に、機能が有効な[同梱スキル](04-orchestration.md#スキルの配布)だけを各 worktree の `.claude/skills/` へ symlink する。無効な機能のスキルは配布しない（`usagi-session` は常時配布） |
 
 > ホーム画面の `config` で `session_action_ui` や `key_scheme` を変更すると、設定画面を閉じて
-> ホームに戻った時点で実効設定を読み直し、[在席](design/home/02-layout.md#在席focus)の右ペインや
+> ホームに戻った時点で実効設定を読み直し、[集中](design/home/02-layout.md#集中closeup)の右ペインや
 > [没入](design/home/02-layout.md#没入attached)のキー処理に反映します（ホーム画面を開き直す必要はありません）。
 
 > 設定の永続化は `usecase/settings.rs`（`load` / `save` / 各 `set_*`）と

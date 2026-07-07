@@ -99,15 +99,15 @@ pub fn farewell_lines() -> Vec<String> {
 }
 
 /// The mascot's mood while it rests at the bottom of the workspace sidebar — one
-/// per home-screen engagement mode (切替 / 在席 / 没入), so the resting rabbit's
+/// per home-screen engagement mode (選択 / 集中 / 没入), so the resting rabbit's
 /// expression and gesture mirror what the user is doing. The presentation layer
 /// maps its [`Mode`](crate::presentation::tui::home) onto this so the widget
 /// stays decoupled from the screen's own enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RabbitMood {
-    /// 切替 (Switch): browsing the session list — ears up, looking around (`?`).
+    /// 選択 (Overview): browsing the session list — ears up, looking around (`?`).
     Browsing,
-    /// 在席 (Focus): a session is in hand — bright-eyed and attentive, a raised
+    /// 集中 (Closeup): a session is in hand — bright-eyed and attentive, a raised
     /// paw (`/`).
     Attentive,
     /// 没入 (Attached): immersed in the live terminal — eyes screwed up in
