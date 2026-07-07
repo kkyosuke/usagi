@@ -220,26 +220,54 @@ impl PendingPane {
     }
 }
 
-/// A session being created in the background whose row is not in the list yet.
+/// Which background lifecycle operation a sidebar skeleton is visualising.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingSessionKind {
+    /// A session is being created; its row does not exist yet, so the skeleton is
+    /// inserted above the workspace's persistent "+ new session" row.
+    Create,
+    /// A session is being removed; its row still exists until the worker
+    /// finishes, so the skeleton replaces that existing row in place.
+    Remove,
+}
+
+/// A session lifecycle operation currently visualised by an inline sidebar
+/// skeleton.
 ///
-/// Creating a session shells out to git (worktree add / submodule init) on a
-/// worker thread, so its row only appears once that work finishes and the
-/// refreshed list lands. Meanwhile the sidebar repaints the target workspace's
-/// "+ new session" row as an animated **skeleton** carrying this pending name —
-/// the same "coming up right where it will land" idea the tab strip uses for a
-/// launching pane ([`PendingPane`]) — so the create reads as busy inline instead
-/// of stealing the top-right corner the waiting notice wants. Tracked per
-/// `(root, name)` so a create lands its skeleton in the workspace it targets.
+/// Creating and removing a session shell out to git (worktree add / submodule
+/// init / worktree remove) on a worker thread, so the sidebar keeps the
+/// operation visible where the row belongs while the worker runs. Creates insert
+/// a placeholder above the target workspace's "+ new session" row; removals
+/// replace the existing session row until the refreshed list lands (or the
+/// failure clears the placeholder). Tracked per `(kind, root, name)` so
+/// concurrent workspace operations stay routed to the row they affect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingSession {
-    /// The workspace root the session is being created under (the group whose
-    /// "+ new session" row repaints as the skeleton).
+    /// The lifecycle operation being visualised.
+    kind: PendingSessionKind,
+    /// The workspace root the session operation targets.
     root: PathBuf,
-    /// The session (branch) name being created — shown inside the skeleton.
+    /// The session (branch) name being created or removed — shown inside the
+    /// skeleton.
     name: String,
 }
 
 impl PendingSession {
+    /// The lifecycle operation being visualised.
+    pub fn kind(&self) -> PendingSessionKind {
+        self.kind
+    }
+
+    /// Whether this pending row is a create placeholder.
+    pub fn is_create(&self) -> bool {
+        self.kind == PendingSessionKind::Create
+    }
+
+    /// Whether this pending row is a remove placeholder.
+    pub fn is_remove(&self) -> bool {
+        self.kind == PendingSessionKind::Remove
+    }
+
     /// The workspace root the pending session lands in.
     pub fn root(&self) -> &Path {
         &self.root
@@ -757,14 +785,15 @@ pub struct HomeState {
     /// the event loop polls it each frame, animating its chip and — once ready —
     /// moving to it unless the user acted meanwhile. See [`PendingPane`].
     pending_pane: Option<PendingPane>,
-    /// Sessions currently being created in the background, shown as animated
-    /// skeleton rows on their target workspace's "+ new session" row until the
-    /// worker reports success or failure.
+    /// Session lifecycle operations currently shown as animated sidebar
+    /// skeletons: creates inserted above the target workspace's "+ new session"
+    /// row, removals replacing the target session row until the worker reports
+    /// success or failure.
     pending_sessions: Vec<PendingSession>,
     /// The rows of the background-task board (session create / remove running
     /// off the event-loop thread), refreshed each frame from the shared task
-    /// handle. The renderer filters these by kind: creates are mirrored as
-    /// sidebar skeletons, while removals still use the top-right status block.
+    /// handle. The renderer may filter rows by kind when a task has its own
+    /// inline affordance; the mascot still speaks the leading task label.
     tasks: Vec<TaskRow>,
     /// The workspace root's free-form note (the `⌂ root` row's memo), loaded from
     /// `state.json` at startup and updated in place when the user edits it. The
@@ -2392,30 +2421,62 @@ impl HomeState {
             .and_then(|p| p.tab.map(|tab| (tab, p.frame)))
     }
 
+    fn begin_pending_session_kind(
+        &mut self,
+        kind: PendingSessionKind,
+        root: PathBuf,
+        name: String,
+    ) {
+        if self
+            .pending_sessions
+            .iter()
+            .any(|p| p.kind == kind && p.root == root && p.name == name)
+        {
+            return;
+        }
+        self.pending_sessions
+            .push(PendingSession { kind, root, name });
+    }
+
+    fn clear_pending_session_kind(
+        &mut self,
+        kind: PendingSessionKind,
+        root: &Path,
+        name: &str,
+    ) -> bool {
+        let before = self.pending_sessions.len();
+        self.pending_sessions
+            .retain(|p| !(p.kind == kind && p.root.as_path() == root && p.name == name));
+        self.pending_sessions.len() != before
+    }
+
     /// Begin showing an inline skeleton for a session create targeting `root`.
     /// Duplicate begins for the same `(root, name)` are ignored so repeated
     /// dispatch paths cannot stack identical skeletons.
     pub fn begin_pending_session(&mut self, root: PathBuf, name: String) {
-        if self
-            .pending_sessions
-            .iter()
-            .any(|p| p.root == root && p.name == name)
-        {
-            return;
-        }
-        self.pending_sessions.push(PendingSession { root, name });
+        self.begin_pending_session_kind(PendingSessionKind::Create, root, name);
+    }
+
+    /// Begin showing an inline skeleton for a session removal targeting `root`.
+    /// Duplicate begins for the same `(root, name)` are ignored so repeated
+    /// dispatch paths cannot stack identical skeletons.
+    pub fn begin_removing_session(&mut self, root: PathBuf, name: String) {
+        self.begin_pending_session_kind(PendingSessionKind::Remove, root, name);
     }
 
     /// Clear the inline create skeleton for `name` under `root`, returning
     /// whether one was present.
     pub fn clear_pending_session(&mut self, root: &Path, name: &str) -> bool {
-        let before = self.pending_sessions.len();
-        self.pending_sessions
-            .retain(|p| !(p.root.as_path() == root && p.name == name));
-        self.pending_sessions.len() != before
+        self.clear_pending_session_kind(PendingSessionKind::Create, root, name)
     }
 
-    /// Pending session-create skeletons currently shown in the sidebar.
+    /// Clear the inline removal skeleton for `name` under `root`, returning
+    /// whether one was present.
+    pub fn clear_removing_session(&mut self, root: &Path, name: &str) -> bool {
+        self.clear_pending_session_kind(PendingSessionKind::Remove, root, name)
+    }
+
+    /// Pending session lifecycle skeletons currently shown in the sidebar.
     pub fn pending_sessions(&self) -> &[PendingSession] {
         &self.pending_sessions
     }

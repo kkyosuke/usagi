@@ -303,6 +303,7 @@ fn finished_create_does_not_auto_focus_after_another_operation() {
                             evict: None,
                             focus: Some(focus),
                             created: Some("newx".to_string()),
+                            removed: None,
                         },
                     );
                 }
@@ -536,6 +537,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
                             evict: Some(PathBuf::from("/ws/.usagi/sessions/feat")),
                             focus: Some(focus),
                             created: None,
+                            removed: Some("feat".to_string()),
                         },
                     );
                 }

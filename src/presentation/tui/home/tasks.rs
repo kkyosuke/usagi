@@ -119,8 +119,13 @@ pub struct Completion {
     /// The name of the session a create task targeted, so the event loop can
     /// clear its inline sidebar skeleton (`HomeState::begin_pending_session`)
     /// whether the create succeeded or failed. `Some(name)` for both outcomes of
-    /// a create; `None` for removals (which never raise a create skeleton).
+    /// a create; `None` for removals.
     pub created: Option<String>,
+    /// The name of the session a remove task targeted, so the event loop can
+    /// clear its inline removal skeleton (`HomeState::begin_removing_session`)
+    /// whether the removal succeeded, failed, or panicked. `Some(name)` for both
+    /// outcomes of a removal; `None` for creates.
+    pub removed: Option<String>,
 }
 
 /// Decode the message a worker thread panicked with, from the payload
@@ -169,9 +174,9 @@ pub fn panic_outcome(
         target_root: None,
         evict: None,
         focus: None,
-        // A panicked create still needs its inline skeleton cleared; a remove
-        // never raised one, so it stays `None`.
+        // A panicked task still needs its inline skeleton cleared.
         created: matches!(kind, TaskKind::CreateSession).then(|| target.to_string()),
+        removed: matches!(kind, TaskKind::RemoveSession).then(|| target.to_string()),
     };
     (log_line, completion)
 }
@@ -383,6 +388,7 @@ mod tests {
             evict: None,
             focus: None,
             created: None,
+            removed: None,
         }
     }
 
