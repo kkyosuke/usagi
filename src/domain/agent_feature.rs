@@ -131,8 +131,8 @@ impl AgentCapabilities {
 /// The capability descriptor for `cli` — the single source of truth for the
 /// support matrix.
 ///
-/// Claude, Codex, and codex-fugu receive every integration (Claude via its native
-/// flags; Codex and the codex-fugu variant via `-c` config overrides and Codex's
+/// Claude, Codex, and SakanaAi receive every integration (Claude via its native
+/// flags; Codex and SakanaAi via `-c` config overrides and Codex's
 /// hook system). Gemini and Antigravity (`agy`, the Gemini CLI's successor) get
 /// MCP through their provisioned MCP config and support the plain flags usagi can
 /// drive — an opening prompt, resume, and the conversation store usagi can clear
@@ -143,7 +143,7 @@ impl AgentCapabilities {
 /// error until its capabilities are declared here.
 pub fn capabilities(cli: AgentCli) -> AgentCapabilities {
     match cli {
-        AgentCli::Claude | AgentCli::Codex | AgentCli::CodexFugu => AgentCapabilities {
+        AgentCli::Claude | AgentCli::Codex | AgentCli::SakanaAi => AgentCapabilities {
             mcp: true,
             local_llm_mcp: true,
             phase_reporting: true,
@@ -195,8 +195,8 @@ mod tests {
         for feature in AgentFeature::ALL {
             assert_eq!(support(AgentCli::Claude, feature), Support::Yes);
             assert_eq!(support(AgentCli::Codex, feature), Support::Yes);
-            // codex-fugu reuses the Codex adapter, so it supports the same set.
-            assert_eq!(support(AgentCli::CodexFugu, feature), Support::Yes);
+            // SakanaAi reuses the Codex adapter, so it supports the same set.
+            assert_eq!(support(AgentCli::SakanaAi, feature), Support::Yes);
         }
     }
 

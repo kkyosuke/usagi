@@ -84,7 +84,7 @@ fn agent_check_reports_presence_as_ok_or_warn() {
     // one is `warn` (optional — doctor still exits 0), keyed by its display name.
     let runner = FakeRunner::new(vec!["codex-fugu"], Ok(true));
 
-    let present = agent_check(AgentCli::CodexFugu, &runner);
+    let present = agent_check(AgentCli::SakanaAi, &runner);
     assert_eq!(present.name, "sakana.ai");
     assert_eq!(present.health, Health::Ok);
     assert_eq!(present.detail.as_deref(), Some("codex-fugu"));

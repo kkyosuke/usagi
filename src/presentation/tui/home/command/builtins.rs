@@ -543,24 +543,13 @@ impl Command for AgentCommand {
     fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
         let (head, _) = arg_tokens(args);
         if head.is_empty() {
-            let mut names = Vec::new();
-            for cli in crate::domain::settings::AgentCli::ALL {
-                let cmd = cli.command().to_string();
-                let display = cli.display_name().to_lowercase();
-                // codex-fugu is branded as `sakana.ai`: surface only the
-                // display name so the internal `codex-fugu` command never
-                // appears as a completion choice. Other CLIs keep both their
-                // command and display name as selectable aliases.
-                if cli == crate::domain::settings::AgentCli::CodexFugu {
-                    names.push(display);
-                    continue;
-                }
-                names.push(cmd.clone());
-                if display != cmd.to_lowercase() {
-                    names.push(display);
-                }
-            }
-            names
+            // Suggest each CLI by its user-facing display name (e.g. `sakana.ai`),
+            // not its internal launch command (`codex-fugu`). `run` still resolves
+            // either form through `AgentCli::from_name`.
+            crate::domain::settings::AgentCli::ALL
+                .iter()
+                .map(|cli| cli.display_name().to_lowercase())
+                .collect()
         } else {
             Vec::new()
         }

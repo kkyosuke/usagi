@@ -252,10 +252,10 @@ fn closeup_prompt_agent_with_a_name_launches_that_cli() {
     let mut create: fn(&str) -> SessionOutcome = noop_create;
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
     let mut state = prompt_state();
-    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::CodexFugu]);
+    state.set_installed_agents(vec![AgentCli::Claude, AgentCli::SakanaAi]);
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Closeup (prompt)
-    keys.extend(typed("agent sakana.ai")); // pick the codex-fugu CLI by display name
+    keys.extend(typed("agent sakana.ai")); // pick SakanaAi by display name
     keys.push(Ok(Key::Enter)); // attach that agent
     keys.push(Ok(Key::Escape)); // -> Overview
     keys.push(Ok(Key::Escape)); // Esc inert; fallback Ctrl-C quits
@@ -271,5 +271,5 @@ fn closeup_prompt_agent_with_a_name_launches_that_cli() {
         .unwrap(),
         Outcome::Quit
     ));
-    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::CodexFugu))]);
+    assert_eq!(*opened.borrow(), vec![(false, Some(AgentCli::SakanaAi))]);
 }

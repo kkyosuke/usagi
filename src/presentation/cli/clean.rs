@@ -246,7 +246,7 @@ mod tests {
         );
         assert_eq!(
             resolve_agent_cli(AgentCli::Claude, Some("sakana.ai")).unwrap(),
-            AgentCli::CodexFugu
+            AgentCli::SakanaAi
         );
     }
 

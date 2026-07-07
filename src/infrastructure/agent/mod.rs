@@ -116,7 +116,7 @@ pub fn agent_for(cli: AgentCli) -> Arc<dyn Agent> {
     match cli {
         AgentCli::Claude => Arc::new(ClaudeAgent::new()),
         AgentCli::Codex => Arc::new(CodexAgent::new()),
-        AgentCli::CodexFugu => Arc::new(CodexAgent::fugu()),
+        AgentCli::SakanaAi => Arc::new(CodexAgent::fugu()),
         AgentCli::Gemini => Arc::new(GeminiAgent::new()),
         AgentCli::Antigravity => Arc::new(AntigravityAgent::new()),
     }
@@ -156,10 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_for_codex_fugu_wires_like_codex_under_the_codex_fugu_program() {
-        // codex-fugu reuses the Codex adapter, so it gets the same MCP wiring and
+    fn agent_for_sakana_ai_wires_like_codex_under_the_codex_fugu_program() {
+        // SakanaAi reuses the Codex adapter, so it gets the same MCP wiring and
         // lifecycle hooks — only the launched program name differs.
-        let agent = agent_for(AgentCli::CodexFugu);
+        let agent = agent_for(AgentCli::SakanaAi);
         assert_eq!(agent.program(), "codex-fugu");
         let launch = agent.launch_command(&Settings::default().agent_wiring("usagi"), false, None);
         assert!(launch.starts_with("codex-fugu --dangerously-bypass-hook-trust "));

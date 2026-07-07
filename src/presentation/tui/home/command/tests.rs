@@ -539,7 +539,7 @@ fn agent_with_a_name_overrides_which_cli_to_launch() {
     assert!(result.lines.is_empty());
     assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::Codex)));
     let result = registry().dispatch("agent sakana.ai", &[], &[]);
-    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::CodexFugu)));
+    assert_eq!(result.effect, Effect::OpenAgent(Some(AgentCli::SakanaAi)));
 }
 
 #[test]
@@ -551,16 +551,19 @@ fn agent_with_an_unknown_name_is_rejected_without_launching() {
 
 #[test]
 fn agent_completes_available_cli_names() {
-    // "agent " (no prefix yet) suggests all configured agent commands and display names.
+    // "agent " (no prefix yet) suggests the user-facing agent display names.
     let completion = registry().complete("agent ", CommandScope::Session);
     assert!(completion.candidates.contains(&"claude".to_string()));
     assert!(completion.candidates.contains(&"sakana.ai".to_string()));
+    assert!(completion.candidates.contains(&"antigravity".to_string()));
     assert!(
         !completion.candidates.contains(&"codex-fugu".to_string()),
-        "codex-fugu should be offered as the user-facing sakana.ai label"
+        "the SakanaAi variant is selected as sakana.ai, not by its binary name"
     );
-    assert!(completion.candidates.contains(&"agy".to_string()));
-    assert!(completion.candidates.contains(&"antigravity".to_string()));
+    assert!(
+        !completion.candidates.contains(&"agy".to_string()),
+        "Antigravity is selected by its display name, not by its binary name"
+    );
 
     // "agent cl" uniquely completes to "agent claude" with no candidates.
     let partial = registry().complete("agent cl", CommandScope::Session);

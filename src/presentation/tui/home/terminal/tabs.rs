@@ -388,7 +388,7 @@ mod tests {
             },
             PaneTab {
                 kind: PaneKind::Agent,
-                cli: Some(AgentCli::CodexFugu),
+                cli: Some(AgentCli::SakanaAi),
                 id: 2,
             },
             PaneTab {

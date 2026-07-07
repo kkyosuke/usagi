@@ -254,10 +254,10 @@ fn agent_cli_field_cycles_through_each_cli() {
 
 #[test]
 fn agent_cli_field_cycles_only_through_installed_agents() {
-    // Only Claude and sakana.ai (codex-fugu) are installed: the selector skips
+    // Only Claude and SakanaAi are installed: the selector skips
     // the uninstalled Codex and Gemini entirely.
     let mut config = config_with_workspaces(&[]);
-    config.set_available_agent_clis(vec![AgentCli::Claude, AgentCli::CodexFugu]);
+    config.set_available_agent_clis(vec![AgentCli::Claude, AgentCli::SakanaAi]);
     config.move_down();
     config.move_down();
     config.move_down();
@@ -1412,7 +1412,7 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     // The first local field is selected from the start.
     assert_eq!(config.selected_local_field(), Some(LocalField::AgentCli));
 
-    // None (follow global) -> Claude -> Codex -> CodexFugu -> Gemini
+    // None (follow global) -> Claude -> Codex -> SakanaAi -> Gemini
     // -> Antigravity -> None.
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Claude));
@@ -1422,7 +1422,7 @@ fn cycling_a_local_agent_cli_override_walks_global_then_each_value() {
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Codex));
     assert!(config.cycle_selected(true));
-    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::CodexFugu));
+    assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::SakanaAi));
     assert!(config.cycle_selected(true));
     assert_eq!(config.local().unwrap().agent_cli, Some(AgentCli::Gemini));
     assert!(config.cycle_selected(true));

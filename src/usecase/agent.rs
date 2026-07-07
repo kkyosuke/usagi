@@ -88,7 +88,7 @@ mod tests {
         let runner = FakeRunner(vec!["claude", "codex-fugu"]);
         assert_eq!(
             available_clis(&runner),
-            vec![AgentCli::Claude, AgentCli::CodexFugu]
+            vec![AgentCli::Claude, AgentCli::SakanaAi]
         );
     }
 

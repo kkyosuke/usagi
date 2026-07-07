@@ -193,13 +193,7 @@ fn theme_label(theme: Theme) -> &'static str {
 
 /// The on-disk label for an [`AgentCli`].
 fn agent_label(agent: AgentCli) -> &'static str {
-    match agent {
-        AgentCli::Claude => "claude",
-        AgentCli::Codex => "codex",
-        AgentCli::CodexFugu => "codex_fugu",
-        AgentCli::Gemini => "gemini",
-        AgentCli::Antigravity => "antigravity",
-    }
+    agent.config_label()
 }
 
 /// The on-disk label for a [`SessionActionUi`].
@@ -322,7 +316,7 @@ mod tests {
         assert_eq!(theme_label(Theme::System), "system");
         assert_eq!(agent_label(AgentCli::Claude), "claude");
         assert_eq!(agent_label(AgentCli::Codex), "codex");
-        assert_eq!(agent_label(AgentCli::CodexFugu), "codex_fugu");
+        assert_eq!(agent_label(AgentCli::SakanaAi), "sakana_ai");
         assert_eq!(agent_label(AgentCli::Gemini), "gemini");
         assert_eq!(agent_label(AgentCli::Antigravity), "antigravity");
         assert_eq!(
