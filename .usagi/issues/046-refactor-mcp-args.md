@@ -1,13 +1,13 @@
 ---
 number: 46
 title: refactor(mcp): Args 構造体の重複を解消し共通ヘルパを集約する
-status: todo
+status: done
 priority: medium
 labels: [refactor, mcp]
 dependson: []
 related: []
 created_at: 2026-06-18T22:41:11.352837+00:00
-updated_at: 2026-06-18T22:41:11.352837+00:00
+updated_at: 2026-07-07T23:48:24.171262+00:00
 ---
 
 ## 背景

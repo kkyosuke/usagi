@@ -10,7 +10,7 @@ use std::env;
 use std::path::Path;
 
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 use crate::domain::issue::{IssuePriority, IssueStatus};
 use crate::usecase::issue::{
@@ -50,24 +50,11 @@ pub enum IssueCommand {
     },
     /// List issues
     List {
-        #[arg(long)]
-        status: Option<IssueStatus>,
-        #[arg(long)]
-        priority: Option<IssuePriority>,
-        #[arg(long = "label", value_name = "LABEL")]
-        label: Option<String>,
-        /// Keep only issues whose parent is this number
-        #[arg(long, value_name = "NUMBER")]
-        parent: Option<u32>,
-        /// Keep only issues in this milestone
-        #[arg(long, value_name = "NAME")]
-        milestone: Option<String>,
+        #[command(flatten)]
+        filter: FilterArgs,
         /// Group the listing by an axis (status, priority, milestone, parent)
         #[arg(long = "group-by", value_name = "AXIS")]
         group_by: Option<GroupBy>,
-        /// Show only issues ready to start (all dependencies done)
-        #[arg(long)]
-        ready: bool,
         #[arg(long)]
         json: bool,
     },
@@ -117,20 +104,8 @@ pub enum IssueCommand {
     /// Search issue titles and bodies (case-insensitive)
     Search {
         query: String,
-        #[arg(long)]
-        status: Option<IssueStatus>,
-        #[arg(long)]
-        priority: Option<IssuePriority>,
-        #[arg(long = "label", value_name = "LABEL")]
-        label: Option<String>,
-        /// Keep only issues whose parent is this number
-        #[arg(long, value_name = "NUMBER")]
-        parent: Option<u32>,
-        /// Keep only issues in this milestone
-        #[arg(long, value_name = "NAME")]
-        milestone: Option<String>,
-        #[arg(long)]
-        ready: bool,
+        #[command(flatten)]
+        filter: FilterArgs,
         #[arg(long)]
         json: bool,
     },
@@ -141,6 +116,40 @@ pub enum IssueCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// CLI flags shared by `issue list` and `issue search`, mapped once to the
+/// usecase filter.
+#[derive(Args)]
+pub struct FilterArgs {
+    #[arg(long)]
+    status: Option<IssueStatus>,
+    #[arg(long)]
+    priority: Option<IssuePriority>,
+    #[arg(long = "label", value_name = "LABEL")]
+    label: Option<String>,
+    /// Keep only issues whose parent is this number
+    #[arg(long, value_name = "NUMBER")]
+    parent: Option<u32>,
+    /// Keep only issues in this milestone
+    #[arg(long, value_name = "NAME")]
+    milestone: Option<String>,
+    /// Show only issues ready to start (all dependencies done)
+    #[arg(long)]
+    ready: bool,
+}
+
+impl From<FilterArgs> for IssueFilter {
+    fn from(args: FilterArgs) -> Self {
+        Self {
+            status: args.status,
+            priority: args.priority,
+            label: args.label,
+            parent: args.parent,
+            milestone: args.milestone,
+            ready_only: args.ready,
+        }
+    }
 }
 
 /// Entry point for `usagi issue`: run the subcommand against the current
@@ -189,23 +198,11 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
             })
         }
         IssueCommand::List {
-            status,
-            priority,
-            label,
-            parent,
-            milestone,
+            filter,
             group_by,
-            ready,
             json,
         } => {
-            let filter = IssueFilter {
-                status,
-                priority,
-                label,
-                parent,
-                milestone,
-                ready_only: ready,
-            };
+            let filter = IssueFilter::from(filter);
             let items = issue::list(repo, &filter)?;
             match group_by {
                 Some(axis) if !json => Ok(render_grouped(items, axis)),
@@ -224,22 +221,10 @@ fn execute(repo: &Path, command: IssueCommand) -> Result<Vec<String>> {
         }
         IssueCommand::Search {
             query,
-            status,
-            priority,
-            label,
-            parent,
-            milestone,
-            ready,
+            filter,
             json,
         } => {
-            let filter = IssueFilter {
-                status,
-                priority,
-                label,
-                parent,
-                milestone,
-                ready_only: ready,
-            };
+            let filter = IssueFilter::from(filter);
             render_listing(issue::search(repo, &query, &filter)?, json)
         }
         IssueCommand::Show { number, json } => match issue::get(repo, number)? {

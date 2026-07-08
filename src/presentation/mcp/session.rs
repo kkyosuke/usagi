@@ -444,6 +444,10 @@ impl McpService for SessionMcpServer {
         "usagi-session"
     }
 
+    fn tool_names(&self) -> &'static [&'static str] {
+        &TOOL_NAMES
+    }
+
     fn tool_schemas(&self) -> Value {
         session_tool_schemas()
     }

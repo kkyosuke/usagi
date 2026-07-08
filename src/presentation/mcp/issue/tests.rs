@@ -32,7 +32,7 @@ fn initialize_advertises_tools_capability() {
     );
     assert_eq!(res["result"]["protocolVersion"], PROTOCOL_VERSION);
     assert!(res["result"]["capabilities"]["tools"].is_object());
-    assert_eq!(res["result"]["serverInfo"]["name"], "usagi");
+    assert_eq!(res["result"]["serverInfo"]["name"], "usagi-issue");
 }
 
 #[test]
@@ -44,27 +44,21 @@ fn ping_returns_empty_result() {
 }
 
 #[test]
-fn tools_list_returns_issue_and_memory_tools() {
+fn tools_list_returns_issue_tools() {
     let server = McpServer::new(tempfile::tempdir().unwrap().path());
     let res = reply(
         &server,
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     );
     let tools = res["result"]["tools"].as_array().unwrap();
-    // Six issue tools followed by four memory tools.
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 6);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"issue_create"));
     assert!(names.contains(&"issue_to_prompt"));
     assert!(names.contains(&"issue_search"));
     assert!(names.contains(&"issue_delete"));
-    assert!(names.contains(&"memory_save"));
-    assert!(names.contains(&"memory_delete"));
-    // The separate list tools were folded into search (query optional), and the
-    // memory update tool into memory_save (upsert).
+    // The separate list tool was folded into search (query optional).
     assert!(!names.contains(&"issue_list"));
-    assert!(!names.contains(&"memory_list"));
-    assert!(!names.contains(&"memory_update"));
 }
 
 #[test]
@@ -87,21 +81,6 @@ fn issue_to_prompt_renders_prompt_and_errors_when_missing() {
 
     let missing = call(&server, "issue_to_prompt", json!({ "number": 99 }));
     assert_eq!(missing["isError"], true);
-}
-
-#[test]
-fn memory_tools_are_served_by_the_same_server() {
-    let server = McpServer::new(tempfile::tempdir().unwrap().path());
-    let saved = call(
-        &server,
-        "memory_save",
-        json!({ "name": "a-fact", "title": "A fact", "type": "project" }),
-    );
-    assert_eq!(saved["isError"], false);
-    assert_eq!(tool_json(&saved)["name"], "a-fact");
-
-    let got = call(&server, "memory_get", json!({ "name": "a-fact" }));
-    assert_eq!(tool_json(&got)["title"], "A fact");
 }
 
 #[test]

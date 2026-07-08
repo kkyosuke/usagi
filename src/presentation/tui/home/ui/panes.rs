@@ -14,7 +14,7 @@ use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::diff_render::diff_pane;
 use super::markdown_render::markdown_row;
-use super::sidebar::{dim_row, status_label, AgentState};
+use super::sidebar::{dim_row, status_label, AgentLifecycle};
 use super::tabs_hit::header_tab_rows;
 use super::{clip_to_width, pad_to_width, DETACHED, ROOT_DETAIL, STATUS_COL, TERMINAL_STARTING};
 use crate::domain::settings::Sidebar;
@@ -87,7 +87,7 @@ fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String
 pub(super) fn active_session_header(state: &HomeState) -> String {
     match state.list().active() {
         Some(w) => {
-            let agent = AgentState::from_flags(
+            let agent = AgentLifecycle::from_flags(
                 state.is_live(&w.path),
                 state.is_running(&w.path),
                 state.is_waiting(&w.path),
@@ -596,7 +596,7 @@ pub(super) fn overview_preview_header(state: &HomeState) -> (String, bool) {
             )
         }
     };
-    let agent = AgentState::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
+    let agent = AgentLifecycle::from_flags(live, running, waiting, done).detail(HEADER_AGENT_COL);
     (preview_header(&name, status, agent), live)
 }
 

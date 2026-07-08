@@ -80,13 +80,15 @@ fn list_marks_ready_blocked_and_done() {
     let lines = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: None,
-            ready: false,
             json: false,
         },
     )
@@ -105,13 +107,15 @@ fn list_reports_when_empty() {
     let lines = execute(
         tmp.path(),
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: None,
-            ready: false,
             json: false,
         },
     )
@@ -130,13 +134,15 @@ fn list_ready_only_and_json() {
     let ready = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: true,
+            },
             group_by: None,
-            ready: true,
             json: false,
         },
     )
@@ -148,13 +154,15 @@ fn list_ready_only_and_json() {
     let json = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: None,
-            ready: false,
             json: true,
         },
     )
@@ -318,12 +326,14 @@ fn search_filters_and_supports_json() {
         repo,
         IssueCommand::Search {
             query: "login".to_string(),
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
-            ready: false,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             json: false,
         },
     )
@@ -335,12 +345,14 @@ fn search_filters_and_supports_json() {
         repo,
         IssueCommand::Search {
             query: "login".to_string(),
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
-            ready: false,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             json: true,
         },
     )
@@ -505,13 +517,15 @@ fn list_filters_by_parent_and_milestone() {
     let by_parent = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: Some(1),
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: Some(1),
+                milestone: None,
+                ready: false,
+            },
             group_by: None,
-            ready: false,
             json: false,
         },
     )
@@ -523,12 +537,14 @@ fn list_filters_by_parent_and_milestone() {
         repo,
         IssueCommand::Search {
             query: String::new(),
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: Some("v1".to_string()),
-            ready: false,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: Some("v1".to_string()),
+                ready: false,
+            },
             json: false,
         },
     )
@@ -587,13 +603,15 @@ fn list_grouped_by_status_emits_headers_and_footers() {
     let lines = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: Some(GroupBy::Status),
-            ready: false,
             json: false,
         },
     )
@@ -611,13 +629,15 @@ fn list_grouped_reports_when_empty() {
     let lines = execute(
         tmp.path(),
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: Some(GroupBy::Priority),
-            ready: false,
             json: false,
         },
     )
@@ -634,13 +654,15 @@ fn grouping_is_ignored_for_json_output() {
     let json = execute(
         repo,
         IssueCommand::List {
-            status: None,
-            priority: None,
-            label: None,
-            parent: None,
-            milestone: None,
+            filter: FilterArgs {
+                status: None,
+                priority: None,
+                label: None,
+                parent: None,
+                milestone: None,
+                ready: false,
+            },
             group_by: Some(GroupBy::Status),
-            ready: false,
             json: true,
         },
     )
@@ -681,13 +703,15 @@ fn run_executes_against_the_current_directory() {
     let original = env::current_dir().unwrap();
     env::set_current_dir(tmp.path()).unwrap();
     let result = run(IssueCommand::List {
-        status: None,
-        priority: None,
-        label: None,
-        parent: None,
-        milestone: None,
+        filter: FilterArgs {
+            status: None,
+            priority: None,
+            label: None,
+            parent: None,
+            milestone: None,
+            ready: false,
+        },
         group_by: None,
-        ready: false,
         json: false,
     });
     env::set_current_dir(original).unwrap();
