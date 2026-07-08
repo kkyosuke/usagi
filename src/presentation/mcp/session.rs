@@ -270,8 +270,39 @@ impl SessionMcpServer {
             crate::infrastructure::error_log::ErrorLog::record(&format!(
                 "mcp session_create \"{name}\" failed: {e:#}"
             ));
-            e.to_string()
+            self.creation_error_message(name, &e)
         })
+    }
+
+    /// Turn a raw session-creation failure into the message surfaced to the
+    /// calling agent. A permission-denied error while taking the workspace's
+    /// `.usagi/` store lock means this MCP server was blocked from writing the
+    /// parent workspace. The usual cause is that it is running inside a
+    /// *sandboxed* session whose filesystem grant is limited to its own worktree
+    /// (`.usagi/sessions/<name>/`), so it cannot create a sibling session rooted
+    /// at the workspace. Replace the cryptic `Operation not permitted` surfaced
+    /// from the lock file with the actual constraint and the supported path:
+    /// delegate from the workspace-root coordinator — e.g. hand the task to
+    /// `:root` with `session_prompt` and let it run the delegation.
+    fn creation_error_message(&self, name: &str, err: &anyhow::Error) -> String {
+        if !is_permission_denied(err) {
+            return err.to_string();
+        }
+        match &self.current_session {
+            Some(parent) => format!(
+                "cannot create session \"{name}\" from inside session \"{parent}\": writing the \
+                 workspace at {} was denied (permission denied). A sandboxed session can only \
+                 write its own worktree, so it cannot spawn a sibling session. Delegate from the \
+                 workspace-root coordinator instead — e.g. hand the task to `:root` with \
+                 `session_prompt` and let it run the delegation.",
+                self.workspace_root.display()
+            ),
+            None => format!(
+                "cannot create session \"{name}\": writing the workspace at {} was denied \
+                 (permission denied). Make sure the workspace `.usagi/` directory is writable.",
+                self.workspace_root.display()
+            ),
+        }
     }
 
     fn tool_list(&self) -> Result<String, String> {
@@ -553,6 +584,21 @@ struct NoteUpdateArgs {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// Whether an error chain's root cause is a permission-denied filesystem error.
+/// Rust maps both `EACCES` and `EPERM` ("Operation not permitted") to
+/// [`std::io::ErrorKind::PermissionDenied`], so this catches a sandbox denial on
+/// the workspace `.usagi/` store lock just as well as an ordinary read-only
+/// directory. Walks the whole `anyhow` chain because the io error is wrapped in
+/// `StoreLock::acquire`'s "failed to open ..." context.
+fn is_permission_denied(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<std::io::Error>(),
+            Some(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+        )
+    })
+}
 
 /// Derive the session name from the worktree path when it sits under
 /// `<workspace_root>/.usagi/sessions/<name>/`, returning `None` when the
@@ -1238,6 +1284,60 @@ mod tests {
         assert!(contents.contains("mcp session_create \"dup\" failed:"));
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn create_permission_denied_inside_session_explains_sandboxed_delegation() {
+        use anyhow::Context as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let server = server_in_session(root.path(), "parent", FakeBackend::ok("x"));
+        let err = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Operation not permitted",
+        ))
+        .with_context(|| {
+            format!(
+                "failed to open {}",
+                root.path().join(".usagi/.lock").display()
+            )
+        })
+        .unwrap_err();
+
+        assert!(is_permission_denied(&err));
+        let message = server.creation_error_message("child", &err);
+
+        assert!(message.contains("cannot create session \"child\" from inside session \"parent\""));
+        assert!(message.contains("sandboxed session can only write its own worktree"));
+        assert!(message.contains("`session_prompt`"));
+        assert!(message.contains("`:root`"));
+    }
+
+    #[test]
+    fn create_permission_denied_at_workspace_root_reports_unwritable_store() {
+        use anyhow::Context as _;
+
+        let root = tempfile::tempdir().unwrap();
+        // Server at the workspace root: no `current_session`, so the message is
+        // the root variant rather than the sub-session delegation hint.
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        let err = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Operation not permitted",
+        ))
+        .with_context(|| {
+            format!(
+                "failed to open {}",
+                root.path().join(".usagi/.lock").display()
+            )
+        })
+        .unwrap_err();
+
+        let message = server.creation_error_message("child", &err);
+
+        assert!(message.contains("cannot create session \"child\""));
+        assert!(!message.contains("from inside session"));
+        assert!(message.contains("workspace `.usagi/` directory is writable"));
     }
 
     #[test]
