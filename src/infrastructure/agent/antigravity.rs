@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::util::{same_dir, shell_single_quote};
+use super::util::{model_flag_parts, same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::settings::AgentCli;
 
@@ -126,16 +126,6 @@ impl AntigravityAgent {
     }
 }
 
-/// Antigravity's model flag (`--model <model>`) when the wiring pins one, else
-/// empty. The model name is escaped for the single-quoted shell context. Shared by
-/// the interactive and headless launches.
-fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
-    match wiring.model.as_deref() {
-        Some(model) => vec!["--model".to_string(), shell_single_quote(model)],
-        None => Vec::new(),
-    }
-}
-
 impl Agent for AntigravityAgent {
     fn program(&self) -> &'static str {
         // The program name lives once in the domain (`AgentCli::command`); the
@@ -157,7 +147,7 @@ impl Agent for AntigravityAgent {
             "--dangerously-skip-permission".to_string(),
         ];
         // An explicit model rides in as `--model`; absent, `agy` auto-selects.
-        parts.extend(model_flag_parts(wiring));
+        parts.extend(model_flag_parts(wiring, "--model"));
         // `-c` (`--continue`) resumes the most recent conversation. usagi only
         // passes `resume` when the worktree already has one (see
         // `has_resumable_session`), so this continues that worktree's conversation.
@@ -191,7 +181,7 @@ impl Agent for AntigravityAgent {
             "agy".to_string(),
             "--dangerously-skip-permission".to_string(),
         ];
-        parts.extend(model_flag_parts(wiring));
+        parts.extend(model_flag_parts(wiring, "--model"));
         parts.push("-p".to_string());
         parts.push(shell_single_quote(&super::session_opening_prompt(
             wiring.is_root,

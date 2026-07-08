@@ -458,7 +458,7 @@ fn main() -> anyhow::Result<()> {
 /// session and would only ever record one open-ended "still running" line.
 fn command_name(command: &Commands) -> Option<&'static str> {
     match command {
-        Commands::AgentPhase { .. } => Some("agent-phase"),
+        Commands::AgentPhase { .. } => Some(usagi::domain::agent_phase::AGENT_PHASE_COMMAND),
         Commands::Clean { .. } => Some("clean"),
         Commands::Completion { .. } => Some("completion"),
         Commands::Config { .. } => Some("config"),

@@ -54,8 +54,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::util::{same_dir, shell_single_quote};
+use super::util::{
+    agent_phase_command, mcp_server_specs, model_flag_parts, same_dir, shell_single_quote,
+};
 use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::AgentCli;
 
 /// Codex hook events wired back into usagi, paired with the phase each reports.
@@ -71,13 +74,13 @@ use crate::domain::settings::AgentCli;
 /// Events deliberately left unwired mirror Claude's: `SubagentStop` (the main
 /// turn keeps going), `PreCompact` / `PostCompact` (handled by the `SessionStart`
 /// guard, and a post-compaction tool call re-asserts `running` anyway).
-const HOOK_PHASES: [(&str, &str); 6] = [
-    ("SessionStart", "ready"),
-    ("UserPromptSubmit", "running"),
-    ("PreToolUse", "running"),
-    ("PostToolUse", "running"),
-    ("PermissionRequest", "waiting"),
-    ("Stop", "ended"),
+const HOOK_PHASES: [(&str, AgentPhase); 6] = [
+    ("SessionStart", AgentPhase::Ready),
+    ("UserPromptSubmit", AgentPhase::Running),
+    ("PreToolUse", AgentPhase::Running),
+    ("PostToolUse", AgentPhase::Running),
+    ("PermissionRequest", AgentPhase::Waiting),
+    ("Stop", AgentPhase::Ended),
 ];
 
 /// Codex MCP approval mode for usagi-owned MCP servers. `approve` skips the
@@ -172,8 +175,8 @@ fn toml_string_array(items: &[&str]) -> String {
 /// `<usagi_bin> agent-phase <phase>` via a single matcher-less command handler,
 /// e.g. `hooks.Stop=[{hooks=[{type="command",command="usagi agent-phase ended"}]}]`.
 /// The matcher is omitted so the hook matches every occurrence of the event.
-fn hook_override(usagi_bin: &str, event: &str, phase: &str) -> String {
-    let command = toml_basic_string(&format!("{usagi_bin} agent-phase {phase}"));
+fn hook_override(usagi_bin: &str, event: &str, phase: AgentPhase) -> String {
+    let command = toml_basic_string(&agent_phase_command(usagi_bin, phase));
     config_override(
         &format!("hooks.{event}"),
         &format!("[{{hooks=[{{type=\"command\",command={command}}}]}}]"),
@@ -182,27 +185,17 @@ fn hook_override(usagi_bin: &str, event: &str, phase: &str) -> String {
 
 /// The `-c` config overrides shared by every Codex launch (fresh or resumed): the
 /// usagi MCP server(s), the system-prompt instruction, and the lifecycle hooks.
-/// Codex's own model flag (`-m <model>`) when the wiring pins one, else empty.
-/// The model name is escaped for the single-quoted shell context. Shared by the
-/// interactive and headless launches.
-fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
-    match wiring.model.as_deref() {
-        Some(model) => vec!["-m".to_string(), shell_single_quote(model)],
-        None => Vec::new(),
-    }
-}
-
 fn wiring_overrides(wiring: &AgentWiring) -> Vec<String> {
     let bin = &wiring.usagi_bin;
     let local_llm_model = wiring.local_llm_model.as_deref();
     // The unified usagi MCP server is always wired in (issues, memories,
     // sessions); the optional local-LLM server joins it when enabled.
-    let mut overrides = mcp_server_overrides("usagi", bin, &["mcp"]);
-    if let Some(model) = local_llm_model {
+    let mut overrides = Vec::new();
+    for server in mcp_server_specs(wiring) {
         overrides.extend(mcp_server_overrides(
-            "usagi-llm",
-            bin,
-            &["llm-mcp", "--model", model],
+            server.name,
+            server.command,
+            &server.args,
         ));
     }
     // The system prompt rides along as Codex's additive `developer_instructions`.
@@ -384,7 +377,7 @@ impl Agent for CodexAgent {
         }
         // An explicit model rides in as Codex's `-m`; absent, Codex uses its own
         // configured default.
-        parts.extend(model_flag_parts(wiring));
+        parts.extend(model_flag_parts(wiring, "-m"));
         parts.extend(overrides);
         // A queued prompt rides along as Codex's trailing positional query (only
         // on the fresh path, where it is unambiguous). It is arbitrary user text,
@@ -410,19 +403,17 @@ impl Agent for CodexAgent {
         // is Codex's single flag for full non-interactive autonomy (it lets the
         // agent delete worktrees and run git without prompting). The MCP wiring is
         // reused but lifecycle hooks are dropped — a headless run reports no phase.
-        let bin = &wiring.usagi_bin;
         let mut parts = vec![
             self.program.to_string(),
             "exec".to_string(),
             "--dangerously-bypass-approvals-and-sandbox".to_string(),
         ];
-        parts.extend(model_flag_parts(wiring));
-        parts.extend(mcp_server_overrides("usagi", bin, &["mcp"]));
-        if let Some(model) = wiring.local_llm_model.as_deref() {
+        parts.extend(model_flag_parts(wiring, "-m"));
+        for server in mcp_server_specs(wiring) {
             parts.extend(mcp_server_overrides(
-                "usagi-llm",
-                bin,
-                &["llm-mcp", "--model", model],
+                server.name,
+                server.command,
+                &server.args,
             ));
         }
         parts.push(shell_single_quote(prompt));

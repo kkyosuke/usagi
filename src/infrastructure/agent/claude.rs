@@ -15,34 +15,10 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::util::shell_single_quote;
+use super::util::{agent_phase_command, mcp_server_specs, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
+use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::AgentCli;
-
-/// One MCP server entry: the program to run and its arguments.
-#[derive(Serialize)]
-struct McpServer {
-    command: String,
-    args: Vec<String>,
-}
-
-/// The `"mcpServers"` map wired into Claude: always the unified `usagi` server
-/// (`<usagi_bin> mcp`) so the agent can manage issues, memories and sessions;
-/// plus the optional `usagi-llm` server when its setting is enabled. Field order
-/// is the serialized key order, so `usagi` precedes `usagi-llm`.
-#[derive(Serialize)]
-struct McpServers {
-    usagi: McpServer,
-    #[serde(rename = "usagi-llm", skip_serializing_if = "Option::is_none")]
-    usagi_llm: Option<McpServer>,
-}
-
-/// The `--mcp-config` payload: `{"mcpServers": …}`.
-#[derive(Serialize)]
-struct McpConfig {
-    #[serde(rename = "mcpServers")]
-    mcp_servers: McpServers,
-}
 
 /// A single hook command: `{"type":"command","command":"…"}`.
 #[derive(Serialize)]
@@ -118,27 +94,37 @@ struct HookSettings {
     hooks: Hooks,
 }
 
-/// The `--mcp-config` JSON for Claude Code. `usagi_bin` is the resolved usagi
-/// binary path (so the wiring resolves even when usagi is run from a build and
-/// not on `$PATH`); `serde_json` escapes it, so a Windows path with backslashes
-/// stays valid JSON. The model name comes from a fixed allowlist
-/// (`LOCAL_LLM_MODELS`).
-fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
-    let config = McpConfig {
-        mcp_servers: McpServers {
-            usagi: McpServer {
-                command: usagi_bin.to_string(),
-                args: vec!["mcp".to_string()],
+/// The `--mcp-config` JSON for Claude Code. The servers come from the shared
+/// [`mcp_server_specs`] registry (the adapter SSoT), always the unified `usagi`
+/// server plus the optional `usagi-llm` server when its setting is enabled; the
+/// `command` is the resolved usagi binary path (so the wiring resolves even when
+/// usagi is run from a build and not on `$PATH`), and `serde_json` escapes it so
+/// a Windows path with backslashes stays valid JSON. `serde_json`'s object map
+/// orders keys so `usagi` precedes `usagi-llm`.
+fn mcp_config_json(wiring: &AgentWiring) -> String {
+    #[derive(Serialize)]
+    struct McpServer<'a> {
+        command: &'a str,
+        args: Vec<&'a str>,
+    }
+    #[derive(Serialize)]
+    struct McpConfig<'a> {
+        #[serde(rename = "mcpServers")]
+        mcp_servers: std::collections::BTreeMap<&'static str, McpServer<'a>>,
+    }
+
+    let mut servers = std::collections::BTreeMap::new();
+    for server in mcp_server_specs(wiring) {
+        servers.insert(
+            server.name,
+            McpServer {
+                command: server.command,
+                args: server.args,
             },
-            usagi_llm: local_llm_model.map(|model| McpServer {
-                command: usagi_bin.to_string(),
-                args: vec![
-                    "llm-mcp".to_string(),
-                    "--model".to_string(),
-                    model.to_string(),
-                ],
-            }),
-        },
+        );
+    }
+    let config = McpConfig {
+        mcp_servers: servers,
     };
     serde_json::to_string(&config).expect("MCP config serializes to JSON")
 }
@@ -148,11 +134,11 @@ fn mcp_config_json(local_llm_model: Option<&str>, usagi_bin: &str) -> String {
 /// escapes it, and the JSON contains only double quotes so it survives the
 /// single-quoted shell argument.
 fn claude_hooks_settings(usagi_bin: &str) -> String {
-    let phase = |phase: &str| {
+    let phase = |phase: AgentPhase| {
         vec![HookEntry {
             hooks: vec![HookCommand {
                 kind: "command",
-                command: format!("{usagi_bin} agent-phase {phase}"),
+                command: agent_phase_command(usagi_bin, phase),
             }],
         }]
     };
@@ -161,7 +147,7 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
     // repo root and sibling worktrees sit just above it on disk). It rides
     // alongside the phase reporter — Claude runs every `PreToolUse` hook, and a
     // deny from any one blocks the call.
-    let mut pre_tool_use = phase("running");
+    let mut pre_tool_use = phase(AgentPhase::Running);
     pre_tool_use.push(HookEntry {
         hooks: vec![HookCommand {
             kind: "command",
@@ -170,14 +156,14 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
     });
     let settings = HookSettings {
         hooks: Hooks {
-            user_prompt_submit: phase("running"),
+            user_prompt_submit: phase(AgentPhase::Running),
             pre_tool_use,
-            post_tool_use: phase("running"),
-            stop: phase("ended"),
-            notification: phase("waiting"),
-            permission_request: phase("waiting"),
-            session_start: phase("ready"),
-            session_end: phase("ended"),
+            post_tool_use: phase(AgentPhase::Running),
+            stop: phase(AgentPhase::Ended),
+            notification: phase(AgentPhase::Waiting),
+            permission_request: phase(AgentPhase::Waiting),
+            session_start: phase(AgentPhase::Ready),
+            session_end: phase(AgentPhase::Ended),
         },
     };
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
@@ -208,7 +194,7 @@ impl Agent for ClaudeAgent {
         initial_prompt: Option<&str>,
     ) -> String {
         let local_llm_model = wiring.local_llm_model.as_deref();
-        let mcp_config = mcp_config_json(local_llm_model, &wiring.usagi_bin);
+        let mcp_config = mcp_config_json(wiring);
         // The system prompt tells the agent it is already inside a usagi worktree,
         // so it skips creating one, and — when the local LLM is on — to delegate
         // light tasks to it.
@@ -258,7 +244,7 @@ impl Agent for ClaudeAgent {
         // is present, so `--dangerously-skip-permissions` lets it act (delete
         // worktrees, run git) without approval prompts. Lifecycle hooks are
         // omitted: a headless run reports no phase to watch.
-        let mcp_config = mcp_config_json(wiring.local_llm_model.as_deref(), &wiring.usagi_bin);
+        let mcp_config = mcp_config_json(wiring);
         let mcp_config = shell_single_quote(&mcp_config);
         let prompt = shell_single_quote(prompt);
         let model_flag = match wiring.model.as_deref() {
