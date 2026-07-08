@@ -12,6 +12,6 @@
 
 ## 一覧
 
-| # | ドキュメント | 内容 | 追跡 Epic |
+| # | ドキュメント | 内容 | 状態 |
 |---|---|---|---|
-| 1 | [01-root-orchestration.md](01-root-orchestration.md) | 自律オーケストレーション運用モデル（root＝オーケストレーション専任・変更は必ず session） | #105 |
+| 1 | [01-root-orchestration.md](01-root-orchestration.md) | 自律オーケストレーション運用モデル（root＝オーケストレーション専任・変更は必ず session） | 正本へ畳み込み済み（#105・[04-orchestration.md](../04-orchestration.md#自律オーケストレーション運用モデル)） |

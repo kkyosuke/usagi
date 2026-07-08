@@ -27,9 +27,17 @@ use super::memory::MemoryMcpServer;
 use super::session::{resolve_session_agent, AgentBackend, PromptMode, SessionMcpServer};
 use super::McpService;
 
-/// The composite-only orchestration tool this server adds on top of the merged
-/// issue/memory and session surfaces (see [`UsagiMcpServer::tool_delegate_issue`]).
+/// The composite-only orchestration tool that delegates a committed issue to a
+/// fresh session (see [`UsagiMcpServer::tool_delegate_issue`]).
 const DELEGATE_ISSUE_TOOL: &str = "session_delegate_issue";
+
+/// The composite-only orchestration tool that starts a triage/design session
+/// from a free-form brief, without requiring a pre-existing issue.
+const DELEGATE_BRIEF_TOOL: &str = "session_delegate_brief";
+
+/// All tools owned directly by this composite server (rather than by one
+/// sub-server).
+const COMPOSITE_TOOLS: [&str; 2] = [DELEGATE_ISSUE_TOOL, DELEGATE_BRIEF_TOOL];
 
 /// Issue tools that write to the repository's **git-tracked** `.usagi/issues/`
 /// store. When the server runs from the workspace root (`worktree ==
@@ -112,13 +120,56 @@ impl UsagiMcpServer {
         [&self.issue, &self.memory, &self.session]
     }
 
+    /// Delegate a free-form brief to a fresh triage/design session in one call:
+    /// create the session, wrap the brief with the origin-flow instructions, and
+    /// queue it for the session's first launch. This is the "work origin" pair
+    /// to [`Self::tool_delegate_issue`]: root can start work without writing a
+    /// git-tracked issue file itself, and the triage session can then create
+    /// issue(s) on its own branch.
+    fn tool_delegate_brief(&self, arguments: Value) -> Result<String, String> {
+        let args: DelegateBriefArgs = super::parse_args(arguments)?;
+        let agent =
+            resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+        let name = match args.name {
+            Some(name) => name,
+            None => self.next_triage_session_name()?,
+        };
+        let prompt = triage_prompt(&args.brief);
+        let created = self.session.create_session(&name, agent)?;
+        let (channel, _detail) = self
+            .session
+            .deliver_prompt(&name, &prompt, PromptMode::Queue)?;
+
+        Ok(super::to_pretty(&json!({
+            "session": created.name,
+            "root": created.root,
+            "worktrees": created.worktrees,
+            "delivered_to": channel.as_str(),
+        })))
+    }
+
+    /// Pick the next safe default name for a triage/design session.
+    fn next_triage_session_name(&self) -> Result<String, String> {
+        let sessions =
+            crate::usecase::session::list(&self.workspace_root).map_err(|e| e.to_string())?;
+        let mut number = 1;
+        loop {
+            let candidate = format!("triage-{number}");
+            if sessions.iter().all(|session| session.name != candidate) {
+                return Ok(candidate);
+            }
+            number += 1;
+        }
+    }
+
     /// Delegate an issue to a fresh session in one call: render the issue as an
     /// agent prompt, create a new session, and queue that prompt for the
-    /// session's first launch. This is the composite's own orchestration tool —
-    /// it does not add new business logic, it drives the existing sub-tools
-    /// (`issue_to_prompt`, `session_create`, `session_prompt`) so their behaviour
-    /// stays single-sourced. The primitives remain available for callers that
-    /// need to tweak the prompt or target an existing session.
+    /// session's first launch. This is the composite's own orchestration tool:
+    /// it drives the existing sub-tools (`issue_to_prompt`, `session_create`,
+    /// `session_prompt`) so their behaviour stays single-sourced, with only the
+    /// cross-cutting base-commit validation added at the composition seam. The
+    /// primitives remain available for callers that need to tweak the prompt or
+    /// target an existing session.
     fn tool_delegate_issue(&self, arguments: Value) -> Result<String, String> {
         let args: DelegateIssueArgs = super::parse_args(arguments)?;
         // Drive the sub-servers through their typed helpers (not their serialized
@@ -183,6 +234,24 @@ impl UsagiMcpServer {
     }
 }
 
+/// Arguments for [`UsagiMcpServer::tool_delegate_brief`].
+#[derive(Deserialize)]
+struct DelegateBriefArgs {
+    /// Free-form triage/design instructions from the coordinator.
+    brief: String,
+    /// Session name to create; defaults to the next available `triage-<n>`.
+    #[serde(default)]
+    name: Option<String>,
+    /// Optional agent CLI the delegated session launches with, overriding the
+    /// workspace effective `agent_cli`. Accepts `claude` / `codex` / `sakana.ai`
+    /// / `gemini` / `antigravity` (case-insensitive).
+    #[serde(default)]
+    agent_cli: Option<String>,
+    /// Optional model the session's agent CLI runs (rendered as `--model` / `-m`).
+    #[serde(default)]
+    model: Option<String>,
+}
+
 /// Arguments for [`UsagiMcpServer::tool_delegate_issue`].
 #[derive(Deserialize)]
 struct DelegateIssueArgs {
@@ -237,13 +306,82 @@ fn delegate_issue_schema() -> Value {
     })
 }
 
+/// The JSON Schema for the composite's `session_delegate_brief` tool.
+fn delegate_brief_schema() -> Value {
+    json!({
+        "name": DELEGATE_BRIEF_TOOL,
+        "description": "Delegate a free-form brief to a fresh triage/design \
+            session in one step: create a new session (worktree + branch \
+            usagi/<name>) and queue a wrapped triage prompt for the session's \
+            first agent launch. Use this as the origin flow when work does not \
+            yet have a committed issue: the session should investigate, create \
+            issue(s) from inside its worktree, and open a PR so the backlog \
+            appears on main. `name` defaults to the next available triage-<n>. \
+            Optionally pin the agent CLI and model this session launches with \
+            (agent_cli / model). Returns { session, root, worktrees, \
+            delivered_to }.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "brief": {
+                    "type": "string",
+                    "description": "Free-form task brief for the triage/design session"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Session name to create (default: next available triage-<n>)"
+                },
+                "agent_cli": {
+                    "type": "string",
+                    "enum": ["claude", "codex", "sakana.ai", "gemini", "antigravity"],
+                    "description": "Agent CLI the delegated session launches (default: the workspace effective agent_cli)"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model the session's agent CLI runs (default: the CLI's own default)"
+                }
+            },
+            "required": ["brief"]
+        }
+    })
+}
+
+/// Wrap a coordinator brief with the stable instructions that make the delegated
+/// session act as a work-origin / triage session.
+fn triage_prompt(brief: &str) -> String {
+    format!(
+        "\
+# Triage / design brief
+
+{brief}
+
+## Operating instructions
+
+You are a triage/design session running in your own usagi session worktree. The
+coordinator/root must not modify git-tracked repository files directly, so any
+repository-changing work that follows from this brief belongs on this session's
+branch.
+
+- Investigate the brief and decide the right implementation issue(s).
+- Create or update issue files from inside this session worktree (for example
+  with `issue_create` / `issue_update` or the local CLI) so the backlog change
+  rides this branch.
+- Split broad work into clear implementation issues when that is more useful
+  than doing everything in one task.
+- Open a PR for the issue/backlog changes (and any directly requested
+  documentation/design updates) so they can be merged to `main`.
+- Do not ask root to create or edit git-tracked issue files for you.
+"
+    )
+}
+
 impl McpService for UsagiMcpServer {
     fn server_name(&self) -> &str {
         "usagi"
     }
 
     fn tool_names(&self) -> &'static [&'static str] {
-        &[DELEGATE_ISSUE_TOOL]
+        &COMPOSITE_TOOLS
     }
 
     fn tool_schemas(&self) -> Value {
@@ -256,6 +394,7 @@ impl McpService for UsagiMcpServer {
             .flat_map(|server| super::into_schema_array(server.tool_schemas()))
             .collect();
         tools.push(delegate_issue_schema());
+        tools.push(delegate_brief_schema());
         Value::Array(tools)
     }
 
@@ -279,6 +418,8 @@ impl McpService for UsagiMcpServer {
         // the tool name. Unknown tools become ordinary MCP tool errors.
         if name == DELEGATE_ISSUE_TOOL {
             self.tool_delegate_issue(arguments)
+        } else if name == DELEGATE_BRIEF_TOOL {
+            self.tool_delegate_brief(arguments)
         } else {
             self.subservers()
                 .into_iter()
@@ -431,7 +572,10 @@ mod tests {
     fn tools_list_merges_issue_memory_and_session_tools() {
         let tmp = tempfile::tempdir().unwrap();
         let server = server_at(tmp.path());
-        assert_eq!(server.tool_names(), ["session_delegate_issue"]);
+        assert_eq!(
+            server.tool_names(),
+            ["session_delegate_issue", "session_delegate_brief"]
+        );
 
         let res = reply(
             &server,
@@ -439,8 +583,8 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 6 issue + 4 memory + 8 session + 1 composite orchestration tool.
-        assert_eq!(names.len(), 19);
+        // 6 issue + 4 memory + 8 session + 2 composite orchestration tools.
+        assert_eq!(names.len(), 20);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"issue_search"));
@@ -454,6 +598,7 @@ mod tests {
         assert!(names.contains(&"session_note_get"));
         assert!(names.contains(&"session_note_update"));
         assert!(names.contains(&"session_delegate_issue"));
+        assert!(names.contains(&"session_delegate_brief"));
         // The list / send / update tools were folded into search / session_prompt
         // / memory_save.
         assert!(!names.contains(&"issue_list"));
@@ -665,6 +810,115 @@ mod tests {
         let body: Value =
             serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(body["session"], "my-work");
+    }
+
+    #[test]
+    fn triage_prompt_wraps_the_brief_with_origin_instructions() {
+        let prompt = triage_prompt("Find the right backlog split for autonomous orchestration.");
+        assert!(prompt.contains("Find the right backlog split for autonomous orchestration."));
+        assert!(prompt.contains("issue_create"));
+        assert!(prompt.contains("Do not ask root"));
+        assert!(prompt.contains("triage/design session"));
+    }
+
+    #[test]
+    fn delegate_brief_defaults_to_next_triage_name_and_queues_for_launch() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+        // Take the first triage name so the default has to skip to triage-2.
+        call(&server, "session_create", json!({"name":"triage-1"}));
+
+        let result = call(
+            &server,
+            "session_delegate_brief",
+            json!({"brief":"Find the right backlog split for autonomous orchestration."}),
+        );
+        assert_eq!(result["isError"], false);
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        // The default name skips the taken triage-1 and lands on triage-2, and a
+        // freshly created session has no live pane so the prompt is queued.
+        assert_eq!(body["session"], "triage-2");
+        assert_eq!(body["delivered_to"], "queue");
+
+        // The session really exists now (create ran through to the workspace).
+        let listed = call(&server, "session_list", json!({}));
+        let listed: Value =
+            serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+        let names: Vec<&str> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"triage-2"));
+    }
+
+    #[test]
+    fn delegate_brief_accepts_explicit_name_and_pins_agent_cli_and_model() {
+        use crate::domain::settings::AgentCli;
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+
+        let result = call(
+            &server,
+            "session_delegate_brief",
+            json!({
+                "brief":"Design a small follow-up issue.",
+                "name":"design-origin",
+                "agent_cli":"claude",
+                "model":"claude-sonnet-4-5"
+            }),
+        );
+        assert_eq!(result["isError"], false);
+        let body: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["session"], "design-origin");
+
+        let store = crate::infrastructure::workspace_store::WorkspaceStore::new(root.path());
+        let session = &store.load().unwrap().unwrap().sessions[0];
+        assert_eq!(session.name, "design-origin");
+        assert_eq!(session.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(session.agent.model.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn delegate_brief_with_an_unknown_agent_cli_errors_before_creating_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path());
+
+        let result = call(
+            &server,
+            "session_delegate_brief",
+            json!({"brief":"triage this","agent_cli":"gpt"}),
+        );
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown agent_cli"));
+        let listed = call(&server, "session_list", json!({}));
+        assert_eq!(listed["content"][0]["text"], "[]");
+    }
+
+    #[test]
+    fn delegate_brief_surfaces_a_session_list_error_when_choosing_a_default_name() {
+        // The default-name path lists sessions to pick the next free triage-<n>.
+        // A corrupt state.json makes that listing fail, and the tool surfaces the
+        // error instead of creating a session.
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let usagi_dir = root.path().join(".usagi");
+        fs::create_dir_all(&usagi_dir).unwrap();
+        fs::write(usagi_dir.join("state.json"), "not json").unwrap();
+        let server = server_at(root.path());
+
+        // No explicit name, so next_triage_session_name runs and hits the error.
+        let result = call(&server, "session_delegate_brief", json!({"brief":"triage"}));
+        assert_eq!(result["isError"], true);
     }
 
     #[test]
