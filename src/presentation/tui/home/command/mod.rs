@@ -4,7 +4,7 @@
 //! a side effect. Commands are not hard-coded into a `match`; each is a value
 //! implementing the [`Command`] trait, collected in a [`CommandRegistry`]. This
 //! is the extension point the follow-up command issues (`session`, `space`,
-//! `ai`, `terminal`, …) plug into: implement [`Command`] and register it.
+//! `terminal`, …) plug into: implement [`Command`] and register it.
 //!
 //! Everything here is pure (no terminal IO), so the whole command surface —
 //! dispatch, completion, and each command's behaviour — is directly testable.
@@ -75,18 +75,11 @@ pub enum Effect {
     /// CLI to launch: `None` uses the workspace's configured agent (the common
     /// fast path), `Some(cli)` overrides it for this launch (`agent <name>`).
     OpenAgent(Option<AgentCli>),
-    /// Open an AI agent in the selected worktree already working on `prompt` (the
-    /// user ran `ai <prompt>`). Like [`OpenAgent`](Self::OpenAgent) it launches the
-    /// workspace's configured agent CLI in the session's worktree, but it also
-    /// hands the agent an opening prompt so it starts on the task at once. The
-    /// event loop resolves the directory and configured CLI, queues the prompt for
-    /// the fresh agent spawn, and launches the pane.
-    OpenAgentPrompt(String),
     /// Open the local-LLM chat screen (the user ran `chat` in 集中, or picked its
-    /// menu row). Unlike [`OpenAgent`](Self::OpenAgent) / [`OpenAgentPrompt`](Self::OpenAgentPrompt),
-    /// which launch an external agent CLI in the worktree, this hands off to a
-    /// dedicated screen that converses with the workspace's configured local LLM
-    /// (via Ollama). The event loop owns the screen and repaints over it on return.
+    /// menu row). Unlike [`OpenAgent`](Self::OpenAgent), which launches an external
+    /// agent CLI in the worktree, this hands off to a dedicated screen that
+    /// converses with the workspace's configured local LLM (via Ollama). The event
+    /// loop owns the screen and repaints over it on return.
     OpenChat,
     /// Close (remove) the focused session (the user ran `close` in 集中). It is the
     /// session equivalent of `session remove <name>`: a clean session's
@@ -156,7 +149,6 @@ impl Effect {
             | Effect::OpenTerminal
             | Effect::OpenExternalTerminal
             | Effect::OpenAgent(_)
-            | Effect::OpenAgentPrompt(_)
             | Effect::OpenChat
             | Effect::OpenConfig
             | Effect::CloseSession { .. }
@@ -239,7 +231,7 @@ pub enum CommandScope {
     /// `config`, `doctor`.
     Workspace,
     /// Operating a single session, the *集中 (Closeup)* right pane: `terminal`,
-    /// `agent`, `ai`.
+    /// `agent`.
     Session,
     /// A utility available in every scope: `man`, `history`, `clear`, `quit`.
     Both,

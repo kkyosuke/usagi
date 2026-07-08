@@ -233,8 +233,8 @@ impl Agent for ClaudeAgent {
         // A queued prompt rides along as Claude's positional query, so the agent
         // opens interactively already working on it. Placed last so it is the
         // trailing argument, behind a `--` end-of-options marker: the prompt is
-        // arbitrary user text (`ai <prompt>` / MCP `session_prompt`), so one
-        // starting with `-` (e.g. `ai --help`) must reach the CLI as the query,
+        // arbitrary user text (MCP `session_prompt`), so one
+        // starting with `-` (e.g. `--help`) must reach the CLI as the query,
         // not be parsed as a flag that aborts the launch.
         let prompt_arg = match initial_prompt {
             Some(prompt) => format!(" -- {}", shell_single_quote(prompt)),
@@ -417,7 +417,7 @@ mod tests {
         let plain = ClaudeAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(!plain.contains("fix issue #50"));
         assert_eq!(launch, format!("{plain} -- 'fix issue #50'"));
-        // A dash-leading prompt (`ai --help`) stays behind the separator as the
+        // A dash-leading prompt (`--help`) stays behind the separator as the
         // positional query instead of aborting the launch as an unknown flag.
         let dashed =
             ClaudeAgent::new().launch_command(&wiring("usagi", None), false, Some("--help"));

@@ -15,7 +15,7 @@
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
 | コマンドパレット（統括。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` |
-| 集中（Closeup）の右ペイン | Session（個別） | `agent` / `ai` / `chat` / `close` / `diff` / `terminal`（Menu はコマンド名のアルファベット順 agent → chat → close → diff → terminal で並べる。`ai <prompt>` は引数が要るので Prompt で入力、`chat` はローカル LLM が使えるときだけ Menu に出る） |
+| 集中（Closeup）の右ペイン | Session（個別） | `agent` / `chat` / `close` / `diff` / `terminal`（Menu はコマンド名のアルファベット順 agent → chat → close → diff → terminal で並べる。`chat` はローカル LLM が使えるときだけ Menu に出る） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
 ワークスペース全体のコマンドは、選択（Overview）・集中（Closeup）から `:`（コロン）で開く**コマンドパレット**（中央オーバーレイ）で実行します。
@@ -37,7 +37,6 @@
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
 | `agent [名前]` | `terminal` ＋ Agent CLI を起動（Session スコープ）。引数なしは設定中の既定 CLI を起動。名前（`claude` / `codex` / `codex-fugu` / `sakana.ai` / `gemini` / `agy` / `antigravity`）を付けるとその CLI を起動する |
-| `ai <prompt>` | 設定中の既定 Agent CLI を選択中セッションの worktree で起動し、`<prompt>` を初期プロンプトとして渡す（Session スコープ。Prompt で入力する） |
 | `chat` | ローカル LLM（Ollama 経由）と対話する。`terminal` / `agent` と同じく集中の右ペインに表示（Session スコープ）。外部 Agent CLI ではなくローカルモデルに直接話しかけるため、クラウド Agent のトークンを消費しない |
 | `diff` | 集中中セッションの差分（既定ブランチとの差分）を右ペインに GitHub 風に表示（行番号・シンタックスハイライト・単語差分・unified/split。Session スコープ） |
 | `close [--force]` | 集中中のセッションを削除し、完了まで他の操作が無ければ選択（Switch）で隣のセッションへカーソルを移す（`session remove <名前>` と同じ。既定では未コミット変更があれば削除を拒否し `--force` の案内をログに出す。`--force` / `-f` で未コミット変更を破棄。Session スコープ） |
@@ -162,24 +161,11 @@ Codex は `codex resume --last`（`codex-fugu` も同様に `codex-fugu resume -
 入力待ちの検知・`◆ waiting` マーカー・デスクトップ通知の挙動は
 [design/home/04-keys.md](../design/home/04-keys.md#使用中-agent-の表示入力待ちの検知と通知) を参照してください。
 
-## ai
-
-**集中の Prompt** から `ai <prompt>` と入力すると、設定中の**既定 Agent CLI**を選択中セッションの worktree で起動し、
-`<prompt>` を初期プロンプトとして渡します。起動先のディレクトリ・MCP 配線・会話再開の扱いは [`agent`](#agent) と同じです。
-
-- 動作中の agent ペインが無い場合（未起動、または CLI が終了済み）: 既定 CLI を新規起動し、`<prompt>` を CLI の初期プロンプト引数として渡す。プロンプトは `--` 区切り（Gemini・Antigravity は `-i=<prompt>`）で渡すため、`-` で始まるテキストもフラグと誤解釈されない。
-- 動作中の agent ペインがある場合: そのペインのタブへ移動し、`<prompt>` を対話入力として送る（貼り付け＋Enter。bracketed paste 対応の CLI には 1 ブロックとして貼り付く）。送り先はそのペインで動いている CLI（`agent <名前>` で起動した既定以外の CLI でも同じ）で、新規起動はしないため次項のインストール判定も行わない。
-- `<prompt>` を省くと `usage: ai <prompt>` を表示して起動しない。
-- 新規起動になる場合で、インストール済み Agent CLI の検出結果（起動時にバックグラウンドで PATH を調べる）に既定 CLI が**含まれていない**ときは、Config でインストール済みの Agent CLI を選ぶよう案内して起動しない。検出が未完了、または 1 つも見つからなかったときは判定せず起動を試みる（`agent` と同じ寛容さ）。Config で既定 CLI を変更すると、Config を閉じた時点で `ai` / `agent` に反映される。
-
-集中の **Menu** は引数を入力できないため `ai` 行を出しません。`ai` を使うワークスペースでは
-[設定](../05-settings.md#設定項目)の `session_action_ui` を `prompt` にします。
-
 ## chat
 
 **集中の右ペイン**で実行します。ローカル LLM（[設定](../05-settings.md#設定項目)の `local_llm.model` が指すモデルを
 Ollama で提供）と対話します。`terminal` / `agent` の埋め込みペインと同じく**右ペインに表示**され、左のセッション一覧はそのまま残ります。
-`agent` / `ai` が外部 Agent CLI を worktree で起動するのに対し、`chat` はローカルモデルに直接話しかけるので、ちょっとした質問に
+`agent` が外部 Agent CLI を worktree で起動するのに対し、`chat` はローカルモデルに直接話しかけるので、ちょっとした質問に
 クラウド Agent のトークンを使いません。
 
 - 引数は取りません。集中の **Menu**（`agent` / `chat` / `close` / `terminal` をアルファベット順に並べる）でカーソル＋`Enter`、

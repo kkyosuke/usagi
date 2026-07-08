@@ -389,7 +389,7 @@ impl Agent for CodexAgent {
         // A queued prompt rides along as Codex's trailing positional query (only
         // on the fresh path, where it is unambiguous). It is arbitrary user text,
         // so it is escaped for the single-quoted shell context and placed behind a
-        // `--` end-of-options marker: a prompt starting with `-` (e.g. `ai --help`)
+        // `--` end-of-options marker: a prompt starting with `-` (e.g. `--help`)
         // must bind to the positional, not be parsed as a flag.
         if !resuming {
             if let Some(prompt) = initial_prompt {
@@ -669,7 +669,7 @@ mod tests {
         let plain = CodexAgent::new().launch_command(&wiring("usagi", None), false, None);
         assert!(!plain.contains("fix issue #50"));
         assert_eq!(launch, format!("{plain} -- 'fix issue #50'"));
-        // A dash-leading prompt (`ai --help`) stays behind the separator as the
+        // A dash-leading prompt (`--help`) stays behind the separator as the
         // positional query instead of aborting the launch as an unknown flag.
         let dashed =
             CodexAgent::new().launch_command(&wiring("usagi", None), false, Some("--help"));

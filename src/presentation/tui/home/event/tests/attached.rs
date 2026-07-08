@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn switch_ctrl_o_a_opens_the_focus_modal() {
-    // In Switch, the `Ctrl-O` leader followed by `a` opens the Focus modal on the
+    // In Switch, the `Ctrl-O` leader followed by `a` opens the Closeup modal on the
     // selected row — entering Closeup so its action surface shows.
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
@@ -24,7 +24,7 @@ fn switch_ctrl_o_a_opens_the_focus_modal() {
 
 #[test]
 fn closeup_ctrl_o_a_opens_the_focus_modal() {
-    // Inside Closeup, the `Ctrl-O` leader followed by `a` opens the Focus modal
+    // Inside Closeup, the `Ctrl-O` leader followed by `a` opens the Closeup modal
     // through the shared prefix grammar.
     let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
     let mut create: fn(&str) -> SessionOutcome = noop_create;
@@ -32,7 +32,7 @@ fn closeup_ctrl_o_a_opens_the_focus_modal() {
     let keys = vec![
         Ok(Key::Char('t')),    // Switch -> Closeup on the selected row
         Ok(Key::Char(CTRL_O)), // leader
-        Ok(Key::Char('a')),    // open the Focus modal
+        Ok(Key::Char('a')),    // open the Closeup modal
     ];
     assert!(matches!(
         run_full(

@@ -22,7 +22,7 @@ mod e2e_tests;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use console::Term;
 
 use crate::domain::workspace::Workspace;
@@ -866,17 +866,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // The session's pinned model (if any) rides into this launch's wiring; an
             // unpinned session keeps the base wiring (the CLI's own default model).
             let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
-            // `ai <prompt>` sets an opening prompt for this one configured-agent
-            // launch. When a fresh agent pane is spawned it is passed as the agent
-            // CLI's initial prompt; when an agent pane already exists we type it
-            // into that live pane after activating it. Ordinary `agent` launches
-            // leave this empty and still fall back to a prompt queued by MCP
-            // `session_prompt` for fresh spawns.
-            let direct_prompt = if run_agent {
-                home.take_agent_initial_prompt()
-            } else {
-                None
-            };
             let agent = crate::infrastructure::agent::agent_for(cli);
             // Build the agent command for this worktree on demand: when it already
             // has a Claude conversation, launch with `--continue` so `:agent` resumes
@@ -910,28 +899,25 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
             // spawns; `enter` spawns only when no pane is live yet; reusing an existing
             // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
-            // spawn happens it stays queued for the next launch. A direct `ai <prompt>`
-            // takes precedence without consuming the queued MCP prompt.
+            // spawn happens it stays queued for the next launch.
             let fresh_agent_spawn =
                 run_agent && !reuse_agent && (new_pane || !pool.has_live_pane(dir));
-            let queued_prompt = if fresh_agent_spawn && direct_prompt.is_none() {
+            let queued_prompt = if fresh_agent_spawn {
                 crate::infrastructure::agent_prompt_store::take(dir)
             } else {
                 None
             };
             // Announce a queued prompt when it is actually delivered: it may have
             // been sitting in the store since long before this launch (MCP
-            // `session_prompt`, or one parked while an `ai <prompt>` took
-            // precedence), so the log makes visible why the agent opens already
-            // working on something the user did not just type.
+            // `session_prompt`), so the log makes visible why the agent opens
+            // already working on something the user did not just type.
             if let Some(prompt) = queued_prompt.as_deref() {
                 home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
             }
-            // The command for this fresh spawn carries the opening prompt (direct
-            // `ai` first, otherwise queued MCP prompt); the command reused for later
-            // `Ctrl-O a` agent tabs never re-sends that one-shot prompt, so only the
-            // first launch receives it.
-            let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            // The command for this fresh spawn carries the queued MCP prompt; the
+            // command reused for later `Ctrl-O a` agent tabs never re-sends that
+            // one-shot prompt, so only the first launch receives it.
+            let spawn_prompt = queued_prompt.as_deref();
             let _ = agent.provision(&launch_wiring);
             let spawn_command = agent.launch_command(&launch_wiring, resume, spawn_prompt);
             let plain_command = match spawn_prompt {
@@ -991,18 +977,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             env: &pane_env,
                         },
                     )?;
-                }
-                if let Some(prompt) = direct_prompt.as_deref().filter(|_| !fresh_agent_spawn) {
-                    // Deliver the `ai <prompt>` to the reused live agent pane as
-                    // pasted text plus Enter. `encode_paste` (the same encoder the
-                    // pane's real paste path uses) wraps it in bracketed-paste
-                    // markers when the agent TUI enabled them, so a prompt starting
-                    // with `/`, `!` or other key-bound characters is inserted as
-                    // one text block instead of being interpreted as keystrokes.
-                    let pty = pool.active_pty(dir).context("agent pane is not active")?;
-                    let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
-                    input.push(b'\r');
-                    pty.write(&input)?;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
@@ -1170,25 +1144,24 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         };
 
     // Spawn a new pane for `dir` through the unified pending-tab path. Mirrors the
-    // launch resolution `open_terminal` does (agent CLI choice, resume, opening
-    // prompt, per-worktree env), but defers the actual pool spawn until the
-    // off-thread environment resolution lands. The tab is selected at dispatch
-    // time (as a placeholder while resolving, then as a real pool tab once
-    // spawned); readiness only decides whether to attach the still-selected tab.
-    // Reusing an existing agent tab opens no new pane: it activates that tab,
-    // delivers any `ai <prompt>`, and returns `None` so the caller re-attaches
-    // instead of tracking a loading tab.
+    // launch resolution `open_terminal` does (agent CLI choice, resume,
+    // per-worktree env), but defers the actual pool spawn until the off-thread
+    // environment resolution lands. The tab is selected at dispatch time (as a
+    // placeholder while resolving, then as a real pool tab once spawned);
+    // readiness only decides whether to attach the still-selected tab. Reusing an
+    // existing agent tab opens no new pane: it activates that tab and returns
+    // `None` so the caller re-attaches instead of tracking a loading tab.
     // The single background pane launch in flight (see [`PendingSpawn`]); held on
     // the UI thread across frames and driven by the three hooks below.
     let pending_spawn = std::cell::RefCell::new(None::<PendingSpawn>);
 
     // Dispatch a pending pane launch: resolve the launch spec on the UI thread
-    // (consuming the one-shot agent choice / opening prompt) and kick the
-    // per-worktree environment resolution off-thread, WITHOUT spawning a pane yet —
+    // (consuming the one-shot agent choice) and kick the per-worktree environment
+    // resolution off-thread, WITHOUT spawning a pane yet —
     // so nothing blocks and no centre loader is painted. `poll_pending_spawn` spawns
     // the selected pane once the environment lands. Reusing an existing agent tab
-    // opens no new pane: it activates that tab, delivers any `ai <prompt>`, and
-    // returns `Reused` so the caller re-attaches instead of tracking a loading tab.
+    // opens no new pane: it activates that tab and returns `Reused` so the caller
+    // re-attaches instead of tracking a loading tab.
     let mut start_pending_spawn =
         |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
             // CLI priority mirrors `open_terminal`: 集中 choice, then the session's
@@ -1200,11 +1173,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 .or(session_agent.cli)
                 .unwrap_or_else(|| home.default_agent());
             let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
-            let direct_prompt = if run_agent {
-                home.take_agent_initial_prompt()
-            } else {
-                None
-            };
             let agent = crate::infrastructure::agent::agent_for(cli);
             let resume = agent.has_resumable_session(dir);
             let label = home
@@ -1226,20 +1194,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 let mut pool = pool.borrow_mut();
                 if run_agent && pool.has_agent_pane_of(dir, cli) {
                     pool.activate_agent_of(dir, cli);
-                    if let Some(prompt) = direct_prompt.as_deref() {
-                        if let Some(pty) = pool.active_pty(dir) {
-                            let mut input = pane_input::encode_paste(prompt, pty.bracketed_paste());
-                            input.push(b'\r');
-                            pty.write(&input)?;
-                        }
-                    }
                     return Ok(event::StartPending::Reused);
                 }
             }
             // A fresh spawn: deliver a prompt queued for this session (MCP
-            // `session_prompt`) when no direct `ai <prompt>` took precedence, exactly
-            // as `open_terminal` does on a fresh agent-pane spawn.
-            let queued_prompt = if run_agent && direct_prompt.is_none() {
+            // `session_prompt`), exactly as `open_terminal` does on a fresh
+            // agent-pane spawn.
+            let queued_prompt = if run_agent {
                 crate::infrastructure::agent_prompt_store::take(dir)
             } else {
                 None
@@ -1247,7 +1208,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             if let Some(prompt) = queued_prompt.as_deref() {
                 home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
             }
-            let spawn_prompt = direct_prompt.as_deref().or(queued_prompt.as_deref());
+            let spawn_prompt = queued_prompt.as_deref();
             if run_agent {
                 let _ = agent.provision(&launch_wiring);
             }
@@ -1447,7 +1408,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         match crate::presentation::tui::config::run_in(t, Some(config_root.clone()))? {
             // Back to home: re-read the (possibly changed) Session Action UI,
             // 没入 key scheme, and default Agent CLI so the 集中 surface, the
-            // pane's key handling, and the next `agent` / `ai` launch reflect the
+            // pane's key handling, and the next `agent` launch reflect the
             // edit without reopening the home screen.
             crate::presentation::tui::config::Outcome::Back => {
                 let settings = effective_settings(&config_root);

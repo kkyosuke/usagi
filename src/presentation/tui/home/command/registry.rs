@@ -3,9 +3,9 @@
 //! new commands can be added with [`CommandRegistry::register`].
 
 use super::builtins::{
-    AgentCommand, AiCommand, ChatCommand, ClearCommand, CloseCommand, ComingSoonCommand,
-    ConfigCommand, DiffCommand, EnvCommand, HistoryCommand, IssueCommand, ManCommand,
-    PreviewCommand, QuitCommand, SessionCommand, TerminalCommand, UniteCommand,
+    AgentCommand, ChatCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand,
+    DiffCommand, EnvCommand, HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand,
+    SessionCommand, TerminalCommand, UniteCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -26,12 +26,11 @@ impl CommandRegistry {
     /// command name), so the `:` palette hints and `man`'s listing read in a
     /// predictable order. The not-yet implemented `doctor` command is present as a
     /// discoverable "coming soon" placeholder; every other command (`session`,
-    /// `terminal`, `agent`, `ai`, `chat`, …) is fully implemented.
+    /// `terminal`, `agent`, `chat`, …) is fully implemented.
     pub fn with_builtins() -> Self {
         Self {
             commands: vec![
                 Box::new(AgentCommand),
-                Box::new(AiCommand),
                 Box::new(ChatCommand),
                 Box::new(ClearCommand),
                 Box::new(CloseCommand),
@@ -77,7 +76,7 @@ impl CommandRegistry {
     }
 
     /// The commands belonging exactly to `scope`, in registry order — used by the
-    /// 集中 (Closeup) menu to list a session's runnable commands (`agent`, `ai`,
+    /// 集中 (Closeup) menu to list a session's runnable commands (`agent`,
     /// `terminal`, `close`); the menu reorders them into its own fixed display
     /// order itself. Unlike
     /// completion this is an exact-scope filter, so it excludes the shared

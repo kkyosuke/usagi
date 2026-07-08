@@ -280,7 +280,7 @@ fn render_frame_closeup_menu_keeps_its_height() {
     let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
     // The right pane carries the action menu; no results band in Closeup.
     assert!(joined.contains("terminal"));
-    assert!(joined.contains("session: main"));
+    assert!(joined.contains("Closeup: main"));
 }
 
 #[test]

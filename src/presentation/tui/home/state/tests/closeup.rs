@@ -429,11 +429,10 @@ fn closeup_tab_prev_walks_the_new_tab_then_panes() {
 }
 
 #[test]
-fn closeup_menu_hides_prompt_taking_ai_command() {
+fn closeup_menu_lists_session_actions() {
     // Focus a session row (not the root) so `close` is offered.
     let mut state = state();
     state.enter_closeup(1);
-    // `ai <prompt>` needs typed arguments, so it is always kept out of the menu.
     // `chat` (local LLM) is gated on availability, so by default (LLM unavailable)
     // the menu lists the pane actions and `close` in alphabetical order.
     let names: Vec<&str> = state
@@ -441,17 +440,14 @@ fn closeup_menu_hides_prompt_taking_ai_command() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert!(!names.contains(&"ai"));
     assert_eq!(names, vec!["agent", "close", "diff", "terminal"]);
-    // Once the local LLM is usable (enabled + model pulled), `chat` appears — but
-    // `ai` (prompt-taking) never does.
+    // Once the local LLM is usable (enabled + model pulled), `chat` appears.
     state.set_ai_available(true);
     let names: Vec<&str> = state
         .closeup_menu_commands()
         .iter()
         .map(|i| i.name)
         .collect();
-    assert!(!names.contains(&"ai"));
     assert_eq!(names, vec!["agent", "chat", "close", "diff", "terminal"]);
 }
 
@@ -522,7 +518,7 @@ fn closeup_menu_keeps_agent_when_an_agent_pane_is_already_open() {
 fn closeup_menu_cursor_moves_and_wraps_and_selects() {
     let mut state = state();
     state.enter_closeup(1);
-    // With `ai` hidden, alphabetical order: agent (0, highlighted by default),
+    // Alphabetical order: agent (0, highlighted by default),
     // close (1), diff (2), terminal (3).
     assert_eq!(state.closeup_selected_command().unwrap().name, "agent");
     state.closeup_menu_move_down();
@@ -818,18 +814,6 @@ fn closeup_prompt_submit_on_empty_input_is_a_noop() {
     assert_eq!(submission.effect, Effect::None);
     assert!(submission.recorded.is_none());
     assert!(state.cmdline.history.is_empty());
-}
-
-#[test]
-fn closeup_prompt_runs_the_ai_prompt_command() {
-    let mut state = state();
-    state.enter_closeup(1);
-    for c in "ai hi".chars() {
-        state.closeup_prompt_mut().insert(c);
-    }
-    let submission = state.closeup_prompt_submit();
-    assert_eq!(submission.effect, Effect::OpenAgentPrompt("hi".to_string()));
-    assert!(submission.recorded.is_some());
 }
 
 #[test]

@@ -121,10 +121,8 @@ pub struct ConfigReload {
     /// The effective 没入 key scheme (the `Ctrl-O` prefix or single `Alt`-chords),
     /// so the pane's key handling reflects the edit without reopening the screen.
     pub key_scheme: KeyScheme,
-    /// The effective default Agent CLI, so `agent` / `ai` (and the 集中 menu's
-    /// `Launch <名前>` row) pick up a CLI switched in Config without restarting —
-    /// in particular, `ai`'s "open config and choose an installed Agent CLI"
-    /// refusal hint actually works in-session.
+    /// The effective default Agent CLI, so `agent` (and the 集中 menu's
+    /// `Launch <名前>` row) picks up a CLI switched in Config without restarting.
     pub agent_cli: AgentCli,
     /// Whether the local LLM is usable (enabled and its model pulled), gating the
     /// `chat` row in the 集中 menu — re-read when Config closes so enabling the LLM

@@ -260,7 +260,7 @@ fn chord(key: &KeyEvent, raw: char, letter: char) -> bool {
 pub(super) enum Reserved {
     /// Zoom out to 選択 (Overview), leaving every pane alive in the pool.
     Detach,
-    /// Open the Focus modal inside Closeup, the session's action menu / prompt.
+    /// Open the Closeup modal inside Closeup, the session's action menu / prompt.
     ToFocus,
     /// Switch to the next tab in place.
     NextTab,
