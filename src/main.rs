@@ -509,8 +509,9 @@ fn log_error(error: &anyhow::Error) {
 fn install_mcp_panic_log_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
         usagi::infrastructure::error_log::ErrorLog::record(&format!(
-            "panic while running usagi mcp: {info}"
+            "panic while running usagi mcp: {info}\nbacktrace:\n{backtrace}"
         ));
         previous(info);
     }));
