@@ -1,13 +1,13 @@
 ---
 number: 120
 title: refactor(agent): model_flag_parts の三重定義と MCP サーバ台帳・agent-phase 語彙を SSoT 化する
-status: todo
+status: done
 priority: medium
 labels: [refactor, agent, review]
 dependson: []
 related: [119]
 created_at: 2026-07-04T23:14:45.302134+00:00
-updated_at: 2026-07-04T23:14:45.302134+00:00
+updated_at: 2026-07-08T22:18:12.370453+00:00
 ---
 
 ## 背景（なぜ問題か）

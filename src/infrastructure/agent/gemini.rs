@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::util::{same_dir, shell_single_quote};
+use super::util::{model_flag_parts, same_dir, shell_single_quote};
 use crate::domain::agent::{Agent, AgentWiring};
 use crate::domain::settings::AgentCli;
 
@@ -116,16 +116,6 @@ impl GeminiAgent {
     }
 }
 
-/// Gemini's own model flag (`-m <model>`) when the wiring pins one, else empty.
-/// The model name is escaped for the single-quoted shell context. Shared by the
-/// interactive and headless launches.
-fn model_flag_parts(wiring: &AgentWiring) -> Vec<String> {
-    match wiring.model.as_deref() {
-        Some(model) => vec!["-m".to_string(), shell_single_quote(model)],
-        None => Vec::new(),
-    }
-}
-
 impl Agent for GeminiAgent {
     fn program(&self) -> &'static str {
         // The program name lives once in the domain (`AgentCli::command`); the
@@ -145,7 +135,7 @@ impl Agent for GeminiAgent {
         let mut parts = vec!["gemini".to_string()];
         // An explicit model rides in as Gemini's `-m`; absent, Gemini uses its own
         // configured default.
-        parts.extend(model_flag_parts(wiring));
+        parts.extend(model_flag_parts(wiring, "-m"));
         // `-r latest` continues the most recent conversation for this directory.
         if resume {
             parts.push("-r".to_string());
@@ -176,7 +166,7 @@ impl Agent for GeminiAgent {
         // to its worktree; the combined text is escaped for the single-quoted shell
         // context.
         let mut parts = vec!["gemini".to_string(), "--yolo".to_string()];
-        parts.extend(model_flag_parts(wiring));
+        parts.extend(model_flag_parts(wiring, "-m"));
         parts.push("-p".to_string());
         parts.push(shell_single_quote(&super::session_opening_prompt(
             wiring.is_root,

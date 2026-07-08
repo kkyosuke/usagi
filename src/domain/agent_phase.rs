@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The hidden CLI subcommand used by lifecycle hooks to report an agent phase.
+pub const AGENT_PHASE_COMMAND: &str = "agent-phase";
+
+const READY_NAME: &str = "ready";
+const RUNNING_NAME: &str = "running";
+const WAITING_NAME: &str = "waiting";
+const ENDED_NAME: &str = "ended";
+
 /// The lifecycle phase of an agent CLI (e.g. Claude Code) running inside a
 /// session's embedded shell, as reported by the agent's own lifecycle hooks.
 ///
@@ -42,10 +50,10 @@ impl AgentPhase {
     /// worktree with no recorded phase as `none` and otherwise this name.
     pub fn as_str(self) -> &'static str {
         match self {
-            AgentPhase::Ready => "ready",
-            AgentPhase::Running => "running",
-            AgentPhase::Waiting => "waiting",
-            AgentPhase::Ended => "ended",
+            AgentPhase::Ready => READY_NAME,
+            AgentPhase::Running => RUNNING_NAME,
+            AgentPhase::Waiting => WAITING_NAME,
+            AgentPhase::Ended => ENDED_NAME,
         }
     }
 

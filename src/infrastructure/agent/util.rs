@@ -6,6 +6,7 @@
 //! rather than being copied per adapter.
 
 use crate::domain::agent::AgentWiring;
+use crate::domain::agent_phase::{AgentPhase, AGENT_PHASE_COMMAND};
 use std::path::Path;
 
 /// Wrap `text` as a single shell argument in single quotes, safe to drop into a
@@ -26,6 +27,54 @@ pub(super) fn same_dir(a: &Path, b: &Path) -> bool {
             (std::fs::canonicalize(a), std::fs::canonicalize(b)),
             (Ok(x), Ok(y)) if x == y
         )
+}
+
+const USAGI_MCP_SERVER_NAME: &str = "usagi";
+const USAGI_LLM_MCP_SERVER_NAME: &str = "usagi-llm";
+const USAGI_MCP_SUBCOMMAND: &str = "mcp";
+const USAGI_LLM_MCP_SUBCOMMAND: &str = "llm-mcp";
+const LLM_MCP_MODEL_FLAG: &str = "--model";
+
+/// One usagi-owned MCP server, before any adapter-specific encoding (Claude JSON,
+/// Codex TOML overrides, or a persisted MCP config file). Keeping the server
+/// names and subcommands here makes this registry the adapter SSoT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct McpServerSpec<'a> {
+    pub(super) name: &'static str,
+    pub(super) command: &'a str,
+    pub(super) args: Vec<&'a str>,
+}
+
+/// The usagi-owned MCP servers implied by the launch wiring. The unified `usagi`
+/// server is always present; the local-LLM server is present only when enabled.
+pub(super) fn mcp_server_specs(wiring: &AgentWiring) -> Vec<McpServerSpec<'_>> {
+    let mut servers = vec![McpServerSpec {
+        name: USAGI_MCP_SERVER_NAME,
+        command: &wiring.usagi_bin,
+        args: vec![USAGI_MCP_SUBCOMMAND],
+    }];
+    if let Some(model) = wiring.local_llm_model.as_deref() {
+        servers.push(McpServerSpec {
+            name: USAGI_LLM_MCP_SERVER_NAME,
+            command: &wiring.usagi_bin,
+            args: vec![USAGI_LLM_MCP_SUBCOMMAND, LLM_MCP_MODEL_FLAG, model],
+        });
+    }
+    servers
+}
+
+/// A model flag rendered as CLI parts (`<flag> <model>`) when the wiring pins an
+/// agent model. The flag spelling remains adapter-specific; quoting is shared.
+pub(super) fn model_flag_parts(wiring: &AgentWiring, flag: &str) -> Vec<String> {
+    match wiring.model.as_deref() {
+        Some(model) => vec![flag.to_string(), shell_single_quote(model)],
+        None => Vec::new(),
+    }
+}
+
+/// The hook command that reports an agent lifecycle phase back to usagi.
+pub(super) fn agent_phase_command(usagi_bin: &str, phase: AgentPhase) -> String {
+    format!("{usagi_bin} {AGENT_PHASE_COMMAND} {}", phase.as_str())
 }
 
 /// Write or merge usagi's MCP server configuration into the JSON file at `path`.
@@ -63,24 +112,17 @@ pub(super) fn update_mcp_config(path: &Path, wiring: &AgentWiring) -> Result<(),
     let servers_obj = mcp_servers
         .as_object_mut()
         .expect("mcpServers is forced to an object above");
-    servers_obj.insert(
-        "usagi".to_string(),
-        serde_json::json!({
-            "command": wiring.usagi_bin,
-            "args": ["mcp"]
-        }),
-    );
-
-    if let Some(ref model) = wiring.local_llm_model {
+    for server in mcp_server_specs(wiring) {
         servers_obj.insert(
-            "usagi-llm".to_string(),
+            server.name.to_string(),
             serde_json::json!({
-                "command": wiring.usagi_bin,
-                "args": ["llm-mcp", "--model", model]
+                "command": server.command,
+                "args": server.args,
             }),
         );
-    } else {
-        servers_obj.remove("usagi-llm");
+    }
+    if wiring.local_llm_model.is_none() {
+        servers_obj.remove(USAGI_LLM_MCP_SERVER_NAME);
     }
 
     let serialized =
@@ -128,6 +170,68 @@ mod tests {
         // A path that cannot be canonicalized (does not exist) and is raw-different
         // also does not match.
         assert!(!same_dir(real, Path::new("/nonexistent/xyz")));
+    }
+
+    #[test]
+    fn model_flag_parts_quotes_the_pinned_model_only_when_present() {
+        let mut wiring = AgentWiring {
+            usagi_bin: "usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+            is_root: false,
+            sandbox_writable_roots: Vec::new(),
+        };
+        assert!(model_flag_parts(&wiring, "-m").is_empty());
+
+        wiring.model = Some("o'clock model".to_string());
+        assert_eq!(
+            model_flag_parts(&wiring, "--model"),
+            vec!["--model".to_string(), r"'o'\''clock model'".to_string()]
+        );
+    }
+
+    #[test]
+    fn mcp_server_specs_are_the_neutral_usagi_server_registry() {
+        let mut wiring = AgentWiring {
+            usagi_bin: "/bin/usagi".to_string(),
+            local_llm_model: None,
+            model: None,
+            is_root: false,
+            sandbox_writable_roots: Vec::new(),
+        };
+        assert_eq!(
+            mcp_server_specs(&wiring),
+            vec![McpServerSpec {
+                name: "usagi",
+                command: "/bin/usagi",
+                args: vec!["mcp"],
+            }]
+        );
+
+        wiring.local_llm_model = Some("qwen2.5-coder:7b".to_string());
+        assert_eq!(
+            mcp_server_specs(&wiring),
+            vec![
+                McpServerSpec {
+                    name: "usagi",
+                    command: "/bin/usagi",
+                    args: vec!["mcp"],
+                },
+                McpServerSpec {
+                    name: "usagi-llm",
+                    command: "/bin/usagi",
+                    args: vec!["llm-mcp", "--model", "qwen2.5-coder:7b"],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_phase_command_uses_the_shared_cli_verb_and_phase_name() {
+        assert_eq!(
+            agent_phase_command("/bin/usagi", AgentPhase::Waiting),
+            "/bin/usagi agent-phase waiting"
+        );
     }
 
     #[test]
