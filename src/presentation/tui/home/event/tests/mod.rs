@@ -968,8 +968,27 @@ fn run_with_tasks(
 /// proving the loop wakes on the timeout tick (to reflect a background agent's
 /// badge) instead of blocking on the next key.
 fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
+    run_with_state_monitor_watch(
+        reader,
+        sample_state(),
+        MonitorHandle::with_live(vec![PathBuf::from("/r/main")]),
+        false,
+    )
+}
+
+fn run_with_pending_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
+    let mut state = sample_state();
+    state.begin_pending_session(PathBuf::from("/r/main"), "new-session".to_string());
+    run_with_state_monitor_watch(reader, state, MonitorHandle::detached(), false)
+}
+
+fn run_with_state_monitor_watch(
+    reader: &mut dyn KeyReader,
+    state: HomeState,
+    monitor: MonitorHandle,
+    watch_sessions: bool,
+) -> Result<Outcome> {
     let term = Term::stdout();
-    let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/main")]);
     let tasks = TaskHandle::new();
     let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
@@ -1001,7 +1020,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
     let mut wiring = Wiring {
         interaction_epoch: 0,
-        watch_sessions: false,
+        watch_sessions,
         workspace_root: Path::new("/ws"),
         persist: &mut persist,
         dispatch_create: &mut dispatch_create,
@@ -1034,7 +1053,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
     event_loop(
         &term,
         reader,
-        sample_state(),
+        state,
         &monitor,
         &UpdateHandle::new(),
         &SessionsRefreshHandle::new(),
@@ -1052,81 +1071,7 @@ fn run_with_live_session(reader: &mut dyn KeyReader) -> Result<Outcome> {
 /// turning the watcher flag on, so the loop's idle-watching read path is
 /// exercised directly.
 fn run_idle_watching(reader: &mut dyn KeyReader) -> Result<Outcome> {
-    let term = Term::stdout();
-    let monitor = MonitorHandle::detached();
-    let tasks = TaskHandle::new();
-    let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
-    let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
-    let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
-    let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
-    let mut evict = |_: &Path| {};
-    let mut branches: fn() -> Vec<String> = no_branches;
-    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
-    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
-    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
-    let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
-    let mut close: fn(&mut HomeState, &Path) = noop_close;
-    let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
-    let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
-    let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
-    let mut save_resume = |_: &str, _: ResumeLevel| {};
-    let mut save_last_active = |_: &[(String, DateTime<Utc>)]| {};
-    let mut open_url: fn(&str) = noop_open_url;
-    let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
-    let mut dispatch_update = || {};
-    let mut unite_resolve: fn(&str) -> std::result::Result<GroupSource, String> = no_unite_resolve;
-    let mut tab_action = |_: &mut HomeState, _: &Path, _: usize, _: TabMenuAction| {};
-    let mut chat_ask = ready_chat_ask;
-    let mut start_pending_spawn: fn(&mut HomeState, &Path, bool) -> anyhow::Result<StartPending> =
-        noop_start_pending_spawn;
-    let mut poll_pending_spawn: fn(&Path) -> PendingPoll = noop_poll_pending_spawn;
-    let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
-    let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
-    let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
-    let mut wiring = Wiring {
-        interaction_epoch: 0,
-        watch_sessions: true,
-        workspace_root: Path::new("/ws"),
-        persist: &mut persist,
-        dispatch_create: &mut dispatch_create,
-        rename_display: &mut rename,
-        set_note: &mut set_note_fake,
-        set_label: &mut set_label_fake,
-        reorder_session: &mut reorder_fake,
-        dispatch_remove: &mut dispatch_remove,
-        unite_resolve: &mut unite_resolve,
-        dispatch_update: &mut dispatch_update,
-        evict_pool: &mut evict,
-        existing_branches: &mut branches,
-        open_terminal: &mut open,
-        start_pending_spawn: &mut start_pending_spawn,
-        poll_pending_spawn: &mut poll_pending_spawn,
-        activate_pending: &mut activate_pending,
-        clear_pending_spawn: &mut clear_pending_spawn,
-        open_url: &mut open_url,
-        open_external_terminal: &mut open_external_terminal,
-        open_config: &mut config,
-        chat_ask: &mut chat_ask,
-        preview: &mut preview,
-        tab_op: &mut tab_op,
-        close_tab: &mut close,
-        tab_action: &mut tab_action,
-        save_resume: &mut save_resume,
-        save_last_active: &mut save_last_active,
-        autostart_queued: &mut autostart_queued,
-    };
-    event_loop(
-        &term,
-        reader,
-        sample_state(),
-        &monitor,
-        &UpdateHandle::new(),
-        &SessionsRefreshHandle::new(),
-        &OneShot::<bool>::new(),
-        &OneShot::<Vec<AgentCli>>::new(),
-        &tasks,
-        &mut wiring,
-    )
+    run_with_state_monitor_watch(reader, sample_state(), MonitorHandle::detached(), true)
 }
 
 /// Run the loop recording every `set_note` call, with a custom `open_terminal`

@@ -1255,7 +1255,7 @@ const SKELETON_TICK_MS: i64 = 90;
 
 /// The animation frame for the create skeletons this paint, derived from the
 /// frame's wall-clock instant so the wave advances between repaints.
-pub(super) fn skeleton_frame(now: DateTime<Utc>) -> usize {
+pub(crate) fn skeleton_frame(now: DateTime<Utc>) -> usize {
     (now.timestamp_millis().rem_euclid(1 << 30) / SKELETON_TICK_MS) as usize
 }
 

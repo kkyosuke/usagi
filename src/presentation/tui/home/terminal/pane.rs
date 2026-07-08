@@ -46,6 +46,7 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use console::Term;
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, MouseButton, MouseEventKind,
@@ -154,6 +155,14 @@ const IDLE_REEVAL: Duration = Duration::from_millis(200);
 /// cannot see, while interactive changes (input echo, resize, scroll, selection,
 /// hover, badges) still repaint immediately so the pane stays responsive.
 const MIN_FRAME: Duration = Duration::from_millis(16);
+
+/// How often an attached pane wakes purely to advance the inline session
+/// create/remove skeleton in the sidebar. The skeleton frame itself is derived
+/// from wall-clock time in the renderer; this timeout only gives the otherwise
+/// quiescent pane loop a chance to repaint while a lifecycle operation is
+/// pending. Keep it close to the UI's 90 ms skeleton step without depending on a
+/// private sidebar constant.
+const SESSION_SKELETON_FRAME: Duration = Duration::from_millis(90);
 
 /// Report mouse motion with no button held (DECSET 1003), so the pane can light
 /// up the link under the pointer on hover. The global mouse modes (1000/1002/1006,
@@ -314,6 +323,11 @@ fn drive(
     // first paint, which always emits — restoring this pane's shape over whatever
     // the previously active tab left on the terminal.
     let mut last_shape: Option<u16> = None;
+    // The sidebar's session create/remove skeleton animates from wall-clock time.
+    // Track the frame last painted while attached so a quiet shell still repaints
+    // the sidebar when the skeleton wave advances, without touching the pane when
+    // no lifecycle operation is pending.
+    let mut last_session_skeleton: Option<usize> = None;
     // The previous left click on a sidebar session row and when it landed, so a
     // second click on the same row within [`DOUBLE_CLICK`] confirms it (switching
     // to that session) — the same double-click-to-confirm 選択 uses. Held across
@@ -424,6 +438,18 @@ fn drive(
         if last_pr_popup != state.pr_popup() {
             interactive = true;
         }
+        let session_skeleton = if state.pending_sessions().is_empty() {
+            last_session_skeleton = None;
+            None
+        } else {
+            let render_now = Utc::now();
+            state.set_now(render_now);
+            let frame = ui::skeleton_frame(render_now);
+            if last_session_skeleton != Some(frame) {
+                interactive = true;
+            }
+            Some(frame)
+        };
         // While 没入 (Attached) owns the event loop, the outer home loop is not
         // running, so it cannot drain the terminal-pool watcher updates that
         // background panes harvest. Drain them here too and apply them to the
@@ -544,6 +570,7 @@ fn drive(
             last_hover = hover;
             last_pr_popup = state.pr_popup();
             last_prefix_pending = Some(prefix_pending);
+            last_session_skeleton = session_skeleton;
             last_paint = Some(now);
             first = false;
         }
@@ -557,10 +584,12 @@ fn drive(
         // the deferred output lands as soon as the interval lets it.
         let redraw_deadline = if throttled {
             last_paint.map(|t| t + MIN_FRAME)
+        } else if session_skeleton.is_some() {
+            Some(now + SESSION_SKELETON_FRAME)
         } else {
             None
         };
-        match wait(pty, drawn_gen, redraw_deadline, last_activity)? {
+        match wait(pty, drawn_gen, redraw_deadline, throttled, last_activity)? {
             // New output, or the idle re-evaluation tick (a possible resize /
             // badge change): loop and let the checks above decide whether to
             // repaint — an unchanged tick redraws nothing.
@@ -603,14 +632,19 @@ enum Wake {
 /// first. The tick only returns control to the loop so it can notice a resize or
 /// a badge change; the loop repaints only when something actually moved.
 ///
-/// When the caller throttled an output-only frame it passes a `redraw_deadline`:
-/// pending output is then held back (while still answering input at once) until
-/// the deadline passes, so coalesced output lands exactly at the frame boundary
-/// rather than immediately re-waking the loop into a busy spin.
+/// When the caller throttled an output-only frame it passes a `redraw_deadline`
+/// with `hold_output_until_deadline`: pending output is then held back (while
+/// still answering input at once) until the deadline passes, so coalesced output
+/// lands exactly at the frame boundary rather than immediately re-waking the
+/// loop into a busy spin. A deadline without `hold_output_until_deadline` is a
+/// pure animation wake (for the sidebar's session skeleton): fresh shell output
+/// still wakes immediately, and the deadline wakes even when the shell stays
+/// quiet.
 fn wait(
     pty: &PtySession,
     drawn_gen: u64,
     redraw_deadline: Option<Instant>,
+    hold_output_until_deadline: bool,
     last_activity: Instant,
 ) -> Result<Wake> {
     let start = Instant::now();
@@ -618,7 +652,13 @@ fn wait(
         let now = Instant::now();
         // Fresh output (or the shell exiting, which also bumps the counter) wakes
         // the loop — but a throttled frame waits out its deadline first.
-        if pty.generation() != drawn_gen && redraw_deadline.is_none_or(|deadline| now >= deadline) {
+        if pty.generation() != drawn_gen
+            && (!hold_output_until_deadline
+                || redraw_deadline.is_none_or(|deadline| now >= deadline))
+        {
+            return Ok(Wake::Output);
+        }
+        if !hold_output_until_deadline && redraw_deadline.is_some_and(|deadline| now >= deadline) {
             return Ok(Wake::Output);
         }
         let mut timeout = if now.duration_since(last_activity) >= QUIET_AFTER {
