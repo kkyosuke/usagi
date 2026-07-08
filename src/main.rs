@@ -429,6 +429,7 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Commands::Mcp => {
+            install_mcp_panic_log_hook();
             // A session created over MCP symlinks each worktree at the skills dir;
             // materialise it here so the target exists. Best-effort.
             let _ = usagi::infrastructure::skills::materialize_default();
@@ -495,6 +496,24 @@ fn trace_command(name: Option<&'static str>, ok: bool) {
 /// swallowed so logging never masks the original error on its way to stderr.
 fn log_error(error: &anyhow::Error) {
     usagi::infrastructure::error_log::ErrorLog::record(&format!("{error:#}"));
+}
+
+/// Install an MCP-specific panic hook before the long-running stdio server starts.
+///
+/// `dispatch_tool_call` catches panics from individual tools and turns them into
+/// MCP `isError` results so the process keeps serving future requests; Rust still
+/// runs the panic hook before the unwind reaches that catch boundary. Recording
+/// the hook here makes the original panic site and payload inspectable in
+/// `<data dir>/logs/` even when the client only sees a sanitized tool error. The
+/// previous hook is chained so normal stderr diagnostics are preserved.
+fn install_mcp_panic_log_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        usagi::infrastructure::error_log::ErrorLog::record(&format!(
+            "panic while running usagi mcp: {info}"
+        ));
+        previous(info);
+    }));
 }
 
 /// Spawn `command` via `sh -c` detached in the background, with `cwd` as its
