@@ -640,6 +640,107 @@ fn closeup_ctrl_o_prefix_walks_the_tab_strip_with_letters_and_arrows() {
 }
 
 #[test]
+fn closeup_tab_keybindings_sync_terminal_pool_active_tab_matrix() {
+    // Keybinding -> TerminalPool navigation. Each row starts on pane 0 of a
+    // two-pane live session, runs the key sequence in 集中, and asserts the
+    // `TabNav::To(index)` calls sent to the pool. Landing on "+ new" is represented
+    // by the absence of a `TabNav` call for that step.
+    fn run_sequence(sequence: Vec<Key>) -> Vec<TabNav> {
+        let term = Term::stdout();
+        let navs = RefCell::new(Vec::new());
+        let active = RefCell::new(0usize);
+        let mut tab_op = |_d: &Path, nav: Option<TabNav>| -> (Vec<String>, usize) {
+            if let Some(n) = nav {
+                navs.borrow_mut().push(n);
+                if let TabNav::To(i) = n {
+                    *active.borrow_mut() = i;
+                }
+            }
+            (
+                vec!["agent".to_string(), "terminal".to_string()],
+                *active.borrow(),
+            )
+        };
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+        let mut keys = cmd("session switch feat");
+        keys.push(Ok(Key::Enter)); // attach feat; ToCloseup -> pane 0 in 集中
+        keys.extend(sequence.into_iter().map(Ok));
+        keys.push(Ok(Key::CtrlC));
+        let mut reader = ScriptedReader::new(keys);
+        let monitor = MonitorHandle::detached();
+        let mut persist: fn(&str) = noop_persist;
+        let mut create: fn(&str) -> SessionOutcome = noop_create;
+        let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+        let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+        let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+        let mut branches: fn() -> Vec<String> = no_branches;
+        let outcome = event_loop_compat(
+            &term,
+            &mut reader,
+            sample_state(),
+            Path::new("/ws"),
+            &monitor,
+            &UpdateHandle::new(),
+            &OneShot::<Vec<AgentCli>>::new(),
+            &mut persist,
+            &mut create,
+            &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+            &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+            &mut remove,
+            &mut branches,
+            &mut open,
+            &mut config,
+            &mut preview,
+            &mut tab_op,
+            &mut (noop_close as fn(&mut HomeState, &Path)),
+            &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Quit));
+        navs.into_inner()
+    }
+
+    let cases = [
+        (
+            "direct next then prev",
+            vec![Key::Char(CTRL_N), Key::Char(CTRL_P)],
+            vec![TabNav::To(1), TabNav::To(0)],
+        ),
+        (
+            "direct next across +new",
+            vec![Key::Char(CTRL_N), Key::Char(CTRL_N), Key::Char(CTRL_P)],
+            // second Ctrl-N lands on "+ new", so it emits no pool navigation;
+            // Ctrl-P wraps from "+ new" back to the last pane.
+            vec![TabNav::To(1), TabNav::To(1)],
+        ),
+        (
+            "prefix letters",
+            vec![
+                Key::Char(CTRL_O),
+                Key::Char('n'),
+                Key::Char(CTRL_O),
+                Key::Char('p'),
+            ],
+            vec![TabNav::To(1), TabNav::To(0)],
+        ),
+        (
+            "prefix arrows",
+            vec![
+                Key::Char(CTRL_O),
+                Key::ArrowRight,
+                Key::Char(CTRL_O),
+                Key::ArrowLeft,
+            ],
+            vec![TabNav::To(1), TabNav::To(0)],
+        ),
+    ];
+
+    for (name, sequence, expected) in cases {
+        assert_eq!(run_sequence(sequence), expected, "{name}");
+    }
+}
+
+#[test]
 fn zoomed_out_menu_keeps_the_keyboard_over_the_pane_tab() {
     // Zooming out of a live pane (ToCloseup) keeps the pane's own tab selected with
     // the action menu floating over its preview — and the menu, not the preview,
