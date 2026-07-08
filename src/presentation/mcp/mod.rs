@@ -26,6 +26,7 @@ pub mod memory;
 pub mod session;
 pub mod usagi;
 
+use std::backtrace::Backtrace;
 use std::io::{BufRead, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -42,6 +43,11 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 /// grow memory without bound (OOM). 64 MiB is far above any real JSON-RPC request
 /// usagi receives while still bounding the damage.
 const MAX_REQUEST_LINE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Upper bound on the JSON argument dump attached to an MCP panic log entry.
+/// Arguments are local diagnostics, not client-facing output, but prompts can be
+/// large; keep one panic from producing an unbounded error-log entry.
+const MAX_PANIC_ARGUMENT_CHARS: usize = 8 * 1024;
 
 /// The outcome of reading one capped request line (see [`read_capped_line`]).
 enum LineRead {
@@ -255,12 +261,14 @@ fn dispatch_tool_call(service: &dyn McpService, params: Option<&Value>, id: Valu
         }
     };
 
+    let panic_arguments = arguments.clone();
     let outcome = match catch_unwind(AssertUnwindSafe(|| service.call_tool(name, arguments))) {
         Ok(outcome) => outcome,
-        Err(payload) => Err(format!(
-            "tool `{name}` panicked: {}",
-            panic_payload_message(&payload)
-        )),
+        Err(payload) => {
+            let message = panic_payload_message(&*payload);
+            log_tool_panic(name, &panic_arguments, &message);
+            Err(format!("tool `{name}` panicked: {message}"))
+        }
     };
     crate::infrastructure::trace_log::TraceLog::record(
         crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Mcp, name)
@@ -285,6 +293,32 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "non-string panic payload".to_string()
     }
+}
+
+/// Record the full local diagnostic context for a panic caught at one tool's
+/// call boundary. The MCP reply stays intentionally short, while the error log
+/// gets the tool name, panic payload, request arguments (bounded), and a forced
+/// backtrace captured at the catch site so the next crash has enough detail to
+/// identify the failing path.
+fn log_tool_panic(name: &str, arguments: &Value, message: &str) {
+    let backtrace = Backtrace::force_capture();
+    crate::infrastructure::error_log::ErrorLog::record(&format!(
+        "mcp tool `{name}` panicked: {message}\narguments: {}\nbacktrace:\n{backtrace}",
+        arguments_json_for_log(arguments)
+    ));
+}
+
+fn arguments_json_for_log(arguments: &Value) -> String {
+    truncate_for_log(arguments.to_string(), MAX_PANIC_ARGUMENT_CHARS)
+}
+
+fn truncate_for_log(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    truncated.push_str("…<truncated>");
+    truncated
 }
 
 /// Wrap `result` as a JSON-RPC success response for `id`.
@@ -522,6 +556,36 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_tool_writes_arguments_and_backtrace_to_the_error_log() {
+        // Point ErrorLog at a temp home so the panic diagnostic is inspectable
+        // without polluting the developer's real `~/.usagi/logs/`.
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"explode","arguments":{"flag":true,"prompt":"hello"}}}"#;
+        let input = format!("{request}\n");
+        let mut output = Vec::new();
+
+        serve(&PanickingService, input.as_bytes(), &mut output).unwrap();
+
+        let log_dir = home.path().join("logs");
+        let entry = std::fs::read_dir(&log_dir)
+            .expect("logs dir exists")
+            .next()
+            .expect("a log file was written")
+            .expect("readable entry");
+        let contents = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(contents.contains("mcp tool `explode` panicked: boom"));
+        assert!(contents.contains(r#""flag":true"#));
+        assert!(contents.contains(r#""prompt":"hello""#));
+        assert!(contents.contains("backtrace:"));
+        assert!(contents.contains("log_tool_panic"));
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
     fn serve_answers_a_non_utf8_line_with_a_parse_error_and_keeps_going() {
         // A line of invalid UTF-8 must not terminate the server: it becomes a
         // parse error, and a following valid request is still answered.
@@ -591,5 +655,16 @@ mod tests {
 
         let opaque: Box<dyn std::any::Any + Send> = Box::new(123_u32);
         assert_eq!(panic_payload_message(&*opaque), "non-string panic payload");
+    }
+
+    #[test]
+    fn panic_argument_dump_is_bounded_but_keeps_short_arguments_intact() {
+        assert_eq!(truncate_for_log("short".to_string(), 10), "short");
+        assert_eq!(
+            truncate_for_log("あいうえお".to_string(), 3),
+            "あいう…<truncated>"
+        );
+        let arguments = json!({ "prompt": "hello" });
+        assert_eq!(arguments_json_for_log(&arguments), r#"{"prompt":"hello"}"#);
     }
 }
