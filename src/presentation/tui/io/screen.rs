@@ -303,6 +303,10 @@ pub struct FramePainter {
     base: Vec<String>,
     /// The last frame actually drawn (base + overlay), for diffing.
     prev: Vec<String>,
+    /// Optional column-diff layout for the last base frame. Home uses this to
+    /// keep the body sidebar and right pane repaint scopes independent; all other
+    /// screens leave it `None` and keep the row-diff behaviour.
+    columns: Option<ColumnDiff>,
     /// A reusable scratch frame the overlay is composed into each flush, then
     /// swapped with `prev`. Holding it across flushes lets the per-paint compose
     /// reuse its row allocations (via `clone_from`) instead of allocating a fresh
@@ -362,6 +366,23 @@ impl FramePainter {
     /// that changed since the previous paint, then remember it for the next diff.
     pub fn paint(&mut self, term: &Term, frame: Vec<String>) -> Result<()> {
         self.base = frame;
+        self.columns = None;
+        self.flush(term)
+    }
+
+    /// Draw `frame` with a column-aware diff for the given body region. Rows
+    /// outside the region (header, input/footer, and full-screen/modal overlays)
+    /// still use the normal row diff, while body rows are diffed as
+    /// left/separator/right fixed-width cells so a sidebar-only change never
+    /// rewrites the right pane (and vice versa).
+    pub(crate) fn paint_columns(
+        &mut self,
+        term: &Term,
+        frame: Vec<String>,
+        columns: ColumnDiff,
+    ) -> Result<()> {
+        self.base = frame;
+        self.columns = Some(columns);
         self.flush(term)
     }
 
@@ -393,7 +414,11 @@ impl FramePainter {
         // ahead of the diff, so it rides this same terminal write instead of a
         // separate flush. Drained here so it is written exactly once.
         let mut out = std::mem::take(&mut self.prefix);
-        out.push_str(&diff_frame(&self.prev, &self.scratch));
+        out.push_str(&diff_frame_with_columns(
+            &self.prev,
+            &self.scratch,
+            self.columns,
+        ));
         // Park the real cursor over the caret (showing it) so an OS IME draws its
         // preedit text in the input field rather than wherever the cursor was left
         // — otherwise composing Japanese surfaces at the bottom of the screen. With
@@ -440,7 +465,31 @@ fn take_caret(frame: &mut [String]) -> Option<(usize, usize)> {
 ///
 /// Exposed to the crate so the embedded terminal pane — which also parks the
 /// real cursor over the shell after the repaint — can share the same diff.
-pub(crate) fn diff_frame(prev: &[String], frame: &[String]) -> String {
+#[cfg(test)]
+fn diff_frame(prev: &[String], frame: &[String]) -> String {
+    diff_frame_with_columns(prev, frame, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnDiff {
+    pub row_start: usize,
+    pub row_count: usize,
+    pub left_width: usize,
+    pub separator_width: usize,
+    pub right_width: usize,
+}
+
+impl ColumnDiff {
+    fn contains_row(self, row: usize) -> bool {
+        row >= self.row_start && row < self.row_start.saturating_add(self.row_count)
+    }
+}
+
+pub(crate) fn diff_frame_with_columns(
+    prev: &[String],
+    frame: &[String],
+    columns: Option<ColumnDiff>,
+) -> String {
     let fresh = prev.is_empty();
     // Hide the cursor while repainting so it does not flicker across the rows.
     let mut buf = String::from("\x1b[?25l");
@@ -449,6 +498,10 @@ pub(crate) fn diff_frame(prev: &[String], frame: &[String]) -> String {
         buf.push_str("\x1b[2J");
     }
     for (row, line) in frame.iter().enumerate() {
+        if let Some(columns) = columns.filter(|columns| columns.contains_row(row)) {
+            diff_column_row(&mut buf, fresh, row, prev.get(row), line, columns);
+            continue;
+        }
         if fresh || prev.get(row) != Some(line) {
             // Move to the row (1-based), clear it, then write the new content.
             let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
@@ -461,6 +514,91 @@ pub(crate) fn diff_frame(prev: &[String], frame: &[String]) -> String {
         let _ = write!(buf, "\x1b[{};1H\x1b[2K", row + 1);
     }
     buf
+}
+
+fn diff_column_row(
+    buf: &mut String,
+    fresh: bool,
+    row: usize,
+    prev: Option<&String>,
+    line: &str,
+    columns: ColumnDiff,
+) {
+    let left = fixed_segment(line, 0, columns.left_width);
+    let separator_col = columns.left_width;
+    let separator = fixed_segment(line, separator_col, columns.separator_width);
+    let right_col = separator_col + columns.separator_width;
+    let right = fixed_segment(line, right_col, columns.right_width);
+
+    let prev_left = prev.map(|line| fixed_segment(line, 0, columns.left_width));
+    let prev_separator =
+        prev.map(|line| fixed_segment(line, separator_col, columns.separator_width));
+    let prev_right = prev.map(|line| fixed_segment(line, right_col, columns.right_width));
+
+    write_segment(
+        buf,
+        row,
+        0,
+        columns.left_width,
+        &left,
+        fresh || prev_left.as_ref() != Some(&left),
+    );
+    write_segment(
+        buf,
+        row,
+        separator_col,
+        columns.separator_width,
+        &separator,
+        fresh || prev_separator.as_ref() != Some(&separator),
+    );
+    write_segment(
+        buf,
+        row,
+        right_col,
+        columns.right_width,
+        &right,
+        fresh || prev_right.as_ref() != Some(&right),
+    );
+}
+
+fn write_segment(
+    buf: &mut String,
+    row: usize,
+    col: usize,
+    width: usize,
+    segment: &str,
+    changed: bool,
+) {
+    if !changed || width == 0 {
+        return;
+    }
+    // Move to a 1-based row/column and overwrite exactly this segment's fixed
+    // width. Do not clear-to-EOL: that would erase the neighbouring pane.
+    let _ = write!(buf, "\x1b[{};{}H", row + 1, col + 1);
+    buf.push_str(segment);
+}
+
+fn fixed_segment(line: &str, start: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut clipped = if start == 0 {
+        widgets::truncate_to_width(line, width)
+    } else {
+        widgets::truncate_to_width(&widgets::slice_from_width(line, start), width)
+    };
+    if clipped.contains('\u{1b}') {
+        clipped.push_str("\u{1b}[0m");
+    }
+    pad_to_width(clipped, width)
+}
+
+fn pad_to_width(mut content: String, width: usize) -> String {
+    let visible = console::measure_text_width(&content);
+    if visible < width {
+        content.extend(std::iter::repeat_n(' ', width - visible));
+    }
+    content
 }
 
 #[cfg(test)]
@@ -600,6 +738,86 @@ mod tests {
         // Row 3 is gone from the new frame, so it is cleared but not rewritten.
         assert!(out.contains("\x1b[3;1H\x1b[2K"));
         assert!(!out.contains("\x1b[3;1H\x1b[2Kc"));
+    }
+
+    #[test]
+    fn diff_frame_with_columns_rewrites_only_the_changed_left_cell() {
+        let columns = ColumnDiff {
+            row_start: 0,
+            row_count: 1,
+            left_width: 4,
+            separator_width: 3,
+            right_width: 5,
+        };
+        let prev = lines(&["left │ right"]);
+        let frame = lines(&["LEFT │ right"]);
+
+        let out = diff_frame_with_columns(&prev, &frame, Some(columns));
+
+        assert!(!out.contains("\x1b[2K"), "column diff must not clear rows");
+        assert!(out.contains("\x1b[1;1HLEFT"));
+        assert!(!out.contains("\x1b[1;5H"), "separator is unchanged");
+        assert!(
+            !out.contains("\x1b[1;8H"),
+            "right pane is unchanged and must not be rewritten: {out:?}"
+        );
+    }
+
+    #[test]
+    fn diff_frame_with_columns_rewrites_only_the_changed_right_cell() {
+        let columns = ColumnDiff {
+            row_start: 0,
+            row_count: 1,
+            left_width: 4,
+            separator_width: 3,
+            right_width: 5,
+        };
+        let prev = lines(&["left │ right"]);
+        let frame = lines(&["left │ RIGHT"]);
+
+        let out = diff_frame_with_columns(&prev, &frame, Some(columns));
+
+        assert!(!out.contains("\x1b[2K"), "column diff must not clear rows");
+        assert!(!out.contains("\x1b[1;1H"), "left pane is unchanged");
+        assert!(!out.contains("\x1b[1;5H"), "separator is unchanged");
+        assert!(out.contains("\x1b[1;8HRIGHT"));
+    }
+
+    #[test]
+    fn diff_frame_with_columns_still_row_diffs_outside_body_region() {
+        let columns = ColumnDiff {
+            row_start: 1,
+            row_count: 1,
+            left_width: 4,
+            separator_width: 3,
+            right_width: 5,
+        };
+        let prev = lines(&["old header", "left │ right"]);
+        let frame = lines(&["new header", "left │ RIGHT"]);
+
+        let out = diff_frame_with_columns(&prev, &frame, Some(columns));
+
+        assert!(out.contains("\x1b[1;1H\x1b[2Knew header"));
+        assert!(out.contains("\x1b[2;8HRIGHT"));
+        assert!(!out.contains("\x1b[2;1H"), "body left cell is unchanged");
+    }
+
+    #[test]
+    fn diff_frame_with_columns_skips_zero_width_segments() {
+        let columns = ColumnDiff {
+            row_start: 0,
+            row_count: 1,
+            left_width: 0,
+            separator_width: 3,
+            right_width: 5,
+        };
+        let prev = lines(&[" │ right"]);
+        let frame = lines(&[" │ RIGHT"]);
+
+        let out = diff_frame_with_columns(&prev, &frame, Some(columns));
+
+        assert!(!out.contains("\x1b[1;1H"));
+        assert!(out.contains("\x1b[1;4HRIGHT"));
     }
 
     /// A reader scripting both blocking reads and timeout reads, so the two

@@ -69,6 +69,7 @@ mod pr_popup;
 mod sidebar;
 mod tabs_hit;
 
+use crate::presentation::tui::io::screen::ColumnDiff;
 use crate::presentation::tui::widgets;
 use crate::presentation::tui::widgets::{clip_to_width, clip_to_width_cow};
 
@@ -233,6 +234,23 @@ fn layout(width: usize, sidebar: Sidebar) -> (usize, usize) {
     let left = left.min(width.saturating_sub(SEP_WIDTH));
     let right = width.saturating_sub(left + SEP_WIDTH);
     (left, right)
+}
+
+/// The body rows' column layout for the terminal diff writer. Rendering still
+/// assembles full frame rows so overlays and hit tests keep one source of truth,
+/// but the writer can use this geometry to diff the body as left / separator /
+/// right fixed-width cells. That lets a sidebar-only animation repaint without
+/// clearing or rewriting the right pane (and vice versa).
+pub(crate) fn column_diff(raw_height: usize, raw_width: usize, sidebar: Sidebar) -> ColumnDiff {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let (left_w, right_w) = layout(width, sidebar);
+    ColumnDiff {
+        row_start: 2,
+        row_count: body_rows_for(height),
+        left_width: left_w,
+        separator_width: SEP_WIDTH,
+        right_width: right_w,
+    }
 }
 
 /// Where the embedded terminal lives on screen: the size of the right pane and

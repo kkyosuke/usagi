@@ -330,7 +330,7 @@ const RESET: &str = "\u{1b}[0m";
 /// content flush against the cut (a floating box's left edge), where a trailing
 /// `…` would be wrong. A double-width glyph that would straddle the boundary is
 /// dropped whole rather than split.
-fn truncate_to_width(text: &str, max: usize) -> String {
+pub(crate) fn truncate_to_width(text: &str, max: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut width = 0usize;
     let mut chars = text.chars();
@@ -405,7 +405,7 @@ pub fn overlay_right(lines: &mut [String], top: usize, width: usize, block: &[St
 ///
 /// Used by [`overlay_centered`] to keep the base columns to the *right* of a
 /// floating box, the way `truncate_to_width` keeps those to its left.
-fn slice_from_width(text: &str, at: usize) -> String {
+pub(crate) fn slice_from_width(text: &str, at: usize) -> String {
     let mut width = 0usize;
     let mut prefix = String::new();
     let mut out = String::new();
