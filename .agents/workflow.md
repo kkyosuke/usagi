@@ -47,24 +47,16 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 ### 2. 開発する
 
 - クリーンアーキテクチャ（`domain → usecase → infrastructure ← presentation`）の依存方向を守る。
-- 実装と同時にテストを追加・更新する（カバレッジ 100% を維持。CI でチェックされる）。
+- 実装と同時にテストを追加・更新する（カバレッジ 100% を維持。CI / pre-push でチェックされる）。
 - コミット前に必ず以下を通す:
 
 ```bash
 cargo fmt
 cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-- **テストは全件を回さない**。全件 `cargo test` や `cargo llvm-cov`（＝カバレッジ計測）は時間がかかりすぎるため、開発中の反復では**自分が変更した箇所のテストだけ**を絞って回す。
-
-  ```bash
-  # 変更したモジュール・関数に対応するテストだけを指定して回す
-  cargo test <module_path>          # 例: cargo test presentation::tui::sidebar
-  cargo test <test_name>            # 例: cargo test test_render_absence_menu
-  cargo test -p <crate>             # 対象クレートだけ
-  ```
-
-  - 全件テスト・カバレッジ 100% の確認は **CI（Coverage CI）が担う**（[06-conventions.md#品質チェック](../document/06-conventions.md#品質チェックコミットpush-前に必須)）。pre-push フックでも走らせない（clippy のみ）。ローカルで全件を手動実行して待つ必要はない。
+- pre-push フックは `cargo clippy --all-targets -- -D warnings` とカバレッジ 100%（`cargo llvm-cov`）を確認する。`cargo llvm-cov` はテスト実行を兼ねる。
 
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
 
