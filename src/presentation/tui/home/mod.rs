@@ -990,7 +990,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // No live pane (every one exited): drop back to 集中.
                         None => return Ok(PaneExit::Closed),
                     };
-                    match terminal::pane::run(term, home, pty, &handle)? {
+                    match terminal::pane::run(term, home, pty, &handle, &sessions_refresh)? {
                         // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
                         terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
                         // `Ctrl-E`: leave the pane to open the note editor over it;

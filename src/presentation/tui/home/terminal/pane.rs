@@ -63,6 +63,7 @@ use super::super::pane_input::{
     is_press, key_scroll_lines, pane_cell, pointer_shape, prefix_alive, wheel_arrows, wheel_delta,
     KeyAction, PointerShape, Reserved, DOUBLE_CLICK,
 };
+use super::super::sessions_refresh::SessionsRefreshHandle;
 use super::super::state::{HomeState, SurfaceOwner};
 use super::super::ui;
 use super::link;
@@ -185,6 +186,7 @@ pub fn run(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
+    sessions_refresh: &SessionsRefreshHandle,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -199,7 +201,7 @@ pub fn run(
     // batched terminal write. A separate `clear_screen()` would flush an
     // all-blank frame just before the real frame and is visible as a one-frame
     // flicker when switching sessions or tabs.
-    drive(term, state, pty, monitor)
+    drive(term, state, pty, monitor, sessions_refresh)
 }
 
 /// RAII guard owning the embedded pane's terminal modes (raw mode, bracketed
@@ -266,6 +268,7 @@ fn drive(
     state: &mut HomeState,
     pty: &mut PtySession,
     monitor: &MonitorHandle,
+    sessions_refresh: &SessionsRefreshHandle,
 ) -> Result<PaneStep> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
@@ -461,6 +464,18 @@ fn drive(
             if state.set_pr_links(&root, prs) {
                 interactive = true;
             }
+        }
+        // While 没入 (Attached) owns the event loop, the outer home loop cannot
+        // drain the state.json watcher that reflects session lifecycle changes
+        // made out of process. MCP `session_delegate_issue` is commonly issued
+        // by a coordinator agent running in this very attached pane; without
+        // draining here, the delegated `issue-<n>` row does not appear in the
+        // left sidebar until the user detaches back to 選択. Apply the same
+        // refresh slot the outer loop drains so external `session_create` /
+        // `session_delegate_issue` updates show immediately while attached too.
+        for (root, sessions) in sessions_refresh.take_all() {
+            state.refresh_sessions_for(&root, sessions);
+            interactive = true;
         }
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions
