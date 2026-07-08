@@ -56,7 +56,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 use crate::infrastructure::pty::PtySession;
 use crate::presentation::tui::io::clipboard;
-use crate::presentation::tui::io::screen::diff_frame;
+use crate::presentation::tui::io::screen::diff_frame_with_columns;
 
 use super::super::pane_input::{
     apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_double_click,
@@ -195,10 +195,10 @@ pub fn run(
     // paste and motion reporting still on.
     let _modes = PaneModeGuard::enter(term)?;
     // Do not clear the screen here. The first pane repaint starts with an empty
-    // diff base, so [`diff_frame`] already emits "clear + all rows" as one batched
-    // terminal write. A separate `clear_screen()` would flush an all-blank frame
-    // just before the real frame and is visible as a one-frame flicker when
-    // switching sessions or tabs.
+    // diff base, so the frame diff already emits "clear + all rows" as one
+    // batched terminal write. A separate `clear_screen()` would flush an
+    // all-blank frame just before the real frame and is visible as a one-frame
+    // flicker when switching sessions or tabs.
     drive(term, state, pty, monitor)
 }
 
@@ -1239,9 +1239,17 @@ fn render(
     let (height, width) = size;
     let frame = ui::render_frame(height as usize, width as usize, state);
 
-    // Repaint only the changed rows (see [`diff_frame`]); the cursor is hidden
-    // for the repaint and re-positioned below over the shell's cell.
-    let mut buf = diff_frame(prev, &frame);
+    // Repaint only the changed frame segments; the cursor is hidden for the
+    // repaint and re-positioned below over the shell's cell.
+    let mut buf = diff_frame_with_columns(
+        prev,
+        &frame,
+        Some(ui::column_diff(
+            height as usize,
+            width as usize,
+            state.sidebar(),
+        )),
+    );
 
     // Re-assert the active pane's cursor shape (DECSCUSR `CSI Ps SP q`) when it
     // changed — `vt100` swallowed the program's own sequence, so without this the

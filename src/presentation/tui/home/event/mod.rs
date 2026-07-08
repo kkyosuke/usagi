@@ -779,7 +779,8 @@ pub(super) fn event_loop(
             // second (keeping the loop's repaint budget low).
             state.set_now(chrono::Utc::now());
             let frame = ui::render_frame(height as usize, width as usize, &state);
-            painter.paint(term, frame)?;
+            let columns = ui::column_diff(height as usize, width as usize, state.sidebar());
+            painter.paint_columns(term, frame, columns)?;
         }
         last_update = latest_update;
         last_blinking = state.mascot_blinking();
