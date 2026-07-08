@@ -1,13 +1,13 @@
 ---
 number: 137
 title: refactor: Focus action・Agent adapter・TabModel のリデザイン実装計画
-status: in-progress
+status: done
 priority: high
 labels: [refactor, review, epic]
 dependson: []
 related: [119, 120, 122, 128, 129]
 created_at: 2026-07-06T00:19:18.467735+00:00
-updated_at: 2026-07-08T22:16:30.167232+00:00
+updated_at: 2026-07-08T22:17:07.517862+00:00
 ---
 
 ## 目的
