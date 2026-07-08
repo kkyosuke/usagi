@@ -7,8 +7,8 @@
 //!   issue/memory and session servers below so one process exposes a
 //!   repository's task issues, its durable memories, and session orchestration
 //!   under one `usagi` registration.
-//! - [`issue`] exposes a repository's task issues — and, merged into the same
-//!   server, its [`memory`] tools.
+//! - [`issue`] exposes a repository's task issues.
+//! - [`memory`] exposes a repository's durable memories.
 //! - [`session`] exposes session orchestration (create / list / prompt) as tools.
 //! - [`llm`] exposes a locally-running model as a single delegation tool.
 //!
@@ -175,6 +175,12 @@ pub trait McpService {
     /// `serverInfo.name` advertised during `initialize`.
     fn server_name(&self) -> &str;
 
+    /// Tool names this service handles. Composite servers use this to route a
+    /// call to the first sub-server that advertises the requested tool.
+    fn tool_names(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Tool schemas advertised via `tools/list`.
     fn tool_schemas(&self) -> Value;
 
@@ -328,6 +334,8 @@ mod tests {
 
     #[test]
     fn serve_advertises_the_service_identity_and_tools() {
+        assert!(EchoService.tool_names().is_empty());
+
         let input = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",

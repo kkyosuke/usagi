@@ -10,7 +10,7 @@ use std::env;
 use std::path::Path;
 
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 use crate::domain::memory::MemoryType;
 use crate::usecase::memory::{self, MemoryChanges, MemoryFilter, MemoryView, NewMemory};
@@ -37,8 +37,8 @@ pub enum MemoryCommand {
     },
     /// List memories (newest first)
     List {
-        #[arg(long = "type", value_name = "TYPE")]
-        kind: Option<MemoryType>,
+        #[command(flatten)]
+        filter: FilterArgs,
         #[arg(long)]
         json: bool,
     },
@@ -66,8 +66,8 @@ pub enum MemoryCommand {
     /// Search memory names, titles and bodies (case-insensitive)
     Search {
         query: String,
-        #[arg(long = "type", value_name = "TYPE")]
-        kind: Option<MemoryType>,
+        #[command(flatten)]
+        filter: FilterArgs,
         #[arg(long)]
         json: bool,
     },
@@ -78,6 +78,20 @@ pub enum MemoryCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// CLI flags shared by `memory list` and `memory search`, mapped once to the
+/// usecase filter.
+#[derive(Args)]
+pub struct FilterArgs {
+    #[arg(long = "type", value_name = "TYPE")]
+    kind: Option<MemoryType>,
+}
+
+impl From<FilterArgs> for MemoryFilter {
+    fn from(args: FilterArgs) -> Self {
+        Self { kind: args.kind }
+    }
 }
 
 /// Entry point for `usagi memory`: run the subcommand against the current
@@ -119,8 +133,9 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
                 vec![format!("saved {} ({})", saved.name, saved.kind)]
             })
         }
-        MemoryCommand::List { kind, json } => {
-            render_listing(memory::list(repo, &MemoryFilter { kind })?, json)
+        MemoryCommand::List { filter, json } => {
+            let filter = MemoryFilter::from(filter);
+            render_listing(memory::list(repo, &filter)?, json)
         }
         MemoryCommand::Show { name, json } => match memory::get(repo, &name)? {
             Some(m) if json => json_lines(&MemoryView::from(&m)),
@@ -147,8 +162,13 @@ fn execute(repo: &Path, command: MemoryCommand) -> Result<Vec<String>> {
                 None => Ok(vec![format!("no memory '{name}'")]),
             }
         }
-        MemoryCommand::Search { query, kind, json } => {
-            render_listing(memory::search(repo, &query, &MemoryFilter { kind })?, json)
+        MemoryCommand::Search {
+            query,
+            filter,
+            json,
+        } => {
+            let filter = MemoryFilter::from(filter);
+            render_listing(memory::search(repo, &query, &filter)?, json)
         }
         MemoryCommand::Delete { name, yes } => {
             if !yes {

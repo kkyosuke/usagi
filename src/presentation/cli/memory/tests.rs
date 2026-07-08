@@ -52,7 +52,7 @@ fn list_reports_empty_then_lists() {
     let empty = execute(
         repo,
         MemoryCommand::List {
-            kind: None,
+            filter: FilterArgs { kind: None },
             json: false,
         },
     )
@@ -63,7 +63,7 @@ fn list_reports_empty_then_lists() {
     let out = execute(
         repo,
         MemoryCommand::List {
-            kind: None,
+            filter: FilterArgs { kind: None },
             json: false,
         },
     )
@@ -81,7 +81,9 @@ fn list_with_type_filter_and_json() {
     let out = execute(
         repo,
         MemoryCommand::List {
-            kind: Some(MemoryType::Project),
+            filter: FilterArgs {
+                kind: Some(MemoryType::Project),
+            },
             json: true,
         },
     )
@@ -191,7 +193,7 @@ fn search_human_and_json() {
         repo,
         MemoryCommand::Search {
             query: "deploy".to_string(),
-            kind: None,
+            filter: FilterArgs { kind: None },
             json: false,
         },
     )
@@ -203,7 +205,7 @@ fn search_human_and_json() {
         repo,
         MemoryCommand::Search {
             query: "deploy".to_string(),
-            kind: None,
+            filter: FilterArgs { kind: None },
             json: true,
         },
     )
@@ -279,7 +281,7 @@ fn run_executes_against_the_current_directory() {
     let original = env::current_dir().unwrap();
     env::set_current_dir(tmp.path()).unwrap();
     let result = run(MemoryCommand::List {
-        kind: None,
+        filter: FilterArgs { kind: None },
         json: false,
     });
     env::set_current_dir(original).unwrap();

@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::Utc;
+use serde::Deserialize;
 
 use crate::domain::issue::{Issue, IssuePriority, IssueStatus, IssueSummary};
 use crate::infrastructure::issue_store::IssueStore;
@@ -30,20 +31,29 @@ pub use view::{IssueView, ListedIssueView};
 
 /// Fields needed to open a new issue. The number and timestamps are assigned by
 /// [`create`].
+#[derive(Deserialize)]
 pub struct NewIssue {
     pub title: String,
+    #[serde(default)]
     pub priority: IssuePriority,
+    #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
     pub dependson: Vec<u32>,
+    #[serde(default)]
     pub related: Vec<u32>,
+    #[serde(default)]
     pub parent: Option<u32>,
+    #[serde(default)]
     pub milestone: Option<String>,
+    #[serde(default)]
     pub body: String,
 }
 
 /// A partial update to an existing issue: every `Some` field is applied, every
 /// `None` field is left unchanged.
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct IssueChanges {
     pub title: Option<String>,
     pub status: Option<IssueStatus>,
@@ -53,9 +63,11 @@ pub struct IssueChanges {
     pub related: Option<Vec<u32>>,
     /// Outer `None` leaves the parent unchanged; `Some(None)` clears it;
     /// `Some(Some(n))` sets it.
+    #[serde(deserialize_with = "double_option")]
     pub parent: Option<Option<u32>>,
     /// Outer `None` leaves the milestone unchanged; `Some(None)` clears it;
     /// `Some(Some(name))` sets it.
+    #[serde(deserialize_with = "double_option")]
     pub milestone: Option<Option<String>>,
     pub body: Option<String>,
 }
@@ -76,7 +88,8 @@ impl IssueChanges {
 }
 
 /// Filters applied to listings and searches. An unset field matches everything.
-#[derive(Default)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 pub struct IssueFilter {
     pub status: Option<IssueStatus>,
     pub priority: Option<IssuePriority>,
@@ -84,6 +97,7 @@ pub struct IssueFilter {
     pub parent: Option<u32>,
     pub milestone: Option<String>,
     /// Keep only issues that are ready to start (not done, all deps done).
+    #[serde(rename = "ready")]
     pub ready_only: bool,
 }
 
@@ -103,6 +117,18 @@ impl IssueFilter {
                 .is_none_or(|milestone| s.milestone.as_deref() == Some(milestone.as_str()))
             && (!self.ready_only || listed.is_ready())
     }
+}
+
+/// Deserialize an optional field while preserving the distinction between an
+/// absent key (`None`) and an explicit `null` (`Some(None)`). Used to let
+/// protocol adapters clear `parent`/`milestone` by passing JSON `null` while
+/// still leaving those fields unchanged when the keys are omitted.
+fn double_option<'de, T, D>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 /// An issue summary annotated with dependency readiness.
