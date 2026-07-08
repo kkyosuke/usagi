@@ -8,6 +8,7 @@
 # 使い方:
 #   . scripts/coverage.sh     # COVERAGE_IGNORE / COVERAGE_MIN を読み込む
 #   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook pre-push 用)
+#                             # --no-clean で前回のビルド成果物を再利用し、cargo-nextest があれば使う
 
 # 計測から外すファイル。いずれも「テスト可能なロジックを取り除いたあとに残る、
 # 実 IO そのもの」だけを持つ層に限定する:
@@ -62,7 +63,12 @@ coverage_enforce() {
     echo "  インストール: cargo install cargo-llvm-cov" >&2
     return 1
   fi
-  cargo llvm-cov --workspace \
+  nextest_arg=
+  if cargo nextest --version >/dev/null 2>&1; then
+    nextest_arg=--nextest
+  fi
+
+  cargo llvm-cov --workspace --no-clean $nextest_arg \
     --ignore-filename-regex "$COVERAGE_IGNORE" \
     --fail-under-lines "$COVERAGE_MIN" \
     --fail-under-functions "$COVERAGE_MIN"

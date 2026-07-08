@@ -113,10 +113,10 @@
 ```bash
 cargo fmt                                  # フォーマット
 cargo clippy --all-targets -- -D warnings  # Lint（警告はエラー扱い）
+cargo test                                 # テスト
 ```
 
-- **全件テスト・カバレッジは手元で毎回回さない**。全件 `cargo test` / `cargo llvm-cov` は時間がかかりすぎるため、開発中の反復では**変更箇所のテストだけ**を絞って回す（`cargo test <module_path>` / `<test_name>` / `-p <crate>`。[ワークフロー](../.agents/workflow.md) ステップ 2）。
-- テストカバレッジ 100% を維持する（CI でチェック。pre-push フックでは走らせない）。
+- テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（`src/main.rs`）で束ねる。こうすると presentation/CLI のオーケストレーションはユニットテストで 100% を満たせる（例: `cli/agent_phase.rs` は `impl Read`、`cli/mcp.rs` は `impl BufRead`/`impl Write` と `Box<dyn AgentBackend>`、`cli/clean.rs` は spawn 関数を注入）。
   - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層だけ（`main.rs` と、live TTY / 実 PTY / 実ネットワーク / 実スレッドを束ねる薄いオーケストレータ）。理由は `scripts/coverage.sh` のコメントに列挙する。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
@@ -127,7 +127,7 @@ cargo clippy --all-targets -- -D warnings  # Lint（警告はエラー扱い）
 |---|---|
 | pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy -- -D warnings`（全件テスト・カバレッジ 100% 確認は時間がかかりすぎるため走らせず、Coverage CI に委ねる） |
+| pre-push | `cargo clippy -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip） |
 
 ### workspace root コミットの拒否（backstop）
 
