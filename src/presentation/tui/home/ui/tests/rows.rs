@@ -242,6 +242,50 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
+fn left_pane_omits_branch_lifecycle_status_from_session_rows() {
+    // The left pane is reserved for session identity, agent lifecycle, and
+    // operational metrics. The branch/worktree lifecycle still exists for the
+    // right-pane header (`status_label` above), but must not ride on the sidebar
+    // session rows.
+    let list = list_with(vec![
+        worktree(Some("alpha"), false, BranchStatus::New),
+        worktree(Some("bravo"), false, BranchStatus::Dirty),
+        worktree(Some("charlie"), false, BranchStatus::Local),
+        worktree(Some("delta"), false, BranchStatus::Pushed),
+        worktree(Some("echo"), false, BranchStatus::Synced),
+    ]);
+    let lines = left_pane(
+        &list,
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &[],
+        &HashMap::new(),
+        &crate::domain::settings::SessionLabelMaster::default(),
+        40,
+        18,
+        false,
+        Sidebar::Full,
+        Utc::now(),
+        None,
+    );
+    let plain = stripped(&lines);
+    for word in ["new", "dirty", "local", "pushed", "synced"] {
+        assert!(
+            !plain.contains(word),
+            "left pane should not show branch lifecycle word {word:?}:\n{plain}"
+        );
+    }
+    for icon in [NEW_ICON, DIRTY_ICON, LOCAL_ICON, PUSHED_ICON, SYNCED_ICON] {
+        assert!(
+            !plain.contains(icon),
+            "left pane should not show branch lifecycle icon {icon:?}:\n{plain}"
+        );
+    }
+}
+
+#[test]
 fn nested_name_cell_clips_the_lineage_prefix_when_the_name_slot_is_tiny() {
     let cell = nested_name_cell("child", 1, false, 1);
     assert_eq!(console::measure_text_width(&cell), 1);
