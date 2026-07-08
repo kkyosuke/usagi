@@ -27,6 +27,7 @@ pub mod session;
 pub mod usagi;
 
 use std::io::{BufRead, Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -248,7 +249,13 @@ fn dispatch_tool_call(service: &dyn McpService, params: Option<&Value>, id: Valu
         }
     };
 
-    let outcome = service.call_tool(name, arguments);
+    let outcome = match catch_unwind(AssertUnwindSafe(|| service.call_tool(name, arguments))) {
+        Ok(outcome) => outcome,
+        Err(payload) => Err(format!(
+            "tool `{name}` panicked: {}",
+            panic_payload_message(&payload)
+        )),
+    };
     crate::infrastructure::trace_log::TraceLog::record(
         crate::domain::trace::TraceEvent::now(crate::domain::trace::TraceCategory::Mcp, name)
             .with_detail(if outcome.is_ok() { "ok" } else { "error" }),
@@ -258,6 +265,20 @@ fn dispatch_tool_call(service: &dyn McpService, params: Option<&Value>, id: Valu
         Err(text) => json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
     };
     success_response(id, result)
+}
+
+/// Extract a readable message from a panic payload caught while running one MCP
+/// tool. Panic payloads are conventionally `&'static str` or `String`; anything
+/// else still becomes a stable placeholder so the tool result remains valid JSON
+/// and the server keeps serving following requests.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// Wrap `result` as a JSON-RPC success response for `id`.
@@ -301,6 +322,27 @@ mod tests {
         }
 
         fn call_tool(&self, name: &str, _arguments: Value) -> Result<String, String> {
+            Ok(format!("called {name}"))
+        }
+    }
+
+    /// A service with one deliberately-panicking tool, used to prove that a bad
+    /// tool call is isolated to that one MCP response.
+    struct PanickingService;
+
+    impl McpService for PanickingService {
+        fn server_name(&self) -> &str {
+            "panicky"
+        }
+
+        fn tool_schemas(&self) -> Value {
+            json!([])
+        }
+
+        fn call_tool(&self, name: &str, _arguments: Value) -> Result<String, String> {
+            if name == "explode" {
+                panic!("boom");
+            }
             Ok(format!("called {name}"))
         }
     }
@@ -427,6 +469,42 @@ mod tests {
     }
 
     #[test]
+    fn a_panicking_tool_returns_is_error_and_the_server_keeps_serving() {
+        // One tool panic is converted into that call's MCP `isError` result; it
+        // must not unwind out of the stdio loop and take every subsequent tool
+        // down with it. The next request in the same input stream proves the
+        // server stayed alive after the panic.
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"explode","arguments":{}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"after","arguments":{}}}"#,
+            "\n",
+        );
+        let mut output = Vec::new();
+
+        serve(&PanickingService, input.as_bytes(), &mut output).unwrap();
+
+        let response = String::from_utf8(output).unwrap();
+        let replies = response
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], json!(1));
+        assert_eq!(replies[0]["result"]["isError"], json!(true));
+        assert!(replies[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tool `explode` panicked"));
+        assert_eq!(replies[1]["id"], json!(2));
+        assert_eq!(replies[1]["result"]["isError"], json!(false));
+        assert_eq!(
+            replies[1]["result"]["content"][0]["text"],
+            json!("called after")
+        );
+    }
+
+    #[test]
     fn serve_answers_a_non_utf8_line_with_a_parse_error_and_keeps_going() {
         // A line of invalid UTF-8 must not terminate the server: it becomes a
         // parse error, and a following valid request is still answered.
@@ -484,5 +562,17 @@ mod tests {
 
         let response = String::from_utf8(output).unwrap();
         assert!(response.contains("called do_thing"));
+    }
+
+    #[test]
+    fn panic_payload_message_covers_common_and_opaque_payloads() {
+        let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed");
+        assert_eq!(panic_payload_message(&*borrowed), "borrowed");
+
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned"));
+        assert_eq!(panic_payload_message(&*owned), "owned");
+
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(123_u32);
+        assert_eq!(panic_payload_message(&*opaque), "non-string panic payload");
     }
 }
