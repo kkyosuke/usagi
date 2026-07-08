@@ -138,19 +138,24 @@ pub(super) fn rail_label_glyph(label: Option<&SessionLabelDef>) -> Option<String
     label.map(|def| label_style(def.color).apply_to(def.glyph()).to_string())
 }
 
-/// The state of a session's embedded agent, shown by an icon on the row's first
-/// line and spelled out on its detail line.
 /// Nerd Font glyph flagging that the row's detail line reports an **AI agent's**
-/// state (rather than a plain shell). It leads the agent label — `<robot> ☾ ready`
-/// — so an agent-backed session reads at a glance. Kept in the Font Awesome **4**
-/// range (like the git-status glyphs above), where every Nerd Font — old or partial
-/// — carries it: the FA5 `nf-fa-robot` (U+F544) is absent from those and shows a `?`
-/// fallback (the same trap noted for [`MEM_ICON`]). Without any Nerd Font the phase
-/// glyph and word beside it still carry the meaning.
+/// lifecycle (rather than a plain shell). It leads the agent label —
+/// `<robot> ☾ ready` — so an agent-backed session reads at a glance. Kept in the
+/// Font Awesome **4** range (like the git-status glyphs above), where every Nerd
+/// Font — old or partial — carries it: the FA5 `nf-fa-robot` (U+F544) is absent
+/// from those and shows a `?` fallback (the same trap noted for [`MEM_ICON`]).
+/// Without any Nerd Font the phase glyph and word beside it still carry the
+/// meaning.
 pub(super) const AGENT_ICON: char = '\u{f17b}'; // nf-fa-android — an AI agent (robot) drives this session
 
+/// The lifecycle of a session's embedded **Agent** process, deliberately named
+/// separately from the git/worktree [`BranchStatus`] shown in the right-pane
+/// header. This says what the *Agent* is doing (ready/running/waiting/done); it
+/// does not say whether the branch is `dirty`, `pushed`, or `synced`. The left
+/// pane shows only this agent lifecycle — the branch lifecycle stays out of the
+/// session rows.
 #[derive(Clone, Copy)]
-pub(super) enum AgentState {
+pub(super) enum AgentLifecycle {
     /// No live embedded session: the row carries no agent detail.
     Absent,
     /// A live session whose agent has started but not begun a turn yet — idle,
@@ -166,22 +171,22 @@ pub(super) enum AgentState {
     Done,
 }
 
-impl AgentState {
+impl AgentLifecycle {
     /// Pick the state from the live / running / waiting / done flags, in
     /// precedence order: done (the agent exited) wins over waiting, which wins
     /// over running, which wins over a plain live session (ready) — every state
     /// but [`Absent`](Self::Absent) is necessarily live.
     pub(super) fn from_flags(live: bool, running: bool, waiting: bool, done: bool) -> Self {
         if done {
-            AgentState::Done
+            AgentLifecycle::Done
         } else if waiting {
-            AgentState::Waiting
+            AgentLifecycle::Waiting
         } else if running {
-            AgentState::Running
+            AgentLifecycle::Running
         } else if live {
-            AgentState::Ready
+            AgentLifecycle::Ready
         } else {
-            AgentState::Absent
+            AgentLifecycle::Absent
         }
     }
 
@@ -192,25 +197,25 @@ impl AgentState {
     /// rides inside the same styled span, so it takes the phase's colour.
     pub(super) fn detail(self, width: usize) -> Option<String> {
         match self {
-            AgentState::Absent => None,
-            AgentState::Ready => Some(
+            AgentLifecycle::Absent => None,
+            AgentLifecycle::Ready => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ☾ ready"), width))
                     .dim()
                     .to_string(),
             ),
-            AgentState::Running => Some(
+            AgentLifecycle::Running => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ▶ running"), width))
                     .success()
                     .bold()
                     .to_string(),
             ),
-            AgentState::Waiting => Some(
+            AgentLifecycle::Waiting => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ◆ waiting"), width))
                     .warning()
                     .bold()
                     .to_string(),
             ),
-            AgentState::Done => Some(
+            AgentLifecycle::Done => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ✓ done"), width))
                     .accent()
                     .bold()
@@ -228,25 +233,25 @@ impl AgentState {
     /// without spending columns on the label.
     fn icon_label(self, width: usize) -> Option<String> {
         match self {
-            AgentState::Absent => None,
-            AgentState::Ready => Some(
+            AgentLifecycle::Absent => None,
+            AgentLifecycle::Ready => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ☾"), width))
                     .dim()
                     .to_string(),
             ),
-            AgentState::Running => Some(
+            AgentLifecycle::Running => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ▶"), width))
                     .success()
                     .bold()
                     .to_string(),
             ),
-            AgentState::Waiting => Some(
+            AgentLifecycle::Waiting => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ◆"), width))
                     .warning()
                     .bold()
                     .to_string(),
             ),
-            AgentState::Done => Some(
+            AgentLifecycle::Done => Some(
                 style(clip_to_width(&format!("{AGENT_ICON} ✓"), width))
                     .accent()
                     .bold()
@@ -261,11 +266,11 @@ impl AgentState {
     /// dot, so the row is never blank).
     fn rail_icon(self) -> Option<String> {
         match self {
-            AgentState::Absent => None,
-            AgentState::Ready => Some(style("☾").dim().to_string()),
-            AgentState::Running => Some(style("▶").success().bold().to_string()),
-            AgentState::Waiting => Some(style("◆").warning().bold().to_string()),
-            AgentState::Done => Some(style("✓").accent().bold().to_string()),
+            AgentLifecycle::Absent => None,
+            AgentLifecycle::Ready => Some(style("☾").dim().to_string()),
+            AgentLifecycle::Running => Some(style("▶").success().bold().to_string()),
+            AgentLifecycle::Waiting => Some(style("◆").warning().bold().to_string()),
+            AgentLifecycle::Done => Some(style("✓").accent().bold().to_string()),
         }
     }
 }
@@ -342,9 +347,8 @@ pub(super) const HUMAN_ORIGIN_ICON: char = '\u{f007}';
 pub(super) const MCP_ORIGIN_ICON: char = '\u{f085}';
 
 /// The fixed-width, dim origin field that prefixes a session's name. It is
-/// intentionally separate from [`AgentState`]'s android/detail icon: this marker
-/// says who *created* the session, not whether an agent is currently running in
-/// it.
+/// intentionally separate from [`AgentLifecycle`]'s detail label: this marker says
+/// who *created* the session, not whether an agent is currently running in it.
 pub(super) fn origin_cell(origin: SessionOrigin) -> String {
     match origin {
         SessionOrigin::Unknown => " ".repeat(ORIGIN_COL),
@@ -749,7 +753,7 @@ pub(super) fn nested_worktree_row(
     // matter how many changed lines or how long ago it was touched. Only the active
     // bar runs down to it — the `>` cursor stays a single point on line 1, so the
     // detail-line gutter ignores the cursor.
-    let agent = AgentState::from_flags(live, running, waiting, done);
+    let agent = AgentLifecycle::from_flags(live, running, waiting, done);
     let lineage_cols = session_name_prefix_width(nesting_depth).min(detail_width);
     let detail_width = detail_width.saturating_sub(lineage_cols);
     let mut cells = Vec::new();
@@ -1063,7 +1067,7 @@ pub(super) fn commits_cell(ab: Option<AheadBehind>, ahead_w: usize, behind_w: us
 /// clipped to the room left of it (the badge can thus clip a long agent label, the
 /// established rule). With no cells the agent label fills the cell; when the
 /// cluster alone overflows it is clipped to the cell.
-pub(super) fn detail_content(agent: AgentState, cells: &[String], width: usize) -> String {
+pub(super) fn detail_content(agent: AgentLifecycle, cells: &[String], width: usize) -> String {
     if cells.is_empty() {
         return agent.icon_label(width).unwrap_or_default();
     }
@@ -1772,7 +1776,7 @@ pub(super) fn rail_pane(
             }
             let kind = kind_dot(heat_of(w.updated_at, now));
             let label = rail_label_glyph(group.row_label_id(i).and_then(|id| label_master.get(id)));
-            let agent = AgentState::from_flags(
+            let agent = AgentLifecycle::from_flags(
                 live.contains(&w.path),
                 running.contains(&w.path),
                 waiting.contains(&w.path),
@@ -2100,7 +2104,7 @@ pub(super) fn left_pane(
         .iter()
         .flat_map(|g| g.worktrees())
         .map(|w| {
-            let agent = AgentState::from_flags(
+            let agent = AgentLifecycle::from_flags(
                 live.contains(&w.path),
                 running.contains(&w.path),
                 waiting.contains(&w.path),

@@ -247,6 +247,52 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
 }
 
 #[test]
+fn an_external_refresh_updates_the_sidebar_without_entering_switch() {
+    // Regression for MCP-created sessions not appearing until the user manually
+    // opened Switch mode: the watcher feeds the same refresh handle while the
+    // screen may be in 集中 (Closeup). Applying that refresh must rebuild the
+    // left-pane list in place, keep the current mode, and keep the cursor on the
+    // same session rather than relying on `enter_switch` to rebuild later.
+    let mut state = state_with_sessions(&["main", "feat"]);
+    assert!(state.enter_closeup_named("feat"));
+    let root = state.root_path().to_path_buf();
+    let refresh = SessionsRefreshHandle::new();
+
+    refresh.set(
+        root,
+        ["main", "feat", "delegated"]
+            .iter()
+            .map(|n| SessionRecord {
+                name: n.to_string(),
+                display_name: None,
+                note: None,
+                label_id: None,
+                agent: Default::default(),
+                origin: Default::default(),
+                started_from: None,
+                root: PathBuf::from(format!("/ws/.usagi/sessions/{n}")),
+                worktrees: vec![worktree(Some(n), &format!("/ws/{n}"))],
+                created_at: Utc::now(),
+                last_active: None,
+            })
+            .collect(),
+    );
+
+    assert!(apply_pending_refresh(&mut state, &refresh));
+    assert_eq!(state.mode(), Mode::Closeup, "no Switch round-trip needed");
+    assert_eq!(state.list().selected_name(), "feat", "cursor is preserved");
+    assert!(
+        state
+            .list()
+            .groups()
+            .iter()
+            .flat_map(|g| g.worktrees())
+            .any(|w| w.branch.as_deref() == Some("delegated")),
+        "the externally-created session is present in the left-pane list"
+    );
+}
+
+#[test]
 fn a_background_refresh_routes_to_the_workspace_it_names() {
     // 統合(unite) mode: the watcher publishes each workspace's recorded sessions
     // keyed by its root, so a refresh naming the extra group updates *that* group's

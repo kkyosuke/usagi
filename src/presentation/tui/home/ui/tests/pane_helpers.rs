@@ -627,7 +627,7 @@ fn detail_content_right_aligns_the_cluster_and_clips_the_agent() {
     );
     // Agent label on the left, the cluster pinned to the cell's right edge; the
     // whole cell measures exactly the width so the badges line up.
-    let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 24);
+    let line = detail_content(AgentLifecycle::Running, std::slice::from_ref(&badge), 24);
     assert_eq!(console::measure_text_width(&line), 24);
     let plain = console::strip_ansi_codes(&line);
     // Icon only: the AI glyph + phase icon, no spelled-out word.
@@ -636,7 +636,7 @@ fn detail_content_right_aligns_the_cluster_and_clips_the_agent() {
     assert!(plain.ends_with("+124 -18"));
 
     // With no agent the cluster still rides the right edge.
-    let line = detail_content(AgentState::Absent, std::slice::from_ref(&badge), 24);
+    let line = detail_content(AgentLifecycle::Absent, std::slice::from_ref(&badge), 24);
     assert_eq!(console::measure_text_width(&line), 24);
     assert_eq!(console::strip_ansi_codes(&line).trim_start(), "+124 -18");
 }
@@ -644,8 +644,8 @@ fn detail_content_right_aligns_the_cluster_and_clips_the_agent() {
 #[test]
 fn detail_content_falls_back_to_the_agent_or_clips_a_cramped_cluster() {
     // No cells → just the agent icons (blank when absent, no spelled-out word).
-    assert_eq!(detail_content(AgentState::Absent, &[], 20), "");
-    let running = detail_content(AgentState::Running, &[], 20);
+    assert_eq!(detail_content(AgentLifecycle::Absent, &[], 20), "");
+    let running = detail_content(AgentLifecycle::Running, &[], 20);
     let running = console::strip_ansi_codes(&running);
     assert!(running.contains('▶'));
     assert!(!running.contains("running"));
@@ -658,7 +658,7 @@ fn detail_content_falls_back_to_the_agent_or_clips_a_cramped_cluster() {
         3,
         2,
     );
-    let line = detail_content(AgentState::Running, std::slice::from_ref(&badge), 5);
+    let line = detail_content(AgentLifecycle::Running, std::slice::from_ref(&badge), 5);
     assert!(console::measure_text_width(&line) <= 5);
 }
 
@@ -682,7 +682,7 @@ fn detail_content_joins_the_cells_in_order_with_single_space_gaps() {
         1,
     );
     let cells = vec![time, commits, badge];
-    let line = detail_content(AgentState::Running, &cells, 40);
+    let line = detail_content(AgentLifecycle::Running, &cells, 40);
     let plain = console::strip_ansi_codes(&line);
     assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
     assert!(plain.contains("3m ago ↑2 ↓1 +1 -2"));
@@ -803,7 +803,7 @@ fn detail_content_keeps_the_pr_cell_at_the_right_edge() {
     );
     let cell = pr_cell(&[pr(412), pr(98)], 3);
     let cells = vec![badge, cell];
-    let line = detail_content(AgentState::Running, &cells, 40);
+    let line = detail_content(AgentLifecycle::Running, &cells, 40);
     let plain = console::strip_ansi_codes(&line);
     assert!(plain.starts_with(&format!("{AGENT_ICON} ▶")));
     assert!(plain.contains(format!("+1 -2 {PR_ICON} 2").as_str()));
