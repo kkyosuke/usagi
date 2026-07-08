@@ -409,3 +409,139 @@ fn a_failed_dispatch_is_logged_and_tracks_nothing() {
         "a failed dispatch tracks no pending tab"
     );
 }
+
+#[derive(Clone, Copy, Debug)]
+enum PendingCase {
+    Resolving,
+    Starting(usize),
+    ReadySelected,
+    ReadyBackground,
+    Gone,
+}
+
+impl PendingCase {
+    fn poll(self) -> PendingPoll {
+        match self {
+            Self::Resolving => PendingPoll::Resolving,
+            Self::Starting(index) => PendingPoll::Starting(index),
+            Self::ReadySelected => PendingPoll::Ready { selected: true },
+            Self::ReadyBackground => PendingPoll::Ready { selected: false },
+            Self::Gone => PendingPoll::Gone,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LaunchCase {
+    Pending(PendingCase),
+    Reused,
+    Error,
+}
+
+#[test]
+fn background_tab_launch_lifecycle_characterization_matrix() {
+    // A compact matrix for the background-tab lifecycle. Every row starts from a
+    // live session, zooms out to 集中, and runs `terminal`; the first open is that
+    // initial re-attach, and later counts show what the launch path did.
+    //
+    // start_pending_spawn / poll result -> (open count, activate count, clear count)
+    //
+    // - Pending + Ready(selected) attaches the newly ready tab.
+    // - Pending + Ready(background) and Gone consume the tracker without opening.
+    // - Pending + Resolving/Starting leaves the tracker alive.
+    // - Reused re-attaches immediately with no tracker.
+    // - Error logs and tracks nothing.
+    let cases = [
+        (
+            "pending resolving",
+            LaunchCase::Pending(PendingCase::Resolving),
+            1,
+            0,
+            0,
+        ),
+        (
+            "pending starting",
+            LaunchCase::Pending(PendingCase::Starting(1)),
+            1,
+            0,
+            0,
+        ),
+        (
+            "pending ready selected",
+            LaunchCase::Pending(PendingCase::ReadySelected),
+            2,
+            1,
+            0,
+        ),
+        (
+            "pending ready background",
+            LaunchCase::Pending(PendingCase::ReadyBackground),
+            1,
+            0,
+            1,
+        ),
+        (
+            "pending gone",
+            LaunchCase::Pending(PendingCase::Gone),
+            1,
+            0,
+            1,
+        ),
+        ("reused", LaunchCase::Reused, 2, 0, 0),
+        ("error", LaunchCase::Error, 1, 0, 0),
+    ];
+
+    for (name, launch, expect_opens, expect_activates, expect_clears) in cases {
+        let activated = RefCell::new(0usize);
+        let cleared = RefCell::new(0usize);
+        let opens = RefCell::new(0usize);
+        let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+            *opens.borrow_mut() += 1;
+            if *opens.borrow() == 1 {
+                Ok(PaneExit::ToFocus)
+            } else {
+                Ok(PaneExit::Closed)
+            }
+        };
+        let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+        let mut start = move |_: &mut HomeState, _: &Path, _: bool| match launch {
+            LaunchCase::Pending(_) => Ok(StartPending::Pending {
+                label: "terminal".to_string(),
+            }),
+            LaunchCase::Reused => Ok(StartPending::Reused),
+            LaunchCase::Error => Err(anyhow::anyhow!("no shell")),
+        };
+        let mut poll = move |_d: &Path| match launch {
+            LaunchCase::Pending(case) => case.poll(),
+            LaunchCase::Reused | LaunchCase::Error => PendingPoll::Ready { selected: true },
+        };
+        let mut activate = |_d: &Path| {
+            *activated.borrow_mut() += 1;
+            true
+        };
+        let mut clear = || {
+            *cleared.borrow_mut() += 1;
+        };
+
+        let outcome = run_bg(
+            reach_closeup_and_launch_terminal(),
+            sample_state(),
+            &mut open,
+            &mut preview,
+            &mut start,
+            &mut poll,
+            &mut activate,
+            &mut clear,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, Outcome::Quit), "outcome: {name}");
+        assert_eq!(*opens.borrow(), expect_opens, "open count: {name}");
+        assert_eq!(
+            *activated.borrow(),
+            expect_activates,
+            "activate count: {name}"
+        );
+        assert_eq!(*cleared.borrow(), expect_clears, "clear count: {name}");
+    }
+}

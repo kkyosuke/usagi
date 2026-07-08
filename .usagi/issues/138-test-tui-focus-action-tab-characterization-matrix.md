@@ -1,14 +1,14 @@
 ---
 number: 138
 title: test(tui): Focus action と tab 操作の現状仕様を characterization matrix で固定する
-status: todo
+status: done
 priority: high
 labels: [test, tui, review]
 dependson: []
 related: []
 parent: 137
 created_at: 2026-07-06T00:19:39.561850+00:00
-updated_at: 2026-07-06T00:19:39.561850+00:00
+updated_at: 2026-07-08T23:29:56.462209+00:00
 ---
 
 ## 目的

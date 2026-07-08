@@ -839,3 +839,235 @@ fn closeup_select_pane_tab_without_live_panes_falls_back_to_the_new_tab() {
     assert_eq!(state.closeup_select_pane_tab(0), None);
     assert!(state.closeup_on_new_tab());
 }
+
+// --- Focus action / tab characterization matrices ------------------------
+//
+// These two `#[test]`s pin the *current* 集中 (Closeup) spec as a table so the
+// planned focus/tab refactor (#137) has an executable contract to preserve. They
+// deliberately assert at the reducer boundary (`HomeState`) rather than through
+// the event loop, so a later issue can port them onto smaller reducer types with
+// minimal churn.
+
+/// The Session-scope action names the 集中 menu offers, in menu order.
+fn menu_action_names(state: &HomeState) -> Vec<&'static str> {
+    state
+        .closeup_menu_commands()
+        .into_iter()
+        .map(|info| info.name)
+        .collect()
+}
+
+#[test]
+fn closeup_menu_action_visibility_matrix() {
+    // Which Session-scope actions the 集中 menu offers, as a table over the two
+    // axes that gate them:
+    //
+    // - row kind: a session row shows the session-only `close` / `diff`; the
+    //   `⌂ root` row (which belongs to no session) hides them.
+    // - local-LLM availability: `chat` only appears when a local LLM is wired in.
+    //
+    // The list is always alphabetical (`sorted_session_menu_commands`), so the
+    // expected vectors below double as the on-screen order.
+    //
+    // (on_root_row, ai_available) -> expected action names
+    let cases: &[(bool, bool, &[&str])] = &[
+        // Session row, LLM available: the full menu.
+        (false, true, &["agent", "chat", "close", "diff", "terminal"]),
+        // Session row, no LLM: `chat` drops.
+        (false, false, &["agent", "close", "diff", "terminal"]),
+        // Root row, LLM available: the session-only `close` / `diff` drop.
+        (true, true, &["agent", "chat", "terminal"]),
+        // Root row, no LLM: both filters apply.
+        (true, false, &["agent", "terminal"]),
+    ];
+    for &(on_root, ai, expected) in cases {
+        let mut state = state(); // rows: 0 = ⌂ root, 1 = main, 2 = feature
+        state.set_ai_available(ai);
+        state.enter_closeup(if on_root { 0 } else { 2 });
+        assert_eq!(
+            state.list().root_active(),
+            on_root,
+            "row kind for (on_root={on_root}, ai={ai})"
+        );
+        assert_eq!(
+            menu_action_names(&state),
+            expected,
+            "menu actions for (on_root={on_root}, ai={ai})"
+        );
+    }
+}
+
+#[test]
+fn closeup_prompt_action_effect_matrix() {
+    use crate::domain::settings::AgentCli;
+
+    // The 集中 Prompt accepts the same Session-scope action vocabulary as the
+    // menu, but its contract is the parsed command effect rather than a row in a
+    // picker. This table fixes the prompt side of the Focus action matrix:
+    //
+    // prompt text -> command effect
+    //
+    // There is intentionally no `ai <prompt>` row here: in the current command
+    // registry the local-LLM focus action is the `chat` command (and the
+    // subsequent chat line is handled by the chat overlay, not this prompt).
+    type Expected = Box<dyn Fn(&Effect)>;
+    let cases: &[(&str, Expected)] = &[
+        (
+            "terminal",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenTerminal)),
+        ),
+        (
+            "terminal open",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenTerminal)),
+        ),
+        (
+            "terminal new",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenExternalTerminal)),
+        ),
+        (
+            "agent",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenAgent(None))),
+        ),
+        (
+            "agent sakana.ai",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenAgent(Some(AgentCli::SakanaAi)))),
+        ),
+        (
+            "chat",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenChat)),
+        ),
+        (
+            "diff",
+            Box::new(|effect| assert_eq!(effect, &Effect::OpenDiff)),
+        ),
+        (
+            "close",
+            Box::new(|effect| assert_eq!(effect, &Effect::CloseSession { force: false })),
+        ),
+        (
+            "close --force",
+            Box::new(|effect| assert_eq!(effect, &Effect::CloseSession { force: true })),
+        ),
+    ];
+
+    for (prompt, assert_effect) in cases {
+        let mut state = state();
+        state.set_ai_available(true); // allow the `chat` Session command.
+        state.set_installed_agents(vec![AgentCli::Claude, AgentCli::SakanaAi]);
+        state.enter_closeup(2);
+        state.set_session_action_ui(SessionActionUi::Prompt);
+        state.closeup_prompt_mut().set_value((*prompt).to_string());
+
+        let submission = state.closeup_prompt_submit();
+
+        assert_effect(&submission.effect);
+        assert!(
+            submission.recorded.is_some(),
+            "prompt command should be recorded: {prompt}"
+        );
+        assert_eq!(
+            state.closeup_prompt(),
+            "",
+            "prompt clears after submission: {prompt}"
+        );
+    }
+}
+
+/// Put 集中's tab selector into a known position: `panes` live pane labels with
+/// `active` selected, and the selector either on the trailing "+ new" tab
+/// (`on_new`) or on the active pane tab. Mirrors how the event loop primes the
+/// strip before a `Ctrl-N/P` / click walks it.
+fn closeup_with_tabs(panes: &[&str], active: usize, on_new: bool) -> HomeState {
+    let mut state = state();
+    state.enter_closeup(2); // feature; entry lands on "+ new"
+    if !panes.is_empty() {
+        state.set_terminal_tabs(panes.iter().map(|s| s.to_string()).collect(), active);
+    }
+    if !on_new {
+        // Step off "+ new" onto the active pane tab without moving `active`.
+        state.closeup_select_active_pane_tab();
+    }
+    state
+}
+
+#[test]
+fn closeup_tab_navigation_matrix() {
+    // The tab strip is `[pane 0 … pane n-1, + new]`. `closeup_tab_next` /
+    // `closeup_tab_prev` wrap through it and return the pane index the terminal
+    // pool should activate (`None` = landed on "+ new"). This table pins that
+    // wrap for `next` and `prev` across pane counts and start positions.
+    //
+    // Each row: (panes, active_pane, start_on_new, expect_next, expect_prev),
+    // where the two expectations are (returned index, on_new_tab after the move).
+    type Move = (Option<usize>, bool);
+    let cases: &[(&[&str], usize, bool, Move, Move)] = &[
+        // No live panes: both directions stay pinned on the lone "+ new" tab.
+        (&[], 0, true, (None, true), (None, true)),
+        // One pane, on "+ new": either direction wraps onto the sole pane.
+        (&["a"], 0, true, (Some(0), false), (Some(0), false)),
+        // One pane, on that pane: either direction steps out to "+ new".
+        (&["a"], 0, false, (None, true), (None, true)),
+        // Two panes, on "+ new": next wraps to the first, prev to the last.
+        (&["a", "b"], 0, true, (Some(0), false), (Some(1), false)),
+        // Two panes, on pane 0: next -> pane 1; prev -> "+ new".
+        (&["a", "b"], 0, false, (Some(1), false), (None, true)),
+        // Two panes, on pane 1 (last): next -> "+ new"; prev -> pane 0.
+        (&["a", "b"], 1, false, (None, true), (Some(0), false)),
+    ];
+    for &(panes, active, on_new, expect_next, expect_prev) in cases {
+        let label = format!("panes={panes:?} active={active} on_new={on_new}");
+
+        let mut next_state = closeup_with_tabs(panes, active, on_new);
+        assert_eq!(
+            next_state.closeup_tab_next(),
+            expect_next.0,
+            "next idx: {label}"
+        );
+        assert_eq!(
+            next_state.closeup_on_new_tab(),
+            expect_next.1,
+            "next on_new: {label}"
+        );
+
+        let mut prev_state = closeup_with_tabs(panes, active, on_new);
+        assert_eq!(
+            prev_state.closeup_tab_prev(),
+            expect_prev.0,
+            "prev idx: {label}"
+        );
+        assert_eq!(
+            prev_state.closeup_on_new_tab(),
+            expect_prev.1,
+            "prev on_new: {label}"
+        );
+    }
+}
+
+#[test]
+fn closeup_tab_select_index_matrix() {
+    // Clicking a concrete tab (`To(index)`, the mouse path) always leaves "+ new"
+    // and returns the clamped pane index — or falls back to "+ new" when the
+    // session has no live panes. This pins the `To(index)` column of the matrix.
+    //
+    // Each row: (panes, clicked_index) -> (returned index, on_new_tab after).
+    let cases: &[(&[&str], usize, Option<usize>, bool)] = &[
+        // No panes: nothing to select, snap back to "+ new".
+        (&[], 0, None, true),
+        // In range: the exact pane, "+ new" cleared.
+        (&["a", "b", "c"], 1, Some(1), false),
+        // First pane.
+        (&["a", "b", "c"], 0, Some(0), false),
+        // Out of range clamps onto the last pane.
+        (&["a", "b", "c"], 9, Some(2), false),
+    ];
+    for &(panes, index, expect_idx, expect_new) in cases {
+        let mut state = closeup_with_tabs(panes, 0, true);
+        let label = format!("panes={panes:?} index={index}");
+        assert_eq!(
+            state.closeup_select_pane_tab(index),
+            expect_idx,
+            "idx: {label}"
+        );
+        assert_eq!(state.closeup_on_new_tab(), expect_new, "on_new: {label}");
+    }
+}
