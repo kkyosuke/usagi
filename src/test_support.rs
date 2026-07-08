@@ -7,11 +7,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 /// test runner would otherwise let race against each other.
 ///
 /// Hold the returned guard for the duration of the mutation (and any reads that
-/// depend on it). If a failing test poisons the mutex, later guarded tests recover
-/// the inner lock rather than cascading the original panic into unrelated tests.
+/// depend on it). A test that panics while holding the guard poisons it, which
+/// surfaces as panics in the other guarded tests — acceptable, since the suite
+/// has already failed at that point.
 pub fn process_env_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }

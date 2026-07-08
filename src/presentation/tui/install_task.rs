@@ -333,7 +333,7 @@ mod tests {
         handle.begin_at("m", t0);
         let clone = handle.clone();
         let _ = std::thread::spawn(move || {
-            let _guard = clone.shared.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = clone.shared.lock().unwrap();
             panic!("poison the mutex");
         })
         .join();

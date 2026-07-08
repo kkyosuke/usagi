@@ -482,6 +482,15 @@ mod tests {
         );
         let mut output = Vec::new();
 
+        // The service identity/schema accessors are part of the trait surface the
+        // stdio loop uses for `initialize` / `tools/list`; touch them so the panic
+        // fixture is exercised in full, not only through `call_tool`.
+        assert_eq!(PanickingService.server_name(), "panicky");
+        assert!(PanickingService
+            .tool_schemas()
+            .as_array()
+            .is_some_and(|tools| tools.is_empty()));
+
         serve(&PanickingService, input.as_bytes(), &mut output).unwrap();
 
         let response = String::from_utf8(output).unwrap();
