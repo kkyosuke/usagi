@@ -1,4 +1,4 @@
-//! Rendering for the focus-mode action menu and command prompt.
+//! Rendering for the Closeup action menu and command prompt.
 
 use console::{style, Style};
 
@@ -258,8 +258,9 @@ pub(super) fn closeup_menu_overflow(hidden: usize, above: bool) -> String {
 /// height that grows to fill the `avail_rows`-tall right pane, so a long picker
 /// shows as many rows as fit before it scrolls rather than collapsing straight
 /// into `↑/↓ N more` markers. Rendered as the body of the floating menu overlay
-/// modal (see [`super::render_frame`] and [`HomeState::closeup_action_overlay`]); the
-/// `session:` identity rides the modal's title rather than a header line here.
+/// modal (see [`super::render_frame`] and [`HomeState::closeup_action_overlay`]);
+/// the session identity rides the modal's `Closeup: <name>` title rather than a
+/// header line here.
 pub(super) fn closeup_menu_body(state: &HomeState, width: usize, avail_rows: usize) -> Vec<String> {
     let cursor = state.closeup_menu_cursor();
     let expanded = state.closeup_menu_expanded();
@@ -414,9 +415,10 @@ pub(super) fn closeup_menu_filter_line(state: &HomeState, width: usize) -> Strin
 /// hint block below it, so the box never resizes as the hint changes while typing.
 /// Rendered as the body of the floating prompt overlay modal (the prompt sibling
 /// of [`closeup_menu_body`]; see [`super::render_frame`] and
-/// [`HomeState::closeup_action_overlay`]); the `session:` identity rides the modal's
-/// title rather than a header line here. `avail_rows` caps the reserved block so a
-/// short right pane never overruns (mirroring the menu's `avail_rows` window).
+/// [`HomeState::closeup_action_overlay`]); the session identity rides the modal's
+/// `Closeup: <name>` title rather than a header line here. `avail_rows` caps the
+/// reserved block so a short right pane never overruns (mirroring the menu's
+/// `avail_rows` window).
 pub(super) fn closeup_prompt_body(
     state: &HomeState,
     width: usize,

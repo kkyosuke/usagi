@@ -129,7 +129,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
         KeyScheme::Prefix => vec![
             cheatsheet_header("Closeup live — terminal (Ctrl-O is the leader)"),
             key_row("Ctrl-O o", "Switch mode"),
-            key_row("Ctrl-O a", "Open Focus modal"),
+            key_row("Ctrl-O a", "Open Closeup modal"),
             key_row("Ctrl-O n/p", "Next / previous tab (or Ctrl-O →/←)"),
             key_row("Ctrl-O g", "Add an agent tab"),
             key_row("Ctrl-O e", "Edit the session note"),
@@ -141,7 +141,7 @@ fn attached_keys(scheme: KeyScheme) -> Vec<LogLine> {
         KeyScheme::Alt => vec![
             cheatsheet_header("Closeup live — terminal (needs Option=Meta on macOS)"),
             key_row("Alt-o", "Switch mode"),
-            key_row("Alt-a", "Open Focus modal"),
+            key_row("Alt-a", "Open Closeup modal"),
             key_row("Alt-→ / Alt-←", "Next / previous tab"),
             key_row("Alt-g", "Add an agent tab"),
             key_row("Alt-e", "Edit the session note"),

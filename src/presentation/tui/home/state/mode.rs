@@ -12,7 +12,7 @@ pub enum Mode {
     /// Switch: operate the session set — choose, create, rename, reorder, and
     /// switch sessions from the left pane.
     Switch,
-    /// Closeup: operate inside the selected session — either the Focus modal
+    /// Closeup: operate inside the selected session — either the Closeup modal
     /// (menu / prompt) or a live embedded terminal owned by that session.
     Closeup,
 }
@@ -40,7 +40,7 @@ pub enum ResumeLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneExit {
     /// The shell exited on its own (e.g. the user typed `exit`); it is gone, so
-    /// the pane returns to the Focus modal in Closeup.
+    /// the pane returns to the Closeup modal in Closeup.
     Closed,
     /// The user pressed `Ctrl-O o`: leave the pane to Switch on the left pane.
     /// Re-selecting the same session re-attaches.
@@ -49,7 +49,7 @@ pub enum PaneExit {
     /// over it. Closing the editor (save or cancel) re-attaches the session's
     /// pane, so the user drops straight back into the live terminal.
     OpenNote,
-    /// The user pressed `Ctrl-T` / `Ctrl-O a`: open the Focus modal — the
+    /// The user pressed `Ctrl-T` / `Ctrl-O a`: open the Closeup modal — the
     /// session's action menu / prompt, floating over the tab the zoom left so its
     /// live preview keeps showing — leaving every pane alive in the pool. Unlike
     /// [`Self::Closed`] no pane is closed; the panes stay live just as
@@ -58,7 +58,7 @@ pub enum PaneExit {
     /// The user pressed `Ctrl-^`: leave the pane to jump straight to the
     /// previously focused session (vim's `Ctrl-^` / tmux's `last-window`),
     /// attaching it when live. With no previous session recorded the pane returns
-    /// to the Focus modal on the current session instead.
+    /// to the Closeup modal on the current session instead.
     ToPreviousSession,
     /// The user double-clicked a selectable sidebar row: leave the pane to act on
     /// that focus row — attaching a session when live, or opening inline creation

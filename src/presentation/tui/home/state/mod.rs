@@ -646,11 +646,6 @@ pub struct HomeState {
     /// terminal-pool wiring on a fresh agent spawn. `None` means "use
     /// [`default_agent`](Self::default_agent)".
     agent_choice: Option<AgentCli>,
-    /// The opening prompt the next configured-agent launch should deliver,
-    /// captured from `ai <prompt>` and consumed by the terminal-pool wiring. It is
-    /// separate from [`agent_choice`](Self::agent_choice) because `ai` always uses
-    /// the configured default CLI rather than an ad-hoc override.
-    agent_initial_prompt: Option<String>,
     /// The worktree (by index in [`list`](Self::list)'s worktrees) whose PR hover
     /// popup is pinned open, or `None` when none is. Set by clicking a session's PR
     /// badge (in any mode, on the full sidebar) and held open across pointer moves —
@@ -931,7 +926,6 @@ impl HomeState {
             ai_available: false,
             installed_agents: Vec::new(),
             agent_choice: None,
-            agent_initial_prompt: None,
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
@@ -1332,19 +1326,6 @@ impl HomeState {
     /// next agent spawn should launch, or `None` to use the configured default.
     pub fn take_agent_choice(&mut self) -> Option<AgentCli> {
         self.agent_choice.take()
-    }
-
-    /// Record the opening prompt for the next configured-agent launch, set by
-    /// `ai <prompt>` just before launching and consumed by
-    /// [`take_agent_initial_prompt`](Self::take_agent_initial_prompt).
-    pub fn set_agent_initial_prompt(&mut self, prompt: String) {
-        self.agent_initial_prompt = Some(prompt);
-    }
-
-    /// Take the pending `ai <prompt>` opening prompt, leaving no prompt behind.
-    /// Returns `None` for ordinary `agent` launches.
-    pub fn take_agent_initial_prompt(&mut self) -> Option<String> {
-        self.agent_initial_prompt.take()
     }
 
     /// Inject the workspace's task issues (loaded from disk by `mod.rs`), read by
@@ -2730,7 +2711,7 @@ impl HomeState {
         self.prefix_pending = false;
     }
 
-    /// Open the Focus modal (`Ctrl-O a`) for the selected / focused session.
+    /// Open the Closeup modal (`Ctrl-O a`) for the selected / focused session.
     ///
     /// From Switch this enters Closeup on the highlighted row, so the session's
     /// action surface appears. From Closeup it makes the action surface visible
@@ -3261,12 +3242,11 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 集中 menu lists, in alphabetical order
-    /// (see [`sorted_session_menu_commands`]). The prompt-taking `ai <prompt>` is kept out of
-    /// the pickable menu (it needs typed arguments; use the Prompt UI). `chat` is
-    /// filtered out unless the local LLM is usable (enabled and its model pulled),
-    /// so it only appears when a reply would actually work. `close` / `diff` are
-    /// filtered out on the root row, which belongs to no session. `agent` always
-    /// stays: a session can hold one agent pane per CLI.
+    /// (see [`sorted_session_menu_commands`]). `chat` is filtered out unless the
+    /// local LLM is usable (enabled and its model pulled), so it only appears when
+    /// a reply would actually work. `close` / `diff` are filtered out on the root
+    /// row, which belongs to no session. `agent` always stays: a session can hold
+    /// one agent pane per CLI.
     ///
     /// Resolved for the **active** row: 集中 acts on the session it focused. When
     /// the menu filter (`/`) is active the list is narrowed by
@@ -3300,31 +3280,16 @@ impl HomeState {
 
     /// Shared body of [`closeup_menu_commands`]: the
     /// Session-scope commands in alphabetical order (see
-    /// [`sorted_session_menu_commands`]): the prompt-taking `ai` is kept out of the menu,
-    /// `chat` is gated on local-LLM availability, and the session-only `close` /
-    /// `diff` are hidden when `root` (the row belongs to no session).
+    /// [`sorted_session_menu_commands`]): `chat` is gated on local-LLM
+    /// availability, and the session-only `close` / `diff` are hidden when `root`
+    /// (the row belongs to no session).
     fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
-            .filter(|info| info.name != "ai")
             .filter(|info| info.name != "chat" || self.ai_available)
             .filter(|info| !matches!(info.name, "close" | "diff") || !root)
             .collect()
-    }
-
-    /// Whether the focused session already has a live `agent` pane — a tab the
-    /// session's published [`TabStrip`] labels `agent` (or `agent N` when several
-    /// agents run). `ai <prompt>` uses this to skip its installed-CLI gate,
-    /// delivering the prompt to that pane (whatever CLI it runs) rather than
-    /// freshly spawning the default.
-    pub fn agent_tab_open(&self) -> bool {
-        self.terminal.tabs.as_ref().is_some_and(|strip| {
-            strip
-                .labels
-                .iter()
-                .any(|label| label == "agent" || label.starts_with("agent "))
-        })
     }
 
     /// How many live panes the focused session publishes (the leading 集中 tabs),

@@ -323,13 +323,13 @@ fn right_pane_shows_the_closeup_menu_or_prompt() {
         "the menu is not drawn inline in the right pane"
     );
     let menu = stripped(&render_frame(24, 120, &state));
-    assert!(menu.contains("session: main"));
+    assert!(menu.contains("Closeup: main"));
     assert!(menu.contains("terminal"));
     assert!(menu.contains("agent"));
     assert!(menu.contains('›'));
 
     // Prompt floats as an overlay modal too: its typed command line and the
-    // session-scope hint ride the floating box (title `session: main`), not the
+    // session-scope hint ride the floating box (title `Closeup: main`), not the
     // inline right pane.
     state.set_session_action_ui(SessionActionUi::Prompt);
     state.enter_closeup(1);
@@ -342,7 +342,7 @@ fn right_pane_shows_the_closeup_menu_or_prompt() {
         "the prompt is not drawn inline in the right pane"
     );
     let prompt = stripped(&render_frame(24, 120, &state));
-    assert!(prompt.contains("session: main"));
+    assert!(prompt.contains("Closeup: main"));
     assert!(prompt.contains("❯ ter"));
     // The session-scope hint lists terminal as a match.
     assert!(prompt.contains("terminal"));
@@ -562,7 +562,7 @@ fn zoomed_out_menu_floats_over_the_pane_preview() {
     assert!(!pane.contains("+ new"), "no chip for an uncreated tab");
     let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("Run a command:"), "the menu floats over it");
-    assert!(out.contains("session: main"));
+    assert!(out.contains("Closeup: main"));
 }
 
 #[test]
@@ -583,7 +583,7 @@ fn closeup_new_tab_with_panes_floats_the_prompt_surface() {
     assert!(!pane.contains("❯ ter"), "the prompt is not inline");
     let out = stripped(&render_frame(24, 120, &state));
     assert!(out.contains("+ new"));
-    assert!(out.contains("session: main"));
+    assert!(out.contains("Closeup: main"));
     assert!(out.contains("❯ ter"));
 }
 

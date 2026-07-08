@@ -155,7 +155,7 @@ impl Agent for GeminiAgent {
         // stay interactive): Gemini has no system-prompt flag, so the session
         // worktree note leads it, with any queued prompt after a blank line. It is
         // escaped for the single-quoted shell context, and glued to the flag with
-        // `=` so a prompt starting with `-` (e.g. `ai --help`) is read as the flag's
+        // `=` so a prompt starting with `-` (e.g. `--help`) is read as the flag's
         // value rather than as the next option. `-r` and `-i` are independent flags,
         // so a resumed session still gets the note and can open on a queued prompt.
         let opening = super::session_opening_prompt(wiring.is_root, true, initial_prompt);
@@ -308,7 +308,7 @@ mod tests {
                 shell_single_quote(&session_opening_prompt(Some("fix issue #50")))
             )
         );
-        // A dash-leading prompt (`ai --help`) binds to `-i` instead of being
+        // A dash-leading prompt (`--help`) binds to `-i` instead of being
         // parsed as the next option.
         let dashed = GeminiAgent::new().launch_command(&test_wiring(), false, Some("--help"));
         assert_eq!(

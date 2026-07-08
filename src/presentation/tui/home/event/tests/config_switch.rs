@@ -76,11 +76,9 @@ fn returning_from_config_refreshes_the_session_action_ui() {
 #[test]
 fn returning_from_config_reapplies_the_default_agent_cli() {
     // The config screen switched the default Agent CLI; on returning to home the
-    // state must adopt it so the next `agent` / `ai` launch (and the 集中 menu's
-    // `Launch <名前>` row) reflect the edit without restarting — in particular,
-    // `ai`'s "open config and choose an installed Agent CLI" hint only works if
-    // this re-apply happens. The launch callback observes the live state's
-    // default, proving the reload reached it.
+    // state must adopt it so the next `agent` launch (and the 集中 menu's
+    // `Launch <名前>` row) reflect the edit without restarting. The launch callback
+    // observes the live state's default, proving the reload reached it.
     let mut config = |_: &Term| {
         Ok(Some(ConfigReload {
             session_action_ui: SessionActionUi::Prompt,

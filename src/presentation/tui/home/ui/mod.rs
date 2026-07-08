@@ -696,7 +696,7 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
             SessionActionUi::Menu => closeup_menu_body(state, inner, body_rows),
             SessionActionUi::Prompt => closeup_prompt_body(state, inner, body_rows),
         };
-        let title = format!("Focus: {}", state.focused_session_name());
+        let title = format!("Closeup: {}", state.focused_session_name());
         widgets::overlay_region_modal(
             &mut lines,
             width,

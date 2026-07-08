@@ -503,16 +503,6 @@ fn agent_requests_opening_the_agent() {
 }
 
 #[test]
-fn ai_requests_opening_the_configured_agent_with_a_prompt() {
-    let result = registry().dispatch("ai fix the failing test", &[], &[]);
-    assert!(result.lines.is_empty());
-    assert_eq!(
-        result.effect,
-        Effect::OpenAgentPrompt("fix the failing test".to_string())
-    );
-}
-
-#[test]
 fn chat_opens_the_local_llm_chat_screen() {
     // `chat` takes no arguments and returns the open-chat side effect; any
     // trailing text is ignored (the screen owns the conversation, not the line).
@@ -521,14 +511,6 @@ fn chat_opens_the_local_llm_chat_screen() {
     assert_eq!(result.effect, Effect::OpenChat);
     let result = registry().dispatch("chat ignored", &[], &[]);
     assert_eq!(result.effect, Effect::OpenChat);
-}
-
-#[test]
-fn ai_requires_a_prompt() {
-    let result = registry().dispatch("ai   ", &[], &[]);
-    assert_eq!(result.effect, Effect::None);
-    assert_eq!(result.lines[0].kind, LineKind::Error);
-    assert!(result.lines[0].text.contains("usage: ai <prompt>"));
 }
 
 #[test]
@@ -935,7 +917,6 @@ fn suggest_splits_the_command_surface_by_scope() {
     assert!(has(&workspace, "man")); // a shared utility
     assert!(!has(&workspace, "terminal"));
     assert!(!has(&workspace, "agent"));
-    assert!(!has(&workspace, "ai"));
     assert!(!has(&workspace, "diff"));
 
     // The 集中 (Closeup) prompt offers the session-specific commands and the
@@ -944,7 +925,6 @@ fn suggest_splits_the_command_surface_by_scope() {
     let session = suggested_names(CommandScope::Session);
     assert!(has(&session, "terminal"));
     assert!(has(&session, "agent"));
-    assert!(has(&session, "ai"));
     assert!(has(&session, "close"));
     assert!(has(&session, "diff"));
     assert!(has(&session, "man")); // a shared utility
@@ -1024,10 +1004,7 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
         .iter()
         .map(|i| i.name)
         .collect();
-    assert_eq!(
-        session,
-        vec!["agent", "ai", "chat", "close", "diff", "terminal"]
-    );
+    assert_eq!(session, vec!["agent", "chat", "close", "diff", "terminal"]);
     // Workspace scope lists its own commands and none of the session ones.
     let workspace: Vec<&str> = registry()
         .commands_in_scope(CommandScope::Workspace)
@@ -1042,11 +1019,10 @@ fn commands_in_scope_lists_a_scopes_own_commands_in_order() {
 
 #[test]
 fn complete_respects_the_current_scope() {
-    // "a" matches the session commands "agent" and "ai" — offered in session
-    // scope, in registration order (common prefix "a")…
+    // "a" matches the session command "agent" and completes it.
     let session = registry().complete("a", CommandScope::Session);
-    assert_eq!(session.input, "a");
-    assert_eq!(session.candidates, vec!["agent", "ai"]);
+    assert_eq!(session.input, "agent");
+    assert!(session.candidates.is_empty());
     // …but nothing in workspace scope, so the input is left untouched.
     let workspace = registry().complete("a", CommandScope::Workspace);
     assert_eq!(workspace.input, "a");
