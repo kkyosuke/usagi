@@ -91,6 +91,23 @@ fn a_live_session_wakes_the_loop_without_a_key() {
 }
 
 #[test]
+fn a_pending_session_skeleton_wakes_the_loop_without_a_key() {
+    // A session create / remove skeleton is rendered inline in the sidebar and
+    // advances from wall-clock time. Even without a task row, live session, or
+    // state watcher, the loop must wake through the animation timeout; otherwise
+    // the skeleton freezes until the next keypress. The blocking queue holds an
+    // error to prove the loop did not fall back to a blocking read.
+    let mut reader = TimeoutScript {
+        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC))]),
+        blocking: VecDeque::from(vec![Err(io::Error::other("loop blocked on a key"))]),
+    };
+    assert!(matches!(
+        run_with_pending_session(&mut reader).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+#[test]
 fn an_idle_watched_screen_wakes_on_the_watch_tick_without_a_key() {
     // A create / remove made outside this screen (an agent's MCP call, another
     // usagi window, or the CLI) only writes state.json; the background watcher

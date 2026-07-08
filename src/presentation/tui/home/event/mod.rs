@@ -728,6 +728,14 @@ pub(super) fn event_loop(
         // showing either must repaint even when nothing else moved.
         let now = Instant::now();
         let panel_animating = install_task::handle().is_active(now) || tasks.is_active(now);
+        // Session create / remove show an inline sidebar skeleton whose loading
+        // wave is derived from the wall clock (see [`ui::sidebar::skeleton_frame`]),
+        // so it only reads as motion while the screen keeps repainting. Treat a
+        // pending session as a moving part in its own right — independent of the
+        // background task board's animation — so the skeleton animates in every
+        // mode (Switch and the Closeup Focus modal alike), not only when some
+        // other animated part happens to keep the loop ticking.
+        let sessions_animating = !state.pending_sessions().is_empty();
         // Refresh the sidebar mascot for this paint: reopen its eyes once a blink's
         // window has passed and advance the Working paw on the live tick. Reactive,
         // not timed — it rides paints that already happen, so a settled mascot
@@ -755,6 +763,9 @@ pub(super) fn event_loop(
             && !pr_links_changed
             && !panel_animating
             && !badges_changed
+            // A session create / remove skeleton animates on the clock, so its
+            // frames must not be skipped either.
+            && !sessions_animating
             // A mascot blink (or the frame that ends one) is a moving part too, so
             // it repaints rather than freezing the eyes mid-blink.
             && !state.mascot_blinking()
@@ -792,6 +803,9 @@ pub(super) fn event_loop(
             || state.has_live_sessions()
             || state.mascot_blinking()
             || state.mascot_reacting()
+            // A session create / remove skeleton advances on the clock, so keep
+            // ticking fast to animate it in every mode.
+            || sessions_animating
             // A pending chat reply: keep ticking to poll the receiver and animate
             // the "thinking" spinner.
             || chat_rx.is_some()

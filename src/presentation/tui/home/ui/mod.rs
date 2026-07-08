@@ -80,6 +80,7 @@ use chrome::{
 };
 use closeup_menu::{closeup_menu_body, closeup_prompt_body};
 use panes::right_pane_contents;
+pub(crate) use sidebar::skeleton_frame;
 use sidebar::{group_inline_insert_line_with_pending, left_pane};
 // The right-pane tab strips map clicks to the tab under them through these.
 pub(super) use tabs_hit::{
