@@ -334,6 +334,8 @@ mod tests {
 
     #[test]
     fn serve_advertises_the_service_identity_and_tools() {
+        assert!(EchoService.tool_names().is_empty());
+
         let input = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",

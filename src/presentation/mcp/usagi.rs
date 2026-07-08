@@ -430,8 +430,11 @@ mod tests {
     #[test]
     fn tools_list_merges_issue_memory_and_session_tools() {
         let tmp = tempfile::tempdir().unwrap();
+        let server = server_at(tmp.path());
+        assert_eq!(server.tool_names(), ["session_delegate_issue"]);
+
         let res = reply(
-            &server_at(tmp.path()),
+            &server,
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         );
         let tools = res["result"]["tools"].as_array().unwrap();

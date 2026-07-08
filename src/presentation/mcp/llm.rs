@@ -186,8 +186,11 @@ mod tests {
 
     #[test]
     fn tools_list_advertises_the_ask_tool_with_the_model_name() {
+        let server = server_ok("hi");
+        assert_eq!(server.tool_names(), ["local_llm_ask"]);
+
         let res = reply(
-            &server_ok("hi"),
+            &server,
             json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         );
         let tools = res["result"]["tools"].as_array().unwrap();
