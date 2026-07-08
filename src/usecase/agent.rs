@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::domain::agent::{AgentWiring, LaunchMode};
 use crate::domain::agent_feature::{self, AgentFeature, Support};
 use crate::domain::settings::AgentCli;
+use crate::infrastructure::repo_paths::STATE_DIR;
 use crate::usecase::doctor::CommandRunner;
 
 /// The agent CLIs whose launch command is available on the PATH, in
@@ -34,11 +35,18 @@ pub fn mcp_capable_clis(runner: &dyn CommandRunner) -> Vec<AgentCli> {
 /// Build the per-pane launch wiring from a workspace-wide base wiring.
 ///
 /// The domain wiring is data-only, so the caller injects the git-common-dir
-/// resolver. A successful resolution is carried as an extra writable root for
-/// attended launches, which lets sandboxed Codex sessions update the repository's
-/// shared `.git` store without approval prompts. A resolver failure leaves the
-/// launch usable with no extra root; adapters still add their own fixed roots
-/// (for Codex, usagi's data directory).
+/// resolver. Interactive launches carry two kinds of extra writable roots:
+///
+/// - the workspace-local `.usagi` directory, so an agent launched from inside
+///   `.usagi/sessions/<name>/` can still use MCP session orchestration tools
+///   that mutate the parent workspace's `state.json` and sibling session
+///   worktrees;
+/// - the repository's shared git common directory, so sandboxed Codex sessions
+///   can update `.git` without approval prompts.
+///
+/// A git resolver failure leaves the launch usable with the workspace metadata
+/// root only; adapters still add their own fixed roots (for Codex, usagi's
+/// global data directory).
 pub fn wiring_for_launch(
     base: &AgentWiring,
     model: Option<String>,
@@ -48,6 +56,7 @@ pub fn wiring_for_launch(
 ) -> AgentWiring {
     let mut sandbox_writable_roots = base.sandbox_writable_roots.clone();
     if mode == LaunchMode::Interactive {
+        sandbox_writable_roots.push(crate::usecase::session::workspace_root(dir).join(STATE_DIR));
         sandbox_writable_roots.extend(resolve_git_common_dir(dir));
     }
     AgentWiring {
@@ -150,12 +159,16 @@ mod tests {
         assert!(!wiring.is_root);
         assert_eq!(
             wiring.sandbox_writable_roots,
-            vec![PathBuf::from("/old/git"), PathBuf::from("/repo/.git")]
+            vec![
+                PathBuf::from("/old/git"),
+                PathBuf::from("/repo/.usagi"),
+                PathBuf::from("/repo/.git")
+            ]
         );
     }
 
     #[test]
-    fn launch_wiring_falls_back_when_git_common_dir_is_unresolved() {
+    fn launch_wiring_still_carries_workspace_state_dir_when_git_common_dir_is_unresolved() {
         let dir = Path::new("/repo/.usagi/sessions/fix");
         let wiring =
             wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, |_| None);
@@ -163,7 +176,20 @@ mod tests {
         assert_eq!(wiring.model, None);
         assert_eq!(
             wiring.sandbox_writable_roots,
-            vec![PathBuf::from("/old/git")]
+            vec![PathBuf::from("/old/git"), PathBuf::from("/repo/.usagi")]
+        );
+    }
+
+    #[test]
+    fn launch_wiring_carries_workspace_state_dir_for_workspace_root() {
+        let dir = Path::new("/repo");
+        let wiring =
+            wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, |_| None);
+
+        assert!(wiring.is_root);
+        assert_eq!(
+            wiring.sandbox_writable_roots,
+            vec![PathBuf::from("/old/git"), PathBuf::from("/repo/.usagi")]
         );
     }
 
