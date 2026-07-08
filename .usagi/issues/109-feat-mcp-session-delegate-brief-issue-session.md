@@ -1,14 +1,14 @@
 ---
 number: 109
 title: feat(mcp): ブリーフ起点の起源フロー — session_delegate_brief（事前 issue 不要でトリアージ session を起こす）
-status: todo
+status: done
 priority: high
 labels: [orchestration, mcp]
 dependson: []
 related: [104]
 parent: 105
 created_at: 2026-07-04T21:46:32.154417+00:00
-updated_at: 2026-07-04T21:46:32.154417+00:00
+updated_at: 2026-07-08T22:37:13.197531+00:00
 ---
 
 ## 背景

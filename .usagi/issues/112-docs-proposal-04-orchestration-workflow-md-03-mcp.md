@@ -1,14 +1,14 @@
 ---
 number: 112
 title: docs: 自律オーケストレーション運用モデルを正本へ反映し proposal を畳む（04-orchestration / workflow.md / 03-mcp）
-status: todo
+status: done
 priority: medium
 labels: [orchestration, docs]
 dependson: [106, 107, 109, 110, 111]
 related: []
 parent: 105
 created_at: 2026-07-04T21:47:43.794426+00:00
-updated_at: 2026-07-04T21:47:43.794426+00:00
+updated_at: 2026-07-08T22:37:13.241364+00:00
 ---
 
 ## 背景

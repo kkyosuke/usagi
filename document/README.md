@@ -36,7 +36,7 @@
 | # | ドキュメント | 内容 |
 |---|---|---|
 | — | [proposals/README.md](proposals/README.md) | 設計提案の位置づけと一覧 |
-| 1 | [proposals/01-root-orchestration.md](proposals/01-root-orchestration.md) | 自律オーケストレーション運用モデル（root＝オーケストレーション専任・変更は必ず session） |
+| 1 | [proposals/01-root-orchestration.md](proposals/01-root-orchestration.md) | 自律オーケストレーション運用モデル（正本へ畳み込み済み → [04-orchestration.md](04-orchestration.md#自律オーケストレーション運用モデル)） |
 
 ### データ永続化 — [data/](data/README.md)
 

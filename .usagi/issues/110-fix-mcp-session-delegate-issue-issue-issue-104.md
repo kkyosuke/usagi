@@ -1,14 +1,14 @@
 ---
 number: 110
 title: fix(mcp): session_delegate_issue は issue が委譲先の基点ブランチにコミット済みか検証する（未コミット issue がブランチに乗らない #104 系の根治）
-status: todo
+status: done
 priority: high
 labels: [orchestration, mcp, fix]
 dependson: []
 related: [104, 109]
 parent: 105
 created_at: 2026-07-04T21:46:55.648110+00:00
-updated_at: 2026-07-04T21:46:55.648110+00:00
+updated_at: 2026-07-08T22:23:47.893647+00:00
 ---
 
 ## 背景

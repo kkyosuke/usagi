@@ -1,13 +1,13 @@
 ---
 number: 105
 title: feat(orchestration): 自律オーケストレーション運用モデル（root=オーケストレーション専任・変更は必ず session）
-status: todo
+status: done
 priority: high
 labels: [orchestration, epic]
 dependson: []
 related: [99, 100, 101, 104]
 created_at: 2026-07-04T21:44:50.362065+00:00
-updated_at: 2026-07-04T21:44:50.362065+00:00
+updated_at: 2026-07-08T22:37:13.353353+00:00
 ---
 
 ## 目的（Epic）
