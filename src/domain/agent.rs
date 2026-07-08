@@ -239,8 +239,10 @@ pub struct AgentWiring {
     /// This is data only: callers resolve any tool-specific or git-specific
     /// paths before constructing the wiring, while each adapter decides whether
     /// and how to render them. Codex uses these alongside usagi's own data
-    /// directory in `sandbox_workspace_write.writable_roots`; other adapters may
-    /// ignore them.
+    /// directory in `sandbox_workspace_write.writable_roots`; the usecase layer
+    /// also supplies the project `.usagi/` store for session launches so MCP
+    /// sub-session delegation can mutate workspace state without asking. Other
+    /// adapters may ignore these roots.
     pub sandbox_writable_roots: Vec<PathBuf>,
 }
 

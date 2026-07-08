@@ -29,11 +29,14 @@
 //!   every command or edit. usagi's data directory (`$USAGI_HOME` or
 //!   `~/.usagi`) is added to Codex's `writable_roots`, because the bundled MCP
 //!   server stores prompt queues, agent phases, and other orchestration state
-//!   there even when the agent itself works in a session worktree. The current
-//!   worktree's git common directory is added too when it can be resolved, so
-//!   ordinary git operations can update `.git` under the same sandbox without an
-//!   approval prompt. (Codex dropped the older `--full-auto` shorthand for this
-//!   pair.) Headless runs use
+//!   there even when the agent itself works in a session worktree. For a session
+//!   launch, the parent workspace's project `.usagi/` directory is added too so
+//!   MCP tools such as `session_create` / `session_delegate_issue` can update
+//!   `state.json` and create sibling worktrees from inside the sandbox. The
+//!   current worktree's git common directory is added too when it can be
+//!   resolved, so ordinary git operations can update `.git` under the same
+//!   sandbox without an approval prompt. (Codex dropped the older `--full-auto`
+//!   shorthand for this pair.) Headless runs use
 //!   Codex's stronger `--dangerously-bypass-approvals-and-sandbox` because no
 //!   user is present.
 //!
