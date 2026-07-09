@@ -580,7 +580,7 @@ pub(super) fn tab_menu_box(menu: &TabMenu) -> Vec<String> {
             }
         })
         .collect();
-    widgets::boxed(&format!("tab {}", menu.tab() + 1), 12, &rows)
+    widgets::boxed("Menu", 12, &rows)
 }
 
 pub(super) fn tab_rename_body(label: &str, cursor: usize, width: usize) -> Vec<String> {
