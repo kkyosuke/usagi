@@ -1024,6 +1024,24 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         terminal::pane::PaneStep::MoveTab { from, to } => {
                             let _ = pool.move_tab(dir, from, to);
                         }
+                        // A right-click tab menu action taken while attached:
+                        // reorder / rename / close the chosen tab against the pool
+                        // and keep driving (staying in 没入) — the same operations
+                        // the menu runs from 選択 / 集中 via `tab_action`, but here the
+                        // pool mutation loops back into the pane. `Move` / `Rename`
+                        // keep every pane alive; `Close` empties the session when it
+                        // was the last tab, so drop to 集中 like `CloseTab`.
+                        terminal::pane::PaneStep::MenuMoveTab { tab, swap } => {
+                            let _ = pool.move_tab_by(dir, tab, swap);
+                        }
+                        terminal::pane::PaneStep::MenuRenameTab { tab, label: name } => {
+                            let _ = pool.rename_tab(dir, tab, &name);
+                        }
+                        terminal::pane::PaneStep::MenuCloseTab { tab } => {
+                            if !pool.close_tab(dir, tab, &label) {
+                                return Ok(PaneExit::Closed);
+                            }
+                        }
                         // `Ctrl-T`: zoom out to 集中 (Closeup) so the user picks the next
                         // action from the session's menu, leaving every pane alive in
                         // the pool (like `Ctrl-O`, but one level shallower).

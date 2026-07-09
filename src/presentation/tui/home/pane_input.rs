@@ -519,6 +519,99 @@ pub(super) fn encode_key(key: &KeyEvent) -> Vec<u8> {
     }
 }
 
+/// What a key does to the tab context menu that a right-click opens over a live
+/// 没入 (Attached) pane. The menu is the same overlay 選択 / 集中 show; while it is
+/// up the pane routes keys here instead of to the shell. Pure so the
+/// coverage-excluded drive loop only applies the verdict; the keymap is
+/// unit-tested here. Mirrors the home event loop's tab-menu key handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuVerdict {
+    /// Move the menu cursor up (`↑` / `k`).
+    Up,
+    /// Move the menu cursor down (`↓` / `j`).
+    Down,
+    /// Run the highlighted item (`Enter`).
+    Confirm,
+    /// Dismiss the menu (`Esc`).
+    Cancel,
+    /// Any other key: swallowed so it neither drives the menu nor reaches the
+    /// shell underneath.
+    Ignore,
+}
+
+/// Classify a key while the 没入 tab context menu is open. `j` / `k` move the
+/// cursor only as bare letters — a `Ctrl` / `Alt` chord is never a cursor move
+/// (it falls through to [`MenuVerdict::Ignore`]), matching the plain-letter keys
+/// the home screens accept.
+pub(super) fn classify_menu_key(key: &KeyEvent) -> MenuVerdict {
+    let plain = !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Up => MenuVerdict::Up,
+        KeyCode::Down => MenuVerdict::Down,
+        KeyCode::Char('k') if plain => MenuVerdict::Up,
+        KeyCode::Char('j') if plain => MenuVerdict::Down,
+        KeyCode::Enter => MenuVerdict::Confirm,
+        KeyCode::Esc => MenuVerdict::Cancel,
+        _ => MenuVerdict::Ignore,
+    }
+}
+
+/// A single edit applied to the inline tab-rename input's text buffer, decoded
+/// from a key so the coverage-excluded drive loop only has to call the matching
+/// [`TabRenameInput`](super::state::TabRenameInput) method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RenameEdit {
+    Backspace,
+    DeleteForward,
+    Left,
+    Right,
+    Home,
+    End,
+    Insert(char),
+}
+
+/// What a key does to the inline tab-rename input opened from the 没入 tab menu's
+/// `Rename` item. Pure, mirroring the home event loop's rename-input handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RenameVerdict {
+    /// Commit the typed label (`Enter`).
+    Confirm,
+    /// Abandon the rename (`Esc`).
+    Cancel,
+    /// Edit the buffer (a printable char, or a caret / delete key).
+    Edit(RenameEdit),
+    /// Any other key: swallowed.
+    Ignore,
+}
+
+/// Classify a key while the 没入 inline tab-rename input is open. A printable
+/// character (no `Ctrl` / `Alt`, not a control char) inserts; the caret and
+/// delete keys edit; `Enter` / `Esc` finish. Everything else is swallowed so it
+/// never leaks to the shell behind the overlay.
+pub(super) fn classify_rename_key(key: &KeyEvent) -> RenameVerdict {
+    match key.code {
+        KeyCode::Enter => RenameVerdict::Confirm,
+        KeyCode::Esc => RenameVerdict::Cancel,
+        KeyCode::Backspace => RenameVerdict::Edit(RenameEdit::Backspace),
+        KeyCode::Delete => RenameVerdict::Edit(RenameEdit::DeleteForward),
+        KeyCode::Left => RenameVerdict::Edit(RenameEdit::Left),
+        KeyCode::Right => RenameVerdict::Edit(RenameEdit::Right),
+        KeyCode::Home => RenameVerdict::Edit(RenameEdit::Home),
+        KeyCode::End => RenameVerdict::Edit(RenameEdit::End),
+        KeyCode::Char(c)
+            if !c.is_control()
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            RenameVerdict::Edit(RenameEdit::Insert(c))
+        }
+        _ => RenameVerdict::Ignore,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,5 +1242,93 @@ mod tests {
     fn encode_key_drops_keys_it_does_not_map() {
         // An unmapped key (e.g. a function key) produces no bytes.
         assert!(encode_key(&key(KeyCode::F(1), KeyModifiers::NONE)).is_empty());
+    }
+
+    #[test]
+    fn classify_menu_key_maps_navigation_and_swallows_the_rest() {
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Up, KeyModifiers::NONE)),
+            MenuVerdict::Up
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Down, KeyModifiers::NONE)),
+            MenuVerdict::Down
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Char('k'), KeyModifiers::NONE)),
+            MenuVerdict::Up
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Char('j'), KeyModifiers::NONE)),
+            MenuVerdict::Down
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            MenuVerdict::Confirm
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            MenuVerdict::Cancel
+        );
+        // A `Ctrl`-chorded letter is not a cursor move, and an unrelated key is
+        // swallowed rather than driving the menu or the shell.
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            MenuVerdict::Ignore
+        );
+        assert_eq!(
+            classify_menu_key(&key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            MenuVerdict::Ignore
+        );
+    }
+
+    #[test]
+    fn classify_rename_key_maps_edits_confirm_and_cancel() {
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Enter, KeyModifiers::NONE)),
+            RenameVerdict::Confirm
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Esc, KeyModifiers::NONE)),
+            RenameVerdict::Cancel
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Backspace, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::Backspace)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Delete, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::DeleteForward)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Left, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::Left)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Right, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::Right)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Home, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::Home)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::End, KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::End)
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            RenameVerdict::Edit(RenameEdit::Insert('a'))
+        );
+        // A `Ctrl` / `Alt` chord is not a printable insert, and an unmapped key
+        // is swallowed.
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            RenameVerdict::Ignore
+        );
+        assert_eq!(
+            classify_rename_key(&key(KeyCode::F(1), KeyModifiers::NONE)),
+            RenameVerdict::Ignore
+        );
     }
 }
