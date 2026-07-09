@@ -512,16 +512,22 @@ impl SessionMcpServer {
             return Err("session_todo_update needs `done` and/or `text` to change".to_string());
         }
         // Apply the text edit first, then the checked-state toggle, so a call
-        // carrying both lands as one logical update.
+        // carrying both lands as one logical update. Each mutation returns the
+        // updated checklist, so we echo the last one applied.
+        let mut todos = None;
         if let Some(text) = &args.text {
-            session::edit_todo(&self.workspace_root, target, args.index, text)
-                .map_err(|e| e.to_string())?;
+            todos = Some(
+                session::edit_todo(&self.workspace_root, target, args.index, text)
+                    .map_err(|e| e.to_string())?,
+            );
         }
         if let Some(done) = args.done {
-            session::set_todo_done(&self.workspace_root, target, args.index, done)
-                .map_err(|e| e.to_string())?;
+            todos = Some(
+                session::set_todo_done(&self.workspace_root, target, args.index, done)
+                    .map_err(|e| e.to_string())?,
+            );
         }
-        let todos = session::get_todos(&self.workspace_root, target).map_err(|e| e.to_string())?;
+        let todos = todos.expect("guard above ensures `done` or `text` is present");
         Ok(to_pretty(&json!({ "name": name, "todos": todos })))
     }
 
@@ -2429,6 +2435,39 @@ mod tests {
 
         let list = call(&server, "session_decision_list", json!({}));
         assert_eq!(tool_json(&list)["decisions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn todo_and_decision_tools_surface_usecase_errors() {
+        // Inside a session worktree whose name is *not* recorded in state.json:
+        // `require_session` resolves (the name is derived from the path), but every
+        // usecase call then fails with "no such session", exercising each handler's
+        // error path (its `map_err` conversion to a tool error).
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "ghost", FakeBackend::ok("x"));
+        // Record a *different* session so state.json exists but "ghost" is absent:
+        // every scratchpad op then fails with "no such session".
+        call(&server, "session_create", json!({"name":"other"}));
+        for (tool, args) in [
+            ("session_todo_list", json!({})),
+            ("session_todo_add", json!({"text":"x"})),
+            ("session_todo_update", json!({"index":0,"text":"x"})),
+            ("session_todo_update", json!({"index":0,"done":true})),
+            ("session_todo_remove", json!({"index":0})),
+            ("session_decision_list", json!({})),
+            ("session_decision_log", json!({"text":"x"})),
+        ] {
+            let r = call(&server, tool, args);
+            assert_eq!(
+                r["isError"], true,
+                "{tool} should surface the usecase error"
+            );
+            assert!(r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no such session"));
+        }
     }
 
     #[test]

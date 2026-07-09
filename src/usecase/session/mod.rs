@@ -2190,6 +2190,11 @@ mod tests {
         assert!(get_todos(fresh.path(), NoteTarget::Root)
             .unwrap()
             .is_empty());
+
+        // A session-targeted *mutation* with no state.json yet errors like
+        // `set_note` (the root defaults one into being; a session cannot).
+        let err = add_todo(fresh.path(), NoteTarget::Session("x"), "hi").unwrap_err();
+        assert!(err.to_string().contains("no sessions recorded"));
     }
 
     #[test]
