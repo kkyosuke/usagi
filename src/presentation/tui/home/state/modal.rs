@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::LogLine;
 use crate::presentation::tui::chat::state::Chat;
-use crate::presentation::tui::diff::DiffDoc;
+use crate::presentation::tui::diff::{self, DiffDoc, DiffFile, TreeKind, TreeRow};
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -605,19 +605,281 @@ pub struct Preview {
     pub scroll: usize,
 }
 
+/// Which half of the diff view the keyboard drives: the left file explorer
+/// (directory tree) or the right diff pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiffFocus {
+    /// The left explorer: `↑`/`↓` move the tree cursor, `Enter` expands a
+    /// directory or opens a file's diff.
+    #[default]
+    Tree,
+    /// The right diff pane: `↑`/`↓` / `PageUp`/`PageDown` scroll the selected
+    /// file's diff.
+    Diff,
+}
+
+/// One visible row of the explorer tree, flattened for the renderer: its `depth`
+/// (indentation), the path `segment` shown at that depth, whether it is a
+/// directory (and if so whether `collapsed`), the file's `+added -removed` counts
+/// (files only), and whether it is the row under the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffTreeRow {
+    pub depth: usize,
+    pub segment: String,
+    pub is_dir: bool,
+    pub collapsed: bool,
+    pub added: usize,
+    pub removed: usize,
+    pub selected: bool,
+}
+
 /// The right-pane diff view, opened by the `diff` command. Like [`Preview`] it
-/// takes over the right pane, but it renders a parsed, syntax-highlighted
-/// [`DiffDoc`] (GitHub-style: line-number gutter, per-line add/del backgrounds,
-/// word-level emphasis) rather than Markdown. `title` names the diffed branch →
-/// base, `scroll` is the first visible row, and `split` toggles the unified
-/// layout (default) against the side-by-side one. While open it captures the keys
-/// (scroll / toggle layout / dismiss).
+/// takes over the right pane, but it renders a GitHub pull-request-style split: a
+/// **left directory-tree explorer** of the changed files beside the **right
+/// syntax-highlighted diff** of the selected one (line-number gutter, per-line
+/// add/del backgrounds, word-level emphasis).
+///
+/// `title` names the diffed branch → base. The changed files (`files`) and their
+/// directory tree (`tree`) are derived once from `doc`; `collapsed` holds the
+/// directory paths the user has folded, `cursor` is the tree index the explorer
+/// highlights, and `file` is the file whose diff the right side shows. `focus`
+/// selects which half the keyboard drives, `scroll` is the first visible diff row
+/// *within the selected file*, and `split` toggles the unified layout (default)
+/// against the side-by-side one. While open it captures the keys (navigate /
+/// scroll / toggle layout / dismiss).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffView {
     pub title: String,
     pub doc: DiffDoc,
-    pub scroll: usize,
-    pub split: bool,
+    files: Vec<DiffFile>,
+    tree: Vec<TreeRow>,
+    collapsed: HashSet<String>,
+    cursor: usize,
+    file: usize,
+    focus: DiffFocus,
+    scroll: usize,
+    split: bool,
+}
+
+impl DiffView {
+    /// Build the view from a parsed diff: derive the changed files and their
+    /// directory tree, and park the cursor on the first file (so its diff shows on
+    /// the right straight away). Nothing is collapsed and the unified layout is the
+    /// default, mirroring the previous flat view.
+    pub(super) fn new(title: String, doc: DiffDoc) -> Self {
+        let files = diff::files(&doc);
+        let tree = diff::tree_rows(&files);
+        let cursor = tree
+            .iter()
+            .position(|r| matches!(r.kind, TreeKind::File { .. }))
+            .unwrap_or(0);
+        let file = match tree.get(cursor).map(|r| &r.kind) {
+            Some(TreeKind::File { index }) => *index,
+            _ => 0,
+        };
+        Self {
+            title,
+            doc,
+            files,
+            tree,
+            collapsed: HashSet::new(),
+            cursor,
+            file,
+            focus: DiffFocus::Tree,
+            scroll: 0,
+            split: false,
+        }
+    }
+
+    /// Whether the diff changed no files (an empty patch), so the view shows a
+    /// friendly "no changes" line instead of an explorer.
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Which half the keyboard drives.
+    pub fn focus(&self) -> DiffFocus {
+        self.focus
+    }
+
+    /// The first visible diff row within the selected file.
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Whether the side-by-side layout is active.
+    pub fn split(&self) -> bool {
+        self.split
+    }
+
+    /// The selected file's section, or `None` for an empty patch.
+    pub fn selected_file(&self) -> Option<&DiffFile> {
+        self.files.get(self.file)
+    }
+
+    /// How many changed files the diff has (for the explorer's `Files (N)` label).
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// The explorer rows currently visible (those with no collapsed ancestor),
+    /// flattened for the renderer with per-row display flags. Depth-first order,
+    /// directories before files.
+    pub fn visible_rows(&self) -> Vec<DiffTreeRow> {
+        self.visible_indices()
+            .into_iter()
+            .map(|i| {
+                let row = &self.tree[i];
+                let (is_dir, collapsed) = match &row.kind {
+                    TreeKind::Dir { path } => (true, self.collapsed.contains(path)),
+                    TreeKind::File { .. } => (false, false),
+                };
+                let (added, removed) = match &row.kind {
+                    TreeKind::File { index } => self
+                        .files
+                        .get(*index)
+                        .map(|f| (f.added, f.removed))
+                        .unwrap_or((0, 0)),
+                    TreeKind::Dir { .. } => (0, 0),
+                };
+                DiffTreeRow {
+                    depth: row.depth,
+                    segment: row.name.clone(),
+                    is_dir,
+                    collapsed,
+                    added,
+                    removed,
+                    selected: i == self.cursor,
+                }
+            })
+            .collect()
+    }
+
+    /// How many visual rows the selected file's diff occupies in the current
+    /// layout — the unified row count, or the folded side-by-side count. Drives the
+    /// scroll clamp and the renderer's window.
+    pub fn file_row_count(&self) -> usize {
+        let Some(file) = self.selected_file() else {
+            return 0;
+        };
+        if self.split {
+            diff::split_rows_slice(&self.doc.rows[file.start..file.end], file.start).len()
+        } else {
+            file.end - file.start
+        }
+    }
+
+    /// The tree indices with no collapsed ancestor, in tree (depth-first) order.
+    /// Because the tree is depth-first, a collapsed directory hides every deeper
+    /// row until the depth returns to its own or shallower.
+    fn visible_indices(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut hide_below: Option<usize> = None;
+        for (i, row) in self.tree.iter().enumerate() {
+            if let Some(depth) = hide_below {
+                if row.depth > depth {
+                    continue;
+                }
+                hide_below = None;
+            }
+            out.push(i);
+            if let TreeKind::Dir { path } = &row.kind {
+                if self.collapsed.contains(path) {
+                    hide_below = Some(row.depth);
+                }
+            }
+        }
+        out
+    }
+
+    /// Move the explorer cursor to the previous visible row (clamped at the top).
+    /// Landing on a file selects it, resetting the diff scroll.
+    pub(super) fn move_up(&mut self) {
+        let visible = self.visible_indices();
+        if let Some(pos) = visible.iter().position(|&i| i == self.cursor) {
+            if pos > 0 {
+                self.set_cursor(visible[pos - 1]);
+            }
+        }
+    }
+
+    /// Move the explorer cursor to the next visible row (clamped at the bottom).
+    /// Landing on a file selects it, resetting the diff scroll.
+    pub(super) fn move_down(&mut self) {
+        let visible = self.visible_indices();
+        if let Some(pos) = visible.iter().position(|&i| i == self.cursor) {
+            if pos + 1 < visible.len() {
+                self.set_cursor(visible[pos + 1]);
+            }
+        }
+    }
+
+    /// Park the cursor on tree index `i`; when it is a file, show its diff and
+    /// reset the scroll to the top.
+    fn set_cursor(&mut self, i: usize) {
+        self.cursor = i;
+        if let Some(TreeKind::File { index }) = self.tree.get(i).map(|r| &r.kind) {
+            if *index != self.file {
+                self.file = *index;
+                self.scroll = 0;
+            }
+        }
+    }
+
+    /// Activate the cursor row: a directory folds/unfolds; a file moves the focus
+    /// to the diff pane so the arrows scroll it.
+    pub(super) fn activate(&mut self) {
+        match self.tree.get(self.cursor).map(|r| &r.kind) {
+            Some(TreeKind::Dir { path }) => {
+                let path = path.clone();
+                if !self.collapsed.remove(&path) {
+                    self.collapsed.insert(path);
+                }
+            }
+            Some(TreeKind::File { .. }) => self.focus = DiffFocus::Diff,
+            None => {}
+        }
+    }
+
+    /// Collapse the cursor's directory if it is an expanded one (the explorer's
+    /// `←`); a no-op on a file or an already-collapsed directory.
+    pub(super) fn collapse_current(&mut self) {
+        if let Some(TreeKind::Dir { path }) = self.tree.get(self.cursor).map(|r| &r.kind) {
+            self.collapsed.insert(path.clone());
+        }
+    }
+
+    /// Give the keyboard to the explorer.
+    pub(super) fn focus_tree(&mut self) {
+        self.focus = DiffFocus::Tree;
+    }
+
+    /// Toggle the keyboard between the explorer and the diff pane.
+    pub(super) fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            DiffFocus::Tree => DiffFocus::Diff,
+            DiffFocus::Diff => DiffFocus::Tree,
+        };
+    }
+
+    /// Scroll the selected file's diff up one row (no-op at the top).
+    pub(super) fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+    }
+
+    /// Scroll the selected file's diff down one row, clamped so the last row of the
+    /// file stays in view. `visible` is the diff pane's body height.
+    pub(super) fn scroll_down(&mut self, visible: usize) {
+        let max = self.file_row_count().saturating_sub(visible);
+        self.scroll = (self.scroll + 1).min(max);
+    }
+
+    /// Toggle the diff pane between the unified and side-by-side layouts, resetting
+    /// the scroll so the switch lands at the top of the file.
+    pub(super) fn toggle_split(&mut self) {
+        self.split = !self.split;
+        self.scroll = 0;
+    }
 }
 
 /// One row in the open session-removal checklist.

@@ -1039,18 +1039,21 @@ fn open_diff_result_parses_the_patch_into_the_diff_view() {
     // holds the parsed rows (file header + hunk + del + add).
     let view = state.diff_view().expect("diff view is open");
     assert_eq!(view.title, "feature → main");
-    assert!(!view.split);
-    assert_eq!(view.scroll, 0);
+    assert!(!view.split());
+    assert_eq!(view.scroll(), 0);
     assert_eq!(view.doc.rows.len(), 4);
-    assert!(!view.doc.is_empty());
+    assert!(!view.is_empty());
+    // The single changed file `f` is selected, so its diff shows on the right.
+    assert_eq!(view.file_count(), 1);
+    assert_eq!(view.selected_file().unwrap().path, "f");
 
     // Scrolling and toggling the layout run through the view's own helpers.
     state.diff_scroll_down(2);
-    assert_eq!(state.diff_view().unwrap().scroll, 1);
+    assert_eq!(state.diff_view().unwrap().scroll(), 1);
     state.diff_scroll_up();
-    assert_eq!(state.diff_view().unwrap().scroll, 0);
+    assert_eq!(state.diff_view().unwrap().scroll(), 0);
     state.diff_toggle_split();
-    assert!(state.diff_view().unwrap().split);
+    assert!(state.diff_view().unwrap().split());
     // Scrolling in the split layout clamps against the folded (split) row count.
     state.diff_scroll_down(1);
     state.close_diff();
@@ -1058,11 +1061,120 @@ fn open_diff_result_parses_the_patch_into_the_diff_view() {
 }
 
 #[test]
+fn diff_explorer_navigates_the_directory_tree_and_selects_files() {
+    // A three-file patch across two directories, so the explorer builds a tree
+    // (src/ with a ui/ subdir, plus a top-level file).
+    let patch = "diff --git a/src/main.rs b/src/main.rs\n\
+--- a/src/main.rs\n\
++++ b/src/main.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n\
+diff --git a/src/ui/render.rs b/src/ui/render.rs\n\
+--- /dev/null\n\
++++ b/src/ui/render.rs\n\
+@@ -0,0 +1 @@\n\
++one\n\
+diff --git a/README.md b/README.md\n\
+--- a/README.md\n\
++++ b/README.md\n\
+@@ -1 +1 @@\n\
+-a\n\
++b\n"
+        .to_string();
+    let mut state = state();
+    state.open_diff_result(Ok(("feature → main".to_string(), patch)));
+
+    // The focus starts on the explorer, cursor on the first file, whose diff shows.
+    let view = state.diff_view().unwrap();
+    assert_eq!(view.focus(), DiffFocus::Tree);
+    assert_eq!(view.file_count(), 3);
+    assert_eq!(view.selected_file().unwrap().path, "src/ui/render.rs");
+    // Visible tree: src/ (dir), ui/ (dir), render.rs (file), main.rs (file),
+    // README.md (file) — directories first, alphabetical.
+    let rows = view.visible_rows();
+    assert_eq!(rows.len(), 5);
+    assert!(rows[0].is_dir && rows[0].segment == "src");
+    assert!(rows[2].selected && !rows[2].is_dir);
+
+    // Collapsing `src/` (cursor on it after two ups) hides its subtree.
+    state.diff_move_up(); // render.rs -> ui/
+    state.diff_move_up(); // ui/ -> src/
+    state.diff_collapse();
+    let rows = state.diff_view().unwrap().visible_rows();
+    // Only src/ and README.md remain visible.
+    let visible: Vec<&str> = rows.iter().map(|r| r.segment.as_str()).collect();
+    assert_eq!(visible, vec!["src", "README.md"]);
+    assert!(rows[0].collapsed);
+
+    // Moving down lands on README.md and shows its diff.
+    state.diff_move_down();
+    assert_eq!(
+        state.diff_view().unwrap().selected_file().unwrap().path,
+        "README.md"
+    );
+    // Activating a file hands the keyboard to the diff pane.
+    state.diff_activate();
+    assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Diff);
+    // Tab / focus-tree toggle the driven half back and forth.
+    state.diff_focus_tree();
+    assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Tree);
+    state.diff_toggle_focus();
+    assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Diff);
+
+    // Re-expanding src/ (cursor back on it) restores the subtree. Focus the tree,
+    // move up to src/, activate to unfold.
+    state.diff_focus_tree();
+    state.diff_move_up(); // README.md -> src/
+    state.diff_activate(); // unfold
+    let rows = state.diff_view().unwrap().visible_rows();
+    assert_eq!(rows.len(), 5);
+
+    // Moving up at the very top (src/) is a no-op — the cursor stays put.
+    state.diff_move_up();
+    assert!(state.diff_view().unwrap().visible_rows()[0].selected);
+    // Activating the expanded src/ directory folds it (the collapse path of
+    // `activate`, distinct from the `←` collapse used above).
+    state.diff_activate();
+    let rows = state.diff_view().unwrap().visible_rows();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].collapsed && rows[0].selected);
+    // Move down to the last row (README.md); moving down again clamps at the
+    // bottom rather than wrapping.
+    state.diff_move_down();
+    state.diff_move_down();
+    let rows = state.diff_view().unwrap().visible_rows();
+    let last = rows.last().unwrap();
+    assert!(last.selected && last.segment == "README.md");
+}
+
+#[test]
+fn diff_navigation_is_safe_on_an_empty_patch() {
+    // An empty patch has no files or tree, so every explorer / scroll action is a
+    // guarded no-op rather than a panic.
+    let mut state = state();
+    state.open_diff_result(Ok(("main → main".to_string(), String::new())));
+    state.diff_move_up();
+    state.diff_move_down();
+    state.diff_activate(); // no cursor row -> nothing to activate
+    state.diff_collapse();
+    state.diff_scroll_down(5); // file_row_count is 0, so the scroll stays put
+    state.diff_scroll_up();
+    state.diff_toggle_focus();
+    let view = state.diff_view().unwrap();
+    assert!(view.is_empty());
+    assert_eq!(view.scroll(), 0);
+    assert!(view.visible_rows().is_empty());
+}
+
+#[test]
 fn open_diff_result_reports_an_empty_patch_as_no_changes() {
     let mut state = state();
     state.open_diff_result(Ok(("main → main".to_string(), String::new())));
     let view = state.diff_view().expect("diff view is open");
-    assert!(view.doc.is_empty());
+    assert!(view.is_empty());
+    assert_eq!(view.file_count(), 0);
+    assert!(view.selected_file().is_none());
 }
 
 #[test]

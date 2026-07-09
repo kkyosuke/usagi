@@ -42,8 +42,8 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, DiffView, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal,
-    RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, Preview,
+    RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel};
 
@@ -1897,12 +1897,8 @@ impl HomeState {
     pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
         match loaded {
             Ok((title, patch)) => {
-                self.overlay = Overlay::Diff(DiffView {
-                    title,
-                    doc: crate::presentation::tui::diff::render(&patch),
-                    scroll: 0,
-                    split: false,
-                });
+                let doc = crate::presentation::tui::diff::render(&patch);
+                self.overlay = Overlay::Diff(DiffView::new(title, doc));
             }
             Err(e) => self.log_error(format!("diff failed: {e}")),
         }
@@ -1922,35 +1918,81 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Scroll the diff view up one line (no-op when closed or at the top).
-    pub fn diff_scroll_up(&mut self) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            diff.scroll = diff.scroll.saturating_sub(1);
+    /// The open diff view for mutation, or `None` when it is not the open overlay.
+    fn diff_view_mut(&mut self) -> Option<&mut DiffView> {
+        match &mut self.overlay {
+            Overlay::Diff(diff) => Some(diff),
+            _ => None,
         }
     }
 
-    /// Scroll the diff view down one line, clamped so the last row stays in view
-    /// (no-op when closed). `visible` is the pane body height the view can show.
-    /// The row count is layout-aware: the split view folds paired add/del lines
-    /// into one visual row, so it clamps against fewer rows than the unified view.
+    /// Move the explorer cursor up one visible row (no-op when closed).
+    pub fn diff_move_up(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.move_up();
+        }
+    }
+
+    /// Move the explorer cursor down one visible row (no-op when closed).
+    pub fn diff_move_down(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.move_down();
+        }
+    }
+
+    /// Activate the explorer cursor row — fold/unfold a directory, or open a
+    /// file's diff (moving the focus to the diff pane). No-op when closed.
+    pub fn diff_activate(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.activate();
+        }
+    }
+
+    /// Collapse the explorer cursor's directory (the `←` key); no-op on a file or
+    /// when closed.
+    pub fn diff_collapse(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.collapse_current();
+        }
+    }
+
+    /// Return the keyboard to the explorer from the diff pane (no-op when closed).
+    pub fn diff_focus_tree(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.focus_tree();
+        }
+    }
+
+    /// Toggle the keyboard between the explorer and the diff pane (no-op closed).
+    pub fn diff_toggle_focus(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.toggle_focus();
+        }
+    }
+
+    /// Scroll the selected file's diff up one line (no-op when closed or at the
+    /// top).
+    pub fn diff_scroll_up(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.scroll_up();
+        }
+    }
+
+    /// Scroll the selected file's diff down one line, clamped so its last row stays
+    /// in view (no-op when closed). `visible` is the diff pane's body height. The
+    /// row count is layout-aware: the split view folds paired add/del lines into
+    /// one visual row, so it clamps against fewer rows than the unified view.
     pub fn diff_scroll_down(&mut self, visible: usize) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            let total = if diff.split {
-                crate::presentation::tui::diff::split_rows(&diff.doc).len()
-            } else {
-                diff.doc.rows.len()
-            };
-            let max = total.saturating_sub(visible);
-            diff.scroll = (diff.scroll + 1).min(max);
+        if let Some(diff) = self.diff_view_mut() {
+            diff.scroll_down(visible);
         }
     }
 
     /// Toggle the diff view between the unified and split (side-by-side) layouts
     /// (no-op when closed), resetting the scroll so the switch lands at the top.
     pub fn diff_toggle_split(&mut self) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            diff.split = !diff.split;
-            diff.scroll = 0;
+        if let Some(diff) = self.diff_view_mut() {
+            diff.toggle_split();
         }
     }
 

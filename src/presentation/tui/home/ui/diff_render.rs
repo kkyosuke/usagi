@@ -3,10 +3,10 @@
 use console::style;
 use unicode_width::UnicodeWidthChar;
 
-use super::super::state::DiffView;
-use super::clip_to_width;
+use super::super::state::{DiffFocus, DiffTreeRow, DiffView};
 use super::markdown_render::rgb_to_ansi256;
-use crate::presentation::tui::diff::{split_rows, DiffRow, DiffSpan, RowKind, SplitRow};
+use super::{clip_to_width, pad_to_width};
+use crate::presentation::tui::diff::{split_rows_slice, DiffRow, DiffSpan, RowKind, SplitRow};
 use crate::presentation::tui::markdown::Rgb;
 
 const DIFF_ADD_BG: u8 = 22; // dark green
@@ -15,18 +15,39 @@ const DIFF_DEL_BG: u8 = 52; // dark red
 const DIFF_DEL_EMPH_BG: u8 = 88; // brighter red
 const DIFF_NUM_FG: u8 = 244; // dim grey line numbers
 const DIFF_HUNK_FG: u8 = 37; // teal hunk headers
+const DIFF_ADD_FG: u8 = 34; // green +N count
+const DIFF_DEL_FG: u8 = 160; // red -N count
+const DIFF_DIR_FG: u8 = 39; // blue directory node
 
-/// Render the right-pane diff view: a one-row header (title + scroll position)
-/// over a window of diff rows, laid out unified or side-by-side. The window is
-/// clamped so the last row stays in view (matching the event loop's scroll
-/// clamp), and every row is exactly `width` columns so the layout never shifts.
+/// The explorer column's width as a share of the pane, clamped so it stays a
+/// readable file list without crowding the diff: about a third of the pane,
+/// floored at [`TREE_MIN`] and capped at [`TREE_MAX`], and never wider than half.
+const TREE_MIN: usize = 16;
+const TREE_MAX: usize = 34;
+
+/// The explorer column width for a `pane_w`-column diff view (see [`TREE_MIN`] /
+/// [`TREE_MAX`]). Returns `None` when the pane is too narrow to split usefully, so
+/// the diff falls back to filling the whole pane.
+fn tree_width(pane_w: usize) -> Option<usize> {
+    if pane_w < TREE_MIN + 8 {
+        return None;
+    }
+    Some((pane_w / 3).clamp(TREE_MIN, TREE_MAX).min(pane_w / 2))
+}
+
+/// Render the right-pane diff view GitHub pull-request style: a one-row header
+/// (title + layout + the selected file's scroll position) over a left directory-
+/// tree explorer of the changed files beside the right diff of the selected one.
+/// The explorer window keeps its cursor in view and the diff window is clamped so
+/// the file's last row stays visible (matching the event loop's scroll clamp);
+/// every row fits the pane width so the layout never shifts.
 pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<String> {
-    let body_h = rows.saturating_sub(1);
     // An empty patch (a session that changed nothing) shows a friendly line
-    // instead of a blank pane.
-    if view.doc.is_empty() {
+    // instead of an explorer. An empty patch has no selected file, so the same
+    // check drives both the friendly line and the columns below.
+    let Some(file) = view.selected_file() else {
         let mut lines = Vec::with_capacity(rows);
-        lines.push(diff_header(view, 0, 0, 0, width));
+        lines.push(diff_header(view, width));
         if rows > 1 {
             lines.push(
                 style(clip_to_width(
@@ -39,23 +60,156 @@ pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<Strin
         }
         lines.truncate(rows);
         return lines;
-    }
-
-    let num_w = num_width(&view.doc);
-    // The renderable rows depend on the layout: split folds paired add/del lines
-    // into one visual row.
-    let split = view.split.then(|| split_rows(&view.doc));
-    let total = split.as_ref().map_or(view.doc.rows.len(), Vec::len);
-    let max_start = total.saturating_sub(body_h);
-    let start = view.scroll.min(max_start);
-    let end = (start + body_h).min(total);
+    };
 
     let mut lines = Vec::with_capacity(rows);
-    lines.push(diff_header(view, start, end, total, width));
+    lines.push(diff_header(view, width));
     if rows <= 1 {
         lines.truncate(rows);
         return lines;
     }
+    let body_h = rows - 1;
+
+    // A pane too narrow to split shows just the diff, full width.
+    let Some(tree_w) = tree_width(width) else {
+        lines.extend(diff_column(view, file, width, body_h));
+        return lines;
+    };
+    let diff_w = width - tree_w - 1;
+    // Both columns return exactly `body_h` rows, so zipping them pairs every row.
+    let tree = tree_column(view, tree_w, body_h);
+    let diff = diff_column(view, file, diff_w, body_h);
+    let sep = if matches!(view.focus(), DiffFocus::Tree) {
+        style("│").color256(DIFF_DIR_FG).to_string()
+    } else {
+        style("│").dim().to_string()
+    };
+    for (left, right) in tree.into_iter().zip(diff) {
+        lines.push(format!("{left}{sep}{right}"));
+    }
+    lines
+}
+
+/// The diff view's one-row header: an icon, the branch → base title, the changed-
+/// file count, the layout name, and the selected file's `start-end/total` scroll
+/// position once it overflows.
+fn diff_header(view: &DiffView, width: usize) -> String {
+    let files = view.file_count();
+    if view.is_empty() {
+        return style(clip_to_width(&format!(" {}", view.title), width))
+            .bold()
+            .to_string();
+    }
+    let layout = if view.split() { "split" } else { "unified" };
+    let noun = if files == 1 { "file" } else { "files" };
+    let header = format!(" {}  ·  {files} {noun}  [{layout}]", view.title);
+    style(clip_to_width(&header, width)).bold().to_string()
+}
+
+/// Render the left explorer column: the visible tree rows windowed so the cursor
+/// stays in view, each padded to exactly `width` columns so the separator and the
+/// diff column line up. Always returns exactly `body_h` rows (blank padding below
+/// a short tree).
+fn tree_column(view: &DiffView, width: usize, body_h: usize) -> Vec<String> {
+    let rows = view.visible_rows();
+    let focus = view.focus();
+    let cursor = rows.iter().position(|r| r.selected).unwrap_or(0);
+    // Window the list so the cursor is always visible, showing as much of the tree
+    // as fits below it.
+    let start = if cursor >= body_h {
+        cursor - body_h + 1
+    } else {
+        0
+    }
+    .min(rows.len().saturating_sub(body_h));
+    let mut out: Vec<String> = rows
+        .iter()
+        .skip(start)
+        .take(body_h)
+        .map(|row| tree_cell(row, focus, width))
+        .collect();
+    out.resize(body_h, " ".repeat(width));
+    out
+}
+
+/// Render one explorer row into exactly `width` columns: an indent for its depth,
+/// a `▸`/`▾` marker for a (collapsed/expanded) directory or the file name, and the
+/// file's `+A -B` counts. The cursor row is reversed (bold while the explorer has
+/// the focus, plain while the diff pane does, so it still reads as "the open
+/// file").
+fn tree_cell(row: &DiffTreeRow, focus: DiffFocus, width: usize) -> String {
+    let indent = "  ".repeat(row.depth);
+    if row.selected {
+        // A selection highlight overrides the per-part colours: build the plain
+        // text, pad it, then reverse the whole row.
+        let marker = if row.is_dir {
+            if row.collapsed {
+                "▸ "
+            } else {
+                "▾ "
+            }
+        } else {
+            ""
+        };
+        let name = if row.is_dir {
+            format!("{}/", row.segment)
+        } else {
+            row.segment.clone()
+        };
+        let counts = counts_text(row);
+        let plain = clip_to_width(&format!("{indent}{marker}{name}{counts}"), width);
+        let padded = pad_to_width(plain, width);
+        let styled = style(padded).reverse();
+        return if matches!(focus, DiffFocus::Tree) {
+            styled.bold().to_string()
+        } else {
+            styled.dim().to_string()
+        };
+    }
+    if row.is_dir {
+        let marker = if row.collapsed { "▸ " } else { "▾ " };
+        let text = clip_to_width(&format!("{indent}{marker}{}/", row.segment), width);
+        return pad_to_width(style(text).color256(DIFF_DIR_FG).bold().to_string(), width);
+    }
+    // A file: the name, then its add/remove counts coloured green / red.
+    let name = clip_to_width(&format!("{indent}{}", row.segment), width);
+    let counts = counts_text(row);
+    let styled_counts = style(&counts)
+        .color256(if row.added >= row.removed {
+            DIFF_ADD_FG
+        } else {
+            DIFF_DEL_FG
+        })
+        .to_string();
+    pad_to_width(format!("{name}{styled_counts}"), width)
+}
+
+/// The ` +A -B` count suffix for a file row (empty for a directory or a file with
+/// no counted lines, e.g. a binary change).
+fn counts_text(row: &DiffTreeRow) -> String {
+    if row.is_dir || (row.added == 0 && row.removed == 0) {
+        String::new()
+    } else {
+        format!("  +{} -{}", row.added, row.removed)
+    }
+}
+
+/// Render the right diff column: a `body_h`-row window of the selected `file`'s
+/// section, laid out unified or side-by-side, scrolled by the view's per-file
+/// offset and clamped so the file's last row stays in view.
+fn diff_column(
+    view: &DiffView,
+    file: &crate::presentation::tui::diff::DiffFile,
+    width: usize,
+    body_h: usize,
+) -> Vec<String> {
+    let section = &view.doc.rows[file.start..file.end];
+    let num_w = num_width(section);
+    let split = view.split().then(|| split_rows_slice(section, file.start));
+    let total = split.as_ref().map_or(section.len(), Vec::len);
+    let max_start = total.saturating_sub(body_h);
+    let start = view.scroll().min(max_start);
+    let mut out = Vec::with_capacity(body_h);
     for i in 0..body_h {
         let row = match &split {
             Some(split) => split
@@ -64,38 +218,19 @@ pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<Strin
             None => view
                 .doc
                 .rows
-                .get(start + i)
+                .get(file.start + start + i)
+                .filter(|_| start + i < total)
                 .map(|r| diff_unified_row(r, num_w, width)),
         };
-        lines.push(row.unwrap_or_default());
+        out.push(row.unwrap_or_default());
     }
-    lines
+    out
 }
 
-/// The diff view's one-row header: an icon, the branch → base title, the layout
-/// name, and a `start-end/total` position once it scrolls.
-fn diff_header(view: &DiffView, start: usize, end: usize, total: usize, width: usize) -> String {
-    let layout = if view.split { "split" } else { "unified" };
-    let header = if total > end.saturating_sub(start) && total > 0 {
-        format!(
-            " {}  [{}]  ({}-{}/{})",
-            view.title,
-            layout,
-            start + 1,
-            end,
-            total
-        )
-    } else {
-        format!(" {}  [{}]", view.title, layout)
-    };
-    style(clip_to_width(&header, width)).bold().to_string()
-}
-
-/// The line-number gutter width: the digit count of the largest line number in
-/// the diff (at least 2), so the gutter is as narrow as the content allows.
-fn num_width(doc: &crate::presentation::tui::diff::DiffDoc) -> usize {
-    let max = doc
-        .rows
+/// The line-number gutter width for a file section: the digit count of its largest
+/// line number (at least 2), so the gutter is as narrow as the content allows.
+fn num_width(rows: &[DiffRow]) -> usize {
+    let max = rows
         .iter()
         .filter_map(|r| r.old_no.max(r.new_no))
         .max()
