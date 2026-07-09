@@ -358,7 +358,8 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut reader = InputReader::new(vec![
         right_click(col, geo.origin_row),
         Ok(Input::Key(Key::Enter)), // default menu row: Move left
-        Ok(Input::Key(Key::CtrlC)),
+        Ok(Input::Key(Key::CtrlC)), // a session is live -> raise the quit modal
+        Ok(Input::Key(Key::Enter)), // confirm the quit (Ctrl-C no longer confirms)
     ]);
     let monitor = MonitorHandle::with_live(vec![PathBuf::from("/r/feat")]);
     let mut persist: fn(&crate::domain::history::HistoryEntry) = noop_persist_entry;
