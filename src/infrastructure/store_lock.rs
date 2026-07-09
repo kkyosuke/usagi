@@ -64,13 +64,7 @@ impl StoreLock {
     fn acquire_with_timeout(dir: &Path, timeout: Duration) -> Result<Self> {
         fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
         let path = Self::path(dir);
-        let file = File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .context(format!("failed to open {}", path.display()))?;
+        let file = Self::open_lock_file(&path)?;
         let deadline = Instant::now() + timeout;
         loop {
             match file.try_lock_exclusive() {
@@ -92,6 +86,42 @@ impl StoreLock {
         }
     }
 
+    /// Open the lock file for locking, tolerating sandboxes that permit reading
+    /// an existing lock file but deny opening it for writing.
+    ///
+    /// The normal path opens the file `create + read + write`, which is required
+    /// the first time the lock file has to be created. Some sandboxes (e.g. the
+    /// seatbelt profile that runs `usagi mcp` under codex/fugu) allow reading a
+    /// pre-existing lock file yet reject the write open with `EPERM`, which std
+    /// maps to [`std::io::ErrorKind::PermissionDenied`]. Because advisory locks
+    /// (Unix `flock`, Windows `LockFileEx`) succeed on a read-only descriptor —
+    /// `fs2` locks whatever handle it is given — we can retry with a read-only
+    /// open when the file already exists. If the file is missing we cannot fall
+    /// back (read-only cannot create it), so the original error stands.
+    fn open_lock_file(path: &Path) -> Result<File> {
+        match File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+        {
+            Ok(file) => Ok(file),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() => {
+                // Advisory locking only needs a valid descriptor, not write
+                // access, so a read-only handle is enough to `try_lock_exclusive`
+                // on both Unix (flock) and Windows (LockFileEx, per fs2).
+                File::options()
+                    .read(true)
+                    .open(path)
+                    .context(format!("failed to open {} read-only", path.display()))
+            }
+            Err(e) => {
+                Err(anyhow::Error::new(e)).context(format!("failed to open {}", path.display()))
+            }
+        }
+    }
+
     /// Path of the lock file for the store rooted at `dir`.
     pub fn path(dir: &Path) -> PathBuf {
         dir.join(LOCK_FILE_NAME)
@@ -108,6 +138,8 @@ impl Drop for StoreLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -208,5 +240,59 @@ mod tests {
         fs::write(&path, "x").unwrap();
         // create_dir_all fails because the path is an existing file.
         assert!(StoreLock::acquire(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_falls_back_to_read_only_when_existing_lock_denies_write() {
+        // Production saw seatbelt return EPERM for the write-open while still
+        // allowing reads of an existing lock file. We cannot reproduce seatbelt
+        // EPERM in a portable unit test, so chmod 0444 forces EACCES instead;
+        // both map to ErrorKind::PermissionDenied and exercise the same path.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        fs::create_dir_all(&dir).unwrap();
+        let path = StoreLock::path(&dir);
+        fs::write(&path, b"").unwrap();
+        let original = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let acquired = StoreLock::acquire(&dir).unwrap();
+
+        drop(acquired);
+        fs::set_permissions(&path, original).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_does_not_fall_back_when_permission_denied_for_missing_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        fs::create_dir_all(&dir).unwrap();
+        let original = fs::metadata(&dir).unwrap().permissions();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = StoreLock::acquire_with_timeout(&dir, Duration::from_millis(50)).unwrap_err();
+
+        fs::set_permissions(&dir, original).unwrap();
+        assert!(err.to_string().contains("failed to open"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_reports_read_only_open_failure_after_permission_denied_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("store");
+        fs::create_dir_all(&dir).unwrap();
+        let path = StoreLock::path(&dir);
+        fs::write(&path, b"").unwrap();
+        let original = fs::metadata(&path).unwrap().permissions();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = StoreLock::acquire_with_timeout(&dir, Duration::from_millis(50)).unwrap_err();
+
+        fs::set_permissions(&path, original).unwrap();
+        assert!(err.to_string().contains("failed to open"));
+        assert!(err.to_string().contains("read-only"));
     }
 }
