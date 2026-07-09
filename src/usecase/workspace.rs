@@ -279,6 +279,8 @@ mod tests {
             updated_at: now,
         };
         let session = |name: &str, prs: Vec<PrLink>| SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: name.to_string(),
             display_name: None,
             note: None,

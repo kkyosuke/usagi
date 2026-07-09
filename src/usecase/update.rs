@@ -644,6 +644,8 @@ mod tests {
         let store = WorkspaceStore::new(root.path());
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "ghost".to_string(),
             display_name: None,
             note: None,

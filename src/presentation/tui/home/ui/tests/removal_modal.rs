@@ -49,6 +49,8 @@ fn render_frame_removal_modal_prefixes_rows_in_unite_mode() {
         root_path: "/ws/tools".into(),
         root_note: None,
         sessions: vec![SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "beta".to_string(),
             display_name: None,
             note: None,

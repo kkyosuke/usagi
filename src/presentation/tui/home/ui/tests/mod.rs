@@ -105,6 +105,8 @@ fn state_with_sessions(names: &[&str]) -> HomeState {
     let sessions = names
         .iter()
         .map(|n| SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: n.to_string(),
             display_name: None,
             note: None,
@@ -135,6 +137,8 @@ fn preview_state(title: &str, content: &str) -> HomeState {
 fn overview_state_with_note(note: &str) -> HomeState {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     state.restore_sessions(vec![SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: "alpha".to_string(),
         display_name: None,
         note: Some(note.to_string()),

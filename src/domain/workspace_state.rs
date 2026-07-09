@@ -396,6 +396,55 @@ impl std::fmt::Display for SessionOrigin {
 /// Sessions are the single unit of state usagi tracks: each carries the git
 /// status of its per-repository worktrees, so a workspace is fully described by
 /// its sessions — even when the root itself is not a git repository.
+/// `true` when a boolean is its `false` default, so a not-yet-done todo omits
+/// the `done` key from `state.json`.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// One entry in a session's (or the root's) lightweight checklist — the
+/// `todos` section of the note scratchpad.
+///
+/// Unlike an issue in the store (`.usagi/issues/`, git-tracked, with status /
+/// priority / dependencies), a todo is a throwaway, machine-local reminder for
+/// the current session's work. Display / UX only, alongside
+/// [`SessionRecord::note`](SessionRecord::note).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionTodo {
+    /// The todo text. Trimmed and required to be non-empty by the usecase that
+    /// writes it.
+    pub text: String,
+    /// Whether the todo is checked off. `false` (the default) is omitted from
+    /// `state.json`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub done: bool,
+}
+
+impl SessionTodo {
+    /// A fresh, unchecked todo with the given text.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            done: false,
+        }
+    }
+}
+
+/// One append-only entry in a session's (or the root's) decision log — the
+/// `decisions` section of the note scratchpad.
+///
+/// An agent records *why* it chose an approach, timestamped, so a coordinator
+/// can follow a session's reasoning without replaying its whole transcript.
+/// Display / UX only, machine-local like [`SessionRecord::note`](SessionRecord::note).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDecision {
+    /// When the decision was recorded (RFC3339, UTC). Supplied by the caller so
+    /// the usecase stays clock-free and testable.
+    pub at: DateTime<Utc>,
+    /// What was decided and why. Trimmed and required non-empty by the usecase.
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
     /// Session name (also the branch name created in every repository). This is
@@ -413,6 +462,16 @@ pub struct SessionRecord {
     /// default, and omitted from the file) means no note has been written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// A lightweight checklist for this session's work — the `todos` section of
+    /// the note scratchpad. Display / UX only, machine-local; distinct from the
+    /// git-tracked issue store. Empty (the default) is omitted from the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<SessionTodo>,
+    /// An append-only log of decisions an agent made while working this session —
+    /// the `decisions` section of the note scratchpad. Display / UX only. Empty
+    /// (the default) is omitted from the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<SessionDecision>,
     /// The [`id`](crate::domain::settings::SessionLabelDef::id) of the manual
     /// status label the user has assigned to this session in 選択 (Overview), or
     /// `None` when unset. Resolved back to a
@@ -486,6 +545,16 @@ impl SessionRecord {
         self.note.as_deref()
     }
 
+    /// The session's todo checklist (empty when none have been added).
+    pub fn todos(&self) -> &[SessionTodo] {
+        &self.todos
+    }
+
+    /// The session's decision log (empty when none have been recorded).
+    pub fn decisions(&self) -> &[SessionDecision] {
+        &self.decisions
+    }
+
     /// The reference time for the freshness ("heat") dot: the persisted
     /// [`last_active`](Self::last_active), or [`created_at`](Self::created_at) when
     /// the session has never been touched.
@@ -512,6 +581,14 @@ pub struct WorkspaceState {
     /// has been written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_note: Option<String>,
+    /// The workspace **root**'s todo checklist — the `⌂ root` row's counterpart
+    /// to [`SessionRecord::todos`]. Empty (the default) is omitted from the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_todos: Vec<SessionTodo>,
+    /// The workspace **root**'s decision log — the `⌂ root` row's counterpart to
+    /// [`SessionRecord::decisions`]. Empty (the default) is omitted from the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_decisions: Vec<SessionDecision>,
     /// When the state was last refreshed from git.
     pub updated_at: DateTime<Utc>,
 }
@@ -521,6 +598,8 @@ impl WorkspaceState {
         Self {
             sessions: Vec::new(),
             root_note: None,
+            root_todos: Vec::new(),
+            root_decisions: Vec::new(),
             updated_at: Utc::now(),
         }
     }
@@ -528,6 +607,16 @@ impl WorkspaceState {
     /// The workspace root's note, or `None` when none has been written.
     pub fn root_note(&self) -> Option<&str> {
         self.root_note.as_deref()
+    }
+
+    /// The workspace root's todo checklist (empty when none have been added).
+    pub fn root_todos(&self) -> &[SessionTodo] {
+        &self.root_todos
+    }
+
+    /// The workspace root's decision log (empty when none have been recorded).
+    pub fn root_decisions(&self) -> &[SessionDecision] {
+        &self.root_decisions
     }
 }
 
@@ -583,6 +672,8 @@ mod tests {
         // A default (unset) agent override is skipped entirely, so an older
         // `state.json` without the key still loads and a fresh one stays lean.
         let mut session = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "s".to_string(),
             display_name: None,
             note: None,
@@ -649,6 +740,8 @@ mod tests {
         // The default (Unknown) origin is skipped entirely, so a session recorded
         // before usagi tracked provenance stays lean and its key is simply absent.
         let mut session = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "s".to_string(),
             display_name: None,
             note: None,
@@ -721,6 +814,8 @@ mod tests {
         // interactively-created session stays lean and an older file without the
         // key still loads.
         let mut session = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "child".to_string(),
             display_name: None,
             note: None,
@@ -949,6 +1044,8 @@ mod tests {
     fn pr_is_omitted_when_empty_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -988,6 +1085,8 @@ mod tests {
     fn diff_is_omitted_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -1043,6 +1142,8 @@ mod tests {
     fn workspace_state_round_trips_through_json() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -1064,6 +1165,8 @@ mod tests {
     #[test]
     fn display_label_falls_back_to_name_then_prefers_display_name() {
         let mut session = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -1086,6 +1189,8 @@ mod tests {
     fn display_name_is_omitted_from_json_when_absent_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: Some("Nice name".to_string()),
             note: None,
@@ -1119,6 +1224,8 @@ mod tests {
     fn note_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -1153,9 +1260,82 @@ mod tests {
     }
 
     #[test]
+    fn todos_and_decisions_are_omitted_when_empty_round_trip_and_read_legacy_files() {
+        let at = Utc.with_ymd_and_hms(2026, 6, 13, 5, 1, 18).unwrap();
+        let mut state = WorkspaceState::new();
+        state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
+            name: "feature-x".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: Default::default(),
+            origin: Default::default(),
+            started_from: None,
+            root: PathBuf::from("/repo/.usagi/sessions/feature-x"),
+            worktrees: vec![sample_worktree()],
+            created_at: at,
+            last_active: None,
+        });
+
+        // Empty → accessors are empty slices and the keys are dropped everywhere.
+        assert!(state.sessions[0].todos().is_empty());
+        assert!(state.sessions[0].decisions().is_empty());
+        assert!(state.root_todos().is_empty());
+        assert!(state.root_decisions().is_empty());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("todos"));
+        assert!(!json.contains("decisions"));
+        assert!(!json.contains("root_todos"));
+        assert!(!json.contains("root_decisions"));
+
+        // Session and root carry checklists and decision logs; the unchecked
+        // `done` default is dropped from the file, a checked one is written.
+        state.sessions[0].todos = vec![SessionTodo::new("write tests"), {
+            let mut done = SessionTodo::new("draft design");
+            done.done = true;
+            done
+        }];
+        state.sessions[0].decisions = vec![SessionDecision {
+            at,
+            text: "store todos on SessionRecord for symmetry with note".to_string(),
+        }];
+        state.root_todos = vec![SessionTodo::new("cut a release")];
+        state.root_decisions = vec![SessionDecision {
+            at,
+            text: "keep the scratchpad machine-local".to_string(),
+        }];
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"text\":\"write tests\""));
+        // The unchecked todo omits `done`; only the checked one serialises it.
+        assert_eq!(json.matches("\"done\":true").count(), 1);
+        assert!(!json.contains("\"done\":false"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+        assert_eq!(state.sessions[0].todos().len(), 2);
+        assert_eq!(state.sessions[0].decisions().len(), 1);
+        assert_eq!(state.root_todos().len(), 1);
+        assert_eq!(state.root_decisions().len(), 1);
+
+        // A legacy file without any of the new keys parses with empty collections.
+        let legacy = r#"{"sessions":[{"name":"x","root":"/r","worktrees":[],"created_at":"2026-06-13T05:01:18.659149Z"}],"updated_at":"2026-06-13T05:01:18.659149Z"}"#;
+        let parsed: WorkspaceState = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.sessions[0].todos().is_empty());
+        assert!(parsed.sessions[0].decisions().is_empty());
+        assert!(parsed.root_todos().is_empty());
+        assert!(parsed.root_decisions().is_empty());
+    }
+
+    #[test]
     fn last_active_is_omitted_when_absent_falls_back_to_created_at_and_round_trips() {
         let created = Utc.with_ymd_and_hms(2026, 6, 13, 5, 0, 0).unwrap();
         let mut session = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,
@@ -1196,6 +1376,8 @@ mod tests {
     fn label_id_is_omitted_when_absent_round_trips_when_set_and_reads_legacy_files() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature-x".to_string(),
             display_name: None,
             note: None,

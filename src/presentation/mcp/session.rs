@@ -31,6 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -43,7 +44,7 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 8] = [
+pub const TOOL_NAMES: [&str; 14] = [
     "session_create",
     "session_list",
     "session_status",
@@ -52,6 +53,12 @@ pub const TOOL_NAMES: [&str; 8] = [
     "session_remove",
     "session_note_get",
     "session_note_update",
+    "session_todo_list",
+    "session_todo_add",
+    "session_todo_update",
+    "session_todo_remove",
+    "session_decision_list",
+    "session_decision_log",
 ];
 
 /// Largest prompt (in bytes) accepted by `session_prompt`.
@@ -468,6 +475,88 @@ impl SessionMcpServer {
             .find(|s| s.name == name)
             .ok_or_else(|| format!("no such session: \"{}\"", name))
     }
+
+    /// The name of the session this process runs inside, or an error naming
+    /// `tool` when it runs from the workspace root — the todo / decision tools,
+    /// like the note tools, act on the current session only.
+    fn require_session(&self, tool: &str) -> Result<&str, String> {
+        self.current_session
+            .as_deref()
+            .ok_or_else(|| format!("{tool} is only available from inside a session worktree"))
+    }
+
+    fn tool_todo_list(&self) -> Result<String, String> {
+        let name = self.require_session("session_todo_list")?;
+        let todos = session::get_todos(&self.workspace_root, session::NoteTarget::Session(name))
+            .map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "todos": todos })))
+    }
+
+    fn tool_todo_add(&self, arguments: Value) -> Result<String, String> {
+        let args: TodoAddArgs = parse_args(arguments)?;
+        let name = self.require_session("session_todo_add")?;
+        let todos = session::add_todo(
+            &self.workspace_root,
+            session::NoteTarget::Session(name),
+            &args.text,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "todos": todos })))
+    }
+
+    fn tool_todo_update(&self, arguments: Value) -> Result<String, String> {
+        let args: TodoUpdateArgs = parse_args(arguments)?;
+        let name = self.require_session("session_todo_update")?;
+        let target = session::NoteTarget::Session(name);
+        if args.done.is_none() && args.text.is_none() {
+            return Err("session_todo_update needs `done` and/or `text` to change".to_string());
+        }
+        // Apply the text edit first, then the checked-state toggle, so a call
+        // carrying both lands as one logical update.
+        if let Some(text) = &args.text {
+            session::edit_todo(&self.workspace_root, target, args.index, text)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(done) = args.done {
+            session::set_todo_done(&self.workspace_root, target, args.index, done)
+                .map_err(|e| e.to_string())?;
+        }
+        let todos = session::get_todos(&self.workspace_root, target).map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "todos": todos })))
+    }
+
+    fn tool_todo_remove(&self, arguments: Value) -> Result<String, String> {
+        let args: TodoRemoveArgs = parse_args(arguments)?;
+        let name = self.require_session("session_todo_remove")?;
+        let todos = session::remove_todo(
+            &self.workspace_root,
+            session::NoteTarget::Session(name),
+            args.index,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "todos": todos })))
+    }
+
+    fn tool_decision_list(&self) -> Result<String, String> {
+        let name = self.require_session("session_decision_list")?;
+        let decisions =
+            session::get_decisions(&self.workspace_root, session::NoteTarget::Session(name))
+                .map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "decisions": decisions })))
+    }
+
+    fn tool_decision_log(&self, arguments: Value) -> Result<String, String> {
+        let args: DecisionLogArgs = parse_args(arguments)?;
+        let name = self.require_session("session_decision_log")?;
+        let decisions = session::log_decision(
+            &self.workspace_root,
+            session::NoteTarget::Session(name),
+            Utc::now(),
+            &args.text,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(to_pretty(&json!({ "name": name, "decisions": decisions })))
+    }
 }
 
 impl McpService for SessionMcpServer {
@@ -493,12 +582,48 @@ impl McpService for SessionMcpServer {
             "session_remove" => self.tool_remove(arguments),
             "session_note_get" => self.tool_note_get(),
             "session_note_update" => self.tool_note_update(arguments),
+            "session_todo_list" => self.tool_todo_list(),
+            "session_todo_add" => self.tool_todo_add(arguments),
+            "session_todo_update" => self.tool_todo_update(arguments),
+            "session_todo_remove" => self.tool_todo_remove(arguments),
+            "session_decision_list" => self.tool_decision_list(),
+            "session_decision_log" => self.tool_decision_log(arguments),
             other => Err(format!("unknown tool: {other}")),
         }
     }
 }
 
 // --- argument shapes -------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TodoAddArgs {
+    /// The todo text (trimmed; must be non-empty).
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct TodoUpdateArgs {
+    /// Zero-based position of the todo to change.
+    index: usize,
+    /// New checked state, when toggling.
+    #[serde(default)]
+    done: Option<bool>,
+    /// New text, when editing.
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TodoRemoveArgs {
+    /// Zero-based position of the todo to remove.
+    index: usize,
+}
+
+#[derive(Deserialize)]
+struct DecisionLogArgs {
+    /// What was decided and why (trimmed; must be non-empty).
+    text: String,
+}
 
 #[derive(Deserialize)]
 struct CreateArgs {
@@ -841,6 +966,80 @@ fn session_tool_schemas() -> Value {
                 },
                 "required": ["note"]
             }
+        },
+        {
+            "name": "session_todo_list",
+            "description": "List the current session's lightweight checklist — throwaway, \
+                machine-local todos for this session's work, distinct from the git-tracked \
+                issue store. Returns { name, todos } where each todo is { text, done }. \
+                Only available from inside a session worktree.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "session_todo_add",
+            "description": "Append a todo to the current session's checklist. The text is \
+                trimmed and must be non-empty; the todo starts unchecked. Returns \
+                { name, todos } with the checklist now stored. Only available from inside \
+                a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "The todo text" }
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "session_todo_update",
+            "description": "Change the todo at `index` (zero-based) in the current session's \
+                checklist: pass `done` to check/uncheck it and/or `text` to rewrite it. At \
+                least one of the two is required. Returns { name, todos }. Fails when the \
+                index is out of range. Only available from inside a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "minimum": 0, "description": "Zero-based todo position" },
+                    "done": { "type": "boolean", "description": "New checked state" },
+                    "text": { "type": "string", "description": "New todo text" }
+                },
+                "required": ["index"]
+            }
+        },
+        {
+            "name": "session_todo_remove",
+            "description": "Remove the todo at `index` (zero-based) from the current session's \
+                checklist. Returns { name, todos } with the checklist now stored. Fails when \
+                the index is out of range. Only available from inside a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "minimum": 0, "description": "Zero-based todo position" }
+                },
+                "required": ["index"]
+            }
+        },
+        {
+            "name": "session_decision_list",
+            "description": "List the current session's decision log — an append-only record \
+                of what the agent decided and why, so a coordinator can follow the reasoning \
+                without replaying the transcript. Returns { name, decisions } where each entry \
+                is { at, text } (at is an RFC3339 UTC timestamp). Only available from inside a \
+                session worktree.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "session_decision_log",
+            "description": "Append a decision to the current session's log, timestamped now. \
+                Record why an approach was chosen while the reasoning is fresh. The text is \
+                trimmed and must be non-empty. Returns { name, decisions } with the log now \
+                stored. Only available from inside a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "What was decided and why" }
+                },
+                "required": ["text"]
+            }
         }
     ])
 }
@@ -1057,6 +1256,12 @@ mod tests {
                 "session_remove",
                 "session_note_get",
                 "session_note_update",
+                "session_todo_list",
+                "session_todo_add",
+                "session_todo_update",
+                "session_todo_remove",
+                "session_decision_list",
+                "session_decision_log",
             ]
         );
     }
@@ -2116,6 +2321,144 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("inside a session worktree"));
+    }
+
+    #[test]
+    fn todo_add_list_update_and_remove_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+
+        // Empty to start.
+        let list = call(&server, "session_todo_list", json!({}));
+        assert_eq!(list["isError"], false);
+        assert_eq!(tool_json(&list)["todos"], json!([]));
+
+        // Add two todos.
+        let add = call(
+            &server,
+            "session_todo_add",
+            json!({"text":"  write tests  "}),
+        );
+        assert_eq!(add["isError"], false);
+        assert_eq!(tool_json(&add)["todos"], json!([{"text":"write tests"}]));
+        call(&server, "session_todo_add", json!({"text":"ship it"}));
+
+        // Update: check index 0 and rewrite its text in one call.
+        let upd = call(
+            &server,
+            "session_todo_update",
+            json!({"index":0,"done":true,"text":"write more tests"}),
+        );
+        assert_eq!(upd["isError"], false);
+        let body = tool_json(&upd);
+        assert_eq!(
+            body["todos"][0],
+            json!({"text":"write more tests","done":true})
+        );
+        assert_eq!(body["todos"][1], json!({"text":"ship it"}));
+
+        // A text-only update keeps the checked state (no `done` field passed).
+        let text_only = call(
+            &server,
+            "session_todo_update",
+            json!({"index":0,"text":"write even more tests"}),
+        );
+        assert_eq!(
+            tool_json(&text_only)["todos"][0],
+            json!({"text":"write even more tests","done":true})
+        );
+        // A done-only update leaves the text alone.
+        let done_only = call(
+            &server,
+            "session_todo_update",
+            json!({"index":0,"done":false}),
+        );
+        assert_eq!(
+            tool_json(&done_only)["todos"][0],
+            json!({"text":"write even more tests"})
+        );
+
+        // Remove index 0.
+        let rem = call(&server, "session_todo_remove", json!({"index":0}));
+        assert_eq!(rem["isError"], false);
+        assert_eq!(tool_json(&rem)["todos"], json!([{"text":"ship it"}]));
+    }
+
+    #[test]
+    fn todo_update_reports_bad_input_and_out_of_range() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+
+        // Neither `done` nor `text` → rejected before touching the store.
+        let empty = call(&server, "session_todo_update", json!({"index":0}));
+        assert_eq!(empty["isError"], true);
+        assert!(empty["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`done` and/or `text`"));
+
+        // Out-of-range index on an empty checklist.
+        let oor = call(
+            &server,
+            "session_todo_update",
+            json!({"index":5,"done":true}),
+        );
+        assert_eq!(oor["isError"], true);
+        assert!(oor["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("out of range"));
+    }
+
+    #[test]
+    fn decision_log_and_list_round_trip_with_timestamps() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_in_session(root.path(), "work", FakeBackend::ok("x"));
+        call(&server, "session_create", json!({"name":"work"}));
+
+        let empty = call(&server, "session_decision_list", json!({}));
+        assert_eq!(tool_json(&empty)["decisions"], json!([]));
+
+        let log = call(
+            &server,
+            "session_decision_log",
+            json!({"text":"  chose approach A over B  "}),
+        );
+        assert_eq!(log["isError"], false);
+        let body = tool_json(&log);
+        assert_eq!(body["decisions"][0]["text"], "chose approach A over B");
+        // The server stamps `at`; it parses back as an RFC3339 timestamp.
+        let at = body["decisions"][0]["at"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok());
+
+        let list = call(&server, "session_decision_list", json!({}));
+        assert_eq!(tool_json(&list)["decisions"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn todo_and_decision_tools_fail_when_not_inside_a_session() {
+        let root = tempfile::tempdir().unwrap();
+        let server = server_at(root.path(), FakeBackend::ok("x"));
+        for (tool, args) in [
+            ("session_todo_list", json!({})),
+            ("session_todo_add", json!({"text":"x"})),
+            ("session_todo_update", json!({"index":0,"done":true})),
+            ("session_todo_remove", json!({"index":0})),
+            ("session_decision_list", json!({})),
+            ("session_decision_log", json!({"text":"x"})),
+        ] {
+            let result = call(&server, tool, args);
+            assert_eq!(result["isError"], true, "{tool} should error at root");
+            assert!(result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("inside a session worktree"));
+        }
     }
 
     #[test]

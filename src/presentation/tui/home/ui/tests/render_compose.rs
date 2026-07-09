@@ -426,6 +426,8 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
     // screen never switches to a full-screen modal.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let session = SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: "alpha".to_string(),
         display_name: None,
         note: Some("first line\nsecond".to_string()),

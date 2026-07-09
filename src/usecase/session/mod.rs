@@ -36,7 +36,8 @@ use crate::domain::agent::Agent;
 use crate::domain::agent_phase::AgentPhase;
 use crate::domain::settings::LocalSettings;
 use crate::domain::workspace_state::{
-    BranchStatus, PrLink, SessionAgent, SessionOrigin, SessionRecord,
+    BranchStatus, PrLink, SessionAgent, SessionDecision, SessionOrigin, SessionRecord, SessionTodo,
+    WorkspaceState,
 };
 use crate::infrastructure::repo_paths::{SESSIONS_DIR, STATE_DIR};
 use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
@@ -390,6 +391,8 @@ fn record(
 
     let now = Utc::now();
     state.sessions.push(SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: name.to_string(),
         display_name: None,
         note: None,
@@ -574,6 +577,225 @@ pub fn set_root_note(workspace_root: &Path, note: &str) -> Result<Option<String>
     state.updated_at = Utc::now();
     store.save(&state)?;
     Ok(stored)
+}
+
+/// Which scratchpad a todo / decision operation targets: the workspace **root**
+/// (`⌂ root`, whose lists live at the top level of `state.json`) or a named
+/// session (whose lists live on its [`SessionRecord`]).
+///
+/// This unifies the two storage locations behind one API so each operation is
+/// written once instead of in `set_…` / `set_root_…` pairs like [`set_note`] /
+/// [`set_root_note`].
+#[derive(Debug, Clone, Copy)]
+pub enum NoteTarget<'a> {
+    /// The workspace root (`⌂ root`).
+    Root,
+    /// The session with this name.
+    Session(&'a str),
+}
+
+/// Borrow the target's `(todos, decisions)` lists out of a loaded state. Fails
+/// only for [`NoteTarget::Session`] naming a session that does not exist; the
+/// root always resolves.
+fn scratchpad_mut<'s>(
+    state: &'s mut WorkspaceState,
+    target: NoteTarget<'_>,
+) -> Result<(&'s mut Vec<SessionTodo>, &'s mut Vec<SessionDecision>)> {
+    match target {
+        NoteTarget::Root => Ok((&mut state.root_todos, &mut state.root_decisions)),
+        NoteTarget::Session(name) => {
+            let session = state
+                .sessions
+                .iter_mut()
+                .find(|s| s.name == name)
+                .ok_or_else(|| anyhow!("no such session: \"{name}\""))?;
+            Ok((&mut session.todos, &mut session.decisions))
+        }
+    }
+}
+
+/// Run `edit` against the target's scratchpad lists under the store lock, then
+/// persist — the todo/decision counterpart to [`edit_session`], but able to
+/// target the root as well.
+///
+/// The state is loaded the way each target expects: a [`NoteTarget::Session`]
+/// requires an existing `state.json` (like [`edit_session`]), while
+/// [`NoteTarget::Root`] defaults an absent one into being (like
+/// [`set_root_note`]), since the root can carry lists before any session exists.
+/// `edit` returns a `Result`, so an operation that rejects its input (an empty
+/// text, an out-of-range index) short-circuits with `?` **before** the save, and
+/// `state.json` is left untouched.
+fn edit_target<T>(
+    store: &WorkspaceStore,
+    target: NoteTarget<'_>,
+    edit: impl FnOnce(&mut Vec<SessionTodo>, &mut Vec<SessionDecision>) -> Result<T>,
+) -> Result<T> {
+    let _lock = store.lock()?;
+    let mut state = match target {
+        NoteTarget::Root => store.load()?.unwrap_or_default(),
+        NoteTarget::Session(_) => store
+            .load()?
+            .ok_or_else(|| anyhow!("no sessions recorded for this workspace"))?,
+    };
+    let (todos, decisions) = scratchpad_mut(&mut state, target)?;
+    let result = edit(todos, decisions)?;
+    state.updated_at = Utc::now();
+    store.save(&state)?;
+    Ok(result)
+}
+
+/// Read the target's scratchpad lists without taking the write lock or saving —
+/// the shared body of [`get_todos`] / [`get_decisions`]. A
+/// [`NoteTarget::Session`] naming no session fails; the root reads as empty when
+/// no `state.json` exists yet.
+fn read_target<T>(
+    store: &WorkspaceStore,
+    target: NoteTarget<'_>,
+    read: impl FnOnce(&[SessionTodo], &[SessionDecision]) -> T,
+) -> Result<T> {
+    let mut state = store.load()?.unwrap_or_default();
+    let (todos, decisions) = scratchpad_mut(&mut state, target)?;
+    Ok(read(todos, decisions))
+}
+
+/// Reject an index that is not a valid position in a list of `len` items.
+fn check_index(index: usize, len: usize, what: &str) -> Result<()> {
+    if index >= len {
+        bail!("{what} index {index} out of range (0..{len})");
+    }
+    Ok(())
+}
+
+/// Append a todo to the target's checklist and return the checklist as stored.
+///
+/// `text` is trimmed; a text that trims to empty is rejected (an empty todo is
+/// never stored). The new todo starts unchecked.
+pub fn add_todo(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    text: &str,
+) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |todos, _| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            bail!("a todo cannot be empty");
+        }
+        todos.push(SessionTodo::new(trimmed));
+        Ok(todos.clone())
+    })
+}
+
+/// Check or uncheck the todo at `index` and return the checklist as stored.
+/// Fails when `index` is out of range.
+pub fn set_todo_done(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    index: usize,
+    done: bool,
+) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |todos, _| {
+        check_index(index, todos.len(), "todo")?;
+        todos[index].done = done;
+        Ok(todos.clone())
+    })
+}
+
+/// Replace the text of the todo at `index` (its checked state is kept) and
+/// return the checklist as stored. `text` is trimmed and must be non-empty;
+/// fails when `index` is out of range.
+pub fn edit_todo(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    index: usize,
+    text: &str,
+) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |todos, _| {
+        check_index(index, todos.len(), "todo")?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            bail!("a todo cannot be empty");
+        }
+        todos[index].text = trimmed.to_string();
+        Ok(todos.clone())
+    })
+}
+
+/// Remove the todo at `index` and return the checklist as stored. Fails when
+/// `index` is out of range.
+pub fn remove_todo(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    index: usize,
+) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |todos, _| {
+        check_index(index, todos.len(), "todo")?;
+        todos.remove(index);
+        Ok(todos.clone())
+    })
+}
+
+/// Clear the target's whole checklist, returning how many todos were removed.
+pub fn clear_todos(workspace_root: &Path, target: NoteTarget<'_>) -> Result<usize> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |todos, _| {
+        let removed = todos.len();
+        todos.clear();
+        Ok(removed)
+    })
+}
+
+/// Return the target's checklist (empty when none have been added).
+pub fn get_todos(workspace_root: &Path, target: NoteTarget<'_>) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    read_target(&store, target, |todos, _| todos.to_vec())
+}
+
+/// Append a decision to the target's log and return the log as stored.
+///
+/// `at` is supplied by the caller (the composition root passes the real clock,
+/// tests a fixed instant) so this usecase stays clock-free. `text` is trimmed
+/// and a text that trims to empty is rejected.
+pub fn log_decision(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    at: DateTime<Utc>,
+    text: &str,
+) -> Result<Vec<SessionDecision>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |_, decisions| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            bail!("a decision cannot be empty");
+        }
+        decisions.push(SessionDecision {
+            at,
+            text: trimmed.to_string(),
+        });
+        Ok(decisions.clone())
+    })
+}
+
+/// Return the target's decision log (empty when none have been recorded).
+pub fn get_decisions(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+) -> Result<Vec<SessionDecision>> {
+    let store = WorkspaceStore::new(workspace_root);
+    read_target(&store, target, |_, decisions| decisions.to_vec())
+}
+
+/// Clear the target's whole decision log, returning how many entries were removed.
+pub fn clear_decisions(workspace_root: &Path, target: NoteTarget<'_>) -> Result<usize> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |_, decisions| {
+        let removed = decisions.len();
+        decisions.clear();
+        Ok(removed)
+    })
 }
 
 /// List the sessions recorded for `workspace_root`, in stored order.
@@ -1000,6 +1222,7 @@ mod tests {
     use crate::infrastructure::setup_runner::SystemSetupCommandRunner;
     use crate::usecase::settings;
     use anyhow::anyhow;
+    use chrono::TimeZone;
     use std::cell::RefCell;
 
     /// Initialise a throwaway git repo with one commit on `main`.
@@ -1887,6 +2110,149 @@ mod tests {
         );
     }
 
+    fn todos_of(root: &Path, name: &str) -> Vec<SessionTodo> {
+        get_todos(root, NoteTarget::Session(name)).unwrap()
+    }
+
+    #[test]
+    fn todo_add_toggle_edit_remove_and_clear_round_trip_through_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        create(root.path(), "other").unwrap();
+        let t = |name| NoteTarget::Session(name);
+
+        // Add trims and rejects an empty todo; the session starts with none.
+        assert!(todos_of(root.path(), "feature").is_empty());
+        let todos = add_todo(root.path(), t("feature"), "  write tests  ").unwrap();
+        assert_eq!(todos, vec![SessionTodo::new("write tests")]);
+        assert!(add_todo(root.path(), t("feature"), "   ")
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty"));
+        add_todo(root.path(), t("feature"), "ship it").unwrap();
+        // The other session is left untouched.
+        assert!(todos_of(root.path(), "other").is_empty());
+
+        // Toggle done on / off by index.
+        let todos = set_todo_done(root.path(), t("feature"), 0, true).unwrap();
+        assert!(todos[0].done);
+        assert!(!todos[1].done);
+        assert!(!set_todo_done(root.path(), t("feature"), 0, false).unwrap()[0].done);
+
+        // Edit keeps the checked state and trims; clearing to empty is rejected.
+        set_todo_done(root.path(), t("feature"), 1, true).unwrap();
+        let todos = edit_todo(root.path(), t("feature"), 1, "  ship it now  ").unwrap();
+        assert_eq!(todos[1].text, "ship it now");
+        assert!(todos[1].done);
+        assert!(edit_todo(root.path(), t("feature"), 1, "  ")
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty"));
+
+        // Remove by index, then clear the rest.
+        let todos = remove_todo(root.path(), t("feature"), 0).unwrap();
+        assert_eq!(
+            todos,
+            vec![{
+                let mut td = SessionTodo::new("ship it now");
+                td.done = true;
+                td
+            }]
+        );
+        assert_eq!(clear_todos(root.path(), t("feature")).unwrap(), 1);
+        assert!(todos_of(root.path(), "feature").is_empty());
+    }
+
+    #[test]
+    fn todo_ops_reject_out_of_range_indices_and_missing_targets() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        let t = NoteTarget::Session("feature");
+
+        // Empty list → every index is out of range.
+        for err in [
+            set_todo_done(root.path(), t, 0, true).unwrap_err(),
+            edit_todo(root.path(), t, 0, "x").unwrap_err(),
+            remove_todo(root.path(), t, 0).unwrap_err(),
+        ] {
+            assert!(err.to_string().contains("out of range"));
+        }
+
+        // A session-targeted op fails when the session does not exist.
+        let err = add_todo(root.path(), NoteTarget::Session("absent"), "x").unwrap_err();
+        assert!(err.to_string().contains("no such session"));
+
+        // get_todos with no state.json yet reads as empty for the root.
+        let fresh = tempfile::tempdir().unwrap();
+        init_repo(fresh.path());
+        assert!(get_todos(fresh.path(), NoteTarget::Root)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn root_todos_are_stored_separately_from_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        // The root can carry todos before any session exists.
+        add_todo(root.path(), NoteTarget::Root, "cut a release").unwrap();
+        create(root.path(), "feature").unwrap();
+        add_todo(root.path(), NoteTarget::Session("feature"), "review").unwrap();
+
+        assert_eq!(
+            get_todos(root.path(), NoteTarget::Root).unwrap(),
+            vec![SessionTodo::new("cut a release")]
+        );
+        assert_eq!(
+            todos_of(root.path(), "feature"),
+            vec![SessionTodo::new("review")]
+        );
+    }
+
+    #[test]
+    fn decisions_are_appended_with_the_callers_timestamp_and_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        let t = NoteTarget::Session("feature");
+        let at1 = Utc.with_ymd_and_hms(2026, 7, 9, 10, 0, 0).unwrap();
+        let at2 = Utc.with_ymd_and_hms(2026, 7, 9, 11, 0, 0).unwrap();
+
+        assert!(get_decisions(root.path(), t).unwrap().is_empty());
+        let log = log_decision(root.path(), t, at1, "  chose approach A  ").unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].at, at1);
+        assert_eq!(log[0].text, "chose approach A");
+
+        // Appends in order; empty text is rejected.
+        let log = log_decision(root.path(), t, at2, "revisited after tests").unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[1].at, at2);
+        assert!(log_decision(root.path(), t, at2, "   ")
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be empty"));
+
+        // Clearing reports the count removed and leaves an empty log.
+        assert_eq!(clear_decisions(root.path(), t).unwrap(), 2);
+        assert!(get_decisions(root.path(), t).unwrap().is_empty());
+
+        // Missing session fails; the root logs independently.
+        assert!(
+            log_decision(root.path(), NoteTarget::Session("absent"), at1, "x")
+                .unwrap_err()
+                .to_string()
+                .contains("no such session")
+        );
+        log_decision(root.path(), NoteTarget::Root, at1, "root call").unwrap();
+        assert_eq!(
+            get_decisions(root.path(), NoteTarget::Root).unwrap().len(),
+            1
+        );
+    }
+
     #[test]
     fn set_display_name_errors_without_state_or_session() {
         let root = tempfile::tempdir().unwrap();
@@ -2177,6 +2543,8 @@ mod tests {
         let ghost_root = root.path().join(".usagi/sessions/ghost");
         let mut state = store.load().unwrap().unwrap_or_default();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "ghost".to_string(),
             display_name: None,
             note: None,

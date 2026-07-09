@@ -81,6 +81,13 @@
       "name": "login",
       "display_name": "ログイン機能",
       "note": "バリデーションを実装中\n・API は未着手",
+      "todos": [
+        { "text": "バリデーションのテストを書く" },
+        { "text": "設計メモを起票", "done": true }
+      ],
+      "decisions": [
+        { "at": "2026-06-13T06:00:00Z", "text": "セッション単位で state.json に持たせる" }
+      ],
       "label_id": "review",
       "agent": { "cli": "claude", "model": "claude-opus-4-8" },
       "origin": "human",
@@ -105,6 +112,7 @@
     }
   ],
   "root_note": "リリース前に CHANGELOG を更新する",
+  "root_todos": [{ "text": "全セッションのレビュー状況を確認" }],
   "updated_at": "2026-06-13T05:01:18.659149Z"
 }
 ```
@@ -115,6 +123,8 @@
 |---|---|---|
 | `sessions` | array | 作成済みセッションの一覧（`.usagi/sessions/` 配下）。**配列順がホーム画面の表示順**で、初期値は作成順、選択（Overview）の `K`/`J` で並び替えると入れ替えた順序がこの配列に永続化される（[design/home/02-layout.md](../design/home/02-layout.md#選択overview既定)）。古いファイルには無く、その場合は空として扱う |
 | `root_note` | string? | ワークスペース**ルート行（`⌂ root`）**に紐づく自由記述の**複数行メモ**（任意）。セッションが持つ `note` のルート版で、ルートはどのセッションにも属さないためトップレベルに置く。**見た目だけ**の付加情報で、未設定（既定）なら省略される |
+| `root_todos` | array | ルート行の**チェックリスト**（`SessionRecord.todos` のルート版）。要素は下記 `SessionTodo`。空（既定）なら省略される |
+| `root_decisions` | array | ルート行の**意思決定ログ**（`SessionRecord.decisions` のルート版）。要素は下記 `SessionDecision`。空（既定）なら省略される |
 | `updated_at` | RFC3339(UTC) | この状態を git から最後に更新した日時 |
 
 > ワークスペース共通の「既定ブランチ」は持ちません。複数リポジトリで既定ブランチが異なり得る（`main` / `master` など）ため、各 worktree の status は**その worktree のリポジトリの既定ブランチ**に対して個別に判定します。
@@ -131,6 +141,8 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `name` | string | セッション名。セッションの識別子で、作成後は変わらない。各リポジトリで作成するブランチは `usagi/<name>`（`usagi/` 名前空間に収め、手で切ったブランチと衝突させない） |
 | `display_name` | string? | サイドメニューでの表示名（任意）。設定時は一覧の `name` の代わりに表示する**見た目だけ**の上書きで、ブランチ名・識別子は変えない。未設定（既定）なら省略され、`name` を表示する |
 | `note` | string? | セッションに紐づく自由記述の**複数行メモ**（任意）。用途・残タスク・リンクなどの覚え書きで、**見た目だけ**の付加情報。ブランチ名・識別子には影響しない。未設定（既定）なら省略される |
+| `todos` | array | セッション作業の**軽量チェックリスト**（任意）。要素は下記 `SessionTodo`。人も AI（MCP `session_todo_*`）も編集する使い捨てタスクで、**git 管理の issue ストア（`.usagi/issues/`）とは別物**。空（既定）なら省略される |
+| `decisions` | array | AI が「なぜその方針にしたか」を時刻付きで追記する**意思決定ログ**（任意・追記専用）。要素は下記 `SessionDecision`。空（既定）なら省略される |
 | `label_id` | string? | ユーザーが選択（Overview）で手で付けた**ステータスラベルの ID**（任意）。[`session_labels` マスタ](../05-settings.md#ステータスラベルsession_labels)の要素 `id` を指し、表示時にマスタへ解決される（マスタから消えた ID は未設定扱い）。`status` と違い git からは導出されない純粋なユーザー付与タグで、ワークスペース同期では書き換えない。未設定（既定）なら省略される |
 | `agent` | object? | このセッション単位のエージェント CLI・モデルの上書き（任意）。`{ "cli": <AgentCli>?, "model": string? }` で、`session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成・委譲するときに指定する。このセッションのエージェントペイン起動（自動 spawn・ペイン復旧・集中からの起動）時に、ワークスペースの実効設定 `agent_cli` より**優先**して適用される。`cli` は `claude` / `codex` / `codex_fugu` / `gemini` / `antigravity`（未知の値は `null` に劣化し、その場を含む記録全体は読める）、`model` は各 CLI のモデル指定フラグ（claude `--model`、codex / gemini `-m`）に素通しで展開される（allowlist 無し）。両方未設定（既定）なら省略され、セッションはワークスペースの実効設定と各 CLI の既定モデルに従う |
 | `origin` | enum? | このセッションを**誰が起動したか**（作成時に一度だけ記録し、以後変えない。ワークスペース同期でも書き換えない）。`human`＝人が TUI ホーム画面の選択（Overview）で作成、`mcp`＝エージェントが MCP の `session_create` / `session_delegate_issue`（[MCP](../03-commands/03-mcp.md#対応-tool-一覧)）で作成。この項目が無い古い `state.json` のセッションは `unknown`（＝未記録）に縮退し、未知の値も `unknown` に劣化して記録全体は読める。`unknown`（既定）なら省略される |
@@ -146,6 +158,24 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 読み直して更新します。
 
 これらの更新（作成・削除・表示名変更・再同期）はいずれも `state.json` の read-modify-write（読み込み→編集→保存）です。個々の保存は一時ファイル＋rename でアトミックですが、その**一連**を `.usagi/.lock` に対するプロセス間排他ロックで直列化します。TUI と各セッションの `usagi mcp` サーバなど同一ワークスペースを共有する複数プロセスが同時に書いても、後勝ちで一方の更新を取りこぼす（lost update）ことがありません。
+
+`todos` / `decisions`（およびルート版の `root_todos` / `root_decisions`）は、AI が MCP の `session_todo_*` / `session_decision_*`（[03-commands/03-mcp.md](../03-commands/03-mcp.md#対応-tool-一覧)）で編集します。usecase は `usecase/session` の `add_todo` / `set_todo_done` / `edit_todo` / `remove_todo` / `clear_todos` / `log_decision` / `clear_decisions` で、対象（ルート／セッション）を `NoteTarget` で切り替えつつ `note` と同じロック運用で書き換えます。`note` と同じくマシンローカル（git 管理外）で、ブランチや PR では共有されません。
+
+### スクラッチパッドの要素（`SessionTodo` / `SessionDecision`）
+
+`todos` / `root_todos` の各要素（`SessionTodo`）:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `text` | string | todo の本文（trim 済み・非空）。 |
+| `done` | bool | チェック済みか。`false`（既定・未チェック）なら省略される |
+
+`decisions` / `root_decisions` の各要素（`SessionDecision`）:
+
+| フィールド | 型 | 意味 |
+|---|---|---|
+| `at` | RFC3339(UTC) | 記録した日時（追記時に付与）。 |
+| `text` | string | 決定内容と理由（trim 済み・非空）。 |
 
 ### worktree ごと（`WorktreeState`）
 
