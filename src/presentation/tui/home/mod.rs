@@ -6,6 +6,7 @@
 //! the per-worktree session screen is not implemented yet — so selecting one
 //! shows a "coming soon" notice.
 
+pub mod action;
 pub mod command;
 pub mod event;
 pub mod oneshot;

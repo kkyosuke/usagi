@@ -50,12 +50,8 @@ pub use mode::{Mode, PaneExit, ResumeLevel};
 use list::{session_row, session_tree_layout};
 use modal::{CloseupMenu, CloseupSubmenu, Overlay};
 
-/// The terminal row's inline choices, in display/default order. `open` preserves
-/// the existing fast path: add an embedded usagi pane/tab. `new` opens a native
-/// terminal application in the same directory.
-const TERMINAL_MENU_ACTIONS: [&str; 2] = ["open", "new"];
-
 use crate::presentation::tui::chat::state::Chat;
+use crate::presentation::tui::home::action::{self, ActionPicker};
 
 /// The 集中 (Closeup) menu commands in alphabetical order by name, independent of
 /// registry order, so the menu is predictable regardless of how the registry is
@@ -3242,11 +3238,11 @@ impl HomeState {
     }
 
     /// The Session-scope commands the 集中 menu lists, in alphabetical order
-    /// (see [`sorted_session_menu_commands`]). `chat` is filtered out unless the
-    /// local LLM is usable (enabled and its model pulled), so it only appears when
-    /// a reply would actually work. `close` / `diff` are filtered out on the root
-    /// row, which belongs to no session. `agent` always stays: a session can hold
-    /// one agent pane per CLI.
+    /// (see [`sorted_session_menu_commands`]), filtered by the
+    /// [`SessionActionSpec`](action::SessionActionSpec) table: `chat` is filtered
+    /// out unless the local LLM is usable (enabled and its model pulled), so it
+    /// only appears when a reply would actually work; session-only actions are
+    /// filtered out on the root row, which belongs to no session.
     ///
     /// Resolved for the **active** row: 集中 acts on the session it focused. When
     /// the menu filter (`/`) is active the list is narrowed by
@@ -3280,15 +3276,17 @@ impl HomeState {
 
     /// Shared body of [`closeup_menu_commands`]: the
     /// Session-scope commands in alphabetical order (see
-    /// [`sorted_session_menu_commands`]): `chat` is gated on local-LLM
-    /// availability, and the session-only `close` / `diff` are hidden when `root`
-    /// (the row belongs to no session).
+    /// [`sorted_session_menu_commands`]), filtered through
+    /// [`SessionActionSpec`](action::SessionActionSpec) for menu visibility,
+    /// local-LLM availability and root-row allowance.
     fn menu_commands_for_root(&self, root: bool) -> Vec<CommandInfo> {
         self.session_menu_commands
             .iter()
             .copied()
-            .filter(|info| info.name != "chat" || self.ai_available)
-            .filter(|info| !matches!(info.name, "close" | "diff") || !root)
+            .filter(|info| {
+                action::spec_for(info.name)
+                    .is_none_or(|spec| spec.visible_in_menu(root, self.ai_available))
+            })
             .collect()
     }
 
@@ -3574,14 +3572,14 @@ impl HomeState {
         self.installed_agents.len() > 1
             && self
                 .closeup_selected_command()
-                .is_some_and(|info| info.name == "agent")
+                .is_some_and(|info| action::picker_for(info.name) == ActionPicker::Agent)
     }
 
     /// Whether the 集中 menu's `terminal` row can expand into the open/new
     /// picker. It always has two choices; expansion is gated only by the cursor.
     pub fn closeup_menu_terminal_can_expand(&self) -> bool {
         self.closeup_selected_command()
-            .is_some_and(|info| info.name == "terminal")
+            .is_some_and(|info| action::picker_for(info.name) == ActionPicker::Terminal)
     }
 
     /// Expand the 集中 menu's agent picker, highlighting the configured default
@@ -3623,7 +3621,8 @@ impl HomeState {
     }
 
     /// The highlighted option in the 集中 menu's close picker, or `None` collapsed.
-    /// `Some(0)` = plain close, `Some(1)` = close --force.
+    /// The cursor indexes [`closeup_menu_close_actions`](Self::closeup_menu_close_actions):
+    /// option 0 is plain close, option 1 is close --force.
     pub fn closeup_close_cursor(&self) -> Option<usize> {
         self.closeup_menu.close_cursor()
     }
@@ -3631,7 +3630,7 @@ impl HomeState {
     /// Whether the 集中 menu's `close` row can expand: the cursor is on `close`.
     pub fn closeup_close_can_expand(&self) -> bool {
         self.closeup_selected_command()
-            .is_some_and(|info| info.name == "close")
+            .is_some_and(|info| action::picker_for(info.name) == ActionPicker::Close)
     }
 
     /// Expand the 集中 menu's close picker, starting at option 0 (plain close).
@@ -3654,7 +3653,23 @@ impl HomeState {
     ///
     /// [`closeup_close_expanded`]: Self::closeup_close_expanded
     pub fn closeup_menu_selected_close_force(&self) -> bool {
-        self.closeup_menu.close_selected() == 1
+        self.closeup_menu_selected_close_action()
+            .is_some_and(|option| option.force)
+    }
+
+    /// The close-picker option highlighted by the cursor, or `None` while the
+    /// picker is collapsed.
+    pub fn closeup_menu_selected_close_action(&self) -> Option<action::CloseAction> {
+        self.closeup_menu.close_cursor()?;
+        let actions = self.closeup_menu_close_actions();
+        actions
+            .get(self.closeup_menu.close_selected(actions.len()))
+            .copied()
+    }
+
+    /// The close actions shown below the expanded `close` row.
+    pub fn closeup_menu_close_actions(&self) -> &'static [action::CloseAction] {
+        action::spec_for("close").map_or(&[], |spec| spec.close_actions())
     }
 
     /// The agent CLI highlighted in the picker, or `None` when collapsed / there
@@ -3673,17 +3688,15 @@ impl HomeState {
     /// when the picker is collapsed.
     pub fn closeup_menu_selected_terminal_action(&self) -> Option<&'static str> {
         self.closeup_menu.terminal_cursor()?;
-        TERMINAL_MENU_ACTIONS
-            .get(
-                self.closeup_menu
-                    .terminal_selected(TERMINAL_MENU_ACTIONS.len()),
-            )
+        let actions = self.closeup_menu_terminal_actions();
+        actions
+            .get(self.closeup_menu.terminal_selected(actions.len()))
             .copied()
     }
 
     /// The terminal actions shown below the expanded terminal row.
     pub fn closeup_menu_terminal_actions(&self) -> &'static [&'static str] {
-        &TERMINAL_MENU_ACTIONS
+        action::spec_for("terminal").map_or(&[], |spec| spec.picker_actions())
     }
 
     /// Move the 集中 menu cursor up one row, wrapping (delegated to [`CloseupMenu`],
@@ -3705,9 +3718,9 @@ impl HomeState {
     fn closeup_menu_nav_count(&self) -> usize {
         if self.closeup_menu.is_expanded() {
             if self.closeup_menu_terminal_expanded() {
-                TERMINAL_MENU_ACTIONS.len()
+                self.closeup_menu_terminal_actions().len()
             } else if self.closeup_menu.is_close_expanded() {
-                2
+                self.closeup_menu_close_actions().len()
             } else {
                 self.installed_agents.len()
             }

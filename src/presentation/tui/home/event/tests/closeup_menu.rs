@@ -1141,15 +1141,13 @@ fn chat_ready_state() -> HomeState {
 
 #[test]
 fn closeup_menu_chat_row_opens_the_chat_overlay() {
-    // With the local LLM available, the menu lists agent, terminal, diff, chat,
-    // close; three ArrowDowns land on `chat` and Enter opens the right-pane chat
-    // overlay (sidebar stays). Esc closes it back to Closeup.
+    // With the local LLM available, the menu lists agent, chat, close, diff,
+    // terminal (alphabetical); one ArrowDown lands on `chat` and Enter opens the
+    // right-pane chat overlay (sidebar stays). Esc closes it back to Closeup.
     let mut ask = ready_chat_ask;
     let mut keys = cmd("session switch feat");
     keys.push(Ok(Key::Enter)); // Closeup feat (menu)
-    keys.push(Ok(Key::ArrowDown)); // agent -> terminal
-    keys.push(Ok(Key::ArrowDown)); // terminal -> diff
-    keys.push(Ok(Key::ArrowDown)); // diff -> chat
+    keys.push(Ok(Key::ArrowDown)); // agent -> chat
     keys.push(Ok(Key::Enter)); // open the chat overlay
     keys.push(Ok(Key::Escape)); // close chat -> Closeup
     keys.push(Ok(Key::Escape)); // Closeup -> Overview
