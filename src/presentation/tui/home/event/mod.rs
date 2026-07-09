@@ -426,7 +426,14 @@ fn bump_interaction_epoch(wiring: &mut Wiring) {
 /// repaint (a background spawn changes no key state the skip-paint check would
 /// otherwise notice, and its new badge should show at once). Passed only the
 /// autostart hook — not the whole [`Wiring`] — so it is exercised directly.
-fn apply_autostart(
+///
+/// Shared with the attached pane loop
+/// ([`terminal::pane::drive`](super::terminal::pane)): while 没入 (Attached) owns
+/// the event loop, the outer loop is stopped, so the pane loop calls this on its
+/// idle tick to pick up a prompt queued for a pane-less session (an MCP
+/// `session_delegate_issue` / `session_prompt` made by the coordinator agent
+/// running in the attached pane) without waiting for a detach back to 選択.
+pub(super) fn apply_autostart(
     state: &mut HomeState,
     autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> bool {
