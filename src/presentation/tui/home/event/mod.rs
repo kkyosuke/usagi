@@ -585,6 +585,10 @@ pub(super) fn event_loop(
                 created,
                 removed,
             } = completion;
+            // A removal reports success by carrying the evicted pool path (set
+            // only on the success branch of `run_remove`); both failure branches
+            // leave it `None`. Captured before `evict` is consumed below.
+            let removal_ok = evict.is_some();
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
@@ -593,6 +597,10 @@ pub(super) fn event_loop(
             }
             if let (Some(root), Some(name)) = (target_root.as_deref(), removed.as_deref()) {
                 state.clear_removing_session(root, name);
+                // If the removal modal is still open behind the task, reflect the
+                // outcome in it: a success drops the row (closing the modal once
+                // all succeed), a failure keeps it open with the error shown.
+                state.resolve_remove_modal(root, name, removal_ok, &line.text);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create/close may ask to focus a landing session. Done

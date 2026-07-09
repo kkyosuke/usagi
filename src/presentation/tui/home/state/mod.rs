@@ -4126,19 +4126,34 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Confirm the removal modal: close it and return the checked session
-    /// entries (in display order) together with the `--force` flag, for the
-    /// event loop to remove each (see [`RemoveModal::confirm`]). Returns `None`
-    /// when nothing is checked, leaving the modal open; also `None` when it is
-    /// closed.
+    /// Confirm the removal modal: record the checked sessions as in-flight and
+    /// return them (in display order) with the `--force` flag, for the event loop
+    /// to dispatch each removal (see [`RemoveModal::begin_removal`]). The modal
+    /// stays open in a *removing* state — it closes only once every dispatched
+    /// removal has succeeded (via [`resolve_remove_modal`](Self::resolve_remove_modal)),
+    /// so a failure keeps it open with the error shown. Returns `None` (leaving
+    /// the modal as-is) when nothing is checked, removals are already running, or
+    /// it is closed.
     pub fn submit_remove_modal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
-        let Overlay::Remove(modal) = &self.overlay else {
+        let Overlay::Remove(modal) = &mut self.overlay else {
             return None;
         };
-        // Nothing checked keeps the modal open; only a non-empty selection closes it.
-        let result = modal.confirm()?;
-        self.overlay = Overlay::None;
-        Some(result)
+        modal.begin_removal()
+    }
+
+    /// Reflect a finished background removal of `(root, name)` in the removal
+    /// modal, if it is still open behind the task: a success drops that session's
+    /// row (and closes the modal once every dispatched removal has succeeded),
+    /// while a failure keeps the modal open and shows `error`. A no-op when the
+    /// removal modal is not the open overlay or the finished session is not one it
+    /// dispatched (see [`RemoveModal::resolve`]).
+    pub fn resolve_remove_modal(&mut self, root: &Path, name: &str, ok: bool, error: &str) {
+        let Overlay::Remove(modal) = &mut self.overlay else {
+            return;
+        };
+        if modal.resolve(root, name, ok, error) {
+            self.overlay = Overlay::None;
+        }
     }
 }
 

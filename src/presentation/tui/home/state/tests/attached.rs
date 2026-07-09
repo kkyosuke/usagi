@@ -547,7 +547,7 @@ fn remove_modal_navigation_is_a_noop_when_empty_or_closed() {
 }
 
 #[test]
-fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
+fn submit_remove_modal_returns_checked_names_in_order_and_stays_open_removing() {
     let mut state = state();
     state.restore_sessions(vec![
         session_record("a", 1),
@@ -565,6 +565,80 @@ fn submit_remove_modal_returns_checked_names_in_order_and_closes() {
     let names: Vec<&str> = entries.iter().map(|entry| entry.name()).collect();
     assert_eq!(names, ["a", "c"]);
     assert!(force);
+    // The modal stays open while the dispatched removals run: the checks reset
+    // and the two rows are marked as pending (`b`, unchecked, is not).
+    let modal = state.remove_modal().unwrap();
+    assert!(modal.is_removing());
+    assert_eq!(modal.selected_count(), 0);
+    assert!(modal.is_pending(0)); // a
+    assert!(!modal.is_pending(1)); // b
+    assert!(modal.is_pending(2)); // c
+                                  // A second confirm while removals are in flight dispatches nothing.
+    assert!(state.submit_remove_modal().is_none());
+}
+
+#[test]
+fn resolve_remove_modal_drops_succeeded_rows_and_closes_when_all_succeed() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("a", 1), session_record("c", 1)]);
+    state.open_remove_modal(false);
+    state.remove_modal_mut().unwrap().toggle(); // "a"
+    state.remove_modal_mut().unwrap().move_down();
+    state.remove_modal_mut().unwrap().toggle(); // "c"
+    let (entries, _) = state.submit_remove_modal().unwrap();
+    let root_a = entries[0].root_path().to_path_buf();
+    let root_c = entries[1].root_path().to_path_buf();
+
+    // First removal lands: its row is dropped, the modal stays open for the rest.
+    state.resolve_remove_modal(&root_a, "a", true, "");
+    let modal = state.remove_modal().unwrap();
+    assert!(modal.is_removing());
+    let names: Vec<&str> = modal.entries().iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["c"]);
+
+    // The last removal lands successfully: the modal closes.
+    state.resolve_remove_modal(&root_c, "c", true, "");
+    assert!(state.remove_modal().is_none());
+}
+
+#[test]
+fn resolve_remove_modal_keeps_it_open_with_the_error_on_failure() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("a", 1)]);
+    state.open_remove_modal(false);
+    state.remove_modal_mut().unwrap().toggle(); // "a"
+    let (entries, _) = state.submit_remove_modal().unwrap();
+    let root = entries[0].root_path().to_path_buf();
+
+    state.resolve_remove_modal(&root, "a", false, "uncommitted changes");
+    // The modal stays open: the row survives and the error is shown.
+    let modal = state.remove_modal().unwrap();
+    assert!(!modal.is_removing());
+    assert_eq!(modal.error(), Some("uncommitted changes"));
+    assert_eq!(modal.entries().len(), 1);
+    assert!(!modal.is_pending(0));
+
+    // Retrying clears the error and re-arms the row as pending.
+    state.remove_modal_mut().unwrap().toggle();
+    let _ = state.submit_remove_modal().unwrap();
+    assert!(state.remove_modal().unwrap().error().is_none());
+    // A success now closes it.
+    state.resolve_remove_modal(&root, "a", true, "");
+    assert!(state.remove_modal().is_none());
+}
+
+#[test]
+fn resolve_remove_modal_ignores_a_completion_it_did_not_dispatch() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("a", 1)]);
+    state.open_remove_modal(false);
+    // No confirm yet: a stray completion must not close or mutate the modal.
+    state.resolve_remove_modal(&PathBuf::from("/repo"), "a", true, "");
+    assert!(state.remove_modal().is_some());
+    assert!(!state.remove_modal().unwrap().is_removing());
+    // With the modal closed, resolving is a no-op (does not panic / reopen).
+    state.cancel_remove_modal();
+    state.resolve_remove_modal(&PathBuf::from("/repo"), "a", true, "");
     assert!(state.remove_modal().is_none());
 }
 
@@ -575,6 +649,7 @@ fn submit_remove_modal_with_nothing_checked_keeps_it_open() {
     state.open_remove_modal(false);
     assert!(state.submit_remove_modal().is_none());
     assert!(state.remove_modal().is_some());
+    assert!(!state.remove_modal().unwrap().is_removing());
 }
 
 #[test]
