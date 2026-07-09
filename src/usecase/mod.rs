@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_phase;
+pub mod daemon;
 pub mod doctor;
 pub mod font;
 pub mod history;

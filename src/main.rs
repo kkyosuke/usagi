@@ -270,6 +270,16 @@ enum Commands {
         #[arg(long)]
         edit: bool,
     },
+    /// Control the per-machine background daemon (start / stop / status)
+    ///
+    /// Hidden from `usagi --help`: the daemon has no user-visible behaviour yet
+    /// (it only supervises itself). The control plane lands ahead of the work
+    /// that moves agent PTY ownership into it — see `document/proposals/02-daemon.md`.
+    #[command(hide = true)]
+    Daemon {
+        #[command(subcommand)]
+        command: usagi::presentation::cli::daemon::DaemonCommand,
+    },
     /// Check required tools and offer to install anything missing
     Doctor {
         /// Install everything missing without asking (otherwise prompt first)
@@ -384,6 +394,18 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Config { edit } => usagi::presentation::cli::config::run(edit),
+        Commands::Daemon { command } => {
+            let dir = usagi::infrastructure::daemon_store::default_dir()?;
+            let mut stdout = std::io::stdout();
+            usagi::presentation::cli::daemon::run(
+                command,
+                &dir,
+                &usagi::infrastructure::resource::process_alive,
+                &|| spawn_daemon(&dir),
+                &|| run_daemon_serve(&dir),
+                &mut stdout,
+            )
+        }
         Commands::Doctor { fix } => usagi::presentation::cli::doctor::run(fix),
         Commands::Feature => usagi::presentation::cli::feature::run(),
         Commands::GuardWorkspace => {
@@ -462,6 +484,12 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Clean { .. } => Some("clean"),
         Commands::Completion { .. } => Some("completion"),
         Commands::Config { .. } => Some("config"),
+        // `daemon serve` is the long-running loop — excluded like the mcp servers
+        // below; the short control subcommands are traced.
+        Commands::Daemon { command } => match command {
+            usagi::presentation::cli::daemon::DaemonCommand::Serve => None,
+            _ => Some("daemon"),
+        },
         Commands::Doctor { .. } => Some("doctor"),
         Commands::Feature => Some("feature"),
         Commands::GuardWorkspace => Some("guard-workspace"),
@@ -559,6 +587,78 @@ fn spawn_detached(command: &str, cwd: &Path, log_path: &Path) -> anyhow::Result<
     builder
         .spawn()
         .with_context(|| format!("spawning background agent: {command}"))?;
+    Ok(())
+}
+
+/// How often the daemon's supervisor loop wakes to check for a stop request.
+const DAEMON_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Run the daemon supervisor loop in the foreground (the body of `usagi daemon
+/// serve`, launched detached by `usagi daemon start`).
+///
+/// It claims the single-instance slot for this pid — exiting quietly if another
+/// live daemon already holds it — then polls for a stop request until one
+/// arrives, and releases the slot on the way out. The decisions
+/// (register / take-stop / deregister) are the unit-tested usecase/store calls;
+/// this composition-root wrapper only supplies the real process table, the sleep,
+/// and stderr, so it stays out of coverage like [`spawn_detached`].
+fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
+    use usagi::usecase::daemon::RegisterOutcome;
+    let pid = std::process::id();
+    match usagi::usecase::daemon::register(
+        dir,
+        pid,
+        &usagi::infrastructure::resource::process_alive,
+    )? {
+        RegisterOutcome::AlreadyRunning { pid } => {
+            eprintln!("usagi daemon already running (pid {pid}); exiting");
+            return Ok(());
+        }
+        RegisterOutcome::Registered => {}
+    }
+    while !usagi::infrastructure::daemon_store::take_stop_request(dir)? {
+        std::thread::sleep(DAEMON_POLL);
+    }
+    usagi::usecase::daemon::deregister(dir)
+}
+
+/// Spawn `usagi daemon serve` detached in the background, so the daemon outlives
+/// the `usagi daemon start` invocation (and the TUI). Its stdout/stderr are
+/// appended to `<dir>/serve.log`. Composition-root IO, excluded from coverage
+/// like [`spawn_detached`].
+fn spawn_daemon(dir: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe().context("locating the usagi executable")?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating daemon directory {}", dir.display()))?;
+    let log_path = dir.join("serve.log");
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+    let stderr = log
+        .try_clone()
+        .with_context(|| format!("opening log file {}", log_path.display()))?;
+
+    let mut builder = Command::new(exe);
+    builder
+        .arg("daemon")
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr));
+    // Detach from usagi's process group so the daemon keeps running after the
+    // launching `usagi daemon start` (and the TUI) exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        builder.process_group(0);
+    }
+    builder.spawn().context("spawning the usagi daemon")?;
     Ok(())
 }
 
