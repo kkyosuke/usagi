@@ -257,14 +257,8 @@ mod tests {
 
         // Two sessions record the same PR URL; the overview counts unique PRs
         // across the workspace, so the duplicate contributes once.
-        let pr = PrLink {
-            number: 493,
-            url: "https://github.com/kkyosuke/usagi/pull/493".to_string(),
-        };
-        let other_pr = PrLink {
-            number: 494,
-            url: "https://github.com/kkyosuke/usagi/pull/494".to_string(),
-        };
+        let pr = PrLink::new(493, "https://github.com/kkyosuke/usagi/pull/493");
+        let other_pr = PrLink::new(494, "https://github.com/kkyosuke/usagi/pull/494");
         let now = Utc::now();
         let worktree = |name: &str, prs: Vec<PrLink>| WorktreeState {
             branch: Some(name.to_string()),

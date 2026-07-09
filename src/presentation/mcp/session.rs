@@ -1795,14 +1795,8 @@ mod tests {
         pr_link_store::add(
             &worktree,
             &[
-                PrLink {
-                    number: 12,
-                    url: "https://github.com/o/r/pull/12".to_string(),
-                },
-                PrLink {
-                    number: 34,
-                    url: "https://github.com/o/r/pull/34".to_string(),
-                },
+                PrLink::new(12, "https://github.com/o/r/pull/12"),
+                PrLink::new(34, "https://github.com/o/r/pull/34"),
             ],
         )
         .unwrap();
@@ -1898,10 +1892,7 @@ mod tests {
         let worktree = root.path().join(".usagi/sessions/work");
         pr_link_store::add(
             &worktree,
-            &[PrLink {
-                number: 7,
-                url: "https://github.com/o/r/pull/7".to_string(),
-            }],
+            &[PrLink::new(7, "https://github.com/o/r/pull/7")],
         )
         .unwrap();
 

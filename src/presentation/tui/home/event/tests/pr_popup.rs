@@ -45,10 +45,7 @@ fn geom() -> (u16, u16, u16) {
 /// a popup listing `#412`. The full sidebar (which draws the badge) is the default.
 fn pr_state() -> HomeState {
     let mut main = worktree(Some("main"), "/r/main");
-    main.pr = vec![PrLink {
-        number: 412,
-        url: "https://github.com/o/r/pull/412".to_string(),
-    }];
+    main.pr = vec![PrLink::new(412, "https://github.com/o/r/pull/412")];
     HomeState::new("usagi", vec![main, worktree(Some("feat"), "/r/feat")], None)
 }
 
@@ -234,14 +231,16 @@ fn the_compat_loop_also_opens_a_clicked_pr() {
 }
 
 #[test]
-fn a_click_inside_the_box_off_a_number_keeps_it_pinned() {
-    // The box's trailing pad column is inside the rectangle but on no `#<number>`,
-    // so it neither opens a PR nor dismisses the popup; the number then still opens.
-    let (badge, token, pad) = geom();
+fn a_click_on_the_box_border_keeps_it_pinned() {
+    // The popup lists one PR per line, so the only spots inside the box that carry
+    // no `#<number>` are its top / bottom borders. A click on the top border (one
+    // row above the PR's row) is inside the rectangle but on no PR, so it neither
+    // opens a PR nor dismisses the popup; the PR's own row then still opens it.
+    let (badge, token, _) = geom();
     let (urls, _) = run_pr_clicks(
         vec![
             click(badge, BADGE_ROW),
-            click(pad, POPUP_ROW),
+            click(token, POPUP_ROW - 1),
             click(token, POPUP_ROW),
         ],
         pr_state(),

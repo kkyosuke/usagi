@@ -16,6 +16,7 @@ pub mod markdown_store;
 pub mod memory_store;
 pub mod open_panes_store;
 pub mod pr_link_store;
+pub mod pr_title;
 pub mod pty;
 pub mod pty_exit;
 pub mod release;

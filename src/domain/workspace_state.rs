@@ -220,22 +220,71 @@ pub struct PrLink {
     pub number: u32,
     /// The full URL to open in the browser when the badge is clicked.
     pub url: String,
+    /// The pull request's title, resolved out-of-band via the `gh` CLI (see
+    /// [`crate::infrastructure::pr_title`]) and shown next to the `#<number>` in
+    /// the PR popup. `None` until it has been fetched (or when the fetch failed);
+    /// omitted from persisted files when absent, and an older file without it
+    /// loads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 impl PrLink {
+    /// A PR link with no title yet resolved — the shape freshly parsed from a
+    /// pull-request URL. The title is filled in later by
+    /// [`crate::infrastructure::pr_title`].
+    pub fn new(number: u32, url: impl Into<String>) -> Self {
+        Self {
+            number,
+            url: url.into(),
+            title: None,
+        }
+    }
+
+    /// The canonical identity used to de-duplicate PR links: the URL truncated at
+    /// the pull-request number, dropping any trailing path segment
+    /// (`/pull/412/files`), query, or fragment. This makes `.../pull/412` and
+    /// `.../pull/412/files` count as **one** PR — the fix for the same PR showing
+    /// several times when a command printed both the plain and the `/files` URL.
+    /// A URL with no recognisable `/pull/<N>` is its own key (returned whole).
+    pub fn pr_key(&self) -> &str {
+        match pull_number_end(&self.url) {
+            Some(end) => &self.url[..end],
+            None => &self.url,
+        }
+    }
+
     /// Roll a session's per-worktree pull requests up into the single list its
-    /// sidebar row shows: every worktree's PRs, in order, with duplicates (same
-    /// `url`) dropped so a PR shared across repositories is listed once. Empty when
-    /// no worktree of the session has a PR.
+    /// sidebar row shows: every worktree's PRs, in order, de-duplicated by
+    /// [`pr_key`](Self::pr_key) so a PR shared across repositories — or seen with
+    /// both its plain and `/files` URL — is listed once. When duplicates carry
+    /// different titles the first sighting keeps its URL but adopts a title if it
+    /// still lacks one, so an early untitled sighting is upgraded by a later
+    /// titled one. Empty when no worktree of the session has a PR.
     pub fn aggregate(prs: impl IntoIterator<Item = PrLink>) -> Vec<PrLink> {
         let mut out: Vec<PrLink> = Vec::new();
         for pr in prs {
-            if !out.iter().any(|p| p.url == pr.url) {
-                out.push(pr);
+            match out.iter_mut().find(|p| p.pr_key() == pr.pr_key()) {
+                Some(existing) => {
+                    if existing.title.is_none() {
+                        existing.title = pr.title;
+                    }
+                }
+                None => out.push(pr),
             }
         }
         out
     }
+}
+
+/// The byte offset just past the pull-request number in a `/pull/<N>` URL, or
+/// `None` when the URL carries no `/pull/<digits>` segment. Used by
+/// [`PrLink::pr_key`] to truncate a URL to its canonical PR identity.
+fn pull_number_end(url: &str) -> Option<usize> {
+    let marker = "/pull/";
+    let after = url.find(marker)? + marker.len();
+    let digits = url[after..].bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0).then_some(after + digits)
 }
 
 /// State of a single worktree (a branch checked out into a directory).
@@ -928,21 +977,51 @@ mod tests {
 
     #[test]
     fn pr_link_aggregate_collects_every_pr_and_drops_duplicate_urls() {
-        let a = PrLink {
-            number: 12,
-            url: "https://github.com/o/r/pull/12".to_string(),
-        };
-        let b = PrLink {
-            number: 34,
-            url: "https://github.com/o/s/pull/34".to_string(),
-        };
+        let a = PrLink::new(12, "https://github.com/o/r/pull/12");
+        let b = PrLink::new(34, "https://github.com/o/s/pull/34");
         // Every PR is collected, in order; a duplicate `url` is listed once.
         assert_eq!(
             PrLink::aggregate([a.clone(), b.clone(), a.clone()]),
-            vec![a, b]
+            vec![a.clone(), b]
         );
         // No worktree carries a PR → empty.
         assert_eq!(PrLink::aggregate(std::iter::empty()), Vec::new());
+    }
+
+    #[test]
+    fn pr_link_aggregate_folds_the_files_url_onto_the_plain_pr() {
+        // The same PR seen with both its plain and its `/pull/<N>/files` URL is
+        // one PR: the first sighting wins and the duplicate is dropped. This is
+        // the fix for a PR showing several times in the popup.
+        let plain = PrLink::new(7, "https://github.com/o/r/pull/7");
+        let files = PrLink::new(7, "https://github.com/o/r/pull/7/files");
+        assert_eq!(
+            PrLink::aggregate([plain.clone(), files]),
+            vec![plain.clone()]
+        );
+        // pr_key truncates at the number regardless of a trailing path or query.
+        assert_eq!(plain.pr_key(), "https://github.com/o/r/pull/7");
+        assert_eq!(
+            PrLink::new(7, "https://github.com/o/r/pull/7?w=1").pr_key(),
+            "https://github.com/o/r/pull/7"
+        );
+        // A URL with no `/pull/<N>` is its own key.
+        assert_eq!(
+            PrLink::new(0, "https://example.com/x").pr_key(),
+            "https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn pr_link_aggregate_upgrades_an_untitled_sighting_with_a_later_title() {
+        let untitled = PrLink::new(9, "https://github.com/o/r/pull/9");
+        let mut titled = PrLink::new(9, "https://github.com/o/r/pull/9/files");
+        titled.title = Some("Fix the thing".to_string());
+        let folded = PrLink::aggregate([untitled, titled]);
+        assert_eq!(folded.len(), 1);
+        // The first sighting's URL is kept, but it adopts the later title.
+        assert_eq!(folded[0].url, "https://github.com/o/r/pull/9");
+        assert_eq!(folded[0].title.as_deref(), Some("Fix the thing"));
     }
 
     #[test]
@@ -967,17 +1046,16 @@ mod tests {
 
         // Discovered PRs are stored as a list, and round-trip through JSON.
         state.sessions[0].worktrees[0].pr = vec![
-            PrLink {
-                number: 412,
-                url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
-            },
-            PrLink {
-                number: 98,
-                url: "https://github.com/KKyosuke/other/pull/98".to_string(),
-            },
+            PrLink::new(412, "https://github.com/KKyosuke/usagi/pull/412"),
+            PrLink::new(98, "https://github.com/KKyosuke/other/pull/98"),
         ];
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"pr\":[{\"number\":412,"));
+        // An untitled PR omits the `title` key; a resolved title round-trips.
+        assert!(!json.contains("\"title\""));
+        state.sessions[0].worktrees[0].pr[0].title = Some("Add PR titles".to_string());
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"title\":\"Add PR titles\""));
         assert_eq!(
             serde_json::from_str::<WorkspaceState>(&json).unwrap(),
             state
