@@ -42,7 +42,9 @@
 //!
 //! [`TerminalPool`]: super::pool::TerminalPool
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -68,7 +70,7 @@ use super::super::sessions_refresh::SessionsRefreshHandle;
 use super::super::state::{HomeState, SurfaceOwner, TabMenuItem};
 use super::super::ui;
 use super::link;
-use super::pool::MonitorHandle;
+use super::pool::{MonitorHandle, TerminalPool};
 use super::selection::{Cell, Selection};
 use super::tabs::TabSwap;
 use super::view::TerminalView;
@@ -161,6 +163,15 @@ const QUIET_POLL_SLICE: Duration = Duration::from_millis(32);
 /// paced to the watcher's own poll interval rather than a tight redraw timer.
 const IDLE_REEVAL: Duration = Duration::from_millis(200);
 
+/// The shortest gap between two attached-loop autostart passes. While 没入
+/// (Attached) owns the event loop, the outer loop's per-tick autostart is not
+/// running, so the pane loop picks up prompts queued for pane-less sessions (an
+/// MCP `session_delegate_issue` / `session_prompt`) itself. Each pass does a
+/// cheap directory listing to gate the per-session work (`any_queued`), so it is
+/// paced to the idle re-evaluation cadence rather than run on every fast output
+/// frame while an agent streams.
+const AUTOSTART_TICK: Duration = Duration::from_millis(200);
+
 /// The shortest gap between two repaints driven purely by fresh shell output.
 /// The reader thread bumps the generation once per 64 KiB read — roughly every
 /// 4 ms while an agent streams — and each repaint locks the parser and
@@ -194,12 +205,15 @@ const DISABLE_MOTION: &str = "\x1b[?1003l";
 /// [`PaneExit`] the event loop acts on.
 ///
 /// [`TerminalPool`]: super::pool::TerminalPool
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     term: &Term,
     state: &mut HomeState,
-    pty: &mut PtySession,
+    pool: &RefCell<TerminalPool>,
+    dir: &Path,
     monitor: &MonitorHandle,
     sessions_refresh: &SessionsRefreshHandle,
+    autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
     // restored by the guard's `Drop` — including when `drive` panics and unwinds,
@@ -214,7 +228,7 @@ pub fn run(
     // batched terminal write. A separate `clear_screen()` would flush an
     // all-blank frame just before the real frame and is visible as a one-frame
     // flicker when switching sessions or tabs.
-    drive(term, state, pty, monitor, sessions_refresh)
+    drive(term, state, pool, dir, monitor, sessions_refresh, autostart)
 }
 
 /// RAII guard owning the embedded pane's terminal modes (raw mode, bracketed
@@ -276,12 +290,15 @@ impl Drop for PaneModeGuard<'_> {
 /// for the parser lock) ten times a second while idle. Tracking what was last
 /// applied / drawn lets each pass do only the work a real change demands, so a
 /// quiescent terminal costs almost nothing.
+#[allow(clippy::too_many_arguments)]
 fn drive(
     term: &Term,
     state: &mut HomeState,
-    pty: &mut PtySession,
+    pool: &RefCell<TerminalPool>,
+    dir: &Path,
     monitor: &MonitorHandle,
     sessions_refresh: &SessionsRefreshHandle,
+    autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> Result<PaneStep> {
     // The frame drawn last pass, so we only repaint the rows that changed.
     let mut prev: Vec<String> = Vec::new();
@@ -327,7 +344,11 @@ fn drive(
     // (shared with the home screens); this only decides when to repaint.
     let mut last_menu_cursor: Option<usize> = None;
     let mut last_rename: Option<(String, usize)> = None;
-    let mut drawn_gen = pty.generation();
+    let mut drawn_gen = match pool.borrow_mut().active_pty(dir) {
+        Some(pty) => pty.generation(),
+        // The session has no pane to drive (every one already closed): fall to 集中.
+        None => return Ok(PaneStep::Closed),
+    };
     // When the last repaint landed, so a flood of output-only frames coalesces to
     // at most one per [`MIN_FRAME`]; `None` until the first paint, which never
     // throttles.
@@ -369,6 +390,10 @@ fn drive(
     // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
     // set on each idle/live-frame pass.
     let mut seen_badge_version = u64::MAX;
+    // When the attached-loop autostart pass last ran; `None` until the first pass,
+    // which fires at once so a prompt already queued when this pane was attached is
+    // picked up without waiting out the first [`AUTOSTART_TICK`].
+    let mut last_autostart: Option<Instant> = None;
     let mut first = true;
     loop {
         let (height, width) = term.size();
@@ -379,6 +404,36 @@ fn drive(
         let geo = ui::attached_geometry(height as usize, width as usize, state.sidebar());
 
         let now = Instant::now();
+        // Pick up prompts queued for pane-less sessions while this pane is attached
+        // (an MCP `session_delegate_issue` / `session_prompt` from the coordinator
+        // agent running here) and start their agent panes in the background — the
+        // job the outer event loop's `apply_autostart` does each tick, which does
+        // not run while 没入 (Attached) owns the loop. Run *before* the pool borrow
+        // below is taken: the previous iteration dropped its borrow at the loop's
+        // end, so `autostart` (which spawns via `pool.borrow_mut()`) sees no live
+        // borrow. A started pane logs a line and forces a repaint so its new sidebar
+        // badge shows at once. Paced to [`AUTOSTART_TICK`] so a fast stream of output
+        // frames does not run the gating directory listing on every pass.
+        let autostart_started =
+            if last_autostart.is_none_or(|t| now.duration_since(t) >= AUTOSTART_TICK) {
+                last_autostart = Some(now);
+                super::super::event::apply_autostart(state, autostart)
+            } else {
+                false
+            };
+
+        // Borrow the pool for this iteration's render / wait / input work, then let
+        // it drop at the loop's end so the next pass's autostart runs unborrowed.
+        // The active pane is fixed for the duration of this call (tab switches
+        // return to the caller, which re-enters with the new pane), so re-resolving
+        // it each pass yields the same shell.
+        let mut pool_guard = pool.borrow_mut();
+        let pty = match pool_guard.active_pty(dir) {
+            Some(pty) => pty,
+            // Every pane closed out from under the loop: fall to 集中.
+            None => return Ok(PaneStep::Closed),
+        };
+
         // Drop a leader that has waited past `PREFIX_TIMEOUT` for its action key,
         // so the footer hint clears and the next `Ctrl-O` starts a fresh sequence
         // rather than completing a stale one (`pump_input` makes the same check
@@ -389,8 +444,10 @@ fn drive(
 
         // Interactive changes (input echo, resize, scroll, selection, hover,
         // badges) always repaint at once to stay responsive; fresh shell output
-        // is tracked separately so a flood of it can be coalesced below.
-        let mut interactive = first;
+        // is tracked separately so a flood of it can be coalesced below. A pane
+        // just autostarted in the background also repaints, so its sidebar badge
+        // and command-log line show without waiting for the next real change.
+        let mut interactive = first || autostart_started;
         // Surface the leader-pending state to the footer; repaint when it flips.
         let prefix_pending = pending_prefix.is_some();
         state.set_prefix_pending(prefix_pending);
