@@ -599,15 +599,30 @@ pub(super) fn tab_rename_body(label: &str, cursor: usize, width: usize) -> Vec<S
 }
 
 /// Builds one removal-modal row: a `>` cursor for the highlighted entry, a
-/// `[x]` / `[ ]` checkbox for its selection, and the (clipped) session name.
-/// The cursored row is emphasised, a checked row stays bright, and the rest are
-/// dimmed.
-pub(super) fn remove_modal_row(name: &str, cursor: bool, selected: bool, inner: usize) -> String {
+/// `[x]` / `[ ]` checkbox for its selection, and the (clipped) session name. A
+/// row whose removal is still in flight shows a `[~]` marker instead and reads
+/// as dimmed work in progress. The cursored row is emphasised, a checked row
+/// stays bright, and the rest are dimmed.
+pub(super) fn remove_modal_row(
+    name: &str,
+    cursor: bool,
+    selected: bool,
+    pending: bool,
+    inner: usize,
+) -> String {
     let marker = if cursor { ">" } else { " " };
-    let check = if selected { "[x]" } else { "[ ]" };
+    let check = if pending {
+        "[~]"
+    } else if selected {
+        "[x]"
+    } else {
+        "[ ]"
+    };
     let text = clip_to_width(name, inner.saturating_sub(6));
     let line = format!("{marker} {check} {text}");
-    if cursor {
+    if pending {
+        style(line).dim().to_string()
+    } else if cursor {
         style(line).accent().bold().to_string()
     } else if selected {
         style(line).accent().to_string()
@@ -652,6 +667,7 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
                 entry.display(),
                 i == modal.cursor(),
                 modal.is_selected(i),
+                modal.is_pending(i),
                 inner,
             ));
         }
@@ -659,11 +675,25 @@ pub(super) fn remove_modal_body(modal: &RemoveModal, inner: usize) -> Vec<String
             body.push(style(format!("  ↓ {} more", total - end)).dim().to_string());
         }
         body.push(String::new());
-        body.push(
-            style(format!("{} selected", modal.selected_count()))
-                .dim()
-                .to_string(),
-        );
+        // While removals run, say so; otherwise show how many are checked.
+        if modal.is_removing() {
+            body.push(style("Removing…").dim().to_string());
+        } else {
+            body.push(
+                style(format!("{} selected", modal.selected_count()))
+                    .dim()
+                    .to_string(),
+            );
+        }
+    }
+
+    // A failed removal keeps the modal open with its reason shown, so the user can
+    // read why a session stayed and retry or cancel.
+    if let Some(error) = modal.error() {
+        body.push(String::new());
+        for line in crate::presentation::tui::widgets::wrap_to_width(error, inner) {
+            body.push(style(line).danger().to_string());
+        }
     }
 
     body.push(String::new());

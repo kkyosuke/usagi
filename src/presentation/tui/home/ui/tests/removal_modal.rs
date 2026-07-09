@@ -3,22 +3,28 @@ use super::*;
 #[test]
 fn remove_modal_row_marks_the_cursor_and_checkbox() {
     let cursor =
-        console::strip_ansi_codes(&remove_modal_row("alpha", true, false, 40)).into_owned();
+        console::strip_ansi_codes(&remove_modal_row("alpha", true, false, false, 40)).into_owned();
     assert!(cursor.contains('>'));
     assert!(cursor.contains("[ ]"));
     assert!(cursor.contains("alpha"));
     let checked =
-        console::strip_ansi_codes(&remove_modal_row("beta", false, true, 40)).into_owned();
+        console::strip_ansi_codes(&remove_modal_row("beta", false, true, false, 40)).into_owned();
     assert!(!checked.contains('>'));
     assert!(checked.contains("[x]"));
-    let idle = console::strip_ansi_codes(&remove_modal_row("gamma", false, false, 40)).into_owned();
+    let idle =
+        console::strip_ansi_codes(&remove_modal_row("gamma", false, false, false, 40)).into_owned();
     assert!(idle.contains("[ ]"));
     assert!(idle.contains("gamma"));
+    // A removal in flight shows the `[~]` marker instead of a checkbox.
+    let pending =
+        console::strip_ansi_codes(&remove_modal_row("delta", false, false, true, 40)).into_owned();
+    assert!(pending.contains("[~]"));
+    assert!(pending.contains("delta"));
 }
 
 #[test]
 fn remove_modal_row_clips_a_long_name() {
-    let row = remove_modal_row("a-very-long-session-name-indeed", false, false, 12);
+    let row = remove_modal_row("a-very-long-session-name-indeed", false, false, false, 12);
     assert!(console::strip_ansi_codes(&row).contains('…'));
 }
 
@@ -39,6 +45,39 @@ fn render_frame_overlays_the_removal_modal_with_a_checklist() {
     // The modal floats over the live workspace: the chrome (here the 選択 footer)
     // shows through around it rather than a black backdrop.
     assert!(joined.contains("[switch]"));
+}
+
+#[test]
+fn render_frame_removal_modal_marks_pending_rows_while_removing() {
+    let mut state = state_with_sessions(&["alpha", "beta"]);
+    state.open_remove_modal(false);
+    state.remove_modal_mut().unwrap().toggle(); // check "alpha"
+                                                // Confirming dispatches the removal and keeps the modal open in the removing
+                                                // state: the checked row now reads as pending and the footer says so.
+    let _ = state.submit_remove_modal().unwrap();
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("[~]"));
+    assert!(joined.contains("Removing…"));
+    // The unchecked "beta" is not in flight, so it keeps its empty checkbox.
+    assert!(joined.contains("[ ]"));
+}
+
+#[test]
+fn render_frame_removal_modal_shows_the_failure_error_and_stays_open() {
+    let mut state = state_with_sessions(&["alpha"]);
+    state.open_remove_modal(false);
+    state.remove_modal_mut().unwrap().toggle();
+    let (entries, _) = state.submit_remove_modal().unwrap();
+    let root = entries[0].root_path().to_path_buf();
+    // A failed removal keeps the modal open with its reason shown.
+    state.resolve_remove_modal(&root, "alpha", false, "uncommitted changes present");
+    let frame = render_frame(24, 80, &state);
+    let joined = console::strip_ansi_codes(&frame.join("\n")).into_owned();
+    assert!(joined.contains("Remove sessions"));
+    assert!(joined.contains("uncommitted changes present"));
+    // The session is still listed (not removed) so it can be retried.
+    assert!(joined.contains("alpha"));
 }
 
 #[test]
