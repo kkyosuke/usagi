@@ -11,6 +11,34 @@ fn ctrl_c_quits_outright_when_no_session_is_live() {
 }
 
 #[test]
+fn ctrl_c_in_the_modal_is_inert_so_a_burst_cannot_confirm() {
+    // The accident this guards: mashing Ctrl-C to close an agent, then having the
+    // spillover confirm usagi's quit modal. A second Ctrl-C inside the modal is now
+    // inert — only y / Y / Enter confirms — so a pure Ctrl-C burst can raise the
+    // modal but never confirm it. Here the first Ctrl-C raises it, a second is a
+    // no-op, 'n' cancels back to 選択 where `man` still runs (proving neither Ctrl-C
+    // quit), then Ctrl-C raises it again and Enter finally confirms.
+    let mut keys = vec![
+        Ok(Key::CtrlC),     // raise the modal (a session is live)
+        Ok(Key::CtrlC),     // inert inside the modal — does not confirm
+        Ok(Key::Char('n')), // cancel -> 選択
+    ];
+    keys.extend(cmd("man"));
+    keys.push(Ok(Key::Enter)); // runs `man` -> persisted (opens a text modal)
+    keys.push(Ok(Key::Escape)); // dismiss the text modal
+    keys.push(Ok(Key::Escape)); // close the palette
+    keys.push(Ok(Key::CtrlC)); // raise again
+    keys.push(Ok(Key::Enter)); // confirm via Enter -> quit
+
+    let mut recorded = Vec::new();
+    let mut persist = |c: &str| recorded.push(c.to_string());
+    let outcome = run_with_live_monitor(keys, sample_state(), &mut persist).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    // `man` ran after the two Ctrl-C presses, so neither quit the app.
+    assert_eq!(recorded, vec!["man"]);
+}
+
+#[test]
 fn ctrl_q_at_the_base_overview_confirms_before_quitting() {
     // Unlike Ctrl-C, Ctrl-Q always raises the quit-confirmation modal first —
     // even with nothing live — so a lone Ctrl-Q does not quit; `y` then confirms.
@@ -27,13 +55,15 @@ fn ctrl_q_at_the_base_overview_confirms_before_quitting() {
 #[test]
 fn ctrl_q_modal_can_be_cancelled_then_re_raised_and_confirmed() {
     // Ctrl-Q raises the modal on an idle screen; `n` cancels back to 選択 (proving
-    // it did not quit, since the loop reads on); a second Ctrl-Q raises it again
-    // and a third Ctrl-Q inside the modal confirms the close.
+    // it did not quit, since the loop reads on); a second Ctrl-Q raises it again,
+    // a third Ctrl-Q inside the modal is inert (it no longer confirms), and Enter
+    // finally confirms the close.
     let keys = vec![
         Ok(Key::Char(CTRL_Q)), // raise the modal (idle)
         Ok(Key::Char('n')),    // cancel -> 選択
         Ok(Key::Char(CTRL_Q)), // raise again
-        Ok(Key::Char(CTRL_Q)), // confirm via a second Ctrl-Q inside the modal
+        Ok(Key::Char(CTRL_Q)), // inert inside the modal — does not confirm
+        Ok(Key::Enter),        // confirm via Enter
     ];
     assert!(matches!(run(keys, sample_state()).unwrap(), Outcome::Quit));
 }
@@ -67,10 +97,11 @@ fn ctrl_c_with_a_live_session_quits_only_after_confirming() {
         Outcome::Quit
     ));
 
-    // A second Ctrl-C inside the modal confirms too.
+    // Enter confirms too (Ctrl-C no longer does — see
+    // `ctrl_c_in_the_modal_is_inert_so_a_burst_cannot_confirm`).
     assert!(matches!(
         run_with_live_monitor(
-            vec![Ok(Key::CtrlC), Ok(Key::CtrlC)],
+            vec![Ok(Key::CtrlC), Ok(Key::Enter)],
             sample_state(),
             &mut persist,
         )

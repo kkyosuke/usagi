@@ -77,11 +77,11 @@ fn a_live_session_wakes_the_loop_without_a_key() {
     // (waiting ◆ / finished ✓) and the update notice are reflected without the
     // user pressing a key. The first tick yields no key (Ok(None)) and the loop
     // re-iterates; the live session makes the next Ctrl-C raise the quit-confirm
-    // modal, and a second confirms. The blocking queue holds an error: were the
-    // loop to block on `read_key` (the bug), it would surface here instead of
-    // quitting cleanly through the timeout path.
+    // modal, and Enter confirms (Ctrl-C is inert inside the modal). The blocking
+    // queue holds an error: were the loop to block on `read_key` (the bug), it
+    // would surface here instead of quitting cleanly through the timeout path.
     let mut reader = TimeoutScript {
-        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC)), Ok(Some(Key::CtrlC))]),
+        timeouts: VecDeque::from(vec![Ok(None), Ok(Some(Key::CtrlC)), Ok(Some(Key::Enter))]),
         blocking: VecDeque::from(vec![Err(io::Error::other("loop blocked on a key"))]),
     };
     assert!(matches!(

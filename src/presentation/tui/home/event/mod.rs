@@ -1059,12 +1059,19 @@ pub(super) fn event_loop(
                 .with_detail(format!("{:?} {:?}", state.mode(), key))
         });
 
-        // The quit-confirmation modal, when open, captures every key: `y` /
-        // `Enter` (or a second `Ctrl-C` / `Ctrl-Q`) confirms the close, `n` /
-        // `Esc` cancels.
+        // Consume the one-shot pane-exit grace on *every* key, so a deliberate key
+        // (not just the absorbed `Ctrl-C`) disarms it — the guard only ever spans
+        // the single press right after an embedded pane hands focus back.
+        let pane_grace = state.take_pane_exit_grace();
+
+        // The quit-confirmation modal, when open, captures every key: only `y` /
+        // `Y` / `Enter` confirms the close and `n` / `N` / `Esc` cancels. `Ctrl-C`
+        // and `Ctrl-Q` are inert here on purpose: a burst of `Ctrl-C` (say, from
+        // interrupting an agent) must not be able to both raise *and* confirm the
+        // modal, so closing usagi always takes a deliberate, distinct keystroke.
         if state.quit_confirm() {
             match key {
-                Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC | Key::Char(CTRL_Q) => {
+                Key::Char('y') | Key::Char('Y') | Key::Enter => {
                     save_resume_focus(&mut state, wiring);
                     return Ok(Outcome::Quit);
                 }
@@ -1104,6 +1111,17 @@ pub(super) fn event_loop(
         // one is live we raise the quit-confirmation modal first instead of
         // closing outright; an idle screen quits immediately.
         if let Key::CtrlC = key {
+            // …unless an embedded pane just handed focus back: a `Ctrl-C` burst
+            // meant to close / interrupt the agent can spill past the pane onto
+            // the home screen. Swallow the first such press (with a hint) so it
+            // does not quit usagi by accident; the grace is one-shot, so a second,
+            // deliberate `Ctrl-C` quits as usual.
+            if pane_grace {
+                state.log_output(
+                    "Ctrl-C ignored just after leaving a pane — press it again (or Ctrl-Q) to quit usagi.",
+                );
+                continue;
+            }
             if state.has_live_sessions() {
                 state.open_quit_confirm();
             } else {

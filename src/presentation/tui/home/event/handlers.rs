@@ -1429,6 +1429,9 @@ fn open_pane(
         Ok(PaneExit::ToSwitch) => {
             // `Ctrl-O o` zooms out to Switch; re-selecting the same live session re-attaches.
             state.enter_switch();
+            // Landing back on the home chrome: absorb one stray `Ctrl-C` from a
+            // burst that was driving the agent, so it does not fall through to quit.
+            state.arm_pane_exit_grace();
         }
         Ok(PaneExit::OpenNote) => {
             // `Ctrl-E` opens the focused row's note editor over the (now detached)
@@ -1449,6 +1452,7 @@ fn open_pane(
             state.leave_attached();
             state.closeup_action_over_active_pane();
             state.arm_closeup_return_attach();
+            state.arm_pane_exit_grace();
         }
         Ok(PaneExit::ToPreviousSession) => {
             // `Ctrl-^` jumps to the previously focused session, re-attaching it
@@ -1461,6 +1465,7 @@ fn open_pane(
                 None => {
                     state.leave_attached();
                     state.closeup_action_over_active_pane();
+                    state.arm_pane_exit_grace();
                 }
             }
         }
@@ -1493,12 +1498,17 @@ fn open_pane(
             state.open_quit_confirm();
         }
         Ok(PaneExit::Closed) => {
-            // The shell exited: drop back to 集中 on the same session.
+            // The shell / agent exited: drop back to 集中 on the same session. This
+            // is the exact case behind accidental quits — the user mashed `Ctrl-C`
+            // to close the agent, it exited, and the tail of the burst would quit
+            // usagi — so absorb the next stray `Ctrl-C`.
             state.leave_attached();
+            state.arm_pane_exit_grace();
             state.log_output(format!("{label} in {} closed.", dir.display()));
         }
         Err(e) => {
             state.leave_attached();
+            state.arm_pane_exit_grace();
             state.log_error(format!("{fail} failed: {e}"));
         }
     }
