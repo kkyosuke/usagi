@@ -155,11 +155,46 @@ fn diff_pane_clips_content_wider_than_the_pane() {
 
 #[test]
 fn diff_pane_goes_through_the_right_pane_dispatch() {
-    // Opened from the palette, the diff view takes over the whole right pane.
+    // Opened outside 集中 (e.g. the base 選択 preview), the diff view takes over the
+    // whole right pane — no session tab strip to sit in.
     let state = diff_state("feature → main", MULTI);
     let out = stripped(&right_pane_contents(&state, 90, 12));
     assert!(out.contains("feature → main"));
     assert!(out.contains("render.rs"));
+}
+
+#[test]
+fn diff_renders_as_a_session_tab_in_closeup() {
+    // In 集中 the diff is a session tab: the tab strip heads it with the session's
+    // pane chips plus an active `diff` chip, and the split view fills the body.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["Claude".to_string(), "terminal".to_string()], 0);
+    state.open_diff_result(Ok(("feature → main".to_string(), MULTI.to_string())));
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    // Strip: the live panes' chips plus the `diff` chip.
+    assert!(out.contains("Claude"), "pane chips head the diff: {out}");
+    assert!(out.contains("terminal"));
+    assert!(out.contains("diff"));
+    // Body: the diff explorer + the selected file's diff still render below.
+    assert!(out.contains("render.rs"));
+    assert!(out.contains("feature → main"));
+}
+
+#[test]
+fn diff_tab_shows_a_lone_chip_without_live_panes() {
+    // An idle session (no live pane) still reads the diff as a tab: the strip
+    // carries just the `diff` chip.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    state.open_diff_result(Ok(("feature → main".to_string(), MULTI.to_string())));
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    assert!(out.contains("diff"));
+    assert!(
+        out.contains("render.rs"),
+        "the diff body still renders: {out}"
+    );
 }
 
 #[test]
