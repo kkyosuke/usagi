@@ -2126,10 +2126,10 @@ mod tests {
         .unwrap();
         pr_link_store::add(
             &created.root,
-            &[crate::domain::workspace_state::PrLink {
-                number: 7,
-                url: "https://github.com/o/r/pull/7".to_string(),
-            }],
+            &[crate::domain::workspace_state::PrLink::new(
+                7,
+                "https://github.com/o/r/pull/7",
+            )],
         )
         .unwrap();
         agent_prompt_store::set(&created.root, "queued prompt").unwrap();

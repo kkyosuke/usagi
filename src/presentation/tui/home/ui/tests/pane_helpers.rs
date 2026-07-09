@@ -710,10 +710,7 @@ fn relative_time_buckets_by_elapsed_span() {
 }
 
 fn pr(number: u32) -> PrLink {
-    PrLink {
-        number,
-        url: format!("https://github.com/o/r/pull/{number}"),
-    }
+    PrLink::new(number, format!("https://github.com/o/r/pull/{number}"))
 }
 
 #[test]
@@ -747,15 +744,23 @@ fn pr_width_is_the_icon_space_and_count_digits() {
 }
 
 #[test]
-fn pr_popup_box_lists_the_numbers_in_a_titled_box() {
-    let popup = pr_popup_box(&[pr(442), pr(447)]);
+fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
+    let mut titled = pr(442);
+    titled.title = Some("Add PR titles".to_string());
+    let popup = pr_popup_box(&[titled, pr(447)]);
     let plain: Vec<String> = popup
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
         .collect();
-    // The top border carries the `PR` title; a content row lists both numbers.
+    // The top border carries the `PR` title; each PR sits on its own row, with the
+    // resolved title beside its number and just `#<n>` while a title is unresolved.
     assert!(plain[0].contains("PR"));
     assert!(plain
+        .iter()
+        .any(|l| l.contains("#442") && l.contains("Add PR titles")));
+    assert!(plain.iter().any(|l| l.contains("#447")));
+    // The two PRs are on distinct rows, not packed together on one.
+    assert!(!plain
         .iter()
         .any(|l| l.contains("#442") && l.contains("#447")));
     // No PR → no box, so the overlay is a no-op for a session without one.
@@ -775,17 +780,19 @@ fn pr_popup_box_keeps_the_title_clear_for_a_single_digit_pr() {
 }
 
 #[test]
-fn pr_popup_box_wraps_a_long_list_within_the_inner_cap() {
-    // Twenty `#1NN` badges (4 columns each) cannot fit one capped line, so they
-    // wrap onto several content rows.
+fn pr_popup_box_lists_every_pr_on_its_own_row_and_clips_a_long_title() {
+    // Each PR is one content row, so twenty PRs make twenty rows plus the two
+    // borders — the list stacks vertically rather than packing across a row.
     let many: Vec<PrLink> = (100u32..120).map(pr).collect();
     let popup = pr_popup_box(&many);
-    // More than just the top + bottom border: the list spilled onto several rows.
-    assert!(popup.len() > 3);
-    // Every row (content and border alike) stays within the inner cap plus the
-    // two borders and a space of padding on each side.
-    for line in &popup {
-        assert!(console::measure_text_width(line) <= PR_POPUP_INNER + 4);
+    assert_eq!(popup.len(), many.len() + 2);
+    // A title wider than the cap is clipped so the box never spans the screen:
+    // every row stays within the inner cap plus the two borders and a pad space
+    // on each side.
+    let mut long = pr(7);
+    long.title = Some("x".repeat(200));
+    for line in pr_popup_box(std::slice::from_ref(&long)) {
+        assert!(console::measure_text_width(&line) <= PR_POPUP_INNER + 4);
     }
 }
 

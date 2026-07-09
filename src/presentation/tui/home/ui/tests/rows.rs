@@ -2628,10 +2628,7 @@ fn left_pane_detail_line_with_commit_arrows_does_not_overrun_the_sidebar() {
         added: 71,
         removed: 1,
     });
-    w.pr = vec![PrLink {
-        number: 1,
-        url: "https://github.com/o/r/pull/1".into(),
-    }];
+    w.pr = vec![PrLink::new(1, "https://github.com/o/r/pull/1")];
     let left_w = 34usize;
     let lines = left_pane(
         &list_with(vec![w]),
@@ -2744,10 +2741,8 @@ fn left_pane_shows_the_pr_badge_for_a_session_that_has_one() {
 /// PR session at rows 5–7, the PR-less one at rows 8–10.
 fn attached_with_pr_sidebar() -> HomeState {
     let mut wt = worktree_with_pr(412);
-    wt.pr.push(PrLink {
-        number: 98,
-        url: "https://github.com/o/other/pull/98".to_string(),
-    });
+    wt.pr
+        .push(PrLink::new(98, "https://github.com/o/other/pull/98"));
     let mut state = state_with(vec![
         wt,
         worktree(Some("plain"), false, BranchStatus::Local),
@@ -2862,32 +2857,27 @@ fn pr_popup_placement_floats_the_box_beside_the_pinned_session() {
 }
 
 #[test]
-fn pr_popup_click_opens_the_number_under_the_pointer() {
+fn pr_popup_click_opens_the_pr_on_the_clicked_row() {
     let mut state = attached_with_pr_sidebar();
     state.set_pr_popup(Some(0));
-    // Content sits two columns in from the box's left edge (left 43 → col 45). The
-    // packed row is `#412 #98`: `#412` spans cols 45–48, a gap at 49, `#98` 50–52,
-    // all on the box's content row (top 5 + 1 = row 6).
+    // The popup lists one PR per line: `#412` on the first content row (top 5 + 1 =
+    // row 6) and `#98` on the second (row 7). A click anywhere along a PR's row
+    // opens that PR, so the whole line is the target.
     assert!(matches!(
         pr_popup_click(&state, 24, 120, 45, 6),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/412"
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 50, 6),
+        pr_popup_click(&state, 24, 120, 47, 7),
         PopupClick::Open(url) if url == "https://github.com/o/other/pull/98"
     ));
-    // The gap between tokens is inside the box but on no number → stays pinned.
-    assert!(matches!(
-        pr_popup_click(&state, 24, 120, 49, 6),
-        PopupClick::Inside
-    ));
-    // The box's borders (top row 5, bottom row 7) are inside it too.
+    // The box's top (row 5) and bottom (row 8) borders carry no PR → stay pinned.
     assert!(matches!(
         pr_popup_click(&state, 24, 120, 45, 5),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 7),
+        pr_popup_click(&state, 24, 120, 45, 8),
         PopupClick::Inside
     ));
 }
@@ -2901,8 +2891,8 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
         PopupClick::Outside
     ));
     state.set_pr_popup(Some(0));
-    // A click left of the box (over the sidebar), above it, and below it all land
-    // outside the box's rectangle and so dismiss the popup.
+    // A click left of the box (over the sidebar), above it, and below it (past the
+    // bottom border at row 8) all land outside the box's rectangle and dismiss it.
     assert!(matches!(
         pr_popup_click(&state, 24, 120, 2, 6),
         PopupClick::Outside
@@ -2912,7 +2902,7 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
         PopupClick::Outside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 8),
+        pr_popup_click(&state, 24, 120, 45, 9),
         PopupClick::Outside
     ));
 }
@@ -2921,21 +2911,21 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
 fn pr_popup_click_on_the_box_borders_stays_pinned() {
     let mut state = attached_with_pr_sidebar();
     state.set_pr_popup(Some(0));
-    // The box spans columns 43–54 (left 43, `#412 #98` → width 12) on content row 6.
-    // Its left border / pad (43, 44) and right border (54) are inside the rectangle
-    // but on no `#<number>`, as is a content column past the last token — all keep
-    // the popup pinned rather than opening or dismissing.
+    // The box's top border (row 5) and bottom border (row 8) carry no PR, so a
+    // click on them keeps the popup pinned rather than opening or dismissing.
+    // A click just right of the box (block width 8 → cols 43–50, so col 51) is
+    // outside the rectangle and dismisses it.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 43, 6),
+        pr_popup_click(&state, 24, 120, 45, 5),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 44, 6),
+        pr_popup_click(&state, 24, 120, 45, 8),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 54, 6),
-        PopupClick::Inside
+        pr_popup_click(&state, 24, 120, 51, 6),
+        PopupClick::Outside
     ));
 }
 
@@ -2953,10 +2943,18 @@ fn pr_popup_placement_is_none_when_empty_or_too_narrow() {
     }]);
     empty.set_pr_popup(Some(0));
     assert!(pr_popup_placement(&empty, 24, 120).is_none());
-    // Too narrow: the `PR` box can't fit the terminal width, so it is not placed.
-    let mut narrow = attached_with_pr_sidebar();
+    // Too narrow: a PR with a long resolved title makes a box wider than a slim
+    // terminal, so it is not placed.
+    let mut wt = worktree_with_pr(412);
+    wt.pr[0].title = Some("A reasonably long pull request title".to_string());
+    let mut narrow = state_with(vec![
+        wt,
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    narrow.enter_closeup(1);
+    narrow.show_attached();
     narrow.set_pr_popup(Some(0));
-    assert!(pr_popup_placement(&narrow, 24, 10).is_none());
+    assert!(pr_popup_placement(&narrow, 24, 20).is_none());
 }
 
 #[test]
