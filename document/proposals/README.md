@@ -15,3 +15,4 @@
 | # | ドキュメント | 内容 | 状態 |
 |---|---|---|---|
 | 1 | [01-root-orchestration.md](01-root-orchestration.md) | 自律オーケストレーション運用モデル（root＝オーケストレーション専任・変更は必ず session） | 正本へ畳み込み済み（#105・[04-orchestration.md](../04-orchestration.md#自律オーケストレーション運用モデル)） |
+| 2 | [02-daemon.md](02-daemon.md) | daemon（常駐プロセス）による agent ライフサイクルの TUI 非依存化（PTY 所有を daemon へ移し TUI をクライアント化） | 提案（実装中・Epic #159 / Step 1 #160 済み） |
