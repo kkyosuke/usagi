@@ -16,6 +16,7 @@ use crate::presentation::tui::io::screen::{self, FramePainter};
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 
+use super::super::action;
 use super::super::command::Effect;
 use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
 use super::super::state::{HomeState, ModalSize, PaneExit, ROOT_NAME};
@@ -1122,12 +1123,13 @@ fn closeup_menu_key(
                     state.closeup_menu_collapse_agent();
                     launch_agent(term, state, painter, wiring, Some(cli));
                 } else if let Some(action) = state.closeup_menu_selected_terminal_action() {
+                    // Dispatch the picked terminal action through the shared
+                    // command runner so `open` / `new` route to the same effects
+                    // the prompt/shortcuts use, rather than re-branching on the
+                    // action string here.
+                    let command = format!("terminal {action}");
                     state.closeup_menu_collapse_agent();
-                    if action == "new" {
-                        open_external_terminal(state, wiring);
-                    } else {
-                        launch_pane(term, state, painter, wiring, false);
-                    }
+                    run_closeup_command(term, state, painter, &command, wiring);
                 } else {
                     run_closeup_close_picker(term, state, painter, wiring);
                 }
@@ -1168,12 +1170,11 @@ fn closeup_menu_key(
         Key::Char('/') => state.start_closeup_menu_filter(),
         Key::Char('k') => state.closeup_menu_move_up(),
         Key::Char('j') => state.closeup_menu_move_down(),
-        Key::Char('t') => run_closeup_command(term, state, painter, "terminal", wiring),
-        Key::Char('a') => run_closeup_command(term, state, painter, "agent", wiring),
-        // `Shift`+`c` is the deliberate discard shortcut: run `close --force`
-        // instead of the safe `close`, matching the existing capital-letter
-        // convention for shifted actions in 選択 (`K`/`J` reorder).
-        Key::Char('C') => run_closeup_command(term, state, painter, "close --force", wiring),
+        Key::Char(c) => {
+            if let Some(command) = action::shortcut_command(c) {
+                run_closeup_command(term, state, painter, command, wiring);
+            }
+        }
         _ => {}
     }
 }
@@ -1184,10 +1185,11 @@ fn run_closeup_close_picker(
     painter: &mut FramePainter,
     wiring: &mut Wiring,
 ) {
-    let force = state.closeup_menu_selected_close_force();
+    let command = state
+        .closeup_menu_selected_close_action()
+        .map_or("close", |option| option.command);
     state.closeup_menu_collapse_close();
-    let cmd = if force { "close --force" } else { "close" };
-    run_closeup_command(term, state, painter, cmd, wiring);
+    run_closeup_command(term, state, painter, command, wiring);
 }
 
 /// 集中 prompt surface: edit / complete the session-scoped command line and run
@@ -1257,23 +1259,30 @@ fn run_closeup_command(
     // Running a command dismisses any `/` filter so the menu — whether re-shown
     // after a `diff` / `chat` overlay closes or re-entered later — lists in full.
     state.clear_closeup_menu_filter();
-    match name {
-        "terminal" => launch_pane(term, state, painter, wiring, false),
-        // The menu's `agent` row / `a` shortcut launch the configured default.
-        "agent" => launch_agent(term, state, painter, wiring, None),
+    match action::effect_for_command_line(name) {
+        Some(action::SessionActionEffect::OpenTerminal) => {
+            launch_pane(term, state, painter, wiring, false);
+        }
+        Some(action::SessionActionEffect::OpenExternalTerminal) => {
+            open_external_terminal(state, wiring);
+        }
+        Some(action::SessionActionEffect::OpenAgentDefault) => {
+            // The menu's `agent` row / `a` shortcut launch the configured default.
+            launch_agent(term, state, painter, wiring, None);
+        }
         // `diff` opens the right-pane diff view of the focused session (the same
         // effect the 集中 prompt / palette `diff` produced): resolve its worktree
         // and shell out to git, then render / store the patch (or log a failure).
-        "diff" => state.open_diff_result(selected_diff(state)),
+        Some(action::SessionActionEffect::OpenDiff) => state.open_diff_result(selected_diff(state)),
         // `chat` opens the local-LLM chat overlay in the right pane.
-        "chat" => state.open_chat(),
-        // `close` removes the focused session safely and leaves 集中.
-        "close" => close_focused_session(state, wiring, false),
-        // `close --force` is exposed as `Shift`+`c` on the 集中 menu for the
-        // explicit discard path.
-        "close --force" => close_focused_session(state, wiring, true),
+        Some(action::SessionActionEffect::OpenChat) => state.open_chat(),
+        // `close` removes the focused session; the force flag comes from the
+        // action table (`close`) or the picker/shortcut variant (`close --force`).
+        Some(action::SessionActionEffect::CloseSession { force }) => {
+            close_focused_session(state, wiring, force);
+        }
         // Any future coming-soon command just logs its line.
-        _ => state.log_output(format!("\"{name}\" is coming soon 󰤇")),
+        None => state.log_output(format!("\"{name}\" is coming soon 󰤇")),
     }
 }
 

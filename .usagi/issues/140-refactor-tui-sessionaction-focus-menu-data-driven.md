@@ -1,14 +1,14 @@
 ---
 number: 140
 title: refactor(tui): SessionAction 定義表を導入し Focus menu の表示条件を data-driven 化する
-status: todo
+status: done
 priority: high
 labels: [refactor, tui, review]
 dependson: [138]
 related: [45]
 parent: 137
 created_at: 2026-07-06T00:20:19.113899+00:00
-updated_at: 2026-07-06T00:20:19.113899+00:00
+updated_at: 2026-07-09T00:12:13.118813+00:00
 ---
 
 ## 目的

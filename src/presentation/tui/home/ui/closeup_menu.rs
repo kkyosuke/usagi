@@ -7,6 +7,7 @@ use super::super::state::HomeState;
 use super::{clip_to_width, HINT_INDENT, HINT_MAX};
 use crate::domain::settings::AgentCli;
 use crate::presentation::theme::Palette;
+use crate::presentation::tui::home::action::{self, ActionPicker, CloseAction};
 use crate::presentation::tui::widgets;
 
 pub(super) fn menu_marker(selected: bool) -> String {
@@ -20,7 +21,10 @@ pub(super) fn menu_marker(selected: bool) -> String {
 /// Builds one 集中 (Closeup) menu row: a `›` cursor for the highlighted command,
 /// its name, and its dimmed description, clipped to `width`.
 pub(super) fn closeup_menu_row(info: &CommandInfo, selected: bool, width: usize) -> String {
-    menu_row(info.name, info.description, selected, width)
+    let (label, description) = action::spec_for(info.name)
+        .map(|spec| (spec.label, spec.description))
+        .unwrap_or((info.name, info.description));
+    menu_row(label, description, selected, width)
 }
 
 /// The shared layout for an action row: a `›` cursor when `selected`, a fixed-
@@ -57,7 +61,8 @@ pub(super) fn closeup_agent_command_row(state: &HomeState, selected: bool, width
         ""
     };
     let desc = format!("{chevron}Launch {}", state.default_agent().display_name());
-    menu_row("agent", &desc, selected, width)
+    let label = action::spec_for("agent").map_or("agent", |spec| spec.label);
+    menu_row(label, &desc, selected, width)
 }
 
 /// The 集中 menu's `terminal` row: like a plain command row but it can expand
@@ -77,7 +82,8 @@ pub(super) fn closeup_terminal_command_row(
         "  "
     };
     let desc = format!("{chevron}Open a shell");
-    menu_row("terminal", &desc, selected, width)
+    let label = action::spec_for("terminal").map_or("terminal", |spec| spec.label);
+    menu_row(label, &desc, selected, width)
 }
 
 /// One agent-picker sub-row, indented under the expanded `agent` row: a `›`
@@ -127,27 +133,27 @@ pub(super) fn closeup_close_command_row(
     } else {
         "  "
     };
-    let desc = format!("{chevron}{}", info.description);
-    menu_row(info.name, &desc, selected, width)
+    let (label, description) = action::spec_for(info.name)
+        .map(|spec| (spec.label, spec.description))
+        .unwrap_or((info.name, info.description));
+    let desc = format!("{chevron}{description}");
+    menu_row(label, &desc, selected, width)
 }
 
 /// One close-picker sub-row, indented under the expanded `close` row: a `›`
 /// cursor on the highlighted option, the command label, and a dimmed hint.
 /// `force = false` → plain close; `force = true` → close --force.
-pub(super) fn closeup_close_pick_row(force: bool, selected: bool, width: usize) -> String {
+pub(super) fn closeup_close_pick_row(option: CloseAction, selected: bool, width: usize) -> String {
     let marker = menu_marker(selected);
-    let label = if force { "close --force" } else { "close" };
-    let hint = if force {
-        "(discard uncommitted changes)"
-    } else {
-        "(safe)"
-    };
     let name = if selected {
-        style(format!("{label:<14}")).cyan().bold().to_string()
+        style(format!("{:<14}", option.label))
+            .cyan()
+            .bold()
+            .to_string()
     } else {
-        style(format!("{label:<14}")).cyan().to_string()
+        style(format!("{:<14}", option.label)).cyan().to_string()
     };
-    let hint = style(hint).dim();
+    let hint = style(option.hint).dim();
     clip_to_width(&format!("      {marker} {name}{hint}"), width)
 }
 
@@ -195,10 +201,12 @@ pub(super) const FOCUS_MENU_CHROME: usize = 5;
 pub(super) fn closeup_menu_target(state: &HomeState, commands: &[CommandInfo]) -> usize {
     let widest_picker = commands
         .iter()
-        .map(|info| match info.name {
-            "agent" if state.installed_agents().len() > 1 => state.installed_agents().len(),
-            "terminal" => state.closeup_menu_terminal_actions().len(),
-            "close" => 2,
+        .map(|info| match action::picker_for(info.name) {
+            ActionPicker::Agent if state.installed_agents().len() > 1 => {
+                state.installed_agents().len()
+            }
+            ActionPicker::Terminal => state.closeup_menu_terminal_actions().len(),
+            ActionPicker::Close => state.closeup_menu_close_actions().len(),
             _ => 0,
         })
         .max()
@@ -274,72 +282,78 @@ pub(super) fn closeup_menu_body(state: &HomeState, width: usize, avail_rows: usi
     let mut active = 0usize;
     for (i, info) in commands.iter().enumerate() {
         let selected = i == cursor;
-        if info.name == "agent" {
-            // The `agent` row names the default CLI; when expanded, its installed
-            // alternatives follow as indented picker sub-rows (案A).
-            let agent_cursor = state.closeup_menu_agent_cursor();
-            if agent_cursor.is_none() && selected {
-                active = rows.len();
-            }
-            rows.push(closeup_agent_command_row(state, selected, width));
-            if agent_cursor.is_some() {
-                let default = state.default_agent();
-                for (j, &cli) in state.installed_agents().iter().enumerate() {
-                    if Some(j) == agent_cursor {
-                        active = rows.len();
+        match action::picker_for(info.name) {
+            ActionPicker::Agent => {
+                // The `agent` row names the default CLI; when expanded, its
+                // installed alternatives follow as indented picker sub-rows (案A).
+                let agent_cursor = state.closeup_menu_agent_cursor();
+                if agent_cursor.is_none() && selected {
+                    active = rows.len();
+                }
+                rows.push(closeup_agent_command_row(state, selected, width));
+                if agent_cursor.is_some() {
+                    let default = state.default_agent();
+                    for (j, &cli) in state.installed_agents().iter().enumerate() {
+                        if Some(j) == agent_cursor {
+                            active = rows.len();
+                        }
+                        rows.push(closeup_agent_pick_row(
+                            cli,
+                            Some(j) == agent_cursor,
+                            cli == default,
+                            width,
+                        ));
                     }
-                    rows.push(closeup_agent_pick_row(
-                        cli,
-                        Some(j) == agent_cursor,
-                        cli == default,
-                        width,
-                    ));
                 }
             }
-        } else if info.name == "close" {
-            // The `close` row carries a chevron affordance; when expanded the two
-            // options (plain close and close --force) follow as sub-rows.
-            if !close_expanded && selected {
-                active = rows.len();
-            }
-            rows.push(closeup_close_command_row(state, info, selected, width));
-            if close_expanded {
-                let close_cursor = state.closeup_close_cursor();
-                for j in 0..2usize {
-                    if Some(j) == close_cursor {
-                        active = rows.len();
+            ActionPicker::Close => {
+                // The `close` row carries a chevron affordance; when expanded the
+                // picker options (plain close and close --force) follow as
+                // sub-rows.
+                if !close_expanded && selected {
+                    active = rows.len();
+                }
+                rows.push(closeup_close_command_row(state, info, selected, width));
+                if close_expanded {
+                    let close_cursor = state.closeup_close_cursor();
+                    for (j, option) in state.closeup_menu_close_actions().iter().enumerate() {
+                        if Some(j) == close_cursor {
+                            active = rows.len();
+                        }
+                        rows.push(closeup_close_pick_row(
+                            *option,
+                            Some(j) == close_cursor,
+                            width,
+                        ));
                     }
-                    rows.push(closeup_close_pick_row(
-                        j == 1,
-                        Some(j) == close_cursor,
-                        width,
-                    ));
                 }
             }
-        } else if info.name == "terminal" {
-            let terminal_expanded = state.closeup_menu_terminal_expanded();
-            if !terminal_expanded && selected {
-                active = rows.len();
-            }
-            rows.push(closeup_terminal_command_row(state, selected, width));
-            if terminal_expanded {
-                let terminal_cursor = state.closeup_menu_terminal_cursor();
-                for (j, &action) in state.closeup_menu_terminal_actions().iter().enumerate() {
-                    if Some(j) == terminal_cursor {
-                        active = rows.len();
+            ActionPicker::Terminal => {
+                let terminal_expanded = state.closeup_menu_terminal_expanded();
+                if !terminal_expanded && selected {
+                    active = rows.len();
+                }
+                rows.push(closeup_terminal_command_row(state, selected, width));
+                if terminal_expanded {
+                    let terminal_cursor = state.closeup_menu_terminal_cursor();
+                    for (j, &action) in state.closeup_menu_terminal_actions().iter().enumerate() {
+                        if Some(j) == terminal_cursor {
+                            active = rows.len();
+                        }
+                        rows.push(closeup_terminal_pick_row(
+                            action,
+                            Some(j) == terminal_cursor,
+                            width,
+                        ));
                     }
-                    rows.push(closeup_terminal_pick_row(
-                        action,
-                        Some(j) == terminal_cursor,
-                        width,
-                    ));
                 }
             }
-        } else {
-            if selected {
-                active = rows.len();
+            ActionPicker::None => {
+                if selected {
+                    active = rows.len();
+                }
+                rows.push(closeup_menu_row(info, selected, width));
             }
-            rows.push(closeup_menu_row(info, selected, width));
         }
     }
 

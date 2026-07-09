@@ -917,9 +917,12 @@ impl CloseupMenu {
             .min(count.saturating_sub(1))
     }
 
-    /// The selected close-picker index, clamped to 0 or 1. `0` when collapsed.
-    pub(super) fn close_selected(self) -> usize {
-        self.close_cursor().unwrap_or(0).min(1)
+    /// The selected close-picker index, clamped to the available `count`. `0`
+    /// when collapsed (no picker open).
+    pub(super) fn close_selected(self, count: usize) -> usize {
+        self.close_cursor()
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
     }
 }
 
