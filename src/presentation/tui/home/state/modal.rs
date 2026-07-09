@@ -932,12 +932,28 @@ impl RemoveEntry {
 /// cursor marks the row the keyboard acts on, `selected` holds the checked rows,
 /// and `force` carries the `--force` flag from `session remove --force` so the
 /// confirmed removal can discard uncommitted changes.
+///
+/// Confirming does not close the modal outright: the checked removals run in the
+/// background, so the modal stays open in a *removing* state — `pending` holds
+/// the `(root, name)` of every removal still in flight, keyed by the same pair
+/// the finished task reports back. As each lands, the screen calls
+/// [`resolve`](Self::resolve): a success drops that session's row, a failure
+/// records its message in `error` and keeps the row. The modal closes only once
+/// every dispatched removal has succeeded (empty `pending`, no `error`); a
+/// failure leaves it open so the error is read and the remaining rows retried.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoveModal {
     entries: Vec<RemoveEntry>,
     cursor: usize,
     selected: HashSet<usize>,
     force: bool,
+    /// The `(root, name)` of the removals dispatched from this modal and not yet
+    /// finished. Empty until a confirm dispatches work, and again once every
+    /// dispatched removal has resolved.
+    pending: HashSet<(PathBuf, String)>,
+    /// The last removal failure's message, shown in the modal so the user sees
+    /// why a session was not removed. Cleared on the next confirm.
+    error: Option<String>,
 }
 
 impl RemoveModal {
@@ -949,6 +965,8 @@ impl RemoveModal {
             cursor: 0,
             selected: HashSet::new(),
             force,
+            pending: HashSet::new(),
+            error: None,
         }
     }
 
@@ -1007,6 +1025,63 @@ impl RemoveModal {
         }
     }
 
+    /// Whether removals dispatched from this modal are still in flight — while
+    /// true the modal shows a *removing* state and refuses a fresh confirm.
+    pub fn is_removing(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Whether the row at `index` is a removal still in flight (so the renderer
+    /// can mark it as removing rather than a plain checkbox).
+    pub fn is_pending(&self, index: usize) -> bool {
+        self.entries
+            .get(index)
+            .is_some_and(|entry| self.pending.contains(&entry_key(entry)))
+    }
+
+    /// The last removal failure's message, shown under the checklist.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Confirm the checked removals: record them as in-flight, clear the checks
+    /// and any previous error, and return the entries (in display order) with the
+    /// `--force` flag for the caller to dispatch. Returns `None` — leaving the
+    /// modal untouched — when nothing is checked or removals are already running,
+    /// so neither an empty confirm nor a double-submit dispatches work.
+    pub(super) fn begin_removal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
+        if self.is_removing() {
+            return None;
+        }
+        let (entries, force) = self.confirm()?;
+        self.pending = entries.iter().map(entry_key).collect();
+        self.selected.clear();
+        self.error = None;
+        Some((entries, force))
+    }
+
+    /// Apply a finished background removal of `(root, name)`: on success drop that
+    /// session's row, on failure record `error` and keep the row. Returns `true`
+    /// when the modal should now close — every dispatched removal has succeeded.
+    /// A removal this modal did not dispatch is ignored (returns `false`), so a
+    /// stray completion never closes it.
+    pub(super) fn resolve(&mut self, root: &Path, name: &str, ok: bool, error: &str) -> bool {
+        let key = (root.to_path_buf(), name.to_string());
+        if !self.pending.remove(&key) {
+            return false;
+        }
+        if ok {
+            // Drop the removed row; the surviving indices shift, so reset the
+            // cursor and any stale checks rather than leave them dangling.
+            self.entries.retain(|entry| entry_key(entry) != key);
+            self.selected.clear();
+            self.cursor = self.cursor.min(self.entries.len().saturating_sub(1));
+        } else {
+            self.error = Some(error.to_string());
+        }
+        self.pending.is_empty() && self.error.is_none()
+    }
+
     /// The checked removal entries (in display order) together with the
     /// `--force` flag, or `None` when nothing is checked (so the modal stays
     /// open).
@@ -1023,6 +1098,13 @@ impl RemoveModal {
             .collect();
         Some((entries, self.force))
     }
+}
+
+/// The `(root, name)` key identifying a removal — the pair a finished background
+/// task reports back — so a modal row is matched to its completion even in
+/// 統合(unite) mode, where two workspaces can hold the same session name.
+fn entry_key(entry: &RemoveEntry) -> (PathBuf, String) {
+    (entry.root_path().to_path_buf(), entry.name().to_string())
 }
 
 /// Which inline sub-picker is expanded under a 集中 (Closeup) menu row.

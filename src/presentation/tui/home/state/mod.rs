@@ -662,6 +662,15 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// A one-shot guard, armed the moment an embedded pane hands focus back to the
+    /// home chrome (选择 / 集中). A burst of `Ctrl-C` aimed at interrupting / closing
+    /// the agent can outlive the pane it was meant for: the agent exits, the pane
+    /// closes, and the tail of the burst lands on the home screen where `Ctrl-C`
+    /// means "quit usagi". While this is armed the next `Ctrl-C` is swallowed (with
+    /// a hint) instead of quitting; it clears on the first key either way, so a
+    /// second, deliberate press quits as usual. See the `Ctrl-C` handling in
+    /// [`event`](super::super::event).
+    pane_exit_ctrl_c_grace: bool,
     /// Whether the update-confirmation modal is open. Raised by clicking the
     /// sidebar mascot while it is announcing an available update (see
     /// [`update`](Self::update)); confirming it runs the self-update. Like
@@ -925,6 +934,7 @@ impl HomeState {
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
+            pane_exit_ctrl_c_grace: false,
             update_confirm: false,
             pending_resume: None,
             resume_attach: false,
@@ -2601,6 +2611,22 @@ impl HomeState {
         self.quit_confirm = true;
     }
 
+    /// Arm the one-shot [`pane_exit_ctrl_c_grace`](Self::pane_exit_ctrl_c_grace):
+    /// an embedded pane just handed focus back to the home chrome, so the next
+    /// `Ctrl-C` — likely the tail of a burst that was interrupting / closing the
+    /// agent — is absorbed instead of quitting usagi.
+    pub fn arm_pane_exit_grace(&mut self) {
+        self.pane_exit_ctrl_c_grace = true;
+    }
+
+    /// Consume the one-shot [`pane_exit_ctrl_c_grace`](Self::pane_exit_ctrl_c_grace),
+    /// returning whether it was armed and clearing it. Called once per keypress so
+    /// any key — the absorbed `Ctrl-C` or a deliberate one — disarms it, keeping the
+    /// grace to the single press right after leaving a pane.
+    pub fn take_pane_exit_grace(&mut self) -> bool {
+        std::mem::take(&mut self.pane_exit_ctrl_c_grace)
+    }
+
     /// Dismiss the quit-confirmation modal without quitting, returning to
     /// whatever overlay it was raised over. Also drops any armed
     /// [`ResumeLevel`] (e.g. the 没入 arm from a cancelled `Ctrl-Q`), so a later
@@ -4168,19 +4194,34 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Confirm the removal modal: close it and return the checked session
-    /// entries (in display order) together with the `--force` flag, for the
-    /// event loop to remove each (see [`RemoveModal::confirm`]). Returns `None`
-    /// when nothing is checked, leaving the modal open; also `None` when it is
-    /// closed.
+    /// Confirm the removal modal: record the checked sessions as in-flight and
+    /// return them (in display order) with the `--force` flag, for the event loop
+    /// to dispatch each removal (see [`RemoveModal::begin_removal`]). The modal
+    /// stays open in a *removing* state — it closes only once every dispatched
+    /// removal has succeeded (via [`resolve_remove_modal`](Self::resolve_remove_modal)),
+    /// so a failure keeps it open with the error shown. Returns `None` (leaving
+    /// the modal as-is) when nothing is checked, removals are already running, or
+    /// it is closed.
     pub fn submit_remove_modal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
-        let Overlay::Remove(modal) = &self.overlay else {
+        let Overlay::Remove(modal) = &mut self.overlay else {
             return None;
         };
-        // Nothing checked keeps the modal open; only a non-empty selection closes it.
-        let result = modal.confirm()?;
-        self.overlay = Overlay::None;
-        Some(result)
+        modal.begin_removal()
+    }
+
+    /// Reflect a finished background removal of `(root, name)` in the removal
+    /// modal, if it is still open behind the task: a success drops that session's
+    /// row (and closes the modal once every dispatched removal has succeeded),
+    /// while a failure keeps the modal open and shows `error`. A no-op when the
+    /// removal modal is not the open overlay or the finished session is not one it
+    /// dispatched (see [`RemoveModal::resolve`]).
+    pub fn resolve_remove_modal(&mut self, root: &Path, name: &str, ok: bool, error: &str) {
+        let Overlay::Remove(modal) = &mut self.overlay else {
+            return;
+        };
+        if modal.resolve(root, name, ok, error) {
+            self.overlay = Overlay::None;
+        }
     }
 }
 

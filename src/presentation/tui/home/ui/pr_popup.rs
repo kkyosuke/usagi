@@ -5,7 +5,7 @@ use console::style;
 
 use super::super::state::{HomeState, PendingSession, WorktreeList};
 use super::sidebar::{
-    digits, pr_width, sidebar_scroll_with_pending, SESSION_ROWS, UNITE_WORKSPACE_GAP_ROWS,
+    pr_width, sidebar_scroll_with_pending, SESSION_ROWS, UNITE_WORKSPACE_GAP_ROWS,
 };
 use super::{widgets, NAME_PREFIX};
 use crate::domain::settings::Sidebar;
@@ -113,87 +113,62 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
     (start..left_w).contains(&col).then_some(idx)
 }
 
-/// The widest a PR popup's content grows before its `#<number>` list wraps to
-/// another line, so a session with many PRs stays a tidy box rather than one long
-/// row.
-pub(super) const PR_POPUP_INNER: usize = 28;
+/// The widest a PR popup's content grows before a long title is clipped, so a
+/// session's PR list stays a tidy box rather than spanning the whole screen. The
+/// popup lists **one PR per line** (`#<number>  <title>`), so this is the line's
+/// full width budget — wide enough for a title to read comfortably.
+pub(super) const PR_POPUP_INNER: usize = 56;
 
 /// The popup box's title, embedded in its top border by [`widgets::boxed`] as
 /// `─ PR `. The box must stay at least this wide so the title keeps its closing
 /// frame instead of butting against the corner.
 pub(super) const PR_POPUP_TITLE: &str = "PR";
 
-/// Greedily packs a session's `prs` into the popup's rows: each `#<number>` token
-/// is `#` + its digits wide, joined by a one-space gap, and a row never grows past
-/// [`PR_POPUP_INNER`]. Shared by the popup's renderer ([`pr_popup_box`]) and its
-/// click hit-test ([`pr_popup_click`]) so they agree on which token sits where.
-pub(super) fn pr_popup_pack(prs: &[PrLink]) -> Vec<Vec<&PrLink>> {
-    let mut rows: Vec<Vec<&PrLink>> = Vec::new();
-    let mut cur: Vec<&PrLink> = Vec::new();
-    let mut cur_w = 0usize;
-    for pr in prs {
-        let tok = 1 + digits(pr.number as usize);
-        if cur.is_empty() {
-            cur_w = tok;
-        } else if cur_w + 1 + tok > PR_POPUP_INNER {
-            rows.push(std::mem::take(&mut cur));
-            cur_w = tok;
-        } else {
-            cur_w += 1 + tok;
-        }
-        cur.push(pr);
+/// The styled content line for one PR: its `#<number>` link (soft link blue,
+/// underlined) followed by the PR title once it has been resolved via `gh` (see
+/// [`crate::infrastructure::pr_title`]). Until then only the `#<number>` shows, so
+/// the popup is useful immediately and gains titles on a later frame. The two-space
+/// gap separates the clickable number from its title.
+fn pr_popup_line(pr: &PrLink) -> String {
+    let number = style(format!("#{}", pr.number))
+        .info()
+        .underlined()
+        .to_string();
+    match pr.title.as_deref() {
+        Some(title) if !title.is_empty() => format!("{number}  {title}"),
+        _ => number,
     }
-    rows.push(cur);
-    rows
 }
 
-/// The popup box's inner content width: as wide as its widest packed row, never
-/// past [`PR_POPUP_INNER`], and at least wide enough to keep the title readable.
-pub(super) fn pr_popup_inner(rows: &[Vec<&PrLink>]) -> usize {
+/// The popup box's inner content width: as wide as its widest PR line, never past
+/// [`PR_POPUP_INNER`], and at least wide enough to keep the title readable.
+pub(super) fn pr_popup_inner(lines: &[String]) -> usize {
     // `boxed` frames the title as `─ {title} ` inside the `inner + 2`-wide top
     // border, so the inner width must clear `title + 1` columns or the trailing
-    // space (and the title itself) gets clipped — most visibly for a single
-    // narrow `#<n>` token, where the content alone would size the box smaller
-    // than its own title.
+    // space (and the title itself) gets clipped — most visibly for a lone narrow
+    // `#<n>` line, whose content alone would size the box smaller than its title.
     let title_floor = PR_POPUP_TITLE.chars().count() + 1;
-    rows.iter()
-        .map(|r| {
-            r.iter()
-                .map(|pr| 1 + digits(pr.number as usize))
-                .sum::<usize>()
-                + r.len().saturating_sub(1)
-        })
+    lines
+        .iter()
+        .map(|line| console::measure_text_width(line))
         .max()
         .unwrap_or(0)
         .min(PR_POPUP_INNER)
         .max(title_floor)
 }
 
-/// Builds the pinned PR popup for a session's `prs`: its `#<number>` links
-/// (soft link blue, underlined), space-joined and wrapped to [`PR_POPUP_INNER`]
-/// columns, wrapped in a titled box ready to float beside the session's row (see
-/// [`pr_popup_placement`]). Empty `prs` yields no box (the popup only shows for a
-/// PR-bearing session), so the overlay is a no-op.
+/// Builds the pinned PR popup for a session's `prs`: one `#<number>  <title>` line
+/// per PR (the `#<number>` a soft-blue underlined link), stacked into a titled box
+/// ready to float beside the session's row (see [`pr_popup_placement`]). A title
+/// wider than [`PR_POPUP_INNER`] is clipped by [`widgets::boxed`]. Empty `prs`
+/// yields no box (the popup only shows for a PR-bearing session), so the overlay
+/// is a no-op.
 pub(in crate::presentation::tui::home) fn pr_popup_box(prs: &[PrLink]) -> Vec<String> {
     if prs.is_empty() {
         return Vec::new();
     }
-    let rows = pr_popup_pack(prs);
-    let inner = pr_popup_inner(&rows);
-    let lines: Vec<String> = rows
-        .iter()
-        .map(|r| {
-            r.iter()
-                .map(|pr| {
-                    style(format!("#{}", pr.number))
-                        .info()
-                        .underlined()
-                        .to_string()
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect();
+    let lines: Vec<String> = prs.iter().map(pr_popup_line).collect();
+    let inner = pr_popup_inner(&lines);
     widgets::boxed(PR_POPUP_TITLE, inner, &lines)
 }
 
@@ -270,12 +245,12 @@ pub(in crate::presentation::tui::home) enum PopupClick {
     Outside,
 }
 
-/// Resolve a left click against the pinned PR popup. A click on a `#<number>`
-/// token yields [`PopupClick::Open`] with that PR's URL; elsewhere inside the box
-/// [`PopupClick::Inside`] (the box stays); anywhere else (or with no popup pinned)
-/// [`PopupClick::Outside`]. The token columns are recomputed from the same
-/// [`pr_popup_pack`] the box is drawn from, offset by the box's `│ ` border and
-/// padding, so a click lands on exactly the number the user sees.
+/// Resolve a left click against the pinned PR popup. Because the popup now lists
+/// one PR per line, a click anywhere on a PR's row opens that PR
+/// ([`PopupClick::Open`] with its URL); a click on the box's top or bottom border
+/// keeps it pinned ([`PopupClick::Inside`]); anywhere outside the box (or with no
+/// popup pinned) dismisses it ([`PopupClick::Outside`]). The row → PR mapping
+/// mirrors [`pr_popup_box`], which stacks the PRs between the two border rows.
 pub(in crate::presentation::tui::home) fn pr_popup_click(
     state: &HomeState,
     raw_height: usize,
@@ -294,37 +269,18 @@ pub(in crate::presentation::tui::home) fn pr_popup_click(
     if row < top || row >= top + popup.len() || col < left || col >= left + block_w {
         return PopupClick::Outside;
     }
-    // The first row is the box's top border; content rows follow, the last being the
-    // bottom border. `checked_sub` drops a click on the top border, and `pack.get`
-    // drops one on the bottom border (its index runs one past the packed rows).
-    // `pr_popup_placement` above resolved this same index to a worktree, so it is
-    // in range here; re-fetch its PRs to map the token columns.
+    // Row `top` is the box's top border and the last row its bottom border; the PRs
+    // occupy the rows between, so `prs[row - top - 1]` is the clicked PR.
+    // `pr_popup_placement` resolved this index to a worktree above, so it is in
+    // range; re-fetch its PRs to map the click to a URL.
     let wt = state
         .list()
         .worktree_by_global_index(idx)
         .expect("the pinned index placement already resolved");
-    let pack = pr_popup_pack(&wt.pr);
-    let Some(tokens) = row.checked_sub(top + 1).and_then(|i| pack.get(i)) else {
-        return PopupClick::Inside;
-    };
-    // `boxed` prefixes each content row with `│ ` (border + a pad space), so the
-    // tokens start two columns in from the box's left edge.
-    let Some(mut inner_col) = col.checked_sub(left + 2) else {
-        return PopupClick::Inside;
-    };
-    for pr in tokens {
-        let w = 1 + digits(pr.number as usize);
-        if inner_col < w {
-            return PopupClick::Open(pr.url.clone());
-        }
-        // Step past the token and the one-space gap to the next; a click in the gap
-        // (or past the last token) underflows and falls through to `Inside`.
-        match inner_col.checked_sub(w + 1) {
-            Some(rest) => inner_col = rest,
-            None => return PopupClick::Inside,
-        }
+    match row.checked_sub(top + 1).and_then(|i| wt.pr.get(i)) {
+        Some(pr) => PopupClick::Open(pr.url.clone()),
+        None => PopupClick::Inside,
     }
-    PopupClick::Inside
 }
 
 /// The 0-based line, within a list entry's [`SESSION_ROWS`] rows, that carries the

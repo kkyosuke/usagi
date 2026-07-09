@@ -135,6 +135,45 @@ fn pane_to_switch_then_esc_stays_in_switch() {
 }
 
 #[test]
+fn a_stray_ctrl_c_right_after_leaving_a_pane_is_absorbed_not_a_quit() {
+    // The core fix: a Ctrl-C burst aimed at closing / interrupting the agent can
+    // spill past the pane onto the home screen. The first Ctrl-C after a pane hands
+    // focus back is swallowed (a one-shot grace) instead of quitting. The pane
+    // returns Closed (the agent exited); a stray Ctrl-C is absorbed rather than
+    // quitting the idle screen; the loop keeps running, so re-issuing the switch
+    // attaches a *second* time. Had the Ctrl-C quit, the loop would have returned
+    // after the first attach and the pane would have opened only once.
+    let calls = RefCell::new(0);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| {
+        *calls.borrow_mut() += 1;
+        Ok(PaneExit::Closed)
+    };
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut keys = cmd("session switch root");
+    keys.push(Ok(Key::Enter)); // attach #1 -> Closed -> Closeup, grace armed
+    keys.push(Ok(Key::CtrlC)); // stray burst tail -> absorbed by the grace, not a quit
+    keys.extend(cmd("session switch root"));
+    keys.push(Ok(Key::Enter)); // attach #2 -> Closed (only reached if #1's Ctrl-C did not quit)
+                               // fallback Ctrl-C: the first is absorbed by the freshly armed grace, the second quits (idle)
+    assert!(matches!(
+        run_full(
+            keys,
+            sample_state(),
+            &mut open,
+            &mut create,
+            &mut preview,
+            &mut noop_config
+        )
+        .unwrap(),
+        Outcome::Quit
+    ));
+    // The pane opened twice: the initial attach and the re-attach after the
+    // absorbed Ctrl-C. A quit on that Ctrl-C would have left it at one.
+    assert_eq!(*calls.borrow(), 2);
+}
+
+#[test]
 fn pane_to_overview_then_esc_onto_an_idle_session_lands_in_closeup() {
     // ToOverview -> Overview(return=Attached). Moving the cursor onto an idle
     // session and pressing Esc lands in 集中 *without* spawning a second pane

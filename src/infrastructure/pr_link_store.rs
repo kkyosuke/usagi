@@ -10,10 +10,12 @@
 //! once.
 //!
 //! A session may open several PRs (one per repository it touches, or several over
-//! its life), so the store **accumulates** distinct URLs across calls rather than
-//! replacing: [`add`] merges newly seen PRs into the recorded list (dropping
-//! duplicate URLs), and [`get`] returns the whole list. The read is not one-shot —
-//! the list stays so the badges keep showing across syncs.
+//! its life), so the store **accumulates** distinct PRs across calls rather than
+//! replacing: [`add`] merges newly seen PRs into the recorded list (de-duplicated
+//! by [`PrLink::pr_key`], so the plain and `/files` forms of one PR are one entry,
+//! and a later title backfills an untitled entry), [`set`] overwrites the list
+//! (used to write back resolved titles), and [`get`] returns the whole list. The
+//! read is not one-shot — the list stays so the badges keep showing across syncs.
 //!
 //! Like [`super::agent_prompt_store`], the writer and reader may be different
 //! processes that never share memory, so they agree on a file path purely from
@@ -55,9 +57,12 @@ impl WorktreeStamped for PrLinkFile {
 }
 
 /// Merge `prs` into the pull requests recorded for the session rooted at
-/// `worktree`, keeping the existing ones and appending any whose `url` is not
-/// already recorded (so a PR seen again is not duplicated). New PRs land at the
-/// end, after the ones already stored.
+/// `worktree`, keeping the existing ones and appending any whose
+/// [`pr_key`](PrLink::pr_key) is not already recorded (so a PR seen again — even
+/// under its `/files` deep link — is not duplicated). A PR already recorded but
+/// still untitled adopts an incoming title, so a title resolved after the URL was
+/// first stored is not lost. New PRs land at the end, after the ones already
+/// stored.
 pub fn add(worktree: &Path, prs: &[PrLink]) -> Result<()> {
     let key = key(worktree);
     let dir = dir(PR_SUBDIR)?;
@@ -67,8 +72,10 @@ pub fn add(worktree: &Path, prs: &[PrLink]) -> Result<()> {
     let path = dir.join(file_name(&key));
     let mut recorded = read_prs_ours(&path, &key);
     for pr in prs {
-        if !recorded.iter().any(|p| p.url == pr.url) {
-            recorded.push(pr.clone());
+        match recorded.iter_mut().find(|p| p.pr_key() == pr.pr_key()) {
+            Some(existing) if existing.title.is_none() => existing.title = pr.title.clone(),
+            Some(_) => {}
+            None => recorded.push(pr.clone()),
         }
     }
     write_stamped(
@@ -77,6 +84,26 @@ pub fn add(worktree: &Path, prs: &[PrLink]) -> Result<()> {
         &PrLinkFile {
             worktree: key,
             prs: recorded,
+        },
+    )
+}
+
+/// Overwrite the pull requests recorded for the session rooted at `worktree` with
+/// `prs`. Unlike [`add`] this replaces the list wholesale — the terminal pool
+/// uses it to write back a list whose missing titles it has just resolved (see
+/// [`crate::infrastructure::pr_title`]), keeping the same set of PRs but with
+/// their titles filled in.
+pub fn set(worktree: &Path, prs: &[PrLink]) -> Result<()> {
+    let key = key(worktree);
+    let dir = dir(PR_SUBDIR)?;
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    write_stamped(
+        &dir,
+        &path,
+        &PrLinkFile {
+            worktree: key,
+            prs: prs.to_vec(),
         },
     )
 }
@@ -128,10 +155,7 @@ mod tests {
     }
 
     fn pr(number: u32) -> PrLink {
-        PrLink {
-            number,
-            url: format!("https://github.com/o/r/pull/{number}"),
-        }
+        PrLink::new(number, format!("https://github.com/o/r/pull/{number}"))
     }
 
     #[test]
@@ -159,6 +183,43 @@ mod tests {
             // de-duplicated, appending only the new PR.
             add(wt.path(), &[pr(1), pr(3)]).unwrap();
             assert_eq!(get(wt.path()), vec![pr(1), pr(2), pr(3)]);
+        });
+    }
+
+    #[test]
+    fn add_dedups_the_files_url_and_backfills_a_title() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            add(wt.path(), &[pr(5)]).unwrap();
+            // The same PR under its `/files` deep link is not a new entry.
+            let files = PrLink::new(5, "https://github.com/o/r/pull/5/files");
+            add(wt.path(), std::slice::from_ref(&files)).unwrap();
+            assert_eq!(get(wt.path()), vec![pr(5)]);
+            // Re-adding it with a title now resolved upgrades the stored entry in
+            // place — keeping its canonical URL but adopting the title.
+            let mut titled = pr(5);
+            titled.title = Some("Fix the thing".to_string());
+            add(wt.path(), std::slice::from_ref(&titled)).unwrap();
+            let stored = get(wt.path());
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].url, "https://github.com/o/r/pull/5");
+            assert_eq!(stored[0].title.as_deref(), Some("Fix the thing"));
+            // An already-titled entry is not clobbered by a later untitled add.
+            add(wt.path(), &[pr(5)]).unwrap();
+            assert_eq!(get(wt.path())[0].title.as_deref(), Some("Fix the thing"));
+        });
+    }
+
+    #[test]
+    fn set_overwrites_the_recorded_list() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            add(wt.path(), &[pr(1), pr(2)]).unwrap();
+            let mut titled = pr(1);
+            titled.title = Some("t".to_string());
+            // `set` replaces the whole list — here dropping #2 and titling #1.
+            set(wt.path(), std::slice::from_ref(&titled)).unwrap();
+            assert_eq!(get(wt.path()), vec![titled]);
         });
     }
 

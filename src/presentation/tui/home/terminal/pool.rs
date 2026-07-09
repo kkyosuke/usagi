@@ -388,15 +388,77 @@ fn lock_parser(
 /// Persist newly harvested PRs and return the store's accumulated list for each
 /// session root whose visible PRs changed. Disk IO is kept out of the watcher
 /// mutex; failures are best-effort like the attached-pane harvest path.
+///
+/// After merging the freshly seen PRs, any accumulated PR still missing a title
+/// has it resolved through the `gh` CLI ([`resolve_pr_title`]) and the titled list
+/// is written back, so the sidebar's PR popup can show `#<number>  <title>`. A
+/// title is fetched at most once (subsequent scans skip already-titled PRs), and
+/// a failed lookup simply leaves the PR untitled for a later retry.
 fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
+    use crate::infrastructure::{pr_link_store, pr_title};
     results
         .iter()
         .map(|result| {
-            let _ = crate::infrastructure::pr_link_store::add(&result.path, &result.prs);
-            let merged = crate::infrastructure::pr_link_store::get(&result.path);
+            let _ = pr_link_store::add(&result.path, &result.prs);
+            let mut merged = pr_link_store::get(&result.path);
+            let mut fetch: fn(&[String]) -> Option<String> = resolve_pr_title;
+            if pr_title::resolve_titles(&mut merged, &mut fetch) {
+                let _ = pr_link_store::set(&result.path, &merged);
+            }
             (result.path.clone(), merged)
         })
         .collect()
+}
+
+/// How long a single `gh pr view` title lookup may run before it is abandoned, so
+/// a slow or hanging `gh` never stalls the watcher thread indefinitely.
+const GH_TITLE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the title lookup re-polls whether `gh` has exited.
+const GH_TITLE_POLL: Duration = Duration::from_millis(50);
+/// Cap on the bytes read from `gh`'s stdout — a PR title is a single short line.
+const GH_TITLE_MAX_BYTES: usize = 4 * 1024;
+
+/// Run one `gh` PR-title lookup, returning its stdout on a clean (zero-exit)
+/// finish, or `None` when `gh` is absent, errors, is killed, or exceeds
+/// [`GH_TITLE_TIMEOUT`]. This is the real subprocess behind
+/// [`crate::infrastructure::pr_title::resolve_titles`]; the argv it is handed and
+/// the parsing of what it returns are built and tested in that pure module, so
+/// this thin spawn is all that stays coverage-excluded. Reading stdout on its own
+/// thread while [`child_io::wait_with_timeout`] reaps the child mirrors the
+/// 1Password CLI harness so a wedged `gh` is killed rather than blocking forever.
+fn resolve_pr_title(argv: &[String]) -> Option<String> {
+    use crate::presentation::mcp::child_io::{read_capped, wait_with_timeout};
+    let (program, args) = argv.split_first()?;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || read_capped(&mut out, GH_TITLE_MAX_BYTES));
+    let status = wait_with_timeout(&mut RealChild(child), GH_TITLE_TIMEOUT, GH_TITLE_POLL);
+    let stdout = reader.join().ok()?.ok()?.0;
+    status?
+        .success()
+        .then(|| String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// Adapts a real [`std::process::Child`] to [`child_io::WaitableChild`] so
+/// [`resolve_pr_title`] can wait on it with a timeout.
+struct RealChild(std::process::Child);
+
+impl crate::presentation::mcp::child_io::WaitableChild for RealChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.0.kill()
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.wait()
+    }
 }
 
 /// Update the watcher's per-pane PR cache, queue sidebar updates for the event
