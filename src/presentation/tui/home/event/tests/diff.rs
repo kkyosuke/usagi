@@ -112,9 +112,10 @@ fn selected_diff_fails_when_the_base_ref_is_unresolvable() {
 #[test]
 fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
     // Driving the 集中 (Closeup) `diff` command end-to-end over a real repo opens the
-    // scrollable diff view: focus the session, move the menu cursor onto `diff`
-    // (agent → close → diff), and run it. The arrows scroll it and Esc dismisses
-    // it back to 集中, then out to 選択 (Ctrl-C quits).
+    // GitHub-style diff view: focus the session, move the menu cursor onto `diff`
+    // (agent → close → diff), and run it. Then exercise the focus-aware keys — the
+    // explorer navigates, `Enter`/`→`/`l` open a file into the diff pane, the diff
+    // pane scrolls, and `q`/`Esc` dismiss back to 集中, then out to 選択.
     let dir = tempfile::tempdir().unwrap();
     let work = repo_with_feature_diff(dir.path());
     let state = state_with_worktree_at(&work);
@@ -126,6 +127,19 @@ fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
         Ok(Key::ArrowDown), // close -> diff
         Ok(Key::Enter),     // run `diff` -> gathers the patch, opens the pane
     ];
+    // Explorer (Tree focus): move the cursor and try to collapse (no-op on a file).
+    keys.push(Ok(Key::ArrowDown)); // tree move down
+    keys.push(Ok(Key::Char('j'))); // tree move down (vi)
+    keys.push(Ok(Key::ArrowUp)); // tree move up
+    keys.push(Ok(Key::Char('k'))); // tree move up (vi)
+    keys.push(Ok(Key::ArrowLeft)); // collapse (no-op on a file leaf)
+    keys.push(Ok(Key::Char('h'))); // collapse (no-op, vi)
+    keys.push(Ok(Key::ArrowRight)); // open the file -> focus the diff pane
+    keys.push(Ok(Key::ArrowLeft)); // diff pane: back to the explorer
+    keys.push(Ok(Key::Char('l'))); // open the file (vi) -> focus the diff pane
+    keys.push(Ok(Key::Char('h'))); // diff pane: back to the explorer (vi)
+    keys.push(Ok(Key::Enter)); // open the file -> focus the diff pane
+                               // Diff pane focus: scroll and toggle the layout.
     keys.push(Ok(Key::ArrowDown)); // scroll down a line
     keys.push(Ok(Key::Char('j'))); // scroll down (vi)
     keys.push(Ok(Key::ArrowUp)); // scroll up a line
@@ -134,9 +148,10 @@ fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
     keys.push(Ok(Key::Char(' '))); // Space also pages forward
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('s'))); // toggle to the split layout
-    keys.push(Ok(Key::Tab)); // toggle back to unified
-    keys.push(Ok(Key::Char('z'))); // ignored inside the diff view
-    keys.push(Ok(Key::Escape)); // dismiss -> back to Closeup
+    keys.push(Ok(Key::Char('x'))); // ignored while the diff pane is focused
+    keys.push(Ok(Key::Tab)); // toggle focus back to the explorer
+    keys.push(Ok(Key::Char('z'))); // ignored while the explorer is focused
+    keys.push(Ok(Key::Char('q'))); // dismiss -> back to Closeup
     keys.push(Ok(Key::Escape)); // Closeup -> base Overview; fallback Ctrl-C quits
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }

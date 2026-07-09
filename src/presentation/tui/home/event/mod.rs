@@ -21,7 +21,7 @@ use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyR
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{
-    GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+    DiffFocus, GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
     SurfaceOwner,
 };
 use super::tasks::TaskHandle;
@@ -1370,28 +1370,45 @@ pub(super) fn event_loop(
             continue;
         }
 
-        // The right-pane diff view, when open, captures every key: the arrows /
-        // `j`/`k` and PageUp/PageDown/Space scroll, `s` / `Tab` toggle the unified
-        // and side-by-side layouts, and `Esc` / `Enter` / `q` dismiss it. It shares
-        // the preview's one-row-header geometry, so it pages by the same measure.
-        if state.diff_view().is_some() {
+        // The right-pane diff view, when open, captures every key. It is a GitHub
+        // pull-request-style split, so the keys are focus-aware: the left explorer
+        // (directory tree) navigates with the arrows / `j`/`k`, `Enter` (or `→`)
+        // folds a directory or opens a file's diff, and `←` collapses a directory;
+        // the right diff pane scrolls with the arrows / `j`/`k` / PageUp/PageDown /
+        // Space, `←` returns to the explorer, and `s` toggles the layout. `Tab`
+        // swaps focus from either side and `Esc` / `q` dismiss. It shares the
+        // preview's one-row-header geometry, so it pages by the same measure.
+        if let Some(focus) = state.diff_view().map(|d| d.focus()) {
             let page = ui::preview_visible(height as usize, width as usize, &state);
             match key {
-                Key::ArrowUp | Key::Char('k') => state.diff_scroll_up(),
-                Key::ArrowDown | Key::Char('j') => state.diff_scroll_down(page),
-                Key::PageUp => {
-                    for _ in 0..page {
-                        state.diff_scroll_up();
-                    }
-                }
-                Key::PageDown | Key::Char(' ') => {
-                    for _ in 0..page {
-                        state.diff_scroll_down(page);
-                    }
-                }
-                Key::Char('s') | Key::Tab => state.diff_toggle_split(),
-                Key::Escape | Key::Enter | Key::Char('q') => state.close_diff(),
-                _ => {}
+                Key::Tab => state.diff_toggle_focus(),
+                Key::Escape | Key::Char('q') => state.close_diff(),
+                _ => match focus {
+                    DiffFocus::Tree => match key {
+                        Key::ArrowUp | Key::Char('k') => state.diff_move_up(),
+                        Key::ArrowDown | Key::Char('j') => state.diff_move_down(),
+                        Key::Enter | Key::ArrowRight | Key::Char('l') => state.diff_activate(),
+                        Key::ArrowLeft | Key::Char('h') => state.diff_collapse(),
+                        _ => {}
+                    },
+                    DiffFocus::Diff => match key {
+                        Key::ArrowUp | Key::Char('k') => state.diff_scroll_up(),
+                        Key::ArrowDown | Key::Char('j') => state.diff_scroll_down(page),
+                        Key::PageUp => {
+                            for _ in 0..page {
+                                state.diff_scroll_up();
+                            }
+                        }
+                        Key::PageDown | Key::Char(' ') => {
+                            for _ in 0..page {
+                                state.diff_scroll_down(page);
+                            }
+                        }
+                        Key::ArrowLeft | Key::Char('h') => state.diff_focus_tree(),
+                        Key::Char('s') => state.diff_toggle_split(),
+                        _ => {}
+                    },
+                },
             }
             continue;
         }
