@@ -473,10 +473,10 @@ fn refs_list_every_groups_root_then_its_worktrees() {
 fn set_pr_links_finds_the_row_in_any_group() {
     let mut list = united();
     let b1_root = list.groups()[1].worktrees()[0].path.clone();
-    let prs = vec![crate::domain::workspace_state::PrLink {
-        url: "https://example.com/pull/7".to_string(),
-        number: 7,
-    }];
+    let prs = vec![crate::domain::workspace_state::PrLink::new(
+        7,
+        "https://example.com/pull/7",
+    )];
     assert!(list.set_pr_links(&b1_root, prs.clone()));
     assert_eq!(list.groups()[1].worktrees()[0].pr, prs);
     // A path matching no row is a no-op.

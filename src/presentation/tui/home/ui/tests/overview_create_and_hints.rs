@@ -284,7 +284,7 @@ fn tab_menu_box_and_rename_body_render_action_surface() {
     state.open_tab_menu(PathBuf::from("/repo/main"), 1, "terminal", 12, 3);
     let menu = state.tab_menu().unwrap();
     let menu_text = stripped(&tab_menu_box(menu));
-    assert!(menu_text.contains("tab 2"));
+    assert!(menu_text.contains("Menu"));
     assert!(menu_text.contains("Move left"));
     assert!(menu_text.contains("Move right"));
     assert!(menu_text.contains("Rename"));

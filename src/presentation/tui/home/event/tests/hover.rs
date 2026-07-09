@@ -23,10 +23,7 @@ const MAIN_ROW: u16 = 6;
 /// the popup. The full sidebar (which draws the PR badge) is the default.
 fn pr_state() -> HomeState {
     let mut main = worktree(Some("main"), "/r/main");
-    main.pr = vec![PrLink {
-        number: 412,
-        url: "https://github.com/o/r/pull/412".to_string(),
-    }];
+    main.pr = vec![PrLink::new(412, "https://github.com/o/r/pull/412")];
     HomeState::new("usagi", vec![main, worktree(Some("feat"), "/r/feat")], None)
 }
 

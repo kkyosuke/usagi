@@ -47,10 +47,10 @@ fn list_with(worktrees: Vec<WorktreeState>) -> WorktreeList {
 /// sidebar-click tests.
 fn worktree_with_pr(number: u32) -> WorktreeState {
     let mut wt = worktree(Some("main"), false, BranchStatus::Pushed);
-    wt.pr = vec![PrLink {
+    wt.pr = vec![PrLink::new(
         number,
-        url: format!("https://github.com/o/r/pull/{number}"),
-    }];
+        format!("https://github.com/o/r/pull/{number}"),
+    )];
     wt
 }
 

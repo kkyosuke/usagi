@@ -21,7 +21,7 @@ use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyR
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
 use super::state::{
-    GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
+    DiffFocus, GroupSource, HomeState, Mode, PaneExit, ResumeLevel, SessionOutcome, SessionReorder,
     SurfaceOwner,
 };
 use super::tasks::TaskHandle;
@@ -585,6 +585,10 @@ pub(super) fn event_loop(
                 created,
                 removed,
             } = completion;
+            // A removal reports success by carrying the evicted pool path (set
+            // only on the success branch of `run_remove`); both failure branches
+            // leave it `None`. Captured before `evict` is consumed below.
+            let removal_ok = evict.is_some();
             if let Some(path) = evict {
                 (wiring.evict_pool)(&path);
             }
@@ -593,6 +597,10 @@ pub(super) fn event_loop(
             }
             if let (Some(root), Some(name)) = (target_root.as_deref(), removed.as_deref()) {
                 state.clear_removing_session(root, name);
+                // If the removal modal is still open behind the task, reflect the
+                // outcome in it: a success drops the row (closing the modal once
+                // all succeed), a failure keeps it open with the error shown.
+                state.resolve_remove_modal(root, name, removal_ok, &line.text);
             }
             state.apply_task_completion(line, sessions, target_root.as_deref());
             // A finished create/close may ask to focus a landing session. Done
@@ -1059,12 +1067,19 @@ pub(super) fn event_loop(
                 .with_detail(format!("{:?} {:?}", state.mode(), key))
         });
 
-        // The quit-confirmation modal, when open, captures every key: `y` /
-        // `Enter` (or a second `Ctrl-C` / `Ctrl-Q`) confirms the close, `n` /
-        // `Esc` cancels.
+        // Consume the one-shot pane-exit grace on *every* key, so a deliberate key
+        // (not just the absorbed `Ctrl-C`) disarms it — the guard only ever spans
+        // the single press right after an embedded pane hands focus back.
+        let pane_grace = state.take_pane_exit_grace();
+
+        // The quit-confirmation modal, when open, captures every key: only `y` /
+        // `Y` / `Enter` confirms the close and `n` / `N` / `Esc` cancels. `Ctrl-C`
+        // and `Ctrl-Q` are inert here on purpose: a burst of `Ctrl-C` (say, from
+        // interrupting an agent) must not be able to both raise *and* confirm the
+        // modal, so closing usagi always takes a deliberate, distinct keystroke.
         if state.quit_confirm() {
             match key {
-                Key::Char('y') | Key::Char('Y') | Key::Enter | Key::CtrlC | Key::Char(CTRL_Q) => {
+                Key::Char('y') | Key::Char('Y') | Key::Enter => {
                     save_resume_focus(&mut state, wiring);
                     return Ok(Outcome::Quit);
                 }
@@ -1104,6 +1119,17 @@ pub(super) fn event_loop(
         // one is live we raise the quit-confirmation modal first instead of
         // closing outright; an idle screen quits immediately.
         if let Key::CtrlC = key {
+            // …unless an embedded pane just handed focus back: a `Ctrl-C` burst
+            // meant to close / interrupt the agent can spill past the pane onto
+            // the home screen. Swallow the first such press (with a hint) so it
+            // does not quit usagi by accident; the grace is one-shot, so a second,
+            // deliberate `Ctrl-C` quits as usual.
+            if pane_grace {
+                state.log_output(
+                    "Ctrl-C ignored just after leaving a pane — press it again (or Ctrl-Q) to quit usagi.",
+                );
+                continue;
+            }
             if state.has_live_sessions() {
                 state.open_quit_confirm();
             } else {
@@ -1370,28 +1396,45 @@ pub(super) fn event_loop(
             continue;
         }
 
-        // The right-pane diff view, when open, captures every key: the arrows /
-        // `j`/`k` and PageUp/PageDown/Space scroll, `s` / `Tab` toggle the unified
-        // and side-by-side layouts, and `Esc` / `Enter` / `q` dismiss it. It shares
-        // the preview's one-row-header geometry, so it pages by the same measure.
-        if state.diff_view().is_some() {
+        // The right-pane diff view, when open, captures every key. It is a GitHub
+        // pull-request-style split, so the keys are focus-aware: the left explorer
+        // (directory tree) navigates with the arrows / `j`/`k`, `Enter` (or `→`)
+        // folds a directory or opens a file's diff, and `←` collapses a directory;
+        // the right diff pane scrolls with the arrows / `j`/`k` / PageUp/PageDown /
+        // Space, `←` returns to the explorer, and `s` toggles the layout. `Tab`
+        // swaps focus from either side and `Esc` / `q` dismiss. It shares the
+        // preview's one-row-header geometry, so it pages by the same measure.
+        if let Some(focus) = state.diff_view().map(|d| d.focus()) {
             let page = ui::preview_visible(height as usize, width as usize, &state);
             match key {
-                Key::ArrowUp | Key::Char('k') => state.diff_scroll_up(),
-                Key::ArrowDown | Key::Char('j') => state.diff_scroll_down(page),
-                Key::PageUp => {
-                    for _ in 0..page {
-                        state.diff_scroll_up();
-                    }
-                }
-                Key::PageDown | Key::Char(' ') => {
-                    for _ in 0..page {
-                        state.diff_scroll_down(page);
-                    }
-                }
-                Key::Char('s') | Key::Tab => state.diff_toggle_split(),
-                Key::Escape | Key::Enter | Key::Char('q') => state.close_diff(),
-                _ => {}
+                Key::Tab => state.diff_toggle_focus(),
+                Key::Escape | Key::Char('q') => state.close_diff(),
+                _ => match focus {
+                    DiffFocus::Tree => match key {
+                        Key::ArrowUp | Key::Char('k') => state.diff_move_up(),
+                        Key::ArrowDown | Key::Char('j') => state.diff_move_down(),
+                        Key::Enter | Key::ArrowRight | Key::Char('l') => state.diff_activate(),
+                        Key::ArrowLeft | Key::Char('h') => state.diff_collapse(),
+                        _ => {}
+                    },
+                    DiffFocus::Diff => match key {
+                        Key::ArrowUp | Key::Char('k') => state.diff_scroll_up(),
+                        Key::ArrowDown | Key::Char('j') => state.diff_scroll_down(page),
+                        Key::PageUp => {
+                            for _ in 0..page {
+                                state.diff_scroll_up();
+                            }
+                        }
+                        Key::PageDown | Key::Char(' ') => {
+                            for _ in 0..page {
+                                state.diff_scroll_down(page);
+                            }
+                        }
+                        Key::ArrowLeft | Key::Char('h') => state.diff_focus_tree(),
+                        Key::Char('s') => state.diff_toggle_split(),
+                        _ => {}
+                    },
+                },
             }
             continue;
         }

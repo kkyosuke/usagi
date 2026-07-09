@@ -14,6 +14,8 @@
 //! the UI layer's job (see the home screen's `panes` module), which also chooses
 //! between the unified and split (side-by-side) layouts from the same rows.
 
+use std::collections::HashMap;
+
 use similar::{ChangeTag, TextDiff};
 
 use super::markdown::{highlight, Rgb};
@@ -113,15 +115,24 @@ pub enum SplitRow {
 /// span the full width. The mapping is index-based so the renderer and the scroll
 /// clamp share one definition of "how many visual rows the split layout has".
 pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
-    let rows = &doc.rows;
+    split_rows_slice(&doc.rows, 0)
+}
+
+/// Fold a *slice* of rows into the side-by-side layout, offsetting every emitted
+/// row index by `base` so the returned [`SplitRow`]s still reference the rows by
+/// their position in the whole [`DiffDoc`]. This lets the diff view fold only the
+/// selected file's section (`doc.rows[start..end]`) while the renderer keeps
+/// indexing the shared `doc`. [`split_rows`] is the whole-document case
+/// (`base == 0`).
+pub fn split_rows_slice(rows: &[DiffRow], base: usize) -> Vec<SplitRow> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < rows.len() {
         match rows[i].kind {
             RowKind::Context => {
                 out.push(SplitRow::Pair {
-                    left: Some(i),
-                    right: Some(i),
+                    left: Some(base + i),
+                    right: Some(base + i),
                 });
                 i += 1;
             }
@@ -138,8 +149,8 @@ pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
                 let adds = i - add_start;
                 for k in 0..dels.max(adds) {
                     out.push(SplitRow::Pair {
-                        left: (k < dels).then_some(del_start + k),
-                        right: (k < adds).then_some(add_start + k),
+                        left: (k < dels).then_some(base + del_start + k),
+                        right: (k < adds).then_some(base + add_start + k),
                     });
                 }
             }
@@ -148,17 +159,215 @@ pub fn split_rows(doc: &DiffDoc) -> Vec<SplitRow> {
                 // each added line occupies the right side only.
                 out.push(SplitRow::Pair {
                     left: None,
-                    right: Some(i),
+                    right: Some(base + i),
                 });
                 i += 1;
             }
             _ => {
-                out.push(SplitRow::Full(i));
+                out.push(SplitRow::Full(base + i));
                 i += 1;
             }
         }
     }
     out
+}
+
+/// One changed file's section within a [`DiffDoc`]: its display path, the added /
+/// removed line counts (for the explorer's `+N -M` badge), and the half-open
+/// `[start, end)` range of `doc.rows` that belongs to it — from its `diff --git`
+/// header up to the next file's (or the end of the document). The diff view shows
+/// exactly this range on its right side when the file is selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The changed files of a parsed diff, in file order, one per
+/// [`RowKind::FileHeader`] row. Each carries the row range of its section and its
+/// add / remove counts. A patch with no file headers (empty, or headerless) yields
+/// no files.
+pub fn files(doc: &DiffDoc) -> Vec<DiffFile> {
+    let headers: Vec<usize> = doc
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.kind == RowKind::FileHeader)
+        .map(|(i, _)| i)
+        .collect();
+    headers
+        .iter()
+        .enumerate()
+        .map(|(n, &start)| {
+            let end = headers.get(n + 1).copied().unwrap_or(doc.rows.len());
+            let section = &doc.rows[start..end];
+            let added = section.iter().filter(|r| r.kind == RowKind::Add).count();
+            let removed = section.iter().filter(|r| r.kind == RowKind::Del).count();
+            DiffFile {
+                path: section_path(section),
+                added,
+                removed,
+                start,
+                end,
+            }
+        })
+        .collect()
+}
+
+/// The display path for a file section: the new path from its `+++ b/<path>` line
+/// (the side GitHub names files by), falling back to the old `--- a/<path>` for a
+/// deletion, and finally to the `b/` operand of the `diff --git` banner when a
+/// section carries neither (a pure rename or a binary file).
+fn section_path(section: &[DiffRow]) -> String {
+    let meta = |prefix: &str| {
+        section.iter().find_map(|r| {
+            let text = r.text();
+            text.strip_prefix(prefix).map(clean_path)
+        })
+    };
+    let new = meta("+++ ").filter(|p| !p.is_empty());
+    let old = meta("--- ").filter(|p| !p.is_empty());
+    new.or(old)
+        .or_else(|| section.first().and_then(|r| header_path(&r.text())))
+        .unwrap_or_default()
+}
+
+/// The `b/<path>` operand of a `diff --git a/<old> b/<new>` banner. Splits on the
+/// ` b/` boundary so the new path is preferred; returns `None` when the banner is
+/// malformed.
+fn header_path(header: &str) -> Option<String> {
+    let rest = header.strip_prefix("diff --git ")?;
+    rest.find(" b/")
+        .map(|at| clean_path(&rest[at + 1..]))
+        .filter(|p| !p.is_empty())
+}
+
+/// Strip an `a/` / `b/` prefix and any trailing tab-separated git metadata from a
+/// diff path operand, mapping `/dev/null` to the empty string (an absent side).
+fn clean_path(operand: &str) -> String {
+    let path = operand
+        .split('\t')
+        .next()
+        .unwrap_or(operand)
+        .trim_start_matches("a/")
+        .trim_start_matches("b/");
+    if path == "/dev/null" {
+        String::new()
+    } else {
+        path.to_string()
+    }
+}
+
+/// What a [`TreeRow`] stands for: a directory (carrying its full path, the key the
+/// diff view collapses it by) or a changed file (carrying its index into
+/// [`files`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TreeKind {
+    /// A directory node, keyed by its full slash-joined path (e.g. `src/ui`).
+    Dir { path: String },
+    /// A file leaf, by its index into the [`files`] list.
+    File { index: usize },
+}
+
+/// One row of the explorer's directory tree: its indentation `depth`, the path
+/// segment `name` shown at that depth, and what it stands for ([`TreeKind`]). The
+/// rows are a depth-first flattening of the changed files' paths, directories
+/// before files and alphabetical within each — GitHub's file-tree order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub depth: usize,
+    pub name: String,
+    pub kind: TreeKind,
+}
+
+/// An intermediate directory node used only while building the tree: its children
+/// in insertion order (later sorted), split into subdirectories and file leaves.
+#[derive(Default)]
+struct DirNode {
+    order: Vec<String>,
+    dirs: HashMap<String, DirNode>,
+    files: HashMap<String, usize>,
+}
+
+impl DirNode {
+    fn child(&mut self, segment: &str) -> &mut DirNode {
+        if !self.order.contains(&segment.to_string()) {
+            self.order.push(segment.to_string());
+        }
+        self.dirs.entry(segment.to_string()).or_default()
+    }
+
+    fn leaf(&mut self, segment: &str, index: usize) {
+        if !self.order.contains(&segment.to_string()) {
+            self.order.push(segment.to_string());
+        }
+        self.files.insert(segment.to_string(), index);
+    }
+}
+
+/// Flatten the changed `files`' paths into an explorer directory tree: each path
+/// is split on `/`, its leading segments become nested directory nodes and its
+/// last segment a file leaf. The result is depth-first, directories before files
+/// and alphabetical within each level, so the explorer reads like GitHub's file
+/// tree. A file with no `/` sits at depth 0.
+pub fn tree_rows(files: &[DiffFile]) -> Vec<TreeRow> {
+    let mut root = DirNode::default();
+    for (index, file) in files.iter().enumerate() {
+        let mut segments = file.path.split('/').filter(|s| !s.is_empty()).peekable();
+        let mut node = &mut root;
+        // Empty path (a binary/rename with no resolvable name): fall back to a
+        // single leaf named by the raw path so it is still selectable.
+        if segments.peek().is_none() {
+            node.leaf(&file.path, index);
+            continue;
+        }
+        while let Some(segment) = segments.next() {
+            if segments.peek().is_some() {
+                node = node.child(segment);
+            } else {
+                node.leaf(segment, index);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    emit_tree(&root, 0, "", &mut out);
+    out
+}
+
+/// Depth-first emit of a directory node's children into `out`: directories first
+/// (recursing into each), then file leaves, both alphabetical, so the flattened
+/// rows match the on-screen tree order.
+fn emit_tree(node: &DirNode, depth: usize, prefix: &str, out: &mut Vec<TreeRow>) {
+    let mut segments = node.order.clone();
+    segments.sort_by(|a, b| {
+        let a_dir = node.dirs.contains_key(a);
+        let b_dir = node.dirs.contains_key(b);
+        b_dir.cmp(&a_dir).then_with(|| a.cmp(b))
+    });
+    for segment in segments {
+        if let Some(sub) = node.dirs.get(&segment) {
+            let path = if prefix.is_empty() {
+                segment.clone()
+            } else {
+                format!("{prefix}/{segment}")
+            };
+            out.push(TreeRow {
+                depth,
+                name: segment.clone(),
+                kind: TreeKind::Dir { path: path.clone() },
+            });
+            emit_tree(sub, depth + 1, &path, out);
+        } else if let Some(&index) = node.files.get(&segment) {
+            out.push(TreeRow {
+                depth,
+                name: segment,
+                kind: TreeKind::File { index },
+            });
+        }
+    }
 }
 
 /// The most rows [`render`] emits, bounding work and allocation on a pathological
@@ -642,5 +851,123 @@ index 111..222 100644\n\
                 right: Some(_)
             }
         )));
+    }
+
+    /// A three-file patch across two directories: an edit, an addition, and a
+    /// deletion — the shape the explorer tree groups.
+    const MULTI: &str = "diff --git a/src/main.rs b/src/main.rs\n\
+index 111..222 100644\n\
+--- a/src/main.rs\n\
++++ b/src/main.rs\n\
+@@ -1,2 +1,2 @@\n\
+ fn main() {\n\
+-    old();\n\
++    new();\n\
+diff --git a/src/ui/render.rs b/src/ui/render.rs\n\
+new file mode 100644\n\
+index 000..333\n\
+--- /dev/null\n\
++++ b/src/ui/render.rs\n\
+@@ -0,0 +1,2 @@\n\
++one\n\
++two\n\
+diff --git a/README.md b/README.md\n\
+deleted file mode 100644\n\
+index 444..000\n\
+--- a/README.md\n\
++++ /dev/null\n\
+@@ -1 +0,0 @@\n\
+-gone\n";
+
+    #[test]
+    fn files_lists_each_section_with_counts_and_row_ranges() {
+        let doc = render(MULTI);
+        let files = files(&doc);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/main.rs", "src/ui/render.rs", "README.md"]);
+        // main.rs: one removed, one added.
+        assert_eq!((files[0].added, files[0].removed), (1, 1));
+        // render.rs: a new file, two added lines, none removed; its path comes
+        // from `+++ b/...` since `--- /dev/null` is the empty side.
+        assert_eq!((files[1].added, files[1].removed), (2, 0));
+        // README.md: a deletion, path from `--- a/...` since `+++` is /dev/null.
+        assert_eq!((files[2].added, files[2].removed), (0, 1));
+        // Ranges tile the document without gaps or overlap.
+        assert_eq!(files[0].start, 0);
+        assert_eq!(files[0].end, files[1].start);
+        assert_eq!(files[1].end, files[2].start);
+        assert_eq!(files[2].end, doc.rows.len());
+        // Each section really is that file's rows.
+        assert_eq!(doc.rows[files[1].start].kind, RowKind::FileHeader);
+    }
+
+    #[test]
+    fn files_is_empty_for_a_patch_without_file_headers() {
+        assert!(files(&render("")).is_empty());
+        assert!(files(&render("@@ -0,0 +1 @@\n+loose\n")).is_empty());
+    }
+
+    #[test]
+    fn tree_rows_group_directories_before_files_alphabetically() {
+        let doc = render(MULTI);
+        let files = files(&doc);
+        let tree = tree_rows(&files);
+        // Directories (src/) sort before top-level files (README.md); within src/
+        // the ui/ subdir sorts before the main.rs leaf.
+        let shape: Vec<(usize, &str)> = tree.iter().map(|r| (r.depth, r.name.as_str())).collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0, "src"),
+                (1, "ui"),
+                (2, "render.rs"),
+                (1, "main.rs"),
+                (0, "README.md"),
+            ]
+        );
+        // The directory nodes carry their full collapse-key path.
+        assert!(matches!(&tree[0].kind, TreeKind::Dir { path } if path == "src"));
+        assert!(matches!(&tree[1].kind, TreeKind::Dir { path } if path == "src/ui"));
+        // The leaves point back at their file index.
+        assert!(matches!(tree[2].kind, TreeKind::File { index: 1 }));
+        assert!(matches!(tree[3].kind, TreeKind::File { index: 0 }));
+        assert!(matches!(tree[4].kind, TreeKind::File { index: 2 }));
+    }
+
+    #[test]
+    fn tree_rows_keep_an_unresolved_path_as_a_flat_leaf() {
+        // A section whose path cannot be resolved (no +++/---, malformed header)
+        // still yields a selectable leaf rather than vanishing.
+        let doc = render("diff --git weird\nBinary files differ\n");
+        let files = files(&doc);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "");
+        let tree = tree_rows(&files);
+        assert_eq!(tree.len(), 1);
+        assert!(matches!(tree[0].kind, TreeKind::File { index: 0 }));
+    }
+
+    #[test]
+    fn split_rows_slice_offsets_indices_by_the_base() {
+        // Folding only the second file's section must reference rows by their
+        // position in the whole document, not within the slice.
+        let doc = render(MULTI);
+        let files = files(&doc);
+        let second = &files[1];
+        let slice = &doc.rows[second.start..second.end];
+        let folded = split_rows_slice(slice, second.start);
+        // Every referenced index lands inside the file's own range.
+        for row in &folded {
+            match *row {
+                SplitRow::Full(i) => assert!((second.start..second.end).contains(&i)),
+                SplitRow::Pair { left, right } => {
+                    for i in [left, right].into_iter().flatten() {
+                        assert!((second.start..second.end).contains(&i));
+                    }
+                }
+            }
+        }
+        // The whole-document helper is the base-0 case.
+        assert_eq!(split_rows(&doc), split_rows_slice(&doc.rows, 0));
     }
 }

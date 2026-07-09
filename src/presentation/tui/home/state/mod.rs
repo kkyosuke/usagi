@@ -42,8 +42,8 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, DiffView, EnvEditor, ModalSize, NoteEditor, Preview, RemoveEntry, RemoveModal,
-    RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, Preview,
+    RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel};
 
@@ -662,6 +662,15 @@ pub struct HomeState {
     /// already shown, and cancelling it returns to that overlay rather than
     /// closing it, so the two are independent.
     quit_confirm: bool,
+    /// A one-shot guard, armed the moment an embedded pane hands focus back to the
+    /// home chrome (选择 / 集中). A burst of `Ctrl-C` aimed at interrupting / closing
+    /// the agent can outlive the pane it was meant for: the agent exits, the pane
+    /// closes, and the tail of the burst lands on the home screen where `Ctrl-C`
+    /// means "quit usagi". While this is armed the next `Ctrl-C` is swallowed (with
+    /// a hint) instead of quitting; it clears on the first key either way, so a
+    /// second, deliberate press quits as usual. See the `Ctrl-C` handling in
+    /// [`event`](super::super::event).
+    pane_exit_ctrl_c_grace: bool,
     /// Whether the update-confirmation modal is open. Raised by clicking the
     /// sidebar mascot while it is announcing an available update (see
     /// [`update`](Self::update)); confirming it runs the self-update. Like
@@ -925,6 +934,7 @@ impl HomeState {
             pr_popup: None,
             overlay: Overlay::default(),
             quit_confirm: false,
+            pane_exit_ctrl_c_grace: false,
             update_confirm: false,
             pending_resume: None,
             resume_attach: false,
@@ -1887,12 +1897,8 @@ impl HomeState {
     pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
         match loaded {
             Ok((title, patch)) => {
-                self.overlay = Overlay::Diff(DiffView {
-                    title,
-                    doc: crate::presentation::tui::diff::render(&patch),
-                    scroll: 0,
-                    split: false,
-                });
+                let doc = crate::presentation::tui::diff::render(&patch);
+                self.overlay = Overlay::Diff(DiffView::new(title, doc));
             }
             Err(e) => self.log_error(format!("diff failed: {e}")),
         }
@@ -1912,35 +1918,81 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Scroll the diff view up one line (no-op when closed or at the top).
-    pub fn diff_scroll_up(&mut self) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            diff.scroll = diff.scroll.saturating_sub(1);
+    /// The open diff view for mutation, or `None` when it is not the open overlay.
+    fn diff_view_mut(&mut self) -> Option<&mut DiffView> {
+        match &mut self.overlay {
+            Overlay::Diff(diff) => Some(diff),
+            _ => None,
         }
     }
 
-    /// Scroll the diff view down one line, clamped so the last row stays in view
-    /// (no-op when closed). `visible` is the pane body height the view can show.
-    /// The row count is layout-aware: the split view folds paired add/del lines
-    /// into one visual row, so it clamps against fewer rows than the unified view.
+    /// Move the explorer cursor up one visible row (no-op when closed).
+    pub fn diff_move_up(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.move_up();
+        }
+    }
+
+    /// Move the explorer cursor down one visible row (no-op when closed).
+    pub fn diff_move_down(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.move_down();
+        }
+    }
+
+    /// Activate the explorer cursor row — fold/unfold a directory, or open a
+    /// file's diff (moving the focus to the diff pane). No-op when closed.
+    pub fn diff_activate(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.activate();
+        }
+    }
+
+    /// Collapse the explorer cursor's directory (the `←` key); no-op on a file or
+    /// when closed.
+    pub fn diff_collapse(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.collapse_current();
+        }
+    }
+
+    /// Return the keyboard to the explorer from the diff pane (no-op when closed).
+    pub fn diff_focus_tree(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.focus_tree();
+        }
+    }
+
+    /// Toggle the keyboard between the explorer and the diff pane (no-op closed).
+    pub fn diff_toggle_focus(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.toggle_focus();
+        }
+    }
+
+    /// Scroll the selected file's diff up one line (no-op when closed or at the
+    /// top).
+    pub fn diff_scroll_up(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.scroll_up();
+        }
+    }
+
+    /// Scroll the selected file's diff down one line, clamped so its last row stays
+    /// in view (no-op when closed). `visible` is the diff pane's body height. The
+    /// row count is layout-aware: the split view folds paired add/del lines into
+    /// one visual row, so it clamps against fewer rows than the unified view.
     pub fn diff_scroll_down(&mut self, visible: usize) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            let total = if diff.split {
-                crate::presentation::tui::diff::split_rows(&diff.doc).len()
-            } else {
-                diff.doc.rows.len()
-            };
-            let max = total.saturating_sub(visible);
-            diff.scroll = (diff.scroll + 1).min(max);
+        if let Some(diff) = self.diff_view_mut() {
+            diff.scroll_down(visible);
         }
     }
 
     /// Toggle the diff view between the unified and split (side-by-side) layouts
     /// (no-op when closed), resetting the scroll so the switch lands at the top.
     pub fn diff_toggle_split(&mut self) {
-        if let Overlay::Diff(diff) = &mut self.overlay {
-            diff.split = !diff.split;
-            diff.scroll = 0;
+        if let Some(diff) = self.diff_view_mut() {
+            diff.toggle_split();
         }
     }
 
@@ -2557,6 +2609,22 @@ impl HomeState {
     /// overlays whatever is already shown rather than replacing it.
     pub fn open_quit_confirm(&mut self) {
         self.quit_confirm = true;
+    }
+
+    /// Arm the one-shot [`pane_exit_ctrl_c_grace`](Self::pane_exit_ctrl_c_grace):
+    /// an embedded pane just handed focus back to the home chrome, so the next
+    /// `Ctrl-C` — likely the tail of a burst that was interrupting / closing the
+    /// agent — is absorbed instead of quitting usagi.
+    pub fn arm_pane_exit_grace(&mut self) {
+        self.pane_exit_ctrl_c_grace = true;
+    }
+
+    /// Consume the one-shot [`pane_exit_ctrl_c_grace`](Self::pane_exit_ctrl_c_grace),
+    /// returning whether it was armed and clearing it. Called once per keypress so
+    /// any key — the absorbed `Ctrl-C` or a deliberate one — disarms it, keeping the
+    /// grace to the single press right after leaving a pane.
+    pub fn take_pane_exit_grace(&mut self) -> bool {
+        std::mem::take(&mut self.pane_exit_ctrl_c_grace)
     }
 
     /// Dismiss the quit-confirmation modal without quitting, returning to
@@ -4126,19 +4194,34 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Confirm the removal modal: close it and return the checked session
-    /// entries (in display order) together with the `--force` flag, for the
-    /// event loop to remove each (see [`RemoveModal::confirm`]). Returns `None`
-    /// when nothing is checked, leaving the modal open; also `None` when it is
-    /// closed.
+    /// Confirm the removal modal: record the checked sessions as in-flight and
+    /// return them (in display order) with the `--force` flag, for the event loop
+    /// to dispatch each removal (see [`RemoveModal::begin_removal`]). The modal
+    /// stays open in a *removing* state — it closes only once every dispatched
+    /// removal has succeeded (via [`resolve_remove_modal`](Self::resolve_remove_modal)),
+    /// so a failure keeps it open with the error shown. Returns `None` (leaving
+    /// the modal as-is) when nothing is checked, removals are already running, or
+    /// it is closed.
     pub fn submit_remove_modal(&mut self) -> Option<(Vec<RemoveEntry>, bool)> {
-        let Overlay::Remove(modal) = &self.overlay else {
+        let Overlay::Remove(modal) = &mut self.overlay else {
             return None;
         };
-        // Nothing checked keeps the modal open; only a non-empty selection closes it.
-        let result = modal.confirm()?;
-        self.overlay = Overlay::None;
-        Some(result)
+        modal.begin_removal()
+    }
+
+    /// Reflect a finished background removal of `(root, name)` in the removal
+    /// modal, if it is still open behind the task: a success drops that session's
+    /// row (and closes the modal once every dispatched removal has succeeded),
+    /// while a failure keeps the modal open and shows `error`. A no-op when the
+    /// removal modal is not the open overlay or the finished session is not one it
+    /// dispatched (see [`RemoveModal::resolve`]).
+    pub fn resolve_remove_modal(&mut self, root: &Path, name: &str, ok: bool, error: &str) {
+        let Overlay::Remove(modal) = &mut self.overlay else {
+            return;
+        };
+        if modal.resolve(root, name, ok, error) {
+            self.overlay = Overlay::None;
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::domain::workspace_state::{
-    AheadBehind, BranchStatus, DiffStat, SessionRecord, WorkspaceState, WorktreeState,
+    AheadBehind, BranchStatus, DiffStat, PrLink, SessionRecord, WorkspaceState, WorktreeState,
 };
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::git;
@@ -139,11 +139,13 @@ pub fn load(cwd: &Path) -> Result<Option<WorkspaceState>> {
 fn fold_pr_links(session: &mut SessionRecord) {
     let stored = pr_link_store::get(&session.root);
     if let Some(first) = session.worktrees.first_mut() {
-        for pr in stored {
-            if !first.pr.iter().any(|p| p.url == pr.url) {
-                first.pr.push(pr);
-            }
-        }
+        // Rebuild through `aggregate` so the caller's own badges and the store's
+        // are de-duplicated by canonical PR identity (collapsing a `/files` deep
+        // link onto its plain PR) and titles are merged — never dropping a badge,
+        // since the store is a superset of every PR ever seen. An empty store
+        // leaves the same set, just de-duplicated.
+        let merged = std::mem::take(&mut first.pr).into_iter().chain(stored);
+        first.pr = PrLink::aggregate(merged);
     }
 }
 
@@ -551,14 +553,8 @@ mod tests {
 
         // The agent "printed" two PRs, harvested into the PR-link store out-of-band.
         let prs = vec![
-            PrLink {
-                number: 412,
-                url: "https://github.com/KKyosuke/usagi/pull/412".to_string(),
-            },
-            PrLink {
-                number: 98,
-                url: "https://github.com/KKyosuke/other/pull/98".to_string(),
-            },
+            PrLink::new(412, "https://github.com/KKyosuke/usagi/pull/412"),
+            PrLink::new(98, "https://github.com/KKyosuke/other/pull/98"),
         ];
         pr_link_store::add(&wt_path, &prs).unwrap();
 
@@ -703,14 +699,8 @@ mod tests {
         let root = dir.path().join(".usagi/sessions/wip");
         let second = dir.path().join(".usagi/sessions/wip-lib");
         // One PR already persisted in state.json, one only in the store.
-        let known = PrLink {
-            number: 7,
-            url: "https://github.com/KKyosuke/usagi/pull/7".to_string(),
-        };
-        let fresh = PrLink {
-            number: 8,
-            url: "https://github.com/KKyosuke/usagi/pull/8".to_string(),
-        };
+        let known = PrLink::new(7, "https://github.com/KKyosuke/usagi/pull/7");
+        let fresh = PrLink::new(8, "https://github.com/KKyosuke/usagi/pull/8");
         let wt = |path: &Path, pr: Vec<PrLink>| WorktreeState {
             branch: Some("wip".to_string()),
             path: path.to_path_buf(),

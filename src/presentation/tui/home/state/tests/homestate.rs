@@ -1139,10 +1139,7 @@ fn set_pr_links_updates_the_sidebar_row_live() {
     // `state()` records two sessions: `main` at /repo/main and `feature` at
     // /repo/feature.
     let mut state = state();
-    let pr = |n: u32| PrLink {
-        number: n,
-        url: format!("https://github.com/o/r/pull/{n}"),
-    };
+    let pr = |n: u32| PrLink::new(n, format!("https://github.com/o/r/pull/{n}"));
 
     // A new PR for an existing row updates its in-memory badge and reports the
     // change (so the attached pane knows it has something fresh to show).
@@ -1175,10 +1172,7 @@ fn refresh_sessions_refolds_pr_links_so_a_stale_sync_cannot_drop_live_badges() {
 
     let session_root = tempfile::tempdir().unwrap();
     let root = session_root.path().to_path_buf();
-    let pr = |n: u32| PrLink {
-        number: n,
-        url: format!("https://github.com/o/r/pull/{n}"),
-    };
+    let pr = |n: u32| PrLink::new(n, format!("https://github.com/o/r/pull/{n}"));
 
     let mut session = session_record("pr-session", 1);
     session.root = root.clone();

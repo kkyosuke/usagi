@@ -649,10 +649,7 @@ fn render_frame_keeps_the_pane_divider_straight_across_commit_stat_rows() {
         ahead: 1,
         behind: 7,
     });
-    behind.pr = vec![PrLink {
-        number: 1,
-        url: "https://github.com/o/r/pull/1".into(),
-    }];
+    behind.pr = vec![PrLink::new(1, "https://github.com/o/r/pull/1")];
     let state = state_with(vec![
         worktree(Some("main"), true, BranchStatus::Pushed),
         behind,

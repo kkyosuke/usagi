@@ -103,7 +103,7 @@
           "status": "local",
           "diff": { "added": 124, "removed": 18 },
           "ahead_behind": { "ahead": 2, "behind": 1 },
-          "pr": [{ "number": 412, "url": "https://github.com/KKyosuke/usagi/pull/412" }],
+          "pr": [{ "number": 412, "url": "https://github.com/KKyosuke/usagi/pull/412", "title": "Add PR titles" }],
           "updated_at": "2026-06-13T05:01:18.659149Z"
         }
       ],
@@ -191,7 +191,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 | `status` | enum | ブランチのライフサイクル状態（下記） |
 | `diff` | object? | 既定ブランチとの累積差分の行数 `{ "added": N, "removed": M }`。サイドバーの `+N -M` バッジの元。差分が無い（手つかず）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
 | `ahead_behind` | object? | 既定ブランチとのコミット単位の差 `{ "ahead": N, "behind": M }`（`ahead`＝ブランチ側に多いコミット数・`behind`＝既定ブランチ側に多いコミット数）。サイドバーの `↑N ↓M` マーカーの元。差が無い（ahead も behind も 0）・既定ブランチ自身・detached HEAD・読めなかったときは省略（`null` 相当）。古いファイルにキーが無くても読める |
-| `pr` | array | このセッションに紐づく Pull Request の配列 `[{ "number": N, "url": "..." }, …]`。サイドバーの `#N` バッジ（[design/home/03-sidebar.md](../design/home/03-sidebar.md#pr-バッジ)）の元で、バッジをクリックすると番号一覧のポップアップが開き、その中の `#<番号>` をクリックすると該当 `url` をブラウザで開く。セッションが複数リポジトリに跨り複数 PR を持つ場合は**全部**並ぶ。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、worktree キーの保存先（`pr-links/`、URL 単位で重複排除しつつ蓄積）経由でここへ畳み込む。一度きりの URL でもバッジが再起動後も残るよう永続化する。未観測なら空配列で省略される。古いファイルにキーが無くても読める |
+| `pr` | array | このセッションに紐づく Pull Request の配列 `[{ "number": N, "url": "...", "title": "..." }, …]`。サイドバーの `#N` バッジ（[design/home/03-sidebar.md](../design/home/03-sidebar.md#pr-バッジ)）の元で、バッジをクリックすると `#<番号>  <タイトル>` を 1 行 1 件で並べたポップアップが開き、行をクリックすると該当 `url` をブラウザで開く。セッションが複数リポジトリに跨り複数 PR を持つ場合は**全部**並ぶ。上の git 由来フィールドと違い**再同期で git から読み直さない**——没入中にエージェントが出力した PR の URL（`/pull/<N>`）をターミナル出力から拾い、`.../pull/<N>` に正規化した URL で重複排除しつつ worktree キーの保存先（`pr-links/`）経由でここへ畳み込む。`title` は `gh pr view` で解決したタイトルのキャッシュで、未解決なら省略される（`None`）。一度きりの URL でもバッジ・タイトルが再起動後も残るよう永続化する。未観測なら空配列で省略される。古いファイルにキー（`pr` / 各要素の `title`）が無くても読める |
 | `updated_at` | RFC3339(UTC) | この worktree の状態を更新した日時 |
 
 ## `status`: ブランチのライフサイクル状態

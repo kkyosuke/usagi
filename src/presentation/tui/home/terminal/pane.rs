@@ -59,16 +59,18 @@ use crate::presentation::tui::io::clipboard;
 use crate::presentation::tui::io::screen::diff_frame_with_columns;
 
 use super::super::pane_input::{
-    apply_scroll, classify, encode_key, encode_mouse_wheel, encode_paste, is_copy, is_double_click,
-    is_press, key_scroll_lines, pane_cell, pointer_shape, prefix_alive, wheel_arrows, wheel_delta,
-    KeyAction, PointerShape, Reserved, DOUBLE_CLICK,
+    apply_scroll, classify, classify_menu_key, classify_rename_key, encode_key, encode_mouse_wheel,
+    encode_paste, is_copy, is_double_click, is_press, key_scroll_lines, pane_cell, pointer_shape,
+    prefix_alive, wheel_arrows, wheel_delta, KeyAction, MenuVerdict, PointerShape, RenameEdit,
+    RenameVerdict, Reserved, DOUBLE_CLICK,
 };
 use super::super::sessions_refresh::SessionsRefreshHandle;
-use super::super::state::{HomeState, SurfaceOwner};
+use super::super::state::{HomeState, SurfaceOwner, TabMenuItem};
 use super::super::ui;
 use super::link;
 use super::pool::MonitorHandle;
 use super::selection::{Cell, Selection};
+use super::tabs::TabSwap;
 use super::view::TerminalView;
 
 /// Why the embedded terminal loop handed control back, so the pool-driven loop
@@ -76,7 +78,7 @@ use super::view::TerminalView;
 /// switched tabs, added / closed a tab, or the shell closed. Tab switching and
 /// agent-tab / close management are handled in place without leaving 没入 — the
 /// same actions are also reachable from 選択 (Overview) via `Detach`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneStep {
     /// `Ctrl-O`: zoom out one level (→ 選択), leaving every pane alive in the pool.
     Detach,
@@ -108,6 +110,17 @@ pub enum PaneStep {
     /// The caller drives the next surviving tab, or drops back to 集中 when this
     /// was the last one (the same handling as a shell that exits on its own).
     CloseTab,
+    /// A right-click tab menu's `Move left` / `Move right`: reorder the (0-based)
+    /// `tab` and keep the moved pane active, without leaving 没入. The caller
+    /// mutates the pool and re-drives (like [`MoveTab`](Self::MoveTab)).
+    MenuMoveTab { tab: usize, swap: TabSwap },
+    /// A right-click tab menu's `Rename`: relabel the (0-based) `tab` to `label`
+    /// (empty resets to the generated default), without leaving 没入.
+    MenuRenameTab { tab: usize, label: String },
+    /// A right-click tab menu's `Close`: close the (0-based) `tab`, killing its
+    /// shell. The caller drives the surviving pane, or drops to 集中 when it was
+    /// the last one (the same handling as [`CloseTab`](Self::CloseTab)).
+    MenuCloseTab { tab: usize },
     /// `Ctrl-^`: leave 没入 to jump to the previously focused session (vim's
     /// `Ctrl-^` / tmux's `last-window`), attaching it when live. The caller
     /// re-roots the pane on that session.
@@ -307,6 +320,13 @@ fn drive(
     // The pinned PR popup last drawn, so opening / closing it (or moving it to
     // another session) repaints the floating box over the live pane just once.
     let mut last_pr_popup: Option<usize> = None;
+    // The tab context menu / inline rename last drawn (its cursor row, and the
+    // rename buffer + caret), so opening / closing the overlay, moving its cursor,
+    // or typing in the rename field repaints the box over the live pane — the same
+    // one-shot repaint the PR popup gets. `render_frame` draws the overlay itself
+    // (shared with the home screens); this only decides when to repaint.
+    let mut last_menu_cursor: Option<usize> = None;
+    let mut last_rename: Option<(String, usize)> = None;
     let mut drawn_gen = pty.generation();
     // When the last repaint landed, so a flood of output-only frames coalesces to
     // at most one per [`MIN_FRAME`]; `None` until the first paint, which never
@@ -441,6 +461,15 @@ fn drive(
         if last_pr_popup != state.pr_popup() {
             interactive = true;
         }
+        // The tab context menu / inline rename opened, closed, moved its cursor, or
+        // took a keystroke: repaint so the overlay tracks it over the live pane.
+        let menu_cursor = state.tab_menu().map(|m| m.cursor());
+        let rename_sig = state
+            .tab_rename()
+            .map(|r| (r.value().to_string(), r.cursor()));
+        if last_menu_cursor != menu_cursor || last_rename != rename_sig {
+            interactive = true;
+        }
         let session_skeleton = if state.pending_sessions().is_empty() {
             last_session_skeleton = None;
             None
@@ -554,9 +583,15 @@ fn drive(
             // The cursor belongs to the live screen, so don't park it while the
             // user is viewing scrolled-back history. When live, park it on the
             // program's cursor cell even if the program hid it (so the IME's
-            // preedit lands there) and mirror the program's show/hide.
-            let cursor = if scrollback == 0 { view.cursor() } else { None };
-            let cursor_visible = view.cursor_visible();
+            // preedit lands there) and mirror the program's show/hide. While the
+            // tab context menu / rename overlay is up it draws its own caret and
+            // sits over the pane, so the shell cursor is hidden — otherwise it
+            // would blink through the box.
+            let overlay_open = state.tab_menu().is_some() || state.tab_rename().is_some();
+            let cursor = (scrollback == 0 && !overlay_open)
+                .then(|| view.cursor())
+                .flatten();
+            let cursor_visible = view.cursor_visible() && !overlay_open;
             // Re-assert the shape only when it moved off what we last emitted, so
             // a stream of output frames doesn't keep re-poking the cursor. The
             // first paint (`last_shape == None`) always emits, claiming this
@@ -584,6 +619,8 @@ fn drive(
             last_selection = selection;
             last_hover = hover;
             last_pr_popup = state.pr_popup();
+            last_menu_cursor = menu_cursor;
+            last_rename = rename_sig;
             last_prefix_pending = Some(prefix_pending);
             last_session_skeleton = session_skeleton;
             last_paint = Some(now);
@@ -707,7 +744,14 @@ fn wait(
 /// ([`PaneStep::ToSession`], tracked across calls via `last_click`), or opens
 /// inline session creation when that row is `+ new session`; a left click on a
 /// tab chip switches to that tab ([`PaneStep::ToTab`]; see
-/// [`ui::attached_tab_at`]). Button-less motion updates
+/// [`ui::attached_tab_at`]). A *right* click on a tab chip opens the tab context
+/// menu ([`open_tab_menu_at`]) — the same `Menu` overlay 選択 / 集中 show, drawn
+/// over the live pane by `render_frame` — and while it (or the inline rename it
+/// spawns) is up the keyboard drives the overlay: `↑↓`/`j`/`k` move, `Enter` runs
+/// the item, `Esc` (or a click) dismisses. `Move` / `Close` / a confirmed
+/// `Rename` hand a step back ([`PaneStep::MenuMoveTab`] / [`PaneStep::MenuCloseTab`]
+/// / [`PaneStep::MenuRenameTab`]) to mutate the pool and re-drive, staying in 没入.
+/// Button-less motion updates
 /// `hover` so the link under the pointer lights up. The navigation keys are
 /// classified by the active `KeyScheme` (see
 /// [`classify`](super::super::pane_input::classify)) — the prefix scheme reserves
@@ -722,6 +766,28 @@ fn wait(
 /// sidebar stays in 没入. `Esc` and
 /// `Ctrl-W` always reach the shell; tabs are closed from 選択 (`x`). Other events
 /// are ignored so the next redraw picks up any new size.
+/// Open the tab context menu for the chip under a pointer event at the 0-based
+/// screen (`col`, `row`) while 没入, if the event lands on one. Returns `Some(())`
+/// when a chip was hit (the menu opened at that spot), else `None`. The menu is
+/// the same `TabMenu` overlay 選択 / 集中 raise; `render_frame` draws it over the
+/// live pane. Mirrors the home event loop's right-click handling
+/// ([`ui::attached_tab_hit`] is the shared hit test).
+fn open_tab_menu_at(
+    state: &mut HomeState,
+    col: u16,
+    row: u16,
+    geo: ui::TerminalGeometry,
+) -> Option<()> {
+    let tab = ui::attached_tab_hit(state, col, row, geo)?;
+    // The attached session's own dir / tab label: the menu stores them for the
+    // home path, but the 没入 path acts on the tab index alone (the caller already
+    // holds the driving dir), so a best-effort identity here is harmless.
+    let dir = state.list().active().map(|wt| wt.path.clone())?;
+    let label = state.terminal_tabs()?.labels.get(tab)?.clone();
+    state.open_tab_menu(dir, tab, label, col, row);
+    Some(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pump_input(
     term: &Term,
@@ -744,6 +810,83 @@ fn pump_input(
         match event::read()? {
             Event::Key(key) => {
                 if !is_press(key) {
+                    continue;
+                }
+                // The tab context menu / inline rename (opened by a right-click on
+                // a tab chip) owns the keyboard while it is up: its keys drive the
+                // overlay instead of reaching the shell. `Move` / `Close` / a
+                // confirmed `Rename` hand a step back to the caller to mutate the
+                // pool and re-drive, staying in 没入. `render_frame` draws the box;
+                // this only routes the keys (classified purely in `pane_input`).
+                if state.tab_rename().is_some() {
+                    match classify_rename_key(&key) {
+                        RenameVerdict::Confirm => {
+                            if let Some((_, tab, label)) = state.confirm_tab_rename() {
+                                return Ok(Some(PaneStep::MenuRenameTab { tab, label }));
+                            }
+                        }
+                        RenameVerdict::Cancel => state.cancel_tab_rename(),
+                        RenameVerdict::Edit(edit) => {
+                            if let Some(input) = state.tab_rename_mut() {
+                                match edit {
+                                    RenameEdit::Backspace => input.backspace(),
+                                    RenameEdit::DeleteForward => input.delete_forward(),
+                                    RenameEdit::Left => input.move_left(),
+                                    RenameEdit::Right => input.move_right(),
+                                    RenameEdit::Home => input.move_home(),
+                                    RenameEdit::End => input.move_end(),
+                                    RenameEdit::Insert(c) => input.push_char(c),
+                                }
+                            }
+                        }
+                        RenameVerdict::Ignore => {}
+                    }
+                    continue;
+                }
+                if state.tab_menu().is_some() {
+                    match classify_menu_key(&key) {
+                        MenuVerdict::Up => {
+                            if let Some(menu) = state.tab_menu_mut() {
+                                menu.move_up();
+                            }
+                        }
+                        MenuVerdict::Down => {
+                            if let Some(menu) = state.tab_menu_mut() {
+                                menu.move_down();
+                            }
+                        }
+                        MenuVerdict::Cancel => state.close_tab_menu(),
+                        MenuVerdict::Confirm => {
+                            let (tab, item) = state
+                                .tab_menu()
+                                .map(|m| (m.tab(), m.item()))
+                                .expect("tab menu open while confirming");
+                            match item {
+                                TabMenuItem::MoveLeft => {
+                                    state.close_tab_menu();
+                                    return Ok(Some(PaneStep::MenuMoveTab {
+                                        tab,
+                                        swap: TabSwap::Left,
+                                    }));
+                                }
+                                TabMenuItem::MoveRight => {
+                                    state.close_tab_menu();
+                                    return Ok(Some(PaneStep::MenuMoveTab {
+                                        tab,
+                                        swap: TabSwap::Right,
+                                    }));
+                                }
+                                TabMenuItem::Rename => {
+                                    state.begin_tab_rename_from_menu();
+                                }
+                                TabMenuItem::Close => {
+                                    state.close_tab_menu();
+                                    return Ok(Some(PaneStep::MenuCloseTab { tab }));
+                                }
+                            }
+                        }
+                        MenuVerdict::Ignore => {}
+                    }
                     continue;
                 }
                 *drag_tab = None;
@@ -862,6 +1005,22 @@ fn pump_input(
                     mouse.row,
                     last_pointer,
                 )?;
+                // While the tab context menu / rename overlay is up it owns pointer
+                // input: a right-click on another chip relocates the menu, and any
+                // other press dismisses the overlay — nothing reaches the shell
+                // selection / tab logic below. The keyboard drives the rest.
+                if state.tab_menu().is_some() || state.tab_rename().is_some() {
+                    if let MouseEventKind::Down(button) = mouse.kind {
+                        let relocated = button == MouseButton::Right
+                            && state.tab_rename().is_none()
+                            && open_tab_menu_at(state, mouse.column, mouse.row, geo).is_some();
+                        if !relocated {
+                            state.close_tab_menu();
+                            state.cancel_tab_rename();
+                        }
+                    }
+                    continue;
+                }
                 match mouse.kind {
                     // A left press on a tab chip arms a tab click/drag: releasing on
                     // the same chip switches to it, while releasing on another chip
@@ -883,6 +1042,13 @@ fn pump_input(
                                     pane_cell(mouse.column, mouse.row, geo).map(Selection::new);
                             }
                         }
+                    }
+                    // A right press on a tab chip opens the tab context menu over
+                    // the live pane — the same overlay 選択 / 集中 show — so tabs are
+                    // reorderable / renamable / closable without leaving 没入. Off a
+                    // chip it does nothing (there is no menu open to dismiss here).
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        open_tab_menu_at(state, mouse.column, mouse.row, geo);
                     }
                     // Dragging the left button stretches the terminal selection
                     // unless a tab drag is armed.

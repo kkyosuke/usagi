@@ -261,7 +261,7 @@ pub fn pr_links(screen: &vt100::Screen) -> Vec<PrLink> {
 pub fn pr_links_from(urls: &[String]) -> Vec<PrLink> {
     let mut out: Vec<PrLink> = Vec::new();
     for pr in urls.iter().filter_map(|u| parse_pr_url(u)) {
-        if !out.iter().any(|p| p.url == pr.url) {
+        if !out.iter().any(|p| p.pr_key() == pr.pr_key()) {
             out.push(pr);
         }
     }
@@ -273,9 +273,13 @@ pub fn pr_links_from(urls: &[String]) -> Vec<PrLink> {
 /// or `None` otherwise. The number is the `<N>` path segment; a path with no
 /// owner/repo before `pull`, or a non-numeric / overflowing `<N>`, is rejected.
 /// Trailing path segments (`/pull/<N>/files`) are tolerated — only the segment
-/// right after `pull` is read.
+/// right after `pull` is read, and the stored URL is **canonicalised** to
+/// `<scheme>://<host>/<owner>/<repo>/pull/<N>` (dropping any `/files`, query, or
+/// fragment) so the plain and `/files` forms of the same PR de-duplicate to one
+/// badge and a click always opens the PR's conversation tab.
 pub fn parse_pr_url(url: &str) -> Option<PrLink> {
-    let rest = SCHEMES.iter().find_map(|s| url.strip_prefix(s))?;
+    let scheme = SCHEMES.iter().find(|s| url.starts_with(**s))?;
+    let rest = &url[scheme.len()..];
     let segments: Vec<&str> = rest.split('/').collect();
     // host / owner / repo / "pull" / <N>: `pull` sits at index 3 at the earliest,
     // so there is always an owner and repo (and a host) ahead of it.
@@ -287,10 +291,10 @@ pub fn parse_pr_url(url: &str) -> Option<PrLink> {
     if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some(PrLink {
-        number: number.parse().ok()?,
-        url: url.to_string(),
-    })
+    Some(PrLink::new(
+        number.parse().ok()?,
+        format!("{scheme}{}", segments[..=pull + 1].join("/")),
+    ))
 }
 
 /// Every `http(s)` URL on `screen`, as text, in reading order (top-to-bottom,
@@ -714,13 +718,13 @@ mod tests {
         let pr = parse_pr_url("https://github.com/KKyosuke/usagi/pull/412").unwrap();
         assert_eq!(pr.number, 412);
         assert_eq!(pr.url, "https://github.com/KKyosuke/usagi/pull/412");
-        // A trailing path segment after the number is tolerated.
-        assert_eq!(
-            parse_pr_url("https://github.com/o/r/pull/7/files")
-                .unwrap()
-                .number,
-            7,
-        );
+        assert_eq!(pr.title, None);
+        // A trailing path segment after the number is tolerated, and the stored
+        // URL is canonicalised back to the bare `/pull/<N>` form so it de-dups
+        // with the plain URL and opens the conversation tab.
+        let files = parse_pr_url("https://github.com/o/r/pull/7/files").unwrap();
+        assert_eq!(files.number, 7);
+        assert_eq!(files.url, "https://github.com/o/r/pull/7");
         // GitHub Enterprise (any host) works the same.
         assert_eq!(
             parse_pr_url("https://ghe.corp.example/team/app/pull/99")
@@ -770,6 +774,20 @@ mod tests {
         );
         let numbers: Vec<u32> = pr_links(parser.screen()).iter().map(|p| p.number).collect();
         assert_eq!(numbers, vec![1, 2]);
+    }
+
+    #[test]
+    fn pr_links_folds_the_plain_and_files_urls_of_one_pr() {
+        // The agent printed both the PR URL and its `/files` deep link: they are
+        // the same PR and collapse to a single canonical badge, not two.
+        let parser = parsed(
+            2,
+            60,
+            b"https://github.com/o/r/pull/5\r\nhttps://github.com/o/r/pull/5/files",
+        );
+        let prs = pr_links(parser.screen());
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].url, "https://github.com/o/r/pull/5");
     }
 
     #[test]
