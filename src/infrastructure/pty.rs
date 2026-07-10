@@ -157,6 +157,7 @@ pub struct PtySession {
     /// which reads the parser directly and needs no byte-level replay.
     output_backlog: Option<Arc<Mutex<OutputBacklog>>>,
     child: Box<dyn Child + Send + Sync>,
+    exit_status: Option<ExitStatus>,
     /// The worktree this shell runs in and whether it was launched into an agent
     /// CLI — both only for the line [`Drop`] records when the shell exits
     /// abnormally on its own (see [`pty_exit::exit_log_message`]).
@@ -183,9 +184,10 @@ const READER_STACK_BYTES: usize = 256 * 1024;
 fn configure_initial_command(cmd: &mut CommandBuilder, _shell: &str, command: &str) {
     cmd.arg("-i");
     cmd.arg("-c");
-    // `command` is already shell-quoted; run it and let the `-c` shell exit when
-    // it finishes (no trailing `exec`), so the agent exiting closes the pane.
-    cmd.arg(command);
+    // `command` is already shell-quoted; run it and explicitly exit with the
+    // same status so shells that stay interactive after `-i -c` still close the
+    // pane when the agent exits.
+    cmd.arg(format!("{command}\nexit $?"));
 }
 
 /// Windows fallback: `cmd.exe` / PowerShell take `/c` and run the command, then
@@ -416,6 +418,7 @@ impl PtySession {
             cursor_shape,
             output_backlog,
             child,
+            exit_status: None,
             // A launch command means this pane runs an agent CLI; its absence a
             // plain terminal. Recorded for the exit log line built in Drop.
             worktree: dir.to_path_buf(),
@@ -588,6 +591,28 @@ impl PtySession {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// Poll the child directly and return whether it has exited.
+    ///
+    /// The reader thread normally clears [`alive`](Self::alive) when it observes
+    /// EOF from the PTY, but EOF is not the only reliable child-death signal: a
+    /// shell can be reaped before the reader gets scheduled to observe the
+    /// closed slave side. Daemon-owned terminals need a timely `Exited` event for
+    /// attached clients, so they call this in their poll loop.
+    pub fn poll_exit(&mut self) -> bool {
+        if !self.is_alive() {
+            return true;
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.exit_status = Some(status);
+                self.alive.store(false, Ordering::SeqCst);
+                self.generation.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// A counter bumped each time the shell's output is parsed (and once more
     /// when it exits). The render loop compares it against the value at its last
     /// draw to decide whether the screen needs redrawing.
@@ -665,7 +690,11 @@ impl Drop for PtySession {
             // reaped status is discarded rather than logged.
             self.terminate();
             let _ = self.reap_within_timeout(deadline);
-        } else if let Some(status) = self.reap_within_timeout(deadline) {
+        } else if let Some(status) = self
+            .exit_status
+            .take()
+            .or_else(|| self.reap_within_timeout(deadline))
+        {
             // The shell exited on its own (the reader hit EOF): reap it and, if it
             // ended abnormally, record it — an agent CLI crashing or exiting
             // non-zero is otherwise indistinguishable from the user typing `exit`.
