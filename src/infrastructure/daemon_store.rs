@@ -104,9 +104,11 @@ mod tests {
 
     #[test]
     fn default_dir_is_daemon_under_the_data_dir() {
-        // Derived purely from the resolved data dir (tested in `storage`), so the
-        // check needs no environment mutation — it just asserts the subdir hangs
-        // off whatever data dir resolves to.
+        // `default_dir` just hangs the subdir off whatever data dir resolves to,
+        // but that read consults `$USAGI_HOME`. Hold the env guard so a parallel
+        // test mutating it cannot shift the answer between the two `data_dir`
+        // reads below and make them disagree.
+        let _guard = crate::test_support::process_env_guard();
         let expected = storage::data_dir().unwrap().join(DAEMON_SUBDIR);
         assert_eq!(default_dir().unwrap(), expected);
     }
