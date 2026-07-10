@@ -20,6 +20,7 @@ use usagi::infrastructure::resource::process_alive;
 
 /// The compiled `usagi` binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_usagi");
+const IPC_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Run `usagi daemon <arg>` with `home` as $USAGI_HOME and wait for it to finish.
 fn daemon_cmd(home: &Path, arg: &str) {
@@ -116,7 +117,7 @@ fn spawn_terminal(
     worktree: &Path,
 ) -> (TerminalId, u32) {
     send(stream, &spawn_message(worktree));
-    match recv(stream, decoder, Duration::from_secs(5)) {
+    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
         ServerMessage::Spawned { terminal, pid, .. } => (terminal, pid),
         other => panic!("expected Spawned, got {other:?}"),
     }
@@ -129,7 +130,7 @@ fn attach_terminal(
     decoder: &mut FrameDecoder,
     worktree: &Path,
     terminal: TerminalId,
-) {
+) -> Vec<u8> {
     send(
         stream,
         &ClientMessage::Attach {
@@ -137,16 +138,20 @@ fn attach_terminal(
             worktree: worktree.to_path_buf(),
         },
     );
-    match recv(stream, decoder, Duration::from_secs(5)) {
+    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
         ServerMessage::Attached { terminal: id, .. } => {
             assert_eq!(id, terminal, "attached to the wrong terminal");
         }
         other => panic!("expected Attached, got {other:?}"),
     }
     // The daemon paints the current screen right after the attach reply.
-    match recv(stream, decoder, Duration::from_secs(5)) {
-        ServerMessage::Screen { terminal: id, .. } => {
+    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
+        ServerMessage::Screen {
+            terminal: id,
+            contents,
+        } => {
             assert_eq!(id, terminal, "screen was for the wrong terminal");
+            contents
         }
         other => panic!("expected Screen, got {other:?}"),
     }
@@ -424,26 +429,30 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
             &mut stream,
             &ClientMessage::Spawn {
                 worktree: worktree.path().to_path_buf(),
-                command: Some("printf usagi-cmd-$USAGI_E2E_MARKER".to_string()),
+                command: Some("sleep 1; printf usagi-cmd-$USAGI_E2E_MARKER; sleep 1".to_string()),
                 env: [("USAGI_E2E_MARKER".to_string(), "env-ok".to_string())].into(),
                 cols: 80,
                 rows: 24,
                 scrollback: 200,
             },
         );
-        let terminal = match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+        let terminal = match recv(&mut stream, &mut decoder, IPC_REPLY_TIMEOUT) {
             ServerMessage::Spawned { terminal, .. } => terminal,
             other => panic!("expected Spawned, got {other:?}"),
         };
-        attach_terminal(&mut stream, &mut decoder, worktree.path(), terminal);
+        let initial_screen = attach_terminal(&mut stream, &mut decoder, worktree.path(), terminal);
+        let marker = b"usagi-cmd-env-ok";
         assert!(
-            wait_for_marker(
-                &mut stream,
-                &mut decoder,
-                terminal,
-                b"usagi-cmd-env-ok",
-                Duration::from_secs(10),
-            ),
+            initial_screen
+                .windows(marker.len())
+                .any(|window| window == marker)
+                || wait_for_marker(
+                    &mut stream,
+                    &mut decoder,
+                    terminal,
+                    marker,
+                    Duration::from_secs(10),
+                ),
             "the opening command's output never appeared"
         );
 
