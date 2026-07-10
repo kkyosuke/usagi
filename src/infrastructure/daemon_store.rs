@@ -71,8 +71,13 @@ pub fn request_stop(dir: &Path) -> Result<()> {
 }
 
 /// Whether a stop has been requested, clearing the marker as it reports `true`
-/// so the same request is consumed once. Called by the daemon's poll loop.
+/// so the same request is consumed once. A missing daemon directory also means
+/// stop: its owner has removed the data directory, so the daemon must not
+/// recreate it or remain alive as an orphan. Called by the daemon's poll loop.
 pub fn take_stop_request(dir: &Path) -> Result<bool> {
+    if !dir.exists() {
+        return Ok(true);
+    }
     let path = dir.join(STOP_FILE);
     if path.exists() {
         remove_if_present(&path)?;
@@ -164,6 +169,12 @@ mod tests {
         let dir = tmp.path().join("not-yet-there");
         request_stop(&dir).unwrap();
         assert!(take_stop_request(&dir).unwrap());
+    }
+
+    #[test]
+    fn missing_daemon_dir_is_a_stop_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(take_stop_request(&tmp.path().join("removed-daemon")).unwrap());
     }
 
     #[test]
