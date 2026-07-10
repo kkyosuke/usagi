@@ -58,11 +58,12 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Vendored, minimally-patched `vt100`: upstream only feeds scrollback when no
-# DECSTBM region is active, so an inline TUI with a top-anchored transcript leaves
-# no history. The patch feeds top-anchored regions like xterm and exposes read-only
-# retained-row/high-water APIs used to incrementally harvest transient PR URLs.
-# Alternate-screen history is retained for detection without becoming user-visible
-# scrollback. See `third_party/vt100/src/{grid,screen}.rs`.
+# Vendored, minimally-patched `vt100`: upstream only feeds the scrollback when no
+# DECSTBM scroll region is active, so an inline full-screen TUI that reserves its
+# composer with a top-anchored region (`ESC[1;Nr`) and scrolls its transcript
+# inside it — the Codex CLI does exactly this — leaves the embedded pane with an
+# empty scrollback and nothing to wheel back through. The patch feeds the
+# scrollback whenever the top margin is the first row, matching xterm. See
+# `third_party/vt100/src/grid.rs` (`scroll_up`).
 [patch.crates-io]
 vt100 = { path = "third_party/vt100" }
