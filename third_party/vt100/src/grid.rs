@@ -598,7 +598,7 @@ impl Grid {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
-            let removed = self.rows.remove(usize::from(self.scroll_top));
+            let mut removed = self.rows.remove(usize::from(self.scroll_top));
             // usagi patch: feed the scrollback whenever the top margin is the
             // first row, matching xterm. Inline full-screen TUIs (e.g. the Codex
             // CLI) reserve their composer with a top-anchored DECSTBM region
@@ -607,6 +607,7 @@ impl Grid {
             // push, so the embedded pane had nothing to scroll back through.
             if self.scrollback_len > 0 && self.scroll_top == 0 {
                 self.scrollback_high_water = self.scrollback_high_water.saturating_add(1);
+                removed.compact();
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();

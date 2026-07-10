@@ -1,13 +1,13 @@
 ---
 number: 174
 title: perf(tui): vt100 scrollback の実確保を削減する（行の末尾空白トリム・非表示セッションの縮退）
-status: todo
+status: in-progress
 priority: low
 labels: [perf, tui]
 dependson: []
 related: [159, 172]
 created_at: 2026-07-10T20:47:45.559154+00:00
-updated_at: 2026-07-10T20:47:45.559154+00:00
+updated_at: 2026-07-10T21:20:20.091763+00:00
 ---
 
 ## 背景（メモリ調査 2026-07-11）

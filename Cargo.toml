@@ -63,7 +63,10 @@ strip = true
 # composer with a top-anchored region (`ESC[1;Nr`) and scrolls its transcript
 # inside it — the Codex CLI does exactly this — leaves the embedded pane with an
 # empty scrollback and nothing to wheel back through. The patch feeds the
-# scrollback whenever the top margin is the first row, matching xterm. See
-# `third_party/vt100/src/grid.rs` (`scroll_up`).
+# scrollback whenever the top margin is the first row, matching xterm. It also
+# trims trailing default cells from immutable scrollback rows to avoid retaining
+# a full-width allocation for mostly-short terminal output. See
+# `third_party/vt100/src/grid.rs` (`scroll_up`) and
+# `third_party/vt100/src/row.rs` (`Row::compact`).
 [patch.crates-io]
 vt100 = { path = "third_party/vt100" }

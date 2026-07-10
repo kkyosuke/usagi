@@ -3,6 +3,7 @@ use crate::term::BufWrite as _;
 #[derive(Clone, Debug)]
 pub struct Row {
     cells: Vec<crate::Cell>,
+    cols: u16,
     wrapped: bool,
 }
 
@@ -10,16 +11,18 @@ impl Row {
     pub fn new(cols: u16) -> Self {
         Self {
             cells: vec![crate::Cell::new(); usize::from(cols)],
+            cols,
             wrapped: false,
         }
     }
 
+    fn empty_cell() -> &'static crate::Cell {
+        static EMPTY_CELL: std::sync::OnceLock<crate::Cell> = std::sync::OnceLock::new();
+        EMPTY_CELL.get_or_init(crate::Cell::new)
+    }
+
     fn cols(&self) -> u16 {
-        self.cells
-            .len()
-            .try_into()
-            // we limit the number of cols to a u16 (see Size)
-            .unwrap()
+        self.cols
     }
 
     pub fn clear(&mut self, attrs: crate::attrs::Attrs) {
@@ -30,11 +33,21 @@ impl Row {
     }
 
     fn cells(&self) -> impl Iterator<Item = &crate::Cell> {
-        self.cells.iter()
+        self.cells
+            .iter()
+            .chain(std::iter::repeat(Self::empty_cell()))
+            .take(usize::from(self.cols))
     }
 
     pub fn get(&self, col: u16) -> Option<&crate::Cell> {
-        self.cells.get(usize::from(col))
+        if col >= self.cols {
+            return None;
+        }
+        Some(
+            self.cells
+                .get(usize::from(col))
+                .unwrap_or_else(|| Self::empty_cell()),
+        )
     }
 
     pub fn get_mut(&mut self, col: u16) -> Option<&mut crate::Cell> {
@@ -43,12 +56,14 @@ impl Row {
 
     pub fn insert(&mut self, i: u16, cell: crate::Cell) {
         self.cells.insert(usize::from(i), cell);
+        self.cols += 1;
         self.wrapped = false;
     }
 
     pub fn remove(&mut self, i: u16) {
         self.clear_wide(i);
         self.cells.remove(usize::from(i));
+        self.cols -= 1;
         self.wrapped = false;
     }
 
@@ -63,6 +78,7 @@ impl Row {
 
     pub fn truncate(&mut self, len: u16) {
         self.cells.truncate(usize::from(len));
+        self.cols = len;
         self.wrapped = false;
         let last_cell = &mut self.cells[usize::from(len) - 1];
         if last_cell.is_wide() {
@@ -72,7 +88,16 @@ impl Row {
 
     pub fn resize(&mut self, len: u16, cell: crate::Cell) {
         self.cells.resize(usize::from(len), cell);
+        self.cols = len;
         self.wrapped = false;
+    }
+
+    /// Drops default cells at the end of an immutable scrollback row.
+    pub fn compact(&mut self) {
+        while self.cells.last() == Some(Self::empty_cell()) {
+            self.cells.pop();
+        }
+        self.cells.shrink_to_fit();
     }
 
     pub fn wrap(&mut self, wrap: bool) {
@@ -153,7 +178,7 @@ impl Row {
         });
         let mut prev_attrs = prev_attrs.unwrap_or_default();
 
-        let first_cell = &self.cells[usize::from(start)];
+        let first_cell = self.get(start).unwrap();
         if wrapping && first_cell == &default_cell {
             let default_attrs = default_cell.attrs();
             if &prev_attrs != default_attrs {
@@ -273,8 +298,8 @@ impl Row {
     ) -> (crate::grid::Pos, crate::attrs::Attrs) {
         let mut prev_was_wide = false;
 
-        let first_cell = &self.cells[usize::from(start)];
-        let prev_first_cell = &prev.cells[usize::from(start)];
+        let first_cell = self.get(start).unwrap();
+        let prev_first_cell = prev.get(start).unwrap();
         if wrapping
             && !prev_wrapping
             && first_cell == prev_first_cell
@@ -397,7 +422,7 @@ impl Row {
         // position the cursor after the end of the line correctly so that
         // drawing the next line can just start writing and be wrapped.
         if (!self.wrapped && prev.wrapped) || (!prev.wrapped && self.wrapped) {
-            let end_pos = if self.cells[usize::from(self.cols() - 1)].is_wide_continuation() {
+            let end_pos = if self.get(self.cols() - 1).unwrap().is_wide_continuation() {
                 crate::grid::Pos {
                     row,
                     col: self.cols() - 2,
@@ -413,7 +438,7 @@ impl Row {
             if !self.wrapped {
                 crate::term::EraseChar::new(1).write_buf(contents);
             }
-            let end_cell = &self.cells[usize::from(end_pos.col)];
+            let end_cell = self.get(end_pos.col).unwrap();
             if end_cell.has_contents() {
                 let attrs = end_cell.attrs();
                 if &prev_attrs != attrs {
@@ -426,5 +451,38 @@ impl Row {
         }
 
         (prev_pos, prev_attrs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Row;
+
+    #[test]
+    fn compact_drops_trailing_default_cells_without_changing_width() {
+        let mut row = Row::new(120);
+        row.compact();
+
+        assert_eq!(row.cols(), 120);
+        assert!(row.cells.is_empty());
+        assert_eq!(row.cells.capacity(), 0);
+        assert_eq!(row.get(119), Some(&crate::Cell::new()));
+        assert_eq!(row.get(120), None);
+    }
+
+    #[test]
+    fn compact_keeps_content_and_non_default_attributes() {
+        let mut row = Row::new(4);
+        row.cells[1].set('x', crate::attrs::Attrs::default());
+        let mut attrs = crate::attrs::Attrs::default();
+        attrs.set_inverse(true);
+        row.cells[2].clear(attrs);
+
+        row.compact();
+
+        assert_eq!(row.cells.len(), 3);
+        assert_eq!(row.get(1).unwrap().contents(), "x");
+        assert_eq!(row.get(2).unwrap().attrs(), &attrs);
+        assert_eq!(row.get(3), Some(&crate::Cell::new()));
     }
 }
