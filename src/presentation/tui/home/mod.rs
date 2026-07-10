@@ -884,6 +884,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // `terminal` / `agent`). The attached session is declared to the monitor (so
     // it is never flagged as waiting) and cleared again on the way out.
     let terminal_root = workspace.path.clone();
+    // The attached pane loop drains finished session tasks itself (the outer
+    // event loop is stopped while 没入 owns the screen), so hand it its own
+    // handle onto the shared board.
+    let pane_tasks = tasks.clone();
     let mut open_terminal =
         |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
             // Resolve which agent CLI this launch drives. Priority: the user's 集中
@@ -1054,6 +1058,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         dir,
                         &handle,
                         &sessions_refresh,
+                        &pane_tasks,
                         &mut autostart_hook,
                     )? {
                         // `Ctrl-O`: zoom out to 選択, leaving every pane alive.

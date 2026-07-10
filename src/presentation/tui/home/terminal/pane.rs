@@ -68,6 +68,7 @@ use super::super::pane_input::{
 };
 use super::super::sessions_refresh::SessionsRefreshHandle;
 use super::super::state::{HomeState, SurfaceOwner, TabMenuItem};
+use super::super::tasks::TaskHandle;
 use super::super::ui;
 use super::link;
 use super::pool::{MonitorHandle, TerminalPool};
@@ -213,6 +214,7 @@ pub fn run(
     dir: &Path,
     monitor: &MonitorHandle,
     sessions_refresh: &SessionsRefreshHandle,
+    tasks: &TaskHandle,
     autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> Result<PaneStep> {
     // Raw mode, bracketed paste, and motion reporting are entered here and
@@ -228,7 +230,16 @@ pub fn run(
     // batched terminal write. A separate `clear_screen()` would flush an
     // all-blank frame just before the real frame and is visible as a one-frame
     // flicker when switching sessions or tabs.
-    drive(term, state, pool, dir, monitor, sessions_refresh, autostart)
+    drive(
+        term,
+        state,
+        pool,
+        dir,
+        monitor,
+        sessions_refresh,
+        tasks,
+        autostart,
+    )
 }
 
 /// RAII guard owning the embedded pane's terminal modes (raw mode, bracketed
@@ -298,6 +309,7 @@ fn drive(
     dir: &Path,
     monitor: &MonitorHandle,
     sessions_refresh: &SessionsRefreshHandle,
+    tasks: &TaskHandle,
     autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> Result<PaneStep> {
     // The frame drawn last pass, so we only repaint the rows that changed.
@@ -422,6 +434,32 @@ fn drive(
                 false
             };
 
+        // While 没入 (Attached) owns the event loop, the outer home loop cannot
+        // drain finished session tasks (create / remove) either. Without this, a
+        // create completing while the user operates another session leaves its
+        // inline sidebar skeleton animating until they detach back to 選択 —
+        // the completion sits in the task mailbox with nobody applying it. Run
+        // the same drain the outer loop runs (clear the skeleton, log the
+        // result, refresh the session list, evict a removed session's pooled
+        // shells), but never honor auto-focus (`None`): pulling the user out of
+        // 没入 into 集中 mid-typing would be wrong, and the epoch check would
+        // reject it anyway. Like `autostart` above, this runs before this
+        // pass's pool borrow is taken, since the eviction closure borrows the
+        // pool itself.
+        let tasks_applied = super::super::event::apply_task_completions(
+            state,
+            tasks,
+            &mut |session_root| {
+                // Mirrors the outer loop's `evict_pool` wiring: drop the removed
+                // worktrees' persisted pane snapshots along with their pool
+                // entries, so a session recreated at the same path starts fresh.
+                for dir in pool.borrow_mut().remove_under(session_root) {
+                    crate::infrastructure::open_panes_store::clear(&dir);
+                }
+            },
+            None,
+        );
+
         // Borrow the pool for this iteration's render / wait / input work, then let
         // it drop at the loop's end so the next pass's autostart runs unborrowed.
         // The active pane is fixed for the duration of this call (tab switches
@@ -446,8 +484,10 @@ fn drive(
         // badges) always repaint at once to stay responsive; fresh shell output
         // is tracked separately so a flood of it can be coalesced below. A pane
         // just autostarted in the background also repaints, so its sidebar badge
-        // and command-log line show without waiting for the next real change.
-        let mut interactive = first || autostart_started;
+        // and command-log line show without waiting for the next real change —
+        // as does a just-applied task completion, so a cleared create / remove
+        // skeleton leaves the sidebar on this frame.
+        let mut interactive = first || autostart_started || tasks_applied;
         // Surface the leader-pending state to the footer; repaint when it flips.
         let prefix_pending = pending_prefix.is_some();
         state.set_prefix_pending(prefix_pending);

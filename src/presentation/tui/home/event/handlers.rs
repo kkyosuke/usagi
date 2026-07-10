@@ -497,10 +497,9 @@ pub(super) fn overview_key(
         Key::Char('n') | Key::Char(CTRL_E) | Key::End => {
             state.overview_begin_note();
         }
-        Key::Char(CTRL_O) => {
-            if state.key_scheme() == KeyScheme::Prefix {
-                state.set_prefix_pending(true);
-            }
+        // (A non-Prefix scheme's `Ctrl-O` falls through to the inert `_` arm.)
+        Key::Char(CTRL_O) if state.key_scheme() == KeyScheme::Prefix => {
+            state.set_prefix_pending(true);
         }
         // `:` summons the workspace command palette overlay (the `session` /
         // `config` / `doctor` / `man` commands). It is placed after the inline
