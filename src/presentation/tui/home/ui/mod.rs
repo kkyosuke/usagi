@@ -391,6 +391,35 @@ fn body_rows_for(height: usize) -> usize {
     height.saturating_sub(CHROME_TOP_ROWS + 2).max(1)
 }
 
+/// The header/body separator row, carrying the sidebar's scroll-position
+/// indicator when the full sidebar's list overflows its `body_rows`-high pane —
+/// a dim `⋮ start-end/total` flush to the sidebar's right edge (the divider), the
+/// same read-out the diff / Markdown previews show. The rail is too narrow to
+/// label and a list that fits scrolls off nothing, so both leave the row blank.
+fn sidebar_scroll_indicator_row(
+    state: &HomeState,
+    sidebar: Sidebar,
+    left_w: usize,
+    width: usize,
+    body_rows: usize,
+) -> String {
+    let blank = pad_to_width(String::new(), width);
+    if sidebar != Sidebar::Full {
+        return blank;
+    }
+    let Some((start, end, total)) =
+        sidebar::sidebar_scroll_position(state.list(), true, body_rows, state.pending_sessions())
+    else {
+        return blank;
+    };
+    // Right-align within the sidebar column (a trailing space keeps it off the
+    // divider); the rest of the row stays blank.
+    let text = clip_to_width(&format!("⋮ {start}-{end}/{total} "), left_w);
+    let pad = left_w.saturating_sub(console::measure_text_width(&text));
+    let indicator = format!("{}{}", " ".repeat(pad), console::style(text).dim());
+    pad_to_width(indicator, width)
+}
+
 /// The home frame with the 1Password env-resolution indicator floated in the
 /// **centre of the right pane** — the same region and multiplying-rabbit visual
 /// [`launch_loading_block`] gives the pane launch, since resolving a pane's secret
@@ -586,8 +615,14 @@ pub fn render_frame(raw_height: usize, raw_width: usize, state: &HomeState) -> V
     let mut lines = Vec::with_capacity(height);
     lines.push(title_bar(width, state.list(), state.mode()));
     // A blank separator row between the header and the body, so the breadcrumb /
-    // mode band reads as its own strip set apart from the panes.
-    lines.push(pad_to_width(String::new(), width));
+    // mode band reads as its own strip set apart from the panes. When the full
+    // sidebar's list overflows its pane, this row carries a dim scroll-position
+    // indicator (`start-end/total`) at the top-right of the sidebar column — the
+    // same read-out the diff / Markdown previews show — so the list no longer
+    // scrolls silently. The rail is too narrow to label, so it is left blank.
+    lines.push(sidebar_scroll_indicator_row(
+        state, sidebar, left_w, width, body_rows,
+    ));
     let body_start = lines.len();
     // `left` / `right` are not read past this loop, so consume them by value: each
     // row's owned cell text moves straight into the composed line instead of being

@@ -3240,6 +3240,68 @@ fn sidebar_scroll_reveals_a_selected_row_below_the_fold() {
 }
 
 #[test]
+fn sidebar_scroll_position_reports_the_visible_range_or_none() {
+    let mut list = list_with(sessions(6)); // total 22 lines
+                                           // Fits (huge viewport): nothing scrolled off, so no indicator.
+    assert_eq!(sidebar_scroll_position(&list, true, 100, &[]), None);
+    // Overflowing with the cursor pinned at the top: the top window, 1-based.
+    assert_eq!(
+        sidebar_scroll_position(&list, true, 9, &[]),
+        Some((1, 9, 22))
+    );
+    // Selecting the last session slides the window down to reveal it.
+    list.focus_index(6);
+    assert_eq!(
+        sidebar_scroll_position(&list, true, 9, &[]),
+        Some((13, 21, 22))
+    );
+}
+
+/// A full-sidebar Switch state with `n` sessions, for the scroll-indicator row.
+fn overview_state_with_worktrees(n: usize) -> HomeState {
+    let wts: Vec<_> = (0..n)
+        .map(|i| worktree(Some(&format!("s{i}")), false, BranchStatus::Local))
+        .collect();
+    let mut state = state_with(wts);
+    state.enter_switch();
+    state
+}
+
+#[test]
+fn render_frame_shows_the_sidebar_scroll_indicator_when_overflowing() {
+    // Many sessions in a short pane overflow the sidebar; the header/body separator
+    // row (index 1) carries the dim `⋮ start-end/total` position.
+    let state = overview_state_with_worktrees(8);
+    let frame = render_frame(12, 80, &state);
+    let sep = console::strip_ansi_codes(&frame[1]);
+    assert!(
+        sep.contains('⋮') && sep.contains('/'),
+        "the separator row shows the scroll position: {sep:?}"
+    );
+}
+
+#[test]
+fn render_frame_hides_the_sidebar_indicator_when_the_list_fits() {
+    // A tall pane fits the whole list, so the separator stays blank.
+    let state = overview_state_with_worktrees(1);
+    let frame = render_frame(40, 80, &state);
+    assert!(!console::strip_ansi_codes(&frame[1]).contains('⋮'));
+}
+
+#[test]
+fn render_frame_omits_the_sidebar_indicator_on_the_narrow_rail() {
+    // The 5-column rail is too narrow to label, so it leaves the separator blank
+    // even when the list overflows.
+    let mut state = overview_state_with_worktrees(8);
+    state.set_sidebar(Sidebar::Rail);
+    let frame = render_frame(12, 80, &state);
+    assert!(
+        !console::strip_ansi_codes(&frame[1]).contains('⋮'),
+        "the rail is too narrow for the indicator"
+    );
+}
+
+#[test]
 fn left_pane_scrolls_the_selected_session_into_view() {
     let mut list = list_with(sessions(6));
     // Cursor on the root row: the window stays pinned to the top, so the first
