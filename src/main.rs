@@ -616,16 +616,230 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
         }
         RegisterOutcome::Registered => {}
     }
+
+    // Bind the IPC socket that clients connect to for the session feed. A stale
+    // socket file from a crashed daemon is removed first (this daemon owns the
+    // single-instance slot, so any leftover is dead). Best-effort: if the socket
+    // cannot be bound the daemon still runs its monitor, just without IPC.
+    let socket_path = usagi::infrastructure::daemon_ipc::socket_path(dir);
+    let mut server = DaemonIpcServer::bind(&socket_path);
+
     while !usagi::infrastructure::daemon_store::take_stop_request(dir)? {
+        // Accept any newly connected clients and answer whatever they have sent.
+        server.poll(dir);
         // Refresh the monitored-sessions snapshot each tick. Best-effort: a
         // transient store error must not tear the daemon down, so it is logged
-        // and the loop continues.
-        if let Err(error) = usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
-            eprintln!("usagi daemon: session monitor tick failed: {error:#}");
+        // and the loop continues. On a change, push the fresh snapshot to every
+        // subscribed client.
+        match usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
+            Ok(true) => server.broadcast_sessions(dir),
+            Ok(false) => {}
+            Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
         }
         std::thread::sleep(DAEMON_POLL);
     }
+
+    server.shutdown(&socket_path);
     usagi::usecase::daemon::deregister(dir)
+}
+
+/// The daemon's single-threaded IPC endpoint: a non-blocking [`UnixListener`] and
+/// the connected clients, driven a step at a time from the serve loop. It owns
+/// the real socket IO — accepting, reading, writing, disconnect detection — and
+/// delegates every protocol decision (which reply, who is subscribed) to the
+/// unit-tested [`usagi::usecase::daemon_ipc`] / [`usagi::domain::daemon_ipc`].
+/// Composition-root IO, excluded from coverage like the rest of this file.
+///
+/// Single-threaded on purpose: with no worker threads there are no locks around
+/// the registry or the client table, and a client's request is answered within
+/// one [`DAEMON_POLL`] tick — fast enough for the session feed.
+struct DaemonIpcServer {
+    listener: Option<std::os::unix::net::UnixListener>,
+    clients: std::collections::HashMap<u64, IpcClient>,
+    registry: usagi::usecase::daemon_ipc::SubscriberRegistry,
+    next_id: u64,
+}
+
+/// One connected client: its stream and the decoder reassembling frames from its
+/// partial reads.
+struct IpcClient {
+    stream: std::os::unix::net::UnixStream,
+    decoder: usagi::domain::daemon_ipc::FrameDecoder,
+}
+
+impl DaemonIpcServer {
+    /// Bind the listener at `path`, removing any stale socket file first. Returns
+    /// a server with no listener (IPC disabled) if binding fails, so the daemon
+    /// keeps monitoring regardless.
+    fn bind(path: &Path) -> Self {
+        let _ = std::fs::remove_file(path);
+        let listener = match std::os::unix::net::UnixListener::bind(path) {
+            Ok(listener) => match listener.set_nonblocking(true) {
+                Ok(()) => Some(listener),
+                Err(error) => {
+                    eprintln!("usagi daemon: could not set the IPC socket non-blocking: {error}");
+                    None
+                }
+            },
+            Err(error) => {
+                eprintln!("usagi daemon: could not bind the IPC socket: {error}");
+                None
+            }
+        };
+        Self {
+            listener,
+            clients: std::collections::HashMap::new(),
+            registry: usagi::usecase::daemon_ipc::SubscriberRegistry::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Accept pending connections and service each client's buffered input.
+    fn poll(&mut self, dir: &Path) {
+        self.accept_pending();
+        self.service_clients(dir);
+    }
+
+    /// Accept every connection waiting on the listener (non-blocking), assigning
+    /// each a fresh id.
+    fn accept_pending(&mut self) {
+        let Some(listener) = &self.listener else {
+            return;
+        };
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if stream.set_nonblocking(true).is_err() {
+                        continue;
+                    }
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    self.clients.insert(
+                        id,
+                        IpcClient {
+                            stream,
+                            decoder: usagi::domain::daemon_ipc::FrameDecoder::new(),
+                        },
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Read and answer whatever each client has sent, dropping clients that have
+    /// disconnected.
+    fn service_clients(&mut self, dir: &Path) {
+        let sessions = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
+        let ids: Vec<u64> = self.clients.keys().copied().collect();
+        for id in ids {
+            if !self.service_one(id, &sessions) {
+                self.clients.remove(&id);
+                self.registry.remove(id);
+            }
+        }
+    }
+
+    /// Drain one client's readable bytes, dispatch each complete message, and
+    /// write its reply. Returns `false` when the client has disconnected (or
+    /// errored) and should be dropped.
+    fn service_one(
+        &mut self,
+        id: u64,
+        sessions: &[usagi::domain::daemon::SessionSnapshot],
+    ) -> bool {
+        use std::io::Read as _;
+        let mut buf = [0u8; 4096];
+        loop {
+            let read = match self.clients.get_mut(&id) {
+                Some(client) => client.stream.read(&mut buf),
+                None => return false,
+            };
+            match read {
+                // A zero-length read means the peer closed the connection.
+                Ok(0) => return false,
+                Ok(n) => {
+                    if let Some(client) = self.clients.get_mut(&id) {
+                        client.decoder.feed(&buf[..n]);
+                    }
+                    if !self.dispatch_frames(id, sessions) {
+                        return false;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Pull every complete frame the client has buffered, dispatch it, and write
+    /// any reply. Returns `false` on a framing error or a failed write.
+    fn dispatch_frames(
+        &mut self,
+        id: u64,
+        sessions: &[usagi::domain::daemon::SessionSnapshot],
+    ) -> bool {
+        loop {
+            let frame = match self.clients.get_mut(&id) {
+                Some(client) => client.decoder.next_frame(),
+                None => return false,
+            };
+            let payload = match frame {
+                Ok(Some(payload)) => payload,
+                Ok(None) => return true,
+                Err(error) => {
+                    eprintln!("usagi daemon: dropping client on framing error: {error}");
+                    return false;
+                }
+            };
+            let message = match usagi::infrastructure::daemon_ipc::decode_message(&payload) {
+                Ok(message) => message,
+                Err(error) => {
+                    eprintln!("usagi daemon: dropping client on bad message: {error:#}");
+                    return false;
+                }
+            };
+            if let Some(reply) =
+                usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions)
+            {
+                if !self.send(id, &reply) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Push the current snapshot to every subscribed client, dropping any whose
+    /// write fails.
+    fn broadcast_sessions(&mut self, dir: &Path) {
+        let sessions = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
+        let message = usagi::domain::daemon_ipc::ServerMessage::Sessions { sessions };
+        for id in self.registry.subscribers() {
+            if !self.send(id, &message) {
+                self.clients.remove(&id);
+                self.registry.remove(id);
+            }
+        }
+    }
+
+    /// Encode and write one message to client `id`. Returns `false` when the
+    /// client is gone or the write fails.
+    fn send(&mut self, id: u64, message: &usagi::domain::daemon_ipc::ServerMessage) -> bool {
+        use std::io::Write as _;
+        let Ok(bytes) = usagi::infrastructure::daemon_ipc::encode_message(message) else {
+            return false;
+        };
+        match self.clients.get_mut(&id) {
+            Some(client) => client.stream.write_all(&bytes).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Remove the socket file as the daemon shuts down.
+    fn shutdown(&self, path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Gather the daemon's view of every monitored session from the real stores.
