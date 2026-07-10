@@ -11,6 +11,7 @@ pub mod command;
 pub mod event;
 pub mod oneshot;
 pub mod pane_input;
+mod reclaim;
 pub mod sessions_refresh;
 pub mod state;
 pub mod tasks;
@@ -647,6 +648,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // / `session_prompt`) auto-starts that session's agent pane in the background.
     // Copied out so the autostart pass can read it without holding `settings`.
     let autostart_queued_prompts_enabled = settings.autostart_queued_prompts;
+    let auto_reclaim_grace = settings
+        .auto_reclaim_merged_sessions
+        .map(|minutes| std::time::Duration::from_secs(minutes.saturating_mul(60)));
 
     // usagi's wiring policy (resolved usagi binary + local LLM model) the agent
     // renders into its own invocation; built once and reused for every launch.
@@ -1455,7 +1459,16 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| dir.display().to_string())
             });
-        pool.borrow_mut().close_active(dir, &label);
+        let mut pool = pool.borrow_mut();
+        pool.close_active(dir, &label);
+        if restore_panes_enabled {
+            match pool.snapshot_open_panes_for(dir) {
+                Some((active, panes)) => {
+                    let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                }
+                None => crate::infrastructure::open_panes_store::clear(dir),
+            }
+        }
     };
 
     let mut tab_action =
@@ -1645,15 +1658,50 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // their agent panes in the background. Shares the pool with `open_terminal` /
     // `preview`; the event loop calls one hook at a time, so their `RefCell`
     // borrows never overlap.
+    let mut reclaim_tracker = reclaim::ReclaimTracker::default();
     let mut autostart_queued = |state: &HomeState| -> Vec<String> {
-        autostart_queued_prompts(
+        let mut lines = autostart_queued_prompts(
             term,
             state,
             &pool,
             &agent_wiring,
             default_cli,
             autostart_queued_prompts_enabled,
-        )
+        );
+        if let Some(grace) = auto_reclaim_grace {
+            let badges = state.badges();
+            let due = reclaim_tracker.due(
+                state.list().worktrees(),
+                &badges.running,
+                &badges.waiting,
+                &badges.live,
+                grace,
+                std::time::Instant::now(),
+            );
+            for dir in due {
+                let label = state
+                    .list()
+                    .worktrees()
+                    .iter()
+                    .find(|worktree| worktree.path == dir)
+                    .map(state::worktree_name)
+                    .unwrap_or("session");
+                if notifications_enabled {
+                    let _ = notify_rust::Notification::new()
+                        .summary("usagi")
+                        .body(&format!("Reclaiming merged session: {label}"))
+                        .show();
+                }
+                let count = pool.borrow_mut().close_all(&dir, label);
+                if count > 0 {
+                    crate::infrastructure::open_panes_store::clear(&dir);
+                    lines.push(format!(
+                        "Reclaimed {count} pane(s) from merged session \"{label}\""
+                    ));
+                }
+            }
+        }
+        lines
     };
 
     // When a scheduled `wake` fires, resume every session whose agent pane is

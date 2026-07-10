@@ -467,6 +467,30 @@ pub(super) fn overview_key(
             let dir = selected_dir(state, wiring.workspace_root);
             (wiring.close_tab)(state, &dir);
         }
+        // `X` reclaims every pane belonging to a merged or ended session. The
+        // same guard as automatic reclamation protects active work and dirty
+        // trees; the session/worktree itself is deliberately retained.
+        Key::Char('X') => {
+            let badges = state.badges().clone();
+            let dirs = super::super::reclaim::finished_reclaim_paths(
+                state.list().worktrees(),
+                &badges.running,
+                &badges.waiting,
+                &badges.done,
+            );
+            let mut reclaimed = 0;
+            for dir in dirs {
+                loop {
+                    let pane_count = (wiring.tab_op)(&dir, None).0.len();
+                    if pane_count == 0 {
+                        break;
+                    }
+                    (wiring.close_tab)(state, &dir);
+                    reclaimed += 1;
+                }
+            }
+            state.log_output(format!("Reclaimed {reclaimed} finished session pane(s)"));
+        }
         // `c` begins inline session creation. `Ctrl-A` (which `console` decodes
         // as `Key::Home`) is an IME-safe alias: with a Japanese IME left on, the
         // bare letter `c` composes into kana and never reaches usagi, but a

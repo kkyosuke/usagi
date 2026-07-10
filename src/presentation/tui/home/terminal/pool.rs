@@ -1177,6 +1177,21 @@ impl TerminalPool {
         remains
     }
 
+    /// Close every pane owned by `dir`, killing all child shells and agents.
+    /// Returns the number of panes reclaimed.
+    pub fn close_all(&mut self, dir: &Path, label: &str) -> usize {
+        let count = self
+            .sessions
+            .get(dir)
+            .map_or(0, |session| session.panes.len());
+        if count > 0 {
+            self.sessions.remove(dir);
+            self.preview_cache = None;
+            self.refresh_watched(dir, label);
+        }
+        count
+    }
+
     /// Close `dir`'s active pane, killing its shell (its [`PtySession`] drops).
     /// Returns whether any pane remains: `true` leaves the next tab active so the
     /// caller keeps driving, `false` means the session is empty and the caller

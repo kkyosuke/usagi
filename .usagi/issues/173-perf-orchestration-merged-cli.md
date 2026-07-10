@@ -1,13 +1,13 @@
 ---
 number: 173
 title: perf(orchestration): merged/終了済みセッションの自動回収でエージェント CLI プロセスのメモリを解放する
-status: todo
+status: done
 priority: medium
 labels: [perf, orchestration]
 dependson: []
 related: [159]
 created_at: 2026-07-10T20:47:21.179449+00:00
-updated_at: 2026-07-10T20:47:21.179449+00:00
+updated_at: 2026-07-10T22:17:45.422363+00:00
 ---
 
 ## 背景（メモリ調査 2026-07-11 実測）

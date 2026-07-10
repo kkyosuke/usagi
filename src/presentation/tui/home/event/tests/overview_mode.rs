@@ -270,6 +270,83 @@ fn overview_x_closes_the_highlighted_sessions_active_tab() {
 }
 
 #[test]
+fn overview_shift_x_reclaims_merged_session_panes() {
+    let term = Term::stdout();
+    let mut main = worktree(Some("main"), "/r/main");
+    let mut pr =
+        crate::domain::workspace_state::PrLink::new(173, "https://github.com/o/r/pull/173");
+    pr.state = crate::domain::workspace_state::PrState::Merged;
+    main.pr = vec![pr];
+    let mut feat = worktree(Some("feat"), "/r/feat");
+    let mut feat_pr =
+        crate::domain::workspace_state::PrLink::new(174, "https://github.com/o/r/pull/174");
+    feat_pr.state = crate::domain::workspace_state::PrState::Merged;
+    feat.pr = vec![feat_pr];
+    let state = HomeState::new("usagi", vec![main, feat], None);
+
+    let pane_counts = RefCell::new(std::collections::HashMap::from([
+        (PathBuf::from("/r/main"), 2usize),
+        (PathBuf::from("/r/feat"), 1usize),
+    ]));
+    let closed = RefCell::new(Vec::new());
+    let mut tab_op = |dir: &Path, _: Option<TabNav>| {
+        let count = pane_counts.borrow().get(dir).copied().unwrap_or_default();
+        (vec!["pane".to_string(); count], 0)
+    };
+    let mut close_tab = |_h: &mut HomeState, dir: &Path| {
+        closed.borrow_mut().push(dir.to_path_buf());
+        if let Some(count) = pane_counts.borrow_mut().get_mut(dir) {
+            *count = count.saturating_sub(1);
+        }
+    };
+    let mut keys = cmd("session switch");
+    keys.push(Ok(Key::Enter)); // -> Overview
+    keys.push(Ok(Key::Char('X'))); // reclaim merged panes
+    keys.push(Ok(Key::CtrlC)); // quit
+    let mut reader = ScriptedReader::new(keys);
+    let monitor = MonitorHandle::detached();
+    let mut persist: fn(&str) = noop_persist;
+    let mut create: fn(&str) -> SessionOutcome = noop_create;
+    let mut remove: fn(&str, bool) -> SessionOutcome = noop_remove;
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut config: fn(&Term) -> Result<Option<ConfigReload>> = noop_config;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+    let mut branches: fn() -> Vec<String> = no_branches;
+    let outcome = event_loop_compat(
+        &term,
+        &mut reader,
+        state,
+        Path::new("/ws"),
+        &monitor,
+        &UpdateHandle::new(),
+        &OneShot::<Vec<AgentCli>>::new(),
+        &mut persist,
+        &mut create,
+        &mut (noop_rename as fn(&str, &str) -> SessionOutcome),
+        &mut (noop_set_note as fn(&str, &str) -> SessionOutcome),
+        &mut remove,
+        &mut branches,
+        &mut open,
+        &mut config,
+        &mut preview,
+        &mut tab_op,
+        &mut close_tab,
+        &mut (noop_reorder as fn(&str, bool) -> SessionReorder),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *closed.borrow(),
+        vec![
+            PathBuf::from("/r/main"),
+            PathBuf::from("/r/main"),
+            PathBuf::from("/r/feat"),
+        ]
+    );
+}
+
+#[test]
 fn overview_inline_create_makes_and_focuses_the_new_session() {
     let mut keys = cmd("session switch");
     keys.push(Ok(Key::Enter)); // -> Overview
