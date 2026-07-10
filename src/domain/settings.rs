@@ -498,12 +498,13 @@ impl SessionLabelMaster {
 /// How many lines of scrolled-off output each embedded terminal pane keeps by
 /// default, so the user can scroll a pane back over earlier output.
 ///
-/// Every live pane holds its own scrollback buffer, so this cap is paid once per
-/// pane: with many sessions and panes open at once it is the dominant slice of
-/// the TUI's memory. The pool keeps every pane of every session alive in the
-/// background, and each pane's parser holds up to this many scrollback rows of
-/// `cols` cells, so worst-case resident grid memory is on the order of
-/// `panes × terminal_scrollback_lines × cols × sizeof(cell)` — bounded (no
+/// Every live pane holds a primary scrollback buffer and may also fill a hidden
+/// alternate-screen history used for transient PR-link detection. With many
+/// sessions and panes open at once these are the dominant slice of the TUI's
+/// memory. The pool keeps every pane of every session alive in the background,
+/// and each pane's parser holds up to twice this many historical rows of `cols`
+/// cells, so worst-case resident history memory is on the order of
+/// `2 × panes × terminal_scrollback_lines × cols × sizeof(cell)` — bounded (no
 /// leak), but it scales with the number of open panes. The default is
 /// deliberately modest — enough to scroll back over a command's recent output
 /// without each pane reserving a large buffer — and the user can raise it (up to

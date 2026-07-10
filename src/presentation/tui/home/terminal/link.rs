@@ -13,6 +13,8 @@
 //!   clickable.
 //! - [`link_cells_at`] is the hover counterpart: it returns just the cells of the
 //!   one URL under the pointer, so the renderer can recolour the hovered link.
+//! - [`harvest_pr_links`] incrementally scans retained output history plus the
+//!   live drawing grid, so PR URLs cannot disappear between watcher ticks.
 //! - [`open_command`] gives the platform argv that hands a URL to the default
 //!   browser (`open` / `xdg-open` / `cmd /c start`).
 //!
@@ -266,6 +268,62 @@ pub fn pr_links_from(urls: &[String]) -> Vec<PrLink> {
         }
     }
     out
+}
+
+/// Harvest pull-request URLs from rows added to terminal history since
+/// `watermark` and from the current drawing grid.
+///
+/// The returned watermark must be saved per pane and passed to the next call.
+/// Retained scrollback is then scanned only once while visible rows are checked
+/// every time, catching both newly printed URLs and URLs that stay in place.
+/// When a parser reset makes a saved watermark newer than the current screen,
+/// the vendored vt100 API automatically scans all retained rows again.
+pub fn harvest_pr_links(
+    screen: &vt100::Screen,
+    watermark: vt100::ScrollbackWatermark,
+) -> (Vec<PrLink>, vt100::ScrollbackWatermark) {
+    let urls = urls_in_lines(screen.history_rows_since(watermark));
+    (pr_links_from(&urls), screen.scrollback_high_water())
+}
+
+/// Harvest newly retained PR URLs while reusing a render pass's visible URLs.
+///
+/// Only new scrollback (plus a logical line that crosses its boundary) is read
+/// from `screen`; `visible_urls` comes from [`scan_links`]. This keeps the
+/// attached pane's parser-lock work at one whole-visible-grid scan per frame.
+pub fn harvest_pr_links_from_visible(
+    screen: &vt100::Screen,
+    watermark: vt100::ScrollbackWatermark,
+    visible_urls: &[String],
+) -> (Vec<PrLink>, vt100::ScrollbackWatermark) {
+    // `scan_links` follows the user's viewport. While they are scrolled back it
+    // does not describe the live drawing rows, so use the full history API for
+    // that uncommon case; otherwise reuse the scan and avoid a second walk.
+    if screen.scrollback() > 0 {
+        return harvest_pr_links(screen, watermark);
+    }
+    let history_urls = urls_in_lines(screen.scrollback_rows_since(watermark));
+    let mut prs = pr_links_from(&history_urls);
+    for pr in visible_urls.iter().filter_map(|url| parse_pr_url(url)) {
+        if !prs.iter().any(|seen| seen.pr_key() == pr.pr_key()) {
+            prs.push(pr);
+        }
+    }
+    (prs, screen.scrollback_high_water())
+}
+
+/// Extract URL strings from already-flattened logical terminal lines.
+fn urls_in_lines(lines: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut urls = Vec::new();
+    for line in lines {
+        let chars: Vec<char> = line.chars().collect();
+        urls.extend(
+            url_spans(&chars)
+                .into_iter()
+                .map(|span| chars[span].iter().collect()),
+        );
+    }
+    urls
 }
 
 /// Parse a `http(s)` URL into a [`PrLink`] when it is a pull-request URL of the
@@ -809,6 +867,104 @@ mod tests {
         assert!(pr_links(parser.screen()).is_empty());
         let empty = parsed(1, 0, b"");
         assert!(pr_links(empty.screen()).is_empty());
+    }
+
+    #[test]
+    fn harvest_pr_links_finds_a_url_that_scrolled_out_before_the_scan() {
+        let mut parser = vt100::Parser::new(2, 60, 10);
+        parser.process(b"https://github.com/KKyosuke/usagi/pull/158\r\nafter one\r\nafter two");
+        assert!(!parser.screen().contents().contains("pull/158"));
+
+        let (prs, watermark) =
+            harvest_pr_links(parser.screen(), vt100::ScrollbackWatermark::default());
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [158]);
+        assert_eq!(watermark.primary(), 1);
+        assert_eq!(watermark.alternate(), 0);
+        assert_eq!(parser.screen().scrollback_rows().primary(), 1);
+        assert_eq!(parser.screen().scrollback_rows().alternate(), 0);
+
+        parser.process(b"\r\nafter three");
+        let (next, next_watermark) = harvest_pr_links(parser.screen(), watermark);
+        assert!(next.is_empty());
+        assert_eq!(next_watermark.primary(), 2);
+    }
+
+    #[test]
+    fn harvest_reuses_visible_urls_and_only_scans_new_history() {
+        let mut parser = vt100::Parser::new(2, 60, 10);
+        parser.process(b"https://github.com/o/r/pull/7");
+        let scan = scan_links(parser.screen());
+        let (visible, watermark) = harvest_pr_links_from_visible(
+            parser.screen(),
+            vt100::ScrollbackWatermark::default(),
+            &scan.urls,
+        );
+        assert_eq!(visible.iter().map(|pr| pr.number).collect::<Vec<_>>(), [7]);
+
+        parser.process(b"\r\nhttps://github.com/o/r/pull/8\r\nafter");
+        let scan = scan_links(parser.screen());
+        let (combined, _) = harvest_pr_links_from_visible(parser.screen(), watermark, &scan.urls);
+        assert_eq!(
+            combined.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            [7, 8]
+        );
+    }
+
+    #[test]
+    fn history_scan_is_read_only_and_joins_wrapped_rows() {
+        let mut parser = vt100::Parser::new(2, 20, 10);
+        parser.process(b"https://github.com/o/r/pull/42\r\nafter\r\nmore");
+        parser.screen_mut().set_scrollback(1);
+        let offset = parser.screen().scrollback();
+
+        let (prs, _) = harvest_pr_links(parser.screen(), vt100::ScrollbackWatermark::default());
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [42]);
+        assert_eq!(parser.screen().scrollback(), offset);
+    }
+
+    #[test]
+    fn attached_harvest_scans_drawing_rows_while_the_viewport_is_scrolled_back() {
+        let mut parser = vt100::Parser::new(2, 60, 10);
+        parser.process(b"old one\r\nold two\r\nhttps://github.com/o/r/pull/43");
+        parser.screen_mut().set_scrollback(1);
+        let scan = scan_links(parser.screen());
+        assert!(scan.urls.is_empty());
+
+        let (prs, _) = harvest_pr_links_from_visible(
+            parser.screen(),
+            vt100::ScrollbackWatermark::default(),
+            &scan.urls,
+        );
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [43]);
+        assert_eq!(parser.screen().scrollback(), 1);
+    }
+
+    #[test]
+    fn harvest_keeps_alt_screen_history_without_exposing_it_as_scrollback() {
+        let mut parser = vt100::Parser::new(2, 60, 10);
+        parser.process(b"\x1b[?1049hhttps://github.com/o/r/pull/99\r\nafter\r\nmore\x1b[?1049l");
+        assert_eq!(parser.screen().scrollback(), 0);
+        assert_eq!(parser.screen().scrollback_rows().alternate(), 1);
+
+        let (prs, watermark) =
+            harvest_pr_links(parser.screen(), vt100::ScrollbackWatermark::default());
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [99]);
+        assert_eq!(watermark.alternate(), 1);
+    }
+
+    #[test]
+    fn a_parser_reset_causes_retained_history_to_be_rescanned() {
+        let mut parser = vt100::Parser::new(2, 60, 10);
+        parser.process(b"old\r\nrows\r\nhere");
+        let stale = parser.screen().scrollback_high_water();
+        assert_eq!(stale.epoch(), 0);
+        assert_eq!(stale.primary(), 1);
+
+        parser.process(b"\x1bc https://github.com/o/r/pull/5\r\nafter\r\nmore");
+        let (prs, watermark) = harvest_pr_links(parser.screen(), stale);
+        assert_eq!(prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [5]);
+        assert_eq!(watermark.epoch(), 1);
+        assert_eq!(watermark.primary(), 1);
     }
 
     #[test]
