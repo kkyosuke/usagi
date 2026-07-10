@@ -2820,6 +2820,16 @@ impl HomeState {
         self.list.focus_index(row);
     }
 
+    /// Jump the Overview cursor to the first row (the root row) — the `g` jump.
+    pub fn overview_move_first(&mut self) {
+        self.list.focus_index(0);
+    }
+
+    /// Jump the Overview cursor to the last selectable row — the `G` jump.
+    pub fn overview_move_last(&mut self) {
+        self.list.focus_last();
+    }
+
     /// Begin inline session creation in 選択: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
     ///

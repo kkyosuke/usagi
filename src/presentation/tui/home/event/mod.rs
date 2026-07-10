@@ -16,7 +16,9 @@ use console::Term;
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyReader};
+use crate::presentation::tui::io::screen::{
+    ClickEvent, FramePainter, Input, KeyReader, ScrollEvent,
+};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
@@ -872,9 +874,14 @@ pub(super) fn event_loop(
                 bump_interaction_epoch(wiring);
                 key
             }
-            // The TUI never scrolls in place: read the wheel turn and drop it.
-            Input::Scroll(_) => {
+            // A wheel turn scrolls whichever scrollable right-pane surface is open
+            // (the diff view, the Markdown preview, or a text modal); with none
+            // open it is dropped, so the base panes never scroll in place and the
+            // pre-launch scrollback stays hidden.
+            Input::Scroll(ev) => {
                 bump_interaction_epoch(wiring);
+                let page = ui::preview_visible(height as usize, width as usize, &state);
+                scroll_open_surface(&mut state, ev, page);
                 continue;
             }
             // A click on a session row in the left pane acts on it: in 選択 (Overview)
@@ -1517,6 +1524,46 @@ enum Flow {
     Continue,
     /// Quit the application.
     Quit,
+}
+
+/// The most rows one wheel turn scrolls, so a fast flick (or a terminal that
+/// reports several lines per notch) advances a few rows without lurching the
+/// whole page.
+const MAX_SCROLL_STEP: usize = 6;
+
+/// Route a mouse-wheel turn to whichever scrollable right-pane surface is open —
+/// the diff view, the Markdown preview, or a scrollable text modal — scrolling it
+/// by the wheel's line count (bounded by [`MAX_SCROLL_STEP`]). Negative `lines`
+/// scroll up, positive down; `page` is the visible body height used to clamp a
+/// downward scroll. A no-op when no such surface is open (the base panes never
+/// scroll in place) or when the wheel reported no movement.
+fn scroll_open_surface(state: &mut HomeState, ev: ScrollEvent, page: usize) {
+    if ev.lines == 0 {
+        return;
+    }
+    let steps = (ev.lines.unsigned_abs() as usize).min(MAX_SCROLL_STEP);
+    let up = ev.lines < 0;
+    for _ in 0..steps {
+        if state.diff_view().is_some() {
+            if up {
+                state.diff_scroll_up();
+            } else {
+                state.diff_scroll_down(page);
+            }
+        } else if state.preview().is_some() {
+            if up {
+                state.preview_scroll_up();
+            } else {
+                state.preview_scroll_down(page);
+            }
+        } else if state.text_modal().is_some() {
+            if up {
+                state.text_modal_scroll_up();
+            } else {
+                state.text_modal_scroll_down(page);
+            }
+        }
+    }
 }
 
 /// The directory the pane should root at for the focused list row: the selected

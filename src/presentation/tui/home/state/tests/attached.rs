@@ -144,6 +144,21 @@ fn leave_closeup_returns_to_base_overview_clearing_the_create_input() {
 }
 
 #[test]
+fn overview_move_first_and_last_jump_the_cursor() {
+    let mut state = state(); // root (0), main (1), feature (2), + new session
+    state.overview_move_down(); // step off the root row
+    assert_ne!(state.list().selected_index(), 0);
+    // `G` jumps to the last row; `g` back to the first (root).
+    state.overview_move_last();
+    let last = state.list().selected_index();
+    assert!(last > 0, "the last row is past the root");
+    state.overview_move_first();
+    assert_eq!(state.list().selected_index(), 0);
+    state.overview_move_last();
+    assert_eq!(state.list().selected_index(), last);
+}
+
+#[test]
 fn focus_session_jumps_to_a_row_and_clamps_to_the_list() {
     let mut state = state(); // root (0), main (1), feature (2)
     state.focus_session(2);

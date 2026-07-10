@@ -1063,4 +1063,9 @@ impl WorktreeList {
     pub fn move_down(&mut self) {
         self.selected_index = (self.selected_index + 1) % self.nav_rows();
     }
+
+    /// Move the cursor to the last selectable row (the `G` jump).
+    pub fn focus_last(&mut self) {
+        self.selected_index = self.nav_rows().saturating_sub(1);
+    }
 }
