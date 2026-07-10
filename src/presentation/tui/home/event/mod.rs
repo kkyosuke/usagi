@@ -566,6 +566,21 @@ pub(super) fn apply_due_wake(
     true
 }
 
+/// Whether the terminal size changed since the last event-loop pass, updating
+/// the memo. A change must force a repaint: the quiet-選択 skip (`skip_paint`)
+/// compares only content-level moving parts, so without this a resize while
+/// idle left the old-size frame — and whatever the terminal's reflow made of
+/// it — on screen until the next keypress. The repaint it forces is a full
+/// clear + redraw: the painter discards its diff base on the same size change
+/// ([`FramePainter`]'s resize invalidation). The first pass reports `false`;
+/// there is no previous size to differ from, and the first frame always paints
+/// anyway (`force_paint` starts true).
+pub(super) fn size_changed(last: &mut Option<(u16, u16)>, size: (u16, u16)) -> bool {
+    let changed = last.is_some_and(|l| l != size);
+    *last = Some(size);
+    changed
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn event_loop(
     term: &Term,
@@ -600,6 +615,9 @@ pub(super) fn event_loop(
     // The previous left click's session row and time, so a second click on the
     // same row within the double-click window confirms it (see [`overview_click`]).
     let mut last_click: Option<(usize, Instant)> = None;
+    // The terminal size at the last pass, so a resize forces a full repaint
+    // (see [`size_changed`]).
+    let mut last_size: Option<(u16, u16)> = None;
     // The monitor snapshot version last applied to `state`. When unchanged, the
     // loop skips `monitor.snapshot()` entirely — avoiding the clone of every badge
     // set on each idle/live-frame pass.
@@ -837,6 +855,16 @@ pub(super) fn event_loop(
         // leaves `mascot_blinking` false and a truly idle 選択 still skips painting.
         state.tick_mascot(now);
         let blink_changed = state.mascot_blinking() != last_blinking;
+        // The size this frame paints at, read once per pass. A resize since the
+        // last pass invalidates everything on screen — the terminal reflowed the
+        // old frame — so it forces a repaint past the quiet-選択 skip below; the
+        // painter separately discards its diff base on the same size change,
+        // making that repaint a whole-screen clear + full redraw. The loop is
+        // awake to notice: a resize interrupts a blocking read (SIGWINCH →
+        // EINTR, surfaced as a `Key::Unknown` or a swallowed `Interrupted`
+        // below), and an idle 選択 wakes on `WATCH_SESSIONS_TICK` regardless.
+        let (height, width) = term.size();
+        force_paint |= size_changed(&mut last_size, (height, width));
         // In a quiet base 選択 (Overview) — no live preview in the right pane and no
         // command palette open — an idle frame's only moving parts are the sidebar
         // badges, the update notice, and those time-animated panels. When none
@@ -866,7 +894,6 @@ pub(super) fn event_loop(
             && !state.mascot_blinking()
             && !blink_changed
             && last_update == latest_update;
-        let (height, width) = term.size();
         if !skip_paint {
             // Stamp the frame's render time so the left pane's "Nm ago" labels track
             // real time. Only on a real paint — a skipped frame draws nothing, so

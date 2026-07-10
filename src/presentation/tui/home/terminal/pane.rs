@@ -498,6 +498,13 @@ fn drive(
         // loop took the parser lock (and issued a TIOCSWINSZ ioctl) every pass.
         if last_geo != Some(geo) {
             pty.resize(geo.rows, geo.cols);
+            // The resize reflowed what is actually on the host terminal, so
+            // the remembered frame no longer matches it: forget it so this
+            // pass's repaint clears the whole screen and redraws every row,
+            // instead of diffing against a stale base and leaving reflow
+            // leftovers on the rows that happen to compare equal. (A no-op on
+            // the opening pass, where nothing has been drawn yet.)
+            prev.clear();
             last_geo = Some(geo);
             interactive = true;
         }

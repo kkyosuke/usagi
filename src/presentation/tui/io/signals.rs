@@ -19,6 +19,17 @@
 //! handler does is async-signal-safe: a raw `write(2)`, a `tcsetattr(2)` to a
 //! termios captured before the TUI started, and `raise(3)` — no allocation, no
 //! lock, no Rust `Drop`.
+//!
+//! [`install`] also registers a **no-op SIGWINCH handler**. Its entire effect is
+//! that a terminal resize now interrupts the TUI's blocking `select`/`poll` key
+//! reads with `EINTR` — the wake-up the event loops turn into a full repaint at
+//! the new size (`console` surfaces the interrupted read as a spurious
+//! `Key::CtrlC`, which `io::term_reader` maps to `Key::Unknown`). SIGWINCH's
+//! default disposition is "ignore", so without this a resize before the embedded
+//! pane first ran (which installs crossterm's SIGWINCH handler as a side effect
+//! of its event stream) woke nothing, and the screen stayed stale until the next
+//! keypress. crossterm registers via `signal-hook`, which chains a previously
+//! installed `sigaction` handler, so the two coexist.
 
 #[cfg(unix)]
 mod imp {
@@ -66,7 +77,16 @@ mod imp {
         }
     }
 
-    /// Install the terminal-restoring handler for SIGINT, SIGTERM, and SIGHUP.
+    /// Wake blocking reads on a terminal resize. The body is empty on purpose:
+    /// registering *any* handler moves SIGWINCH off its default "ignore"
+    /// disposition, so a resize interrupts the TUI's blocking `select`/`poll`
+    /// key reads with `EINTR` — which the key reader and event loops turn into
+    /// a full repaint at the new size (see the module docs). Trivially
+    /// async-signal-safe: it does nothing.
+    extern "C" fn handle_winch(_signum: c_int) {}
+
+    /// Install the terminal-restoring handler for SIGINT, SIGTERM, and SIGHUP,
+    /// and the read-waking no-op handler for SIGWINCH.
     /// Idempotent: only the first call registers anything.
     pub fn install() {
         if INSTALLED.swap(true, Ordering::SeqCst) {
@@ -92,6 +112,15 @@ mod imp {
             for signum in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
                 libc::sigaction(signum, addr_of!(action), std::ptr::null_mut());
             }
+
+            // SIGWINCH: registered with no flags — no `SA_RESTART`, so a resize
+            // interrupts blocking reads (EINTR) and the event loops repaint at
+            // the new size; no `SA_RESETHAND`, so every resize keeps firing.
+            let mut winch: libc::sigaction = std::mem::zeroed();
+            winch.sa_sigaction = handle_winch as *const libc::c_void as libc::sighandler_t;
+            libc::sigemptyset(addr_of_mut!(winch.sa_mask));
+            winch.sa_flags = 0;
+            libc::sigaction(libc::SIGWINCH, addr_of!(winch), std::ptr::null_mut());
         }
     }
 }
