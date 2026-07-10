@@ -175,6 +175,7 @@ mod tests {
             notifications_enabled: Some(false),
             restore_panes_enabled: Some(false),
             autostart_queued_prompts: Some(false),
+            autostart_queued_prompt_limit: Some(2),
             auto_reclaim_merged_sessions: Some(30),
             default_branch_source: Some(BranchSource::Local),
             default_branch: Some("develop".to_string()),

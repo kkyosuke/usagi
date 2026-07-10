@@ -54,6 +54,8 @@
 │          Default Workspace  < (none) >                │  │  値は常に山かっこで囲み列を揃える
 │      >   Notifications      < On >                    │  │  選択行：左端の赤 ">" + 値が明色
 │          Restore Panes      < On >                    │  │  起動時にペインを復旧（agent は会話を再開）
+│          Autostart Queued   < On >                    │  │  queued prompt を自動起動
+│          Autostart Limit    < 4 >                     │  │  running/waiting の同時 agent 上限
 │        ● Agent CLI          < Gemini >                │  │  変更済み：ラベル左に黄色 ● + 値も黄色
 │          Session Action UI  < Menu >                  │  │  集中の右ペイン UI（Menu / Prompt）
 │          Terminal Keys      < Ctrl-O prefix >         │  │  没入のキー方式（Ctrl-O prefix / Alt chords）
@@ -77,6 +79,8 @@
 | Default Workspace | 既定で開くワークスペース | `(none)` ＋ 登録済みワークスペース名を順に循環。未登録時は変更不可（ヒントを表示） |
 | Notifications | デスクトップ通知（`agent` の入力待ち・完了）の ON/OFF | `On` ⇄ `Off` をトグル |
 | Restore Panes | 起動時に各セッションのペイン（agent / terminal）を復旧（agent は会話を再開） | `On` ⇄ `Off` をトグル（[04-orchestration.md#ペインの復旧](../04-orchestration.md#ペインの復旧)） |
+| Autostart Queued Prompts | queue に積まれた prompt を人手なしに agent 起動へつなぐか | `On` ⇄ `Off` をトグル（[04-orchestration.md#キュー済みプロンプトの自動起動](../04-orchestration.md#キュー済みプロンプトの自動起動)） |
+| Autostart Agent Limit | queued prompt 自動起動が同時に占有できる agent 枠数 | `1` / `2` / `3` / `4` / `6` / `8` / `12` / `16` を循環。`running` / `waiting` が枠を占有し、`ended` / `ready` / `none` は空き |
 | Agent CLI | usagi が起動する AI エージェント CLI | **PATH に存在する（インストール済みの）agent だけ**を `Claude` → `Codex` → `sakana.ai` → `Gemini` → `Antigravity` の順に循環（`sakana.ai` は Codex 互換 CLI `codex-fugu`、`Antigravity` は `agy` を起動）。未インストールの agent は選択肢に出さない。ただし現在保存されている値が未インストールでも、画面を開いただけで失わないよう選択肢に残す |
 | Session Action UI | 集中（Closeup）の右ペインのアクション UI スタイル | `Menu`（選べるリスト）⇄ `Prompt`（コマンドライン）をトグル（[home/02-layout.md](home/02-layout.md#集中のアクション-uimenu--prompt)） |
 | Mascot Animation | サイドバーのマスコットうさぎが操作に反応するか | `On` ⇄ `Off` をトグル。`Off` でうさぎは静止する（[home/02-layout.md](home/02-layout.md#レイアウト)） |
@@ -117,7 +121,7 @@
 
 ホーム画面のコマンドモードで `config` を実行したときのスコープ。起動中のワークスペース
 （`<workspace>/.usagi/settings.json`）だけに効く **ローカルの上書き**を編集します。グローバル設定は
-ここには表示されず、対象は次の固定 7 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
+ここには表示されず、対象は次の固定 10 項目と、その下に並ぶ同梱スキル機能（`PR Skills` など）です。
 
 ```text
 ┌───────────────────────────────────────────────────────┐
@@ -127,9 +131,11 @@
 │                   Workspace Config                    │  ← タイトル（緑・太字）
 │            Adjust this workspace's settings           │  ← サブタイトル（淡色）
 │                                                       │
-│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 8 項目）
+│      >   Agent CLI       < Global (Claude) >          │  ┐ ローカル設定一覧（固定 10 項目）
 │        ● Notifications   < Override: Off >            │  │  選択行：左端の赤 ">"
 │          Restore Panes   < Global (On) >              │  │  変更済み：ラベル左に黄色 ●
+│          Autostart Queued < Global (On) >             │  │
+│          Autostart Limit  < Global (4) >              │  │
 │          Default Branch  < develop >                  │  │
 │          Branch Source   < Remote >                   │  │
 │          Setup Commands  Edit (2 commands)            │  │
@@ -148,6 +154,8 @@
 | Agent CLI | このワークスペースの Agent CLI 上書き | `Global (実効値)` → インストール済みの agent を `Override: Claude` → `Override: Codex` → `Override: sakana.ai` → `Override: Gemini` → `Override: Antigravity` の順に循環（未インストールは出さない。既存の上書き値が未インストールでも選択肢に残す） |
 | Notifications | このワークスペースの通知 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
 | Restore Panes | このワークスペースのペイン復旧 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
+| Autostart Queued Prompts | このワークスペースの queued prompt 自動起動 ON/OFF 上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環 |
+| Autostart Agent Limit | このワークスペースの queued prompt 自動起動の同時 agent 上限 | `Global (実効値)` → `Override: 1` → `Override: 2` → `Override: 3` → `Override: 4` → `Override: 6` → `Override: 8` → `Override: 12` → `Override: 16` の順に循環 |
 | Default Branch | `session create` で worktree を切る基点ブランチ | `Default (auto)` → リポジトリの各ブランチ名 の順に循環（実在ブランチを検出） |
 | Branch Source | 上のブランチをローカル形／リモート形のどちらで使うか | `Local` ⇄ `Remote` をトグル（未設定時は `Default (Remote)` を表示） |
 | Setup Commands | `session create` 後に session root で実行するコマンド列 | 値は `Edit (none)` / `Edit (1 command)` / `Edit (N commands)`。`Space` / `Enter` で複数行エディタを開く |
@@ -155,7 +163,7 @@
 | Session Labels | 選択のステータスラベルマスタ（`session_labels`）のこのワークスペースでの上書き | 未上書きは `Edit (global: N labels)`（グローバルの実効値に追従）、上書き時は `Edit (N labels)`、空上書き時は `Edit (off)`。`Space` / `Enter` で複数行エディタを開く |
 | PR Skills | 同梱スキル機能 `pull-request` のこのワークスペースでの上書き | `Global (実効値)` → `Override: On` → `Override: Off` の順に循環。固定項目の下に機能ごとに 1 行並ぶ |
 
-- Agent CLI と Notifications は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
+- Agent CLI / Notifications / Restore Panes / Autostart Queued Prompts / Autostart Agent Limit は **「グローバルに従う / ローカルで上書き」** を 1 つの chooser で切り替えます。
   `Global (...)` は未上書き（グローバル設定にフォールバック）で、かっこ内に現在の実効値を表示します。
   `Override: ...` を選ぶとそのワークスペース専用の値になります。再度 `Global` まで循環させれば上書きを解除できます。
 - Default Branch はグローバルに対応項目がなく、`Default (auto)`（リポジトリの検出済み既定ブランチ）と、対象

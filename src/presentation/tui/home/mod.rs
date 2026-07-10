@@ -648,6 +648,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // / `session_prompt`) auto-starts that session's agent pane in the background.
     // Copied out so the autostart pass can read it without holding `settings`.
     let autostart_queued_prompts_enabled = settings.autostart_queued_prompts;
+    let autostart_queued_prompt_limit = settings.autostart_queued_prompt_limit;
     let auto_reclaim_grace = settings
         .auto_reclaim_merged_sessions
         .map(|minutes| std::time::Duration::from_secs(minutes.saturating_mul(60)));
@@ -716,6 +717,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         &agent_wiring,
         default_cli,
         autostart_queued_prompts_enabled,
+        autostart_queued_prompt_limit,
     ) {
         state.log_output(line);
     }
@@ -999,6 +1001,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     &agent_wiring,
                     default_cli,
                     autostart_queued_prompts_enabled,
+                    autostart_queued_prompt_limit,
                 )
             };
             // Capture every failure of this launch — the initial spawn (`add_pane`
@@ -1669,6 +1672,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             &agent_wiring,
             default_cli,
             autostart_queued_prompts_enabled,
+            autostart_queued_prompt_limit,
         );
         if let Some(grace) = auto_reclaim_grace {
             let badges = state.badges();
@@ -1968,6 +1972,7 @@ fn autostart_queued_prompts(
     agent_wiring: &crate::domain::agent::AgentWiring,
     default_cli: crate::domain::settings::AgentCli,
     enabled: bool,
+    limit: usize,
 ) -> Vec<String> {
     use terminal::tabs::PaneKind;
 
@@ -1975,6 +1980,12 @@ fn autostart_queued_prompts(
         || (!crate::infrastructure::agent_prompt_store::any_queued()
             && !crate::infrastructure::agent_live_prompt_store::any_queued())
     {
+        return Vec::new();
+    }
+
+    let mut slots_remaining =
+        autostart_slots_remaining(pool.borrow().occupied_agent_slots(), limit);
+    if slots_remaining == 0 {
         return Vec::new();
     }
 
@@ -2003,6 +2014,9 @@ fn autostart_queued_prompts(
 
     let mut logs = Vec::new();
     for (dir, label) in dirs {
+        if slots_remaining == 0 {
+            break;
+        }
         // A live pane already drives this session (or an agent is running there):
         // leave any queued prompt to the ordinary consume-on-fresh-launch path.
         if pool.borrow().has_live_pane(&dir) {
@@ -2052,7 +2066,10 @@ fn autostart_queued_prompts(
                 attach: None,
             },
         ) {
-            Ok(()) => logs.push(format!("queued prompt auto-started for {label}: {prompt}")),
+            Ok(()) => {
+                slots_remaining = slots_remaining.saturating_sub(1);
+                logs.push(format!("queued prompt auto-started for {label}: {prompt}"));
+            }
             Err(err) => {
                 // The background spawn failed, so the prompt was not delivered.
                 // Re-queue it (best-effort) so a later tick — or a human opening the
@@ -2066,6 +2083,10 @@ fn autostart_queued_prompts(
         }
     }
     logs
+}
+
+fn autostart_slots_remaining(occupied: usize, limit: usize) -> usize {
+    limit.saturating_sub(occupied)
 }
 
 /// Create a session on a worker thread: run the git / filesystem work and build
@@ -2208,7 +2229,10 @@ fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::state_fingerprint;
+    use super::terminal::pool::MonitorSnapshot;
+    use super::{autostart_slots_remaining, state_fingerprint};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
 
     #[test]
     fn state_fingerprint_tracks_contents_not_mtime() {
@@ -2239,5 +2263,28 @@ mod tests {
             four_a, four_b,
             "same length, different contents → new signal"
         );
+    }
+
+    #[test]
+    fn occupied_agent_slots_counts_running_and_waiting_only() {
+        let running = PathBuf::from("/tmp/running");
+        let waiting = PathBuf::from("/tmp/waiting");
+        let both = PathBuf::from("/tmp/both");
+        let ended = PathBuf::from("/tmp/ended");
+        let snapshot = MonitorSnapshot {
+            running: HashSet::from([running, both.clone()]),
+            waiting: HashSet::from([waiting, both]),
+            done: HashSet::from([ended]),
+            ..MonitorSnapshot::default()
+        };
+
+        assert_eq!(snapshot.occupied_agent_slots(), 3);
+    }
+
+    #[test]
+    fn autostart_slots_remaining_respects_the_configured_limit() {
+        assert_eq!(autostart_slots_remaining(1, 4), 3);
+        assert_eq!(autostart_slots_remaining(4, 4), 0);
+        assert_eq!(autostart_slots_remaining(5, 4), 0);
     }
 }

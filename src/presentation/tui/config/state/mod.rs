@@ -33,6 +33,9 @@ pub(super) const KEY_SCHEMES: [KeyScheme; 2] = [KeyScheme::Prefix, KeyScheme::Al
 /// The branch sources in the order they cycle through.
 pub(super) const BRANCH_SOURCES: [BranchSource; 2] = [BranchSource::Local, BranchSource::Remote];
 
+/// The queued-prompt autostart concurrency limits offered by the Config screen.
+pub(super) const AUTOSTART_LIMITS: [usize; 8] = [1, 2, 3, 4, 6, 8, 12, 16];
+
 /// An editable global settings field, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -43,6 +46,8 @@ pub enum Field {
     RestorePanes,
     /// Whether a prompt queued for a pane-less session auto-starts its agent.
     AutostartQueued,
+    /// The maximum number of queued-prompt autostarted agents running/waiting at once.
+    AutostartQueuedLimit,
     AgentCli,
     /// How 集中 (Closeup) mode presents a session's runnable commands.
     SessionActionUi,
@@ -62,12 +67,13 @@ pub enum Field {
 
 impl Field {
     /// The fields shown on the screen, top to bottom.
-    pub const ALL: [Field; 12] = [
+    pub const ALL: [Field; 13] = [
         Field::Theme,
         Field::DefaultWorkspace,
         Field::Notifications,
         Field::RestorePanes,
         Field::AutostartQueued,
+        Field::AutostartQueuedLimit,
         Field::AgentCli,
         Field::SessionActionUi,
         Field::KeyScheme,
@@ -85,6 +91,7 @@ impl Field {
             Field::Notifications => "Notifications",
             Field::RestorePanes => "Restore Panes",
             Field::AutostartQueued => "Autostart Queued Prompts",
+            Field::AutostartQueuedLimit => "Autostart Agent Limit",
             Field::AgentCli => "Agent CLI",
             Field::SessionActionUi => "Session Action UI",
             Field::KeyScheme => "Terminal Keys",
@@ -106,6 +113,8 @@ pub enum LocalField {
     RestorePanes,
     /// Whether a prompt queued for a pane-less session auto-starts its agent.
     AutostartQueued,
+    /// Override the queued-prompt autostart concurrency limit.
+    AutostartQueuedLimit,
     /// Which branch new session worktrees are cut from (the detected default, or
     /// a specific branch).
     DefaultBranch,
@@ -123,11 +132,12 @@ pub enum LocalField {
 
 impl LocalField {
     /// The local override fields shown on the screen, top to bottom.
-    pub const ALL: [LocalField; 9] = [
+    pub const ALL: [LocalField; 10] = [
         LocalField::AgentCli,
         LocalField::Notifications,
         LocalField::RestorePanes,
         LocalField::AutostartQueued,
+        LocalField::AutostartQueuedLimit,
         LocalField::DefaultBranch,
         LocalField::BranchSource,
         LocalField::SetupCommands,
@@ -142,6 +152,7 @@ impl LocalField {
             LocalField::Notifications => "Notifications",
             LocalField::RestorePanes => "Restore Panes",
             LocalField::AutostartQueued => "Autostart Queued Prompts",
+            LocalField::AutostartQueuedLimit => "Autostart Agent Limit",
             LocalField::DefaultBranch => "Default Branch",
             LocalField::BranchSource => "Branch Source",
             LocalField::SetupCommands => "Setup Commands",
@@ -562,6 +573,10 @@ impl Config {
             Field::AutostartQueued => {
                 self.settings.autostart_queued_prompts != self.baseline.autostart_queued_prompts
             }
+            Field::AutostartQueuedLimit => {
+                self.settings.autostart_queued_prompt_limit
+                    != self.baseline.autostart_queued_prompt_limit
+            }
             Field::AgentCli => self.settings.agent_cli != self.baseline.agent_cli,
             Field::SessionActionUi => {
                 self.settings.session_action_ui != self.baseline.session_action_ui
@@ -591,6 +606,10 @@ impl Config {
             }
             LocalField::AutostartQueued => {
                 local.settings.autostart_queued_prompts != local.baseline.autostart_queued_prompts
+            }
+            LocalField::AutostartQueuedLimit => {
+                local.settings.autostart_queued_prompt_limit
+                    != local.baseline.autostart_queued_prompt_limit
             }
             LocalField::DefaultBranch => {
                 local.settings.default_branch != local.baseline.default_branch
@@ -646,6 +665,7 @@ impl Config {
             Field::Notifications => on_off(self.settings.notifications_enabled).to_string(),
             Field::RestorePanes => on_off(self.settings.restore_panes_enabled).to_string(),
             Field::AutostartQueued => on_off(self.settings.autostart_queued_prompts).to_string(),
+            Field::AutostartQueuedLimit => self.settings.autostart_queued_prompt_limit.to_string(),
             Field::AgentCli => self.settings.agent_cli.display_name().to_string(),
             Field::SessionActionUi => {
                 session_action_ui_label(self.settings.session_action_ui).to_string()
@@ -710,6 +730,12 @@ impl Config {
                 ),
                 Some(on) => format!("Override: {}", on_off(on)),
             },
+            LocalField::AutostartQueuedLimit => {
+                match local.settings.autostart_queued_prompt_limit {
+                    None => format!("Global ({})", self.settings.autostart_queued_prompt_limit),
+                    Some(limit) => format!("Override: {limit}"),
+                }
+            }
             // The default branch has no global counterpart: an unset value uses
             // the repository's detected default ("auto"), a set value names the
             // branch to cut from.

@@ -278,6 +278,8 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "version": 1,
   "agent_cli": "gemini",             // 任意。未設定ならグローバル値
   "notifications_enabled": false,    // 任意。未設定ならグローバル値
+  "autostart_queued_prompts": true,  // 任意。未設定ならグローバル値
+  "autostart_queued_prompt_limit": 2, // 任意。queued prompt 自動起動の同時 agent 上限
   "auto_reclaim_merged_sessions": 30, // 任意。merged セッションのペイン自動回収猶予（分、未設定ならグローバル値）
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
@@ -299,6 +301,8 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 |---|---|---|
 | `agent_cli` | enum? | グローバル `agent_cli` にフォールバック |
 | `notifications_enabled` | bool? | グローバル `notifications_enabled` にフォールバック |
+| `autostart_queued_prompts` | bool? | グローバル `autostart_queued_prompts` にフォールバック |
+| `autostart_queued_prompt_limit` | usize? | グローバル `autostart_queued_prompt_limit` にフォールバック |
 | `auto_reclaim_merged_sessions` | minutes? | グローバル `auto_reclaim_merged_sessions` にフォールバック |
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
