@@ -1440,6 +1440,39 @@ fn run_wake_commands_schedules_and_cancels() {
     assert!(matches!(outcome, Outcome::Quit));
 }
 
+#[test]
+fn run_wake_status_reports_the_schedule() {
+    use chrono::Timelike;
+    let now = Local::now();
+
+    // 1. `wake status` with nothing scheduled exercises the "none" branch.
+    let mut keys = cmd("wake status");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+
+    // 2. Bare `wake` with a pending wake exercises the "scheduled" branch (and the
+    //    countdown formatting). Seed a future wake so it is still pending.
+    let mut future_h = now.hour();
+    let mut future_m = now.minute() + 2;
+    if future_m >= 60 {
+        future_h = (future_h + 1) % 24;
+        future_m %= 60;
+    }
+    if future_h == 0 {
+        future_h = 23;
+        future_m = 59;
+    }
+    let mut state = sample_state();
+    let _ = state.schedule_wake(now, future_h, future_m);
+    let mut keys = cmd("wake");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, state).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
 mod attached;
 mod background_tab;
 mod background_tasks;

@@ -425,11 +425,11 @@ impl Command for WakeCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "wake -t <hhmm>|cancel"
+        "wake [-t <hhmm>|status|cancel]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
-        &["wake -t 1430", "wake -t 9:05", "wake cancel"]
+        &["wake -t 1430", "wake -t 9:05", "wake status", "wake cancel"]
     }
 
     fn scope(&self) -> CommandScope {
@@ -439,6 +439,13 @@ impl Command for WakeCommand {
     fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
         let parts: Vec<&str> = args.split_whitespace().collect();
         match parts.as_slice() {
+            // Bare `wake` and `wake status` both report the pending wake, so the
+            // command is safe to run without arguments — it shows what is
+            // scheduled rather than erroring on usage.
+            [] | ["status"] => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::WakeStatus,
+            },
             ["cancel"] => CommandResult {
                 lines: Vec::new(),
                 effect: Effect::CancelWake,
@@ -457,7 +464,10 @@ impl Command for WakeCommand {
     fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
         let (head, _) = arg_tokens(args);
         match head.first().copied() {
-            None => ["-t", "cancel"].iter().map(|s| s.to_string()).collect(),
+            None => ["-t", "status", "cancel"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             Some("-t" | "--time") => Vec::new(),
             _ => Vec::new(),
         }

@@ -136,6 +136,11 @@ pub enum Effect {
     /// Cancel a pending wake (the user ran `wake cancel`). A no-op — with a note —
     /// when none is scheduled.
     CancelWake,
+    /// Report the pending wake (the user ran `wake status`, or bare `wake`): the
+    /// event loop logs the scheduled time with a live countdown, or a note that
+    /// none is scheduled. Read-only, so it keeps the palette open like `wake
+    /// cancel`.
+    WakeStatus,
 }
 
 impl Effect {
@@ -175,7 +180,8 @@ impl Effect {
             | Effect::OpenEnvEditor
             | Effect::ShowText { .. }
             | Effect::ScheduleWake { .. }
-            | Effect::CancelWake => false,
+            | Effect::CancelWake
+            | Effect::WakeStatus => false,
         }
     }
 }

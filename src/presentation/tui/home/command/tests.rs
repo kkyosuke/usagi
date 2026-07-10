@@ -118,6 +118,16 @@ fn wake_cancel_requests_cancellation() {
 }
 
 #[test]
+fn bare_wake_and_status_request_the_status_effect() {
+    // Bare `wake` and `wake status` both report the pending wake (no usage error).
+    for input in ["wake", "wake status"] {
+        let result = registry().dispatch(input, &[], &[]);
+        assert!(result.lines.is_empty(), "{input} should produce no lines");
+        assert_eq!(result.effect, Effect::WakeStatus, "{input}");
+    }
+}
+
+#[test]
 fn wake_rejects_bad_arguments() {
     let bad_time = registry().dispatch("wake -t 2460", &[], &[]);
     assert_eq!(bad_time.effect, Effect::None);
@@ -133,7 +143,7 @@ fn wake_rejects_bad_arguments() {
 fn wake_completes_its_arguments() {
     let all = registry().complete("wake ", CommandScope::Workspace);
     assert_eq!(all.input, "wake ");
-    assert_eq!(all.candidates, vec!["-t", "cancel"]);
+    assert_eq!(all.candidates, vec!["-t", "status", "cancel"]);
 
     let partial = registry().complete("wake -", CommandScope::Workspace);
     assert_eq!(partial.input, "wake -t");
@@ -142,6 +152,10 @@ fn wake_completes_its_arguments() {
     let cancel = registry().complete("wake c", CommandScope::Workspace);
     assert_eq!(cancel.input, "wake cancel");
     assert!(cancel.candidates.is_empty());
+
+    let status = registry().complete("wake s", CommandScope::Workspace);
+    assert_eq!(status.input, "wake status");
+    assert!(status.candidates.is_empty());
 
     let time = registry().complete("wake -t ", CommandScope::Workspace);
     assert_eq!(time.input, "wake -t ");
