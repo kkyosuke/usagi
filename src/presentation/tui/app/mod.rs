@@ -14,7 +14,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::storage::Storage;
-use crate::presentation::tui::io::{screen, signals};
+use crate::presentation::tui::io::{loading, screen, signals};
 use crate::presentation::tui::new::state::NewProject;
 use crate::presentation::tui::{config, home, new, open, splash, welcome};
 use crate::usecase::project;
@@ -61,16 +61,24 @@ pub fn run() -> Result<()> {
     let mut run_splash = |t: &Term| splash::run(t);
     let mut run_welcome = |t: &Term, notice: Option<String>| welcome::run(t, notice);
     let mut run_open = |t: &Term| open::run(t);
-    let mut run_new = |t: &Term| new::run(t, &default_location);
-    let mut create_project = |form: &NewProject| -> Result<Workspace> {
+    let mut run_new = |t: &Term, form, notice| new::run(t, &default_location, form, notice);
+    let mut create_project = |t: &Term, form: &NewProject| -> Result<Workspace> {
         match form {
-            NewProject::Clone(spec) => project::create(
-                &storage,
-                &spec.url,
-                &spec.location,
-                &spec.directory,
-                spec.branch.as_deref(),
-            ),
+            NewProject::Clone(spec) => {
+                let worker_storage = Storage::new(storage.dir().to_path_buf());
+                let worker_spec = spec.clone();
+                let label = format!("Cloning {}…", spec.directory);
+                loading::run_with_loading_immediate(t, &label, move || {
+                    project::create(
+                        &worker_storage,
+                        &worker_spec.url,
+                        &worker_spec.location,
+                        &worker_spec.directory,
+                        worker_spec.branch.as_deref(),
+                    )
+                })?
+                .unwrap_or_else(|| Err(anyhow::anyhow!("project creation task panicked")))
+            }
             NewProject::Existing(spec) => {
                 project::register_existing(&storage, &spec.path, &spec.name)
             }

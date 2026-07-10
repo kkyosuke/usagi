@@ -16,8 +16,12 @@ use super::ui;
 pub enum Outcome {
     /// Return to the previous screen without creating a project.
     Back,
-    /// The user submitted a valid project.
-    Submitted(NewProject),
+    /// The user submitted a valid project. The editable form accompanies the
+    /// validated request so a creation failure can reopen it unchanged.
+    Submitted {
+        project: NewProject,
+        form: Box<FormState>,
+    },
     /// The user asked to quit the application entirely.
     Quit,
 }
@@ -26,20 +30,20 @@ pub enum Outcome {
 /// the user submits, goes back, or quits. Assumes the alternate screen is
 /// already active (it is owned by the caller).
 ///
-/// `default_location` pre-fills the Location field with the base directory new
-/// projects are created under; the user can edit it before submitting.
+/// `state` and `notice` are the initial editable values and notification. A
+/// fresh launch supplies a default form; a failed creation supplies the form
+/// that was just submitted and its error message.
 ///
 /// `dir_source` backs the directory browser opened with Space on a directory
 /// field (Location in Clone mode, the path in Existing mode).
 pub fn event_loop(
     term: &Term,
     reader: &mut dyn KeyReader,
+    mut state: FormState,
+    mut notice: Option<String>,
     default_location: &str,
     dir_source: &dyn DirSource,
 ) -> Result<Outcome> {
-    let mut state = FormState::new();
-    state.set_location(default_location);
-    let mut notice: Option<String> = None;
     let mut painter = FramePainter::new();
 
     loop {
@@ -59,7 +63,12 @@ pub fn event_loop(
             // `Ctrl-C` / `Ctrl-Q` (the bare `0x11`) quit the app from here too.
             Key::CtrlC | Key::Char('\u{0011}') => return Ok(Outcome::Quit),
             Key::Enter => match state.validate() {
-                Ok(project) => return Ok(Outcome::Submitted(project)),
+                Ok(project) => {
+                    return Ok(Outcome::Submitted {
+                        project,
+                        form: Box::new(state),
+                    })
+                }
                 Err(message) => notice = Some(message),
             },
             Key::Tab | Key::ArrowDown => {
@@ -157,6 +166,12 @@ mod tests {
         s.chars().map(|c| Ok(Key::Char(c))).collect()
     }
 
+    fn fresh_form(location: &str) -> FormState {
+        let mut form = FormState::new();
+        form.set_location(location);
+        form
+    }
+
     /// A directory source that lists the same two children for any directory,
     /// enough to drive the browser in the integration tests.
     struct FakeDirs;
@@ -172,7 +187,15 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Back
         ));
     }
@@ -182,7 +205,15 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::CtrlC)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Quit
         ));
     }
@@ -193,7 +224,15 @@ mod tests {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Ok(Key::Char('\u{0011}'))]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Quit
         ));
     }
@@ -207,13 +246,25 @@ mod tests {
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
         // The pre-filled location lets validation succeed without editing it.
-        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            fresh_form("/base"),
+            None,
+            "/base",
+            &FakeDirs,
+        )
+        .unwrap();
         assert!(matches!(
             &outcome,
-            Outcome::Submitted(NewProject::Clone(spec))
+            Outcome::Submitted {
+                project: NewProject::Clone(spec),
+                form,
+            }
                 if spec.directory == "repo"
                     && spec.url.as_str() == "https://github.com/owner/repo.git"
                     && spec.location == std::path::Path::new("/base")
+                    && form.url() == "https://github.com/owner/repo.git"
         ));
     }
 
@@ -226,10 +277,21 @@ mod tests {
         keys.extend(type_keys("/home/me/my-app"));
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
-        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            fresh_form("/base"),
+            None,
+            "/base",
+            &FakeDirs,
+        )
+        .unwrap();
         assert!(matches!(
             &outcome,
-            Outcome::Submitted(NewProject::Existing(spec))
+            Outcome::Submitted {
+                project: NewProject::Existing(spec),
+                ..
+            }
                 if spec.name == "my-app"
                     && spec.path == std::path::Path::new("/home/me/my-app")
         ));
@@ -241,7 +303,15 @@ mod tests {
         // Enter on an empty form fails validation (notice), then Escape goes back.
         let mut reader = ScriptedReader::new(vec![Ok(Key::Enter), Ok(Key::Escape)]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Back
         ));
     }
@@ -267,7 +337,15 @@ mod tests {
             Ok(Key::Escape),     // back
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Back
         ));
     }
@@ -282,8 +360,22 @@ mod tests {
         keys.push(Ok(Key::Enter));
         let mut reader = ScriptedReader::new(keys);
         // Back in Clone mode, the URL submits as a clone.
-        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
-        assert!(matches!(&outcome, Outcome::Submitted(NewProject::Clone(_))));
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            fresh_form("/base"),
+            None,
+            "/base",
+            &FakeDirs,
+        )
+        .unwrap();
+        assert!(matches!(
+            &outcome,
+            Outcome::Submitted {
+                project: NewProject::Clone(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -294,7 +386,15 @@ mod tests {
             "interrupted",
         ))]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Quit
         ));
     }
@@ -303,7 +403,15 @@ mod tests {
     fn unexpected_read_error_is_propagated() {
         let term = Term::stdout();
         let mut reader = ScriptedReader::new(vec![Err(io::Error::other("boom"))]);
-        let err = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap_err();
+        let err = event_loop(
+            &term,
+            &mut reader,
+            fresh_form("/base"),
+            None,
+            "/base",
+            &FakeDirs,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Failed to read key"));
     }
 
@@ -320,11 +428,22 @@ mod tests {
             Ok(Key::Enter),      // browser: select "/base"
             Ok(Key::Enter),      // form: submit
         ]);
-        let outcome = event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap();
+        let outcome = event_loop(
+            &term,
+            &mut reader,
+            fresh_form("/base"),
+            None,
+            "/base",
+            &FakeDirs,
+        )
+        .unwrap();
         // The picked directory fills Path, and the name is derived from it.
         assert!(matches!(
             &outcome,
-            Outcome::Submitted(NewProject::Existing(spec))
+            Outcome::Submitted {
+                project: NewProject::Existing(spec),
+                ..
+            }
                 if spec.path == std::path::Path::new("/base") && spec.name == "base"
         ));
     }
@@ -342,7 +461,15 @@ mod tests {
             Ok(Key::Escape),    // form: back
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Back
         ));
     }
@@ -357,7 +484,15 @@ mod tests {
             Ok(Key::CtrlC),      // browser: quit
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Quit
         ));
     }
@@ -373,7 +508,15 @@ mod tests {
             Ok(Key::Escape),
         ]);
         assert!(matches!(
-            event_loop(&term, &mut reader, "/base", &FakeDirs).unwrap(),
+            event_loop(
+                &term,
+                &mut reader,
+                fresh_form("/base"),
+                None,
+                "/base",
+                &FakeDirs
+            )
+            .unwrap(),
             Outcome::Back
         ));
     }
