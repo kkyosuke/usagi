@@ -42,6 +42,10 @@ use console::Term;
 use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
 use crate::domain::workspace_state::PrLink;
+#[cfg(unix)]
+use crate::infrastructure::daemon_client::{DaemonInputHandle, DaemonTerminal};
+#[cfg(unix)]
+use crate::infrastructure::daemon_store;
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
 use crate::infrastructure::pty::{PtyInputHandle, PtySession, ScreenCallbacks};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
@@ -93,7 +97,7 @@ struct Watched {
     /// Input handle for the agent pane, when this session currently has one.
     /// The watcher drains MCP live `session_prompt` prompts only for sessions with
     /// this handle, so prompts sent while no agent pane is live remain queued.
-    agent_input: Option<PtyInputHandle>,
+    agent_input: Option<PaneInputHandle>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
     /// Whether any pane in this session is running the Antigravity agent CLI.
@@ -125,7 +129,7 @@ struct WatchedPrPane {
 /// release the shared-state lock before it drains disk queues or writes to PTYs.
 struct LivePromptTarget {
     path: PathBuf,
-    input: PtyInputHandle,
+    input: PaneInputHandle,
 }
 
 /// State shared between the pool, the watcher thread, and the render loops.
@@ -490,13 +494,223 @@ fn apply_pr_results(
     changed
 }
 
-/// One embedded pane: a live [`PtySession`] and what it runs (so the tab strip
-/// can label it and the agent pane can be told apart for the badge heuristic).
+/// What actually backs one embedded pane: an attach client onto a terminal the
+/// daemon owns (the normal case), or a TUI-local [`PtySession`] (non-Unix
+/// platforms, or the daemon was unavailable at spawn).
+///
+/// Both variants expose the same surface — a vt100 parser to draw from,
+/// generation / bell / liveness counters, input and resize — so the pool, the
+/// pane drive loop, and the watcher stay backend-agnostic. What differs is the
+/// teardown: dropping a `Remote` pane only detaches (the terminal — and the
+/// agent inside it — keeps running in the daemon; that is what lets the TUI
+/// close without killing agents), so the close paths call [`kill`](Self::kill)
+/// explicitly when the user really closes a pane. Dropping a `Local` pane kills
+/// its shell, as it always has.
+pub enum PaneBackend {
+    /// A TUI-owned PTY; dies with this process.
+    Local(PtySession),
+    /// A daemon-owned terminal this TUI is attached to.
+    #[cfg(unix)]
+    Remote(DaemonTerminal),
+}
+
+impl PaneBackend {
+    /// Lock the screen-grid parser to read the current contents.
+    pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<ScreenCallbacks>> {
+        match self {
+            PaneBackend::Local(pty) => pty.parser(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.parser(),
+        }
+    }
+
+    /// Whether the running program asked for bracketed paste mode.
+    pub fn bracketed_paste(&self) -> bool {
+        match self {
+            PaneBackend::Local(pty) => pty.bracketed_paste(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.bracketed_paste(),
+        }
+    }
+
+    /// A shared handle to the bell counter for the pool watcher.
+    fn bell_handle(&self) -> Arc<AtomicU64> {
+        match self {
+            PaneBackend::Local(pty) => pty.bell_handle(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.bell_handle(),
+        }
+    }
+
+    /// A shared handle to the parser for the watcher's off-loop scans.
+    fn parser_handle(&self) -> Arc<Mutex<vt100::Parser<ScreenCallbacks>>> {
+        match self {
+            PaneBackend::Local(pty) => pty.parser_handle(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.parser_handle(),
+        }
+    }
+
+    /// A shared handle to the output generation counter.
+    fn generation_handle(&self) -> Arc<AtomicU64> {
+        match self {
+            PaneBackend::Local(pty) => pty.generation_handle(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.generation_handle(),
+        }
+    }
+
+    /// The shell's pid (the resource-sampling root), when known.
+    fn process_id(&self) -> Option<u32> {
+        match self {
+            PaneBackend::Local(pty) => pty.process_id(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.process_id(),
+        }
+    }
+
+    /// The cursor shape (DECSCUSR `Ps`) the program last selected.
+    pub fn cursor_shape(&self) -> u16 {
+        match self {
+            PaneBackend::Local(pty) => pty.cursor_shape(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.cursor_shape(),
+        }
+    }
+
+    /// A shared handle to the liveness flag for the pool watcher.
+    fn alive_handle(&self) -> Arc<AtomicBool> {
+        match self {
+            PaneBackend::Local(pty) => pty.alive_handle(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.alive_handle(),
+        }
+    }
+
+    /// A cloneable handle that writes to this pane without borrowing it.
+    fn input_handle(&self) -> PaneInputHandle {
+        match self {
+            PaneBackend::Local(pty) => PaneInputHandle::Local(pty.input_handle()),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => PaneInputHandle::Remote(remote.input_handle()),
+        }
+    }
+
+    /// Forward raw input bytes to the terminal.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            PaneBackend::Local(pty) => pty.write(bytes),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.write(bytes),
+        }
+    }
+
+    /// Resize the terminal (and its grid) to `rows`×`cols`.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        match self {
+            PaneBackend::Local(pty) => pty.resize(rows, cols),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.resize(rows, cols),
+        }
+    }
+
+    /// Scroll `offset` lines back into the buffered history, returning the
+    /// offset actually applied.
+    pub fn set_scrollback(&mut self, offset: usize) -> usize {
+        match self {
+            PaneBackend::Local(pty) => pty.set_scrollback(offset),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.set_scrollback(offset),
+        }
+    }
+
+    /// The scroll offset currently applied to the buffered history.
+    pub fn scrollback(&self) -> usize {
+        match self {
+            PaneBackend::Local(pty) => pty.scrollback(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.scrollback(),
+        }
+    }
+
+    /// Whether the terminal is still running.
+    pub fn is_alive(&self) -> bool {
+        match self {
+            PaneBackend::Local(pty) => pty.is_alive(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.is_alive(),
+        }
+    }
+
+    /// A counter bumped on every screen update, for redraw checks.
+    pub fn generation(&self) -> u64 {
+        match self {
+            PaneBackend::Local(pty) => pty.generation(),
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.generation(),
+        }
+    }
+
+    /// Kill the terminal process — the explicit teardown for the close paths.
+    /// A local pane needs nothing here (its `Drop` kills the shell); a remote
+    /// pane must ask the daemon, since its `Drop` only detaches.
+    fn kill(&mut self) {
+        match self {
+            PaneBackend::Local(_) => {}
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => remote.kill(),
+        }
+    }
+
+    /// The daemon's id for this terminal (`None` for a local pane) — persisted
+    /// in the open-panes snapshot so the next TUI run re-attaches to the still
+    /// running terminal instead of respawning it.
+    fn terminal_id(&self) -> Option<u64> {
+        match self {
+            PaneBackend::Local(_) => None,
+            #[cfg(unix)]
+            PaneBackend::Remote(remote) => Some(remote.terminal_id()),
+        }
+    }
+}
+
+/// Cloneable input handle over either backend, for the watcher's prompt
+/// injection into a (possibly detached) agent pane.
+#[derive(Clone)]
+pub enum PaneInputHandle {
+    Local(PtyInputHandle),
+    #[cfg(unix)]
+    Remote(DaemonInputHandle),
+}
+
+impl PaneInputHandle {
+    /// Whether the pane's program asked for bracketed paste mode.
+    fn bracketed_paste(&self) -> bool {
+        match self {
+            PaneInputHandle::Local(handle) => handle.bracketed_paste(),
+            #[cfg(unix)]
+            PaneInputHandle::Remote(handle) => handle.bracketed_paste(),
+        }
+    }
+
+    /// Forward raw input bytes to the pane's terminal.
+    fn write(&self, bytes: &[u8]) -> Result<()> {
+        match self {
+            PaneInputHandle::Local(handle) => handle.write(bytes),
+            #[cfg(unix)]
+            PaneInputHandle::Remote(handle) => handle.write(bytes),
+        }
+    }
+}
+
+/// One embedded pane: its live backend (a daemon-owned terminal, or a local
+/// [`PtySession`]) and what it runs (so the tab strip can label it and the
+/// agent pane can be told apart for the badge heuristic).
 struct Pane {
     /// Stable creation id used to number duplicate tab labels independently of
     /// the current tab-strip order.
     id: u64,
-    pty: PtySession,
+    pty: PaneBackend,
     kind: PaneKind,
     label_override: Option<String>,
     /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
@@ -564,6 +778,12 @@ pub struct PaneLaunch<'a> {
     pub cli: AgentCli,
     pub label: &'a str,
     pub env: &'a BTreeMap<String, String>,
+    /// The daemon terminal id a persisted pane snapshot recorded for this pane,
+    /// when restoring one. The pool then re-attaches to that still-running
+    /// terminal — adopting the live agent mid-run — and only spawns afresh
+    /// (with `agent_command`) if the daemon no longer knows the id. `None` for
+    /// a brand-new pane.
+    pub attach: Option<u64>,
 }
 
 /// The live shells embedded in the workspace screen, keyed by worktree path —
@@ -910,7 +1130,11 @@ impl TerminalPool {
         let remains = match self.sessions.get_mut(&key) {
             Some(sp) if tab < sp.panes.len() => {
                 let len_before = sp.panes.len();
-                sp.panes.remove(tab);
+                let mut closed = sp.panes.remove(tab);
+                // An explicit close kills the terminal even when the daemon owns
+                // it; dropping alone would only detach a remote pane.
+                closed.pty.kill();
+                drop(closed);
                 sp.rebuild_tab_labels();
                 match tabs::active_after_close(sp.active.min(len_before - 1), len_before) {
                     Some(next) => {
@@ -949,8 +1173,12 @@ impl TerminalPool {
             Some(sp) if !sp.panes.is_empty() => {
                 let active = sp.active.min(sp.panes.len().saturating_sub(1));
                 let len_before = sp.panes.len();
-                // Dropping the removed Pane kills the shell it owns.
-                sp.panes.remove(active);
+                // An explicit close kills the terminal even when the daemon owns
+                // it (a remote pane's drop would only detach); a local pane's
+                // shell is killed by the drop itself.
+                let mut closed = sp.panes.remove(active);
+                closed.pty.kill();
+                drop(closed);
                 sp.rebuild_tab_labels();
                 match tabs::active_after_close(active, len_before) {
                     Some(next) => {
@@ -1014,9 +1242,9 @@ impl TerminalPool {
         }
     }
 
-    /// Borrow `dir`'s active pane's shell, or `None` when the session has no
-    /// panes — the pane the terminal loop drives.
-    pub fn active_pty(&mut self, dir: &Path) -> Option<&mut PtySession> {
+    /// Borrow `dir`'s active pane's terminal backend, or `None` when the session
+    /// has no panes — the pane the terminal loop drives.
+    pub fn active_pty(&mut self, dir: &Path) -> Option<&mut PaneBackend> {
         let sp = self.sessions.get_mut(dir)?;
         if sp.panes.is_empty() {
             return None;
@@ -1064,18 +1292,31 @@ impl TerminalPool {
             // A terminal pane opens a plain shell and has no agent to record.
             PaneKind::Terminal => (None, None),
         };
+
+        // A restored pane whose snapshot recorded a daemon terminal id first
+        // tries to re-attach to that still-running terminal: the agent (and its
+        // recorded phase) is adopted mid-run, so nothing is cleared or resumed.
+        // Only when the daemon no longer knows the id (the terminal exited, or
+        // the daemon restarted) does this fall through to a fresh spawn.
+        #[cfg(unix)]
+        if let Some(terminal) = launch.attach {
+            if let Some(pty) = attach_daemon_terminal(dir, terminal, &geo, self.scrollback_lines) {
+                let id = self.allocate_pane_id();
+                return Ok(Pane {
+                    id,
+                    pty,
+                    kind,
+                    label_override: None,
+                    cli,
+                });
+            }
+        }
+
         if matches!(kind, PaneKind::Agent) {
             agent_state_store::clear(dir);
             self.lock().monitor.forget(dir);
         }
-        let pty = PtySession::spawn(
-            dir,
-            geo.rows,
-            geo.cols,
-            initial,
-            self.scrollback_lines,
-            launch.env,
-        )?;
+        let pty = spawn_backend(dir, &geo, initial, self.scrollback_lines, launch.env)?;
         let id = self.allocate_pane_id();
         Ok(Pane {
             id,
@@ -1202,8 +1443,15 @@ impl TerminalPool {
             return removed;
         }
         for path in &removed {
-            // Dropping the PtySession kills the shell it owns.
-            self.sessions.remove(path);
+            // Removing a session is an explicit teardown: kill the daemon-owned
+            // terminals too (their drop alone would only detach and leave them
+            // running against a deleted worktree). A local pane's shell dies
+            // with the drop.
+            if let Some(mut sp) = self.sessions.remove(path) {
+                for pane in &mut sp.panes {
+                    pane.pty.kill();
+                }
+            }
         }
         let mut shared = self.lock();
         for path in &removed {
@@ -1232,6 +1480,10 @@ impl TerminalPool {
                 },
                 cli: p.cli,
                 label: p.label_override.clone(),
+                // The daemon terminal id (None for a local pane): the next TUI
+                // run re-attaches to the still-running terminal instead of
+                // respawning it.
+                terminal: p.pty.terminal_id(),
             })
             .collect();
         let active = sp.active.min(sp.panes.len().saturating_sub(1));
@@ -1349,6 +1601,65 @@ impl Drop for TerminalPool {
             let _ = handle.join();
         }
     }
+}
+
+/// Spawn the backend for a new pane. The normal path asks the daemon (spawned
+/// alongside the TUI) for a terminal it owns, so the shell — and any agent CLI
+/// inside it — survives this TUI process. When the daemon is unreachable (it
+/// failed to start, or died mid-session) the pane falls back to a TUI-local
+/// PTY: everything works as it did pre-daemon, except the pane dies with the
+/// TUI — the fallback is recorded to the error log so a silently-local pane is
+/// diagnosable. Non-Unix platforms always take the local path (the IPC socket
+/// is Unix-only).
+fn spawn_backend(
+    dir: &Path,
+    geo: &ui::TerminalGeometry,
+    initial: Option<&str>,
+    scrollback: usize,
+    env: &BTreeMap<String, String>,
+) -> Result<PaneBackend> {
+    #[cfg(unix)]
+    {
+        let remote = daemon_store::default_dir().and_then(|daemon_dir| {
+            DaemonTerminal::spawn(
+                &daemon_dir,
+                dir,
+                geo.rows,
+                geo.cols,
+                initial,
+                scrollback,
+                env,
+            )
+        });
+        match remote {
+            Ok(remote) => return Ok(PaneBackend::Remote(remote)),
+            Err(error) => error_log::ErrorLog::record(&format!(
+                "daemon terminal unavailable for {}; falling back to a TUI-local PTY \
+                 (this pane will close with the TUI): {error:#}",
+                dir.display()
+            )),
+        }
+    }
+    Ok(PaneBackend::Local(PtySession::spawn(
+        dir, geo.rows, geo.cols, initial, scrollback, env,
+    )?))
+}
+
+/// Re-attach to the daemon terminal a persisted pane snapshot recorded, or
+/// `None` when the daemon does not know the id any more (the terminal exited,
+/// or the daemon restarted) — the caller then spawns afresh. A failed re-attach
+/// is expected across reboots, so it is not logged as an error.
+#[cfg(unix)]
+fn attach_daemon_terminal(
+    dir: &Path,
+    terminal: u64,
+    geo: &ui::TerminalGeometry,
+    scrollback: usize,
+) -> Option<PaneBackend> {
+    let daemon_dir = daemon_store::default_dir().ok()?;
+    DaemonTerminal::attach(&daemon_dir, dir, terminal, geo.rows, geo.cols, scrollback)
+        .ok()
+        .map(PaneBackend::Remote)
 }
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,

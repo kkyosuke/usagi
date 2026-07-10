@@ -1,18 +1,19 @@
 //! The daemon side of the IPC protocol: which connected clients want session
-//! pushes, and how each incoming [`ClientMessage`] is answered.
+//! pushes, which are attached to which terminal, and how each incoming
+//! [`ClientMessage`] is answered.
 //!
 //! This is the pure bookkeeping the socket server drives. The composition root
-//! owns the sockets and the per-client threads; it hands each decoded message
-//! here with the connection's id and the current snapshot, applies the returned
-//! reply, and consults [`SubscriberRegistry::subscribers`] when a snapshot change
-//! must be pushed. Keeping the registry and the dispatch free of IO makes every
-//! branch unit-testable without a socket.
+//! owns the sockets and the terminals; it hands each decoded message here with
+//! the connection's id and the current snapshot, applies the returned reply, and
+//! consults the registries when a snapshot or a terminal's output must be
+//! pushed. Keeping the registries and the dispatch free of IO makes every branch
+//! unit-testable without a socket.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::daemon::SessionSnapshot;
-use crate::domain::daemon_ipc::{ClientMessage, ServerMessage};
+use crate::domain::daemon_ipc::{ClientMessage, OutputBacklog, ServerMessage, TerminalId};
 
 /// Identifies one connected client for the life of its connection. Assigned by
 /// the socket server as connections are accepted.
@@ -20,79 +21,117 @@ pub type ClientId = u64;
 
 /// What the socket server should do in response to a message, decided purely by
 /// [`handle`]. Replies are sent as-is; the terminal actions carry real PTY IO the
-/// composition root performs (spawning / killing the daemon-owned process), which
-/// is why they are returned rather than executed here.
+/// composition root performs (spawning / killing / writing to the daemon-owned
+/// process), which is why they are returned rather than executed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Send this message back to the requesting client.
     Reply(ServerMessage),
-    /// Spawn (or reuse) the daemon-owned terminal for this worktree, then reply.
-    Spawn(PathBuf),
-    /// Kill the daemon-owned terminal for this worktree, then reply.
-    Kill(PathBuf),
-    /// Attach the requesting client to this worktree's screen feed, then send its
-    /// current screen.
-    Attach(PathBuf),
-    /// Detach the requesting client from this worktree's screen feed.
-    Detach(PathBuf),
-    /// Write these input bytes to this worktree's terminal.
-    Keys(PathBuf, Vec<u8>),
-    /// Resize this worktree's terminal to `cols`×`rows`.
-    Resize(PathBuf, u16, u16),
+    /// Spawn a new daemon-owned terminal with this launch configuration, then
+    /// reply with its id.
+    Spawn {
+        worktree: PathBuf,
+        command: Option<String>,
+        env: BTreeMap<String, String>,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
+    },
+    /// Kill this daemon-owned terminal, then reply.
+    Kill(TerminalId),
+    /// Attach the requesting client to this terminal's screen feed — after
+    /// checking it runs in `worktree` — then send its current screen.
+    Attach {
+        terminal: TerminalId,
+        worktree: PathBuf,
+    },
+    /// Detach the requesting client from this terminal's screen feed.
+    Detach(TerminalId),
+    /// Write these input bytes to this terminal.
+    Keys(TerminalId, Vec<u8>),
+    /// Resize this terminal to `cols`×`rows`.
+    Resize(TerminalId, u16, u16),
     /// Nothing to send.
     Nothing,
 }
 
-/// The daemon-owned terminals, tracked by the worktree they run in and the pid of
-/// the process. Pure bookkeeping: the real PTY handles live in the composition
-/// root, which mirrors its spawns and kills into this registry so the running
-/// set (and the "is one already running here?" decision) stays unit-testable.
-#[derive(Debug, Default)]
+/// One daemon-owned terminal as the registry tracks it: where it runs and the
+/// pid of its shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalEntry {
+    pub worktree: PathBuf,
+    pub pid: u32,
+}
+
+/// The daemon-owned terminals, keyed by the [`TerminalId`] assigned at spawn.
+/// Pure bookkeeping: the real PTY handles live in the composition root, which
+/// mirrors its spawns and kills into this registry so the running set (and the
+/// id→worktree resolution every terminal message needs) stays unit-testable.
+/// Ids are never reused within a run, so a client's stale id can only miss, not
+/// alias a different terminal.
+#[derive(Debug)]
 pub struct TerminalRegistry {
-    terminals: HashMap<PathBuf, u32>,
+    next: TerminalId,
+    terminals: HashMap<TerminalId, TerminalEntry>,
+}
+
+impl Default for TerminalRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalRegistry {
     /// An empty registry.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            next: 1,
+            terminals: HashMap::new(),
+        }
     }
 
-    /// Record that a terminal with `pid` runs for `worktree`, replacing any
-    /// previous entry for it.
-    pub fn insert(&mut self, worktree: PathBuf, pid: u32) {
-        self.terminals.insert(worktree, pid);
+    /// Track a freshly spawned terminal, returning the id assigned to it.
+    pub fn allocate(&mut self, worktree: PathBuf, pid: u32) -> TerminalId {
+        let id = self.next;
+        self.next += 1;
+        self.terminals.insert(id, TerminalEntry { worktree, pid });
+        id
     }
 
-    /// Forget the terminal for `worktree`, returning its pid if one was tracked.
-    pub fn remove(&mut self, worktree: &Path) -> Option<u32> {
-        self.terminals.remove(worktree)
+    /// Forget `terminal`, returning its entry if one was tracked.
+    pub fn remove(&mut self, terminal: TerminalId) -> Option<TerminalEntry> {
+        self.terminals.remove(&terminal)
     }
 
-    /// Whether a terminal is tracked for `worktree`.
-    pub fn contains(&self, worktree: &Path) -> bool {
-        self.terminals.contains_key(worktree)
+    /// The entry for `terminal`, if it is running.
+    pub fn entry(&self, terminal: TerminalId) -> Option<&TerminalEntry> {
+        self.terminals.get(&terminal)
     }
 
-    /// The pid of the terminal running for `worktree`, if any.
-    pub fn pid(&self, worktree: &Path) -> Option<u32> {
-        self.terminals.get(worktree).copied()
+    /// Whether `terminal` is tracked and runs in `worktree` — the attach-time
+    /// cross-check that keeps a stale persisted id from latching onto another
+    /// worktree's terminal.
+    pub fn belongs_to(&self, terminal: TerminalId, worktree: &Path) -> bool {
+        self.terminals
+            .get(&terminal)
+            .is_some_and(|entry| entry.worktree == worktree)
     }
 
-    /// The worktrees with a running terminal, sorted for a stable report.
-    pub fn worktrees(&self) -> Vec<PathBuf> {
-        let mut worktrees: Vec<PathBuf> = self.terminals.keys().cloned().collect();
-        worktrees.sort();
-        worktrees
+    /// The running terminal ids, sorted for a stable iteration order.
+    pub fn ids(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self.terminals.keys().copied().collect();
+        ids.sort_unstable();
+        ids
     }
 }
 
-/// Which clients are attached to which worktree's screen feed. A client may be
-/// attached to several worktrees, and several clients may share one. Pure
-/// bookkeeping the socket server consults when a terminal's screen changes.
+/// Which clients are attached to which terminal's screen feed, and how far into
+/// that terminal's [`OutputBacklog`] each has been pushed. A client may be
+/// attached to several terminals, and several clients may share one. Pure
+/// bookkeeping the socket server consults when a terminal produces output.
 #[derive(Debug, Default)]
 pub struct AttachTable {
-    by_worktree: HashMap<PathBuf, HashSet<ClientId>>,
+    by_terminal: HashMap<TerminalId, BTreeMap<ClientId, u64>>,
 }
 
 impl AttachTable {
@@ -101,47 +140,100 @@ impl AttachTable {
         Self::default()
     }
 
-    /// Attach `client` to `worktree`'s screen feed.
-    pub fn attach(&mut self, client: ClientId, worktree: PathBuf) {
-        self.by_worktree.entry(worktree).or_default().insert(client);
+    /// Attach `client` to `terminal`'s screen feed with its cursor at the start;
+    /// the caller advances it (see [`set_cursor`](Self::set_cursor)) once the
+    /// initial snapshot is sent.
+    pub fn attach(&mut self, client: ClientId, terminal: TerminalId) {
+        self.by_terminal
+            .entry(terminal)
+            .or_default()
+            .insert(client, 0);
     }
 
-    /// Detach `client` from `worktree`, forgetting the worktree entirely once no
-    /// client is attached to it.
-    pub fn detach(&mut self, client: ClientId, worktree: &Path) {
-        if let Some(clients) = self.by_worktree.get_mut(worktree) {
-            clients.remove(&client);
-            if clients.is_empty() {
-                self.by_worktree.remove(worktree);
+    /// Record that `client` has been pushed `terminal`'s output up to `cursor`.
+    /// A no-op for a client that is not attached (it may have detached between
+    /// the caller's snapshot and this update).
+    pub fn set_cursor(&mut self, client: ClientId, terminal: TerminalId, cursor: u64) {
+        if let Some(clients) = self.by_terminal.get_mut(&terminal) {
+            if let Some(slot) = clients.get_mut(&client) {
+                *slot = cursor;
             }
         }
     }
 
-    /// Remove `client` from every worktree — used when its connection drops.
+    /// Detach `client` from `terminal`, forgetting the terminal entirely once no
+    /// client is attached to it.
+    pub fn detach(&mut self, client: ClientId, terminal: TerminalId) {
+        if let Some(clients) = self.by_terminal.get_mut(&terminal) {
+            clients.remove(&client);
+            if clients.is_empty() {
+                self.by_terminal.remove(&terminal);
+            }
+        }
+    }
+
+    /// Remove `client` from every terminal — used when its connection drops.
     pub fn remove_client(&mut self, client: ClientId) {
-        self.by_worktree.retain(|_, clients| {
+        self.by_terminal.retain(|_, clients| {
             clients.remove(&client);
             !clients.is_empty()
         });
     }
 
-    /// The clients attached to `worktree`, sorted for a stable push order.
-    pub fn clients_for(&self, worktree: &Path) -> Vec<ClientId> {
-        let mut clients: Vec<ClientId> = self
-            .by_worktree
-            .get(worktree)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default();
-        clients.sort_unstable();
-        clients
+    /// Forget `terminal` entirely (it exited or was killed), returning the
+    /// clients that were attached so the caller can notify them.
+    pub fn remove_terminal(&mut self, terminal: TerminalId) -> Vec<ClientId> {
+        self.by_terminal
+            .remove(&terminal)
+            .map(|clients| clients.into_keys().collect())
+            .unwrap_or_default()
     }
 
-    /// Whether `client` is attached to `worktree`.
-    pub fn is_attached(&self, client: ClientId, worktree: &Path) -> bool {
-        self.by_worktree
-            .get(worktree)
-            .is_some_and(|clients| clients.contains(&client))
+    /// The clients attached to `terminal` with their output cursors, in a
+    /// stable (ascending id) order.
+    pub fn clients_for(&self, terminal: TerminalId) -> Vec<(ClientId, u64)> {
+        self.by_terminal
+            .get(&terminal)
+            .map(|clients| clients.iter().map(|(&id, &cursor)| (id, cursor)).collect())
+            .unwrap_or_default()
     }
+
+    /// Whether `client` is attached to `terminal`.
+    pub fn is_attached(&self, client: ClientId, terminal: TerminalId) -> bool {
+        self.by_terminal
+            .get(&terminal)
+            .is_some_and(|clients| clients.contains_key(&client))
+    }
+}
+
+/// What one attached client should be sent to catch it up with a terminal's
+/// output, decided by [`plan_screen_updates`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenUpdate {
+    /// The raw output bytes the client is missing; its cursor advances to the
+    /// backlog's end.
+    Output(Vec<u8>),
+    /// The client's cursor no longer addresses retained bytes — send a full
+    /// screen snapshot and reset its cursor to the backlog's end.
+    Snapshot,
+}
+
+/// Decide, for each attached client (with its current cursor), what to push so
+/// it has seen `backlog`'s bytes up to the end. Fully caught-up clients get
+/// nothing.
+pub fn plan_screen_updates(
+    backlog: &OutputBacklog,
+    clients: &[(ClientId, u64)],
+) -> Vec<(ClientId, ScreenUpdate)> {
+    let end = backlog.end();
+    clients
+        .iter()
+        .filter(|(_, cursor)| *cursor != end)
+        .map(|&(client, cursor)| match backlog.since(cursor) {
+            Some(data) => (client, ScreenUpdate::Output(data)),
+            None => (client, ScreenUpdate::Snapshot),
+        })
+        .collect()
 }
 
 /// The set of clients currently subscribed to session-snapshot pushes.
@@ -204,16 +296,30 @@ pub fn handle(
             registry.remove(client);
             Action::Nothing
         }
-        ClientMessage::Spawn { worktree } => Action::Spawn(worktree),
-        ClientMessage::Kill { worktree } => Action::Kill(worktree),
-        ClientMessage::Attach { worktree } => Action::Attach(worktree),
-        ClientMessage::Detach { worktree } => Action::Detach(worktree),
-        ClientMessage::Keys { worktree, data } => Action::Keys(worktree, data),
-        ClientMessage::Resize {
+        ClientMessage::Spawn {
             worktree,
+            command,
+            env,
             cols,
             rows,
-        } => Action::Resize(worktree, cols, rows),
+            scrollback,
+        } => Action::Spawn {
+            worktree,
+            command,
+            env,
+            cols,
+            rows,
+            scrollback,
+        },
+        ClientMessage::Kill { terminal } => Action::Kill(terminal),
+        ClientMessage::Attach { terminal, worktree } => Action::Attach { terminal, worktree },
+        ClientMessage::Detach { terminal } => Action::Detach(terminal),
+        ClientMessage::Keys { terminal, data } => Action::Keys(terminal, data),
+        ClientMessage::Resize {
+            terminal,
+            cols,
+            rows,
+        } => Action::Resize(terminal, cols, rows),
     }
 }
 
@@ -298,60 +404,98 @@ mod tests {
     }
 
     #[test]
-    fn spawn_and_kill_return_terminal_actions() {
+    fn spawn_carries_the_full_launch_configuration() {
         let mut registry = SubscriberRegistry::new();
         let worktree = PathBuf::from("/repo/.usagi/sessions/work");
+        let env: std::collections::BTreeMap<String, String> =
+            [("TOKEN".to_string(), "secret".to_string())].into();
         assert_eq!(
             handle(
                 ClientMessage::Spawn {
-                    worktree: worktree.clone()
+                    worktree: worktree.clone(),
+                    command: Some("claude".to_string()),
+                    env: env.clone(),
+                    cols: 120,
+                    rows: 40,
+                    scrollback: 500,
                 },
                 1,
                 &mut registry,
                 &[]
             ),
-            Action::Spawn(worktree.clone())
-        );
-        assert_eq!(
-            handle(
-                ClientMessage::Kill {
-                    worktree: worktree.clone()
-                },
-                1,
-                &mut registry,
-                &[]
-            ),
-            Action::Kill(worktree)
+            Action::Spawn {
+                worktree,
+                command: Some("claude".to_string()),
+                env,
+                cols: 120,
+                rows: 40,
+                scrollback: 500,
+            }
         );
     }
 
     #[test]
-    fn terminal_registry_tracks_insert_pid_and_remove() {
+    fn kill_returns_a_terminal_action() {
+        let mut registry = SubscriberRegistry::new();
+        assert_eq!(
+            handle(ClientMessage::Kill { terminal: 3 }, 1, &mut registry, &[]),
+            Action::Kill(3)
+        );
+    }
+
+    #[test]
+    fn terminal_registry_allocates_unique_ids_and_resolves_entries() {
         let mut registry = TerminalRegistry::new();
         let a = PathBuf::from("/a");
         let b = PathBuf::from("/b");
-        assert!(!registry.contains(&a));
-        assert_eq!(registry.pid(&a), None);
-        registry.insert(a.clone(), 111);
-        registry.insert(b.clone(), 222);
-        assert!(registry.contains(&a));
-        assert_eq!(registry.pid(&a), Some(111));
-        assert_eq!(registry.worktrees(), vec![a.clone(), b.clone()]);
-        // Removing returns the pid so the caller can kill it; a second remove is
-        // a no-op returning None.
-        assert_eq!(registry.remove(&a), Some(111));
-        assert_eq!(registry.remove(&a), None);
-        assert!(!registry.contains(&a));
-        assert_eq!(registry.worktrees(), vec![b]);
+        let id_a = registry.allocate(a.clone(), 111);
+        let id_b = registry.allocate(b.clone(), 222);
+        assert_ne!(id_a, id_b);
+        assert_eq!(
+            registry.entry(id_a),
+            Some(&TerminalEntry {
+                worktree: a.clone(),
+                pid: 111
+            })
+        );
+        assert_eq!(registry.ids(), vec![id_a, id_b]);
+        // Removing returns the entry so the caller can kill it; a second remove
+        // is a no-op returning None.
+        assert_eq!(
+            registry.remove(id_a),
+            Some(TerminalEntry {
+                worktree: a,
+                pid: 111
+            })
+        );
+        assert_eq!(registry.remove(id_a), None);
+        assert_eq!(registry.entry(id_a), None);
+        assert_eq!(registry.ids(), vec![id_b]);
     }
 
     #[test]
-    fn terminal_registry_insert_replaces_a_previous_pid() {
+    fn terminal_registry_default_is_empty_and_allocates_from_one() {
+        let mut registry = TerminalRegistry::default();
+        assert!(registry.ids().is_empty());
+        assert_eq!(registry.allocate(PathBuf::from("/a"), 1), 1);
+    }
+
+    #[test]
+    fn terminal_registry_never_reuses_an_id_after_removal() {
         let mut registry = TerminalRegistry::new();
-        let a = PathBuf::from("/a");
-        registry.insert(a.clone(), 1);
-        registry.insert(a.clone(), 2);
-        assert_eq!(registry.pid(&a), Some(2));
+        let first = registry.allocate(PathBuf::from("/a"), 1);
+        registry.remove(first);
+        let second = registry.allocate(PathBuf::from("/a"), 2);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn terminal_registry_checks_worktree_ownership() {
+        let mut registry = TerminalRegistry::new();
+        let id = registry.allocate(PathBuf::from("/a"), 1);
+        assert!(registry.belongs_to(id, Path::new("/a")));
+        assert!(!registry.belongs_to(id, Path::new("/b")));
+        assert!(!registry.belongs_to(99, Path::new("/a")));
     }
 
     #[test]
@@ -361,47 +505,43 @@ mod tests {
         assert_eq!(
             handle(
                 ClientMessage::Attach {
+                    terminal: 5,
                     worktree: worktree.clone()
                 },
                 1,
                 &mut registry,
                 &[]
             ),
-            Action::Attach(worktree.clone())
+            Action::Attach {
+                terminal: 5,
+                worktree
+            }
         );
         assert_eq!(
-            handle(
-                ClientMessage::Detach {
-                    worktree: worktree.clone()
-                },
-                1,
-                &mut registry,
-                &[]
-            ),
-            Action::Detach(worktree)
+            handle(ClientMessage::Detach { terminal: 5 }, 1, &mut registry, &[]),
+            Action::Detach(5)
         );
     }
 
     #[test]
     fn keys_and_resize_return_terminal_io_actions() {
         let mut registry = SubscriberRegistry::new();
-        let worktree = PathBuf::from("/repo/.usagi/sessions/work");
         assert_eq!(
             handle(
                 ClientMessage::Keys {
-                    worktree: worktree.clone(),
+                    terminal: 4,
                     data: b"ls\n".to_vec(),
                 },
                 1,
                 &mut registry,
                 &[],
             ),
-            Action::Keys(worktree.clone(), b"ls\n".to_vec())
+            Action::Keys(4, b"ls\n".to_vec())
         );
         assert_eq!(
             handle(
                 ClientMessage::Resize {
-                    worktree: worktree.clone(),
+                    terminal: 4,
                     cols: 120,
                     rows: 40,
                 },
@@ -409,51 +549,97 @@ mod tests {
                 &mut registry,
                 &[],
             ),
-            Action::Resize(worktree, 120, 40)
+            Action::Resize(4, 120, 40)
         );
     }
 
     #[test]
-    fn attach_table_tracks_multiple_clients_and_worktrees() {
+    fn attach_table_tracks_multiple_clients_and_terminals() {
         let mut table = AttachTable::new();
-        let a = PathBuf::from("/a");
-        let b = PathBuf::from("/b");
-        table.attach(1, a.clone());
-        table.attach(2, a.clone());
-        table.attach(1, b.clone());
-        assert!(table.is_attached(1, &a));
-        assert_eq!(table.clients_for(&a), vec![1, 2]);
-        assert_eq!(table.clients_for(&b), vec![1]);
-        // No one attached to an unknown worktree.
-        assert!(table.clients_for(&PathBuf::from("/none")).is_empty());
+        table.attach(1, 10);
+        table.attach(2, 10);
+        table.attach(1, 20);
+        assert!(table.is_attached(1, 10));
+        assert_eq!(table.clients_for(10), vec![(1, 0), (2, 0)]);
+        assert_eq!(table.clients_for(20), vec![(1, 0)]);
+        // No one attached to an unknown terminal.
+        assert!(table.clients_for(99).is_empty());
     }
 
     #[test]
-    fn attach_table_detach_drops_worktree_when_last_client_leaves() {
+    fn attach_table_tracks_per_client_cursors() {
         let mut table = AttachTable::new();
-        let a = PathBuf::from("/a");
-        table.attach(1, a.clone());
-        table.attach(2, a.clone());
-        table.detach(1, &a);
-        assert!(!table.is_attached(1, &a));
-        assert_eq!(table.clients_for(&a), vec![2]);
-        table.detach(2, &a);
-        assert!(table.clients_for(&a).is_empty());
-        // Detaching from an unknown worktree is a no-op.
-        table.detach(9, &PathBuf::from("/none"));
+        table.attach(1, 10);
+        table.attach(2, 10);
+        table.set_cursor(1, 10, 42);
+        assert_eq!(table.clients_for(10), vec![(1, 42), (2, 0)]);
+        // Advancing a cursor for a client that is not attached is a no-op.
+        table.set_cursor(3, 10, 7);
+        table.set_cursor(1, 99, 7);
+        assert_eq!(table.clients_for(10), vec![(1, 42), (2, 0)]);
+        assert!(table.clients_for(99).is_empty());
+    }
+
+    #[test]
+    fn attach_table_detach_drops_terminal_when_last_client_leaves() {
+        let mut table = AttachTable::new();
+        table.attach(1, 10);
+        table.attach(2, 10);
+        table.detach(1, 10);
+        assert!(!table.is_attached(1, 10));
+        assert_eq!(table.clients_for(10), vec![(2, 0)]);
+        table.detach(2, 10);
+        assert!(table.clients_for(10).is_empty());
+        // Detaching from an unknown terminal is a no-op.
+        table.detach(9, 99);
     }
 
     #[test]
     fn attach_table_remove_client_clears_it_everywhere() {
         let mut table = AttachTable::new();
-        let a = PathBuf::from("/a");
-        let b = PathBuf::from("/b");
-        table.attach(1, a.clone());
-        table.attach(2, a.clone());
-        table.attach(1, b.clone());
+        table.attach(1, 10);
+        table.attach(2, 10);
+        table.attach(1, 20);
         table.remove_client(1);
-        assert_eq!(table.clients_for(&a), vec![2]);
-        // `b` had only client 1, so it is gone entirely.
-        assert!(table.clients_for(&b).is_empty());
+        assert_eq!(table.clients_for(10), vec![(2, 0)]);
+        // Terminal 20 had only client 1, so it is gone entirely.
+        assert!(table.clients_for(20).is_empty());
+    }
+
+    #[test]
+    fn attach_table_remove_terminal_reports_its_attachers() {
+        let mut table = AttachTable::new();
+        table.attach(1, 10);
+        table.attach(2, 10);
+        let mut notified = table.remove_terminal(10);
+        notified.sort_unstable();
+        assert_eq!(notified, vec![1, 2]);
+        assert!(table.clients_for(10).is_empty());
+        // Removing an unknown terminal notifies no one.
+        assert!(table.remove_terminal(99).is_empty());
+    }
+
+    #[test]
+    fn plan_sends_missing_bytes_and_skips_caught_up_clients() {
+        let mut backlog = OutputBacklog::new(16);
+        backlog.append(b"hello");
+        // Client 1 saw nothing yet, client 2 saw "hel", client 3 is caught up.
+        let plan = plan_screen_updates(&backlog, &[(1, 0), (2, 3), (3, 5)]);
+        assert_eq!(
+            plan,
+            vec![
+                (1, ScreenUpdate::Output(b"hello".to_vec())),
+                (2, ScreenUpdate::Output(b"lo".to_vec())),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_resyncs_a_client_that_fell_past_the_backlog() {
+        let mut backlog = OutputBacklog::new(4);
+        backlog.append(b"abcdef");
+        // Start is now 2: a cursor at 0 addresses evicted bytes.
+        let plan = plan_screen_updates(&backlog, &[(1, 0)]);
+        assert_eq!(plan, vec![(1, ScreenUpdate::Snapshot)]);
     }
 }

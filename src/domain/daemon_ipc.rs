@@ -1,19 +1,28 @@
 //! The daemon's client/server IPC protocol: the messages a usagi client and the
-//! daemon exchange over their socket, and the length-prefixed framing that
-//! delimits them on the byte stream.
+//! daemon exchange over their socket, the length-prefixed framing that delimits
+//! them on the byte stream, and the output backlog a terminal's raw bytes are
+//! staged in between pushes.
 //!
 //! This is the substrate for making the daemon the authority on session state
-//! (and, in later work, on the agent terminals): a client connects, `Subscribe`s
-//! to the session feed, and the daemon pushes a [`ServerMessage::Sessions`] every
-//! time its monitored-sessions snapshot changes — the same snapshot
-//! [`SessionSnapshot`] carries. `ListSessions` is the one-shot pull.
+//! and on the agent terminals. A client connects and either `Subscribe`s to the
+//! session feed ([`ServerMessage::Sessions`]) or spawns / attaches to a
+//! daemon-owned terminal. Terminals are addressed by the [`TerminalId`] the
+//! daemon assigns at spawn — a worktree can hold several terminals at once (an
+//! agent pane alongside plain shells), so the worktree path alone is not an
+//! address. An attach is answered with [`ServerMessage::Attached`] and a full
+//! [`ServerMessage::Screen`] snapshot; after that the daemon streams the raw PTY
+//! output bytes as [`ServerMessage::Output`] deltas, which reproduce everything
+//! a directly-owned PTY would have shown (colors, bells, cursor-shape and
+//! bracketed-paste sequences, scrollback growth). A client that falls behind the
+//! bounded [`OutputBacklog`] is resynchronised with a fresh `Screen` snapshot.
 //!
-//! Everything here is pure: the message *shapes*, and a byte-level
-//! [`FrameDecoder`] that reassembles whole frames from arbitrarily chunked reads.
-//! Turning a message into JSON bytes and back, and the socket itself, live in
-//! [`crate::infrastructure::daemon_ipc`] and the composition root — so the
-//! protocol logic is unit-tested without a socket.
+//! Everything here is pure: the message *shapes*, a byte-level [`FrameDecoder`]
+//! that reassembles whole frames from arbitrarily chunked reads, and the
+//! [`OutputBacklog`] ring. Turning a message into JSON bytes and back, and the
+//! socket itself, live in [`crate::infrastructure::daemon_ipc`] and the
+//! composition root — so the protocol logic is unit-tested without a socket.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -21,9 +30,30 @@ use serde::{Deserialize, Serialize};
 use crate::domain::daemon::SessionSnapshot;
 
 /// Largest single frame the decoder will assemble, so a corrupt or hostile
-/// length prefix cannot make it buffer without bound. Session snapshots are
-/// small; 16 MiB is far above any real payload while still bounding memory.
+/// length prefix cannot make it buffer without bound. Screen snapshots are at
+/// most a few hundred KiB; 16 MiB is far above any real payload while still
+/// bounding memory.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// Identifies one daemon-owned terminal for the daemon's lifetime. Assigned by
+/// the daemon when the terminal is spawned and carried by every message about
+/// it. Ids are never reused within a daemon run; a daemon restart starts over
+/// (its terminals died with it), so a stale id simply fails to attach.
+pub type TerminalId = u64;
+
+/// The geometry a [`ClientMessage::Spawn`] falls back to when the field is
+/// absent from the wire (a hand-written or older client).
+fn default_spawn_cols() -> u16 {
+    80
+}
+/// See [`default_spawn_cols`].
+fn default_spawn_rows() -> u16 {
+    24
+}
+/// Scrollback lines a [`ClientMessage::Spawn`] falls back to.
+fn default_spawn_scrollback() -> usize {
+    1000
+}
 
 /// A message a client sends to the daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,23 +66,48 @@ pub enum ClientMessage {
     Subscribe,
     /// Stop receiving snapshot pushes.
     Unsubscribe,
-    /// Spawn (or reuse) the daemon-owned terminal for `worktree`. The daemon owns
-    /// the process, so it keeps running after the requesting client disconnects.
-    Spawn { worktree: PathBuf },
-    /// Kill the daemon-owned terminal for `worktree`, if one is running.
-    Kill { worktree: PathBuf },
-    /// Start receiving [`ServerMessage::Screen`] updates for `worktree`'s
-    /// terminal. The daemon sends the current screen at once, then again whenever
-    /// it changes.
-    Attach { worktree: PathBuf },
-    /// Stop receiving screen updates for `worktree`.
-    Detach { worktree: PathBuf },
-    /// Write input bytes to `worktree`'s terminal (keystrokes, pasted text). The
-    /// resulting output flows back as [`ServerMessage::Screen`] to its attachers.
-    Keys { worktree: PathBuf, data: Vec<u8> },
-    /// Resize `worktree`'s terminal to `cols`×`rows`.
-    Resize {
+    /// Spawn a new daemon-owned terminal in `worktree`, answered with
+    /// [`ServerMessage::Spawned`]. The daemon owns the process, so it keeps
+    /// running after the requesting client disconnects. `command` (an agent
+    /// launch line) is run as a shell argument when present; a plain shell opens
+    /// otherwise. `env` carries the resolved workspace environment, injected
+    /// into the child process. `cols`×`rows` size the PTY and `scrollback` caps
+    /// the daemon-side scrollback buffer.
+    Spawn {
         worktree: PathBuf,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+        #[serde(default = "default_spawn_cols")]
+        cols: u16,
+        #[serde(default = "default_spawn_rows")]
+        rows: u16,
+        #[serde(default = "default_spawn_scrollback")]
+        scrollback: usize,
+    },
+    /// Kill the daemon-owned terminal `terminal`, answered with
+    /// [`ServerMessage::Killed`] (also when none is running).
+    Kill { terminal: TerminalId },
+    /// Start receiving screen updates for `terminal`. `worktree` is the path the
+    /// client believes the terminal runs in; the daemon refuses the attach when
+    /// it does not match, so a stale id (from a persisted pane snapshot) can
+    /// never latch onto some other worktree's terminal. Answered with
+    /// [`ServerMessage::Attached`] followed by a full [`ServerMessage::Screen`]
+    /// snapshot, then [`ServerMessage::Output`] deltas.
+    Attach {
+        terminal: TerminalId,
+        worktree: PathBuf,
+    },
+    /// Stop receiving screen updates for `terminal`. The terminal itself keeps
+    /// running — detaching is how a client leaves an agent working unobserved.
+    Detach { terminal: TerminalId },
+    /// Write input bytes to `terminal` (keystrokes, pasted text). The resulting
+    /// output flows back as [`ServerMessage::Output`] to its attachers.
+    Keys { terminal: TerminalId, data: Vec<u8> },
+    /// Resize `terminal` to `cols`×`rows`.
+    Resize {
+        terminal: TerminalId,
         cols: u16,
         rows: u16,
     },
@@ -65,19 +120,98 @@ pub enum ServerMessage {
     /// The monitored-sessions snapshot, as a one-shot reply or a subscription
     /// push.
     Sessions { sessions: Vec<SessionSnapshot> },
-    /// A terminal is running for `worktree`, owned by the daemon under `pid`.
-    Spawned { worktree: PathBuf, pid: u32 },
-    /// The terminal for `worktree` has been killed (or none was running).
-    Killed { worktree: PathBuf },
-    /// The current screen of `worktree`'s terminal, as the vt100 escape-sequence
-    /// bytes that reproduce it when written to a terminal. Sent on attach and on
-    /// every subsequent change.
-    Screen {
+    /// The terminal spawned for a [`ClientMessage::Spawn`]: its daemon-assigned
+    /// id, the worktree it runs in, and the shell's pid.
+    Spawned {
+        terminal: TerminalId,
         worktree: PathBuf,
+        pid: u32,
+    },
+    /// The reply to a successful [`ClientMessage::Attach`]: the client now
+    /// receives this terminal's screen. Carries the shell's pid so a client
+    /// attaching to an already-running terminal (which never saw `Spawned`)
+    /// still learns it. A full [`ServerMessage::Screen`] snapshot follows.
+    Attached { terminal: TerminalId, pid: u32 },
+    /// The terminal has been killed (or none was running under that id).
+    Killed { terminal: TerminalId },
+    /// A full snapshot of `terminal`'s screen, as the vt100 escape-sequence
+    /// bytes that reproduce it (including input modes) when fed to a terminal
+    /// parser. Sent right after [`ServerMessage::Attached`], and again whenever
+    /// the client fell so far behind the output backlog that deltas were lost.
+    Screen {
+        terminal: TerminalId,
         contents: Vec<u8>,
     },
+    /// The raw PTY output bytes `terminal` produced since the previous push to
+    /// this client. Feeding them to the parser that replayed the last `Screen`
+    /// snapshot reproduces the daemon's screen exactly.
+    Output { terminal: TerminalId, data: Vec<u8> },
+    /// `terminal`'s process has exited. Any final [`ServerMessage::Output`] was
+    /// pushed before this; the id is dead afterwards.
+    Exited { terminal: TerminalId },
     /// A request could not be handled; carries a human-readable reason.
     Error { message: String },
+}
+
+/// A bounded ring of a terminal's raw output bytes, addressed by a monotonically
+/// growing byte offset.
+///
+/// The daemon appends every chunk its PTY reader parses; per-client cursors
+/// (kept in the attach table) remember how far each attached client has been
+/// pushed. [`since`](Self::since) then yields the bytes a client is missing — or
+/// `None` when they have already been evicted by the capacity bound, which tells
+/// the caller to resynchronise that client with a full screen snapshot instead.
+/// Offsets keep growing across evictions, so a cursor never ambiguously matches
+/// recycled bytes.
+#[derive(Debug)]
+pub struct OutputBacklog {
+    /// Total bytes ever evicted from the front — the offset of `bytes[0]`.
+    evicted: u64,
+    bytes: VecDeque<u8>,
+    capacity: usize,
+}
+
+impl OutputBacklog {
+    /// An empty backlog that retains at most `capacity` bytes.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            evicted: 0,
+            bytes: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Append freshly read output, evicting the oldest bytes past the capacity.
+    pub fn append(&mut self, data: &[u8]) {
+        self.bytes.extend(data.iter().copied());
+        let over = self.bytes.len().saturating_sub(self.capacity);
+        if over > 0 {
+            self.bytes.drain(..over);
+            self.evicted += over as u64;
+        }
+    }
+
+    /// The offset of the oldest byte still retained.
+    pub fn start(&self) -> u64 {
+        self.evicted
+    }
+
+    /// The offset one past the newest byte — the cursor a fully caught-up
+    /// client holds.
+    pub fn end(&self) -> u64 {
+        self.evicted + self.bytes.len() as u64
+    }
+
+    /// The bytes from `offset` to the end, or `None` when `offset` no longer
+    /// addresses retained bytes (evicted, or ahead of the end — either way the
+    /// client's cursor is unusable and it needs a snapshot resync).
+    pub fn since(&self, offset: u64) -> Option<Vec<u8>> {
+        if offset < self.start() || offset > self.end() {
+            return None;
+        }
+        let skip = (offset - self.evicted) as usize;
+        Some(self.bytes.iter().skip(skip).copied().collect())
+    }
 }
 
 /// Prefix `payload` with its length (`u32` big-endian) to frame it for the
@@ -212,5 +346,57 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.feed(&[0, 0]);
         assert_eq!(decoder.next_frame().unwrap(), None);
+    }
+
+    #[test]
+    fn a_spawn_without_optional_fields_takes_the_defaults() {
+        // A minimal spawn payload (as an older or hand-written client would
+        // send) decodes with the default geometry, scrollback, empty env and no
+        // command.
+        let json = br#"{"type":"spawn","worktree":"/repo/wt"}"#;
+        let message: ClientMessage = serde_json::from_slice(json).unwrap();
+        assert_eq!(
+            message,
+            ClientMessage::Spawn {
+                worktree: std::path::PathBuf::from("/repo/wt"),
+                command: None,
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                scrollback: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn backlog_append_within_capacity_keeps_every_byte() {
+        let mut backlog = OutputBacklog::new(8);
+        backlog.append(b"abc");
+        backlog.append(b"de");
+        assert_eq!(backlog.start(), 0);
+        assert_eq!(backlog.end(), 5);
+        assert_eq!(backlog.since(0), Some(b"abcde".to_vec()));
+        assert_eq!(backlog.since(3), Some(b"de".to_vec()));
+        // A fully caught-up cursor yields an empty (but valid) delta.
+        assert_eq!(backlog.since(5), Some(Vec::new()));
+    }
+
+    #[test]
+    fn backlog_evicts_the_oldest_bytes_past_capacity() {
+        let mut backlog = OutputBacklog::new(4);
+        backlog.append(b"abcdef");
+        // Two bytes were evicted; offsets keep counting from the true start.
+        assert_eq!(backlog.start(), 2);
+        assert_eq!(backlog.end(), 6);
+        assert_eq!(backlog.since(2), Some(b"cdef".to_vec()));
+        // A cursor pointing at evicted bytes cannot be served — resync needed.
+        assert_eq!(backlog.since(1), None);
+    }
+
+    #[test]
+    fn backlog_refuses_a_cursor_ahead_of_its_end() {
+        let mut backlog = OutputBacklog::new(4);
+        backlog.append(b"ab");
+        assert_eq!(backlog.since(3), None);
     }
 }

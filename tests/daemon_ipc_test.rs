@@ -1,18 +1,20 @@
 //! End-to-end check of the daemon IPC socket: start a real `usagi daemon`, connect
-//! to its Unix domain socket, ask for the session list, and read the framed reply
-//! back. This exercises the whole composition-root socket server (bind, accept,
-//! per-client read/dispatch, write) that the unit tests cover only piecewise.
+//! to its Unix domain socket, and drive the terminal protocol — spawn, attach,
+//! keys, detach, kill — reading the framed replies back. This exercises the whole
+//! composition-root socket server (bind, accept, per-client read/dispatch, write,
+//! output streaming) that the unit tests cover only piecewise.
 //!
 //! Unix-only: the IPC socket is a Unix domain socket.
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage};
+use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage, TerminalId};
 use usagi::infrastructure::daemon_ipc::{decode_message, encode_message, socket_path};
 use usagi::infrastructure::resource::process_alive;
 
@@ -39,6 +41,36 @@ fn wait_for(path: &Path, budget: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     path.exists()
+}
+
+/// Connect to the daemon socket, retrying briefly: on a loaded machine (several
+/// of these tests spawn daemons in parallel, more so under coverage
+/// instrumentation) the socket file can be observable an instant before the
+/// freshly exec'd daemon is accepting, which surfaces as `ConnectionRefused`.
+fn connect(sock: &Path) -> UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match UnixStream::connect(sock) {
+            Ok(stream) => return stream,
+            Err(e) if Instant::now() < deadline => {
+                let _ = e;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => panic!("connecting to the daemon socket: {e}"),
+        }
+    }
+}
+
+/// A `Spawn` message for `worktree` with the defaults the tests use.
+fn spawn_message(worktree: &Path) -> ClientMessage {
+    ClientMessage::Spawn {
+        worktree: worktree.to_path_buf(),
+        command: None,
+        env: BTreeMap::new(),
+        cols: 80,
+        rows: 24,
+        scrollback: 200,
+    }
 }
 
 /// Read one framed [`ServerMessage`] from `stream` into the caller's `decoder`,
@@ -72,6 +104,81 @@ fn read_message(stream: &mut UnixStream, budget: Duration) -> ServerMessage {
     recv(stream, &mut decoder, budget)
 }
 
+/// Send `message` on `stream`, panicking on a write failure.
+fn send(stream: &mut UnixStream, message: &ClientMessage) {
+    stream.write_all(&encode_message(message).unwrap()).unwrap();
+}
+
+/// Spawn a terminal over `stream` and return its id and pid.
+fn spawn_terminal(
+    stream: &mut UnixStream,
+    decoder: &mut FrameDecoder,
+    worktree: &Path,
+) -> (TerminalId, u32) {
+    send(stream, &spawn_message(worktree));
+    match recv(stream, decoder, Duration::from_secs(5)) {
+        ServerMessage::Spawned { terminal, pid, .. } => (terminal, pid),
+        other => panic!("expected Spawned, got {other:?}"),
+    }
+}
+
+/// Attach to `terminal` over `stream`, asserting the `Attached` reply and the
+/// initial `Screen` snapshot that follows it.
+fn attach_terminal(
+    stream: &mut UnixStream,
+    decoder: &mut FrameDecoder,
+    worktree: &Path,
+    terminal: TerminalId,
+) {
+    send(
+        stream,
+        &ClientMessage::Attach {
+            terminal,
+            worktree: worktree.to_path_buf(),
+        },
+    );
+    match recv(stream, decoder, Duration::from_secs(5)) {
+        ServerMessage::Attached { terminal: id, .. } => {
+            assert_eq!(id, terminal, "attached to the wrong terminal");
+        }
+        other => panic!("expected Attached, got {other:?}"),
+    }
+    // The daemon paints the current screen right after the attach reply.
+    match recv(stream, decoder, Duration::from_secs(5)) {
+        ServerMessage::Screen { terminal: id, .. } => {
+            assert_eq!(id, terminal, "screen was for the wrong terminal");
+        }
+        other => panic!("expected Screen, got {other:?}"),
+    }
+}
+
+/// Keep reading screen updates for `terminal` until `marker` appears in one,
+/// or `budget` runs out. Both the full-snapshot and the raw-delta forms count —
+/// which one arrives depends on timing (a resync vs. an incremental push).
+fn wait_for_marker(
+    stream: &mut UnixStream,
+    decoder: &mut FrameDecoder,
+    terminal: TerminalId,
+    marker: &[u8],
+    budget: Duration,
+) -> bool {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        let bytes = match recv(stream, decoder, Duration::from_secs(5)) {
+            ServerMessage::Screen {
+                terminal: id,
+                contents,
+            } if id == terminal => contents,
+            ServerMessage::Output { terminal: id, data } if id == terminal => data,
+            _ => continue,
+        };
+        if bytes.windows(marker.len()).any(|window| window == marker) {
+            return true;
+        }
+    }
+    false
+}
+
 #[test]
 fn client_lists_sessions_over_the_ipc_socket() {
     let home = tempfile::tempdir().unwrap();
@@ -87,10 +194,8 @@ fn client_lists_sessions_over_the_ipc_socket() {
     );
 
     let outcome = std::panic::catch_unwind(|| {
-        let mut stream = UnixStream::connect(&sock).expect("connecting to the daemon socket");
-        stream
-            .write_all(&encode_message(&ClientMessage::ListSessions).unwrap())
-            .unwrap();
+        let mut stream = connect(&sock);
+        send(&mut stream, &ClientMessage::ListSessions);
 
         // No workspaces are registered under this fresh $USAGI_HOME, so the
         // daemon reports an empty session list — proving the request reached the
@@ -119,7 +224,6 @@ fn client_attaches_and_receives_the_terminal_screen() {
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
     let worktree = tempfile::tempdir().unwrap();
-    let worktree_path = worktree.path().to_path_buf();
 
     daemon_cmd(home.path(), "start");
     assert!(
@@ -128,39 +232,33 @@ fn client_attaches_and_receives_the_terminal_screen() {
     );
 
     let outcome = std::panic::catch_unwind(|| {
-        let mut stream = UnixStream::connect(&sock).expect("connecting");
+        let mut stream = connect(&sock);
         let mut decoder = FrameDecoder::new();
 
         // Spawn a terminal, then attach to its screen feed over the same
-        // connection.
-        stream
-            .write_all(
-                &encode_message(&ClientMessage::Spawn {
-                    worktree: worktree_path.clone(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
-            ServerMessage::Spawned { .. } => {}
-            other => panic!("expected Spawned, got {other:?}"),
-        }
+        // connection: Attached + the initial Screen snapshot come back, proving
+        // the vt100 screen is streamed over IPC.
+        let (terminal, _) = spawn_terminal(&mut stream, &mut decoder, worktree.path());
+        attach_terminal(&mut stream, &mut decoder, worktree.path(), terminal);
 
-        stream
-            .write_all(
-                &encode_message(&ClientMessage::Attach {
-                    worktree: worktree_path.clone(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        // The daemon paints the current screen on attach: a Screen message for
-        // this worktree comes back, proving the vt100 screen is streamed over IPC.
+        // Attaching with the wrong worktree is refused: a stale persisted id
+        // can never latch onto another worktree's terminal.
+        let elsewhere = tempfile::tempdir().unwrap();
+        send(
+            &mut stream,
+            &ClientMessage::Attach {
+                terminal,
+                worktree: elsewhere.path().to_path_buf(),
+            },
+        );
         match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
-            ServerMessage::Screen { worktree, .. } => {
-                assert_eq!(worktree, worktree_path, "screen was for the wrong worktree");
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("no daemon terminal"),
+                    "odd error: {message}"
+                );
             }
-            other => panic!("expected Screen, got {other:?}"),
+            other => panic!("expected Error for a worktree mismatch, got {other:?}"),
         }
     });
 
@@ -177,7 +275,6 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
     let worktree = tempfile::tempdir().unwrap();
-    let worktree_path = worktree.path().to_path_buf();
 
     daemon_cmd(home.path(), "start");
     assert!(
@@ -186,29 +283,11 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
     );
 
     let outcome = std::panic::catch_unwind(|| {
-        let mut stream = UnixStream::connect(&sock).expect("connecting");
+        let mut stream = connect(&sock);
         let mut decoder = FrameDecoder::new();
 
-        let send = |stream: &mut UnixStream, msg: &ClientMessage| {
-            stream.write_all(&encode_message(msg).unwrap()).unwrap();
-        };
-
-        send(
-            &mut stream,
-            &ClientMessage::Spawn {
-                worktree: worktree_path.clone(),
-            },
-        );
-        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
-            ServerMessage::Spawned { .. } => {}
-            other => panic!("expected Spawned, got {other:?}"),
-        }
-        send(
-            &mut stream,
-            &ClientMessage::Attach {
-                worktree: worktree_path.clone(),
-            },
-        );
+        let (terminal, _) = spawn_terminal(&mut stream, &mut decoder, worktree.path());
+        attach_terminal(&mut stream, &mut decoder, worktree.path(), terminal);
 
         // Type a command that prints a distinctive marker, then read screen
         // updates until the marker shows up — proving input reached the
@@ -216,29 +295,18 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
         send(
             &mut stream,
             &ClientMessage::Keys {
-                worktree: worktree_path.clone(),
+                terminal,
                 data: b"printf usagi-keys-ok\n".to_vec(),
             },
         );
-
-        let marker = b"usagi-keys-ok";
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut seen = false;
-        while Instant::now() < deadline {
-            if let ServerMessage::Screen { contents, .. } =
-                recv(&mut stream, &mut decoder, Duration::from_secs(5))
-            {
-                if contents
-                    .windows(marker.len())
-                    .any(|window| window == marker)
-                {
-                    seen = true;
-                    break;
-                }
-            }
-        }
         assert!(
-            seen,
+            wait_for_marker(
+                &mut stream,
+                &mut decoder,
+                terminal,
+                b"usagi-keys-ok",
+                Duration::from_secs(10),
+            ),
             "the typed marker never appeared on the terminal screen"
         );
     });
@@ -263,7 +331,7 @@ fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
 }
 
 #[test]
-fn daemon_owned_terminal_survives_client_disconnect() {
+fn daemon_owned_terminal_survives_detach_and_disconnect() {
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -277,51 +345,121 @@ fn daemon_owned_terminal_survives_client_disconnect() {
     );
 
     let outcome = std::panic::catch_unwind(|| {
-        // A client asks the daemon to spawn a terminal, then disconnects.
-        let pid = {
-            let mut client = UnixStream::connect(&sock).expect("connecting client A");
-            client
-                .write_all(
-                    &encode_message(&ClientMessage::Spawn {
-                        worktree: worktree.path().to_path_buf(),
-                    })
-                    .unwrap(),
-                )
-                .unwrap();
-            match read_message(&mut client, Duration::from_secs(5)) {
-                ServerMessage::Spawned { pid, .. } => pid,
-                other => panic!("expected Spawned, got {other:?}"),
-            }
+        // A client spawns a terminal, attaches, then detaches (the TUI's
+        // Ctrl-O / quit path) and disconnects entirely.
+        let (terminal, pid) = {
+            let mut client = connect(&sock);
+            let mut decoder = FrameDecoder::new();
+            let (terminal, pid) = spawn_terminal(&mut client, &mut decoder, worktree.path());
+            attach_terminal(&mut client, &mut decoder, worktree.path(), terminal);
+            send(&mut client, &ClientMessage::Detach { terminal });
+            (terminal, pid)
             // `client` drops here — the connection closes.
         };
         assert!(pid != 0, "daemon reported no pid for the spawned terminal");
 
         // The daemon owns the process, so it stays alive after the client that
-        // requested it has gone. (Give the daemon a tick to notice the drop.)
+        // viewed it detached and disconnected — this is "close the TUI, the
+        // agent keeps running". (Give the daemon a tick to notice the drop.)
         std::thread::sleep(Duration::from_millis(700));
         assert!(
             process_alive(pid),
-            "the daemon-owned terminal (pid {pid}) died when its client disconnected"
+            "the daemon-owned terminal (pid {pid}) died when its client detached"
         );
 
-        // A fresh client kills it, and the process goes away.
-        let mut killer = UnixStream::connect(&sock).expect("connecting client B");
-        killer
-            .write_all(
-                &encode_message(&ClientMessage::Kill {
-                    worktree: worktree.path().to_path_buf(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        match read_message(&mut killer, Duration::from_secs(5)) {
-            ServerMessage::Killed { .. } => {}
-            other => panic!("expected Killed, got {other:?}"),
+        // A fresh client re-attaches by id — the restore path a reopened TUI
+        // takes — and sees the terminal's screen again.
+        let mut returning = connect(&sock);
+        let mut decoder = FrameDecoder::new();
+        attach_terminal(&mut returning, &mut decoder, worktree.path(), terminal);
+
+        // A kill by id tears the terminal down for real.
+        send(&mut returning, &ClientMessage::Kill { terminal });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match recv(&mut returning, &mut decoder, Duration::from_secs(5)) {
+                ServerMessage::Killed { terminal: id } => {
+                    assert_eq!(id, terminal);
+                    break;
+                }
+                // Screen/Output pushes may still be in flight ahead of the reply.
+                _ if Instant::now() < deadline => continue,
+                other => panic!("expected Killed, got {other:?}"),
+            }
         }
         assert!(
             wait_until(|| !process_alive(pid), Duration::from_secs(5)),
             "the terminal (pid {pid}) was not killed"
         );
+    });
+
+    daemon_cmd(home.path(), "stop");
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn spawn_runs_the_given_command_and_reports_its_exit() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    let worktree = tempfile::tempdir().unwrap();
+
+    daemon_cmd(home.path(), "start");
+    assert!(
+        wait_for(&sock, Duration::from_secs(10)),
+        "daemon never created its IPC socket"
+    );
+
+    let outcome = std::panic::catch_unwind(|| {
+        let mut stream = connect(&sock);
+        let mut decoder = FrameDecoder::new();
+
+        // Spawn with an opening command (the agent-launch path) that prints a
+        // marker and exits, and an env var the command echoes — proving both
+        // ride the Spawn message into the daemon-owned shell.
+        send(
+            &mut stream,
+            &ClientMessage::Spawn {
+                worktree: worktree.path().to_path_buf(),
+                command: Some("printf usagi-cmd-$USAGI_E2E_MARKER".to_string()),
+                env: [("USAGI_E2E_MARKER".to_string(), "env-ok".to_string())].into(),
+                cols: 80,
+                rows: 24,
+                scrollback: 200,
+            },
+        );
+        let terminal = match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            ServerMessage::Spawned { terminal, .. } => terminal,
+            other => panic!("expected Spawned, got {other:?}"),
+        };
+        attach_terminal(&mut stream, &mut decoder, worktree.path(), terminal);
+        assert!(
+            wait_for_marker(
+                &mut stream,
+                &mut decoder,
+                terminal,
+                b"usagi-cmd-env-ok",
+                Duration::from_secs(10),
+            ),
+            "the opening command's output never appeared"
+        );
+
+        // The command exits when it is done, and the daemon reports the death
+        // to its attachers — the signal a TUI pane closes on.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+                ServerMessage::Exited { terminal: id } => {
+                    assert_eq!(id, terminal);
+                    break;
+                }
+                _ if Instant::now() < deadline => continue,
+                other => panic!("expected Exited, got {other:?}"),
+            }
+        }
     });
 
     daemon_cmd(home.path(), "stop");

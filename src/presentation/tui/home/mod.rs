@@ -1025,6 +1025,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             cli,
                             label: &label,
                             env: &pane_env,
+                            attach: None,
                         },
                     )?;
                 } else {
@@ -1037,6 +1038,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             cli,
                             label: &label,
                             env: &pane_env,
+                            attach: None,
                         },
                     )?;
                 }
@@ -1137,6 +1139,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                                         cli,
                                         label: &label,
                                         env: &add_env,
+                                        attach: None,
                                     },
                                 )?;
                             }
@@ -1367,6 +1370,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         cli: ps.cli,
                         label: &ps.label,
                         env: &env,
+                        attach: None,
                     },
                 ) {
                     Ok(id) => {
@@ -1831,6 +1835,7 @@ fn restore_open_panes(
                         cli: default_cli,
                         label: &label,
                         env: &pane_env,
+                        attach: pane.terminal,
                     },
                 ),
                 StoredPaneKind::Agent => {
@@ -1855,6 +1860,7 @@ fn restore_open_panes(
                             cli,
                             label: &label,
                             env: &pane_env,
+                            attach: pane.terminal,
                         },
                     )
                 }
@@ -1993,6 +1999,7 @@ fn autostart_queued_prompts(
                 cli,
                 label: &label,
                 env: &pane_env,
+                attach: None,
             },
         ) {
             Ok(()) => logs.push(format!("queued prompt auto-started for {label}: {prompt}")),
