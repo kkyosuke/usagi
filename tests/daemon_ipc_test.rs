@@ -171,6 +171,85 @@ fn client_attaches_and_receives_the_terminal_screen() {
     }
 }
 
+#[test]
+fn keys_written_to_a_terminal_appear_on_its_screen() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    let worktree = tempfile::tempdir().unwrap();
+    let worktree_path = worktree.path().to_path_buf();
+
+    daemon_cmd(home.path(), "start");
+    assert!(
+        wait_for(&sock, Duration::from_secs(10)),
+        "daemon never created its IPC socket"
+    );
+
+    let outcome = std::panic::catch_unwind(|| {
+        let mut stream = UnixStream::connect(&sock).expect("connecting");
+        let mut decoder = FrameDecoder::new();
+
+        let send = |stream: &mut UnixStream, msg: &ClientMessage| {
+            stream.write_all(&encode_message(msg).unwrap()).unwrap();
+        };
+
+        send(
+            &mut stream,
+            &ClientMessage::Spawn {
+                worktree: worktree_path.clone(),
+            },
+        );
+        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            ServerMessage::Spawned { .. } => {}
+            other => panic!("expected Spawned, got {other:?}"),
+        }
+        send(
+            &mut stream,
+            &ClientMessage::Attach {
+                worktree: worktree_path.clone(),
+            },
+        );
+
+        // Type a command that prints a distinctive marker, then read screen
+        // updates until the marker shows up — proving input reached the
+        // daemon-owned terminal and its output streamed back.
+        send(
+            &mut stream,
+            &ClientMessage::Keys {
+                worktree: worktree_path.clone(),
+                data: b"printf usagi-keys-ok\n".to_vec(),
+            },
+        );
+
+        let marker = b"usagi-keys-ok";
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while Instant::now() < deadline {
+            if let ServerMessage::Screen { contents, .. } =
+                recv(&mut stream, &mut decoder, Duration::from_secs(5))
+            {
+                if contents
+                    .windows(marker.len())
+                    .any(|window| window == marker)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            seen,
+            "the typed marker never appeared on the terminal screen"
+        );
+    });
+
+    daemon_cmd(home.path(), "stop");
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 /// Poll `cond` until it holds or `budget` elapses; returns whether it held.
 fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;

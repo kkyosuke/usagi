@@ -35,6 +35,10 @@ pub enum Action {
     Attach(PathBuf),
     /// Detach the requesting client from this worktree's screen feed.
     Detach(PathBuf),
+    /// Write these input bytes to this worktree's terminal.
+    Keys(PathBuf, Vec<u8>),
+    /// Resize this worktree's terminal to `cols`×`rows`.
+    Resize(PathBuf, u16, u16),
     /// Nothing to send.
     Nothing,
 }
@@ -204,6 +208,12 @@ pub fn handle(
         ClientMessage::Kill { worktree } => Action::Kill(worktree),
         ClientMessage::Attach { worktree } => Action::Attach(worktree),
         ClientMessage::Detach { worktree } => Action::Detach(worktree),
+        ClientMessage::Keys { worktree, data } => Action::Keys(worktree, data),
+        ClientMessage::Resize {
+            worktree,
+            cols,
+            rows,
+        } => Action::Resize(worktree, cols, rows),
     }
 }
 
@@ -369,6 +379,37 @@ mod tests {
                 &[]
             ),
             Action::Detach(worktree)
+        );
+    }
+
+    #[test]
+    fn keys_and_resize_return_terminal_io_actions() {
+        let mut registry = SubscriberRegistry::new();
+        let worktree = PathBuf::from("/repo/.usagi/sessions/work");
+        assert_eq!(
+            handle(
+                ClientMessage::Keys {
+                    worktree: worktree.clone(),
+                    data: b"ls\n".to_vec(),
+                },
+                1,
+                &mut registry,
+                &[],
+            ),
+            Action::Keys(worktree.clone(), b"ls\n".to_vec())
+        );
+        assert_eq!(
+            handle(
+                ClientMessage::Resize {
+                    worktree: worktree.clone(),
+                    cols: 120,
+                    rows: 40,
+                },
+                1,
+                &mut registry,
+                &[],
+            ),
+            Action::Resize(worktree, 120, 40)
         );
     }
 
