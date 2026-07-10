@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthChar;
 use super::super::state::{DiffFocus, DiffTreeRow, DiffView};
 use super::markdown_render::rgb_to_ansi256;
 use super::{clip_to_width, pad_to_width};
-use crate::presentation::tui::diff::{split_rows_slice, DiffRow, DiffSpan, RowKind, SplitRow};
+use crate::presentation::tui::diff::{DiffRow, DiffSpan, RowKind, SplitRow};
 use crate::presentation::tui::markdown::Rgb;
 
 const DIFF_ADD_BG: u8 = 22; // dark green
@@ -257,8 +257,10 @@ fn diff_column(
 ) -> Vec<String> {
     let section = &view.doc.rows[file.start..file.end];
     let num_w = num_width(section);
-    let split = view.split().then(|| split_rows_slice(section, file.start));
-    let total = split.as_ref().map_or(section.len(), Vec::len);
+    let split = view
+        .split()
+        .then(|| view.selected_split_rows().unwrap_or(&[]));
+    let total = split.as_ref().map_or(section.len(), |rows| rows.len());
     let max_start = total.saturating_sub(body_h);
     let start = view.scroll().min(max_start);
     let mut out = Vec::with_capacity(body_h);

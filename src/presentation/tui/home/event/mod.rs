@@ -403,7 +403,7 @@ fn click_selects_session(state: &HomeState) -> bool {
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
-        && state.diff_view().is_none()
+        && !state.diff_active()
         && state.note_editor().is_none()
         && state.tab_menu().is_none()
         && state.tab_rename().is_none()
@@ -658,6 +658,7 @@ pub(super) fn event_loop(
                 }
             }
         }
+        force_paint |= state.poll_pending_diff();
         // Mark each background session's agent state — running, waiting for
         // input, live (ready), and finished — before painting, applying every
         // badge set together (read under a single lock) so the frame never mixes
@@ -880,6 +881,7 @@ pub(super) fn event_loop(
             && !state.command_palette_open()
             // A loading tab animates on the clock, so its frames must not be skipped.
             && state.pending_pane().is_none()
+            && state.pending_diff_frame().is_none()
             && !force_paint
             && !completed_any
             && !refreshed
@@ -932,6 +934,9 @@ pub(super) fn event_loop(
             // A pending chat reply: keep ticking to poll the receiver and animate
             // the "thinking" spinner.
             || chat_rx.is_some()
+            // A pending diff animates its tab/body and must keep polling the
+            // background git worker.
+            || state.pending_diff_frame().is_some()
             // A background pane loading its tab: keep ticking to poll it ready and
             // animate its chip.
             || state.pending_pane().is_some();
@@ -1527,6 +1532,19 @@ pub(super) fn event_loop(
             continue;
         }
 
+        // The loading `diff` tab owns the right pane as soon as the command is
+        // dispatched. It only needs close/tab-leave keys until the worker yields;
+        // the finished view below takes over rich navigation.
+        if state.pending_diff_frame().is_some() {
+            match key {
+                Key::Escape | Key::Char('q') | Key::Char(CTRL_P) | Key::Char(CTRL_N) => {
+                    state.close_diff()
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         // The right-pane diff view, when open, captures every key. It is a GitHub
         // pull-request-style split, so the keys are focus-aware: the left explorer
         // (directory tree) navigates with the arrows / `j`/`k`, `Enter` (or `→`)
@@ -1711,6 +1729,7 @@ fn selected_dir(state: &HomeState, workspace_root: &Path) -> PathBuf {
 /// cursor is on a root row (no session highlighted) or the base ref cannot be
 /// resolved (e.g. a repo with no commits). The git shell-out makes this the
 /// impure half of the `diff` command; the selection read is pure.
+#[cfg(test)]
 fn selected_diff(state: &HomeState) -> Result<(String, String)> {
     let Some(worktree) = state.list().selected() else {
         anyhow::bail!("highlight a session to see its diff");
@@ -1720,6 +1739,47 @@ fn selected_diff(state: &HomeState) -> Result<(String, String)> {
         .ok_or_else(|| anyhow::anyhow!("could not resolve the base branch `{base}`"))?;
     let branch = worktree.branch.as_deref().unwrap_or("(detached)");
     Ok((format!("{branch} → {base}"), patch))
+}
+
+struct DiffRequest {
+    path: PathBuf,
+    branch: String,
+}
+
+fn selected_diff_request(state: &HomeState) -> Result<DiffRequest> {
+    let Some(worktree) = state.list().selected() else {
+        anyhow::bail!("highlight a session to see its diff");
+    };
+    Ok(DiffRequest {
+        path: worktree.path.clone(),
+        branch: worktree
+            .branch
+            .as_deref()
+            .unwrap_or("(detached)")
+            .to_string(),
+    })
+}
+
+/// Start loading the highlighted session's patch off the UI path. The returned
+/// channel always yields once: either a ready `(title, patch)` or the selection /
+/// git error that should be logged by [`HomeState::open_diff_result`].
+fn load_selected_diff(state: &HomeState) -> std::sync::mpsc::Receiver<Result<(String, String)>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    match selected_diff_request(state) {
+        Ok(request) => {
+            std::thread::spawn(move || {
+                let base = crate::infrastructure::git::default_branch(&request.path);
+                let loaded = crate::infrastructure::git::diff_text(&request.path, &base)
+                    .ok_or_else(|| anyhow::anyhow!("could not resolve the base branch `{base}`"))
+                    .map(|patch| (format!("{} → {base}", request.branch), patch));
+                let _ = tx.send(loaded);
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(Err(e));
+        }
+    }
+    rx
 }
 
 /// Whether a click is allowed to poke the sidebar mascot: only on the plain home
@@ -1734,7 +1794,7 @@ fn mascot_clickable(state: &HomeState) -> bool {
         && state.remove_modal().is_none()
         && state.text_modal().is_none()
         && state.preview().is_none()
-        && state.diff_view().is_none()
+        && !state.diff_active()
         && state.note_editor().is_none()
         && !state.command_palette_open()
 }

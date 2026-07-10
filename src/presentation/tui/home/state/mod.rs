@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
@@ -161,6 +162,19 @@ impl LoadingIndicator {
     }
 
     /// The animation tick, advanced on each step of the running action.
+    pub fn frame(&self) -> usize {
+        self.frame
+    }
+}
+
+/// A `diff` command whose patch is being loaded off the UI path.
+pub struct PendingDiff {
+    frame: usize,
+    rx: Receiver<anyhow::Result<(String, String)>>,
+}
+
+impl PendingDiff {
+    /// The animation tick for the loading `diff` tab.
     pub fn frame(&self) -> usize {
         self.frame
     }
@@ -790,6 +804,9 @@ pub struct HomeState {
     /// (session create / bulk remove / terminal launch). While `Some` the right
     /// pane shows the launch loader.
     loading: Option<LoadingIndicator>,
+    /// A pending `diff` command. The screen shows the active diff tab
+    /// immediately, then replaces its loading body when this receiver yields.
+    pending_diff: Option<PendingDiff>,
     /// A pane launched in the background (集中's `terminal` / `agent` on a session
     /// that already shows tabs) whose tab is loading in the strip. While `Some`
     /// the event loop polls it each frame, animating its chip and — once ready —
@@ -970,6 +987,7 @@ impl HomeState {
             history_entries: Vec::new(),
             update: None,
             loading: None,
+            pending_diff: None,
             pending_pane: None,
             pending_sessions: Vec::new(),
             tasks: Vec::new(),
@@ -1965,6 +1983,7 @@ impl HomeState {
     /// caller's (the event loop); parsing / highlighting the patch and storing the
     /// result is pure, so both outcomes are testable.
     pub fn open_diff_result(&mut self, loaded: anyhow::Result<(String, String)>) {
+        self.pending_diff = None;
         match loaded {
             Ok((title, patch)) => {
                 let doc = crate::presentation::tui::diff::render(&patch);
@@ -1985,7 +2004,46 @@ impl HomeState {
     /// Close the diff view (the user dismissed it). Called only while the diff view
     /// is the open overlay, so it clears the overlay outright.
     pub fn close_diff(&mut self) {
+        self.pending_diff = None;
         self.overlay = Overlay::None;
+    }
+
+    /// Open the `diff` tab immediately while the patch is gathered in the
+    /// background.
+    pub fn begin_pending_diff(&mut self, rx: Receiver<anyhow::Result<(String, String)>>) {
+        self.overlay = Overlay::None;
+        self.pending_diff = Some(PendingDiff { frame: 0, rx });
+    }
+
+    /// Poll a pending diff load. Returns `true` when a repaint is needed.
+    pub fn poll_pending_diff(&mut self) -> bool {
+        let Some(pending) = self.pending_diff.as_mut() else {
+            return false;
+        };
+        match pending.rx.try_recv() {
+            Ok(loaded) => {
+                self.open_diff_result(loaded);
+                true
+            }
+            Err(TryRecvError::Empty) => {
+                pending.frame += 1;
+                true
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.open_diff_result(Err(anyhow::anyhow!("diff worker stopped")));
+                true
+            }
+        }
+    }
+
+    /// Animation frame for the pending `diff` tab.
+    pub fn pending_diff_frame(&self) -> Option<usize> {
+        self.pending_diff.as_ref().map(PendingDiff::frame)
+    }
+
+    /// Whether the diff tab owns the right pane, either loading or ready.
+    pub fn diff_active(&self) -> bool {
+        self.pending_diff.is_some() || self.diff_view().is_some()
     }
 
     /// The open diff view for mutation, or `None` when it is not the open overlay.

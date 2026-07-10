@@ -25,8 +25,8 @@ use super::super::state::{HomeState, ModalSize, NotePane, PaneExit, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
-    selected_diff, selected_dir, Flow, StartPending, Wiring, CTRL_CARET, CTRL_E, CTRL_N, CTRL_O,
-    CTRL_P, CTRL_S,
+    load_selected_diff, selected_dir, Flow, StartPending, Wiring, CTRL_CARET, CTRL_E, CTRL_N,
+    CTRL_O, CTRL_P, CTRL_S,
 };
 
 /// Handle one key in the workspace command palette overlay (`:`): edit /
@@ -1356,7 +1356,7 @@ fn closeup_prompt_key(
                 Effect::OpenExternalTerminal => open_external_terminal(state, wiring),
                 Effect::OpenAgent(cli) => launch_agent(term, state, painter, wiring, cli),
                 Effect::OpenChat => state.open_chat(),
-                Effect::OpenDiff => state.open_diff_result(selected_diff(state)),
+                Effect::OpenDiff => state.begin_pending_diff(load_selected_diff(state)),
                 Effect::CloseSession { force } => close_focused_session(state, wiring, force),
                 _ => {}
             }
@@ -1411,7 +1411,9 @@ fn run_closeup_command(
         // `diff` opens the right-pane diff view of the focused session (the same
         // effect the 集中 prompt / palette `diff` produced): resolve its worktree
         // and shell out to git, then render / store the patch (or log a failure).
-        Some(action::SessionActionEffect::OpenDiff) => state.open_diff_result(selected_diff(state)),
+        Some(action::SessionActionEffect::OpenDiff) => {
+            state.begin_pending_diff(load_selected_diff(state))
+        }
         // `chat` opens the local-LLM chat overlay in the right pane.
         Some(action::SessionActionEffect::OpenChat) => state.open_chat(),
         // `close` removes the focused session; the force flag comes from the
