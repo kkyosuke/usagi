@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage, TerminalId};
 use usagi::infrastructure::daemon_ipc::{decode_message, encode_message, socket_path};
+use usagi::infrastructure::daemon_store;
 use usagi::infrastructure::resource::process_alive;
 
 /// The compiled `usagi` binary under test.
@@ -185,15 +186,14 @@ fn client_lists_sessions_over_the_ipc_socket() {
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
 
-    daemon_cmd(home.path(), "start");
-    // The detached daemon binds the socket shortly after starting.
-    assert!(
-        wait_for(&sock, Duration::from_secs(10)),
-        "daemon never created its IPC socket at {}",
-        sock.display()
-    );
-
     let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        // The detached daemon binds the socket shortly after starting.
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket at {}",
+            sock.display()
+        );
         let mut stream = connect(&sock);
         send(&mut stream, &ClientMessage::ListSessions);
 
@@ -211,7 +211,7 @@ fn client_lists_sessions_over_the_ipc_socket() {
 
     // Always stop the daemon, even if the assertions above failed, so it does
     // not linger past the test.
-    daemon_cmd(home.path(), "stop");
+    stop_daemon(home.path(), &daemon_dir);
 
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
@@ -225,13 +225,12 @@ fn client_attaches_and_receives_the_terminal_screen() {
     let sock = socket_path(&daemon_dir);
     let worktree = tempfile::tempdir().unwrap();
 
-    daemon_cmd(home.path(), "start");
-    assert!(
-        wait_for(&sock, Duration::from_secs(10)),
-        "daemon never created its IPC socket"
-    );
-
     let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket"
+        );
         let mut stream = connect(&sock);
         let mut decoder = FrameDecoder::new();
 
@@ -251,18 +250,25 @@ fn client_attaches_and_receives_the_terminal_screen() {
                 worktree: elsewhere.path().to_path_buf(),
             },
         );
-        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
-            ServerMessage::Error { message } => {
-                assert!(
-                    message.contains("no daemon terminal"),
-                    "odd error: {message}"
-                );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+                ServerMessage::Error { message } => {
+                    assert!(
+                        message.contains("no daemon terminal"),
+                        "odd error: {message}"
+                    );
+                    break;
+                }
+                // Terminal output may still be in flight ahead of the reply.
+                ServerMessage::Screen { .. } | ServerMessage::Output { .. }
+                    if Instant::now() < deadline => {}
+                other => panic!("expected Error for a worktree mismatch, got {other:?}"),
             }
-            other => panic!("expected Error for a worktree mismatch, got {other:?}"),
         }
     });
 
-    daemon_cmd(home.path(), "stop");
+    stop_daemon(home.path(), &daemon_dir);
 
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
@@ -276,13 +282,12 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
     let sock = socket_path(&daemon_dir);
     let worktree = tempfile::tempdir().unwrap();
 
-    daemon_cmd(home.path(), "start");
-    assert!(
-        wait_for(&sock, Duration::from_secs(10)),
-        "daemon never created its IPC socket"
-    );
-
     let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket"
+        );
         let mut stream = connect(&sock);
         let mut decoder = FrameDecoder::new();
 
@@ -311,7 +316,7 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
         );
     });
 
-    daemon_cmd(home.path(), "stop");
+    stop_daemon(home.path(), &daemon_dir);
 
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
@@ -330,6 +335,32 @@ fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
     cond()
 }
 
+/// Stop a test daemon and wait for the detached process to exit before its
+/// temporary data directory is dropped. If graceful shutdown times out, kill
+/// the recorded pid so a failed test cannot leak an orphan onto the host.
+fn stop_daemon(home: &Path, daemon_dir: &Path) {
+    let pid = daemon_store::read(daemon_dir)
+        .ok()
+        .flatten()
+        .map(|record| record.pid);
+
+    let _ = Command::new(BIN)
+        .args(["daemon", "stop"])
+        .env("USAGI_HOME", home)
+        .status();
+
+    if let Some(pid) = pid {
+        if !wait_until(|| !process_alive(pid), Duration::from_secs(5)) {
+            // SAFETY: `pid` came from this test's private daemon record. SIGKILL
+            // is the final fallback after its graceful shutdown budget elapsed.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = wait_until(|| !process_alive(pid), Duration::from_secs(5));
+        }
+    }
+}
+
 #[test]
 fn daemon_owned_terminal_survives_detach_and_disconnect() {
     let home = tempfile::tempdir().unwrap();
@@ -338,13 +369,12 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
     // The spawned shell runs with this directory as its cwd.
     let worktree = tempfile::tempdir().unwrap();
 
-    daemon_cmd(home.path(), "start");
-    assert!(
-        wait_for(&sock, Duration::from_secs(10)),
-        "daemon never created its IPC socket"
-    );
-
     let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket"
+        );
         // A client spawns a terminal, attaches, then detaches (the TUI's
         // Ctrl-O / quit path) and disconnects entirely.
         let (terminal, pid) = {
@@ -393,7 +423,7 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
         );
     });
 
-    daemon_cmd(home.path(), "stop");
+    stop_daemon(home.path(), &daemon_dir);
 
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
@@ -407,13 +437,12 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
     let sock = socket_path(&daemon_dir);
     let worktree = tempfile::tempdir().unwrap();
 
-    daemon_cmd(home.path(), "start");
-    assert!(
-        wait_for(&sock, Duration::from_secs(10)),
-        "daemon never created its IPC socket"
-    );
-
     let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket"
+        );
         let mut stream = connect(&sock);
         let mut decoder = FrameDecoder::new();
 
@@ -462,8 +491,38 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
         }
     });
 
-    daemon_cmd(home.path(), "stop");
+    stop_daemon(home.path(), &daemon_dir);
 
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn daemon_exits_when_its_data_dir_disappears() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+
+    let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, Duration::from_secs(10)),
+            "daemon never created its IPC socket"
+        );
+        let pid = daemon_store::read(&daemon_dir)
+            .unwrap()
+            .expect("daemon record")
+            .pid;
+
+        std::fs::remove_dir_all(&daemon_dir).unwrap();
+        assert!(
+            wait_until(|| !process_alive(pid), Duration::from_secs(2)),
+            "daemon {pid} did not exit after its data directory disappeared"
+        );
+    });
+
+    stop_daemon(home.path(), &daemon_dir);
     if let Err(payload) = outcome {
         std::panic::resume_unwind(payload);
     }

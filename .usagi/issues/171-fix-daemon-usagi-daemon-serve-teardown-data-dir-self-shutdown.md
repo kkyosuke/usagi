@@ -1,13 +1,13 @@
 ---
 number: 171
 title: fix(daemon): 孤児 `usagi daemon serve` プロセスの残留を防ぐ（テスト teardown と data dir 消失時の self-shutdown）
-status: todo
+status: done
 priority: high
 labels: [perf, daemon, test]
 dependson: []
 related: [159, 164]
 created_at: 2026-07-10T20:46:22.934773+00:00
-updated_at: 2026-07-10T20:46:22.934773+00:00
+updated_at: 2026-07-10T22:00:28.111845+00:00
 ---
 
 ## 背景（実測）
