@@ -214,3 +214,55 @@ fn diff_command_logs_a_failure_when_no_session_is_focused() {
     keys.push(Ok(Key::Escape)); // Closeup -> base Overview (no diff view captured it)
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
+
+#[test]
+fn open_diff_view_keys_drive_tree_and_diff_focus() {
+    // Start with the diff already open so the event-loop key router's rich diff
+    // branches are covered independently of the async git-loading path.
+    let mut state = state_with_worktree_at(Path::new("/repo/feature"));
+    state.overview_select(1);
+    state.enter_closeup(1);
+    state.open_diff_result(Ok((
+        "feature → main".to_string(),
+        "diff --git a/a.rs b/a.rs\n\
+--- a/a.rs\n\
++++ b/a.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n\
+diff --git a/b.rs b/b.rs\n\
+--- /dev/null\n\
++++ b/b.rs\n\
+@@ -0,0 +1,4 @@\n\
++one\n\
++two\n\
++three\n\
++four\n"
+            .to_string(),
+    )));
+
+    let keys = vec![
+        Ok(Key::ArrowDown),  // tree: next row
+        Ok(Key::Char('j')),  // tree: next row, vi
+        Ok(Key::ArrowUp),    // tree: previous row
+        Ok(Key::Char('k')),  // tree: previous row, vi
+        Ok(Key::ArrowLeft),  // tree: collapse/no-op on file
+        Ok(Key::Char('h')),  // tree: collapse/no-op, vi
+        Ok(Key::ArrowRight), // tree: open file -> diff focus
+        Ok(Key::ArrowDown),  // diff: scroll down
+        Ok(Key::Char('j')),  // diff: scroll down, vi
+        Ok(Key::ArrowUp),    // diff: scroll up
+        Ok(Key::Char('k')),  // diff: scroll up, vi
+        Ok(Key::PageDown),   // diff: page down
+        Ok(Key::Char(' ')),  // diff: page down via space
+        Ok(Key::PageUp),     // diff: page up
+        Ok(Key::Char('s')),  // diff: split layout
+        Ok(Key::ArrowLeft),  // diff: return to tree
+        Ok(Key::Char('l')),  // tree: open file -> diff focus, vi
+        Ok(Key::Char('h')),  // diff: return to tree, vi
+        Ok(Key::Enter),      // tree: open file -> diff focus
+        Ok(Key::Char('q')),  // close diff
+        Ok(Key::Escape),     // Closeup -> Overview; fallback Ctrl-C quits
+    ];
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
+}

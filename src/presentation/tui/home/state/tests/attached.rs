@@ -1080,6 +1080,49 @@ fn open_diff_result_parses_the_patch_into_the_diff_view() {
 }
 
 #[test]
+fn pending_diff_loads_into_the_diff_view_and_can_be_closed() {
+    let mut state = state();
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    assert!(state.diff_active());
+    assert_eq!(state.pending_diff_frame(), Some(0));
+
+    assert!(state.poll_pending_diff());
+    assert_eq!(state.pending_diff_frame(), Some(1));
+
+    tx.send(Ok((
+        "feature → main".to_string(),
+        "diff --git a/f b/f\n@@ -1 +1 @@\n-old\n+new".to_string(),
+    )))
+    .unwrap();
+    assert!(state.poll_pending_diff());
+    assert!(state.pending_diff_frame().is_none());
+    assert_eq!(state.diff_view().unwrap().title, "feature → main");
+
+    let (_tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    assert!(state.diff_active());
+    state.close_diff();
+    assert!(!state.diff_active());
+    assert!(state.pending_diff_frame().is_none());
+}
+
+#[test]
+fn pending_diff_disconnection_logs_a_failure() {
+    let mut state = state();
+    let (tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    drop(tx);
+
+    assert!(state.poll_pending_diff());
+    assert!(state.pending_diff_frame().is_none());
+    assert!(state.diff_view().is_none());
+    let last = state.log().last().unwrap();
+    assert_eq!(last.kind, LineKind::Error);
+    assert!(last.text.contains("diff worker stopped"));
+}
+
+#[test]
 fn diff_explorer_navigates_the_directory_tree_and_selects_files() {
     // A three-file patch across two directories, so the explorer builds a tree
     // (src/ with a ui/ subdir, plus a top-level file).
@@ -1140,10 +1183,11 @@ diff --git a/README.md b/README.md\n\
     assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Tree);
     state.diff_toggle_focus();
     assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Diff);
+    state.diff_toggle_focus();
+    assert_eq!(state.diff_view().unwrap().focus(), DiffFocus::Tree);
 
     // Re-expanding src/ (cursor back on it) restores the subtree. Focus the tree,
     // move up to src/, activate to unfold.
-    state.diff_focus_tree();
     state.diff_move_up(); // README.md -> src/
     state.diff_activate(); // unfold
     let rows = state.diff_view().unwrap().visible_rows();

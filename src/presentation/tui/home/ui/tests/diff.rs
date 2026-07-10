@@ -156,6 +156,19 @@ fn diff_pane_stacks_the_explorer_above_the_diff() {
 }
 
 #[test]
+fn diff_pane_stacked_dims_the_rule_when_the_diff_side_is_focused() {
+    let mut state = diff_state("feature → main", MULTI);
+    state.diff_toggle_focus();
+    state.diff_toggle_layout();
+    let view = state.diff_view().unwrap();
+    let rows = diff_pane(view, 90, 16);
+    assert!(
+        has_rule(&rows),
+        "focused diff stacked pane still has the rule"
+    );
+}
+
+#[test]
 fn diff_pane_stacked_works_on_a_narrow_pane() {
     // Stacking is full width, so it stays usable on a pane too narrow to sit the
     // explorer and diff side by side.
@@ -238,6 +251,53 @@ fn diff_renders_as_a_session_tab_in_closeup() {
     // Body: the diff explorer + the selected file's diff still render below.
     assert!(out.contains("render.rs"));
     assert!(out.contains("feature → main"));
+}
+
+#[test]
+fn pending_diff_renders_as_a_loading_session_tab() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    state.set_terminal_tabs(vec!["Claude".to_string(), "terminal".to_string()], 0);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    state.poll_pending_diff();
+
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    assert!(out.contains("Claude"), "pane chips stay visible: {out}");
+    assert!(out.contains("terminal"));
+    assert!(out.contains("diff"));
+    assert!(out.contains("(｡･-･)"), "loading body is shown: {out}");
+    assert!(out.contains("起動中…"));
+    assert!(
+        !out.contains("feature → main"),
+        "finished diff content is not shown yet: {out}"
+    );
+}
+
+#[test]
+fn pending_diff_without_live_panes_still_shows_a_loading_diff_chip() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    state.poll_pending_diff();
+
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    assert!(out.contains("diff"));
+    assert!(out.contains("起動中…"));
+}
+
+#[test]
+fn pending_diff_outside_closeup_uses_the_whole_pane_loading_body() {
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    let (_tx, rx) = std::sync::mpsc::channel();
+    state.begin_pending_diff(rx);
+    state.poll_pending_diff();
+
+    let out = stripped(&right_pane_contents(&state, 80, 10));
+    assert!(out.contains("(｡･-･)"));
+    assert!(out.contains("起動中…"));
+    assert!(!out.contains("diff"), "no tab strip outside Closeup: {out}");
 }
 
 #[test]
@@ -324,6 +384,25 @@ fn diff_pane_split_places_surplus_and_pure_insertions_on_one_side() {
     let out = stripped(&diff_pane(view, 100, 10));
     assert!(out.contains("alpha"));
     assert!(out.contains("brand new"));
+}
+
+#[test]
+fn diff_pane_split_renders_a_blank_half_for_a_pure_insertion() {
+    let patch = "diff --git a/f b/f\n@@ -0,0 +1 @@\n+brand new\n";
+    let mut state = diff_state("feature → main", patch);
+    state.diff_toggle_split();
+    let view = state.diff_view().unwrap();
+    let rows = diff_pane(view, 80, 8);
+    let inserted = rows
+        .iter()
+        .map(|r| console::strip_ansi_codes(r).into_owned())
+        .find(|r| r.contains("brand new"))
+        .expect("pure insertion row is rendered");
+    let sep = inserted.find('│').expect("split separator is present");
+    assert!(
+        inserted[..sep].trim().is_empty(),
+        "left half is blank: {inserted:?}"
+    );
 }
 
 #[test]

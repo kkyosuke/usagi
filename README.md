@@ -152,7 +152,7 @@ cargo run -- hop  # TUI を起動
 | モード | 役割 | 主な操作 |
 |---|---|---|
 | **選択**（Overview） | 既定。セッションの選択・新規作成 | 左ペインで `↑↓` 選択・`←→`（または `Ctrl-N`/`Ctrl-P`。右ペインのタブチップの左クリックも同じ）でタブ切替・右クリックでタブメニュー（左右移動・名前変更・削除）・`Enter` 確定・`c` で新規作成・`r` で表示名変更・`n` でメモ編集・`Tab`（`1`〜`9` / `0`）で[ステータスラベル](document/05-settings.md#ステータスラベルsession_labels)を付与（todo / レビュー中 …をセッションに手で付け、サイドバーに色付き表示。選択中の行のメモ＝次回 TODO は右ペインに表示。ルート行はワークスペースルートのメモ） |
-| **集中**（Closeup） | 選択中セッションのコマンド | 右ペインで `terminal` / `agent` / `chat`（ローカル LLM と対話）を起動・`Ctrl-N`/`Ctrl-P` でタブ切替・`Ctrl-E` でメモ編集 |
+| **集中**（Closeup） | 選択中セッションのコマンド | 右ペインで `terminal` / `agent` / `chat`（ローカル LLM と対話）を起動・`diff` で差分タブを開く・`Ctrl-N`/`Ctrl-P` でタブ切替・`Ctrl-E` でメモ編集 |
 | **没入**（Attached） | 埋め込みシェル / Agent | ライブ端末を直接操作（予約キーは `Ctrl-O`・`Ctrl-N`/`Ctrl-P`・`Ctrl-E`（メモ編集）。`Ctrl-N`/`Ctrl-P` で没入のままタブを前後に選択）。マウス左ドラッグでテキストを選択し、離すとコピー。リンクを左クリックすると既定のブラウザで開く |
 | コマンドパレット（**統括**） | ワークスペース全体のコマンド（常駐モードではない） | `:` で開き、`session` / `unite` / `config` / `env` / `issue` などを実行。`Esc` で閉じて元のモードへ戻る |
 
@@ -164,7 +164,7 @@ session create feature-x   # .usagi/sessions/feature-x/ にセッション（wor
 agent                      # 選んだセッションで Agent CLI（既定 claude）を埋め込み起動 → 没入
 ```
 
-`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込み、usagi が注入する MCP サーバは tool 呼び出しごとの確認を省く設定にします。Gemini・Antigravity（`agy`）はインライン注入フラグが無いため MCP は組み込まず、会話再開（Gemini は `-r latest`、Antigravity は `-c`）と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。`terminal` / `terminal open` は usagi 内の埋め込みタブを追加し、追加したタブを即座に選択してタブバーと本文の両方にローディング表示を出したあと、起動完了時にライブ端末へ置き換えます。`terminal new` は同じディレクトリで OS ネイティブの新規ターミナルを開きます。
+`agent` は選択中セッションの worktree でシェルを右ペインに埋め込み、設定中の Agent CLI（既定 `claude`、Config・ローカル設定で変更可）を起動します。このとき usagi の MCP サーバ（後述）を組み込むため、エージェントは起動直後から `issue_*` tool でタスクを、`memory_*` tool でメモリを操作できます（Claude は `--mcp-config`、Codex は `-c` 設定上書きで注入。Codex 互換の `codex-fugu` も同方式で組み込み、usagi が注入する MCP サーバは tool 呼び出しごとの確認を省く設定にします。Gemini・Antigravity（`agy`）はインライン注入フラグが無いため MCP は組み込まず、会話再開（Gemini は `-r latest`、Antigravity は `-c`）と `-i` での初期プロンプトのみ配線します）。素のシェルだけ欲しいときは `terminal` を使います。`terminal` / `terminal open` は usagi 内の埋め込みタブを追加し、追加したタブを即座に選択してタブバーと本文の両方にローディング表示を出したあと、起動完了時にライブ端末へ置き換えます。`diff` も同じく差分タブを即座に表示し、差分の取得・解析が終わるまでタブ内にローディングを出します。`terminal new` は同じディレクトリで OS ネイティブの新規ターミナルを開きます。
 
 グローバル設定（`~/.usagi/settings.json`）または workspace の `<repo>/.usagi/settings.json` に `env` map を設定すると、`agent` / `terminal` の新規 pane 起動時に `op://...` reference を `op read --no-newline` で解決して子プロセス環境へ注入できます。グローバル `env` は全 workspace に適用され、workspace 側の `env` はそこへ追加されます。同じ環境変数名は workspace 側が優先されます。例えば `{"env":{"GH_TOKEN":"op://Private/GitHub/token"}}` とすると、対象スコープで起動した agent や terminal 内の `gh` は `GH_TOKEN` を利用できます。secret 本体は設定ファイルや起動コマンド行には保存されません。`op` の認証は `usagi op login` で OS キーチェーンに保存したサービスアカウントトークン、または既存の `op signin` セッションや外部から渡した `OP_SERVICE_ACCOUNT_TOKEN` など、1Password CLI 側の通常の仕組みを使います。グローバル `env` はグローバル Config の Env Vars 行、workspace 側の `env` はコマンドパレットの `env`（または workspace Config → Env Vars 行）で `NAME=op://vault/item/field` を 1 行ずつ編集して設定できます.
 

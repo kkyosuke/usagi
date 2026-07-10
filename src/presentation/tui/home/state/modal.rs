@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use super::LogLine;
 use crate::domain::workspace_state::{SessionDecision, SessionTodo};
 use crate::presentation::tui::chat::state::Chat;
-use crate::presentation::tui::diff::{self, DiffDoc, DiffFile, TreeKind, TreeRow};
+use crate::presentation::tui::diff::{self, DiffDoc, DiffFile, SplitRow, TreeKind, TreeRow};
 use crate::presentation::tui::markdown::MarkdownLine;
 use crate::presentation::tui::widgets::text_area::TextArea;
 use crate::presentation::tui::widgets::text_input::TextInput;
@@ -880,6 +880,7 @@ pub struct DiffView {
     pub title: String,
     pub doc: DiffDoc,
     files: Vec<DiffFile>,
+    split_rows: Vec<Vec<SplitRow>>,
     tree: Vec<TreeRow>,
     collapsed: HashSet<String>,
     cursor: usize,
@@ -901,6 +902,10 @@ impl DiffView {
     /// default, mirroring the previous flat view.
     pub(super) fn new(title: String, doc: DiffDoc) -> Self {
         let files = diff::files(&doc);
+        let split_rows = files
+            .iter()
+            .map(|file| diff::split_rows_slice(&doc.rows[file.start..file.end], file.start))
+            .collect();
         let tree = diff::tree_rows(&files);
         let cursor = tree
             .iter()
@@ -914,6 +919,7 @@ impl DiffView {
             title,
             doc,
             files,
+            split_rows,
             tree,
             collapsed: HashSet::new(),
             cursor,
@@ -955,6 +961,11 @@ impl DiffView {
     /// The selected file's section, or `None` for an empty patch.
     pub fn selected_file(&self) -> Option<&DiffFile> {
         self.files.get(self.file)
+    }
+
+    /// The selected file's precomputed split-layout rows.
+    pub fn selected_split_rows(&self) -> Option<&[SplitRow]> {
+        self.split_rows.get(self.file).map(Vec::as_slice)
     }
 
     /// How many changed files the diff has (for the explorer's `Files (N)` label).
@@ -1003,7 +1014,7 @@ impl DiffView {
             return 0;
         };
         if self.split {
-            diff::split_rows_slice(&self.doc.rows[file.start..file.end], file.start).len()
+            self.split_rows.get(self.file).map_or(0, Vec::len)
         } else {
             file.end - file.start
         }

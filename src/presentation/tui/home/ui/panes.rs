@@ -177,6 +177,32 @@ macro_rules! loading_tab_body {
     }};
 }
 
+/// Render the `diff` tab while its patch is still loading. This mirrors
+/// [`diff_tab_pane`] so the tab appears immediately, but its body is the same
+/// centered loading surface pane launches use.
+fn pending_diff_tab_pane(
+    state: &HomeState,
+    frame: usize,
+    width: usize,
+    rows: usize,
+) -> Vec<String> {
+    let mut labels = state
+        .terminal_tabs()
+        .map(|s| s.labels.clone())
+        .unwrap_or_default();
+    labels.push(DIFF_TAB_LABEL.to_string());
+    let active = labels.len().saturating_sub(1);
+    let combined = TabStrip { labels, active };
+    let header = active_session_header(state);
+    let mut lines = header_tab_rows(header, Some(&combined), Some((active, frame)), width);
+    lines.resize(super::TAB_BAR_ROWS, String::new());
+    let body = rows.saturating_sub(lines.len());
+    lines.extend(loading_tab_body!(width, body, frame));
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
+    lines
+}
+
 /// Builds the 集中 (Closeup) right pane. With no live panes it is a blank pane
 /// behind the session's floating action surface — the Menu or the Prompt, both
 /// composited as overlay modals by [`render_frame`] (see
@@ -828,6 +854,12 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     // while shown). The sidebar to its left keeps rendering as usual.
     if let Some(chat) = state.chat() {
         return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
+    }
+    if let Some(frame) = state.pending_diff_frame() {
+        if state.mode() == Mode::Closeup {
+            return pending_diff_tab_pane(state, frame, right_w, rows);
+        }
+        return loading_tab_body!(right_w, rows, frame);
     }
     // The diff view is a session tab: opened from 集中 (the `diff` command), it
     // reads as a `diff` tab beside the session's panes — the tab strip heads it
