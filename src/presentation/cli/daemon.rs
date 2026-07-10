@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use crate::domain::daemon::DaemonState;
+use crate::infrastructure::daemon_sessions_store;
 use crate::usecase::daemon::{self, StartOutcome, StopOutcome};
 
 #[derive(Subcommand)]
@@ -53,8 +54,19 @@ pub fn run<W: Write>(
 ) -> Result<()> {
     match command {
         DaemonCommand::Status => {
-            let line = describe(daemon::status(dir, alive)?);
-            writeln!(out, "{line}").context("failed to write status")
+            let state = daemon::status(dir, alive)?;
+            writeln!(out, "{}", describe(state)).context("failed to write status")?;
+            // When a daemon is running, list the sessions it is monitoring from
+            // the snapshot it maintains (see `usecase::daemon::monitor_tick`). A
+            // stale/absent snapshot reads as no sessions.
+            if matches!(state, DaemonState::Running { .. }) {
+                for session in daemon_sessions_store::read(dir)? {
+                    let activity = session.activity.map_or("-", |a| a.as_str());
+                    writeln!(out, "  {}  {activity}", session.name)
+                        .context("failed to write session line")?;
+                }
+            }
+            Ok(())
         }
         DaemonCommand::Start => {
             let line = match daemon::start(dir, alive, spawn)? {
@@ -146,6 +158,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output(out), "usagi daemon is running (pid 55)\n");
+    }
+
+    #[test]
+    fn status_running_lists_monitored_sessions() {
+        use crate::domain::daemon::{SessionActivity, SessionSnapshot};
+        use std::path::PathBuf;
+        let tmp = tempfile::tempdir().unwrap();
+        daemon_store::write(tmp.path(), &DaemonRecord { pid: 12 }).unwrap();
+        daemon_sessions_store::write(
+            tmp.path(),
+            &[
+                SessionSnapshot {
+                    workspace: PathBuf::from("/repo"),
+                    name: "work-a".to_string(),
+                    activity: Some(SessionActivity::Waiting),
+                },
+                SessionSnapshot {
+                    workspace: PathBuf::from("/repo"),
+                    name: "fix-b".to_string(),
+                    activity: None,
+                },
+            ],
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        run(
+            DaemonCommand::Status,
+            tmp.path(),
+            &live,
+            &noop,
+            &noop,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(
+            output(out),
+            "usagi daemon is running (pid 12)\n  work-a  waiting\n  fix-b  -\n"
+        );
     }
 
     #[test]
@@ -316,5 +366,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("failed to write status"));
+    }
+
+    #[test]
+    fn session_line_write_failure_surfaces() {
+        use crate::domain::daemon::{SessionActivity, SessionSnapshot};
+        use std::path::PathBuf;
+        // A writer that lets the whole status line through — however many write
+        // calls `writeln!` splits it into — then fails once that line's newline
+        // has landed, so the failure lands on the following session line and is
+        // reported distinctly. Keying on the newline (not a write count) is robust
+        // to `write_fmt` fragmenting the line.
+        struct FailAfterFirstLine {
+            line_done: bool,
+        }
+        impl Write for FailAfterFirstLine {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.line_done {
+                    return Err(std::io::Error::other("broken pipe"));
+                }
+                if buf.contains(&b'\n') {
+                    self.line_done = true;
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // The always-Ok flush is part of the sink's contract; `writeln!` never
+        // calls it, so exercise it directly to cover the impl.
+        assert!(FailAfterFirstLine { line_done: true }.flush().is_ok());
+        let tmp = tempfile::tempdir().unwrap();
+        daemon_store::write(tmp.path(), &DaemonRecord { pid: 12 }).unwrap();
+        daemon_sessions_store::write(
+            tmp.path(),
+            &[SessionSnapshot {
+                workspace: PathBuf::from("/repo"),
+                name: "s".to_string(),
+                activity: Some(SessionActivity::Running),
+            }],
+        )
+        .unwrap();
+        let err = run(
+            DaemonCommand::Status,
+            tmp.path(),
+            &live,
+            &noop,
+            &noop,
+            &mut FailAfterFirstLine { line_done: false },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("failed to write session line"));
     }
 }

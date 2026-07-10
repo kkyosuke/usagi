@@ -16,11 +16,13 @@
 //!
 //! [`StoreLock`]: crate::infrastructure::store_lock::StoreLock
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::domain::daemon::{classify, DaemonState};
+use crate::domain::agent_phase::AgentPhase;
+use crate::domain::daemon::{classify, DaemonState, SessionActivity, SessionSnapshot};
+use crate::infrastructure::daemon_sessions_store;
 use crate::infrastructure::daemon_store::{self, DaemonRecord};
 use crate::infrastructure::store_lock::StoreLock;
 
@@ -120,6 +122,57 @@ pub fn register(dir: &Path, self_pid: u32, alive: &dyn Fn(u32) -> bool) -> Resul
 pub fn deregister(dir: &Path) -> Result<()> {
     let _lock = StoreLock::acquire(dir)?;
     daemon_store::clear(dir)
+}
+
+/// A session's name paired with its worktree paths, as loaded from a workspace's
+/// state. The unit [`gather`] iterates over.
+pub type SessionWorktrees = (String, Vec<PathBuf>);
+
+/// Build the daemon's view of every monitored session across the registered
+/// workspaces. The three readings are injected so the aggregation is tested with
+/// fakes and the real store IO stays at the composition root:
+///
+/// - `list_roots` — the roots of the registered workspaces.
+/// - `load_sessions` — for a workspace root, each session's name and its
+///   worktree paths.
+/// - `read_phase` — the agent lifecycle phase recorded for a worktree, if any.
+///
+/// A session's activity is taken from the first of its worktrees that has a
+/// recorded phase (a usagi session runs its agent in one worktree), or `None`
+/// when none does.
+pub fn gather(
+    list_roots: &dyn Fn() -> Vec<PathBuf>,
+    load_sessions: &dyn Fn(&Path) -> Vec<SessionWorktrees>,
+    read_phase: &dyn Fn(&Path) -> Option<AgentPhase>,
+) -> Vec<SessionSnapshot> {
+    let mut snapshots = Vec::new();
+    for root in list_roots() {
+        for (name, worktrees) in load_sessions(&root) {
+            let activity = worktrees
+                .iter()
+                .find_map(|worktree| read_phase(worktree))
+                .map(SessionActivity::from_phase);
+            snapshots.push(SessionSnapshot {
+                workspace: root.clone(),
+                name,
+                activity,
+            });
+        }
+    }
+    snapshots
+}
+
+/// Refresh the monitored-sessions snapshot under `dir` from `gather_fn`, writing
+/// it only when it differs from the persisted one so an unchanged tick does no
+/// IO. Returns whether the snapshot changed. `gather_fn` is injected (see
+/// [`gather`]) so the tick is tested without the real stores.
+pub fn monitor_tick(dir: &Path, gather_fn: &dyn Fn() -> Vec<SessionSnapshot>) -> Result<bool> {
+    let current = gather_fn();
+    if current == daemon_sessions_store::read(dir)? {
+        return Ok(false);
+    }
+    daemon_sessions_store::write(dir, &current)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -298,5 +351,93 @@ mod tests {
         daemon_store::write(tmp.path(), &DaemonRecord { pid: 3 }).unwrap();
         deregister(tmp.path()).unwrap();
         assert_eq!(daemon_store::read(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn gather_derives_each_session_activity_from_its_worktree_phase() {
+        // Two workspaces: /a has one session whose worktree reports Waiting; /b
+        // has a session with no phase (None) and one whose second worktree reports
+        // Running (the first has none, proving find_map scans past it).
+        let list_roots = || vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let load_sessions = |root: &Path| match root.to_str().unwrap() {
+            "/a" => vec![("solo".to_string(), vec![PathBuf::from("/a/wt")])],
+            _ => vec![
+                ("idle".to_string(), vec![PathBuf::from("/b/idle")]),
+                (
+                    "busy".to_string(),
+                    vec![PathBuf::from("/b/busy0"), PathBuf::from("/b/busy1")],
+                ),
+            ],
+        };
+        let read_phase = |wt: &Path| match wt.to_str().unwrap() {
+            "/a/wt" => Some(AgentPhase::Waiting),
+            "/b/busy1" => Some(AgentPhase::Running),
+            _ => None,
+        };
+
+        let snapshots = gather(&list_roots, &load_sessions, &read_phase);
+
+        assert_eq!(
+            snapshots,
+            vec![
+                SessionSnapshot {
+                    workspace: PathBuf::from("/a"),
+                    name: "solo".to_string(),
+                    activity: Some(SessionActivity::Waiting),
+                },
+                SessionSnapshot {
+                    workspace: PathBuf::from("/b"),
+                    name: "idle".to_string(),
+                    activity: None,
+                },
+                SessionSnapshot {
+                    workspace: PathBuf::from("/b"),
+                    name: "busy".to_string(),
+                    activity: Some(SessionActivity::Running),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn monitor_tick_writes_on_change_and_skips_when_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let snapshot = || {
+            vec![SessionSnapshot {
+                workspace: PathBuf::from("/repo"),
+                name: "s".to_string(),
+                activity: Some(SessionActivity::Running),
+            }]
+        };
+        // First tick persists the fresh snapshot and reports a change.
+        assert!(monitor_tick(dir, &snapshot).unwrap());
+        assert_eq!(daemon_sessions_store::read(dir).unwrap(), snapshot());
+        // A second identical tick writes nothing and reports no change.
+        assert!(!monitor_tick(dir, &snapshot).unwrap());
+    }
+
+    #[test]
+    fn monitor_tick_rewrites_when_the_snapshot_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        monitor_tick(dir, &|| {
+            vec![SessionSnapshot {
+                workspace: PathBuf::from("/repo"),
+                name: "s".to_string(),
+                activity: Some(SessionActivity::Running),
+            }]
+        })
+        .unwrap();
+        // The session moved to Waiting: the tick detects the difference and writes.
+        let next = || {
+            vec![SessionSnapshot {
+                workspace: PathBuf::from("/repo"),
+                name: "s".to_string(),
+                activity: Some(SessionActivity::Waiting),
+            }]
+        };
+        assert!(monitor_tick(dir, &next).unwrap());
+        assert_eq!(daemon_sessions_store::read(dir).unwrap(), next());
     }
 }
