@@ -149,6 +149,36 @@ fn fold_pr_links(session: &mut SessionRecord) {
     }
 }
 
+/// Set the [`PrState`] of the PR identified by `pr_key` for the session rooted at
+/// `root`, marking it user-[`pinned`](PrLink::pinned) so the `gh` auto-detection
+/// never overrides the choice, and return the session's updated PR list.
+///
+/// This is how the PR popup's inline controls act: toggling open↔merged, hiding a
+/// PR (dismiss), or restoring a hidden one. The change is written to the
+/// [`pr_link_store`] — the monotonic source the sidebar re-folds from — so it
+/// survives a re-sync; the returned list lets the caller reflect it in the live
+/// sidebar row at once (via `HomeState::set_pr_links`) without waiting for one. A
+/// `pr_key` matching no recorded PR leaves the list unchanged.
+///
+/// [`PrState`]: crate::domain::workspace_state::PrState
+pub fn set_pr_state(
+    root: &Path,
+    pr_key: &str,
+    state: crate::domain::workspace_state::PrState,
+) -> Vec<PrLink> {
+    let mut prs = pr_link_store::get(root);
+    for pr in &mut prs {
+        // `pr_key()` borrows `pr` immutably; the comparison ends that borrow before
+        // the mutation below, so the two never overlap.
+        if pr.pr_key() == pr_key {
+            pr.state = state;
+            pr.pinned = true;
+        }
+    }
+    let _ = pr_link_store::set(root, &prs);
+    PrLink::aggregate(prs)
+}
+
 /// Re-derive every session's `#<number>` PR badges from the [`pr_link_store`],
 /// upgrading a possibly-stale session list to the store's **current** contents
 /// just before it is displayed.
@@ -564,6 +594,61 @@ mod tests {
         // They are durable: a fresh load (no sync) still carries the PRs.
         let reloaded = store.load().unwrap().unwrap();
         assert_eq!(reloaded.sessions[0].worktrees[0].pr, prs);
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn set_pr_state_persists_the_choice_pins_it_and_leaves_others_alone() {
+        use crate::domain::workspace_state::{PrLink, PrState};
+
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        pr_link_store::add(
+            root.path(),
+            &[
+                PrLink::new(1, "https://github.com/o/r/pull/1"),
+                PrLink::new(2, "https://github.com/o/r/pull/2"),
+            ],
+        )
+        .unwrap();
+
+        // Mark #1 merged: the returned (folded) list and the persisted store both
+        // carry the new state, pinned so `gh` auto-detection can't override it; #2
+        // is untouched.
+        let updated = set_pr_state(
+            root.path(),
+            "https://github.com/o/r/pull/1",
+            PrState::Merged,
+        );
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].state, PrState::Merged);
+        assert!(updated[0].pinned);
+        assert_eq!(updated[1].state, PrState::Open);
+        let stored = pr_link_store::get(root.path());
+        assert_eq!(stored[0].state, PrState::Merged);
+        assert!(stored[0].pinned);
+        assert_eq!(stored[1].state, PrState::Open);
+        assert!(!stored[1].pinned);
+
+        // Dismissing works the same way; a `pr_key` matching no recorded PR is a
+        // no-op that leaves the list (and its states) exactly as they were.
+        let after = set_pr_state(
+            root.path(),
+            "https://github.com/o/r/pull/1",
+            PrState::Dismissed,
+        );
+        assert_eq!(after[0].state, PrState::Dismissed);
+        let unchanged = set_pr_state(
+            root.path(),
+            "https://github.com/o/r/pull/404",
+            PrState::Open,
+        );
+        assert_eq!(unchanged, pr_link_store::get(root.path()));
+        assert_eq!(unchanged[0].state, PrState::Dismissed);
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }

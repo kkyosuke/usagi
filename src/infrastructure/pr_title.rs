@@ -1,56 +1,90 @@
-//! Resolving pull-request titles through the `gh` CLI.
+//! Resolving pull-request titles and merge state through the `gh` CLI.
 //!
 //! usagi harvests a session's PR **URLs** from its live terminal output (see
 //! [`crate::presentation::tui::home::terminal::link::pr_links`]) but the terminal
-//! rarely prints the PR's human title. To show `#<number>  <title>` in the PR
-//! popup, the title is resolved out-of-band by asking `gh` — the GitHub CLI the
-//! user already authenticates for their repositories.
+//! rarely prints the PR's human title, and never whether it has since merged. To
+//! show `#<number>  <title>` in the PR popup and mark a merged PR, both are
+//! resolved out-of-band by asking `gh` — the GitHub CLI the user already
+//! authenticates for their repositories.
 //!
 //! This module is the **pure** core of that feature: it builds the `gh` command
-//! line ([`title_argv`]), parses the title out of its stdout ([`parse_title`]),
-//! and fills the missing titles of a PR list through an injected runner
-//! ([`resolve_titles`]). The real subprocess spawn lives in the
-//! (coverage-excluded) terminal pool, which passes a runner that executes `gh`;
-//! everything here is unit-tested against a fake runner so no network or `gh`
-//! install is needed to cover it.
+//! line ([`view_argv`]), parses the title and state out of its stdout
+//! ([`parse_view`]), and fills a PR list's missing titles and auto-detected merge
+//! state through an injected runner ([`resolve`]). The real subprocess spawn lives
+//! in the (coverage-excluded) terminal pool, which passes a runner that executes
+//! `gh`; everything here is unit-tested against a fake runner so no network or
+//! `gh` install is needed to cover it.
 
-use crate::domain::workspace_state::PrLink;
+use crate::domain::workspace_state::{PrLink, PrState};
 
-/// The `gh` command line that prints PR `url`'s title as a single plain line.
-/// `--jq .title` reduces the `--json title` object to the bare string so the
-/// caller does not have to parse JSON.
-pub fn title_argv(url: &str) -> Vec<String> {
-    ["gh", "pr", "view", url, "--json", "title", "--jq", ".title"]
+/// The `gh` command line that prints PR `url`'s title and state as a JSON object,
+/// e.g. `{"title":"Fix the thing","state":"MERGED"}`. `state` is one of `OPEN`,
+/// `CLOSED`, or `MERGED`.
+pub fn view_argv(url: &str) -> Vec<String> {
+    ["gh", "pr", "view", url, "--json", "title,state"]
         .iter()
         .map(|s| s.to_string())
         .collect()
 }
 
-/// The PR title parsed from `gh`'s stdout — the `--jq .title` output is the bare
-/// title on its own line. Surrounding whitespace and the trailing newline are
-/// trimmed; blank output (a failed lookup, or a PR with no title) yields `None`,
-/// so the caller leaves the PR untitled and a later pass can retry.
-pub fn parse_title(stdout: &str) -> Option<String> {
-    let title = stdout.trim();
-    (!title.is_empty()).then(|| title.to_string())
+/// A PR's title and merge state, parsed from [`view_argv`]'s JSON stdout.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PrView {
+    /// The PR title, or `None` when `gh` returned none / a blank one.
+    pub title: Option<String>,
+    /// Whether `gh` reports the PR merged (`state == "MERGED"`).
+    pub merged: bool,
 }
 
-/// Fill in the titles still missing from `prs`, fetching each through `run` (a
-/// `gh` invocation that returns the command's stdout, or `None` when it could not
-/// be run or exited non-zero). Already-titled PRs are skipped so a title is
-/// fetched at most once. Returns whether any title was newly filled — the caller
-/// persists the list only then, sparing a disk write when nothing changed.
-pub fn resolve_titles(
-    prs: &mut [PrLink],
-    run: &mut dyn FnMut(&[String]) -> Option<String>,
-) -> bool {
+/// Parse `gh`'s JSON stdout into a [`PrView`]. Invalid or empty output (a failed
+/// lookup, or `gh` not installed) yields `None`, so the caller leaves the PR as it
+/// is and a later pass can retry. A present-but-blank title is normalised to
+/// `None`; surrounding whitespace is trimmed.
+pub fn parse_view(stdout: &str) -> Option<PrView> {
+    let value: serde_json::Value = serde_json::from_str(stdout).ok()?;
+    let title = value
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let merged = value.get("state").and_then(|s| s.as_str()) == Some("MERGED");
+    Some(PrView { title, merged })
+}
+
+/// Fill in the titles still missing from `prs` and auto-detect merges, fetching
+/// each through `run` (a `gh` invocation returning the command's stdout, or `None`
+/// when it could not be run or exited non-zero). Returns whether anything changed —
+/// the caller persists the list only then, sparing a disk write when nothing did.
+///
+/// A PR is queried only when a fact could still change: it needs a title, or its
+/// state is still the auto-managed [`PrState::Open`]. A **dismissed** PR is left
+/// untouched (it is a tombstone), and a **pinned** state — one the user set from
+/// the popup — is authoritative and never overridden by `gh`. Once a PR is titled
+/// and merged (or dismissed/pinned) it is skipped, so `gh` is not re-polled
+/// forever.
+pub fn resolve(prs: &mut [PrLink], run: &mut dyn FnMut(&[String]) -> Option<String>) -> bool {
     let mut changed = false;
     for pr in prs.iter_mut() {
-        if pr.title.is_some() {
+        if pr.is_dismissed() {
             continue;
         }
-        if let Some(title) = run(&title_argv(&pr.url)).as_deref().and_then(parse_title) {
-            pr.title = Some(title);
+        let need_title = pr.title.is_none();
+        let need_state = !pr.pinned && pr.state == PrState::Open;
+        if !need_title && !need_state {
+            continue;
+        }
+        let Some(view) = run(&view_argv(&pr.url)).as_deref().and_then(parse_view) else {
+            continue;
+        };
+        if need_title {
+            if let Some(title) = view.title {
+                pr.title = Some(title);
+                changed = true;
+            }
+        }
+        if need_state && view.merged {
+            pr.state = PrState::Merged;
             changed = true;
         }
     }
@@ -62,76 +96,173 @@ mod tests {
     use super::*;
 
     #[test]
-    fn title_argv_asks_gh_for_the_bare_title() {
+    fn view_argv_asks_gh_for_the_title_and_state_json() {
         assert_eq!(
-            title_argv("https://github.com/o/r/pull/7"),
+            view_argv("https://github.com/o/r/pull/7"),
             vec![
                 "gh",
                 "pr",
                 "view",
                 "https://github.com/o/r/pull/7",
                 "--json",
-                "title",
-                "--jq",
-                ".title",
+                "title,state",
             ]
         );
     }
 
     #[test]
-    fn parse_title_trims_and_rejects_blank_output() {
+    fn parse_view_reads_title_and_merge_state() {
         assert_eq!(
-            parse_title("Add PR titles\n").as_deref(),
-            Some("Add PR titles")
+            parse_view(r#"{"title":"Add PR titles","state":"MERGED"}"#),
+            Some(PrView {
+                title: Some("Add PR titles".to_string()),
+                merged: true,
+            })
         );
-        assert_eq!(parse_title("  spaced  ").as_deref(), Some("spaced"));
-        // A failed lookup / titleless PR prints nothing → no title.
-        assert_eq!(parse_title(""), None);
-        assert_eq!(parse_title("   \n"), None);
+        // An open PR: a title, not merged.
+        assert_eq!(
+            parse_view(r#"{"title":"  spaced  ","state":"OPEN"}"#),
+            Some(PrView {
+                title: Some("spaced".to_string()),
+                merged: false,
+            })
+        );
+        // A closed-but-unmerged PR is not merged.
+        assert_eq!(
+            parse_view(r#"{"title":"x","state":"CLOSED"}"#),
+            Some(PrView {
+                title: Some("x".to_string()),
+                merged: false,
+            })
+        );
     }
 
     #[test]
-    fn resolve_titles_fills_missing_skips_titled_and_reports_change() {
+    fn parse_view_normalises_blank_titles_and_rejects_bad_json() {
+        // A present-but-blank title becomes None; a missing state is not merged.
+        assert_eq!(
+            parse_view(r#"{"title":"   "}"#),
+            Some(PrView {
+                title: None,
+                merged: false,
+            })
+        );
+        // A missing title key is None too.
+        assert_eq!(
+            parse_view(r#"{"state":"MERGED"}"#),
+            Some(PrView {
+                title: None,
+                merged: true,
+            })
+        );
+        // A failed lookup / gh-not-installed prints nothing parseable → None.
+        assert_eq!(parse_view(""), None);
+        assert_eq!(parse_view("not json at all"), None);
+    }
+
+    #[test]
+    fn resolve_fills_titles_skips_titled_and_reports_change() {
         let mut prs = vec![
             PrLink::new(1, "https://github.com/o/r/pull/1"),
             PrLink::new(2, "https://github.com/o/r/pull/2"),
         ];
         prs[1].title = Some("already known".to_string());
+        // #2 is already titled and open, so it is still polled for a merge below.
 
         let mut calls: Vec<Vec<String>> = Vec::new();
-        let changed = resolve_titles(&mut prs, &mut |argv: &[String]| {
+        let changed = resolve(&mut prs, &mut |argv: &[String]| {
             calls.push(argv.to_vec());
-            Some("fetched\n".to_string())
+            Some(r#"{"title":"fetched","state":"OPEN"}"#.to_string())
         });
 
         assert!(changed);
-        // Only the untitled PR was queried; the titled one was left untouched.
-        assert_eq!(calls, vec![title_argv("https://github.com/o/r/pull/1")]);
+        // Both open PRs were queried — the untitled one for its title, the titled
+        // one to check whether it has merged.
+        assert_eq!(
+            calls,
+            vec![
+                view_argv("https://github.com/o/r/pull/1"),
+                view_argv("https://github.com/o/r/pull/2"),
+            ]
+        );
         assert_eq!(prs[0].title.as_deref(), Some("fetched"));
+        // The already-known title is not clobbered.
         assert_eq!(prs[1].title.as_deref(), Some("already known"));
+        assert_eq!(prs[0].state, PrState::Open);
     }
 
     #[test]
-    fn resolve_titles_reports_no_change_when_the_runner_yields_nothing() {
+    fn resolve_marks_a_merged_pr() {
         let mut prs = vec![PrLink::new(3, "https://github.com/o/r/pull/3")];
-        // A failed `gh` (None) and a blank title both leave the PR untitled.
-        assert!(!resolve_titles(&mut prs, &mut |_: &[String]| None));
+        // One runner reused across both passes, counting its calls — so its body is
+        // exercised on the first (queried) pass and merely *not* re-run on the
+        // second, without a never-run closure leaving dead lines.
+        let mut calls = 0;
+        {
+            let mut run = |_: &[String]| {
+                calls += 1;
+                Some(r#"{"title":"done","state":"MERGED"}"#.to_string())
+            };
+            // First pass queries and merges; the second has nothing left to learn
+            // (titled and merged) so it does not query again.
+            assert!(resolve(&mut prs, &mut run));
+            assert!(!resolve(&mut prs, &mut run));
+        }
+        assert_eq!(calls, 1);
+        assert_eq!(prs[0].title.as_deref(), Some("done"));
+        assert_eq!(prs[0].state, PrState::Merged);
+    }
+
+    #[test]
+    fn resolve_leaves_dismissed_and_pinned_prs_alone() {
+        let mut dismissed = PrLink::new(4, "https://github.com/o/r/pull/4");
+        dismissed.state = PrState::Dismissed;
+        let mut pinned_open = PrLink::new(5, "https://github.com/o/r/pull/5");
+        pinned_open.pinned = true; // user kept it open
+        pinned_open.title = Some("kept open".to_string()); // and it is already titled
+                                                           // A plain open PR alongside them, so the runner is genuinely exercised and
+                                                           // we can assert *which* PRs were queried.
+        let plain = PrLink::new(7, "https://github.com/o/r/pull/7");
+        let mut prs = vec![dismissed, pinned_open, plain];
+
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        // The dismissed PR is skipped entirely and the pinned-open PR is
+        // authoritative (so `gh` reporting it merged does not flip it); only the
+        // plain open PR is queried.
+        let changed = resolve(&mut prs, &mut |argv: &[String]| {
+            calls.push(argv.to_vec());
+            Some(r#"{"title":"t","state":"MERGED"}"#.to_string())
+        });
+        assert!(changed);
+        assert_eq!(calls, vec![view_argv("https://github.com/o/r/pull/7")]);
+        assert_eq!(prs[0].state, PrState::Dismissed);
+        assert!(prs[0].title.is_none());
+        assert_eq!(prs[1].state, PrState::Open);
+        assert_eq!(prs[2].state, PrState::Merged);
+    }
+
+    #[test]
+    fn resolve_reports_no_change_when_the_runner_yields_nothing() {
+        let mut prs = vec![PrLink::new(6, "https://github.com/o/r/pull/6")];
+        // A failed `gh` (None) and unparseable output both leave the PR untouched.
+        assert!(!resolve(&mut prs, &mut |_: &[String]| None));
         assert_eq!(prs[0].title, None);
-        assert!(!resolve_titles(&mut prs, &mut |_: &[String]| Some(
-            "  \n".to_string()
+        assert!(!resolve(&mut prs, &mut |_: &[String]| Some(
+            "garbage".to_string()
         )));
         assert_eq!(prs[0].title, None);
+        assert_eq!(prs[0].state, PrState::Open);
     }
 
     #[test]
-    fn resolve_titles_over_an_empty_list_never_runs_the_fetch() {
+    fn resolve_over_an_empty_list_never_runs_the_fetch() {
         // The same runner is called on an empty list (which must not invoke it) and
         // then on a real one (which must), so its "not called" behaviour is pinned
         // without leaving its body unexercised.
-        let mut run = |_: &[String]| Some("x\n".to_string());
-        assert!(!resolve_titles(&mut [], &mut run));
+        let mut run = |_: &[String]| Some(r#"{"title":"x","state":"OPEN"}"#.to_string());
+        assert!(!resolve(&mut [], &mut run));
         let mut prs = vec![PrLink::new(1, "https://github.com/o/r/pull/1")];
-        assert!(resolve_titles(&mut prs, &mut run));
+        assert!(resolve(&mut prs, &mut run));
         assert_eq!(prs[0].title.as_deref(), Some("x"));
     }
 }

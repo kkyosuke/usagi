@@ -389,11 +389,12 @@ fn lock_parser(
 /// session root whose visible PRs changed. Disk IO is kept out of the watcher
 /// mutex; failures are best-effort like the attached-pane harvest path.
 ///
-/// After merging the freshly seen PRs, any accumulated PR still missing a title
-/// has it resolved through the `gh` CLI ([`resolve_pr_title`]) and the titled list
-/// is written back, so the sidebar's PR popup can show `#<number>  <title>`. A
-/// title is fetched at most once (subsequent scans skip already-titled PRs), and
-/// a failed lookup simply leaves the PR untitled for a later retry.
+/// After merging the freshly seen PRs, any accumulated PR still missing a title —
+/// or still open and so possibly since merged — is resolved through the `gh` CLI
+/// ([`resolve_pr_title`]) and the updated list is written back, so the sidebar's
+/// PR popup can show `#<number>  <title>` and mark a merged PR (see
+/// [`crate::infrastructure::pr_title::resolve`]). A dismissed or user-pinned PR is
+/// left untouched, and a failed lookup simply leaves the PR for a later retry.
 fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
     use crate::infrastructure::{pr_link_store, pr_title};
     results
@@ -402,7 +403,7 @@ fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
             let _ = pr_link_store::add(&result.path, &result.prs);
             let mut merged = pr_link_store::get(&result.path);
             let mut fetch: fn(&[String]) -> Option<String> = resolve_pr_title;
-            if pr_title::resolve_titles(&mut merged, &mut fetch) {
+            if pr_title::resolve(&mut merged, &mut fetch) {
                 let _ = pr_link_store::set(&result.path, &merged);
             }
             (result.path.clone(), merged)

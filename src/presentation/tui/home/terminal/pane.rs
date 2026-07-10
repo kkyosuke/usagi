@@ -1158,6 +1158,15 @@ fn pump_input(
                                 mouse.row,
                             ) {
                                 ui::PopupClick::Open(url) => open_url(&url),
+                                ui::PopupClick::SetState {
+                                    pr_key,
+                                    state: pr_state,
+                                } => {
+                                    state.set_pinned_pr_state(&pr_key, pr_state);
+                                }
+                                ui::PopupClick::ToggleDismissedView => {
+                                    state.toggle_pr_popup_show_dismissed();
+                                }
                                 ui::PopupClick::Inside => {}
                                 ui::PopupClick::Outside => {
                                     state.set_pr_popup(None);
@@ -1340,6 +1349,8 @@ fn update_pointer(
                 || matches!(
                     ui::pr_popup_click(state, height as usize, width as usize, col, row),
                     ui::PopupClick::Open(_)
+                        | ui::PopupClick::SetState { .. }
+                        | ui::PopupClick::ToggleDismissedView
                 )
         }
     };

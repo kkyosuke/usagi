@@ -21,22 +21,25 @@ fn click(col: u16, row: u16) -> io::Result<Input> {
     Ok(Input::Click(ClickEvent { col, row }))
 }
 
-/// `main`'s detail line (its badge row) and the popup's content row both sit on
-/// screen row 6; the popup's top / bottom borders are rows 5 and 7.
+/// `main`'s detail line (its badge row) sits on screen row 6. The pinned popup's
+/// top border is row 5, its `owner/repo` group header row 6, and the `#412` PR row
+/// 7 (indented under the header).
 const BADGE_ROW: u16 = 6;
-const POPUP_ROW: u16 = 6;
+const POPUP_ROW: u16 = 7;
 
 /// Columns derived from the loop's real terminal width: the left pane is
 /// `(width / 3)` clamped to 16..=40, the flush-right `<icon> 1` badge is its last
 /// three columns, and the pinned popup floats at `left_w + 3` (past the divider) —
-/// its `#412` token starting two columns in (the box's `│ ` border + pad). Returns
+/// its `#412` number starting five columns in (the box's `│ ` border + pad, then
+/// the row's indent + state-glyph + space). A click there lands on the PR's middle
+/// (open) rather than the glyph-toggle or hide-action zones. Returns
 /// `(badge_col, token_col, inside_pad_col)`.
 fn geom() -> (u16, u16, u16) {
     let (_h, w) = Term::stdout().size();
     let left_w = ((w as usize) / 3).clamp(16, 40);
     let badge_col = (left_w - 2) as u16; // middle of the 3 flush-right badge columns
     let popup_left = left_w + 3; // left pane + the 3-column divider
-    let token_col = (popup_left + 2) as u16; // first column of `#412`
+    let token_col = (popup_left + 5) as u16; // first column of `#412`, past `│  ○ `
     let inside_pad_col = (popup_left + 6) as u16; // trailing pad inside the box, on no token
     (badge_col, token_col, inside_pad_col)
 }
@@ -233,11 +236,67 @@ fn the_compat_loop_also_opens_a_clicked_pr() {
 }
 
 #[test]
+fn clicking_the_glyph_toggles_state_and_the_footer_reveals_hidden_prs() {
+    use crate::domain::workspace_state::PrState;
+    use crate::infrastructure::{pr_link_store, storage};
+
+    // The state change persists through the store, so pin it to a temp data dir.
+    let _guard = crate::test_support::process_env_guard();
+    let data = tempfile::tempdir().unwrap();
+    let old = std::env::var_os(storage::DATA_DIR_ENV);
+    std::env::set_var(storage::DATA_DIR_ENV, data.path());
+
+    // The pinned session's row path is `/r/main`; seed its store with an open and a
+    // dismissed PR so the collapsed popup shows the open PR plus a `1 件非表示`
+    // footer.
+    let open = PrLink::new(412, "https://github.com/o/r/pull/412");
+    let mut hidden = PrLink::new(99, "https://github.com/o/r/pull/99");
+    hidden.state = PrState::Dismissed;
+    pr_link_store::add(Path::new("/r/main"), &[open.clone(), hidden.clone()]).unwrap();
+    let mut main = worktree(Some("main"), "/r/main");
+    main.pr = vec![open, hidden];
+    let state = HomeState::new("usagi", vec![main, worktree(Some("feat"), "/r/feat")], None);
+
+    let (badge, _, _) = geom();
+    let (_h, w) = Term::stdout().size();
+    let left_w = ((w as usize) / 3).clamp(16, 40);
+    let popup_left = (left_w + 3) as u16;
+    let glyph_col = popup_left + 2; // the state glyph on the #412 row (content row 7)
+    let footer_col = popup_left + 3; // anywhere on the `1 件非表示` footer row (row 8)
+
+    // Rows: 5 border, 6 `o/r` header, 7 #412, 8 footer, 9 border. Pin, click the
+    // glyph (toggle open→merged), then the footer (reveal hidden). Neither opens a
+    // PR, and the popup stays pinned across both.
+    let (urls, dirs) = run_pr_clicks(
+        vec![
+            click(badge, BADGE_ROW),
+            click(glyph_col, 7),
+            click(footer_col, 8),
+        ],
+        state,
+    );
+    assert!(urls.is_empty());
+    assert!(dirs.is_empty());
+    // The glyph click persisted the merge, pinned so `gh` can't override it.
+    let stored = pr_link_store::get(Path::new("/r/main"));
+    let merged = stored
+        .iter()
+        .find(|p| p.number == 412)
+        .expect("#412 recorded");
+    assert_eq!(merged.state, PrState::Merged);
+    assert!(merged.pinned);
+
+    match old {
+        Some(old) => std::env::set_var(storage::DATA_DIR_ENV, old),
+        None => std::env::remove_var(storage::DATA_DIR_ENV),
+    }
+}
+
+#[test]
 fn a_click_on_the_box_border_keeps_it_pinned() {
-    // The popup lists one PR per line, so the only spots inside the box that carry
-    // no `#<number>` are its top / bottom borders. A click on the top border (one
-    // row above the PR's row) is inside the rectangle but on no PR, so it neither
-    // opens a PR nor dismisses the popup; the PR's own row then still opens it.
+    // The row directly above the PR (`POPUP_ROW - 1`) is its `owner/repo` group
+    // header — inside the box but not a PR, so a click there neither opens nor
+    // dismisses (stays pinned); the PR's own row then still opens it.
     let (badge, token, _) = geom();
     let (urls, _) = run_pr_clicks(
         vec![

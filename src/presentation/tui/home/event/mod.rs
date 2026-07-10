@@ -944,6 +944,18 @@ pub(super) fn event_loop(
                         click.row,
                     ) {
                         ui::PopupClick::Open(url) => (wiring.open_url)(&url),
+                        ui::PopupClick::SetState {
+                            pr_key,
+                            state: pr_state,
+                        } => {
+                            if state.set_pinned_pr_state(&pr_key, pr_state) {
+                                force_paint = true;
+                            }
+                        }
+                        ui::PopupClick::ToggleDismissedView => {
+                            state.toggle_pr_popup_show_dismissed();
+                            force_paint = true;
+                        }
                         ui::PopupClick::Inside => {}
                         ui::PopupClick::Outside => {
                             state.set_pr_popup(None);
