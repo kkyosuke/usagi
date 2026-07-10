@@ -57,6 +57,7 @@ mod tests {
         SessionSnapshot {
             workspace: PathBuf::from("/repo"),
             name: name.to_string(),
+            worktree: None,
             activity,
         }
     }

@@ -1,14 +1,14 @@
 ---
 number: 168
 title: feat(daemon): 孤児 adopt・マルチクライアント・通知調停（Step 4）
-status: todo
+status: done
 priority: medium
 labels: [daemon, orchestration]
 dependson: [167]
 related: []
 parent: 159
 created_at: 2026-07-10T13:36:03.038440+00:00
-updated_at: 2026-07-10T13:36:03.038440+00:00
+updated_at: 2026-07-10T23:00:46+00:00
 ---
 
 Epic #159 の Step 4。daemon が端末を所有し TUI が attach クライアントになった状態（Step 3b-4 #167）の上に、堅牢性と多クライアント運用の仕上げを行う。

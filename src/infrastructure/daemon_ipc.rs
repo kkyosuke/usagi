@@ -65,6 +65,7 @@ mod tests {
         let sessions = vec![SessionSnapshot {
             workspace: PathBuf::from("/repo"),
             name: "work".to_string(),
+            worktree: None,
             activity: Some(SessionActivity::Waiting),
         }];
         let encoded = encode_message(&ServerMessage::Sessions {

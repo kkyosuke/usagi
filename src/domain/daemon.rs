@@ -93,6 +93,10 @@ pub struct SessionSnapshot {
     pub workspace: PathBuf,
     /// The session's name.
     pub name: String,
+    /// Representative worktree for the session, used by the daemon to match
+    /// monitored activity to attached terminals. Old snapshots omit it.
+    #[serde(default)]
+    pub worktree: Option<PathBuf>,
     /// The session's current activity, or `None` when unknown.
     pub activity: Option<SessionActivity>,
 }
