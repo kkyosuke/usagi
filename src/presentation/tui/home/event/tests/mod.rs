@@ -1408,6 +1408,25 @@ fn apply_due_wake_logs_when_no_agents_are_running() {
 }
 
 #[test]
+fn size_changed_reports_a_resize_and_updates_the_memo() {
+    let mut last = None;
+
+    // The first pass has no previous size to differ from: not a resize (the
+    // first frame paints via `force_paint` anyway), but the size is memoised.
+    assert!(!size_changed(&mut last, (24, 80)));
+    assert_eq!(last, Some((24, 80)));
+
+    // The same size on a later pass is not a resize either.
+    assert!(!size_changed(&mut last, (24, 80)));
+
+    // A different size is: the loop must force a repaint past the quiet-選択
+    // skip, and the memo moves so the next pass is quiet again.
+    assert!(size_changed(&mut last, (30, 100)));
+    assert_eq!(last, Some((30, 100)));
+    assert!(!size_changed(&mut last, (30, 100)));
+}
+
+#[test]
 fn run_wake_commands_schedules_and_cancels() {
     use chrono::Timelike;
     let now = Local::now();

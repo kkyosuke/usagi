@@ -228,26 +228,41 @@ impl Drop for RawModeGuard {
 }
 
 impl TermKeyReader {
-    /// Read the next key, dropping the spurious `Key::CtrlC` that a terminal
-    /// resize produces.
+    /// Read the next key, surfacing the spurious `Key::CtrlC` that a terminal
+    /// resize produces as a `Key::Unknown`.
     ///
     /// `read_key_raw` blocks in a `select`/`poll` that any delivered signal
-    /// interrupts (EINTR). The embedded terminal pane installs crossterm's
-    /// `SIGWINCH` handler, so every terminal resize now interrupts this read —
-    /// and `console` maps that EINTR to `Key::CtrlC`. Left untouched it would
-    /// read as a real `Ctrl-C` and close the app on every resize. When the
-    /// terminal size changed across the read the `CtrlC` is a resize artefact,
-    /// so keep reading instead of surfacing it; the loop then repaints at the
-    /// new size on the next real key.
+    /// interrupts (EINTR). The TUI installs a `SIGWINCH` handler at startup
+    /// (see [`super::signals`]; the embedded terminal pane later installs
+    /// crossterm's too), so every terminal resize interrupts this read — and
+    /// `console` maps that EINTR to `Key::CtrlC`. Left untouched it would read
+    /// as a real `Ctrl-C` and close the app on every resize. When the terminal
+    /// size changed across the read the `CtrlC` is a resize artefact:
+    /// [`resize_artifact_to_unknown`] surfaces it as `Key::Unknown`, which no
+    /// screen acts on, so every event loop falls through its key dispatch and
+    /// repaints — at the new size, in full, because the painter discards its
+    /// diff base on the same size change. (Swallowing the artefact and
+    /// re-blocking, as this used to, left the blocking screens garbled until
+    /// the next real key.)
     fn next_key(&self) -> io::Result<Key> {
-        loop {
-            let before = self.term.size();
-            let key = self.term.read_key_raw()?;
-            if matches!(key, Key::CtrlC) && self.term.size() != before {
-                continue;
-            }
-            return Ok(key);
-        }
+        let before = self.term.size();
+        let key = self.term.read_key_raw()?;
+        Ok(resize_artifact_to_unknown(key, self.term.size() != before))
+    }
+}
+
+/// Map the resize artefact to `Key::Unknown`: a `Key::CtrlC` read while the
+/// terminal size changed across the read is `console`'s rendering of the EINTR
+/// a SIGWINCH delivered mid-read (see [`TermKeyReader::next_key`]), not a real
+/// `Ctrl-C`. `Key::Unknown` is ignored by every screen's key dispatch, so the
+/// event loop just repaints — at the new size. Any other key — including a
+/// genuine `Ctrl-C`, whose read crosses no size change — passes through
+/// untouched.
+fn resize_artifact_to_unknown(key: Key, resized: bool) -> Key {
+    if resized && matches!(key, Key::CtrlC) {
+        Key::Unknown
+    } else {
+        key
     }
 }
 
@@ -776,5 +791,29 @@ mod tests {
     fn key_from_inputs_propagates_a_read_error() {
         let err = key_from_inputs(|| Err::<Input, _>(io::Error::other("boom"))).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn a_ctrlc_across_a_resize_surfaces_as_unknown() {
+        // The resize artefact — console's rendering of the SIGWINCH EINTR — must
+        // not read as a real Ctrl-C (which would quit the app on every resize);
+        // it surfaces as `Key::Unknown` so the event loop repaints at the new
+        // size instead of blocking until the next real key.
+        assert_eq!(resize_artifact_to_unknown(Key::CtrlC, true), Key::Unknown);
+    }
+
+    #[test]
+    fn a_ctrlc_without_a_resize_stays_a_ctrlc() {
+        // A genuine Ctrl-C crosses no size change and must keep quitting.
+        assert_eq!(resize_artifact_to_unknown(Key::CtrlC, false), Key::CtrlC);
+    }
+
+    #[test]
+    fn a_real_key_across_a_resize_passes_through() {
+        // A key that raced a resize is still that key, not an artefact.
+        assert_eq!(
+            resize_artifact_to_unknown(Key::Char('j'), true),
+            Key::Char('j')
+        );
     }
 }

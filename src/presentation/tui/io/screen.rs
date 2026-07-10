@@ -320,6 +320,10 @@ pub struct FramePainter {
     /// repaint — never a separate flush that leaves the cleared screen visible as
     /// a one-frame black flash. Drained (cleared) on the flush that emits it.
     prefix: String,
+    /// The terminal size at the last flush, so a resize between flushes is
+    /// detected and the remembered frame discarded
+    /// ([`invalidate_on_resize`](Self::invalidate_on_resize)).
+    last_size: Option<(u16, u16)>,
 }
 
 impl FramePainter {
@@ -393,9 +397,29 @@ impl FramePainter {
         self.flush(term)
     }
 
+    /// Discard the diff base when the terminal size changed since the last
+    /// flush. A resize reflows / truncates what is actually on screen, so the
+    /// remembered frame no longer matches reality: diffing against it would
+    /// skip "unchanged" rows and leave the disturbed content in place.
+    /// Forgetting the frame entirely — not just blanking its rows, as
+    /// [`reset`](Self::reset) does — makes the next diff clear the whole screen
+    /// (`\x1b[2J`) before redrawing every row: the flicker-free per-row path is
+    /// pointless here (the resize already disturbed the screen), and only a
+    /// whole-screen clear also wipes reflow leftovers outside the new frame.
+    fn invalidate_on_resize(&mut self, size: (u16, u16)) {
+        if self.last_size.is_some_and(|last| last != size) {
+            self.prev.clear();
+        }
+        self.last_size = Some(size);
+    }
+
     /// Overlay the global install (if any) onto the base frame and diff-paint it.
     fn flush(&mut self, term: &Term) -> Result<()> {
-        let (_, width) = term.size();
+        let size = term.size();
+        // A resize since the last flush invalidates everything on screen: drop
+        // the diff base so this paint is a full clear + redraw at the new size.
+        self.invalidate_on_resize(size);
+        let (_, width) = size;
         // Compose into the reused scratch buffer rather than a fresh clone: copy
         // the base into it (reusing its rows' allocations) and overlay any install
         // on top. `prev` is still untouched, so it remains the correct diff base.
@@ -925,6 +949,27 @@ mod tests {
         assert!(out.contains("\x1b[2;1H\x1b[2Kb"));
         painter.paint(&term, lines(&["a", "b"])).unwrap();
         assert_eq!(painter.prev, lines(&["a", "b"]));
+    }
+
+    #[test]
+    fn a_resize_between_flushes_discards_the_diff_base() {
+        let mut painter = FramePainter::new();
+        painter.prev = lines(&["old", "frame"]);
+        // The first flush records the size without touching the base…
+        painter.invalidate_on_resize((24, 80));
+        assert_eq!(painter.prev, lines(&["old", "frame"]));
+        // …and so does a flush at the same size.
+        painter.invalidate_on_resize((24, 80));
+        assert_eq!(painter.prev, lines(&["old", "frame"]));
+        // A resize forgets the frame entirely (not just blanking rows): the
+        // next diff then clears the whole screen and redraws every row,
+        // wiping whatever the terminal's reflow left behind.
+        painter.invalidate_on_resize((30, 100));
+        assert!(painter.prev.is_empty());
+        assert_eq!(painter.last_size, Some((30, 100)));
+        let out = diff_frame(&painter.prev, &lines(&["new"]));
+        assert!(out.contains("\x1b[2J"));
+        assert!(out.contains("\x1b[1;1H\x1b[2Knew"));
     }
 
     #[test]
