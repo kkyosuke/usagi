@@ -1,13 +1,13 @@
 ---
 number: 172
 title: perf(tui): 終了（ended）ペインの vt100 grid / PTY リソースを解放する
-status: todo
+status: in-progress
 priority: medium
 labels: [perf, tui]
 dependson: []
 related: [128, 159]
 created_at: 2026-07-10T20:46:50.759156+00:00
-updated_at: 2026-07-10T20:46:50.759156+00:00
+updated_at: 2026-07-10T21:20:14.980906+00:00
 ---
 
 ## 背景（メモリ調査 2026-07-11）
