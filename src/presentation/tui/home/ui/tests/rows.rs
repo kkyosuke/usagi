@@ -3074,8 +3074,9 @@ fn pr_popup_placement_is_none_when_empty_or_too_narrow() {
     }]);
     empty.set_pr_popup(Some(0));
     assert!(pr_popup_placement(&empty, 24, 120).is_none());
-    // Too narrow: a PR with a long resolved title makes a box wider than a slim
-    // terminal, so it is not placed.
+    // Too narrow for the full [`PR_POPUP_INNER`] budget: the box shrinks to the
+    // screen instead of vanishing, so the popup (title clipped with an ellipsis)
+    // still shows on a slim terminal.
     let mut wt = worktree_with_pr(412);
     wt.pr[0].title = Some("A reasonably long pull request title".to_string());
     let mut narrow = state_with(vec![
@@ -3085,7 +3086,18 @@ fn pr_popup_placement_is_none_when_empty_or_too_narrow() {
     narrow.enter_closeup(1);
     narrow.show_attached();
     narrow.set_pr_popup(Some(0));
-    assert!(pr_popup_placement(&narrow, 24, 20).is_none());
+    let (popup, _, left) = pr_popup_placement(&narrow, 24, 40).expect("a shrunken box");
+    for line in &popup {
+        assert!(left + console::measure_text_width(line) <= 40);
+    }
+    let plain = console::strip_ansi_codes(&popup.join("\n")).into_owned();
+    // The number still shows and the clipped title keeps its leading columns.
+    assert!(plain.contains("#412"));
+    assert!(plain.contains("A reasonab") && plain.contains('…'));
+    assert!(!plain.contains("A reasonably long pull request title"));
+    // A degenerate sliver of a terminal can't host even the floored box (the
+    // `PR` title plus its frame), so nothing is placed.
+    assert!(pr_popup_placement(&narrow, 24, 6).is_none());
 }
 
 #[test]

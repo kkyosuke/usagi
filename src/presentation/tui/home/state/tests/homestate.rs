@@ -591,6 +591,51 @@ fn set_pinned_pr_state_persists_the_choice_and_reflects_it_in_the_row() {
 }
 
 #[test]
+fn set_pinned_pr_state_keeps_the_rows_titles_when_the_store_lags_behind() {
+    use crate::domain::workspace_state::{PrLink, PrState};
+    use crate::infrastructure::{pr_link_store, storage};
+
+    let _guard = crate::test_support::process_env_guard();
+    let data = tempfile::tempdir().unwrap();
+    let old = std::env::var_os(storage::DATA_DIR_ENV);
+    std::env::set_var(storage::DATA_DIR_ENV, data.path());
+
+    // The sidebar row knows the `gh`-resolved titles; the store never persisted
+    // them — and does not record the second PR at all (a recreated session whose
+    // store file was cleared while state.json kept the badge).
+    let root = std::path::Path::new("/repo/main");
+    pr_link_store::add(root, &[PrLink::new(412, "https://github.com/o/r/pull/412")]).unwrap();
+    let mut titled = PrLink::new(412, "https://github.com/o/r/pull/412");
+    titled.title = Some("Add PR titles".to_string());
+    let mut extra = PrLink::new(447, "https://github.com/o/r/pull/447");
+    extra.title = Some("Fix the thing".to_string());
+    let mut main = worktree("main");
+    main.pr = vec![titled, extra];
+    let mut state = HomeState::new("usagi", vec![main], None);
+
+    state.set_pr_popup(Some(0));
+    assert!(state.set_pinned_pr_state("https://github.com/o/r/pull/412", PrState::Merged));
+    // The click must not roll the row back to the store's title-less contents:
+    // both PRs keep their titles, and the store-unknown one survives the write.
+    let row = state.list().worktree_by_global_index(0).unwrap();
+    assert_eq!(row.pr.len(), 2);
+    assert_eq!(row.pr[0].title.as_deref(), Some("Add PR titles"));
+    assert_eq!(row.pr[0].state, PrState::Merged);
+    assert_eq!(row.pr[1].title.as_deref(), Some("Fix the thing"));
+    // The persisted store now carries the union — titles included — rather than
+    // the shrunken list the row used to be overwritten with.
+    let stored = pr_link_store::get(root);
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored[0].title.as_deref(), Some("Add PR titles"));
+    assert_eq!(stored[1].title.as_deref(), Some("Fix the thing"));
+
+    match old {
+        Some(old) => std::env::set_var(storage::DATA_DIR_ENV, old),
+        None => std::env::remove_var(storage::DATA_DIR_ENV),
+    }
+}
+
+#[test]
 fn command_palette_opens_and_closes_clearing_the_input() {
     let mut state = state();
     assert!(!state.command_palette_open());
