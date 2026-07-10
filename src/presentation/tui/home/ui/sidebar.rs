@@ -1609,6 +1609,26 @@ pub(super) fn sidebar_scroll_with_pending(
     scroll.min(total - viewport_rows)
 }
 
+/// The sidebar's scroll position as `(start, end, total)` 1-based body-line range
+/// currently visible in a `viewport_rows`-high pane, or `None` when the list fits
+/// (nothing scrolled off). Reports the *existing* window (same offset the renderer
+/// and hit test use — [`sidebar_scroll_with_pending`]), so it is a pure read-out
+/// that changes neither. Drives the chrome's scroll-position indicator, unifying
+/// it with the diff / Markdown preview headers' `start-end/total`.
+pub(super) fn sidebar_scroll_position(
+    list: &WorktreeList,
+    with_headers: bool,
+    viewport_rows: usize,
+    pending_sessions: &[PendingSession],
+) -> Option<(usize, usize, usize)> {
+    let total = sidebar_total_lines_with_pending(list, with_headers, pending_sessions);
+    if viewport_rows == 0 || total <= viewport_rows {
+        return None;
+    }
+    let scroll = sidebar_scroll_with_pending(list, with_headers, viewport_rows, pending_sessions);
+    Some((scroll + 1, (scroll + viewport_rows).min(total), total))
+}
+
 /// Accumulates a scrolled window of body lines: only lines whose full-column
 /// index lands in `[scroll, scroll + cap)` are kept, so the sidebar can show a
 /// slice of a list taller than the pane while the builders still walk the whole
