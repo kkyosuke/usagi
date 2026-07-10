@@ -126,6 +126,16 @@ pub enum Effect {
     /// Drop a workspace from the 統合(unite) view (the user ran `unite remove
     /// <workspace>`), restoring the single-workspace view when none remain.
     UniteRemove(String),
+    /// Schedule a one-shot **wake** at `hour:minute` today (the user ran `wake -t
+    /// hhmm`): when that moment arrives the home loop sends `continue` to every
+    /// session with a running agent pane. The command validates the `hhmm`
+    /// argument to an in-range `hour`/`minute`; the event loop turns it into a
+    /// concrete same-day instant against the wall clock (rejecting a time already
+    /// passed) and stores it on the screen state.
+    ScheduleWake { hour: u32, minute: u32 },
+    /// Cancel a pending wake (the user ran `wake cancel`). A no-op — with a note —
+    /// when none is scheduled.
+    CancelWake,
 }
 
 impl Effect {
@@ -163,7 +173,9 @@ impl Effect {
             | Effect::ListSessions
             | Effect::OpenRemoveModal { .. }
             | Effect::OpenEnvEditor
-            | Effect::ShowText { .. } => false,
+            | Effect::ShowText { .. }
+            | Effect::ScheduleWake { .. }
+            | Effect::CancelWake => false,
         }
     }
 }

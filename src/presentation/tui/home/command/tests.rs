@@ -97,6 +97,39 @@ fn dispatch_in_scope_runs_in_scope_and_shared_commands() {
 }
 
 #[test]
+fn wake_time_schedules_a_today_wake_effect() {
+    let result =
+        registry().dispatch_in_scope("wake -t 1430", CommandScope::Workspace, &[], &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(
+        result.effect,
+        Effect::ScheduleWake {
+            hour: 14,
+            minute: 30,
+        }
+    );
+}
+
+#[test]
+fn wake_cancel_requests_cancellation() {
+    let result = registry().dispatch("wake cancel", &[], &[]);
+    assert!(result.lines.is_empty());
+    assert_eq!(result.effect, Effect::CancelWake);
+}
+
+#[test]
+fn wake_rejects_bad_arguments() {
+    let bad_time = registry().dispatch("wake -t 2460", &[], &[]);
+    assert_eq!(bad_time.effect, Effect::None);
+    assert_eq!(bad_time.lines[0].kind, LineKind::Error);
+    assert!(bad_time.lines[0].text.contains("00–23"));
+
+    let missing_time = registry().dispatch("wake -t", &[], &[]);
+    assert_eq!(missing_time.effect, Effect::None);
+    assert!(missing_time.lines[0].text.contains("usage: wake"));
+}
+
+#[test]
 fn man_without_argument_lists_every_command() {
     let registry = registry();
     let result = registry.dispatch("man", &[], &[]);

@@ -1613,6 +1613,31 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         )
     };
 
+    // When a scheduled `wake` fires, resume every session whose agent pane is
+    // live by enqueueing `continue` on the same live channel the MCP
+    // `session_prompt` tool uses; the terminal pool's watcher then types it into
+    // each pane. Pane-less sessions are skipped (nothing would drain their queue).
+    let mut broadcast_wake = |state: &HomeState| -> usize {
+        let roots: Vec<std::path::PathBuf> =
+            state.sessions().iter().map(|s| s.root.clone()).collect();
+        crate::usecase::wake::broadcast_continue(
+            roots.iter().map(|p| p.as_path()),
+            |root| {
+                crate::infrastructure::agent_live_pane_store::is_live(
+                    root,
+                    crate::infrastructure::resource::process_alive,
+                )
+            },
+            |root| {
+                crate::infrastructure::agent_live_prompt_store::append(
+                    root,
+                    crate::usecase::wake::CONTINUE_PROMPT,
+                )
+                .map_err(|e| e.to_string())
+            },
+        )
+    };
+
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
         // The state.json watcher below is always running, so let the idle loop wake
@@ -1646,6 +1671,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event::event_loop(
         term,

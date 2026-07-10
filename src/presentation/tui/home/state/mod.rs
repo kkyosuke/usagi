@@ -16,13 +16,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 
 use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
+use crate::domain::wake::WakeSchedule;
 use crate::domain::workspace_state::{SessionAgent, SessionRecord, WorktreeState};
 
 use super::command::{
@@ -886,6 +887,11 @@ pub struct HomeState {
     /// stays a `&HomeState`-only function and its many test call sites are
     /// unaffected; tests that pin the label set a fixed value with `set_now`.
     now: DateTime<Utc>,
+    /// A one-shot wake scheduled by the workspace `wake -t hhmm` command. The
+    /// event loop checks it each tick and, once due, broadcasts `continue` to all
+    /// currently running session agents and clears it. `None` means no wake is
+    /// pending; `wake cancel` clears it.
+    wake_schedule: Option<WakeSchedule>,
 }
 
 /// How long the mascot holds a blink (eyes shut). A touch longer than the
@@ -974,6 +980,7 @@ impl HomeState {
             mascot_reaction_rng: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
             now: Utc::now(),
+            wake_schedule: None,
         }
     }
 
@@ -987,6 +994,48 @@ impl HomeState {
     /// The instant the current frame renders at (see [`set_now`](Self::set_now)).
     pub fn now(&self) -> DateTime<Utc> {
         self.now
+    }
+
+    /// Schedule a one-shot wake for `hour:minute` today, using the supplied local
+    /// `now` as both the date and the "already passed" boundary. On success it
+    /// replaces any existing pending wake and returns the scheduled instant for a
+    /// confirmation line.
+    pub fn schedule_wake(
+        &mut self,
+        now: DateTime<Local>,
+        hour: u32,
+        minute: u32,
+    ) -> Result<DateTime<Local>, String> {
+        let schedule = WakeSchedule::for_today(now, hour, minute)?;
+        let at = schedule.at();
+        self.wake_schedule = Some(schedule);
+        Ok(at)
+    }
+
+    /// Cancel the pending wake, returning the instant that would have fired so
+    /// the UI can distinguish "cancelled X" from "nothing to cancel".
+    pub fn cancel_wake(&mut self) -> Option<DateTime<Local>> {
+        self.wake_schedule.take().map(|schedule| schedule.at())
+    }
+
+    /// If a wake is due by `now`, consume it and return its scheduled instant.
+    /// Otherwise leave it pending. This one-shot consumption point prevents a due
+    /// wake from firing on every idle tick.
+    pub fn take_due_wake(&mut self, now: DateTime<Local>) -> Option<DateTime<Local>> {
+        if self
+            .wake_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.is_due(now))
+        {
+            self.wake_schedule.take().map(|schedule| schedule.at())
+        } else {
+            None
+        }
+    }
+
+    /// The pending wake instant, exposed for tests / rendering-adjacent callers.
+    pub fn wake_scheduled_at(&self) -> Option<DateTime<Local>> {
+        self.wake_schedule.as_ref().map(|schedule| schedule.at())
     }
 
     /// Inject the error sink that persists operation failures to the daily log

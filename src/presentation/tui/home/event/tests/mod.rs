@@ -6,7 +6,7 @@ use super::*;
 use crate::domain::settings::{AgentCli, SessionActionUi};
 use crate::domain::workspace_state::{BranchStatus, SessionRecord, WorktreeState};
 use crate::presentation::tui::io::screen::{ClickEvent, Input, ScrollEvent};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
@@ -212,6 +212,12 @@ fn noop_autostart(_: &HomeState) -> Vec<String> {
     Vec::new()
 }
 
+/// A `broadcast_wake` callback that reports no running agents, for loop tests
+/// that do not exercise the wake broadcast.
+fn noop_broadcast_wake(_: &HomeState) -> usize {
+    0
+}
+
 fn live_preview(_: &Path, _: Sidebar) -> Option<TerminalView> {
     Some(TerminalView::from_rows(vec!["live".to_string()], None))
 }
@@ -392,6 +398,7 @@ fn run_full_external(
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -423,6 +430,7 @@ fn run_full_external(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     event_loop(
         &term,
@@ -917,6 +925,7 @@ fn run_with_tasks(
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -948,6 +957,7 @@ fn run_with_tasks(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     event_loop(
         &term,
@@ -1018,6 +1028,7 @@ fn run_with_state_monitor_watch(
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions,
@@ -1049,6 +1060,7 @@ fn run_with_state_monitor_watch(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     event_loop(
         &term,
@@ -1198,6 +1210,7 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -1229,6 +1242,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event_loop(
         &term,
@@ -1312,6 +1326,62 @@ fn apply_autostart_logs_started_panes_and_reports_change() {
     };
     assert!(apply_autostart(&mut state, &mut two));
     assert_eq!(state.log().len(), before + 2);
+}
+
+#[test]
+fn apply_due_wake_broadcasts_once_and_logs_count() {
+    let mut state = sample_state();
+    let now = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 0, 0)
+        .single()
+        .unwrap();
+    state.schedule_wake(now, 14, 30).unwrap();
+    let before_due = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 29, 59)
+        .single()
+        .unwrap();
+    let due = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 30, 0)
+        .single()
+        .unwrap();
+    let calls = std::cell::Cell::new(0);
+    let mut broadcast = |_: &HomeState| {
+        calls.set(calls.get() + 1);
+        2
+    };
+
+    assert!(!apply_due_wake(&mut state, before_due, &mut broadcast));
+    assert_eq!(calls.get(), 0);
+    assert!(apply_due_wake(&mut state, due, &mut broadcast));
+    assert_eq!(calls.get(), 1);
+    assert!(state
+        .log()
+        .last()
+        .is_some_and(|line| line.text.contains("sent `continue` to 2")));
+    // Consumed after the first due tick, so it does not fire again.
+    assert!(!apply_due_wake(&mut state, due, &mut broadcast));
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn apply_due_wake_logs_when_no_agents_are_running() {
+    let mut state = sample_state();
+    let now = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 0, 0)
+        .single()
+        .unwrap();
+    let due = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 30, 0)
+        .single()
+        .unwrap();
+    state.schedule_wake(now, 14, 30).unwrap();
+    let mut broadcast = |_: &HomeState| 0usize;
+
+    assert!(apply_due_wake(&mut state, due, &mut broadcast));
+    assert!(state
+        .log()
+        .last()
+        .is_some_and(|line| line.text.contains("no running agents")));
 }
 
 mod attached;

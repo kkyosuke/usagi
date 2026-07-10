@@ -7,6 +7,7 @@ use super::{
     Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
     LogLine,
 };
+use crate::domain::wake::parse_hhmm;
 use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
@@ -400,6 +401,64 @@ impl Command for UniteCommand {
         // free-form (the registry is not threaded into completion).
         match head.first() {
             None => ["add", "remove"].iter().map(|s| s.to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// `wake -t hhmm`: schedule a one-shot broadcast that sends `continue` to every
+/// session with a running agent pane when the requested time arrives today.
+///
+/// The command owns only argument parsing and validation (`-t` plus a local time
+/// written as `hhmm` or `hh:mm`). The event loop resolves the parsed hour/minute
+/// against the actual wall clock so the schedule can reject "already passed
+/// today" using the same clock it later checks for due-ness.
+pub(super) struct WakeCommand;
+
+impl Command for WakeCommand {
+    fn name(&self) -> &'static str {
+        "wake"
+    }
+
+    fn description(&self) -> &'static str {
+        "Send `continue` to all running session agents at a time today"
+    }
+
+    fn usage(&self) -> &'static str {
+        "wake -t <hhmm>|cancel"
+    }
+
+    fn examples(&self) -> &'static [&'static str] {
+        &["wake -t 1430", "wake -t 9:05", "wake cancel"]
+    }
+
+    fn scope(&self) -> CommandScope {
+        CommandScope::Workspace
+    }
+
+    fn run(&self, args: &str, _ctx: &CommandContext) -> CommandResult {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        match parts.as_slice() {
+            ["cancel"] => CommandResult {
+                lines: Vec::new(),
+                effect: Effect::CancelWake,
+            },
+            ["-t", raw] | ["--time", raw] => match parse_hhmm(raw) {
+                Ok((hour, minute)) => CommandResult {
+                    lines: Vec::new(),
+                    effect: Effect::ScheduleWake { hour, minute },
+                },
+                Err(err) => CommandResult::line(LogLine::error(err)),
+            },
+            _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
+        }
+    }
+
+    fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
+        let (head, _) = arg_tokens(args);
+        match head.first().copied() {
+            None => ["-t", "cancel"].iter().map(|s| s.to_string()).collect(),
+            Some("-t" | "--time") => Vec::new(),
             _ => Vec::new(),
         }
     }
