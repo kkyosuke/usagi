@@ -377,6 +377,11 @@ pub(super) fn overview_key(
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.overview_move_up(),
         Key::ArrowDown | Key::Char('j') => state.overview_move_down(),
+        // `g` / `G` jump to the first / last row. Home/End are already taken by
+        // create / note (and are IME-safe aliases), so the vim pair fills the
+        // list-top/bottom gap the review flagged.
+        Key::Char('g') => state.overview_move_first(),
+        Key::Char('G') => state.overview_move_last(),
         // K/J (Shift+k/j) move the *selected session itself* up/down, persisting
         // the new order — capital mirrors the lower-case cursor move. The cursor
         // follows the moved session; a no-op on the root row and at the ends.

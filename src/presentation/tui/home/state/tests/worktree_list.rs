@@ -154,6 +154,20 @@ fn move_down_advances_past_the_root_row_and_wraps() {
 }
 
 #[test]
+fn focus_index_and_focus_last_jump_to_the_first_and_last_rows() {
+    let mut list = sample(); // root, main, feature, fix, + new session (5 rows)
+    list.move_down(); // step off the root row
+    assert_eq!(list.selected_index(), 1);
+    // `g` jumps to the first row (root), `G` to the last (the create row).
+    list.focus_index(0);
+    assert_eq!(list.selected_index(), 0);
+    assert!(list.root_selected());
+    list.focus_last();
+    assert_eq!(list.selected_index(), 4);
+    assert!(list.create_row_selected());
+}
+
+#[test]
 fn move_up_wraps_from_the_root_row_to_the_bottom() {
     let mut list = sample(); // root, main, feature, fix, + new session
     list.move_up();
