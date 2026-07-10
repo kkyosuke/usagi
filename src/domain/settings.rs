@@ -517,12 +517,21 @@ pub const DEFAULT_TERMINAL_SCROLLBACK_LINES: usize = 2_000;
 /// cannot blow up memory across every open pane.
 pub const MAX_TERMINAL_SCROLLBACK_LINES: usize = 50_000;
 
+/// The default maximum number of queued-prompt autostarts allowed to occupy
+/// agent slots at once. Users can lower this for serial delegation or raise it
+/// when their machine can comfortably run more agents in parallel.
+pub const DEFAULT_AUTOSTART_QUEUED_PROMPT_LIMIT: usize = 4;
+
 /// The default used for a missing `terminal_scrollback_lines` field, so an older
 /// `settings.json` (written before the field existed) loads with the modest
 /// default rather than `0` — `#[serde(default)]` on the struct would otherwise
 /// fall back to `usize`'s `0`, leaving panes with no scrollback at all.
 fn default_terminal_scrollback_lines() -> usize {
     DEFAULT_TERMINAL_SCROLLBACK_LINES
+}
+
+fn default_autostart_queued_prompt_limit() -> usize {
+    DEFAULT_AUTOSTART_QUEUED_PROMPT_LIMIT
 }
 
 /// A map of environment variables whose values are resolved from 1Password
@@ -566,6 +575,12 @@ pub struct Settings {
     /// user disables it; when off, a queued prompt waits to be consumed by the
     /// next fresh launch of that session's agent pane as before.
     pub autostart_queued_prompts: bool,
+    /// Maximum number of agents that queued-prompt autostart may have in
+    /// `running` or `waiting` phase at once. The on/off switch remains
+    /// [`autostart_queued_prompts`](Self::autostart_queued_prompts); this only
+    /// limits how many queued sessions the home screen starts concurrently.
+    #[serde(default = "default_autostart_queued_prompt_limit")]
+    pub autostart_queued_prompt_limit: usize,
     /// Minutes to wait after a merged PR is detected before closing that
     /// session's panes. `None` disables automatic reclamation.
     pub auto_reclaim_merged_sessions: Option<u64>,
@@ -637,6 +652,7 @@ impl Default for Settings {
             // Auto-starting queued prompts is opt-out: on unless disabled, so a
             // delegated issue begins work without a human opening the pane.
             autostart_queued_prompts: true,
+            autostart_queued_prompt_limit: DEFAULT_AUTOSTART_QUEUED_PROMPT_LIMIT,
             auto_reclaim_merged_sessions: None,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
@@ -679,6 +695,7 @@ impl Settings {
         self.terminal_scrollback_lines = self
             .terminal_scrollback_lines
             .min(MAX_TERMINAL_SCROLLBACK_LINES);
+        self.autostart_queued_prompt_limit = self.autostart_queued_prompt_limit.max(1);
         // Drop skill-feature keys this usagi does not recognise (a feature
         // removed since the file was written, or a hand-edited typo) so a stale
         // entry never lingers in the saved file or the `usagi config` output.
@@ -728,6 +745,9 @@ impl Settings {
         }
         if let Some(autostart_queued_prompts) = local.autostart_queued_prompts {
             self.autostart_queued_prompts = autostart_queued_prompts;
+        }
+        if let Some(autostart_queued_prompt_limit) = local.autostart_queued_prompt_limit {
+            self.autostart_queued_prompt_limit = autostart_queued_prompt_limit.max(1);
         }
         if let Some(auto_reclaim_merged_sessions) = local.auto_reclaim_merged_sessions {
             self.auto_reclaim_merged_sessions = Some(auto_reclaim_merged_sessions);
@@ -803,6 +823,9 @@ pub struct LocalSettings {
     /// Override whether queued prompts are auto-started for this project's
     /// sessions. `None` defers to the global setting.
     pub autostart_queued_prompts: Option<bool>,
+    /// Override the queued-prompt autostart concurrency limit for this project.
+    /// `None` defers to the global setting.
+    pub autostart_queued_prompt_limit: Option<usize>,
     /// Override the merged-session reclamation grace period for this project.
     /// `None` defers to the global setting.
     pub auto_reclaim_merged_sessions: Option<u64>,
@@ -858,6 +881,7 @@ impl LocalSettings {
             && self.notifications_enabled.is_none()
             && self.restore_panes_enabled.is_none()
             && self.autostart_queued_prompts.is_none()
+            && self.autostart_queued_prompt_limit.is_none()
             && self.auto_reclaim_merged_sessions.is_none()
             && self.default_branch_source.is_none()
             && self.default_branch.is_none()
@@ -1151,6 +1175,10 @@ mod tests {
     fn autostart_queued_prompts_defaults_on() {
         // Auto-starting queued prompts is opt-out, so a fresh install has it on.
         assert!(Settings::default().autostart_queued_prompts);
+        assert_eq!(
+            Settings::default().autostart_queued_prompt_limit,
+            DEFAULT_AUTOSTART_QUEUED_PROMPT_LIMIT
+        );
     }
 
     #[test]
@@ -1169,6 +1197,20 @@ mod tests {
         assert!(!effective.autostart_queued_prompts);
         // Unrelated fields keep their global value.
         assert!(effective.restore_panes_enabled);
+    }
+
+    #[test]
+    fn with_local_overrides_autostart_queued_prompt_limit_when_set() {
+        let global = Settings::default();
+        let local = LocalSettings {
+            autostart_queued_prompt_limit: Some(2),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert_eq!(effective.autostart_queued_prompt_limit, 2);
+        assert!(effective.autostart_queued_prompts);
     }
 
     #[test]
@@ -1230,6 +1272,12 @@ mod tests {
         // As does the autostart-queued-prompts toggle.
         assert!(!LocalSettings {
             autostart_queued_prompts: Some(false),
+            ..Default::default()
+        }
+        .is_empty());
+        // As does the autostart concurrency limit.
+        assert!(!LocalSettings {
+            autostart_queued_prompt_limit: Some(2),
             ..Default::default()
         }
         .is_empty());
@@ -1629,6 +1677,16 @@ mod tests {
             huge.sanitized().terminal_scrollback_lines,
             MAX_TERMINAL_SCROLLBACK_LINES
         );
+    }
+
+    #[test]
+    fn sanitized_clamps_autostart_queued_prompt_limit_to_at_least_one() {
+        let zero = Settings {
+            autostart_queued_prompt_limit: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(zero.sanitized().autostart_queued_prompt_limit, 1);
     }
 
     #[test]

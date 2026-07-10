@@ -192,6 +192,14 @@ pub struct MonitorSnapshot {
     pub resource_total: ResourceUsage,
 }
 
+impl MonitorSnapshot {
+    /// Number of agent slots currently occupied by lifecycle phase. `running`
+    /// and `waiting` occupy a slot; `done`/ready/none do not.
+    pub fn occupied_agent_slots(&self) -> usize {
+        self.running.union(&self.waiting).count()
+    }
+}
+
 impl MonitorHandle {
     /// A handle backed by empty state and no watcher — for screens (and tests)
     /// that render without any live sessions.
@@ -894,6 +902,13 @@ impl TerminalPool {
             shared: Arc::clone(&self.shared),
             version: Arc::clone(&self.version),
         }
+    }
+
+    /// Number of queued-autostart agent slots occupied right now, based on the
+    /// monitor's agent phase snapshot rather than pane liveness.
+    pub fn occupied_agent_slots(&self) -> usize {
+        snapshot_locked(&self.shared.lock().unwrap_or_else(|p| p.into_inner()))
+            .occupied_agent_slots()
     }
 
     /// Make `dir`'s active pane ready to attach. With no live pane yet, spawns the

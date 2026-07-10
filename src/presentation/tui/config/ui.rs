@@ -502,39 +502,41 @@ mod tests {
         assert!(lines[3].contains("On"));
         assert!(lines[4].contains("Autostart Queued Prompts"));
         assert!(lines[4].contains("On"));
-        assert!(lines[5].contains("Agent CLI"));
+        assert!(lines[5].contains("Autostart Agent Limit"));
+        assert!(lines[5].contains("4"));
+        assert!(lines[6].contains("Agent CLI"));
         // Each field shows its single current value via the chooser.
-        assert!(lines[5].contains("Claude"));
-        assert!(lines[6].contains("Session Action UI"));
-        assert!(lines[6].contains("Menu"));
+        assert!(lines[6].contains("Claude"));
+        assert!(lines[7].contains("Session Action UI"));
+        assert!(lines[7].contains("Menu"));
         // The 没入 key-scheme row is a chooser like the others.
-        assert!(lines[7].contains("Terminal Keys"));
-        assert!(lines[7].contains("Ctrl-O prefix"));
-        assert!(lines[8].contains("Mascot Animation"));
-        assert!(lines[8].contains("On"));
-        // The Local LLM row (index 9) is an action button: plain "Install",
+        assert!(lines[8].contains("Terminal Keys"));
+        assert!(lines[8].contains("Ctrl-O prefix"));
+        assert!(lines[9].contains("Mascot Animation"));
+        assert!(lines[9].contains("On"));
+        // The Local LLM row (index 10) is an action button: plain "Install",
         // with no chevrons.
-        assert!(lines[9].contains("Local LLM"));
-        assert!(lines[9].contains("Install"));
-        assert!(!lines[9].contains('<'));
-        // The model row (index 10) is inert until the runtime is installed: a
-        // plain "—" with no chevrons.
-        assert!(lines[10].contains("Local LLM Model"));
-        assert!(lines[10].contains('—'));
+        assert!(lines[10].contains("Local LLM"));
+        assert!(lines[10].contains("Install"));
         assert!(!lines[10].contains('<'));
-        // Global Env Vars is an action row too: plain edit summary, no chevrons.
-        assert!(lines[11].contains("Env Vars"));
-        assert!(lines[11].contains("Edit (none)"));
+        // The model row (index 11) is inert until the runtime is installed: a
+        // plain "—" with no chevrons.
+        assert!(lines[11].contains("Local LLM Model"));
+        assert!(lines[11].contains('—'));
         assert!(!lines[11].contains('<'));
+        // Global Env Vars is an action row too: plain edit summary, no chevrons.
+        assert!(lines[12].contains("Env Vars"));
+        assert!(lines[12].contains("Edit (none)"));
+        assert!(!lines[12].contains('<'));
         // The shipped-skill feature rows follow the fixed fields: a chooser
         // showing the feature's on/off state (on by default).
-        assert!(lines[12].contains("PR Skills"));
-        assert!(lines[12].contains("On"));
+        assert!(lines[13].contains("PR Skills"));
+        assert!(lines[13].contains("On"));
         // Every other field is a chooser, so chevrons appear on those rows...
         assert!(lines
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 9 && *i != 10 && *i != 11)
+            .filter(|(i, _)| *i != 10 && *i != 11 && *i != 12)
             .all(|(_, l)| l.contains('<') && l.contains('>')));
         // ...but only the focused (first) row carries the cursor.
         assert!(has_cursor(&lines[0]));

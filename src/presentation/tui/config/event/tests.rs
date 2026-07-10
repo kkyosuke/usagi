@@ -192,6 +192,7 @@ fn cycling_default_workspace_persists_when_saved() {
         Ok(Key::ArrowDown),  // Notifications
         Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Autostart Queued Prompts
+        Ok(Key::ArrowDown),  // Autostart Agent Limit
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Terminal Keys
@@ -299,6 +300,7 @@ fn saving_a_local_override_passes_it_to_save() {
         Ok(Key::ArrowDown),  // Notifications
         Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Autostart Queued Prompts
+        Ok(Key::ArrowDown),  // Autostart Agent Limit
         Ok(Key::ArrowDown),  // Default Branch
         Ok(Key::ArrowDown),  // Branch Source
         Ok(Key::ArrowDown),  // Setup Commands
@@ -341,6 +343,7 @@ fn setup_commands_modal_applies_to_local_settings_before_save() {
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Autostart Queued Prompts
+        Ok(Key::ArrowDown), // Autostart Agent Limit
         Ok(Key::ArrowDown), // Default Branch
         Ok(Key::ArrowDown), // Branch Source
         Ok(Key::ArrowDown), // Setup Commands
@@ -397,9 +400,10 @@ fn setup_commands_modal_applies_to_local_settings_before_save() {
 fn setup_commands_modal_can_be_cancelled_and_can_quit() {
     let term = Term::stdout();
     // Agent CLI → Notifications → Restore Panes → Autostart Queued Prompts →
-    // Default Branch → Branch Source → Setup Commands (7th row, 6 steps down).
+    // Autostart Agent Limit → Default Branch → Branch Source → Setup Commands.
     let to_setup = || {
         vec![
+            Ok(Key::ArrowDown),
             Ok(Key::ArrowDown),
             Ok(Key::ArrowDown),
             Ok(Key::ArrowDown),
@@ -466,6 +470,7 @@ fn env_vars_modal_applies_to_local_settings_before_save() {
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Autostart Queued Prompts
+        Ok(Key::ArrowDown), // Autostart Agent Limit
         Ok(Key::ArrowDown), // Default Branch
         Ok(Key::ArrowDown), // Branch Source
         Ok(Key::ArrowDown), // Setup Commands
@@ -539,6 +544,7 @@ fn env_vars_modal_can_be_cancelled_and_can_quit() {
             Ok(Key::ArrowDown), // Notifications
             Ok(Key::ArrowDown), // Restore Panes
             Ok(Key::ArrowDown), // Autostart Queued Prompts
+            Ok(Key::ArrowDown), // Autostart Agent Limit
             Ok(Key::ArrowDown), // Default Branch
             Ok(Key::ArrowDown), // Branch Source
             Ok(Key::ArrowDown), // Setup Commands
@@ -603,6 +609,7 @@ fn session_labels_modal_applies_to_local_settings_before_save() {
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Autostart Queued Prompts
+        Ok(Key::ArrowDown), // Autostart Agent Limit
         Ok(Key::ArrowDown), // Default Branch
         Ok(Key::ArrowDown), // Branch Source
         Ok(Key::ArrowDown), // Setup Commands
@@ -684,6 +691,7 @@ fn session_labels_modal_can_be_cancelled_and_can_quit() {
             Ok(Key::ArrowDown), // Notifications
             Ok(Key::ArrowDown), // Restore Panes
             Ok(Key::ArrowDown), // Autostart Queued Prompts
+            Ok(Key::ArrowDown), // Autostart Agent Limit
             Ok(Key::ArrowDown), // Default Branch
             Ok(Key::ArrowDown), // Branch Source
             Ok(Key::ArrowDown), // Setup Commands
@@ -824,6 +832,7 @@ fn keys_to_local_llm() -> Vec<io::Result<Key>> {
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Autostart Queued Prompts
+        Ok(Key::ArrowDown), // Autostart Agent Limit
         Ok(Key::ArrowDown), // Agent CLI
         Ok(Key::ArrowDown), // Session Action UI
         Ok(Key::ArrowDown), // Terminal Keys
@@ -1144,6 +1153,7 @@ fn toggling_the_local_llm_after_install_persists_the_enabled_flag() {
         Ok(Key::ArrowDown),  // Notifications
         Ok(Key::ArrowDown),  // Restore Panes
         Ok(Key::ArrowDown),  // Autostart Queued Prompts
+        Ok(Key::ArrowDown),  // Autostart Agent Limit
         Ok(Key::ArrowDown),  // Agent CLI
         Ok(Key::ArrowDown),  // Session Action UI
         Ok(Key::ArrowDown),  // Terminal Keys
@@ -1172,6 +1182,7 @@ fn unhandled_keys_inside_the_setup_modal_are_silently_ignored() {
         Ok(Key::ArrowDown), // Notifications
         Ok(Key::ArrowDown), // Restore Panes
         Ok(Key::ArrowDown), // Autostart Queued Prompts
+        Ok(Key::ArrowDown), // Autostart Agent Limit
         Ok(Key::ArrowDown), // Default Branch
         Ok(Key::ArrowDown), // Branch Source
         Ok(Key::ArrowDown), // Setup Commands

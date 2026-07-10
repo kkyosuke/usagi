@@ -76,6 +76,14 @@ impl Config {
                 self.settings.autostart_queued_prompts = !self.settings.autostart_queued_prompts;
                 true
             }
+            Field::AutostartQueuedLimit => {
+                self.settings.autostart_queued_prompt_limit = cycle_enum(
+                    self.settings.autostart_queued_prompt_limit,
+                    &AUTOSTART_LIMITS,
+                    forward,
+                );
+                true
+            }
             Field::AgentCli => {
                 // Only cycle through installed agents (the current value is always
                 // kept selectable), so an uninstalled CLI is never offered.
@@ -165,6 +173,15 @@ impl Config {
                 local.settings.autostart_queued_prompts = cycle_optional(
                     local.settings.autostart_queued_prompts,
                     &[true, false],
+                    forward,
+                );
+                true
+            }
+            LocalField::AutostartQueuedLimit => {
+                let local = self.local_edit_mut();
+                local.settings.autostart_queued_prompt_limit = cycle_optional(
+                    local.settings.autostart_queued_prompt_limit,
+                    &AUTOSTART_LIMITS,
                     forward,
                 );
                 true
