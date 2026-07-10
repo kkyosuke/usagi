@@ -225,6 +225,14 @@ const SHIMMER_GLYPH: char = '░';
 /// the sidebar's pending-session skeleton so every shimmer in the UI flows in
 /// step. The caller sizes the text; an empty string sweeps to nothing.
 pub fn shimmer_text(text: &str, frame: usize) -> String {
+    shimmer_text_styled(text, frame, &Style::new().accent().bold())
+}
+
+/// A [`shimmer_text`] wave whose bright band uses the caller-provided `style`.
+/// The dim rest of the text is unchanged. This lets operation-specific callers
+/// communicate semantics such as destructive work without changing the default
+/// accent used by existing loading indicators.
+pub fn shimmer_text_styled(text: &str, frame: usize, band_style: &Style) -> String {
     let chars: Vec<char> = text.chars().collect();
     // Sweep across the text plus a short tail, so the band leaves the right edge
     // and re-enters from the left with a brief all-dim beat between passes. The
@@ -236,7 +244,7 @@ pub fn shimmer_text(text: &str, frame: usize) -> String {
         let s = c.to_string();
         // A two-column bright band trailing the sweep head.
         if i == head || i + 1 == head {
-            out.push_str(&style(s).accent().bold().to_string());
+            out.push_str(&band_style.apply_to(s).to_string());
         } else {
             out.push_str(&style(s).dim().to_string());
         }

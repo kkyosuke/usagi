@@ -1031,6 +1031,20 @@ fn rail_pending_session_rows_reserve_three_rows() {
 }
 
 #[test]
+fn session_loading_styles_removal_red_and_keeps_creation_accented() {
+    let danger = Style::new().force_styling(true).danger().bold();
+    let accent = Style::new().force_styling(true).accent().bold();
+    let removing = widgets::shimmer_text_styled("✂ old", 1, &danger);
+    let creating = widgets::shimmer_text_styled("● new", 1, &accent);
+
+    assert!(removing.contains(&danger.apply_to("✂").to_string()));
+    assert!(removing.contains(&danger.apply_to(" ").to_string()));
+    assert!(creating.contains(&accent.apply_to("●").to_string()));
+    assert!(creating.contains(&accent.apply_to(" ").to_string()));
+    assert!(!creating.contains(&danger.apply_to("●").to_string()));
+}
+
+#[test]
 fn rail_removing_session_rows_use_a_pruning_glyph_in_place() {
     let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
     state.set_root_path("/repo");
