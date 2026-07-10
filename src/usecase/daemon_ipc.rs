@@ -8,7 +8,8 @@
 //! must be pushed. Keeping the registry and the dispatch free of IO makes every
 //! branch unit-testable without a socket.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::domain::daemon::SessionSnapshot;
 use crate::domain::daemon_ipc::{ClientMessage, ServerMessage};
@@ -16,6 +17,66 @@ use crate::domain::daemon_ipc::{ClientMessage, ServerMessage};
 /// Identifies one connected client for the life of its connection. Assigned by
 /// the socket server as connections are accepted.
 pub type ClientId = u64;
+
+/// What the socket server should do in response to a message, decided purely by
+/// [`handle`]. Replies are sent as-is; the terminal actions carry real PTY IO the
+/// composition root performs (spawning / killing the daemon-owned process), which
+/// is why they are returned rather than executed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Send this message back to the requesting client.
+    Reply(ServerMessage),
+    /// Spawn (or reuse) the daemon-owned terminal for this worktree, then reply.
+    Spawn(PathBuf),
+    /// Kill the daemon-owned terminal for this worktree, then reply.
+    Kill(PathBuf),
+    /// Nothing to send.
+    Nothing,
+}
+
+/// The daemon-owned terminals, tracked by the worktree they run in and the pid of
+/// the process. Pure bookkeeping: the real PTY handles live in the composition
+/// root, which mirrors its spawns and kills into this registry so the running
+/// set (and the "is one already running here?" decision) stays unit-testable.
+#[derive(Debug, Default)]
+pub struct TerminalRegistry {
+    terminals: HashMap<PathBuf, u32>,
+}
+
+impl TerminalRegistry {
+    /// An empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a terminal with `pid` runs for `worktree`, replacing any
+    /// previous entry for it.
+    pub fn insert(&mut self, worktree: PathBuf, pid: u32) {
+        self.terminals.insert(worktree, pid);
+    }
+
+    /// Forget the terminal for `worktree`, returning its pid if one was tracked.
+    pub fn remove(&mut self, worktree: &Path) -> Option<u32> {
+        self.terminals.remove(worktree)
+    }
+
+    /// Whether a terminal is tracked for `worktree`.
+    pub fn contains(&self, worktree: &Path) -> bool {
+        self.terminals.contains_key(worktree)
+    }
+
+    /// The pid of the terminal running for `worktree`, if any.
+    pub fn pid(&self, worktree: &Path) -> Option<u32> {
+        self.terminals.get(worktree).copied()
+    }
+
+    /// The worktrees with a running terminal, sorted for a stable report.
+    pub fn worktrees(&self) -> Vec<PathBuf> {
+        let mut worktrees: Vec<PathBuf> = self.terminals.keys().cloned().collect();
+        worktrees.sort();
+        worktrees
+    }
+}
 
 /// The set of clients currently subscribed to session-snapshot pushes.
 #[derive(Debug, Default)]
@@ -53,29 +114,32 @@ impl SubscriberRegistry {
     }
 }
 
-/// Answer one `message` from `client`, updating `registry` and returning the
-/// immediate reply to send back (or `None` when the message needs no reply).
-/// `sessions` is the daemon's current monitored-sessions snapshot.
+/// Decide what to do with one `message` from `client`, updating the subscriber
+/// `registry` for the subscription messages. `sessions` is the daemon's current
+/// monitored-sessions snapshot. The terminal messages return an [`Action`] the
+/// caller performs (they need real PTY IO); the rest resolve to a reply here.
 pub fn handle(
     message: ClientMessage,
     client: ClientId,
     registry: &mut SubscriberRegistry,
     sessions: &[SessionSnapshot],
-) -> Option<ServerMessage> {
+) -> Action {
     match message {
-        ClientMessage::ListSessions => Some(ServerMessage::Sessions {
+        ClientMessage::ListSessions => Action::Reply(ServerMessage::Sessions {
             sessions: sessions.to_vec(),
         }),
         ClientMessage::Subscribe => {
             registry.subscribe(client);
-            Some(ServerMessage::Sessions {
+            Action::Reply(ServerMessage::Sessions {
                 sessions: sessions.to_vec(),
             })
         }
         ClientMessage::Unsubscribe => {
             registry.remove(client);
-            None
+            Action::Nothing
         }
+        ClientMessage::Spawn { worktree } => Action::Spawn(worktree),
+        ClientMessage::Kill { worktree } => Action::Kill(worktree),
     }
 }
 
@@ -112,15 +176,15 @@ mod tests {
     #[test]
     fn list_sessions_replies_with_the_snapshot_without_subscribing() {
         let mut registry = SubscriberRegistry::new();
-        let reply = handle(
+        let action = handle(
             ClientMessage::ListSessions,
             7,
             &mut registry,
             &sample_sessions(),
         );
         assert_eq!(
-            reply,
-            Some(ServerMessage::Sessions {
+            action,
+            Action::Reply(ServerMessage::Sessions {
                 sessions: sample_sessions()
             })
         );
@@ -130,15 +194,15 @@ mod tests {
     #[test]
     fn subscribe_registers_and_replies_with_the_current_snapshot() {
         let mut registry = SubscriberRegistry::new();
-        let reply = handle(
+        let action = handle(
             ClientMessage::Subscribe,
             7,
             &mut registry,
             &sample_sessions(),
         );
         assert_eq!(
-            reply,
-            Some(ServerMessage::Sessions {
+            action,
+            Action::Reply(ServerMessage::Sessions {
                 sessions: sample_sessions()
             })
         );
@@ -146,16 +210,73 @@ mod tests {
     }
 
     #[test]
-    fn unsubscribe_removes_and_has_no_reply() {
+    fn unsubscribe_removes_and_does_nothing_else() {
         let mut registry = SubscriberRegistry::new();
         registry.subscribe(7);
-        let reply = handle(
+        let action = handle(
             ClientMessage::Unsubscribe,
             7,
             &mut registry,
             &sample_sessions(),
         );
-        assert_eq!(reply, None);
+        assert_eq!(action, Action::Nothing);
         assert!(!registry.is_subscribed(7));
+    }
+
+    #[test]
+    fn spawn_and_kill_return_terminal_actions() {
+        let mut registry = SubscriberRegistry::new();
+        let worktree = PathBuf::from("/repo/.usagi/sessions/work");
+        assert_eq!(
+            handle(
+                ClientMessage::Spawn {
+                    worktree: worktree.clone()
+                },
+                1,
+                &mut registry,
+                &[]
+            ),
+            Action::Spawn(worktree.clone())
+        );
+        assert_eq!(
+            handle(
+                ClientMessage::Kill {
+                    worktree: worktree.clone()
+                },
+                1,
+                &mut registry,
+                &[]
+            ),
+            Action::Kill(worktree)
+        );
+    }
+
+    #[test]
+    fn terminal_registry_tracks_insert_pid_and_remove() {
+        let mut registry = TerminalRegistry::new();
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        assert!(!registry.contains(&a));
+        assert_eq!(registry.pid(&a), None);
+        registry.insert(a.clone(), 111);
+        registry.insert(b.clone(), 222);
+        assert!(registry.contains(&a));
+        assert_eq!(registry.pid(&a), Some(111));
+        assert_eq!(registry.worktrees(), vec![a.clone(), b.clone()]);
+        // Removing returns the pid so the caller can kill it; a second remove is
+        // a no-op returning None.
+        assert_eq!(registry.remove(&a), Some(111));
+        assert_eq!(registry.remove(&a), None);
+        assert!(!registry.contains(&a));
+        assert_eq!(registry.worktrees(), vec![b]);
+    }
+
+    #[test]
+    fn terminal_registry_insert_replaces_a_previous_pid() {
+        let mut registry = TerminalRegistry::new();
+        let a = PathBuf::from("/a");
+        registry.insert(a.clone(), 1);
+        registry.insert(a.clone(), 2);
+        assert_eq!(registry.pid(&a), Some(2));
     }
 }

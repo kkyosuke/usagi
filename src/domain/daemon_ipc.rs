@@ -14,6 +14,8 @@
 //! [`crate::infrastructure::daemon_ipc`] and the composition root — so the
 //! protocol logic is unit-tested without a socket.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::daemon::SessionSnapshot;
@@ -34,6 +36,11 @@ pub enum ClientMessage {
     Subscribe,
     /// Stop receiving snapshot pushes.
     Unsubscribe,
+    /// Spawn (or reuse) the daemon-owned terminal for `worktree`. The daemon owns
+    /// the process, so it keeps running after the requesting client disconnects.
+    Spawn { worktree: PathBuf },
+    /// Kill the daemon-owned terminal for `worktree`, if one is running.
+    Kill { worktree: PathBuf },
 }
 
 /// A message the daemon sends to a client.
@@ -43,6 +50,10 @@ pub enum ServerMessage {
     /// The monitored-sessions snapshot, as a one-shot reply or a subscription
     /// push.
     Sessions { sessions: Vec<SessionSnapshot> },
+    /// A terminal is running for `worktree`, owned by the daemon under `pid`.
+    Spawned { worktree: PathBuf, pid: u32 },
+    /// The terminal for `worktree` has been killed (or none was running).
+    Killed { worktree: PathBuf },
     /// A request could not be handled; carries a human-readable reason.
     Error { message: String },
 }
