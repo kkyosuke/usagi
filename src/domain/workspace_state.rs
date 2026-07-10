@@ -227,6 +227,23 @@ pub struct PrLink {
     /// loads as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The PR's lifecycle state — open, merged, or dismissed (hidden). Drives how
+    /// the popup renders and lists it. Defaults to [`PrState::Open`]; an
+    /// unrecognised stored value degrades to it via
+    /// [`crate::domain::serde_fallback`], and an older file without the field
+    /// loads as `Open`. Omitted from persisted files when `Open`.
+    #[serde(
+        default,
+        skip_serializing_if = "PrState::is_open",
+        deserialize_with = "crate::domain::serde_fallback::or_default"
+    )]
+    pub state: PrState,
+    /// Whether [`state`](Self::state) was set by the user (from the popup) rather
+    /// than derived. A pinned state is authoritative: the `gh` auto-detection
+    /// ([`crate::infrastructure::pr_title`]) never overrides it. Defaults to
+    /// `false`, and is omitted from persisted files when `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
 }
 
 impl PrLink {
@@ -238,7 +255,27 @@ impl PrLink {
             number,
             url: url.into(),
             title: None,
+            state: PrState::Open,
+            pinned: false,
         }
+    }
+
+    /// Whether this PR is dismissed (hidden). A dismissed PR is kept as a
+    /// tombstone but excluded from the badge count and the popup's default view.
+    pub fn is_dismissed(&self) -> bool {
+        self.state == PrState::Dismissed
+    }
+
+    /// Whether this PR shows in the badge and the popup's default view — every
+    /// state except [`PrState::Dismissed`].
+    pub fn is_visible(&self) -> bool {
+        !self.is_dismissed()
+    }
+
+    /// How many of `prs` are visible (not dismissed) — the number the sidebar's
+    /// `#<count>` badge shows.
+    pub fn visible_count(prs: &[PrLink]) -> usize {
+        prs.iter().filter(|p| p.is_visible()).count()
     }
 
     /// The canonical identity used to de-duplicate PR links: the URL truncated at
@@ -266,14 +303,52 @@ impl PrLink {
         for pr in prs {
             match out.iter_mut().find(|p| p.pr_key() == pr.pr_key()) {
                 Some(existing) => {
+                    // Read these before moving `pr.title` out below (a partial move
+                    // would otherwise forbid borrowing `pr` again).
+                    let dismissed = pr.is_dismissed();
+                    let pinned = pr.pinned;
                     if existing.title.is_none() {
                         existing.title = pr.title;
                     }
+                    // Dismissal is sticky: if any worktree hid this PR it stays
+                    // hidden folded, so a tombstone is never resurrected by a
+                    // sibling worktree that still lists it. A user-pinned state on
+                    // either side is likewise preserved.
+                    if dismissed {
+                        existing.state = PrState::Dismissed;
+                    }
+                    existing.pinned |= pinned;
                 }
                 None => out.push(pr),
             }
         }
         out
+    }
+}
+
+/// The lifecycle state of a discovered pull request, controlling how the PR popup
+/// renders and lists it (see [`PrLink::state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    /// Open — shown with the `○` glyph. The default for a freshly detected PR.
+    #[default]
+    Open,
+    /// Merged — shown with the `●` glyph. Set automatically when `gh` reports the
+    /// PR merged, or manually from the popup.
+    Merged,
+    /// Dismissed (hidden) — kept as a tombstone so a re-detected URL is not
+    /// re-surfaced, but excluded from the badge count and the popup's default
+    /// view. Revealed by the popup's "hidden" toggle, from where it can be
+    /// restored to [`Open`](Self::Open).
+    Dismissed,
+}
+
+impl PrState {
+    /// Whether this is the default [`Open`](Self::Open) state — the
+    /// `skip_serializing_if` predicate that keeps `open` out of persisted files.
+    fn is_open(&self) -> bool {
+        matches!(self, PrState::Open)
     }
 }
 
@@ -1120,6 +1195,48 @@ mod tests {
     }
 
     #[test]
+    fn pr_state_helpers_classify_visibility_and_count() {
+        let open = PrLink::new(1, "https://github.com/o/r/pull/1");
+        let mut merged = PrLink::new(2, "https://github.com/o/r/pull/2");
+        merged.state = PrState::Merged;
+        let mut hidden = PrLink::new(3, "https://github.com/o/r/pull/3");
+        hidden.state = PrState::Dismissed;
+
+        // Open and merged are visible; only dismissed is hidden.
+        assert!(open.is_visible() && !open.is_dismissed());
+        assert!(merged.is_visible() && !merged.is_dismissed());
+        assert!(hidden.is_dismissed() && !hidden.is_visible());
+        // The badge count is the visible ones — the dismissed PR is not counted.
+        assert_eq!(PrLink::visible_count(&[open, merged, hidden]), 2);
+        assert_eq!(PrLink::visible_count(&[]), 0);
+    }
+
+    #[test]
+    fn pr_link_aggregate_keeps_a_dismissal_and_a_pin_sticky() {
+        // The same PR seen open in one worktree and dismissed in another folds to a
+        // single dismissed entry — a tombstone a sibling sighting cannot resurrect.
+        let open = PrLink::new(5, "https://github.com/o/r/pull/5");
+        let mut hidden = PrLink::new(5, "https://github.com/o/r/pull/5/files");
+        hidden.state = PrState::Dismissed;
+        hidden.pinned = true;
+        let folded = PrLink::aggregate([open, hidden]);
+        assert_eq!(folded.len(), 1);
+        assert!(folded[0].is_dismissed());
+        // The user-pinned flag survives the fold too.
+        assert!(folded[0].pinned);
+
+        // Order-independent: an open sighting after the dismissed one still folds
+        // to dismissed (the existing dismissal wins, and the pin is OR-ed in).
+        let mut hidden_first = PrLink::new(6, "https://github.com/o/r/pull/6");
+        hidden_first.state = PrState::Dismissed;
+        let open_second = PrLink::new(6, "https://github.com/o/r/pull/6");
+        let folded = PrLink::aggregate([hidden_first, open_second]);
+        assert_eq!(folded.len(), 1);
+        assert!(folded[0].is_dismissed());
+        assert!(!folded[0].pinned);
+    }
+
+    #[test]
     fn pr_is_omitted_when_empty_and_round_trips_when_set() {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
@@ -1157,6 +1274,24 @@ mod tests {
             serde_json::from_str::<WorkspaceState>(&json).unwrap(),
             state
         );
+
+        // The default `open` state and unpinned flag are omitted from the file (so
+        // an older usagi parses it), but a non-default state and a pin round-trip.
+        assert!(!json.contains("\"state\"") && !json.contains("\"pinned\""));
+        state.sessions[0].worktrees[0].pr[1].state = PrState::Merged;
+        state.sessions[0].worktrees[0].pr[1].pinned = true;
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"state\":\"merged\"") && json.contains("\"pinned\":true"));
+        assert_eq!(
+            serde_json::from_str::<WorkspaceState>(&json).unwrap(),
+            state
+        );
+        // An unknown future state degrades to the default rather than failing the
+        // whole load (serde_fallback), while the rest of the PR still parses.
+        let forged = json.replace("\"state\":\"merged\"", "\"state\":\"superseded\"");
+        let loaded = serde_json::from_str::<WorkspaceState>(&forged).unwrap();
+        assert_eq!(loaded.sessions[0].worktrees[0].pr[1].state, PrState::Open);
+        assert!(loaded.sessions[0].worktrees[0].pr[1].pinned);
     }
 
     #[test]

@@ -856,7 +856,9 @@ pub(super) fn pr_cell(prs: &[PrLink], width: usize) -> String {
     if prs.is_empty() {
         return " ".repeat(width);
     }
-    let badge = style(format!("{PR_ICON} {}", prs.len()))
+    // Dismissed PRs are hidden from the count (they linger only as tombstones), so
+    // the badge tracks the active PRs — the same set the popup shows by default.
+    let badge = style(format!("{PR_ICON} {}", PrLink::visible_count(prs)))
         .info()
         .underlined()
         .to_string();
@@ -870,8 +872,9 @@ pub(super) fn pr_width(prs: &[PrLink]) -> usize {
     if prs.is_empty() {
         return 0;
     }
-    // icon (1 column) + space + the count's digits.
-    2 + digits(prs.len())
+    // icon (1 column) + space + the visible count's digits (dismissed PRs, which
+    // the badge omits, still keep the column reserved via the non-empty check).
+    2 + digits(PrLink::visible_count(prs))
 }
 
 /// The PR column is reserved at (at least) this width on every render — the glyph,

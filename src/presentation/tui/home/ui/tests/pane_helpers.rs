@@ -2,7 +2,7 @@ use super::*;
 
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{LabelColor, SessionLabelDef, SessionLabelMaster};
-use crate::domain::workspace_state::{AheadBehind, DiffStat};
+use crate::domain::workspace_state::{AheadBehind, DiffStat, PrState};
 use crate::presentation::theme::Palette;
 use chrono::DateTime;
 use console::{style, Style};
@@ -747,7 +747,7 @@ fn pr_width_is_the_icon_space_and_count_digits() {
 fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
     let mut titled = pr(442);
     titled.title = Some("Add PR titles".to_string());
-    let popup = pr_popup_box(&[titled, pr(447)]);
+    let popup = pr_popup_box(&[titled, pr(447)], false);
     let plain: Vec<String> = popup
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -763,35 +763,83 @@ fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
     assert!(!plain
         .iter()
         .any(|l| l.contains("#442") && l.contains("#447")));
+    // Each active PR leads with the open glyph and ends with the hide action.
+    assert!(plain.iter().any(|l| l.contains('○') && l.contains('✕')));
     // No PR → no box, so the overlay is a no-op for a session without one.
-    assert!(pr_popup_box(&[]).is_empty());
+    assert!(pr_popup_box(&[], false).is_empty());
 }
 
 #[test]
 fn pr_popup_box_keeps_the_title_clear_for_a_single_digit_pr() {
-    let popup = pr_popup_box(&[pr(7)]);
+    let popup = pr_popup_box(&[pr(7)], false);
     let plain: Vec<String> = popup
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
         .collect();
 
-    assert_eq!(plain[0], "┌─ PR ┐");
-    assert_eq!(plain[1], "│ #7  │");
+    // The box title border stays framed, the `owner/repo` header sits on its own
+    // row, and the PR is indented beneath it: `<glyph> #<n> … <action>` — the open
+    // glyph, the number in its fixed cell, and the hide action flush right.
+    assert!(plain[0].contains("─ PR ─"));
+    assert!(plain[1].contains("o/r"));
+    assert!(plain[2].contains('○') && plain[2].contains("#7") && plain[2].contains('✕'));
+    // The row is indented under the header.
+    assert!(plain[2].starts_with("│  "));
+}
+
+#[test]
+fn pr_popup_box_renders_merged_dismissed_and_the_hidden_toggle() {
+    let mut merged = pr(1);
+    merged.state = PrState::Merged;
+    merged.title = Some("Merged work".to_string()); // exercises the dimmed-title branch
+    let mut hidden = pr(2);
+    hidden.state = PrState::Dismissed;
+    let open = pr(3);
+
+    // Collapsed: the open and merged PRs show; the dismissed one is folded behind a
+    // `1 件非表示 ▸` toggle rather than listed.
+    let collapsed: Vec<String> =
+        pr_popup_box(&[merged.clone(), hidden.clone(), open.clone()], false)
+            .iter()
+            .map(|l| console::strip_ansi_codes(l).into_owned())
+            .collect();
+    assert!(collapsed
+        .iter()
+        .any(|l| l.contains('●') && l.contains("#1")));
+    assert!(collapsed.iter().any(|l| l.contains("#3")));
+    assert!(collapsed
+        .iter()
+        .any(|l| l.contains("1 件非表示") && l.contains('▸')));
+    assert!(!collapsed.iter().any(|l| l.contains("#2")));
+
+    // Expanded: the toggle flips to `▾` and the dismissed PR appears with the
+    // restore action `↺`.
+    let expanded: Vec<String> = pr_popup_box(&[merged, hidden, open], true)
+        .iter()
+        .map(|l| console::strip_ansi_codes(l).into_owned())
+        .collect();
+    assert!(expanded
+        .iter()
+        .any(|l| l.contains("1 件非表示") && l.contains('▾')));
+    assert!(expanded
+        .iter()
+        .any(|l| l.contains("#2") && l.contains('⨯') && l.contains('↺')));
 }
 
 #[test]
 fn pr_popup_box_lists_every_pr_on_its_own_row_and_clips_a_long_title() {
-    // Each PR is one content row, so twenty PRs make twenty rows plus the two
-    // borders — the list stacks vertically rather than packing across a row.
+    // Each PR is one content row, so twenty PRs (all in one repo) make twenty rows
+    // plus the single `owner/repo` header and the two borders — the list stacks
+    // vertically rather than packing across a row.
     let many: Vec<PrLink> = (100u32..120).map(pr).collect();
-    let popup = pr_popup_box(&many);
-    assert_eq!(popup.len(), many.len() + 2);
+    let popup = pr_popup_box(&many, false);
+    assert_eq!(popup.len(), many.len() + 3);
     // A title wider than the cap is clipped so the box never spans the screen:
     // every row stays within the inner cap plus the two borders and a pad space
     // on each side.
     let mut long = pr(7);
     long.title = Some("x".repeat(200));
-    for line in pr_popup_box(std::slice::from_ref(&long)) {
+    for line in pr_popup_box(std::slice::from_ref(&long), false) {
         assert!(console::measure_text_width(&line) <= PR_POPUP_INNER + 4);
     }
 }

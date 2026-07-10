@@ -526,6 +526,71 @@ fn pr_popup_tracks_the_target_and_reports_changes() {
 }
 
 #[test]
+fn pr_popup_show_dismissed_toggles_and_resets_on_repin() {
+    let mut state = state();
+    // A fresh popup opens collapsed (dismissed PRs hidden behind the toggle).
+    assert!(!state.pr_popup_show_dismissed());
+    state.set_pr_popup(Some(1));
+    state.toggle_pr_popup_show_dismissed();
+    assert!(state.pr_popup_show_dismissed());
+    // (Re-)pinning to a *different* session collapses it again...
+    state.set_pr_popup(Some(0));
+    assert!(!state.pr_popup_show_dismissed());
+    // ...and so does closing the popup.
+    state.toggle_pr_popup_show_dismissed();
+    assert!(state.pr_popup_show_dismissed());
+    state.set_pr_popup(None);
+    assert!(!state.pr_popup_show_dismissed());
+    // A no-op re-pin (same target) does not disturb the expanded view.
+    state.set_pr_popup(Some(0));
+    state.toggle_pr_popup_show_dismissed();
+    assert!(!state.set_pr_popup(Some(0)));
+    assert!(state.pr_popup_show_dismissed());
+}
+
+#[test]
+fn set_pinned_pr_state_persists_the_choice_and_reflects_it_in_the_row() {
+    use crate::domain::workspace_state::{PrLink, PrState};
+    use crate::infrastructure::{pr_link_store, storage};
+
+    let _guard = crate::test_support::process_env_guard();
+    let data = tempfile::tempdir().unwrap();
+    let old = std::env::var_os(storage::DATA_DIR_ENV);
+    std::env::set_var(storage::DATA_DIR_ENV, data.path());
+
+    // The popup pins a session row whose path is the store key `set_pr_state`
+    // writes under, so seed the store at that path and mirror it in the row.
+    let root = std::path::Path::new("/repo/main");
+    let pr = PrLink::new(412, "https://github.com/o/r/pull/412");
+    pr_link_store::add(root, std::slice::from_ref(&pr)).unwrap();
+    let mut main = worktree("main");
+    main.pr = vec![pr];
+    let mut state = HomeState::new("usagi", vec![main], None);
+
+    // With no popup pinned it is a no-op.
+    assert!(!state.set_pinned_pr_state("https://github.com/o/r/pull/412", PrState::Merged));
+    // A popup pinned to an out-of-range index resolves no session row → no-op.
+    state.set_pr_popup(Some(99));
+    assert!(!state.set_pinned_pr_state("https://github.com/o/r/pull/412", PrState::Merged));
+
+    state.set_pr_popup(Some(0));
+    assert!(state.set_pinned_pr_state("https://github.com/o/r/pull/412", PrState::Merged));
+    // The live sidebar row reflects the merge, pinned so `gh` won't override it...
+    let row = state.list().worktree_by_global_index(0).unwrap();
+    assert_eq!(row.pr[0].state, PrState::Merged);
+    assert!(row.pr[0].pinned);
+    // ...and the choice is persisted to the store.
+    assert_eq!(pr_link_store::get(root)[0].state, PrState::Merged);
+    // Re-applying the same state changes nothing (so the loop skips the repaint).
+    assert!(!state.set_pinned_pr_state("https://github.com/o/r/pull/412", PrState::Merged));
+
+    match old {
+        Some(old) => std::env::set_var(storage::DATA_DIR_ENV, old),
+        None => std::env::remove_var(storage::DATA_DIR_ENV),
+    }
+}
+
+#[test]
 fn command_palette_opens_and_closes_clearing_the_input() {
     let mut state = state();
     assert!(!state.command_palette_open());

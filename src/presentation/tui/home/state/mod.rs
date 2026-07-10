@@ -653,6 +653,11 @@ pub struct HomeState {
     /// `#<number>`; cleared by a click outside it, a keypress, or `Esc`. The
     /// renderer floats the session's `#<number>` list beside its row.
     pr_popup: Option<usize>,
+    /// Whether the pinned PR popup is expanded to also list this session's
+    /// dismissed (hidden) PRs, from where they can be restored. Toggled by the
+    /// popup's "N 件非表示" row and reset to `false` whenever the popup is
+    /// (re-)pinned to a session or closed, so a fresh popup opens collapsed.
+    pr_popup_show_dismissed: bool,
     /// The transient overlay that captures the keyboard while open (the 選択
     /// inline create/rename inputs, the text modal, the right-pane preview, the
     /// session-removal checklist, the note editor). One [`Overlay`] rather than a
@@ -941,6 +946,7 @@ impl HomeState {
             installed_agents: Vec::new(),
             agent_choice: None,
             pr_popup: None,
+            pr_popup_show_dismissed: false,
             overlay: Overlay::default(),
             quit_confirm: false,
             pane_exit_ctrl_c_grace: false,
@@ -3135,13 +3141,58 @@ impl HomeState {
         self.pr_popup
     }
 
+    /// Whether the pinned PR popup is expanded to also list dismissed (hidden)
+    /// PRs. Read by the renderer and the click hit-test so both agree on which
+    /// rows the box carries.
+    pub fn pr_popup_show_dismissed(&self) -> bool {
+        self.pr_popup_show_dismissed
+    }
+
+    /// Toggle whether the pinned PR popup also lists dismissed PRs, always forcing
+    /// a repaint (the box grows or shrinks).
+    pub fn toggle_pr_popup_show_dismissed(&mut self) {
+        self.pr_popup_show_dismissed = !self.pr_popup_show_dismissed;
+    }
+
     /// Pin the PR popup to worktree `target` (or close it with `None`), returning
     /// whether the target changed — the loop repaints only then, so re-pinning the
-    /// same session (or a no-op close) costs no redraw.
+    /// same session (or a no-op close) costs no redraw. Any (re-)pin or close
+    /// collapses the dismissed-PR view so a fresh popup opens showing only the
+    /// active PRs.
     pub fn set_pr_popup(&mut self, target: Option<usize>) -> bool {
         let changed = self.pr_popup != target;
+        if changed {
+            self.pr_popup_show_dismissed = false;
+        }
         self.pr_popup = target;
         changed
+    }
+
+    /// Apply `state` to the PR identified by `pr_key` in the pinned popup's
+    /// session, marking it user-pinned, and reflect the change in the live sidebar
+    /// row at once. Returns whether anything changed (worth a repaint); a no-op
+    /// when no popup is pinned or its session row cannot be resolved.
+    ///
+    /// The popup pins a session row whose `path` is the session root — the same key
+    /// the [`pr_link_store`](crate::infrastructure::pr_link_store) is written under —
+    /// so the persisted state and the in-memory badge stay in lock-step.
+    pub fn set_pinned_pr_state(
+        &mut self,
+        pr_key: &str,
+        state: crate::domain::workspace_state::PrState,
+    ) -> bool {
+        let Some(idx) = self.pr_popup else {
+            return false;
+        };
+        let Some(root) = self
+            .list
+            .worktree_by_global_index(idx)
+            .map(|wt| wt.path.clone())
+        else {
+            return false;
+        };
+        let prs = crate::usecase::workspace_state::set_pr_state(&root, pr_key, state);
+        self.list.set_pr_links(&root, prs)
     }
 
     /// Open the note editor for `target`, pre-filled with its current note.

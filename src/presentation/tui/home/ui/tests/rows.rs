@@ -2064,11 +2064,11 @@ fn pr_popup_floats_and_opens_across_unite_groups() {
     let (popup, top, left) = pr_popup_placement(&state, 24, 120).expect("a box for group 1");
     assert_eq!((top, left), (16, 43));
     assert!(stripped(&popup).contains("#777"));
-    // Clicking `#777` in that box (content row 17, the token flush at left+2 = 45)
-    // opens the extra workspace's PR — the click resolves the right session's URL
-    // across groups.
+    // The box lists an `o/r` header (row 17) then `#777` (row 18). Clicking the
+    // number's middle (past the indent+glyph zone, at left+2+3 = 48) opens the extra
+    // workspace's PR — the click resolves the right session's URL across groups.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 17),
+        pr_popup_click(&state, 24, 120, 48, 18),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/777"
     ));
 }
@@ -2874,24 +2874,29 @@ fn pr_popup_placement_floats_the_box_beside_the_pinned_session() {
 fn pr_popup_click_opens_the_pr_on_the_clicked_row() {
     let mut state = attached_with_pr_sidebar();
     state.set_pr_popup(Some(0));
-    // The popup lists one PR per line: `#412` on the first content row (top 5 + 1 =
-    // row 6) and `#98` on the second (row 7). A click anywhere along a PR's row
-    // opens that PR, so the whole line is the target.
+    // The box groups by repo: row 5 border, 6 `o/r` header, 7 `#412`, 8 `o/other`
+    // header, 9 `#98`, 10 border. A click on a PR's **middle** (the number/title
+    // span, past the indent+glyph zone, at left+2+3 = 48) opens it.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 6),
+        pr_popup_click(&state, 24, 120, 48, 7),
         PopupClick::Open(url) if url == "https://github.com/o/r/pull/412"
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 47, 7),
+        pr_popup_click(&state, 24, 120, 48, 9),
         PopupClick::Open(url) if url == "https://github.com/o/other/pull/98"
     ));
-    // The box's top (row 5) and bottom (row 8) borders carry no PR → stay pinned.
+    // A repo header (row 6) and the box borders (rows 5 and 10) carry no PR → stay
+    // pinned.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, 48, 6),
+        PopupClick::Inside
+    ));
     assert!(matches!(
         pr_popup_click(&state, 24, 120, 45, 5),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 8),
+        pr_popup_click(&state, 24, 120, 45, 10),
         PopupClick::Inside
     ));
 }
@@ -2906,9 +2911,9 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
     ));
     state.set_pr_popup(Some(0));
     // A click left of the box (over the sidebar), above it, and below it (past the
-    // bottom border at row 8) all land outside the box's rectangle and dismiss it.
+    // bottom border at row 10) all land outside the box's rectangle and dismiss it.
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 2, 6),
+        pr_popup_click(&state, 24, 120, 2, 7),
         PopupClick::Outside
     ));
     assert!(matches!(
@@ -2916,7 +2921,7 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
         PopupClick::Outside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 9),
+        pr_popup_click(&state, 24, 120, 45, 11),
         PopupClick::Outside
     ));
 }
@@ -2925,21 +2930,133 @@ fn pr_popup_click_outside_the_box_dismisses_it() {
 fn pr_popup_click_on_the_box_borders_stays_pinned() {
     let mut state = attached_with_pr_sidebar();
     state.set_pr_popup(Some(0));
-    // The box's top border (row 5) and bottom border (row 8) carry no PR, so a
+    // The box's top border (row 5) and bottom border (row 10) carry no PR, so a
     // click on them keeps the popup pinned rather than opening or dismissing.
-    // A click just right of the box (block width 8 → cols 43–50, so col 51) is
+    // A click just right of the box (block width 17 → cols 43–59, so col 60) is
     // outside the rectangle and dismisses it.
     assert!(matches!(
         pr_popup_click(&state, 24, 120, 45, 5),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 45, 8),
+        pr_popup_click(&state, 24, 120, 45, 10),
         PopupClick::Inside
     ));
     assert!(matches!(
-        pr_popup_click(&state, 24, 120, 51, 6),
+        pr_popup_click(&state, 24, 120, 60, 6),
         PopupClick::Outside
+    ));
+}
+
+/// The 0-based inner width of the pinned popup box (its block width less the two
+/// borders and the two pad spaces), for deriving column zones in the tests below.
+fn popup_inner_width(state: &HomeState) -> usize {
+    let (popup, _, _) = pr_popup_placement(state, 24, 120).expect("a pinned box");
+    console::measure_text_width(&popup[0]).saturating_sub(4)
+}
+
+#[test]
+fn pr_popup_click_glyph_toggles_state_and_action_hides_the_pr() {
+    use crate::domain::workspace_state::PrState;
+    let mut wt = worktree(Some("main"), false, BranchStatus::Pushed);
+    let mut merged = PrLink::new(98, "https://github.com/o/r/pull/98");
+    merged.state = PrState::Merged;
+    wt.pr = vec![PrLink::new(412, "https://github.com/o/r/pull/412"), merged];
+    let mut state = state_with(vec![
+        wt,
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    state.enter_closeup(1);
+    state.show_attached();
+    state.set_pr_popup(Some(0));
+
+    let (_popup, top, left) = pr_popup_placement(&state, 24, 120).unwrap();
+    let inner = popup_inner_width(&state);
+    // Rows: top border, `o/r` header, #412 (open), #98 (merged).
+    let open_row = (top + 2) as u16;
+    let merged_row = (top + 3) as u16;
+    let glyph_col = (left + 2) as u16; // inner col 0 — the indent/state-glyph zone
+    let middle_col = (left + 5) as u16; // inner col 3 — the `#` number (past the glyph zone)
+    let action_col = (left + 2 + inner - 1) as u16; // the trailing ✕
+
+    // The glyph toggles open↔merged; a dismissed one would restore (covered below).
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, glyph_col, open_row),
+        PopupClick::SetState { state: PrState::Merged, pr_key } if pr_key == "https://github.com/o/r/pull/412"
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, glyph_col, merged_row),
+        PopupClick::SetState {
+            state: PrState::Open,
+            ..
+        }
+    ));
+    // The middle opens the PR.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, middle_col, open_row),
+        PopupClick::Open(url) if url == "https://github.com/o/r/pull/412"
+    ));
+    // The trailing action hides an active PR.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, action_col, open_row),
+        PopupClick::SetState { state: PrState::Dismissed, pr_key } if pr_key == "https://github.com/o/r/pull/412"
+    ));
+    // A click on the box's left border/pad column of a content row keeps it pinned.
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, left as u16, open_row),
+        PopupClick::Inside
+    ));
+}
+
+#[test]
+fn pr_popup_click_footer_toggles_hidden_view_and_dismissed_rows_restore() {
+    use crate::domain::workspace_state::PrState;
+    let mut wt = worktree(Some("main"), false, BranchStatus::Pushed);
+    let mut hidden = PrLink::new(50, "https://github.com/o/r/pull/50");
+    hidden.state = PrState::Dismissed;
+    wt.pr = vec![PrLink::new(412, "https://github.com/o/r/pull/412"), hidden];
+    let mut state = state_with(vec![
+        wt,
+        worktree(Some("plain"), false, BranchStatus::Local),
+    ]);
+    state.enter_closeup(1);
+    state.show_attached();
+    state.set_pr_popup(Some(0));
+
+    // Collapsed: rows are the `o/r` header, the active #412, then the `1 件非表示 ▸`
+    // footer — the dismissed #50 is not listed. Clicking the footer toggles it.
+    let (_popup, top, left) = pr_popup_placement(&state, 24, 120).unwrap();
+    let footer_row = (top + 3) as u16;
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, (left + 3) as u16, footer_row),
+        PopupClick::ToggleDismissedView
+    ));
+
+    // Expand the hidden view: #50 now renders under its own `o/r` header below the
+    // footer, with a restore action. Its glyph and its trailing `↺` both restore it
+    // to open; its middle still opens the URL. Recompute placement (the box grew).
+    state.toggle_pr_popup_show_dismissed();
+    let (_popup, top, left) = pr_popup_placement(&state, 24, 120).unwrap();
+    let inner = popup_inner_width(&state);
+    // Rows: header, #412, footer, header, #50 → #50 at top + 5.
+    let hidden_row = (top + 5) as u16;
+    let glyph_col = (left + 2) as u16;
+    let middle_col = (left + 5) as u16;
+    let action_col = (left + 2 + inner - 1) as u16;
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, glyph_col, hidden_row),
+        PopupClick::SetState { state: PrState::Open, pr_key } if pr_key == "https://github.com/o/r/pull/50"
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, action_col, hidden_row),
+        PopupClick::SetState {
+            state: PrState::Open,
+            ..
+        }
+    ));
+    assert!(matches!(
+        pr_popup_click(&state, 24, 120, middle_col, hidden_row),
+        PopupClick::Open(url) if url == "https://github.com/o/r/pull/50"
     ));
 }
 
