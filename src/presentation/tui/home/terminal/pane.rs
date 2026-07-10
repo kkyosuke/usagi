@@ -461,6 +461,11 @@ fn drive(
             None,
         );
 
+        // The watcher owns background liveness polling; hand its ended-pane
+        // reports back to the pool before borrowing the active PTY. If this pane
+        // itself ended, compaction leaves no active PTY and the loop closes below.
+        pool.borrow_mut().release_ended();
+
         // Borrow the pool for this iteration's render / wait / input work, then let
         // it drop at the loop's end so the next pass's autostart runs unborrowed.
         // The active pane is fixed for the duration of this call (tab switches

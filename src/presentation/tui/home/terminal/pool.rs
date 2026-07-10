@@ -83,7 +83,7 @@ struct Watched {
     /// the one the monitor heuristic reads — the agent pane's when present.
     bell: Arc<AtomicU64>,
     /// Every pane's liveness flag; the session is live while any is `true`.
-    alive: Vec<Arc<AtomicBool>>,
+    alive: Vec<(u64, Arc<AtomicBool>)>,
     /// The root process id of each live pane's shell — also its process-group id
     /// (portable-pty makes the shell a session leader), so the resource sampler
     /// totals each shell's whole subtree (the shell and any agent CLI beneath it).
@@ -94,10 +94,10 @@ struct Watched {
     /// makes detached panes update the sidebar without waiting for a later
     /// workspace re-sync.
     pr_panes: Vec<WatchedPrPane>,
-    /// Input handle for the agent pane, when this session currently has one.
+    /// Input handles for live agent panes in this session.
     /// The watcher drains MCP live `session_prompt` prompts only for sessions with
-    /// this handle, so prompts sent while no agent pane is live remain queued.
-    agent_input: Option<PaneInputHandle>,
+    /// a handle, so prompts sent while no agent pane is live remain queued.
+    agent_inputs: Vec<(u64, PaneInputHandle)>,
     /// A human label (the worktree branch) shown in the notification.
     label: String,
     /// Whether any pane in this session is running the Antigravity agent CLI.
@@ -107,7 +107,9 @@ struct Watched {
 impl Watched {
     /// Whether the session still has at least one live pane.
     fn any_alive(&self) -> bool {
-        self.alive.iter().any(|a| a.load(Ordering::SeqCst))
+        self.alive
+            .iter()
+            .any(|(_, alive)| alive.load(Ordering::SeqCst))
     }
 }
 
@@ -151,6 +153,11 @@ struct Shared {
     /// The workspace total — the sum across every live session's process tree —
     /// as of the last sample. Idle (zero) while nothing is live.
     resource_total: ResourceUsage,
+    /// Pane ids whose reader observed EOF. The watcher is the only thread that
+    /// polls every background pane, while the pool is the only owner allowed to
+    /// replace a heavy PTY/parser with its final lightweight screen snapshot.
+    /// This queue bridges those two ownership domains.
+    ended_panes: HashMap<PathBuf, HashSet<u64>>,
 }
 
 /// A cloneable read/notify handle onto the shared waiting state, given to the
@@ -212,10 +219,10 @@ impl MonitorHandle {
                 path,
                 Watched {
                     bell: Arc::new(AtomicU64::new(0)),
-                    alive: vec![Arc::new(AtomicBool::new(true))],
+                    alive: vec![(0, Arc::new(AtomicBool::new(true)))],
                     roots: Vec::new(),
                     pr_panes: Vec::new(),
-                    agent_input: None,
+                    agent_inputs: Vec::new(),
                     label: String::new(),
                     has_antigravity: false,
                 },
@@ -724,7 +731,11 @@ struct Pane {
     /// Stable creation id used to number duplicate tab labels independently of
     /// the current tab-strip order.
     id: u64,
-    pty: PaneBackend,
+    pty: Option<PaneBackend>,
+    /// Final visible screen retained after `pty` exits. It deliberately contains
+    /// no backend/parser/scrollback state, so an ended pane costs only its
+    /// rendered rows.
+    ended_view: Option<TerminalView>,
     kind: PaneKind,
     label_override: Option<String>,
     /// For an agent pane, which CLI it ran — recorded so the open-panes snapshot
@@ -779,6 +790,24 @@ impl SessionPanes {
                     .to_string()
             })
             .collect();
+    }
+}
+
+impl Pane {
+    fn is_alive(&self) -> bool {
+        self.pty.as_ref().is_some_and(PaneBackend::is_alive)
+    }
+
+    /// Preserve only the visible screen, then drop the backend, parser and
+    /// scrollback.
+    fn release_ended(&mut self) {
+        let Some(pty) = self.pty.take() else { return };
+        if pty.is_alive() {
+            self.pty = Some(pty);
+            return;
+        }
+        self.ended_view = Some(TerminalView::from_screen(pty.parser().screen()));
+        drop(pty);
     }
 }
 
@@ -916,7 +945,7 @@ impl TerminalPool {
         let alive = self
             .sessions
             .get(&key)
-            .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()));
+            .is_some_and(|sp| sp.panes.iter().any(Pane::is_alive));
         if alive {
             // Re-attach: clamp the active index defensively in case panes changed.
             if let Some(sp) = self.sessions.get_mut(&key) {
@@ -1036,7 +1065,11 @@ impl TerminalPool {
         self.sessions
             .get(dir)
             .and_then(|sp| sp.panes.iter().find(|p| p.id == id))
-            .is_some_and(|p| p.pty.generation() > 0 || !p.pty.is_alive())
+            .is_some_and(|p| {
+                p.pty
+                    .as_ref()
+                    .is_none_or(|pty| pty.generation() > 0 || !pty.is_alive())
+            })
     }
 
     /// Set `dir`'s active tab directly (clamped to the pane count), for restoring
@@ -1147,7 +1180,9 @@ impl TerminalPool {
                 let mut closed = sp.panes.remove(tab);
                 // An explicit close kills the terminal even when the daemon owns
                 // it; dropping alone would only detach a remote pane.
-                closed.pty.kill();
+                if let Some(pty) = closed.pty.as_mut() {
+                    pty.kill();
+                }
                 drop(closed);
                 sp.rebuild_tab_labels();
                 match tabs::active_after_close(sp.active.min(len_before - 1), len_before) {
@@ -1206,7 +1241,9 @@ impl TerminalPool {
                 // it (a remote pane's drop would only detach); a local pane's
                 // shell is killed by the drop itself.
                 let mut closed = sp.panes.remove(active);
-                closed.pty.kill();
+                if let Some(pty) = closed.pty.as_mut() {
+                    pty.kill();
+                }
                 drop(closed);
                 sp.rebuild_tab_labels();
                 match tabs::active_after_close(active, len_before) {
@@ -1234,7 +1271,7 @@ impl TerminalPool {
     pub fn has_live_pane(&self, dir: &Path) -> bool {
         self.sessions
             .get(dir)
-            .is_some_and(|sp| sp.panes.iter().any(|p| p.pty.is_alive()))
+            .is_some_and(|sp| sp.panes.iter().any(Pane::is_alive))
     }
 
     /// Whether `dir` already holds an agent pane running `cli`. A session keeps
@@ -1246,7 +1283,7 @@ impl TerminalPool {
         self.sessions.get(dir).is_some_and(|sp| {
             sp.panes
                 .iter()
-                .any(|p| matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli))
+                .any(|p| p.is_alive() && matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli))
         })
     }
 
@@ -1256,11 +1293,9 @@ impl TerminalPool {
     /// rather than spawning a duplicate.
     pub fn activate_agent_of(&mut self, dir: &Path, cli: AgentCli) -> bool {
         match self.sessions.get_mut(dir) {
-            Some(sp) => match sp
-                .panes
-                .iter()
-                .position(|p| matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli))
-            {
+            Some(sp) => match sp.panes.iter().position(|p| {
+                p.is_alive() && matches!(p.kind, PaneKind::Agent) && p.cli == Some(cli)
+            }) {
                 Some(idx) => {
                     sp.active = idx;
                     true
@@ -1279,7 +1314,7 @@ impl TerminalPool {
             return None;
         }
         let active = sp.active.min(sp.panes.len().saturating_sub(1));
-        Some(&mut sp.panes[active].pty)
+        sp.panes[active].pty.as_mut()
     }
 
     /// The tab strip for `dir`: a label per pane (in tab order) and the active
@@ -1333,7 +1368,8 @@ impl TerminalPool {
                 let id = self.allocate_pane_id();
                 return Ok(Pane {
                     id,
-                    pty,
+                    pty: Some(pty),
+                    ended_view: None,
                     kind,
                     label_override: None,
                     cli,
@@ -1349,7 +1385,8 @@ impl TerminalPool {
         let id = self.allocate_pane_id();
         Ok(Pane {
             id,
-            pty,
+            pty: Some(pty),
+            ended_view: None,
             kind,
             label_override: None,
             cli,
@@ -1362,6 +1399,33 @@ impl TerminalPool {
         id
     }
 
+    /// Drain watcher-reported exits and replace their PTY/parser ownership with
+    /// a visible-only final snapshot. Safe to call on every UI tick: the common
+    /// path is one shared-state lock and an empty map.
+    pub fn release_ended(&mut self) {
+        let ended = std::mem::take(&mut self.lock().ended_panes);
+        for (path, ids) in ended {
+            let Some(session) = self.sessions.get_mut(&path) else {
+                continue;
+            };
+            for pane in &mut session.panes {
+                if ids.contains(&pane.id) {
+                    pane.release_ended();
+                }
+            }
+        }
+        if self.preview_cache.as_ref().is_some_and(|cache| {
+            self.sessions.get(&cache.dir).is_some_and(|session| {
+                session
+                    .panes
+                    .get(cache.active)
+                    .is_some_and(|pane| pane.pty.is_none())
+            })
+        }) {
+            self.preview_cache = None;
+        }
+    }
+
     /// Re-register `dir`'s watched handles from its current panes: liveness is the
     /// union of every pane's flag, and the bell the monitor heuristic reads is the
     /// agent pane's (or the first pane's when there is none). When the session has
@@ -1372,44 +1436,57 @@ impl TerminalPool {
             let bell = sp
                 .panes
                 .iter()
+                .filter(|p| p.pty.is_some())
                 .find(|p| matches!(p.kind, PaneKind::Agent))
-                .or_else(|| sp.panes.first())
-                .map(|p| p.pty.bell_handle())?;
-            let alive = sp.panes.iter().map(|p| p.pty.alive_handle()).collect();
+                .or_else(|| sp.panes.iter().find(|p| p.pty.is_some()))
+                .and_then(|p| p.pty.as_ref())
+                .map(PaneBackend::bell_handle)?;
+            let alive = sp
+                .panes
+                .iter()
+                .filter_map(|p| p.pty.as_ref().map(|pty| (p.id, pty.alive_handle())))
+                .collect();
             // The shell pid of every pane — the roots the resource sampler totals
             // each session's process tree from. A pane already reaped reports
             // none and is simply left out.
-            let roots = sp.panes.iter().filter_map(|p| p.pty.process_id()).collect();
+            let roots = sp
+                .panes
+                .iter()
+                .filter_map(|p| p.pty.as_ref().and_then(PaneBackend::process_id))
+                .collect();
             let pr_panes = sp
                 .panes
                 .iter()
-                .map(|p| WatchedPrPane {
-                    id: p.id,
-                    parser: p.pty.parser_handle(),
-                    generation: p.pty.generation_handle(),
-                    // Force the watcher to scan once after registration, so a
-                    // restored pane whose screen already contains a PR URL is
-                    // folded into the sidebar without requiring more output.
-                    last_generation: u64::MAX,
-                    pr_watermark: vt100::ScrollbackWatermark::default(),
-                    last_prs: Vec::new(),
+                .filter_map(|p| {
+                    p.pty.as_ref().map(|pty| WatchedPrPane {
+                        id: p.id,
+                        parser: pty.parser_handle(),
+                        generation: pty.generation_handle(),
+                        // Force the watcher to scan once after registration, so a
+                        // restored pane whose screen already contains a PR URL is
+                        // folded into the sidebar without requiring more output.
+                        last_generation: u64::MAX,
+                        pr_watermark: vt100::ScrollbackWatermark::default(),
+                        last_prs: Vec::new(),
+                    })
                 })
                 .collect();
-            let agent_input = sp
+            let agent_inputs = sp
                 .panes
                 .iter()
-                .find(|p| matches!(p.kind, PaneKind::Agent))
-                .map(|p| p.pty.input_handle());
+                .filter(|p| matches!(p.kind, PaneKind::Agent))
+                .filter_map(|p| p.pty.as_ref().map(|pty| (p.id, pty.input_handle())))
+                .collect();
             let has_antigravity = sp
                 .panes
                 .iter()
-                .any(|p| p.cli == Some(AgentCli::Antigravity));
+                .any(|p| p.pty.is_some() && p.cli == Some(AgentCli::Antigravity));
             Some(Watched {
                 bell,
                 alive,
                 roots,
                 pr_panes,
-                agent_input,
+                agent_inputs,
                 label: label.to_string(),
                 has_antigravity,
             })
@@ -1419,8 +1496,8 @@ impl TerminalPool {
         // consumer. Stamped with this TUI's pid so a reader can tell a live pane
         // from a stale marker left by a crashed TUI. Written before taking the
         // lock — it is an independent on-disk file, not shared state.
-        match watched.as_ref().and_then(|w| w.agent_input.as_ref()) {
-            Some(_) => {
+        match watched.as_ref().is_some_and(|w| !w.agent_inputs.is_empty()) {
+            true => {
                 if let Err(err) = agent_live_pane_store::set(dir, std::process::id()) {
                     error_log::ErrorLog::record(&format!(
                         "failed to publish live-agent-pane marker for {}: {err:#}",
@@ -1428,7 +1505,7 @@ impl TerminalPool {
                     ));
                 }
             }
-            None => agent_live_pane_store::clear(dir),
+            false => agent_live_pane_store::clear(dir),
         }
         let mut shared = self.lock();
         match watched {
@@ -1479,7 +1556,9 @@ impl TerminalPool {
             // with the drop.
             if let Some(mut sp) = self.sessions.remove(path) {
                 for pane in &mut sp.panes {
-                    pane.pty.kill();
+                    if let Some(pty) = pane.pty.as_mut() {
+                        pty.kill();
+                    }
                 }
             }
         }
@@ -1513,7 +1592,7 @@ impl TerminalPool {
                 // The daemon terminal id (None for a local pane): the next TUI
                 // run re-attaches to the still-running terminal instead of
                 // respawning it.
-                terminal: p.pty.terminal_id(),
+                terminal: p.pty.as_ref().and_then(PaneBackend::terminal_id),
             })
             .collect();
         let active = sp.active.min(sp.panes.len().saturating_sub(1));
@@ -1531,10 +1610,11 @@ impl TerminalPool {
             return None;
         }
         let active = sp.active.min(sp.panes.len().saturating_sub(1));
-        let session = &mut sp.panes[active].pty;
-        if !session.is_alive() {
-            return None;
+        let pane = &mut sp.panes[active];
+        if pane.pty.is_none() {
+            return pane.ended_view.clone();
         }
+        let session = pane.pty.as_mut()?;
         let (height, width) = term.size();
         // The preview draws the tab strip above the body (the same header + tab
         // rows 没入 shows), so it must size the snapshot to the tab-reserved
@@ -1748,6 +1828,44 @@ fn spawn_watcher(
             };
             let before = snapshot_locked(&shared);
 
+            // Report every newly ended pane to the owning pool before pruning an
+            // all-dead session from watcher bookkeeping. Hash sets make repeated
+            // ticks idempotent until the UI thread drains the queue.
+            let ended: Vec<(PathBuf, u64)> = shared
+                .sessions
+                .iter()
+                .flat_map(|(path, watched)| {
+                    watched
+                        .alive
+                        .iter()
+                        .filter(|(_, alive)| !alive.load(Ordering::SeqCst))
+                        .map(|(id, _)| (path.clone(), *id))
+                })
+                .collect();
+            for (path, id) in ended {
+                shared.ended_panes.entry(path).or_default().insert(id);
+            }
+            // Drop watcher-side strong parser/input handles immediately; the
+            // pool dropping its PTY cannot release the grid while these remain.
+            for (path, watched) in &mut shared.sessions {
+                let dead_ids: HashSet<u64> = watched
+                    .alive
+                    .iter()
+                    .filter_map(|(id, alive)| (!alive.load(Ordering::SeqCst)).then_some(*id))
+                    .collect();
+                watched.pr_panes.retain(|pane| !dead_ids.contains(&pane.id));
+                let had_agent_inputs = !watched.agent_inputs.is_empty();
+                watched
+                    .agent_inputs
+                    .retain(|(id, _)| !dead_ids.contains(id));
+                if had_agent_inputs && watched.agent_inputs.is_empty() {
+                    agent_live_pane_store::clear(path);
+                }
+                watched
+                    .alive
+                    .retain(|(_, alive)| alive.load(Ordering::SeqCst));
+            }
+
             // Prune sessions whose every pane has exited so they stop being
             // tracked (the path is live while any pane is alive).
             let dead: Vec<PathBuf> = shared
@@ -1806,10 +1924,13 @@ fn spawn_watcher(
                     .sessions
                     .iter()
                     .filter_map(|(path, watched)| {
-                        watched.agent_input.as_ref().map(|input| LivePromptTarget {
-                            path: path.clone(),
-                            input: input.clone(),
-                        })
+                        watched
+                            .agent_inputs
+                            .first()
+                            .map(|(_, input)| LivePromptTarget {
+                                path: path.clone(),
+                                input: input.clone(),
+                            })
                     })
                     .collect();
                 (notices, pr_jobs, live_prompt_targets)

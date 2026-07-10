@@ -1427,7 +1427,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     let mut preview = |dir: &Path,
                        sidebar: crate::domain::settings::Sidebar|
      -> Option<crate::presentation::tui::home::terminal::view::TerminalView> {
-        pool.borrow_mut().snapshot(term, dir, sidebar)
+        let mut pool = pool.borrow_mut();
+        pool.release_ended();
+        pool.snapshot(term, dir, sidebar)
     };
 
     // Read (and optionally navigate) a session's tabs from 選択: `←`/`→` pass a

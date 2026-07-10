@@ -1115,8 +1115,8 @@ impl DaemonIpcServer {
         for terminal in self.terminal_registry.ids() {
             let exited = self
                 .terminals
-                .get(&terminal)
-                .is_some_and(|session| !session.is_alive());
+                .get_mut(&terminal)
+                .is_some_and(|session| !session.is_alive() || session.poll_exit());
             if !exited {
                 continue;
             }
