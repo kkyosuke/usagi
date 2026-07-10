@@ -848,6 +848,14 @@ impl DaemonIpcServer {
                     self.attach_table.detach(id, &worktree);
                     true
                 }
+                Action::Keys(worktree, data) => {
+                    self.write_terminal(&worktree, &data);
+                    true
+                }
+                Action::Resize(worktree, cols, rows) => {
+                    self.resize_terminal(&worktree, cols, rows);
+                    true
+                }
                 Action::Nothing => true,
             };
             if !alive {
@@ -869,6 +877,26 @@ impl DaemonIpcServer {
                 },
             ),
             None => true,
+        }
+    }
+
+    /// Write input bytes to `worktree`'s terminal, if one is running. Best-effort:
+    /// a write error (e.g. the shell just exited) is logged, not fatal.
+    fn write_terminal(&mut self, worktree: &Path, data: &[u8]) {
+        if let Some(session) = self.terminals.get_mut(worktree) {
+            if let Err(error) = session.write(data) {
+                eprintln!(
+                    "usagi daemon: writing to terminal {}: {error:#}",
+                    worktree.display()
+                );
+            }
+        }
+    }
+
+    /// Resize `worktree`'s terminal, if one is running.
+    fn resize_terminal(&mut self, worktree: &Path, cols: u16, rows: u16) {
+        if let Some(session) = self.terminals.get_mut(worktree) {
+            session.resize(rows, cols);
         }
     }
 

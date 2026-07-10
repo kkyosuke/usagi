@@ -47,6 +47,15 @@ pub enum ClientMessage {
     Attach { worktree: PathBuf },
     /// Stop receiving screen updates for `worktree`.
     Detach { worktree: PathBuf },
+    /// Write input bytes to `worktree`'s terminal (keystrokes, pasted text). The
+    /// resulting output flows back as [`ServerMessage::Screen`] to its attachers.
+    Keys { worktree: PathBuf, data: Vec<u8> },
+    /// Resize `worktree`'s terminal to `cols`×`rows`.
+    Resize {
+        worktree: PathBuf,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// A message the daemon sends to a client.
