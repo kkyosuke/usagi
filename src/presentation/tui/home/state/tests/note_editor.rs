@@ -194,6 +194,71 @@ fn note_editor_edits_confirm_and_cancel() {
 }
 
 #[test]
+fn note_editor_opens_on_the_note_tab_with_the_sessions_todos_and_decisions() {
+    let mut state = state();
+    let mut alpha = session_record("alpha", 1);
+    alpha.note = Some("memo".to_string());
+    alpha.todos = vec![SessionTodo::new("write tests"), {
+        let mut td = SessionTodo::new("ship");
+        td.done = true;
+        td
+    }];
+    alpha.decisions = vec![SessionDecision {
+        at: Utc::now(),
+        text: "chose approach A".to_string(),
+    }];
+    state.restore_sessions(vec![alpha]);
+    state.overview_move_down(); // root -> alpha
+
+    assert!(state.overview_begin_note());
+    let editor = state.note_editor().expect("editor open");
+    // Opens on the note tab, pre-filled, carrying read-only snapshots.
+    assert_eq!(editor.tab(), NoteTab::Note);
+    assert_eq!(editor.area().text(), "memo");
+    assert_eq!(editor.todos().len(), 2);
+    assert!(editor.todos()[1].done);
+    assert_eq!(editor.decisions().len(), 1);
+    assert_eq!(editor.decisions()[0].text, "chose approach A");
+}
+
+#[test]
+fn note_editor_cycle_tab_wraps_forward_and_backward() {
+    let state_labels: Vec<&str> = NoteTab::all().iter().map(|t| t.label()).collect();
+    assert_eq!(state_labels, ["note", "todos", "decisions"]);
+
+    let mut state = state_on_alpha();
+    // No editor open → cycling is a no-op that reports it did nothing.
+    assert!(!state.note_editor_cycle_tab(true));
+
+    assert!(state.overview_begin_note());
+    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Note);
+    // Forward: note -> todos -> decisions -> note (wrap).
+    assert!(state.note_editor_cycle_tab(true));
+    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Todos);
+    state.note_editor_cycle_tab(true);
+    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Decisions);
+    state.note_editor_cycle_tab(true);
+    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Note);
+    // Backward from note wraps to decisions.
+    state.note_editor_cycle_tab(false);
+    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Decisions);
+}
+
+#[test]
+fn note_editor_on_the_root_row_has_empty_todos_and_decisions() {
+    // The root scratchpad's todos/decisions are not mirrored into the sidebar
+    // state, so the editor opens them empty (the note still edits `root_note`).
+    let mut state = state();
+    state.restore_root_note(Some("root memo".to_string()));
+    assert!(state.overview_begin_note()); // cursor starts on the root row
+    let editor = state.note_editor().expect("editor open");
+    assert_eq!(editor.target(), ROOT_NAME);
+    assert_eq!(editor.area().text(), "root memo");
+    assert!(editor.todos().is_empty());
+    assert!(editor.decisions().is_empty());
+}
+
+#[test]
 fn selected_session_note_reads_the_cursor_rows_note() {
     // `state_on_alpha` records alpha with the note "existing" and parks the
     // cursor on it.

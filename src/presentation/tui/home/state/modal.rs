@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::LogLine;
+use crate::domain::workspace_state::{SessionDecision, SessionTodo};
 use crate::presentation::tui::chat::state::Chat;
 use crate::presentation::tui::diff::{self, DiffDoc, DiffFile, TreeKind, TreeRow};
 use crate::presentation::tui::markdown::MarkdownLine;
@@ -468,28 +469,83 @@ impl RenameInput {
     }
 }
 
+/// Which section of the note scratchpad the editor is showing.
+///
+/// The overlay is a small tabbed panel: the free-form [`Note`](NoteTab::Note)
+/// (editable), the [`Todos`](NoteTab::Todos) checklist, and the
+/// [`Decisions`](NoteTab::Decisions) log. `Tab` cycles forward and `BackTab`
+/// (Shift-Tab) backward. Todos and decisions are shown read-only here — an
+/// agent writes them over MCP (`session_todo_*` / `session_decision_*`); this
+/// view is where a person reads a session's checklist and the reasoning behind
+/// its work at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteTab {
+    Note,
+    Todos,
+    Decisions,
+}
+
+impl NoteTab {
+    /// The tab's short label, shown in the box title and the tab strip.
+    pub fn label(self) -> &'static str {
+        match self {
+            NoteTab::Note => "note",
+            NoteTab::Todos => "todos",
+            NoteTab::Decisions => "decisions",
+        }
+    }
+
+    /// The three tabs in display order (also the `Tab` cycle order).
+    pub fn all() -> [NoteTab; 3] {
+        [NoteTab::Note, NoteTab::Todos, NoteTab::Decisions]
+    }
+
+    /// The next (`forward`) or previous tab, wrapping around the three.
+    fn stepped(self, forward: bool) -> NoteTab {
+        let tabs = NoteTab::all();
+        let i = tabs.iter().position(|t| *t == self).unwrap_or(0);
+        let n = tabs.len();
+        let next = if forward { i + 1 } else { i + n - 1 } % n;
+        tabs[next]
+    }
+}
+
 /// The session-note editor modal, opened with `n` in 選択 (Overview) or `Ctrl-E`
-/// in 没入 (Attached). It holds the session whose note is being edited
-/// (`target`, its branch name / identity), the multi-line text buffer
-/// (pre-filled with the existing note), and `reattach` — whether closing it
-/// should re-attach the session's pane (set when opened from 没入, so the user
-/// drops straight back into the live terminal). The buffer's editing and caret
-/// movement live on [`TextArea`]; the modal just bundles it with its target.
+/// in 没入 (Attached). It holds the session whose scratchpad is open
+/// (`target`, its branch name / identity), the editable note buffer
+/// (pre-filled with the existing note), read-only snapshots of the session's
+/// `todos` / `decisions`, the current [`tab`](NoteTab), and `reattach` — whether
+/// closing it should re-attach the session's pane (set when opened from 没入, so
+/// the user drops straight back into the live terminal). The note buffer's
+/// editing and caret movement live on [`TextArea`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEditor {
     target: String,
     area: TextArea,
+    todos: Vec<SessionTodo>,
+    decisions: Vec<SessionDecision>,
+    tab: NoteTab,
     reattach: bool,
 }
 
 impl NoteEditor {
     /// Open the editor for session `target`, pre-filled with `initial` (its
-    /// current note). `reattach` records whether to re-attach the session on
-    /// close (true when opened from 没入).
-    pub(super) fn new(target: impl Into<String>, initial: &str, reattach: bool) -> Self {
+    /// current note) and snapshots of its `todos` / `decisions`. `reattach`
+    /// records whether to re-attach the session on close (true when opened from
+    /// 没入). Always opens on the [`Note`](NoteTab::Note) tab.
+    pub(super) fn new(
+        target: impl Into<String>,
+        initial: &str,
+        todos: Vec<SessionTodo>,
+        decisions: Vec<SessionDecision>,
+        reattach: bool,
+    ) -> Self {
         Self {
             target: target.into(),
             area: TextArea::from_text(initial),
+            todos,
+            decisions,
+            tab: NoteTab::Note,
             reattach,
         }
     }
@@ -504,22 +560,43 @@ impl NoteEditor {
         &self.area
     }
 
+    /// The session's todo checklist (read-only snapshot taken when opened).
+    pub fn todos(&self) -> &[SessionTodo] {
+        &self.todos
+    }
+
+    /// The session's decision log (read-only snapshot taken when opened).
+    pub fn decisions(&self) -> &[SessionDecision] {
+        &self.decisions
+    }
+
+    /// The tab currently shown.
+    pub fn tab(&self) -> NoteTab {
+        self.tab
+    }
+
+    /// Switch to the next (`forward`) or previous tab.
+    pub(super) fn cycle_tab(&mut self, forward: bool) {
+        self.tab = self.tab.stepped(forward);
+    }
+
     /// Whether closing the editor should re-attach the session's pane (it was
     /// opened from 没入).
     pub fn reattach(&self) -> bool {
         self.reattach
     }
 
-    /// The editable buffer: the event loop routes its keys straight to the
-    /// [`TextArea`]'s own editing methods (`insert` / `newline` / `backspace` /
-    /// `move_*` …), so the modal has no per-key forwarders of its own.
+    /// The editable note buffer: the event loop routes editing keys straight to
+    /// the [`TextArea`]'s own methods (`insert` / `newline` / `backspace` /
+    /// `move_*` …) while the [`Note`](NoteTab::Note) tab is shown.
     pub fn area_mut(&mut self) -> &mut TextArea {
         &mut self.area
     }
 
     /// Accept the note, consuming the editor: the target session, the typed text,
     /// and whether to re-attach. The text is persisted (and trimmed) by the
-    /// usecase; an empty buffer clears the note.
+    /// usecase; an empty buffer clears the note. Only the note is editable here,
+    /// so todos / decisions are not part of the result.
     pub(super) fn confirm(self) -> (String, String, bool) {
         (self.target, self.area.text(), self.reattach)
     }

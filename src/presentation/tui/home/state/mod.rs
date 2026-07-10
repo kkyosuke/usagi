@@ -23,7 +23,9 @@ use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
-use crate::domain::workspace_state::{SessionAgent, SessionRecord, WorktreeState};
+use crate::domain::workspace_state::{
+    SessionAgent, SessionDecision, SessionRecord, SessionTodo, WorktreeState,
+};
 
 use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
@@ -42,8 +44,9 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, Preview,
-    RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, NoteTab,
+    Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput,
+    TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel};
 
@@ -3067,7 +3070,25 @@ impl HomeState {
     /// (没入's `Ctrl-E`); `false` for 選択's `n`.
     fn open_note_for(&mut self, target: String, reattach: bool) {
         let initial = self.session_note(&target).unwrap_or_default().to_string();
-        self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
+        let (todos, decisions) = self.session_scratchpad(&target);
+        self.overlay = Overlay::Note(NoteEditor::new(
+            target, &initial, todos, decisions, reattach,
+        ));
+    }
+
+    /// The todos / decisions snapshot for the row named `name`: the session's
+    /// when it names a session, empty for the `⌂ root` row (the root's scratchpad
+    /// is not mirrored into the sidebar state). Cloned so the editor owns a
+    /// read-only copy it can render without borrowing the session list.
+    fn session_scratchpad(&self, name: &str) -> (Vec<SessionTodo>, Vec<SessionDecision>) {
+        if name == ROOT_NAME {
+            return (Vec::new(), Vec::new());
+        }
+        self.sessions
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| (s.todos().to_vec(), s.decisions().to_vec()))
+            .unwrap_or_default()
     }
 
     /// Begin editing the selected row's note in 選択 (Overview): open the note editor
@@ -3120,6 +3141,19 @@ impl HomeState {
     /// (it was opened from 没入). `false` when no editor is open.
     pub fn note_editor_reattaches(&self) -> bool {
         self.note_editor().is_some_and(NoteEditor::reattach)
+    }
+
+    /// Switch the open note editor to the next (`forward`) or previous tab
+    /// (`note` / `todos` / `decisions`). Returns whether a switch happened — i.e.
+    /// whether an editor was open — so the loop repaints only then.
+    pub fn note_editor_cycle_tab(&mut self, forward: bool) -> bool {
+        match self.note_editor_mut() {
+            Some(editor) => {
+                editor.cycle_tab(forward);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Cancel the note editor, discarding the edits. Called only while the note

@@ -19,7 +19,7 @@ use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
 use super::super::action;
 use super::super::command::Effect;
 use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
-use super::super::state::{HomeState, ModalSize, PaneExit, ROOT_NAME};
+use super::super::state::{HomeState, ModalSize, NoteTab, PaneExit, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
@@ -536,10 +536,12 @@ fn leave_overview(
     // mode, not the caller of an Overview mode.
 }
 
-/// Handle one key in the session-note editor overlay (opened with `n` in 選択 or
-/// `Ctrl-E` in 没入). It captures every key: `Ctrl-S` saves the note (persisted
-/// through the wiring), `Esc` cancels, `Enter` inserts a newline, and the usual
-/// editing keys edit the multi-line buffer. Closing it — saved or cancelled —
+/// Handle one key in the session-scratchpad editor overlay (opened with `n` in
+/// 選択 or `Ctrl-E` in 没入). `Ctrl-S` saves the note (persisted through the
+/// wiring), `Esc` cancels, and `Tab` / `BackTab` cycle the `note` / `todos` /
+/// `decisions` tabs. Only the `note` tab is editable — its `Enter` / editing /
+/// motion keys edit the multi-line buffer; the todos / decisions tabs are
+/// read-only, so those keys are ignored there. Closing it — saved or cancelled —
 /// re-attaches the session's pane when it was opened from 没入.
 pub(super) fn note_editor_key(
     term: &Term,
@@ -573,9 +575,23 @@ pub(super) fn note_editor_key(
                 reattach_focused(term, state, painter, wiring);
             }
         }
-        // Every other key edits the multi-line buffer in place: Enter splits the
-        // line, the editing keys delete / move the caret, and a printable
-        // character is inserted at the caret.
+        // `Tab` / `BackTab` cycle the note / todos / decisions tabs.
+        Key::Tab => {
+            state.note_editor_cycle_tab(true);
+        }
+        Key::BackTab => {
+            state.note_editor_cycle_tab(false);
+        }
+        // Every other key edits the multi-line buffer in place — but only on the
+        // editable `note` tab. On the read-only todos / decisions tabs these keys
+        // do nothing (an agent writes those over MCP).
+        _ if state
+            .note_editor()
+            .expect("note editor open while editing")
+            .tab()
+            != NoteTab::Note => {}
+        // Enter splits the line, the editing keys delete / move the caret, and a
+        // printable character is inserted at the caret.
         key => {
             let area = state
                 .note_editor_mut()

@@ -471,6 +471,86 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
 }
 
 #[test]
+fn note_overlay_renders_the_todos_and_decisions_tabs() {
+    // Switching the open editor to the todos / decisions tabs renders those
+    // read-only lists in the same box, titled by the tab.
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    let mut session = SessionRecord {
+        todos: vec![SessionTodo::new("write tests"), {
+            let mut td = SessionTodo::new("ship it");
+            td.done = true;
+            td
+        }],
+        decisions: vec![SessionDecision {
+            at: Utc::now(),
+            text: "chose approach A".to_string(),
+        }],
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("memo".to_string()),
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: None,
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+    session.display_name = None;
+    state.restore_sessions(vec![session]);
+    state.enter_switch();
+    state.overview_move_down(); // root -> alpha
+    assert!(state.overview_begin_note());
+
+    // Todos tab: the checklist with [x]/[ ] marks.
+    state.note_editor_cycle_tab(true); // note -> todos
+    let todos = stripped(&render_frame(24, 80, &state));
+    assert!(todos.contains("─ todos"), "the box is titled `todos`");
+    assert!(todos.contains("[ ] write tests"));
+    assert!(todos.contains("[x] ship it"));
+
+    // Decisions tab: the logged entry's text.
+    state.note_editor_cycle_tab(true); // todos -> decisions
+    let decisions = stripped(&render_frame(24, 80, &state));
+    assert!(
+        decisions.contains("─ decisions"),
+        "the box is titled `decisions`"
+    );
+    assert!(decisions.contains("chose approach A"));
+}
+
+#[test]
+fn note_overlay_todos_and_decisions_tabs_show_placeholders_when_empty() {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    // A session with a note but no todos / decisions.
+    let session = SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
+        name: "alpha".to_string(),
+        display_name: None,
+        note: Some("memo".to_string()),
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: None,
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    };
+    state.restore_sessions(vec![session]);
+    state.enter_switch();
+    state.overview_move_down();
+    assert!(state.overview_begin_note());
+
+    state.note_editor_cycle_tab(true); // todos
+    assert!(stripped(&render_frame(24, 80, &state)).contains("todo なし"));
+    state.note_editor_cycle_tab(true); // decisions
+    assert!(stripped(&render_frame(24, 80, &state)).contains("記録なし"));
+}
+
+#[test]
 fn note_overlay_editor_windows_around_the_caret() {
     // While editing, the overlay box shows a window around the caret (the end,
     // here), so a note taller than the box keeps the caret line in view.

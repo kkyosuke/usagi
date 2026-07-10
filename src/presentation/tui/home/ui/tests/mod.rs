@@ -17,7 +17,7 @@ use super::super::terminal::view::TerminalView;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
 use crate::domain::workspace_state::{
-    BranchStatus, PrLink, SessionOrigin, SessionRecord, WorktreeState,
+    BranchStatus, PrLink, SessionDecision, SessionOrigin, SessionRecord, SessionTodo, WorktreeState,
 };
 use crate::presentation::tui::markdown::{LineStyle, MarkdownLine, Rgb, Span, SpanStyle};
 use chrono::Utc;
