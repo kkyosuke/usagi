@@ -185,6 +185,17 @@ pub(super) fn palette_key(
                         Err(e) => state.log_error(e),
                     }
                 }
+                // `wake -i <dur>`: schedule relative to now. A validated positive
+                // offset is always in the future, so this cannot fail.
+                Effect::ScheduleWakeIn { minutes } => {
+                    let now = Local::now();
+                    let at = state.schedule_wake_after(now, minutes);
+                    state.log_output(format!(
+                        "Wake scheduled for {} ({}) — will send `continue` to running agents",
+                        at.format("%H:%M"),
+                        humanize_until(now, at),
+                    ));
+                }
                 Effect::CancelWake => match state.cancel_wake() {
                     Some(at) => {
                         state.log_output(format!("Cancelled wake for {}", at.format("%H:%M")))

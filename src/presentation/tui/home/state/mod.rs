@@ -1015,6 +1015,18 @@ impl HomeState {
         Ok(at)
     }
 
+    /// Schedule a one-shot wake `minutes` from `now` (the relative `wake -i`
+    /// form), replacing any existing pending wake and returning the scheduled
+    /// instant for a confirmation line. Infallible: the caller validates the
+    /// duration to a positive within-a-day count, and a positive offset from now
+    /// is always in the future.
+    pub fn schedule_wake_after(&mut self, now: DateTime<Local>, minutes: i64) -> DateTime<Local> {
+        let schedule = WakeSchedule::after(now, minutes);
+        let at = schedule.at();
+        self.wake_schedule = Some(schedule);
+        at
+    }
+
     /// Cancel the pending wake, returning the instant that would have fired so
     /// the UI can distinguish "cancelled X" from "nothing to cancel".
     pub fn cancel_wake(&mut self) -> Option<DateTime<Local>> {

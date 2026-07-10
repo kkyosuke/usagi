@@ -111,6 +111,25 @@ fn wake_time_schedules_a_today_wake_effect() {
 }
 
 #[test]
+fn wake_in_schedules_a_relative_wake_effect() {
+    // `-i` and `--in` schedule relative to now; a bare number is minutes.
+    for input in ["wake -i 1h30m", "wake --in 1h30m", "wake -i 90m"] {
+        let result = registry().dispatch_in_scope(input, CommandScope::Workspace, &[], &[], &[]);
+        assert!(result.lines.is_empty(), "{input}");
+        assert_eq!(
+            result.effect,
+            Effect::ScheduleWakeIn { minutes: 90 },
+            "{input}"
+        );
+    }
+    // A bad duration reports the parse error rather than scheduling.
+    let bad = registry().dispatch("wake -i 30s", &[], &[]);
+    assert_eq!(bad.effect, Effect::None);
+    assert_eq!(bad.lines[0].kind, LineKind::Error);
+    assert!(bad.lines[0].text.contains("invalid duration"));
+}
+
+#[test]
 fn wake_cancel_requests_cancellation() {
     let result = registry().dispatch("wake cancel", &[], &[]);
     assert!(result.lines.is_empty());
@@ -143,11 +162,13 @@ fn wake_rejects_bad_arguments() {
 fn wake_completes_its_arguments() {
     let all = registry().complete("wake ", CommandScope::Workspace);
     assert_eq!(all.input, "wake ");
-    assert_eq!(all.candidates, vec!["-t", "status", "cancel"]);
+    assert_eq!(all.candidates, vec!["-t", "-i", "status", "cancel"]);
 
+    // `-` is now ambiguous between `-t` and `-i`, so it extends to the common
+    // prefix and lists both rather than guessing one.
     let partial = registry().complete("wake -", CommandScope::Workspace);
-    assert_eq!(partial.input, "wake -t");
-    assert!(partial.candidates.is_empty());
+    assert_eq!(partial.input, "wake -");
+    assert_eq!(partial.candidates, vec!["-t", "-i"]);
 
     let cancel = registry().complete("wake c", CommandScope::Workspace);
     assert_eq!(cancel.input, "wake cancel");
@@ -160,6 +181,10 @@ fn wake_completes_its_arguments() {
     let time = registry().complete("wake -t ", CommandScope::Workspace);
     assert_eq!(time.input, "wake -t ");
     assert!(time.candidates.is_empty());
+
+    let relative = registry().complete("wake -i ", CommandScope::Workspace);
+    assert_eq!(relative.input, "wake -i ");
+    assert!(relative.candidates.is_empty());
 
     let after_cancel = registry().complete("wake cancel ", CommandScope::Workspace);
     assert_eq!(after_cancel.input, "wake cancel ");

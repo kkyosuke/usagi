@@ -46,6 +46,23 @@ fn wake_schedule_is_one_shot_once_due() {
 }
 
 #[test]
+fn scheduling_wake_after_a_duration_is_relative_and_one_shot() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    let at = state.schedule_wake_after(local_time(14, 0, 0), 90);
+    assert_eq!(at, local_time(15, 30, 0));
+    assert_eq!(state.wake_scheduled_at(), Some(local_time(15, 30, 0)));
+    // It replaces any earlier wake and stays a one-shot like the absolute form.
+    let replaced = state.schedule_wake_after(local_time(14, 0, 0), 30);
+    assert_eq!(replaced, local_time(14, 30, 0));
+    assert_eq!(state.wake_scheduled_at(), Some(local_time(14, 30, 0)));
+    assert_eq!(
+        state.take_due_wake(local_time(14, 30, 0)),
+        Some(local_time(14, 30, 0))
+    );
+    assert_eq!(state.wake_scheduled_at(), None);
+}
+
+#[test]
 fn scheduling_wake_rejects_a_past_time() {
     let mut state = HomeState::new("usagi", Vec::new(), None);
     let err = state

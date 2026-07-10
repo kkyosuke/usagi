@@ -7,7 +7,7 @@ use super::{
     Command, CommandContext, CommandInfo, CommandResult, CommandScope, CompletionContext, Effect,
     LogLine,
 };
-use crate::domain::wake::parse_hhmm;
+use crate::domain::wake::{parse_duration, parse_hhmm};
 use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 use crate::usecase::issue::{
@@ -425,11 +425,17 @@ impl Command for WakeCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "wake [-t <hhmm>|status|cancel]"
+        "wake [-t <hhmm>|-i <dur>|status|cancel]"
     }
 
     fn examples(&self) -> &'static [&'static str] {
-        &["wake -t 1430", "wake -t 9:05", "wake status", "wake cancel"]
+        &[
+            "wake -t 1430",
+            "wake -i 30m",
+            "wake -i 1h30m",
+            "wake status",
+            "wake cancel",
+        ]
     }
 
     fn scope(&self) -> CommandScope {
@@ -457,6 +463,13 @@ impl Command for WakeCommand {
                 },
                 Err(err) => CommandResult::line(LogLine::error(err)),
             },
+            ["-i", raw] | ["--in", raw] => match parse_duration(raw) {
+                Ok(minutes) => CommandResult {
+                    lines: Vec::new(),
+                    effect: Effect::ScheduleWakeIn { minutes },
+                },
+                Err(err) => CommandResult::line(LogLine::error(err)),
+            },
             _ => CommandResult::line(LogLine::error(format!("usage: {}", self.usage()))),
         }
     }
@@ -464,11 +477,11 @@ impl Command for WakeCommand {
     fn complete_args(&self, args: &str, _ctx: &CompletionContext) -> Vec<String> {
         let (head, _) = arg_tokens(args);
         match head.first().copied() {
-            None => ["-t", "status", "cancel"]
+            None => ["-t", "-i", "status", "cancel"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            Some("-t" | "--time") => Vec::new(),
+            Some("-t" | "--time" | "-i" | "--in") => Vec::new(),
             _ => Vec::new(),
         }
     }

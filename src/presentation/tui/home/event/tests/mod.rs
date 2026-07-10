@@ -1443,6 +1443,16 @@ fn run_wake_commands_schedules_and_cancels() {
 }
 
 #[test]
+fn run_wake_in_schedules_a_relative_wake() {
+    // `wake -i 30m` drives the relative-schedule handler arm end to end.
+    let mut keys = cmd("wake -i 30m");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+#[test]
 fn run_wake_status_reports_the_schedule() {
     use chrono::Timelike;
     let now = Local::now();
