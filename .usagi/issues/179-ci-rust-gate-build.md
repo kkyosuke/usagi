@@ -1,14 +1,14 @@
 ---
 number: 179
 title: ci: Rust gate を段階化し重複 build を除去する
-status: todo
+status: done
 priority: high
 labels: [ci, test]
 dependson: []
 related: []
 parent: 177
 created_at: 2026-07-10T23:35:22.675670+00:00
-updated_at: 2026-07-10T23:35:22.675670+00:00
+updated_at: 2026-07-10T23:52:14.472177+00:00
 ---
 
 ## 目的
