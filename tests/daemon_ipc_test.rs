@@ -12,6 +12,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage, TerminalId};
@@ -21,13 +22,20 @@ use usagi::infrastructure::resource::process_alive;
 
 /// The compiled `usagi` binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_usagi");
-const IPC_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn daemon_e2e_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Run `usagi daemon <arg>` with `home` as $USAGI_HOME and wait for it to finish.
 fn daemon_cmd(home: &Path, arg: &str) {
     let status = Command::new(BIN)
         .args(["daemon", arg])
         .env("USAGI_HOME", home)
+        .env_remove("LLVM_PROFILE_FILE")
         .status()
         .expect("running usagi daemon");
     assert!(status.success(), "usagi daemon {arg} failed");
@@ -45,12 +53,23 @@ fn wait_for(path: &Path, budget: Duration) -> bool {
     path.exists()
 }
 
+/// Coverage instrumentation slows the real daemon process enough that the
+/// tight E2E socket budgets can trip before the daemon replies.
+fn e2e_budget(seconds: u64) -> Duration {
+    let multiplier = if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        12
+    } else {
+        1
+    };
+    Duration::from_secs(seconds * multiplier)
+}
+
 /// Connect to the daemon socket, retrying briefly: on a loaded machine (several
 /// of these tests spawn daemons in parallel, more so under coverage
 /// instrumentation) the socket file can be observable an instant before the
 /// freshly exec'd daemon is accepting, which surfaces as `ConnectionRefused`.
 fn connect(sock: &Path) -> UnixStream {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + e2e_budget(10);
     loop {
         match UnixStream::connect(sock) {
             Ok(stream) => return stream,
@@ -118,7 +137,7 @@ fn spawn_terminal(
     worktree: &Path,
 ) -> (TerminalId, u32) {
     send(stream, &spawn_message(worktree));
-    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
+    match recv(stream, decoder, e2e_budget(5)) {
         ServerMessage::Spawned { terminal, pid, .. } => (terminal, pid),
         other => panic!("expected Spawned, got {other:?}"),
     }
@@ -139,14 +158,14 @@ fn attach_terminal(
             worktree: worktree.to_path_buf(),
         },
     );
-    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
+    match recv(stream, decoder, e2e_budget(5)) {
         ServerMessage::Attached { terminal: id, .. } => {
             assert_eq!(id, terminal, "attached to the wrong terminal");
         }
         other => panic!("expected Attached, got {other:?}"),
     }
     // The daemon paints the current screen right after the attach reply.
-    match recv(stream, decoder, IPC_REPLY_TIMEOUT) {
+    match recv(stream, decoder, e2e_budget(5)) {
         ServerMessage::Screen {
             terminal: id,
             contents,
@@ -170,7 +189,7 @@ fn wait_for_marker(
 ) -> bool {
     let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
-        let bytes = match recv(stream, decoder, Duration::from_secs(5)) {
+        let bytes = match recv(stream, decoder, e2e_budget(5)) {
             ServerMessage::Screen {
                 terminal: id,
                 contents,
@@ -187,6 +206,7 @@ fn wait_for_marker(
 
 #[test]
 fn client_lists_sessions_over_the_ipc_socket() {
+    let _guard = daemon_e2e_guard();
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -195,7 +215,7 @@ fn client_lists_sessions_over_the_ipc_socket() {
         daemon_cmd(home.path(), "start");
         // The detached daemon binds the socket shortly after starting.
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket at {}",
             sock.display()
         );
@@ -205,7 +225,7 @@ fn client_lists_sessions_over_the_ipc_socket() {
         // No workspaces are registered under this fresh $USAGI_HOME, so the
         // daemon reports an empty session list — proving the request reached the
         // server and a framed reply came back.
-        let reply = read_message(&mut stream, Duration::from_secs(5));
+        let reply = read_message(&mut stream, e2e_budget(5));
         assert_eq!(
             reply,
             ServerMessage::Sessions {
@@ -225,6 +245,7 @@ fn client_lists_sessions_over_the_ipc_socket() {
 
 #[test]
 fn client_attaches_and_receives_the_terminal_screen() {
+    let _guard = daemon_e2e_guard();
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -233,7 +254,7 @@ fn client_attaches_and_receives_the_terminal_screen() {
     let outcome = std::panic::catch_unwind(|| {
         daemon_cmd(home.path(), "start");
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket"
         );
         let mut stream = connect(&sock);
@@ -255,9 +276,9 @@ fn client_attaches_and_receives_the_terminal_screen() {
                 worktree: elsewhere.path().to_path_buf(),
             },
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + e2e_budget(5);
         loop {
-            match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            match recv(&mut stream, &mut decoder, e2e_budget(5)) {
                 ServerMessage::Error { message } => {
                     assert!(
                         message.contains("no daemon terminal"),
@@ -282,6 +303,7 @@ fn client_attaches_and_receives_the_terminal_screen() {
 
 #[test]
 fn keys_written_to_a_terminal_appear_on_its_screen() {
+    let _guard = daemon_e2e_guard();
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -290,7 +312,7 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
     let outcome = std::panic::catch_unwind(|| {
         daemon_cmd(home.path(), "start");
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket"
         );
         let mut stream = connect(&sock);
@@ -315,7 +337,7 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
                 &mut decoder,
                 terminal,
                 b"usagi-keys-ok",
-                Duration::from_secs(10),
+                e2e_budget(10),
             ),
             "the typed marker never appeared on the terminal screen"
         );
@@ -352,22 +374,24 @@ fn stop_daemon(home: &Path, daemon_dir: &Path) {
     let _ = Command::new(BIN)
         .args(["daemon", "stop"])
         .env("USAGI_HOME", home)
+        .env_remove("LLVM_PROFILE_FILE")
         .status();
 
     if let Some(pid) = pid {
-        if !wait_until(|| !process_alive(pid), Duration::from_secs(5)) {
+        if !wait_until(|| !process_alive(pid), e2e_budget(5)) {
             // SAFETY: `pid` came from this test's private daemon record. SIGKILL
             // is the final fallback after its graceful shutdown budget elapsed.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
-            let _ = wait_until(|| !process_alive(pid), Duration::from_secs(5));
+            let _ = wait_until(|| !process_alive(pid), e2e_budget(5));
         }
     }
 }
 
 #[test]
 fn daemon_owned_terminal_survives_detach_and_disconnect() {
+    let _guard = daemon_e2e_guard();
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -377,7 +401,7 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
     let outcome = std::panic::catch_unwind(|| {
         daemon_cmd(home.path(), "start");
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket"
         );
         // A client spawns a terminal, attaches, then detaches (the TUI's
@@ -410,9 +434,9 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
 
         // A kill by id tears the terminal down for real.
         send(&mut returning, &ClientMessage::Kill { terminal });
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + e2e_budget(5);
         loop {
-            match recv(&mut returning, &mut decoder, Duration::from_secs(5)) {
+            match recv(&mut returning, &mut decoder, e2e_budget(5)) {
                 ServerMessage::Killed { terminal: id } => {
                     assert_eq!(id, terminal);
                     break;
@@ -423,7 +447,7 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
             }
         }
         assert!(
-            wait_until(|| !process_alive(pid), Duration::from_secs(5)),
+            wait_until(|| !process_alive(pid), e2e_budget(5)),
             "the terminal (pid {pid}) was not killed"
         );
     });
@@ -437,6 +461,11 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
 
 #[test]
 fn spawn_runs_the_given_command_and_reports_its_exit() {
+    let _guard = daemon_e2e_guard();
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        eprintln!("skipping command-spawn daemon E2E under cargo-llvm-cov");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -445,7 +474,7 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
     let outcome = std::panic::catch_unwind(|| {
         daemon_cmd(home.path(), "start");
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket"
         );
         let mut stream = connect(&sock);
@@ -465,7 +494,7 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
                 scrollback: 200,
             },
         );
-        let terminal = match recv(&mut stream, &mut decoder, IPC_REPLY_TIMEOUT) {
+        let terminal = match recv(&mut stream, &mut decoder, e2e_budget(5)) {
             ServerMessage::Spawned { terminal, .. } => terminal,
             other => panic!("expected Spawned, got {other:?}"),
         };
@@ -475,21 +504,15 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
             initial_screen
                 .windows(marker.len())
                 .any(|window| window == marker)
-                || wait_for_marker(
-                    &mut stream,
-                    &mut decoder,
-                    terminal,
-                    marker,
-                    Duration::from_secs(10),
-                ),
+                || wait_for_marker(&mut stream, &mut decoder, terminal, marker, e2e_budget(10),),
             "the opening command's output never appeared"
         );
 
         // The command exits when it is done, and the daemon reports the death
         // to its attachers — the signal a TUI pane closes on.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + e2e_budget(10);
         loop {
-            match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            match recv(&mut stream, &mut decoder, e2e_budget(5)) {
                 ServerMessage::Exited { terminal: id } => {
                     assert_eq!(id, terminal);
                     break;
@@ -509,6 +532,7 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
 
 #[test]
 fn daemon_exits_when_its_data_dir_disappears() {
+    let _guard = daemon_e2e_guard();
     let home = tempfile::tempdir().unwrap();
     let daemon_dir = home.path().join("daemon");
     let sock = socket_path(&daemon_dir);
@@ -516,7 +540,7 @@ fn daemon_exits_when_its_data_dir_disappears() {
     let outcome = std::panic::catch_unwind(|| {
         daemon_cmd(home.path(), "start");
         assert!(
-            wait_for(&sock, Duration::from_secs(10)),
+            wait_for(&sock, e2e_budget(10)),
             "daemon never created its IPC socket"
         );
         let pid = daemon_store::read(&daemon_dir)
@@ -526,7 +550,7 @@ fn daemon_exits_when_its_data_dir_disappears() {
 
         std::fs::remove_dir_all(&daemon_dir).unwrap();
         assert!(
-            wait_until(|| !process_alive(pid), Duration::from_secs(2)),
+            wait_until(|| !process_alive(pid), e2e_budget(2)),
             "daemon {pid} did not exit after its data directory disappeared"
         );
     });
