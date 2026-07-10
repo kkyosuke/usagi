@@ -57,6 +57,12 @@ pub struct StoredPane {
     /// use the kind-derived default (`agent`, `terminal 2`, ...).
     #[serde(default)]
     pub label: Option<String>,
+    /// The daemon terminal id backing the pane when it was snapshotted. Restore
+    /// first tries to re-attach to it — the terminal (and any agent inside)
+    /// kept running in the daemon while no TUI was open — and only respawns
+    /// when the daemon no longer knows the id. `None` for a TUI-local pane.
+    #[serde(default)]
+    pub terminal: Option<u64>,
 }
 
 /// A session's open-pane snapshot: the panes in tab order plus which one was
@@ -138,6 +144,7 @@ mod tests {
             kind: StoredPaneKind::Agent,
             cli: Some(cli),
             label: None,
+            terminal: None,
         }
     }
 
@@ -146,6 +153,7 @@ mod tests {
             kind: StoredPaneKind::Terminal,
             cli: None,
             label: None,
+            terminal: None,
         }
     }
 
@@ -161,6 +169,21 @@ mod tests {
             assert_eq!(loaded.panes, panes);
             assert_eq!(loaded.worktree, key(wt.path()));
         });
+    }
+
+    #[test]
+    fn a_daemon_terminal_id_round_trips_and_an_old_file_reads_as_none() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            let mut pane = agent(AgentCli::Claude);
+            pane.terminal = Some(42);
+            save(wt.path(), 0, &[pane.clone()]).unwrap();
+            assert_eq!(load(wt.path()).unwrap().panes, vec![pane]);
+        });
+        // A snapshot written before the field existed still parses, with no id.
+        let json = r#"{"kind":"terminal"}"#;
+        let pane: StoredPane = serde_json::from_str(json).unwrap();
+        assert_eq!(pane.terminal, None);
     }
 
     #[test]

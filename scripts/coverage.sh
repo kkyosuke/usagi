@@ -14,6 +14,11 @@
 # 実 IO そのもの」だけを持つ層に限定する:
 #   - src/main\.rs            : バイナリの合成ルート（clap ディスパッチと実 IO の注入）。
 #   - infrastructure/pty\.rs  : 擬似端末・スレッドの実 IO。
+#   - infrastructure/daemon_client\.rs : daemon 所有端末への attach クライアント
+#       （Unix ソケット接続・ハンドシェイク・受信スレッド）の実 IO。プロトコル判断
+#       （ハンドシェイク応答の解釈・Screen/Output/Exited の畳み込み）は
+#       usecase/daemon_attach.rs に、メッセージ形とフレーミング・出力バックログは
+#       domain/daemon_ipc.rs に切り出して計測対象に含めてある。
 #   - infrastructure/resource\.rs : `sysinfo` による実プロセスの CPU/メモリ計測 IO。
 #       集計・整形の純ロジックは domain/resource.rs に切り出して計測対象に含めてある。
 #   - infrastructure/release\.rs : `git ls-remote` のネットワーク IO とタイムアウト監視。
@@ -51,7 +56,7 @@
 #       コンパイルされ、テストが触れるのは lib 側のシンボルだけのため、binary 側の
 #       インスタンスが常に未カバーになってしまう（二重ビルド問題）。実 IO 層として
 #       除外することで正確な計測結果を維持する。
-export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/secret_store\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/io/signals\.rs|tui/io/loading\.rs|tui/app/mod\.rs|tui/chat/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
+export COVERAGE_IGNORE='(src/main\.rs|infrastructure/pty\.rs|infrastructure/daemon_client\.rs|infrastructure/resource\.rs|infrastructure/release\.rs|infrastructure/env_resolver/op_cli\.rs|infrastructure/secret_store\.rs|infrastructure/setup_runner\.rs|tui/io/term_reader\.rs|tui/io/signals\.rs|tui/io/loading\.rs|tui/app/mod\.rs|tui/chat/mod\.rs|tui/home/mod\.rs|tui/home/terminal/pane\.rs|tui/home/terminal/pool\.rs|tui/open/mod\.rs|tui/config/mod\.rs|tui/config/provisioning\.rs|tui/welcome/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

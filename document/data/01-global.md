@@ -40,6 +40,7 @@
 ├── pr-links/         # セッションのターミナル出力から拾った PR の URL（サイドバーの #N バッジの元。worktree 別）
 ├── open-panes/       # 各セッションの開いていたペイン構成（次回起動時に復旧する。worktree 別）
 ├── resume-closeup/     # 終了時にいたセッションとエンゲージメント段階（次回起動時に復帰する。ワークスペース別）
+├── daemon/           # 常駐 daemon の記録（daemon.json・stop マーカー・IPC ソケット sock・監視スナップショット sessions.json・serve.log。proposals/02-daemon.md 参照）
 ├── unite-set.json    # 直近に統合(unite)モードでまとめて開いたワークスペースの集合（Open 画面が次回プリチェックする）
 ├── skills/           # usagi がバイナリに同梱し Agent へ配布するスキル（起動時に展開。セッション worktree から symlink）
 └── logs/             # 日次のエラーログ（error-YYYY-MM-DD.log）と操作トレース（trace-YYYY-MM-DD.jsonl）
@@ -212,10 +213,12 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 
 - ファイル名は worktree の正規化パスのハッシュ（16 桁 hex）。内容にも worktree パスを持ち、ハッシュ衝突や
   別マシン由来の古いファイルは読み捨てます（`agent-state/` と同じ方式）。
-- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null, "label": "任意名" | null }, … ] }`。
+- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null, "label": "任意名" | null, "terminal": <id> | null }, … ] }`。
   `panes` はタブ順、`active` は最後にアクティブだったタブの添字。`cli` は agent ペインのみ値を持ち（どの Agent CLI で
   復旧するか）、terminal ペインは `null`。`label` はタブメニューの名前変更で設定した表示名で、`null` なら `agent` /
-  `terminal 2` などの自動ラベルを使います。永続的な状態ではないため `version` は持ちません。
+  `terminal 2` などの自動ラベルを使います。`terminal` はそのペインを支えていた daemon 所有端末の id で、復旧は
+  まずこの id へ再 attach し（走り続けている端末を画面ごと引き継ぐ）、daemon がその id を知らないときだけ
+  再 spawn します（TUI ローカル PTY のペインは `null`）。永続的な状態ではないため `version` は持ちません。
 - 書き込みはペインを開閉して制御が戻るたび。ペインが 1 つも無くなると消去され、`session remove` でも
   当該 worktree 分が消えます。`infrastructure/open_panes_store.rs` が save/load/clear を担います。
 

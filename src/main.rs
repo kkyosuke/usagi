@@ -418,6 +418,18 @@ fn main() -> anyhow::Result<()> {
             // launches any agent, so each session worktree's `.claude/skills`
             // symlink resolves to current content. Best-effort.
             let _ = usagi::infrastructure::skills::materialize_default();
+            // Autospawn the daemon that owns the agent terminals, so the TUI can
+            // attach to it (and agents keep running after the TUI closes).
+            // Best-effort and idempotent: with a daemon already running this is
+            // a no-op, and with no daemon at all the terminal pool falls back to
+            // TUI-local PTYs (the pre-daemon behaviour).
+            if let Ok(dir) = usagi::infrastructure::daemon_store::default_dir() {
+                let _ = usagi::usecase::daemon::start(
+                    &dir,
+                    &usagi::infrastructure::resource::process_alive,
+                    &|| spawn_daemon(&dir),
+                );
+            }
             usagi::presentation::cli::hop::run(usagi::presentation::tui::app::run)
         }
         Commands::Icon { view } => usagi::presentation::cli::icon::run(view),
@@ -590,8 +602,16 @@ fn spawn_detached(command: &str, cwd: &Path, log_path: &Path) -> anyhow::Result<
     Ok(())
 }
 
-/// How often the daemon's supervisor loop wakes to check for a stop request.
+/// How often the daemon's control plane beats: the stop-request check and the
+/// session monitor tick.
 const DAEMON_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How often the IPC endpoint is serviced while clients are connected. This is
+/// the ceiling on input echo latency for an attached TUI (a keystroke waits at
+/// most one tick to reach the PTY, and its output at most one more to stream
+/// back), so it is much shorter than the control-plane beat; with no clients
+/// the loop falls back to [`DAEMON_POLL`] so an idle daemon stays cheap.
+const DAEMON_IPC_TICK: std::time::Duration = std::time::Duration::from_millis(15);
 
 /// Run the daemon supervisor loop in the foreground (the body of `usagi daemon
 /// serve`, launched detached by `usagi daemon start`).
@@ -624,19 +644,33 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
     let socket_path = usagi::infrastructure::daemon_ipc::socket_path(dir);
     let mut server = DaemonIpcServer::bind(&socket_path);
 
-    while !usagi::infrastructure::daemon_store::take_stop_request(dir)? {
-        // Accept any newly connected clients and answer whatever they have sent.
-        server.poll(dir);
-        // Refresh the monitored-sessions snapshot each tick. Best-effort: a
-        // transient store error must not tear the daemon down, so it is logged
-        // and the loop continues. On a change, push the fresh snapshot to every
-        // subscribed client.
-        match usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
-            Ok(true) => server.broadcast_sessions(dir),
-            Ok(false) => {}
-            Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
+    let mut next_control = std::time::Instant::now();
+    loop {
+        // The control-plane beat runs on the slow cadence regardless of how
+        // fast the IPC endpoint is being serviced.
+        if std::time::Instant::now() >= next_control {
+            next_control = std::time::Instant::now() + DAEMON_POLL;
+            if usagi::infrastructure::daemon_store::take_stop_request(dir)? {
+                break;
+            }
+            // Refresh the monitored-sessions snapshot. Best-effort: a transient
+            // store error must not tear the daemon down, so it is logged and
+            // the loop continues. On a change, push the fresh snapshot to every
+            // subscribed client.
+            match usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
+                Ok(true) => server.broadcast_sessions(dir),
+                Ok(false) => {}
+                Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
+            }
         }
-        std::thread::sleep(DAEMON_POLL);
+        // Accept any newly connected clients, answer whatever they have sent,
+        // and stream terminal output to attached clients.
+        server.poll(dir);
+        std::thread::sleep(if server.has_clients() {
+            DAEMON_IPC_TICK
+        } else {
+            DAEMON_POLL
+        });
     }
 
     server.shutdown(&socket_path);
@@ -658,19 +692,22 @@ struct DaemonIpcServer {
     clients: std::collections::HashMap<u64, IpcClient>,
     registry: usagi::usecase::daemon_ipc::SubscriberRegistry,
     next_id: u64,
-    /// The daemon-owned terminals, keyed by worktree. Holding the [`PtySession`]
-    /// here — not on any client — is what makes a terminal outlive the client
-    /// that asked for it: a client disconnecting only drops its socket, never
-    /// these. Dropping a session kills its process group.
-    terminals:
-        std::collections::HashMap<std::path::PathBuf, usagi::infrastructure::pty::PtySession>,
-    /// The pure mirror of `terminals` (worktree → pid) for the tested bookkeeping.
+    /// The daemon-owned terminals, keyed by the id assigned at spawn. Holding
+    /// the [`PtySession`] here — not on any client — is what makes a terminal
+    /// outlive the client that asked for it: a client disconnecting only drops
+    /// its socket, never these. Dropping a session kills its process group.
+    ///
+    /// [`PtySession`]: usagi::infrastructure::pty::PtySession
+    terminals: std::collections::HashMap<
+        usagi::domain::daemon_ipc::TerminalId,
+        usagi::infrastructure::pty::PtySession,
+    >,
+    /// The pure mirror of `terminals` (id → worktree/pid) for the tested
+    /// bookkeeping, and the id allocator.
     terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry,
-    /// Which clients are attached to which worktree's screen feed.
+    /// Which clients are attached to which terminal's output feed, and how far
+    /// into its backlog each has been pushed.
     attach_table: usagi::usecase::daemon_ipc::AttachTable,
-    /// The last vt100 screen generation pushed for each worktree, so an unchanged
-    /// screen is not re-sent every tick.
-    screen_generations: std::collections::HashMap<std::path::PathBuf, u64>,
 }
 
 /// One connected client: its stream and the decoder reassembling frames from its
@@ -688,7 +725,17 @@ impl DaemonIpcServer {
         let _ = std::fs::remove_file(path);
         let listener = match std::os::unix::net::UnixListener::bind(path) {
             Ok(listener) => match listener.set_nonblocking(true) {
-                Ok(()) => Some(listener),
+                Ok(()) => {
+                    // Spawn requests carry the resolved workspace environment
+                    // (secrets included), so only the owner may connect.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+                    }
+                    Some(listener)
+                }
                 Err(error) => {
                     eprintln!("usagi daemon: could not set the IPC socket non-blocking: {error}");
                     None
@@ -707,16 +754,22 @@ impl DaemonIpcServer {
             terminals: std::collections::HashMap::new(),
             terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
             attach_table: usagi::usecase::daemon_ipc::AttachTable::new(),
-            screen_generations: std::collections::HashMap::new(),
         }
     }
 
-    /// Accept pending connections, service each client's buffered input, and push
-    /// any changed terminal screens to their attached clients.
+    /// Whether any client is connected — the serve loop's cue to tick fast
+    /// (attached clients are latency-sensitive) or slow (idle daemon).
+    fn has_clients(&self) -> bool {
+        !self.clients.is_empty()
+    }
+
+    /// Accept pending connections, service each client's buffered input, push
+    /// new terminal output to attached clients, and reap exited terminals.
     fn poll(&mut self, dir: &Path) {
         self.accept_pending();
         self.service_clients(dir);
-        self.stream_screens();
+        self.stream_output();
+        self.reap_exited();
     }
 
     /// Accept every connection waiting on the listener (non-blocking), assigning
@@ -830,30 +883,41 @@ impl DaemonIpcServer {
                 usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions);
             let alive = match action {
                 Action::Reply(reply) => self.send(id, &reply),
-                Action::Spawn(worktree) => {
-                    let reply = self.spawn_terminal(worktree);
+                Action::Spawn {
+                    worktree,
+                    command,
+                    env,
+                    cols,
+                    rows,
+                    scrollback,
+                } => {
+                    let reply = self.spawn_terminal(
+                        worktree,
+                        command.as_deref(),
+                        &env,
+                        cols,
+                        rows,
+                        scrollback,
+                    );
                     self.send(id, &reply)
                 }
-                Action::Kill(worktree) => {
-                    let reply = self.kill_terminal(worktree);
+                Action::Kill(terminal) => {
+                    let reply = self.kill_terminal(terminal, Some(id));
                     self.send(id, &reply)
                 }
-                Action::Attach(worktree) => {
-                    self.attach_table.attach(id, worktree.clone());
-                    // Paint immediately on attach; later changes arrive via
-                    // `stream_screens`.
-                    self.send_current_screen(id, &worktree)
+                Action::Attach { terminal, worktree } => {
+                    self.attach_client(id, terminal, &worktree)
                 }
-                Action::Detach(worktree) => {
-                    self.attach_table.detach(id, &worktree);
+                Action::Detach(terminal) => {
+                    self.attach_table.detach(id, terminal);
                     true
                 }
-                Action::Keys(worktree, data) => {
-                    self.write_terminal(&worktree, &data);
+                Action::Keys(terminal, data) => {
+                    self.write_terminal(terminal, &data);
                     true
                 }
-                Action::Resize(worktree, cols, rows) => {
-                    self.resize_terminal(&worktree, cols, rows);
+                Action::Resize(terminal, cols, rows) => {
+                    self.resize_terminal(terminal, cols, rows);
                     true
                 }
                 Action::Nothing => true,
@@ -864,110 +928,206 @@ impl DaemonIpcServer {
         }
     }
 
-    /// Send `worktree`'s current screen to client `id`, if a terminal is running
-    /// there. Returns `false` only when the write fails (the client is dropped);
-    /// having no terminal is not a failure.
-    fn send_current_screen(&mut self, id: u64, worktree: &Path) -> bool {
-        match self.current_screen(worktree) {
-            Some(contents) => self.send(
+    /// Attach client `id` to `terminal`'s output feed — after checking the
+    /// terminal really runs in `worktree`, so a stale persisted id cannot latch
+    /// onto another worktree's terminal — and paint its current screen. Later
+    /// output arrives via `stream_output`. Returns `false` when a write to the
+    /// client fails.
+    fn attach_client(&mut self, id: u64, terminal: u64, worktree: &Path) -> bool {
+        use usagi::domain::daemon_ipc::ServerMessage;
+        if !self.terminal_registry.belongs_to(terminal, worktree) {
+            return self.send(
                 id,
-                &usagi::domain::daemon_ipc::ServerMessage::Screen {
-                    worktree: worktree.to_path_buf(),
-                    contents,
+                &ServerMessage::Error {
+                    message: format!(
+                        "no daemon terminal {terminal} runs in {}",
+                        worktree.display()
+                    ),
                 },
-            ),
-            None => true,
+            );
         }
+        let pid = self
+            .terminal_registry
+            .entry(terminal)
+            .map(|entry| entry.pid)
+            .unwrap_or(0);
+        self.attach_table.attach(id, terminal);
+        self.send(id, &ServerMessage::Attached { terminal, pid }) && self.push_screen(id, terminal)
     }
 
-    /// Write input bytes to `worktree`'s terminal, if one is running. Best-effort:
-    /// a write error (e.g. the shell just exited) is logged, not fatal.
-    fn write_terminal(&mut self, worktree: &Path, data: &[u8]) {
-        if let Some(session) = self.terminals.get_mut(worktree) {
+    /// Send `terminal`'s full current screen to client `id` and move that
+    /// client's backlog cursor to the offset the snapshot corresponds to.
+    /// Returns `false` only when the write fails (the client is dropped);
+    /// having no terminal is not a failure.
+    fn push_screen(&mut self, id: u64, terminal: u64) -> bool {
+        let Some((contents, offset)) = self
+            .terminals
+            .get(&terminal)
+            .map(|session| session.screen_snapshot())
+        else {
+            return true;
+        };
+        if !self.send(
+            id,
+            &usagi::domain::daemon_ipc::ServerMessage::Screen { terminal, contents },
+        ) {
+            return false;
+        }
+        self.attach_table.set_cursor(id, terminal, offset);
+        true
+    }
+
+    /// Write input bytes to `terminal`, if it is running. Best-effort: a write
+    /// error (e.g. the shell just exited) is logged, not fatal.
+    fn write_terminal(&mut self, terminal: u64, data: &[u8]) {
+        if let Some(session) = self.terminals.get_mut(&terminal) {
             if let Err(error) = session.write(data) {
-                eprintln!(
-                    "usagi daemon: writing to terminal {}: {error:#}",
-                    worktree.display()
-                );
+                eprintln!("usagi daemon: writing to terminal {terminal}: {error:#}");
             }
         }
     }
 
-    /// Resize `worktree`'s terminal, if one is running.
-    fn resize_terminal(&mut self, worktree: &Path, cols: u16, rows: u16) {
-        if let Some(session) = self.terminals.get_mut(worktree) {
+    /// Resize `terminal`, if it is running.
+    fn resize_terminal(&mut self, terminal: u64, cols: u16, rows: u16) {
+        if let Some(session) = self.terminals.get_mut(&terminal) {
             session.resize(rows, cols);
         }
     }
 
-    /// The current vt100 screen of `worktree`'s terminal as replayable bytes, or
-    /// `None` when no terminal runs there.
-    fn current_screen(&self, worktree: &Path) -> Option<Vec<u8>> {
-        self.terminals
-            .get(worktree)
-            .map(|session| session.parser().screen().contents_formatted())
+    /// Push each attached client the output bytes it has not seen yet, as raw
+    /// deltas from the terminal's backlog — or a full screen snapshot when the
+    /// client fell so far behind that its bytes were evicted. Terminals with no
+    /// attached client are skipped, so an unobserved terminal costs nothing.
+    fn stream_output(&mut self) {
+        for terminal in self.terminal_registry.ids() {
+            self.stream_terminal_output(terminal);
+        }
     }
 
-    /// Push each terminal whose screen changed since the last tick to the clients
-    /// attached to it. Terminals with no attached client are skipped (and their
-    /// generation left untracked) so an unobserved screen costs nothing.
-    fn stream_screens(&mut self) {
-        let worktrees: Vec<std::path::PathBuf> = self.terminals.keys().cloned().collect();
-        for worktree in worktrees {
-            let clients = self.attach_table.clients_for(&worktree);
-            if clients.is_empty() {
-                continue;
-            }
-            let Some(generation) = self.terminals.get(&worktree).map(|s| s.generation()) else {
-                continue;
-            };
-            if self.screen_generations.get(&worktree) == Some(&generation) {
-                continue;
-            }
-            self.screen_generations.insert(worktree.clone(), generation);
-            let Some(contents) = self.current_screen(&worktree) else {
-                continue;
-            };
-            let message = usagi::domain::daemon_ipc::ServerMessage::Screen {
-                worktree: worktree.clone(),
-                contents,
-            };
-            for id in clients {
-                if !self.send(id, &message) {
-                    self.drop_client(id);
+    /// The per-terminal step of [`stream_output`](Self::stream_output).
+    fn stream_terminal_output(&mut self, terminal: u64) {
+        use usagi::usecase::daemon_ipc::ScreenUpdate;
+        let clients = self.attach_table.clients_for(terminal);
+        if clients.is_empty() {
+            return;
+        }
+        let Some(backlog) = self
+            .terminals
+            .get(&terminal)
+            .and_then(|session| session.output_backlog())
+        else {
+            return;
+        };
+        let (plan, end) = {
+            let backlog = backlog
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                usagi::usecase::daemon_ipc::plan_screen_updates(&backlog, &clients),
+                backlog.end(),
+            )
+        };
+        for (client, update) in plan {
+            let delivered = match update {
+                ScreenUpdate::Output(data) => {
+                    if self.send(
+                        client,
+                        &usagi::domain::daemon_ipc::ServerMessage::Output { terminal, data },
+                    ) {
+                        self.attach_table.set_cursor(client, terminal, end);
+                        true
+                    } else {
+                        false
+                    }
                 }
+                // The snapshot re-reads the live screen (and its own offset), so
+                // it also covers anything appended since the plan was made.
+                ScreenUpdate::Snapshot => self.push_screen(client, terminal),
+            };
+            if !delivered {
+                self.drop_client(client);
             }
         }
     }
 
-    /// Spawn (or reuse) the daemon-owned terminal for `worktree` and report the
-    /// running pid. The [`PtySession`] is stored in `self.terminals`, so it lives
-    /// on independently of the requesting client. Reused when one is already
-    /// running there, so a re-`Spawn` is idempotent.
+    /// Notify attachers of — and forget — every terminal whose process has
+    /// exited. The final output was flushed by `stream_output` (the reader
+    /// appends bytes before it flips liveness, and this runs after the flush in
+    /// the same poll), so attachers see everything the terminal printed before
+    /// the `Exited`. Dropping the [`PtySession`] reaps the child and records an
+    /// abnormal exit to the error log.
+    ///
+    /// [`PtySession`]: usagi::infrastructure::pty::PtySession
+    fn reap_exited(&mut self) {
+        for terminal in self.terminal_registry.ids() {
+            let exited = self
+                .terminals
+                .get(&terminal)
+                .is_some_and(|session| !session.is_alive());
+            if !exited {
+                continue;
+            }
+            // One last delta flush so no tail output is lost to the removal.
+            self.stream_terminal_output(terminal);
+            self.remove_terminal(terminal, None);
+        }
+    }
+
+    /// Forget `terminal` everywhere and tell its attachers (minus `skip`, a
+    /// killer that gets a `Killed` reply instead) that it is gone. Dropping the
+    /// removed [`PtySession`] kills / reaps its process group.
+    ///
+    /// [`PtySession`]: usagi::infrastructure::pty::PtySession
+    fn remove_terminal(&mut self, terminal: u64, skip: Option<u64>) {
+        self.terminals.remove(&terminal);
+        self.terminal_registry.remove(terminal);
+        for client in self.attach_table.remove_terminal(terminal) {
+            if Some(client) == skip {
+                continue;
+            }
+            if !self.send(
+                client,
+                &usagi::domain::daemon_ipc::ServerMessage::Exited { terminal },
+            ) {
+                self.drop_client(client);
+            }
+        }
+    }
+
+    /// Spawn a new daemon-owned terminal in `worktree` and report its id and
+    /// pid. The [`PtySession`] is stored in `self.terminals`, so it lives on
+    /// independently of the requesting client. `command` (an agent launch line)
+    /// runs as a shell argument when given; `env` is injected into the child.
+    ///
+    /// [`PtySession`]: usagi::infrastructure::pty::PtySession
     fn spawn_terminal(
         &mut self,
         worktree: std::path::PathBuf,
+        command: Option<&str>,
+        env: &std::collections::BTreeMap<String, String>,
+        cols: u16,
+        rows: u16,
+        scrollback: usize,
     ) -> usagi::domain::daemon_ipc::ServerMessage {
         use usagi::domain::daemon_ipc::ServerMessage;
-        if let Some(pid) = self.terminal_registry.pid(&worktree) {
-            return ServerMessage::Spawned { worktree, pid };
-        }
-        // Modest fixed geometry and no opening command: this slice only proves the
-        // daemon owns a live process; screen size and content streaming come with
-        // the screen-streaming slice. No workspace secrets are injected yet.
-        match usagi::infrastructure::pty::PtySession::spawn(
+        match usagi::infrastructure::pty::PtySession::spawn_streamed(
             &worktree,
-            24,
-            80,
-            None,
-            DAEMON_TERMINAL_SCROLLBACK,
-            &std::collections::BTreeMap::new(),
+            rows,
+            cols,
+            command,
+            scrollback,
+            env,
+            DAEMON_OUTPUT_BACKLOG_BYTES,
         ) {
             Ok(session) => {
                 let pid = session.process_id().unwrap_or(0);
-                self.terminals.insert(worktree.clone(), session);
-                self.terminal_registry.insert(worktree.clone(), pid);
-                ServerMessage::Spawned { worktree, pid }
+                let terminal = self.terminal_registry.allocate(worktree.clone(), pid);
+                self.terminals.insert(terminal, session);
+                ServerMessage::Spawned {
+                    terminal,
+                    worktree,
+                    pid,
+                }
             }
             Err(error) => ServerMessage::Error {
                 message: format!(
@@ -978,18 +1138,16 @@ impl DaemonIpcServer {
         }
     }
 
-    /// Kill the daemon-owned terminal for `worktree` (a no-op reply when none is
-    /// running). Dropping the removed [`PtySession`] signals its process group.
+    /// Kill the daemon-owned terminal `terminal` (a no-op reply when none is
+    /// running under that id). `killer` is answered with `Killed`; other
+    /// attachers learn of the death via `Exited`.
     fn kill_terminal(
         &mut self,
-        worktree: std::path::PathBuf,
+        terminal: u64,
+        killer: Option<u64>,
     ) -> usagi::domain::daemon_ipc::ServerMessage {
-        if let Some(session) = self.terminals.remove(&worktree) {
-            drop(session);
-            self.terminal_registry.remove(&worktree);
-            self.screen_generations.remove(&worktree);
-        }
-        usagi::domain::daemon_ipc::ServerMessage::Killed { worktree }
+        self.remove_terminal(terminal, killer);
+        usagi::domain::daemon_ipc::ServerMessage::Killed { terminal }
     }
 
     /// Push the current snapshot to every subscribed client, dropping any whose
@@ -1029,9 +1187,12 @@ impl DaemonIpcServer {
     }
 }
 
-/// Scrollback lines kept for a daemon-owned terminal. A modest fixed cap for this
-/// slice; the configurable value threads down once the TUI attaches as a client.
-const DAEMON_TERMINAL_SCROLLBACK: usize = 1000;
+/// Bytes of raw output retained per daemon terminal for streaming exact deltas
+/// to attached clients. A client that falls further behind than this is
+/// resynchronised with a full screen snapshot, so the cap only bounds memory,
+/// never correctness. 256 KiB absorbs a solid burst of agent output between two
+/// IPC ticks with plenty of margin.
+const DAEMON_OUTPUT_BACKLOG_BYTES: usize = 256 * 1024;
 
 /// Gather the daemon's view of every monitored session from the real stores.
 /// The composition-root adapter for [`usagi::usecase::daemon::gather`]: it wires

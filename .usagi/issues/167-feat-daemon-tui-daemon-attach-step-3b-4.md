@@ -1,14 +1,14 @@
 ---
 number: 167
 title: feat(daemon): TUI を daemon 端末の attach クライアント化（Step 3b-4）
-status: todo
+status: done
 priority: high
 labels: [daemon, tui, ipc]
 dependson: [166]
 related: []
 parent: 159
 created_at: 2026-07-10T13:35:38.863387+00:00
-updated_at: 2026-07-10T13:35:38.863387+00:00
+updated_at: 2026-07-10T21:14:44.341278+00:00
 ---
 
 Epic #159 の Step 3b の最終スライス。TUI の `TerminalPool` を **daemon 所有端末への attach** に置き換え、TUI を「daemon 端末のビューア／入力クライアント」にする。ここで **TUI を閉じても agent が走り続ける**が実運用で成立する。3b-3（#166・`Keys`/`Resize`）に依存。

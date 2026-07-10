@@ -56,7 +56,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
-use crate::infrastructure::pty::PtySession;
+use super::pool::PaneBackend;
 use crate::presentation::tui::io::clipboard;
 use crate::presentation::tui::io::screen::diff_frame_with_columns;
 
@@ -797,7 +797,7 @@ enum Wake {
 /// still wakes immediately, and the deadline wakes even when the shell stays
 /// quiet.
 fn wait(
-    pty: &PtySession,
+    pty: &PaneBackend,
     drawn_gen: u64,
     redraw_deadline: Option<Instant>,
     hold_output_until_deadline: bool,
@@ -896,7 +896,7 @@ fn open_tab_menu_at(
 fn pump_input(
     term: &Term,
     state: &mut HomeState,
-    pty: &mut PtySession,
+    pty: &mut PaneBackend,
     geo: ui::TerminalGeometry,
     size: (u16, u16),
     scrollback: &mut usize,
@@ -1351,7 +1351,7 @@ fn pump_input(
 /// A fast key repeat can queue several `Event::Key`s before the next repaint; the
 /// old loop wrote and flushed once per key, while batching keeps the shell input
 /// equivalent and cuts the syscall count to one write+flush per drain.
-fn flush_pending_input(pty: &mut PtySession, pending: &mut Vec<u8>) -> Result<()> {
+fn flush_pending_input(pty: &mut PaneBackend, pending: &mut Vec<u8>) -> Result<()> {
     if !pending.is_empty() {
         pty.write(pending)?;
         pending.clear();
@@ -1415,7 +1415,7 @@ fn update_pointer(
 /// only one that works on terminals ignoring OSC 52 such as Apple Terminal.app,
 /// and an OSC 52 escape written to `term`, which reaches the user's machine over
 /// SSH. A click without a drag selects nothing, so there is nothing to copy.
-fn copy_selection(term: &Term, pty: &PtySession, selection: Option<&Selection>) -> Result<()> {
+fn copy_selection(term: &Term, pty: &PaneBackend, selection: Option<&Selection>) -> Result<()> {
     let Some(sel) = selection.filter(|s| !s.is_empty()) else {
         return Ok(());
     };
@@ -1464,7 +1464,7 @@ fn copy_to_system_clipboard(text: &str) {
 /// real drag selection. The release coordinates locate the clicked cell, which
 /// must match the empty selection's anchor — distinguishing a click from a drag.
 fn open_clicked_url(
-    pty: &PtySession,
+    pty: &PaneBackend,
     geo: ui::TerminalGeometry,
     col: u16,
     row: u16,
