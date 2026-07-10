@@ -41,6 +41,12 @@ pub enum ClientMessage {
     Spawn { worktree: PathBuf },
     /// Kill the daemon-owned terminal for `worktree`, if one is running.
     Kill { worktree: PathBuf },
+    /// Start receiving [`ServerMessage::Screen`] updates for `worktree`'s
+    /// terminal. The daemon sends the current screen at once, then again whenever
+    /// it changes.
+    Attach { worktree: PathBuf },
+    /// Stop receiving screen updates for `worktree`.
+    Detach { worktree: PathBuf },
 }
 
 /// A message the daemon sends to a client.
@@ -54,6 +60,13 @@ pub enum ServerMessage {
     Spawned { worktree: PathBuf, pid: u32 },
     /// The terminal for `worktree` has been killed (or none was running).
     Killed { worktree: PathBuf },
+    /// The current screen of `worktree`'s terminal, as the vt100 escape-sequence
+    /// bytes that reproduce it when written to a terminal. Sent on attach and on
+    /// every subsequent change.
+    Screen {
+        worktree: PathBuf,
+        contents: Vec<u8>,
+    },
     /// A request could not be handled; carries a human-readable reason.
     Error { message: String },
 }

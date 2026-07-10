@@ -41,12 +41,13 @@ fn wait_for(path: &Path, budget: Duration) -> bool {
     path.exists()
 }
 
-/// Read one framed [`ServerMessage`] from `stream`, waiting up to `budget`.
-fn read_message(stream: &mut UnixStream, budget: Duration) -> ServerMessage {
+/// Read one framed [`ServerMessage`] from `stream` into the caller's `decoder`,
+/// waiting up to `budget`. The decoder is caller-owned so several messages read
+/// in sequence over one connection never lose bytes buffered past a frame.
+fn recv(stream: &mut UnixStream, decoder: &mut FrameDecoder, budget: Duration) -> ServerMessage {
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();
-    let mut decoder = FrameDecoder::new();
     let mut buf = [0u8; 4096];
     let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
@@ -63,6 +64,12 @@ fn read_message(stream: &mut UnixStream, budget: Duration) -> ServerMessage {
         }
     }
     panic!("timed out waiting for a reply from the daemon");
+}
+
+/// Read one framed [`ServerMessage`] from a fresh connection (single reply).
+fn read_message(stream: &mut UnixStream, budget: Duration) -> ServerMessage {
+    let mut decoder = FrameDecoder::new();
+    recv(stream, &mut decoder, budget)
 }
 
 #[test]
@@ -99,6 +106,64 @@ fn client_lists_sessions_over_the_ipc_socket() {
 
     // Always stop the daemon, even if the assertions above failed, so it does
     // not linger past the test.
+    daemon_cmd(home.path(), "stop");
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn client_attaches_and_receives_the_terminal_screen() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    let worktree = tempfile::tempdir().unwrap();
+    let worktree_path = worktree.path().to_path_buf();
+
+    daemon_cmd(home.path(), "start");
+    assert!(
+        wait_for(&sock, Duration::from_secs(10)),
+        "daemon never created its IPC socket"
+    );
+
+    let outcome = std::panic::catch_unwind(|| {
+        let mut stream = UnixStream::connect(&sock).expect("connecting");
+        let mut decoder = FrameDecoder::new();
+
+        // Spawn a terminal, then attach to its screen feed over the same
+        // connection.
+        stream
+            .write_all(
+                &encode_message(&ClientMessage::Spawn {
+                    worktree: worktree_path.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            ServerMessage::Spawned { .. } => {}
+            other => panic!("expected Spawned, got {other:?}"),
+        }
+
+        stream
+            .write_all(
+                &encode_message(&ClientMessage::Attach {
+                    worktree: worktree_path.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        // The daemon paints the current screen on attach: a Screen message for
+        // this worktree comes back, proving the vt100 screen is streamed over IPC.
+        match recv(&mut stream, &mut decoder, Duration::from_secs(5)) {
+            ServerMessage::Screen { worktree, .. } => {
+                assert_eq!(worktree, worktree_path, "screen was for the wrong worktree");
+            }
+            other => panic!("expected Screen, got {other:?}"),
+        }
+    });
+
     daemon_cmd(home.path(), "stop");
 
     if let Err(payload) = outcome {
