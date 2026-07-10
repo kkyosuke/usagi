@@ -66,6 +66,15 @@ fn noop_set_note(_: &str, _: &str) -> SessionOutcome {
     }
 }
 
+fn noop_set_todos() -> SessionOutcome {
+    SessionOutcome {
+        line: LogLine::output("todos saved"),
+        sessions: None,
+        select: None,
+        root_note: None,
+    }
+}
+
 fn noop_set_label(_: &str, _: Option<&str>) -> SessionOutcome {
     SessionOutcome {
         line: LogLine::output("label saved"),
@@ -376,6 +385,8 @@ fn run_full_external(
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _: Option<AutoFocus>| {};
@@ -407,6 +418,7 @@ fn run_full_external(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
@@ -908,6 +920,8 @@ fn run_with_tasks(
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
@@ -936,6 +950,7 @@ fn run_with_tasks(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove_w,
@@ -1014,6 +1029,8 @@ fn run_with_state_monitor_watch(
     let mut tab_op: fn(&Path, Option<TabNav>) -> (Vec<String>, usize) = noop_tab_op;
     let mut close: fn(&mut HomeState, &Path) = noop_close;
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut save_resume = |_: &str, _: ResumeLevel| {};
@@ -1039,6 +1056,7 @@ fn run_with_state_monitor_watch(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,
@@ -1189,6 +1207,8 @@ fn unite_add_and_remove_run_through_the_palette() {
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
@@ -1221,6 +1241,7 @@ fn unite_add_and_remove_run_through_the_palette() {
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,

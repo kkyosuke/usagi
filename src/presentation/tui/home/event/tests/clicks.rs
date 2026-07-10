@@ -366,6 +366,8 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut todos =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
@@ -400,6 +402,7 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_todos: &mut todos,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
@@ -493,6 +496,8 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
     let mut create: fn(&Path, &str, u64) = |_, _, _| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+    let mut todos =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
@@ -527,6 +532,7 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
         dispatch_create: &mut create,
         rename_display: &mut rename,
         set_note: &mut note,
+        set_todos: &mut todos,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder,
         dispatch_remove: &mut remove,
@@ -664,6 +670,8 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
         let mut create: fn(&Path, &str, u64) = |_, _, _| {};
         let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
         let mut note = |_: &Path, n: &str, v: &str| noop_set_note(n, v);
+        let mut todos =
+            |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
         let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
         let mut reorder: fn(&str, bool) -> SessionReorder = noop_reorder;
         let mut remove: fn(&Path, &str, bool, Option<AutoFocus>) = |_, _, _, _| {};
@@ -702,6 +710,7 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
             dispatch_create: &mut create,
             rename_display: &mut rename,
             set_note: &mut note,
+            set_todos: &mut todos,
             set_label: &mut set_label_fake,
             reorder_session: &mut reorder,
             dispatch_remove: &mut remove,

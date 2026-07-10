@@ -366,6 +366,8 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
     };
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, _: &str, _: bool, _| {};
@@ -398,6 +400,7 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,
@@ -607,6 +610,8 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut set_label_fake = |_: &Path, n: &str, id: Option<&str>| noop_set_label(n, id);
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut remove = |_: &Path, name: &str, _: bool, auto_closeup: Option<AutoFocus>| {
@@ -648,6 +653,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label_fake,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut remove,

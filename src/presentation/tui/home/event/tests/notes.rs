@@ -125,6 +125,100 @@ fn tab_switches_tabs_and_editing_is_ignored_on_the_read_only_tabs() {
 }
 
 #[test]
+fn todos_tab_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
+    // Exercise the todos tab's interactive keys end to end through the loop:
+    // add / edit (inline input) / toggle / delete / move, then Ctrl-S persists.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::ArrowDown), // root -> alpha
+        Ok(Key::Char('n')), // open the editor (note tab)
+        Ok(Key::Tab),       // note -> todos
+        Ok(Key::Char('z')), // an unbound key on the todos list: ignored
+        Ok(Key::Char('a')), // add
+    ];
+    keys.extend(typed("one"));
+    keys.push(Ok(Key::Enter)); // commit "one"
+    keys.push(Ok(Key::Char('a'))); // add
+    keys.extend(typed("two"));
+    keys.push(Ok(Key::Enter)); // commit "two"
+    keys.push(Ok(Key::Char('k'))); // move up -> "one"
+    keys.push(Ok(Key::ArrowDown)); // move down -> "two"
+    keys.push(Ok(Key::Char(' '))); // toggle "two" done
+    keys.push(Ok(Key::Char('e'))); // edit "two"
+    keys.extend(typed("!"));
+    keys.push(Ok(Key::Enter)); // commit "two!"
+    keys.push(Ok(Key::Char('a'))); // add, then cancel the input
+    keys.push(Ok(Key::Char('x')));
+    keys.push(Ok(Key::Escape)); // cancel the inline input (not the overlay)
+    keys.push(Ok(Key::Char('k'))); // move up -> "one"
+    keys.push(Ok(Key::Char('d'))); // delete "one"
+    keys.push(Ok(Key::Char(CTRL_S))); // save (todos were edited)
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    // The note was saved too (empty, since it was never edited on the note tab).
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), String::new())]
+    );
+}
+
+#[test]
+fn keys_on_the_read_only_decisions_tab_are_ignored() {
+    // On the decisions tab a printable key does nothing (an agent writes decisions
+    // over MCP); the note is saved unchanged on Ctrl-S.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let keys = vec![
+        Ok(Key::ArrowDown),    // root -> alpha
+        Ok(Key::Char('n')),    // open (note tab)
+        Ok(Key::Tab),          // note -> todos
+        Ok(Key::Tab),          // todos -> decisions
+        Ok(Key::Char('x')),    // ignored on the read-only decisions tab
+        Ok(Key::Char(CTRL_S)), // save
+        Ok(Key::CtrlC),
+    ];
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), String::new())]
+    );
+}
+
+#[test]
 fn shift_arrows_select_text_and_delete_removes_the_selection() {
     // In the note editor, `Shift`+a cursor key extends a selection and `Del`
     // removes the whole span. Every selection direction is exercised, then the

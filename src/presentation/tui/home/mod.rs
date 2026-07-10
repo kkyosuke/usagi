@@ -495,6 +495,40 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
+    // Saving the todos tab replaces the row's whole checklist in state.json and
+    // re-reads the sessions so the editor / sidebar reflect it. Like `set_note` it
+    // routes the `⌂ root` row to the workspace-level list and every other name to
+    // the named session, stays synchronous (no git work), and takes the same
+    // op-lock to serialise against the background workers.
+    let todos_lock = op_lock.clone();
+    let mut set_todos =
+        |root: &Path, name: &str, todos: &[crate::domain::workspace_state::SessionTodo]| {
+            let _guard = lock_session_ops(&todos_lock);
+            let is_root = name == ROOT_NAME;
+            let target = if is_root {
+                crate::usecase::session::NoteTarget::Root
+            } else {
+                crate::usecase::session::NoteTarget::Session(name)
+            };
+            match crate::usecase::session::set_todos(root, target, todos.to_vec()) {
+                Ok(stored) => SessionOutcome {
+                    line: LogLine::output(format!(
+                        "Saved {} todo(s) for \"{name}\" ☑",
+                        stored.len()
+                    )),
+                    sessions: crate::usecase::workspace_state::recorded_sessions(root),
+                    select: (!is_root).then(|| name.to_string()),
+                    root_note: None,
+                },
+                Err(e) => SessionOutcome {
+                    line: LogLine::error(format!("todos failed: {e}")),
+                    sessions: None,
+                    select: None,
+                    root_note: None,
+                },
+            }
+        };
+
     // Assigning a manual status label (`Tab` / digit keys in 選択) persists the
     // label id to state.json and re-reads the sessions so the sidebar's status
     // column reflects it. The branch / identity is untouched, so the session keeps
@@ -1648,6 +1682,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display,
         set_note: &mut set_note,
+        set_todos: &mut set_todos,
         set_label: &mut set_label,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,

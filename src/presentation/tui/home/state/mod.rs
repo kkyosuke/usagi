@@ -47,7 +47,7 @@ pub use log::{LineKind, LogLine};
 pub use modal::{
     CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, NoteTab,
     Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput,
-    TextModal,
+    TextModal, TodoInput,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel};
 
@@ -3241,10 +3241,80 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
+    /// Whether the open note editor is on the `todos` tab with no inline input —
+    /// the state in which the todos-list keys (`j`/`k`/`Space`/`a`/`e`/`d`) act.
+    pub fn note_editor_todos_list_active(&self) -> bool {
+        self.note_editor()
+            .is_some_and(|e| e.tab() == NoteTab::Todos && !e.is_editing_todo())
+    }
+
+    /// Whether the open note editor has its inline todo input open (adding or
+    /// editing a todo), so keys route to that single-line input.
+    pub fn note_editor_todo_input_active(&self) -> bool {
+        self.note_editor().is_some_and(NoteEditor::is_editing_todo)
+    }
+
+    /// Move the todos-tab selection down (`down`) or up. No-op unless the todos
+    /// list is active.
+    pub fn note_editor_move_todo(&mut self, down: bool) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.move_todo(down);
+        }
+    }
+
+    /// Toggle / remove the highlighted todo, or open the add / edit inline input.
+    pub fn note_editor_toggle_todo(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.toggle_selected_todo();
+        }
+    }
+
+    pub fn note_editor_remove_todo(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.remove_selected_todo();
+        }
+    }
+
+    pub fn note_editor_begin_add_todo(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.begin_add_todo();
+        }
+    }
+
+    pub fn note_editor_begin_edit_todo(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.begin_edit_todo();
+        }
+    }
+
+    /// Route a key to the open inline todo input. No-op when none is open.
+    pub fn note_editor_todo_input_key(&mut self, key: &console::Key) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.todo_input_key(key);
+        }
+    }
+
+    /// Commit / cancel the inline todo input.
+    pub fn note_editor_commit_todo_input(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.commit_todo_input();
+        }
+    }
+
+    pub fn note_editor_cancel_todo_input(&mut self) {
+        if let Some(editor) = self.note_editor_mut() {
+            editor.cancel_todo_input();
+        }
+    }
+
     /// Accept the note edit: close the editor and return the target session, the
-    /// typed text, and whether to re-attach, for the event loop to persist (see
+    /// typed note text, the todos to persist (`Some` only when changed), and
+    /// whether to re-attach, for the event loop to persist (see
     /// [`NoteEditor::confirm`]). A no-op (returning `None`) when not editing.
-    pub fn confirm_note_editor(&mut self) -> Option<(String, String, bool)> {
+    #[allow(clippy::type_complexity)]
+    pub fn confirm_note_editor(
+        &mut self,
+    ) -> Option<(String, String, Option<Vec<SessionTodo>>, bool)> {
         match std::mem::take(&mut self.overlay) {
             Overlay::Note(editor) => Some(editor.confirm()),
             // Not editing: leave whatever was open (if anything) untouched.

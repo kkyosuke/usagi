@@ -686,6 +686,35 @@ pub fn add_todo(
     })
 }
 
+/// Replace the target's whole checklist with `todos` and return it as stored.
+///
+/// The counterpart to [`set_note`] for the todo section: the TUI edits its
+/// in-memory snapshot (toggle / add / edit / remove) and persists the result in
+/// one write on save, rather than routing each keystroke through a separate
+/// usecase. Each todo's text is trimmed and empties are dropped, so an editor can
+/// never persist a blank row.
+pub fn set_todos(
+    workspace_root: &Path,
+    target: NoteTarget<'_>,
+    todos: Vec<SessionTodo>,
+) -> Result<Vec<SessionTodo>> {
+    let store = WorkspaceStore::new(workspace_root);
+    edit_target(&store, target, |current, _| {
+        *current = todos
+            .into_iter()
+            .filter_map(|mut td| {
+                let trimmed = td.text.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                td.text = trimmed.to_string();
+                Some(td)
+            })
+            .collect();
+        Ok(current.clone())
+    })
+}
+
 /// Check or uncheck the todo at `index` and return the checklist as stored.
 /// Fails when `index` is out of range.
 pub fn set_todo_done(
@@ -2195,6 +2224,40 @@ mod tests {
         // `set_note` (the root defaults one into being; a session cannot).
         let err = add_todo(fresh.path(), NoteTarget::Session("x"), "hi").unwrap_err();
         assert!(err.to_string().contains("no sessions recorded"));
+    }
+
+    #[test]
+    fn set_todos_replaces_the_whole_list_trimming_and_dropping_empties() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        create(root.path(), "feature").unwrap();
+        let t = NoteTarget::Session("feature");
+        add_todo(root.path(), t, "old").unwrap();
+
+        let stored = set_todos(
+            root.path(),
+            t,
+            vec![
+                SessionTodo::new("  keep me  "),
+                SessionTodo::new("   "), // trims to empty -> dropped
+                {
+                    let mut td = SessionTodo::new("done one");
+                    td.done = true;
+                    td
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0], SessionTodo::new("keep me"));
+        assert_eq!(stored[1].text, "done one");
+        assert!(stored[1].done);
+        // The prior "old" entry is gone — the list was replaced wholesale.
+        assert_eq!(todos_of(root.path(), "feature"), stored);
+
+        // An empty replacement clears the checklist.
+        assert!(set_todos(root.path(), t, Vec::new()).unwrap().is_empty());
+        assert!(todos_of(root.path(), "feature").is_empty());
     }
 
     #[test]
