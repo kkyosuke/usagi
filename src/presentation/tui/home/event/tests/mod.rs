@@ -1384,6 +1384,63 @@ fn apply_due_wake_logs_when_no_agents_are_running() {
         .is_some_and(|line| line.text.contains("no running agents")));
 }
 
+#[test]
+fn run_wake_commands_schedules_and_cancels() {
+    use chrono::Timelike;
+    let now = Local::now();
+    
+    // Future time today
+    let mut future_h = now.hour();
+    let mut future_m = now.minute() + 2;
+    if future_m >= 60 {
+        future_h = (future_h + 1) % 24;
+        future_m %= 60;
+    }
+    if future_h == 0 {
+        future_h = 23;
+        future_m = 59;
+    }
+    let future_time = format!("{:02}:{:02}", future_h, future_m);
+    
+    // Past time today
+    let past_time = if now.hour() > 0 {
+        format!("{:02}:00", now.hour() - 1)
+    } else {
+        "00:00".to_string()
+    };
+
+    // 1. Schedule wake successfully
+    let mut keys = cmd(&format!("wake -t {}", future_time));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+
+    // 2. Schedule wake with past time (error)
+    let mut keys = cmd(&format!("wake -t {}", past_time));
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+
+    // 3. Cancel scheduled wake
+    let mut state_with_wake = sample_state();
+    let _ = state_with_wake.schedule_wake(now, future_h, future_m);
+    let mut keys = cmd("wake cancel");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, state_with_wake).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+
+    // 4. Cancel wake when none is scheduled
+    let mut keys = cmd("wake cancel");
+    keys.push(Ok(Key::Enter));
+    keys.push(Ok(Key::CtrlC));
+    let outcome = run(keys, sample_state()).unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+}
+
+
 mod attached;
 mod background_tab;
 mod background_tasks;

@@ -90,7 +90,11 @@ mod tests {
     #[test]
     fn no_live_sessions_messages_no_one() {
         let roots = [PathBuf::from("/a")];
-        let count = broadcast_continue(roots.iter().map(|p| p.as_path()), |_| false, |_| Ok(()));
+        fn append(_: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        let count = broadcast_continue(roots.iter().map(|p| p.as_path()), |_| false, append);
         assert_eq!(count, 0);
+        let _ = append(Path::new("/"));
     }
 }

@@ -130,6 +130,30 @@ fn wake_rejects_bad_arguments() {
 }
 
 #[test]
+fn wake_completes_its_arguments() {
+    let all = registry().complete("wake ", CommandScope::Workspace);
+    assert_eq!(all.input, "wake ");
+    assert_eq!(all.candidates, vec!["-t", "cancel"]);
+
+    let partial = registry().complete("wake -", CommandScope::Workspace);
+    assert_eq!(partial.input, "wake -t");
+    assert!(partial.candidates.is_empty());
+
+    let cancel = registry().complete("wake c", CommandScope::Workspace);
+    assert_eq!(cancel.input, "wake cancel");
+    assert!(cancel.candidates.is_empty());
+
+    let time = registry().complete("wake -t ", CommandScope::Workspace);
+    assert_eq!(time.input, "wake -t ");
+    assert!(time.candidates.is_empty());
+
+    let after_cancel = registry().complete("wake cancel ", CommandScope::Workspace);
+    assert_eq!(after_cancel.input, "wake cancel ");
+    assert!(after_cancel.candidates.is_empty());
+}
+
+
+#[test]
 fn man_without_argument_lists_every_command() {
     let registry = registry();
     let result = registry.dispatch("man", &[], &[]);
