@@ -209,7 +209,7 @@ impl AheadBehind {
 /// usagi does not query GitHub for this — it is harvested by scanning live
 /// embedded terminal output for pull-request URLs of the form
 /// `https://<host>/<owner>/<repo>/pull/<N>` (see
-/// [`crate::presentation::tui::home::terminal::link::pr_links`]). The sidebar
+/// [`crate::presentation::tui::home::terminal::link::harvest_pr_links`]). The sidebar
 /// shows `#<number>` and a click opens [`url`](Self::url) in the default browser.
 /// A session may carry several — one per repository it touches, or several opened
 /// over its life — so they are kept as a list ([`WorktreeState::pr`]).

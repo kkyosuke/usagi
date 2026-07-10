@@ -369,11 +369,12 @@ fn drive(
     // so hover-only / throttled frames skip the O(all cells) re-scan and reuse
     // them until the shell's output actually changes (see [`link`]).
     let mut links_cache: Option<(u64, std::collections::HashSet<Cell>)> = None;
-    // The pull-request URLs last harvested from this pane's output, so the agent
-    // printing them is recorded for the sidebar (and persisted) only when the set
-    // changes rather than on every output frame they stay on screen (see
-    // [`link::pr_links`]).
+    // The pull-request URLs and scrollback high-water mark last harvested from
+    // this pane's output. History rows are inspected once, while a stable visible
+    // PR is persisted only when the harvested set changes (see
+    // [`link::harvest_pr_links_from_visible`]).
     let mut last_prs: Vec<crate::domain::workspace_state::PrLink> = Vec::new();
+    let mut pr_watermark = vt100::ScrollbackWatermark::default();
     // The cursor shape (DECSCUSR `Ps`) last emitted to the host terminal, so a
     // shape is re-asserted only when the program changes it. `None` until the
     // first paint, which always emits — restoring this pane's shape over whatever
@@ -654,11 +655,13 @@ fn drive(
                     // underline) and the URL text — computing them together avoids
                     // a second full-grid walk under the parser lock.
                     let scan = link::scan_links(screen);
-                    // Fresh output: harvest the pull-request URLs the agent may have
-                    // printed so the attached session records them (sidebar
-                    // `#<number>` badges, click-to-reopen). Return them to persist
-                    // off the lock; only when the visible set actually changed.
-                    let prs = link::pr_links_from(&scan.urls);
+                    // Fresh output: harvest newly retained history plus the visible
+                    // URLs already produced by `scan_links`, so a PR that scrolled
+                    // out between paints is still recorded without walking the
+                    // visible grid twice under the parser lock.
+                    let (prs, next_watermark) =
+                        link::harvest_pr_links_from_visible(screen, pr_watermark, &scan.urls);
+                    pr_watermark = next_watermark;
                     links_cache = Some((gen, scan.cells));
                     (!prs.is_empty() && prs != last_prs).then_some(prs)
                 } else {

@@ -113,15 +113,17 @@ impl Watched {
 
 /// The cheap shared handles the watcher needs to harvest PR URLs from one pane.
 ///
-/// `last_generation` and `last_prs` are watcher-owned cache fields: they avoid
-/// rescanning unchanged screens and avoid re-writing the same visible PR list to
-/// the store every tick. The pane `id` is stable across tab reorders, so a scan
-/// job can be matched back to its cache after it runs off-lock.
+/// `last_generation`, `pr_watermark`, and `last_prs` are watcher-owned cache
+/// fields: they avoid rescanning unchanged screens, restrict history work to rows
+/// added since the previous pass, and avoid re-writing the same harvested PR list
+/// every tick. The pane `id` is stable across tab reorders, so a scan job can be
+/// matched back to its cache after it runs off-lock.
 struct WatchedPrPane {
     id: u64,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     generation: Arc<AtomicU64>,
     last_generation: u64,
+    pr_watermark: vt100::ScrollbackWatermark,
     last_prs: Vec<PrLink>,
 }
 
@@ -329,6 +331,7 @@ struct PrScanJob {
     path: PathBuf,
     pane_id: u64,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+    watermark: vt100::ScrollbackWatermark,
     previous: Vec<PrLink>,
 }
 
@@ -337,6 +340,8 @@ struct PrScanResult {
     path: PathBuf,
     pane_id: u64,
     prs: Vec<PrLink>,
+    watermark: vt100::ScrollbackWatermark,
+    changed: bool,
 }
 
 /// Collect the panes whose output changed since their last watcher scan, and
@@ -355,6 +360,7 @@ fn pending_pr_scans(shared: &mut Shared) -> Vec<PrScanJob> {
                         path: path.clone(),
                         pane_id: pane.id,
                         parser: Arc::clone(&pane.parser),
+                        watermark: pane.pr_watermark,
                         previous: pane.last_prs.clone(),
                     }
                 })
@@ -363,20 +369,24 @@ fn pending_pr_scans(shared: &mut Shared) -> Vec<PrScanJob> {
         .collect()
 }
 
-/// Run PR scans off the watcher mutex. A pane with no visible PRs, or the same
-/// visible PR list as its previous scan, yields no result.
+/// Run incremental PR-history scans off the watcher mutex. Every job yields a
+/// result so its watermark advances even when no PR was present; `changed` marks
+/// only non-empty lists that need persistence.
 fn scan_pr_jobs(jobs: Vec<PrScanJob>) -> Vec<PrScanResult> {
     jobs.into_iter()
-        .filter_map(|job| {
-            let prs = {
+        .map(|job| {
+            let (prs, watermark) = {
                 let parser = lock_parser(&job.parser);
-                super::link::pr_links(parser.screen())
+                super::link::harvest_pr_links(parser.screen(), job.watermark)
             };
-            (!prs.is_empty() && prs != job.previous).then_some(PrScanResult {
+            let changed = !prs.is_empty() && prs != job.previous;
+            PrScanResult {
                 path: job.path,
                 pane_id: job.pane_id,
                 prs,
-            })
+                watermark,
+                changed,
+            }
         })
         .collect()
 }
@@ -390,7 +400,7 @@ fn lock_parser(
 }
 
 /// Persist newly harvested PRs and return the store's accumulated list for each
-/// session root whose visible PRs changed. Disk IO is kept out of the watcher
+/// session root whose harvested PRs changed. Disk IO is kept out of the watcher
 /// mutex; failures are best-effort like the attached-pane harvest path.
 ///
 /// After merging the freshly seen PRs, any accumulated PR still missing a title —
@@ -403,6 +413,7 @@ fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
     use crate::infrastructure::{pr_link_store, pr_title};
     results
         .iter()
+        .filter(|result| result.changed)
         .map(|result| {
             let _ = pr_link_store::add(&result.path, &result.prs);
             let mut merged = pr_link_store::get(&result.path);
@@ -480,7 +491,10 @@ fn apply_pr_results(
                 .iter_mut()
                 .find(|pane| pane.id == result.pane_id)
         }) {
-            pane.last_prs = result.prs;
+            pane.pr_watermark = result.watermark;
+            if result.changed {
+                pane.last_prs = result.prs;
+            }
         }
     }
 
@@ -1362,6 +1376,7 @@ impl TerminalPool {
                     // restored pane whose screen already contains a PR URL is
                     // folded into the sidebar without requiring more output.
                     last_generation: u64::MAX,
+                    pr_watermark: vt100::ScrollbackWatermark::default(),
                     last_prs: Vec::new(),
                 })
                 .collect();

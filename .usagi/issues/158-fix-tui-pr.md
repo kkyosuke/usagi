@@ -1,13 +1,13 @@
 ---
 number: 158
 title: fix(tui): PR リンク検知の取りこぼしを塞ぐ（可視ビューポート限定スキャン → 履歴スキャン化）
-status: todo
+status: done
 priority: high
 labels: [fix, tui]
 dependson: []
 related: []
 created_at: 2026-07-09T23:29:32.568343+00:00
-updated_at: 2026-07-09T23:29:32.568343+00:00
+updated_at: 2026-07-10T21:53:36.333642+00:00
 ---
 
 ## 背景（調査結果）
