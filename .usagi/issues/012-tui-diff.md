@@ -1,13 +1,13 @@
 ---
 number: 12
 title: TUI Diff ビューア
-status: todo
+status: done
 priority: medium
 labels: [tui]
 dependson: [2, 3]
 related: []
 created_at: 2026-06-16T23:01:04.323501+00:00
-updated_at: 2026-06-16T23:01:04.323501+00:00
+updated_at: 2026-07-10T00:20:15.379856+00:00
 ---
 
 # TUI Diff ビューア
