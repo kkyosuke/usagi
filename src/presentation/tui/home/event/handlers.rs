@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use chrono::Local;
+use chrono::{DateTime, Local};
 use console::Key;
 use console::Term;
 
@@ -174,14 +174,12 @@ pub(super) fn palette_key(
                 // a time already passed is rejected immediately.
                 Effect::ScheduleWake { hour, minute } => {
                     // Read the clock once so the stored instant and the countdown
-                    // in the confirmation line agree.
+                    // in the confirmation line agree. Capture any pending wake
+                    // first so the confirmation can note it was replaced.
                     let now = Local::now();
+                    let previous = state.wake_scheduled_at();
                     match state.schedule_wake(now, hour, minute) {
-                        Ok(at) => state.log_output(format!(
-                            "Wake scheduled for {} ({}) — will send `continue` to running agents",
-                            at.format("%H:%M"),
-                            humanize_until(now, at),
-                        )),
+                        Ok(at) => state.log_output(wake_scheduled_line(now, at, previous)),
                         Err(e) => state.log_error(e),
                     }
                 }
@@ -189,12 +187,9 @@ pub(super) fn palette_key(
                 // offset is always in the future, so this cannot fail.
                 Effect::ScheduleWakeIn { minutes } => {
                     let now = Local::now();
+                    let previous = state.wake_scheduled_at();
                     let at = state.schedule_wake_after(now, minutes);
-                    state.log_output(format!(
-                        "Wake scheduled for {} ({}) — will send `continue` to running agents",
-                        at.format("%H:%M"),
-                        humanize_until(now, at),
-                    ));
+                    state.log_output(wake_scheduled_line(now, at, previous));
                 }
                 Effect::CancelWake => match state.cancel_wake() {
                     Some(at) => {
@@ -262,6 +257,29 @@ pub(super) fn palette_key(
         _ => {}
     }
     Ok(Flow::Continue)
+}
+
+/// Build the confirmation line for a freshly scheduled wake at `at` (its
+/// countdown measured against `now`), noting when it replaced an earlier pending
+/// wake so rescheduling never silently drops the previous one. Pure, so both
+/// branches are unit-tested without the wall clock.
+pub(super) fn wake_scheduled_line(
+    now: DateTime<Local>,
+    at: DateTime<Local>,
+    previous: Option<DateTime<Local>>,
+) -> String {
+    let mut line = format!(
+        "Wake scheduled for {} ({}) — will send `continue` to running agents",
+        at.format("%H:%M"),
+        humanize_until(now, at),
+    );
+    if let Some(prev) = previous {
+        line.push_str(&format!(
+            " (replaced earlier wake for {})",
+            prev.format("%H:%M")
+        ));
+    }
+    line
 }
 
 /// The left-pane row a session `name` maps to (0 is the root row), or `None` when

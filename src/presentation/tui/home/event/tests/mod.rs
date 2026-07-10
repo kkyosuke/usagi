@@ -1443,6 +1443,33 @@ fn run_wake_commands_schedules_and_cancels() {
 }
 
 #[test]
+fn wake_scheduled_line_notes_a_replaced_wake() {
+    let now = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 0, 0)
+        .single()
+        .unwrap();
+    let at = Local
+        .with_ymd_and_hms(2026, 7, 10, 14, 30, 0)
+        .single()
+        .unwrap();
+
+    // With no earlier wake, the line is just the confirmation and countdown.
+    let fresh = super::handlers::wake_scheduled_line(now, at, None);
+    assert!(fresh.contains("Wake scheduled for 14:30 (in 30m)"));
+    assert!(!fresh.contains("replaced"));
+
+    // Rescheduling over a pending wake notes the one it replaced, so the previous
+    // time is never silently dropped.
+    let previous = Local
+        .with_ymd_and_hms(2026, 7, 10, 13, 0, 0)
+        .single()
+        .unwrap();
+    let replaced = super::handlers::wake_scheduled_line(now, at, Some(previous));
+    assert!(replaced.contains("Wake scheduled for 14:30 (in 30m)"));
+    assert!(replaced.contains("(replaced earlier wake for 13:00)"));
+}
+
+#[test]
 fn run_wake_in_schedules_a_relative_wake() {
     // `wake -i 30m` drives the relative-schedule handler arm end to end.
     let mut keys = cmd("wake -i 30m");
