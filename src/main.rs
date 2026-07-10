@@ -666,6 +666,11 @@ struct DaemonIpcServer {
         std::collections::HashMap<std::path::PathBuf, usagi::infrastructure::pty::PtySession>,
     /// The pure mirror of `terminals` (worktree → pid) for the tested bookkeeping.
     terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry,
+    /// Which clients are attached to which worktree's screen feed.
+    attach_table: usagi::usecase::daemon_ipc::AttachTable,
+    /// The last vt100 screen generation pushed for each worktree, so an unchanged
+    /// screen is not re-sent every tick.
+    screen_generations: std::collections::HashMap<std::path::PathBuf, u64>,
 }
 
 /// One connected client: its stream and the decoder reassembling frames from its
@@ -701,13 +706,17 @@ impl DaemonIpcServer {
             next_id: 0,
             terminals: std::collections::HashMap::new(),
             terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
+            attach_table: usagi::usecase::daemon_ipc::AttachTable::new(),
+            screen_generations: std::collections::HashMap::new(),
         }
     }
 
-    /// Accept pending connections and service each client's buffered input.
+    /// Accept pending connections, service each client's buffered input, and push
+    /// any changed terminal screens to their attached clients.
     fn poll(&mut self, dir: &Path) {
         self.accept_pending();
         self.service_clients(dir);
+        self.stream_screens();
     }
 
     /// Accept every connection waiting on the listener (non-blocking), assigning
@@ -745,10 +754,16 @@ impl DaemonIpcServer {
         let ids: Vec<u64> = self.clients.keys().copied().collect();
         for id in ids {
             if !self.service_one(id, &sessions) {
-                self.clients.remove(&id);
-                self.registry.remove(id);
+                self.drop_client(id);
             }
         }
+    }
+
+    /// Forget a disconnected client everywhere it is tracked.
+    fn drop_client(&mut self, id: u64) {
+        self.clients.remove(&id);
+        self.registry.remove(id);
+        self.attach_table.remove_client(id);
     }
 
     /// Drain one client's readable bytes, dispatch each complete message, and
@@ -813,15 +828,85 @@ impl DaemonIpcServer {
             use usagi::usecase::daemon_ipc::Action;
             let action =
                 usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions);
-            let reply = match action {
-                Action::Reply(reply) => Some(reply),
-                Action::Spawn(worktree) => Some(self.spawn_terminal(worktree)),
-                Action::Kill(worktree) => Some(self.kill_terminal(worktree)),
-                Action::Nothing => None,
+            let alive = match action {
+                Action::Reply(reply) => self.send(id, &reply),
+                Action::Spawn(worktree) => {
+                    let reply = self.spawn_terminal(worktree);
+                    self.send(id, &reply)
+                }
+                Action::Kill(worktree) => {
+                    let reply = self.kill_terminal(worktree);
+                    self.send(id, &reply)
+                }
+                Action::Attach(worktree) => {
+                    self.attach_table.attach(id, worktree.clone());
+                    // Paint immediately on attach; later changes arrive via
+                    // `stream_screens`.
+                    self.send_current_screen(id, &worktree)
+                }
+                Action::Detach(worktree) => {
+                    self.attach_table.detach(id, &worktree);
+                    true
+                }
+                Action::Nothing => true,
             };
-            if let Some(reply) = reply {
-                if !self.send(id, &reply) {
-                    return false;
+            if !alive {
+                return false;
+            }
+        }
+    }
+
+    /// Send `worktree`'s current screen to client `id`, if a terminal is running
+    /// there. Returns `false` only when the write fails (the client is dropped);
+    /// having no terminal is not a failure.
+    fn send_current_screen(&mut self, id: u64, worktree: &Path) -> bool {
+        match self.current_screen(worktree) {
+            Some(contents) => self.send(
+                id,
+                &usagi::domain::daemon_ipc::ServerMessage::Screen {
+                    worktree: worktree.to_path_buf(),
+                    contents,
+                },
+            ),
+            None => true,
+        }
+    }
+
+    /// The current vt100 screen of `worktree`'s terminal as replayable bytes, or
+    /// `None` when no terminal runs there.
+    fn current_screen(&self, worktree: &Path) -> Option<Vec<u8>> {
+        self.terminals
+            .get(worktree)
+            .map(|session| session.parser().screen().contents_formatted())
+    }
+
+    /// Push each terminal whose screen changed since the last tick to the clients
+    /// attached to it. Terminals with no attached client are skipped (and their
+    /// generation left untracked) so an unobserved screen costs nothing.
+    fn stream_screens(&mut self) {
+        let worktrees: Vec<std::path::PathBuf> = self.terminals.keys().cloned().collect();
+        for worktree in worktrees {
+            let clients = self.attach_table.clients_for(&worktree);
+            if clients.is_empty() {
+                continue;
+            }
+            let Some(generation) = self.terminals.get(&worktree).map(|s| s.generation()) else {
+                continue;
+            };
+            if self.screen_generations.get(&worktree) == Some(&generation) {
+                continue;
+            }
+            self.screen_generations.insert(worktree.clone(), generation);
+            let Some(contents) = self.current_screen(&worktree) else {
+                continue;
+            };
+            let message = usagi::domain::daemon_ipc::ServerMessage::Screen {
+                worktree: worktree.clone(),
+                contents,
+            };
+            for id in clients {
+                if !self.send(id, &message) {
+                    self.drop_client(id);
                 }
             }
         }
@@ -874,6 +959,7 @@ impl DaemonIpcServer {
         if let Some(session) = self.terminals.remove(&worktree) {
             drop(session);
             self.terminal_registry.remove(&worktree);
+            self.screen_generations.remove(&worktree);
         }
         usagi::domain::daemon_ipc::ServerMessage::Killed { worktree }
     }
@@ -885,8 +971,7 @@ impl DaemonIpcServer {
         let message = usagi::domain::daemon_ipc::ServerMessage::Sessions { sessions };
         for id in self.registry.subscribers() {
             if !self.send(id, &message) {
-                self.clients.remove(&id);
-                self.registry.remove(id);
+                self.drop_client(id);
             }
         }
     }

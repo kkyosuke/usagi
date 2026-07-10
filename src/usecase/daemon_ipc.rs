@@ -30,6 +30,11 @@ pub enum Action {
     Spawn(PathBuf),
     /// Kill the daemon-owned terminal for this worktree, then reply.
     Kill(PathBuf),
+    /// Attach the requesting client to this worktree's screen feed, then send its
+    /// current screen.
+    Attach(PathBuf),
+    /// Detach the requesting client from this worktree's screen feed.
+    Detach(PathBuf),
     /// Nothing to send.
     Nothing,
 }
@@ -75,6 +80,63 @@ impl TerminalRegistry {
         let mut worktrees: Vec<PathBuf> = self.terminals.keys().cloned().collect();
         worktrees.sort();
         worktrees
+    }
+}
+
+/// Which clients are attached to which worktree's screen feed. A client may be
+/// attached to several worktrees, and several clients may share one. Pure
+/// bookkeeping the socket server consults when a terminal's screen changes.
+#[derive(Debug, Default)]
+pub struct AttachTable {
+    by_worktree: HashMap<PathBuf, HashSet<ClientId>>,
+}
+
+impl AttachTable {
+    /// An empty table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Attach `client` to `worktree`'s screen feed.
+    pub fn attach(&mut self, client: ClientId, worktree: PathBuf) {
+        self.by_worktree.entry(worktree).or_default().insert(client);
+    }
+
+    /// Detach `client` from `worktree`, forgetting the worktree entirely once no
+    /// client is attached to it.
+    pub fn detach(&mut self, client: ClientId, worktree: &Path) {
+        if let Some(clients) = self.by_worktree.get_mut(worktree) {
+            clients.remove(&client);
+            if clients.is_empty() {
+                self.by_worktree.remove(worktree);
+            }
+        }
+    }
+
+    /// Remove `client` from every worktree — used when its connection drops.
+    pub fn remove_client(&mut self, client: ClientId) {
+        self.by_worktree.retain(|_, clients| {
+            clients.remove(&client);
+            !clients.is_empty()
+        });
+    }
+
+    /// The clients attached to `worktree`, sorted for a stable push order.
+    pub fn clients_for(&self, worktree: &Path) -> Vec<ClientId> {
+        let mut clients: Vec<ClientId> = self
+            .by_worktree
+            .get(worktree)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        clients.sort_unstable();
+        clients
+    }
+
+    /// Whether `client` is attached to `worktree`.
+    pub fn is_attached(&self, client: ClientId, worktree: &Path) -> bool {
+        self.by_worktree
+            .get(worktree)
+            .is_some_and(|clients| clients.contains(&client))
     }
 }
 
@@ -140,6 +202,8 @@ pub fn handle(
         }
         ClientMessage::Spawn { worktree } => Action::Spawn(worktree),
         ClientMessage::Kill { worktree } => Action::Kill(worktree),
+        ClientMessage::Attach { worktree } => Action::Attach(worktree),
+        ClientMessage::Detach { worktree } => Action::Detach(worktree),
     }
 }
 
@@ -278,5 +342,77 @@ mod tests {
         registry.insert(a.clone(), 1);
         registry.insert(a.clone(), 2);
         assert_eq!(registry.pid(&a), Some(2));
+    }
+
+    #[test]
+    fn attach_and_detach_return_actions() {
+        let mut registry = SubscriberRegistry::new();
+        let worktree = PathBuf::from("/repo/.usagi/sessions/work");
+        assert_eq!(
+            handle(
+                ClientMessage::Attach {
+                    worktree: worktree.clone()
+                },
+                1,
+                &mut registry,
+                &[]
+            ),
+            Action::Attach(worktree.clone())
+        );
+        assert_eq!(
+            handle(
+                ClientMessage::Detach {
+                    worktree: worktree.clone()
+                },
+                1,
+                &mut registry,
+                &[]
+            ),
+            Action::Detach(worktree)
+        );
+    }
+
+    #[test]
+    fn attach_table_tracks_multiple_clients_and_worktrees() {
+        let mut table = AttachTable::new();
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        table.attach(1, a.clone());
+        table.attach(2, a.clone());
+        table.attach(1, b.clone());
+        assert!(table.is_attached(1, &a));
+        assert_eq!(table.clients_for(&a), vec![1, 2]);
+        assert_eq!(table.clients_for(&b), vec![1]);
+        // No one attached to an unknown worktree.
+        assert!(table.clients_for(&PathBuf::from("/none")).is_empty());
+    }
+
+    #[test]
+    fn attach_table_detach_drops_worktree_when_last_client_leaves() {
+        let mut table = AttachTable::new();
+        let a = PathBuf::from("/a");
+        table.attach(1, a.clone());
+        table.attach(2, a.clone());
+        table.detach(1, &a);
+        assert!(!table.is_attached(1, &a));
+        assert_eq!(table.clients_for(&a), vec![2]);
+        table.detach(2, &a);
+        assert!(table.clients_for(&a).is_empty());
+        // Detaching from an unknown worktree is a no-op.
+        table.detach(9, &PathBuf::from("/none"));
+    }
+
+    #[test]
+    fn attach_table_remove_client_clears_it_everywhere() {
+        let mut table = AttachTable::new();
+        let a = PathBuf::from("/a");
+        let b = PathBuf::from("/b");
+        table.attach(1, a.clone());
+        table.attach(2, a.clone());
+        table.attach(1, b.clone());
+        table.remove_client(1);
+        assert_eq!(table.clients_for(&a), vec![2]);
+        // `b` had only client 1, so it is gone entirely.
+        assert!(table.clients_for(&b).is_empty());
     }
 }
