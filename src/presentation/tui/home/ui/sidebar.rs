@@ -1262,23 +1262,11 @@ pub(crate) fn skeleton_frame(now: DateTime<Utc>) -> usize {
     (now.timestamp_millis().rem_euclid(1 << 30) / SKELETON_TICK_MS) as usize
 }
 
-/// Render a loading wave in a leaf-green (`success`) band rather than the
-/// blue/cyan accent used for creation. Used by removal skeletons so a row being
-/// pruned reads differently from a row being born.
-fn leaf_loading_chip(text: &str, frame: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let period = chars.len() + 3;
-    let head = frame % period;
-    let mut out = String::new();
-    for (i, c) in chars.into_iter().enumerate() {
-        let s = c.to_string();
-        if i == head || i + 1 == head {
-            out.push_str(&style(s).success().bold().to_string());
-        } else {
-            out.push_str(&style(s).dim().to_string());
-        }
-    }
-    out
+/// Render a loading wave in a red (`danger`) band rather than the blue/cyan
+/// accent used for creation. Used by removal skeletons so the whole visible
+/// pruning indicator — scissors and session name — communicates deletion.
+fn removal_loading_chip(text: &str, frame: usize) -> String {
+    widgets::shimmer_text_styled(text, frame, &Style::new().danger().bold())
 }
 
 /// The full-sidebar **pending session** placeholder inserted above a workspace's
@@ -1323,7 +1311,7 @@ pub(super) fn pending_session_rows(
 
 /// The full-sidebar skeleton that replaces a session row while that session is
 /// being removed. It keeps the same three-row footprint as the real row but uses
-/// a leaf-green wave on the name line, visually separating deletion from the
+/// a red wave on the name line, visually separating deletion from the
 /// blue/cyan create skeleton while leaving the lower two rows height-only.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn removing_session_rows(
@@ -1338,8 +1326,8 @@ pub(super) fn removing_session_rows(
     nesting_depth: usize,
 ) -> [String; SESSION_ROWS] {
     let gutter = session_gutter_cell(selected, active, in_overview, 0);
-    let kind = leaf_loading_chip("✂", frame);
-    let wave = leaf_loading_chip(&clip_to_width(label, name_width), frame);
+    let kind = removal_loading_chip("✂", frame);
+    let wave = removal_loading_chip(&clip_to_width(label, name_width), frame);
     let name = nested_inline_field(&wave, name_width, nesting_depth);
     let name = pad_to_width(name, name_width);
     let status_tag = label_cell(None, label_col);
@@ -1386,7 +1374,7 @@ pub(super) fn rail_removing_session_rows(
     active: bool,
     in_overview: bool,
 ) -> [String; SESSION_ROWS] {
-    let cut = leaf_loading_chip("✂", frame);
+    let cut = removal_loading_chip("✂", frame);
     let top = pad_to_width(
         format!(
             "{} {cut}",
