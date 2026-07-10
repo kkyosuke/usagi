@@ -4,6 +4,7 @@ pub mod agent_live_pane_store;
 pub mod agent_live_prompt_store;
 pub mod agent_prompt_store;
 pub mod agent_state_store;
+pub mod daemon_ipc;
 pub mod daemon_sessions_store;
 pub mod daemon_store;
 pub mod env_resolver;
