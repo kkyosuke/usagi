@@ -1409,13 +1409,17 @@ pub(super) fn event_loop(
         // folds a directory or opens a file's diff, and `←` collapses a directory;
         // the right diff pane scrolls with the arrows / `j`/`k` / PageUp/PageDown /
         // Space, `←` returns to the explorer, and `s` toggles the layout. `Tab`
-        // swaps focus from either side and `Esc` / `q` dismiss. It shares the
+        // swaps focus from either side and `Esc` / `q` dismiss. `Ctrl-P` / `Ctrl-N`
+        // (the tab-switch keys) leave the `diff` tab back to the session's panes,
+        // so the diff reads and behaves as a tab beside them. It shares the
         // preview's one-row-header geometry, so it pages by the same measure.
         if let Some(focus) = state.diff_view().map(|d| d.focus()) {
             let page = ui::preview_visible(height as usize, width as usize, &state);
             match key {
                 Key::Tab => state.diff_toggle_focus(),
-                Key::Escape | Key::Char('q') => state.close_diff(),
+                Key::Escape | Key::Char('q') | Key::Char(CTRL_P) | Key::Char(CTRL_N) => {
+                    state.close_diff()
+                }
                 _ => match focus {
                     DiffFocus::Tree => match key {
                         Key::ArrowUp | Key::Char('k') => state.diff_move_up(),

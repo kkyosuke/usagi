@@ -177,6 +177,28 @@ fn diff_command_opens_the_diff_view_from_the_closeup_prompt() {
 }
 
 #[test]
+fn diff_tab_is_left_and_reopened_with_the_tab_switch_keys() {
+    // The diff is a session tab: `Ctrl-N` / `Ctrl-P` (the tab-switch keys) leave it
+    // back to 集中, and re-running `diff` (the menu cursor stays on it) reopens it.
+    let dir = tempfile::tempdir().unwrap();
+    let work = repo_with_feature_diff(dir.path());
+    let state = state_with_worktree_at(&work);
+
+    let keys = vec![
+        Ok(Key::ArrowDown),    // cursor root -> the feature session
+        Ok(Key::Enter),        // focus it (idle -> Closeup menu, "agent")
+        Ok(Key::ArrowDown),    // agent -> close
+        Ok(Key::ArrowDown),    // close -> diff
+        Ok(Key::Enter),        // open the diff tab
+        Ok(Key::Char(CTRL_N)), // tab-next leaves the diff tab -> back to 集中
+        Ok(Key::Enter),        // the cursor stayed on `diff`; reopen it
+        Ok(Key::Char(CTRL_P)), // tab-prev leaves the diff tab -> back to 集中
+        Ok(Key::Escape),       // 集中 -> base Overview; fallback Ctrl-C quits
+    ];
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
+}
+
+#[test]
 fn diff_command_logs_a_failure_when_no_session_is_focused() {
     // Focused on the root row (no session) the `diff` command — typed into the 集中
     // prompt, where it is offered even on root — gathers nothing, so it logs the

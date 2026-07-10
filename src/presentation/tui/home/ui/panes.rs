@@ -8,7 +8,7 @@
 use console::{style, Style};
 
 use super::super::state::{
-    CreateInput, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, ROOT_NAME,
+    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, ROOT_NAME,
 };
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
@@ -118,6 +118,35 @@ pub(super) fn terminal_pane(view: &TerminalView, right_w: usize, rows: usize) ->
 /// pane. ASCII so the underline marker in [`tab_strip_parts`] (which measures
 /// width in `chars`) lands exactly under it, as it does for the pane labels.
 pub(super) const FOCUS_NEW_TAB_LABEL: &str = "+ new";
+
+/// The label of the session's `diff` tab (the `diff` command's view). Appended to
+/// the strip as the active chip while the diff is open, so it reads as a tab
+/// alongside the session's panes.
+pub(super) const DIFF_TAB_LABEL: &str = "diff";
+
+/// Render the open diff view as a session tab: the session tab strip on top —
+/// the live panes' chips followed by an active `diff` chip — then the diff split
+/// view ([`diff_pane`]) filling the body below. Heading it with the strip (as 没入
+/// and 集中 do for a live pane) is what makes the diff read as a tab in the
+/// session rather than a full-pane takeover. The strip block always fills exactly
+/// [`TAB_BAR_ROWS`], so the diff body lands in a stable place.
+fn diff_tab_pane(state: &HomeState, diff: &DiffView, width: usize, rows: usize) -> Vec<String> {
+    let mut labels = state
+        .terminal_tabs()
+        .map(|s| s.labels.clone())
+        .unwrap_or_default();
+    labels.push(DIFF_TAB_LABEL.to_string());
+    let active = labels.len().saturating_sub(1);
+    let combined = TabStrip { labels, active };
+    let header = active_session_header(state);
+    let mut lines = header_tab_rows(header, Some(&combined), None, width);
+    lines.resize(super::TAB_BAR_ROWS, String::new());
+    let body = rows.saturating_sub(lines.len());
+    lines.extend(diff_pane(diff, width, body));
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
+    lines
+}
 
 /// A blank right pane of exactly `rows` rows — the pane behind a floating overlay
 /// that owns the surface (the 集中 action modal), so the modal reads against an
@@ -626,9 +655,14 @@ pub(super) fn right_pane_contents(state: &HomeState, right_w: usize, rows: usize
     if let Some(chat) = state.chat() {
         return crate::presentation::tui::chat::ui::pane(chat, right_w, rows);
     }
-    // The diff view likewise takes over the right pane (opened from the `:`
-    // palette, capturing the keyboard while shown).
+    // The diff view is a session tab: opened from 集中 (the `diff` command), it
+    // reads as a `diff` tab beside the session's panes — the tab strip heads it
+    // with an active `diff` chip, and the split view fills the body below. Outside
+    // 集中 (there is no session strip to sit in) it takes the whole pane.
     if let Some(diff) = state.diff_view() {
+        if state.mode() == Mode::Closeup {
+            return diff_tab_pane(state, diff, right_w, rows);
+        }
         return diff_pane(diff, right_w, rows);
     }
     // The base pane for the current mode. The session-note overlay (the editor,
