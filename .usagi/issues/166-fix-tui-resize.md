@@ -1,13 +1,13 @@
 ---
 number: 166
 title: fix(tui): ターミナル resize 時に画面が再描画されず表示が崩れたままになる
-status: in-progress
+status: done
 priority: medium
 labels: [tui, bug]
 dependson: []
 related: []
 created_at: 2026-07-10T13:31:34.921092+00:00
-updated_at: 2026-07-10T13:31:41.777329+00:00
+updated_at: 2026-07-10T13:56:05.585416+00:00
 ---
 
 # fix(tui): ターミナル resize 時に画面が再描画されず表示が崩れたままになる
