@@ -16,14 +16,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 
 use crate::domain::history::HistoryEntry;
 use crate::domain::issue::Issue;
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, SessionLabelMaster, Sidebar};
 use crate::domain::version::Version;
-use crate::domain::workspace_state::{SessionAgent, SessionRecord, WorktreeState};
+use crate::domain::wake::WakeSchedule;
+use crate::domain::workspace_state::{
+    SessionAgent, SessionDecision, SessionRecord, SessionTodo, WorktreeState,
+};
 
 use super::command::{
     CommandInfo, CommandRegistry, CommandResult, CommandScope, Completion, Effect, Hint,
@@ -42,8 +45,9 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, Preview,
-    RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput, TextModal,
+    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, NoteTab,
+    Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput,
+    TextModal,
 };
 pub use mode::{Mode, PaneExit, ResumeLevel};
 
@@ -886,6 +890,11 @@ pub struct HomeState {
     /// stays a `&HomeState`-only function and its many test call sites are
     /// unaffected; tests that pin the label set a fixed value with `set_now`.
     now: DateTime<Utc>,
+    /// A one-shot wake scheduled by the workspace `wake -t hhmm` command. The
+    /// event loop checks it each tick and, once due, broadcasts `continue` to all
+    /// currently running session agents and clears it. `None` means no wake is
+    /// pending; `wake cancel` clears it.
+    wake_schedule: Option<WakeSchedule>,
 }
 
 /// How long the mascot holds a blink (eyes shut). A touch longer than the
@@ -974,6 +983,7 @@ impl HomeState {
             mascot_reaction_rng: 0,
             logger: Box::new(crate::infrastructure::error_log::NoopLogger),
             now: Utc::now(),
+            wake_schedule: None,
         }
     }
 
@@ -987,6 +997,48 @@ impl HomeState {
     /// The instant the current frame renders at (see [`set_now`](Self::set_now)).
     pub fn now(&self) -> DateTime<Utc> {
         self.now
+    }
+
+    /// Schedule a one-shot wake for `hour:minute` today, using the supplied local
+    /// `now` as both the date and the "already passed" boundary. On success it
+    /// replaces any existing pending wake and returns the scheduled instant for a
+    /// confirmation line.
+    pub fn schedule_wake(
+        &mut self,
+        now: DateTime<Local>,
+        hour: u32,
+        minute: u32,
+    ) -> Result<DateTime<Local>, String> {
+        let schedule = WakeSchedule::for_today(now, hour, minute)?;
+        let at = schedule.at();
+        self.wake_schedule = Some(schedule);
+        Ok(at)
+    }
+
+    /// Cancel the pending wake, returning the instant that would have fired so
+    /// the UI can distinguish "cancelled X" from "nothing to cancel".
+    pub fn cancel_wake(&mut self) -> Option<DateTime<Local>> {
+        self.wake_schedule.take().map(|schedule| schedule.at())
+    }
+
+    /// If a wake is due by `now`, consume it and return its scheduled instant.
+    /// Otherwise leave it pending. This one-shot consumption point prevents a due
+    /// wake from firing on every idle tick.
+    pub fn take_due_wake(&mut self, now: DateTime<Local>) -> Option<DateTime<Local>> {
+        if self
+            .wake_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule.is_due(now))
+        {
+            self.wake_schedule.take().map(|schedule| schedule.at())
+        } else {
+            None
+        }
+    }
+
+    /// The pending wake instant, exposed for tests / rendering-adjacent callers.
+    pub fn wake_scheduled_at(&self) -> Option<DateTime<Local>> {
+        self.wake_schedule.as_ref().map(|schedule| schedule.at())
     }
 
     /// Inject the error sink that persists operation failures to the daily log
@@ -2820,6 +2872,16 @@ impl HomeState {
         self.list.focus_index(row);
     }
 
+    /// Jump the Overview cursor to the first row (the root row) — the `g` jump.
+    pub fn overview_move_first(&mut self) {
+        self.list.focus_index(0);
+    }
+
+    /// Jump the Overview cursor to the last selectable row — the `G` jump.
+    pub fn overview_move_last(&mut self) {
+        self.list.focus_last();
+    }
+
     /// Begin inline session creation in 選択: open an empty name input that
     /// captures the mode's keys until confirmed (Enter) or cancelled (Esc).
     ///
@@ -3075,7 +3137,25 @@ impl HomeState {
     /// (没入's `Ctrl-E`); `false` for 選択's `n`.
     fn open_note_for(&mut self, target: String, reattach: bool) {
         let initial = self.session_note(&target).unwrap_or_default().to_string();
-        self.overlay = Overlay::Note(NoteEditor::new(target, &initial, reattach));
+        let (todos, decisions) = self.session_scratchpad(&target);
+        self.overlay = Overlay::Note(NoteEditor::new(
+            target, &initial, todos, decisions, reattach,
+        ));
+    }
+
+    /// The todos / decisions snapshot for the row named `name`: the session's
+    /// when it names a session, empty for the `⌂ root` row (the root's scratchpad
+    /// is not mirrored into the sidebar state). Cloned so the editor owns a
+    /// read-only copy it can render without borrowing the session list.
+    fn session_scratchpad(&self, name: &str) -> (Vec<SessionTodo>, Vec<SessionDecision>) {
+        if name == ROOT_NAME {
+            return (Vec::new(), Vec::new());
+        }
+        self.sessions
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| (s.todos().to_vec(), s.decisions().to_vec()))
+            .unwrap_or_default()
     }
 
     /// Begin editing the selected row's note in 選択 (Overview): open the note editor
@@ -3128,6 +3208,19 @@ impl HomeState {
     /// (it was opened from 没入). `false` when no editor is open.
     pub fn note_editor_reattaches(&self) -> bool {
         self.note_editor().is_some_and(NoteEditor::reattach)
+    }
+
+    /// Switch the open note editor to the next (`forward`) or previous tab
+    /// (`note` / `todos` / `decisions`). Returns whether a switch happened — i.e.
+    /// whether an editor was open — so the loop repaints only then.
+    pub fn note_editor_cycle_tab(&mut self, forward: bool) -> bool {
+        match self.note_editor_mut() {
+            Some(editor) => {
+                editor.cycle_tab(forward);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Cancel the note editor, discarding the edits. Called only while the note

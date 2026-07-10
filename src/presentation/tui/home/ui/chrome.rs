@@ -8,7 +8,7 @@ use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{
-    EnvEditor, HomeState, Mode, RemoveModal, TabMenu, TextModal, WorktreeList,
+    EnvEditor, HomeState, Mode, NoteTab, RemoveModal, TabMenu, TextModal, WorktreeList,
 };
 #[cfg(test)]
 use super::super::tasks::{TaskMark, TaskRow};
@@ -477,9 +477,12 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     // open (the note and preview are drawn in the right pane, so the screen never
     // switches), so their controls take over the footer regardless of the
     // underlying mode.
-    let help = if state.note_editor().is_some() {
-        "[note]  Ctrl-S: save / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select"
-            .to_string()
+    let help = if let Some(editor) = state.note_editor() {
+        match editor.tab() {
+            NoteTab::Note => "[note]  Ctrl-S: save / Tab: todos·decisions / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select".to_string(),
+            NoteTab::Todos => "[todos]  Tab: switch tab / Ctrl-S: save note / Esc: close  (edit via MCP)".to_string(),
+            NoteTab::Decisions => "[decisions]  Tab: switch tab / Ctrl-S: save note / Esc: close  (read-only)".to_string(),
+        }
     } else if state.preview().is_some() {
         "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close".to_string()
     } else if state.command_palette_open() {

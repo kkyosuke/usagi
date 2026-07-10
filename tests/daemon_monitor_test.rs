@@ -35,6 +35,8 @@ fn gather_reads_sessions_and_phases_from_the_real_stores() {
         name: "work".to_string(),
         display_name: None,
         note: None,
+        todos: Vec::new(),
+        decisions: Vec::new(),
         label_id: None,
         agent: SessionAgent::default(),
         origin: Default::default(),

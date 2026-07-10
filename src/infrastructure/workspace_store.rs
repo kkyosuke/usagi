@@ -90,6 +90,8 @@ mod tests {
     fn sample_state() -> WorkspaceState {
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feature".to_string(),
             display_name: Some("My Feature".to_string()),
             note: None,

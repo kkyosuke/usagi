@@ -391,6 +391,7 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -422,6 +423,7 @@ fn a_right_click_on_a_overview_tab_opens_a_menu_and_runs_the_selected_action() {
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event_loop(
         &term,
@@ -516,6 +518,7 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -547,6 +550,7 @@ fn run_overview_tab_menu_inputs(after_open: Vec<io::Result<Input>>) -> Vec<TabMe
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event_loop(
         &term,
@@ -689,6 +693,7 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
         let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
         let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
         let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+        let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
         let mut wiring = Wiring {
             interaction_epoch: 0,
             watch_sessions: false,
@@ -720,6 +725,7 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
             save_resume: &mut save_resume,
             save_last_active: &mut save_last_active,
             autostart_queued: &mut autostart_queued,
+            broadcast_wake: &mut broadcast_wake,
         };
         assert!(matches!(
             event_loop(
@@ -754,9 +760,10 @@ fn right_click_tab_paths_cover_closeup_and_attached_modes() {
 }
 
 #[test]
-fn a_scroll_is_ignored() {
-    // The TUI itself never scrolls: a wheel turn is dropped without moving the
-    // cursor, so the following `Enter` attaches the still-selected root (`/ws`).
+fn a_scroll_over_the_base_panes_is_ignored() {
+    // With no scrollable surface open the TUI never scrolls: a wheel turn is dropped
+    // without moving the cursor, so the following `Enter` attaches the still-selected
+    // root (`/ws`).
     let dirs = run_capturing_attached_dirs_for_inputs(
         vec![
             Ok(Input::Scroll(ScrollEvent {
@@ -769,4 +776,128 @@ fn a_scroll_is_ignored() {
         sample_state(),
     );
     assert_eq!(dirs, vec![PathBuf::from("/ws")]);
+}
+
+#[test]
+fn g_and_capital_g_jump_to_the_first_and_last_overview_rows() {
+    // `g` then `G` drive the list-first / list-last jumps in 選択; the run quits on
+    // the scripted reader's trailing Ctrl-C. `g` goes first while the cursor is on a
+    // real row — `G` lands on the create row, where a later letter would open the
+    // inline create input instead. (The cursor arithmetic is asserted in the state
+    // tests; here the key branches are exercised end-to-end.)
+    assert!(matches!(
+        run(vec![Ok(Key::Char('g')), Ok(Key::Char('G'))], sample_state()).unwrap(),
+        Outcome::Quit
+    ));
+}
+
+/// The event loop's scroll router: a downward wheel advances the open surface's
+/// scroll, an upward wheel rewinds it, and nothing open leaves the cursor alone.
+#[test]
+fn wheel_scrolls_the_open_diff_preview_or_text_modal() {
+    use crate::presentation::tui::home::state::ModalSize;
+
+    // Diff open: wheel down advances the per-file scroll, wheel up rewinds it.
+    let mut state = sample_state();
+    state.open_diff_result(Ok((
+        "f → main".to_string(),
+        "diff --git a/f b/f\n@@ -1,6 +1,6 @@\n-a\n-b\n-c\n+A\n+B\n+C\n".to_string(),
+    )));
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: 3,
+            col: 0,
+            row: 0,
+        },
+        2,
+    );
+    assert!(state.diff_view().unwrap().scroll() > 0);
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: -9,
+            col: 0,
+            row: 0,
+        },
+        2,
+    );
+    assert_eq!(state.diff_view().unwrap().scroll(), 0);
+    state.close_diff();
+
+    // Preview open: same, on the preview scroll.
+    let md = (0..20)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    state.open_preview_result(Ok(("README".to_string(), md)));
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: 4,
+            col: 0,
+            row: 0,
+        },
+        3,
+    );
+    assert!(state.preview().unwrap().scroll > 0);
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: -6,
+            col: 0,
+            row: 0,
+        },
+        3,
+    );
+    assert_eq!(state.preview().unwrap().scroll, 0);
+    state.close_preview();
+
+    // Text modal open: a zero-line wheel is a no-op; a real turn scrolls it.
+    let lines = (0..30).map(|i| LogLine::output(format!("l{i}"))).collect();
+    state.open_text_modal("man", lines, ModalSize::Normal);
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: 0,
+            col: 0,
+            row: 0,
+        },
+        5,
+    );
+    assert_eq!(state.text_modal().unwrap().scroll, 0);
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: 2,
+            col: 0,
+            row: 0,
+        },
+        5,
+    );
+    assert!(state.text_modal().unwrap().scroll > 0);
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: -5,
+            col: 0,
+            row: 0,
+        },
+        5,
+    );
+    assert_eq!(state.text_modal().unwrap().scroll, 0);
+    state.close_text_modal();
+
+    // Nothing open: the wheel is a no-op (the cursor does not move).
+    let before = state.list().selected_index();
+    scroll_open_surface(
+        &mut state,
+        ScrollEvent {
+            lines: 5,
+            col: 0,
+            row: 0,
+        },
+        4,
+    );
+    assert_eq!(state.list().selected_index(), before);
 }

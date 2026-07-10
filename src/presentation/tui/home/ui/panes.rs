@@ -8,7 +8,8 @@
 use console::{style, Style};
 
 use super::super::state::{
-    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, Preview, RenameInput, ROOT_NAME,
+    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, NoteTab, Preview, RenameInput,
+    ROOT_NAME,
 };
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
@@ -18,7 +19,7 @@ use super::sidebar::{dim_row, status_label, AgentLifecycle};
 use super::tabs_hit::header_tab_rows;
 use super::{clip_to_width, pad_to_width, DETACHED, ROOT_DETAIL, STATUS_COL, TERMINAL_STARTING};
 use crate::domain::settings::Sidebar;
-use crate::domain::workspace_state::BranchStatus;
+use crate::domain::workspace_state::{BranchStatus, SessionDecision, SessionTodo};
 use crate::presentation::theme::Palette;
 use crate::presentation::tui::widgets;
 
@@ -351,6 +352,8 @@ fn note_box(
     selection: Option<((usize, usize), (usize, usize))>,
     width: usize,
     max: usize,
+    title: &str,
+    active: bool,
 ) -> Vec<String> {
     let inner = width.saturating_sub(4).max(1);
     let max = max.max(1);
@@ -400,15 +403,48 @@ fn note_box(
         }
     };
     // `boxed`/`boxed_styled` clip each line (and the block-caret one, ANSI
-    // included) to `inner`. While editing, paint the frame in the accent colour
-    // and mark the title so the open editor is unmistakable — visually distinct
-    // from the read-only note, which keeps the plain frame.
-    match caret {
-        Some(_) => {
-            widgets::boxed_styled("note (編集中)", inner, &body, &Style::new().accent().bold())
-        }
-        None => widgets::boxed("note", inner, &body),
+    // included) to `inner`. While the editor is open (`active`), paint the frame
+    // in the accent colour so it is unmistakable — visually distinct from the
+    // read-only overview note, which keeps the plain frame.
+    if active {
+        widgets::boxed_styled(title, inner, &body, &Style::new().accent().bold())
+    } else {
+        widgets::boxed(title, inner, &body)
     }
+}
+
+/// The todos tab body: one `[x]` / `[ ]` line per checklist item (its text kept
+/// to a single line), or a placeholder when the session has no todos.
+fn todo_lines(todos: &[SessionTodo]) -> Vec<String> {
+    if todos.is_empty() {
+        return vec!["(todo なし)".to_string()];
+    }
+    todos
+        .iter()
+        .map(|t| {
+            let mark = if t.done { "x" } else { " " };
+            format!("[{}] {}", mark, t.text.replace('\n', " "))
+        })
+        .collect()
+}
+
+/// The decisions tab body: one `MM-DD HH:MM  text` line per logged decision
+/// (newlines flattened so each entry stays one row), or a placeholder when none
+/// have been recorded.
+fn decision_lines(decisions: &[SessionDecision]) -> Vec<String> {
+    if decisions.is_empty() {
+        return vec!["(記録なし)".to_string()];
+    }
+    decisions
+        .iter()
+        .map(|d| {
+            format!(
+                "{}  {}",
+                d.at.format("%m-%d %H:%M"),
+                d.text.replace('\n', " ")
+            )
+        })
+        .collect()
 }
 
 /// The byte span `[start, end)` of `selection` that lies on line `row` (whose
@@ -441,19 +477,45 @@ fn selection_on_line(
 fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<String>> {
     let box_w = note_box_width(width);
     if let Some(editor) = state.note_editor() {
-        let cap = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
-        return Some(note_box(
-            editor.area().lines(),
-            Some(editor.area().cursor()),
-            editor.area().selection(),
-            box_w,
-            cap,
-        ));
+        let edit_cap = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
+        let read_cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
+        // The open editor shows one of three tabs. Only `note` is editable (block
+        // caret + selection, windowed); `todos` / `decisions` are read-only lists.
+        // All three use the accent frame so the open editor stays unmistakable.
+        return Some(match editor.tab() {
+            NoteTab::Note => note_box(
+                editor.area().lines(),
+                Some(editor.area().cursor()),
+                editor.area().selection(),
+                box_w,
+                edit_cap,
+                "note (編集中)",
+                true,
+            ),
+            NoteTab::Todos => note_box(
+                &todo_lines(editor.todos()),
+                None,
+                None,
+                box_w,
+                read_cap,
+                "todos",
+                true,
+            ),
+            NoteTab::Decisions => note_box(
+                &decision_lines(editor.decisions()),
+                None,
+                None,
+                box_w,
+                read_cap,
+                "decisions",
+                true,
+            ),
+        });
     }
     if let Some(note) = state.visible_overview_note() {
         let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
         let note_lines: Vec<String> = note.lines().map(str::to_string).collect();
-        return Some(note_box(&note_lines, None, None, box_w, cap));
+        return Some(note_box(&note_lines, None, None, box_w, cap, "note", false));
     }
     None
 }

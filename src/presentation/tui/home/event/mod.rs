@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use console::Key;
 use console::Term;
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
 use crate::presentation::tui::install_task;
-use crate::presentation::tui::io::screen::{ClickEvent, FramePainter, Input, KeyReader};
+use crate::presentation::tui::io::screen::{
+    ClickEvent, FramePainter, Input, KeyReader, ScrollEvent,
+};
 
 use super::oneshot::OneShot;
 use super::sessions_refresh::SessionsRefreshHandle;
@@ -302,6 +304,12 @@ pub(super) struct Wiring<'a> {
     /// loop appends to the command log. [`super::run`] wires the real pool spawn
     /// (gated by the `autostart_queued_prompts` setting); tests pass a fake.
     pub autostart_queued: &'a mut dyn FnMut(&HomeState) -> Vec<String>,
+    /// Broadcast the wake prompt (`continue`) to every session whose agent pane is
+    /// currently live. Called when a pending `wake -t hhmm` schedule becomes due;
+    /// returns how many agents were messaged so the loop can log the outcome.
+    /// Production wires this to the live-pane / live-prompt stores; tests pass a
+    /// capture or a no-op.
+    pub broadcast_wake: &'a mut dyn FnMut(&HomeState) -> usize,
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -445,6 +453,32 @@ pub(super) fn apply_autostart(
     started
 }
 
+/// Fire a scheduled wake if its target instant has arrived. The wake is consumed
+/// before the callback runs so it is one-shot even if the broadcast reports zero
+/// running agents; the log line records either the sent count or the no-op result.
+pub(super) fn apply_due_wake(
+    state: &mut HomeState,
+    now: DateTime<Local>,
+    broadcast: &mut dyn FnMut(&HomeState) -> usize,
+) -> bool {
+    let Some(at) = state.take_due_wake(now) else {
+        return false;
+    };
+    let sent = broadcast(state);
+    if sent == 0 {
+        state.log_output(format!(
+            "Wake fired at {}: no running agents to continue",
+            at.format("%H:%M")
+        ));
+    } else {
+        state.log_output(format!(
+            "Wake fired at {}: sent `continue` to {sent} running agent(s)",
+            at.format("%H:%M")
+        ));
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn event_loop(
     term: &Term,
@@ -560,6 +594,11 @@ pub(super) fn event_loop(
         // pane logs a line and forces a repaint so its new sidebar badge shows at
         // once. A no-op when the feature is off or nothing is queued.
         force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
+        // Fire the one-shot `wake -t hhmm` schedule once its local wall-clock time
+        // arrives, sending `continue` to every live session agent and logging the
+        // count. The same idle tick that keeps session watching alive also drives
+        // this timer.
+        force_paint |= apply_due_wake(&mut state, Local::now(), wiring.broadcast_wake);
         // Flip the local-LLM `chat` menu row on once the background probe confirms
         // it is usable (drained once); until then the 集中 menu simply omits it.
         // Force a repaint so the change is reflected without waiting for a keypress.
@@ -872,9 +911,14 @@ pub(super) fn event_loop(
                 bump_interaction_epoch(wiring);
                 key
             }
-            // The TUI never scrolls in place: read the wheel turn and drop it.
-            Input::Scroll(_) => {
+            // A wheel turn scrolls whichever scrollable right-pane surface is open
+            // (the diff view, the Markdown preview, or a text modal); with none
+            // open it is dropped, so the base panes never scroll in place and the
+            // pre-launch scrollback stays hidden.
+            Input::Scroll(ev) => {
                 bump_interaction_epoch(wiring);
+                let page = ui::preview_visible(height as usize, width as usize, &state);
+                scroll_open_surface(&mut state, ev, page);
                 continue;
             }
             // A click on a session row in the left pane acts on it: in 選択 (Overview)
@@ -1519,6 +1563,46 @@ enum Flow {
     Quit,
 }
 
+/// The most rows one wheel turn scrolls, so a fast flick (or a terminal that
+/// reports several lines per notch) advances a few rows without lurching the
+/// whole page.
+const MAX_SCROLL_STEP: usize = 6;
+
+/// Route a mouse-wheel turn to whichever scrollable right-pane surface is open —
+/// the diff view, the Markdown preview, or a scrollable text modal — scrolling it
+/// by the wheel's line count (bounded by [`MAX_SCROLL_STEP`]). Negative `lines`
+/// scroll up, positive down; `page` is the visible body height used to clamp a
+/// downward scroll. A no-op when no such surface is open (the base panes never
+/// scroll in place) or when the wheel reported no movement.
+fn scroll_open_surface(state: &mut HomeState, ev: ScrollEvent, page: usize) {
+    if ev.lines == 0 {
+        return;
+    }
+    let steps = (ev.lines.unsigned_abs() as usize).min(MAX_SCROLL_STEP);
+    let up = ev.lines < 0;
+    for _ in 0..steps {
+        if state.diff_view().is_some() {
+            if up {
+                state.diff_scroll_up();
+            } else {
+                state.diff_scroll_down(page);
+            }
+        } else if state.preview().is_some() {
+            if up {
+                state.preview_scroll_up();
+            } else {
+                state.preview_scroll_down(page);
+            }
+        } else if state.text_modal().is_some() {
+            if up {
+                state.text_modal_scroll_up();
+            } else {
+                state.text_modal_scroll_down(page);
+            }
+        }
+    }
+}
+
 /// The directory the pane should root at for the focused list row: the selected
 /// worktree's path, or the workspace root when the cursor is on a root row (which
 /// belongs to no session, so `selected()` is `None`). In 統合(unite) mode a root
@@ -1713,6 +1797,9 @@ pub(crate) fn event_loop_compat(
     // starts anything, so the compat-shim loop tests do not touch the pool or the
     // prompt store. The apply path is covered directly in `apply_autostart` tests.
     let mut autostart_queued = |_: &HomeState| Vec::<String>::new();
+    // Timed wakes use real live-prompt IO in `super::run`; the compat shim's
+    // tests do not exercise it, so report that no agents were messaged.
+    let mut broadcast_wake = |_: &HomeState| 0usize;
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -1804,6 +1891,7 @@ pub(crate) fn event_loop_compat(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     // The compat-shim tests do not exercise the local-LLM probe, so a never-filled
     // handle keeps `ai_available` false throughout (matching an unconfigured LLM).

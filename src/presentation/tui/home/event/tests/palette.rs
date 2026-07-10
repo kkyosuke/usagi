@@ -53,6 +53,8 @@ fn escape_in_overview_closes_the_note_before_backing_out() {
     // mode's is. 選択 is the default, so no Ctrl-O is needed to reach it.
     let mut state = sample_state();
     state.restore_sessions(vec![SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: "alpha".to_string(),
         display_name: None,
         note: Some("todo".to_string()),

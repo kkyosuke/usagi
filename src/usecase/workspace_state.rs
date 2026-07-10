@@ -471,6 +471,8 @@ mod tests {
         let store = WorkspaceStore::new(dir.path());
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "wip".to_string(),
             display_name: None,
             note: None,
@@ -533,6 +535,8 @@ mod tests {
         let store = WorkspaceStore::new(dir.path());
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "wip".to_string(),
             display_name: None,
             note: None,
@@ -567,6 +571,8 @@ mod tests {
     /// A `SessionRecord` with no worktrees, enough to seed `state.json`.
     fn session(name: &str) -> SessionRecord {
         SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: name.to_string(),
             display_name: None,
             note: None,
@@ -711,6 +717,8 @@ mod tests {
         let store = WorkspaceStore::new(dir.path());
         let mut state = WorkspaceState::new();
         state.sessions.push(SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "wip".to_string(),
             display_name: None,
             note: None,

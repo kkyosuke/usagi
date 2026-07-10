@@ -194,6 +194,8 @@ fn a_finished_create_drops_into_closeup_on_the_new_session() {
         // the loop can match it by name and focus its row.
         sessions: Some(vec![
             SessionRecord {
+                todos: Vec::new(),
+                decisions: Vec::new(),
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
@@ -207,6 +209,8 @@ fn a_finished_create_drops_into_closeup_on_the_new_session() {
                 last_active: None,
             },
             SessionRecord {
+                todos: Vec::new(),
+                decisions: Vec::new(),
                 name: name.to_string(),
                 display_name: None,
                 note: None,
@@ -270,6 +274,8 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
                             line: LogLine::output("created"),
                             sessions: Some(vec![
                                 SessionRecord {
+                                    todos: Vec::new(),
+                                    decisions: Vec::new(),
                                     name: "main".to_string(),
                                     display_name: None,
                                     note: None,
@@ -283,6 +289,8 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
                                     last_active: None,
                                 },
                                 SessionRecord {
+                                    todos: Vec::new(),
+                                    decisions: Vec::new(),
                                     name: "feat".to_string(),
                                     display_name: None,
                                     note: None,
@@ -296,6 +304,8 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
                                     last_active: None,
                                 },
                                 SessionRecord {
+                                    todos: Vec::new(),
+                                    decisions: Vec::new(),
                                     name: "newx".to_string(),
                                     display_name: None,
                                     note: None,
@@ -379,6 +389,7 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -410,6 +421,7 @@ fn finished_create_does_not_auto_closeup_after_another_operation() {
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
 
     assert!(matches!(
@@ -467,6 +479,8 @@ fn finished_close_lands_in_switch_on_the_previous_session() {
         SessionOutcome {
             line: LogLine::output("removed"),
             sessions: Some(vec![SessionRecord {
+                todos: Vec::new(),
+                decisions: Vec::new(),
                 name: "main".to_string(),
                 display_name: None,
                 note: None,
@@ -541,6 +555,8 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
                         Completion {
                             line: LogLine::output("removed"),
                             sessions: Some(vec![SessionRecord {
+                                todos: Vec::new(),
+                                decisions: Vec::new(),
                                 name: "main".to_string(),
                                 display_name: None,
                                 note: None,
@@ -623,6 +639,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -654,6 +671,7 @@ fn finished_close_does_not_auto_focus_after_another_operation() {
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
 
     assert!(matches!(

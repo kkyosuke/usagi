@@ -273,6 +273,8 @@ fn footer_and_palette_scope_to_the_cursor_group_in_unite_mode() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "b1".to_string(),
             display_name: None,
             note: None,

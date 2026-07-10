@@ -9,17 +9,19 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::Local;
 use console::Key;
 use console::Term;
 
 use crate::presentation::tui::io::screen::{self, FramePainter};
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
+use crate::domain::wake::humanize_until;
 
 use super::super::action;
 use super::super::command::Effect;
 use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
-use super::super::state::{HomeState, ModalSize, PaneExit, ROOT_NAME};
+use super::super::state::{HomeState, ModalSize, NoteTab, PaneExit, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
@@ -167,6 +169,38 @@ pub(super) fn palette_key(
                         state.log_error(format!("\"{name}\" is not in the unite view"));
                     }
                 }
+                // `wake -t hhmm`: schedule a one-shot local-time wake for today.
+                // The state turns hour/minute into a concrete same-day instant so
+                // a time already passed is rejected immediately.
+                Effect::ScheduleWake { hour, minute } => {
+                    // Read the clock once so the stored instant and the countdown
+                    // in the confirmation line agree.
+                    let now = Local::now();
+                    match state.schedule_wake(now, hour, minute) {
+                        Ok(at) => state.log_output(format!(
+                            "Wake scheduled for {} ({}) — will send `continue` to running agents",
+                            at.format("%H:%M"),
+                            humanize_until(now, at),
+                        )),
+                        Err(e) => state.log_error(e),
+                    }
+                }
+                Effect::CancelWake => match state.cancel_wake() {
+                    Some(at) => {
+                        state.log_output(format!("Cancelled wake for {}", at.format("%H:%M")))
+                    }
+                    None => state.log_output("No wake is scheduled"),
+                },
+                // `wake status` / bare `wake`: report the pending wake with a live
+                // countdown, or note that none is scheduled.
+                Effect::WakeStatus => match state.wake_scheduled_at() {
+                    Some(at) => state.log_output(format!(
+                        "Wake scheduled for {} ({})",
+                        at.format("%H:%M"),
+                        humanize_until(Local::now(), at),
+                    )),
+                    None => state.log_output("No wake is scheduled"),
+                },
                 // `env`: open the workspace-env editor as an overlay *over* the
                 // palette (the palette stayed open — `OpenEnvEditor` does not
                 // close it), so saving / cancelling returns to the command palette. Seed
@@ -358,6 +392,11 @@ pub(super) fn overview_key(
         // ↑/↓ (k/j) move between sessions.
         Key::ArrowUp | Key::Char('k') => state.overview_move_up(),
         Key::ArrowDown | Key::Char('j') => state.overview_move_down(),
+        // `g` / `G` jump to the first / last row. Home/End are already taken by
+        // create / note (and are IME-safe aliases), so the vim pair fills the
+        // list-top/bottom gap the review flagged.
+        Key::Char('g') => state.overview_move_first(),
+        Key::Char('G') => state.overview_move_last(),
         // K/J (Shift+k/j) move the *selected session itself* up/down, persisting
         // the new order — capital mirrors the lower-case cursor move. The cursor
         // follows the moved session; a no-op on the root row and at the ends.
@@ -536,10 +575,12 @@ fn leave_overview(
     // mode, not the caller of an Overview mode.
 }
 
-/// Handle one key in the session-note editor overlay (opened with `n` in 選択 or
-/// `Ctrl-E` in 没入). It captures every key: `Ctrl-S` saves the note (persisted
-/// through the wiring), `Esc` cancels, `Enter` inserts a newline, and the usual
-/// editing keys edit the multi-line buffer. Closing it — saved or cancelled —
+/// Handle one key in the session-scratchpad editor overlay (opened with `n` in
+/// 選択 or `Ctrl-E` in 没入). `Ctrl-S` saves the note (persisted through the
+/// wiring), `Esc` cancels, and `Tab` / `BackTab` cycle the `note` / `todos` /
+/// `decisions` tabs. Only the `note` tab is editable — its `Enter` / editing /
+/// motion keys edit the multi-line buffer; the todos / decisions tabs are
+/// read-only, so those keys are ignored there. Closing it — saved or cancelled —
 /// re-attaches the session's pane when it was opened from 没入.
 pub(super) fn note_editor_key(
     term: &Term,
@@ -573,9 +614,23 @@ pub(super) fn note_editor_key(
                 reattach_focused(term, state, painter, wiring);
             }
         }
-        // Every other key edits the multi-line buffer in place: Enter splits the
-        // line, the editing keys delete / move the caret, and a printable
-        // character is inserted at the caret.
+        // `Tab` / `BackTab` cycle the note / todos / decisions tabs.
+        Key::Tab => {
+            state.note_editor_cycle_tab(true);
+        }
+        Key::BackTab => {
+            state.note_editor_cycle_tab(false);
+        }
+        // Every other key edits the multi-line buffer in place — but only on the
+        // editable `note` tab. On the read-only todos / decisions tabs these keys
+        // do nothing (an agent writes those over MCP).
+        _ if state
+            .note_editor()
+            .expect("note editor open while editing")
+            .tab()
+            != NoteTab::Note => {}
+        // Enter splits the line, the editing keys delete / move the caret, and a
+        // printable character is inserted at the caret.
         key => {
             let area = state
                 .note_editor_mut()

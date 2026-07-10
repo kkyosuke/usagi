@@ -474,6 +474,8 @@ fn overview_reorder_applies_a_moved_result_and_logs_a_failure() {
     keys.push(Ok(Key::CtrlC));
     let reordered = vec![
         SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "feat".to_string(),
             display_name: None,
             note: None,
@@ -487,6 +489,8 @@ fn overview_reorder_applies_a_moved_result_and_logs_a_failure() {
             last_active: None,
         },
         SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "main".to_string(),
             display_name: None,
             note: None,
@@ -550,6 +554,8 @@ fn overview_space_folds_the_cursor_workspace_and_hides_its_sessions() {
         root_path: PathBuf::from("/wsB"),
         root_note: None,
         sessions: vec![SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: "b1".to_string(),
             display_name: None,
             note: None,
