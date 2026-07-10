@@ -8,7 +8,7 @@ use console::{style, Style};
 
 use super::super::command::{CommandHint, Hint};
 use super::super::state::{
-    EnvEditor, HomeState, Mode, NoteTab, RemoveModal, TabMenu, TextModal, WorktreeList,
+    EnvEditor, HomeState, Mode, NotePane, RemoveModal, TabMenu, TextModal, WorktreeList,
 };
 #[cfg(test)]
 use super::super::tasks::{TaskMark, TaskRow};
@@ -478,13 +478,15 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     // switches), so their controls take over the footer regardless of the
     // underlying mode.
     let help = if let Some(editor) = state.note_editor() {
-        match editor.tab() {
+        // The three panes are stacked and always visible; the hints follow the
+        // focused (editing-target) pane.
+        match editor.focus() {
             _ if editor.is_editing_todo() => {
                 "[todo]  Enter: OK / Esc: cancel".to_string()
             }
-            NoteTab::Note => "[note]  Ctrl-S: save / Tab: todos·decisions / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select".to_string(),
-            NoteTab::Todos => "[todos]  j/k: move / Space: toggle / a: add / e: edit / d: delete / Ctrl-S: save / Tab / Esc".to_string(),
-            NoteTab::Decisions => "[decisions]  Tab: switch tab / Ctrl-S: save note / Esc: close  (read-only)".to_string(),
+            NotePane::Note => "[note]  Ctrl-S: save / Tab: focus todos·decisions / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select".to_string(),
+            NotePane::Todos => "[todos]  j/k: move / Space: toggle / a: add / e: edit / d: delete / Ctrl-S: save / Tab: focus / Esc".to_string(),
+            NotePane::Decisions => "[decisions]  Tab: focus note·todos / Ctrl-S: save note / Esc: close  (read-only)".to_string(),
         }
     } else if state.preview().is_some() {
         "[preview]  ↑↓ scroll / PgUp/PgDn page / Esc / q: close".to_string()

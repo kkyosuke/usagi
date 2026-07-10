@@ -471,9 +471,10 @@ fn render_frame_edits_the_note_in_the_right_pane_not_a_full_screen_modal() {
 }
 
 #[test]
-fn note_overlay_renders_the_todos_and_decisions_tabs() {
-    // Switching the open editor to the todos / decisions tabs renders those
-    // read-only lists in the same box, titled by the tab.
+fn note_overlay_renders_all_three_panes_at_once_and_marks_the_focus() {
+    // The open editor stacks the note / todos / decisions boxes in one overlay,
+    // so all three are readable without switching; `Tab` only moves the focus
+    // (the editing target), marked by the title suffix.
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     let mut session = SessionRecord {
         todos: vec![SessionTodo::new("write tests"), {
@@ -503,20 +504,44 @@ fn note_overlay_renders_the_todos_and_decisions_tabs() {
     state.overview_move_down(); // root -> alpha
     assert!(state.overview_begin_note());
 
-    // Todos tab: the checklist with [x]/[ ] marks.
-    state.note_editor_cycle_tab(true); // note -> todos
-    let todos = stripped(&render_frame(24, 80, &state));
-    assert!(todos.contains("─ todos"), "the box is titled `todos`");
-    assert!(todos.contains("[ ] write tests"));
-    assert!(todos.contains("[x] ship it"));
+    // All three panes render in the one frame: the note body, the checklist with
+    // [x]/[ ] marks, and the logged decision. The focus opens on `note`, so only
+    // that title carries the editing suffix.
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("note (編集中)"), "note has the focus");
+    assert!(frame.contains("memo"));
+    assert!(frame.contains("─ todos"), "the todos box shows unfocused");
+    assert!(frame.contains("[ ] write tests"));
+    assert!(frame.contains("[x] ship it"));
+    assert!(
+        frame.contains("─ decisions"),
+        "the decisions box shows unfocused"
+    );
+    assert!(frame.contains("chose approach A"));
+    assert!(
+        !frame.contains("todos (編集中)") && !frame.contains("表示中"),
+        "unfocused panes carry no focus suffix"
+    );
+    assert!(
+        !frame.contains("› ["),
+        "the unfocused todos list hides the selection marker"
+    );
 
-    // Decisions tab: the logged entry's text.
-    state.note_editor_cycle_tab(true); // todos -> decisions
+    // `Tab` moves the focus to todos: all three still show, the suffix moves.
+    state.note_editor_cycle_focus(true); // note -> todos
+    let todos = stripped(&render_frame(24, 80, &state));
+    assert!(todos.contains("todos (編集中)"), "todos took the focus");
+    assert!(!todos.contains("note (編集中)"));
+    assert!(todos.contains("memo"), "the note body stays visible");
+
+    // And to decisions, whose focused title says viewing (it is read-only).
+    state.note_editor_cycle_focus(true); // todos -> decisions
     let decisions = stripped(&render_frame(24, 80, &state));
     assert!(
-        decisions.contains("─ decisions"),
-        "the box is titled `decisions`"
+        decisions.contains("decisions (表示中)"),
+        "decisions took the focus"
     );
+    assert!(!decisions.contains("編集中"));
     assert!(decisions.contains("chose approach A"));
 }
 
@@ -541,7 +566,7 @@ fn todos_tab_marks_the_selection_and_shows_the_inline_input() {
     state.enter_switch();
     state.overview_move_down();
     assert!(state.overview_begin_note());
-    state.note_editor_cycle_tab(true); // note -> todos
+    state.note_editor_cycle_focus(true); // note -> todos
 
     // The highlighted row (first) is marked with `›`.
     state.note_editor_move_todo(true); // select "ship it"
@@ -572,7 +597,7 @@ fn todos_tab_marks_the_selection_and_shows_the_inline_input() {
 }
 
 #[test]
-fn note_overlay_todos_and_decisions_tabs_show_placeholders_when_empty() {
+fn note_overlay_todos_and_decisions_panes_show_placeholders_when_empty() {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     // A session with a note but no todos / decisions.
     let session = SessionRecord {
@@ -595,15 +620,15 @@ fn note_overlay_todos_and_decisions_tabs_show_placeholders_when_empty() {
     state.overview_move_down();
     assert!(state.overview_begin_note());
 
-    state.note_editor_cycle_tab(true); // todos
-    assert!(stripped(&render_frame(24, 80, &state)).contains("todo なし"));
-    state.note_editor_cycle_tab(true); // decisions
-    assert!(stripped(&render_frame(24, 80, &state)).contains("記録なし"));
+    // Both placeholders show at once — the stacked panes need no switching.
+    let frame = stripped(&render_frame(24, 80, &state));
+    assert!(frame.contains("todo なし"));
+    assert!(frame.contains("記録なし"));
 }
 
 #[test]
 fn note_overlay_editor_windows_around_the_caret() {
-    // While editing, the overlay box shows a window around the caret (the end,
+    // While editing, the note box shows a window around the caret (the end,
     // here), so a note taller than the box keeps the caret line in view.
     let note = (0..10)
         .map(|i| format!("L{i}"))
@@ -617,6 +642,53 @@ fn note_overlay_editor_windows_around_the_caret() {
     assert!(pane.contains("─ note"));
     assert!(pane.contains("L9"), "the caret line is kept visible");
     assert!(!pane.contains("L0"), "the top lines are windowed out");
+}
+
+#[test]
+fn note_overlay_falls_back_to_the_focused_pane_alone_on_a_short_pane() {
+    // A pane too short to give each of the three stacked boxes even a one-line
+    // body (under nine rows) shows only the focused pane, so a tiny terminal
+    // still edits with the old single-box footprint.
+    let mut state = overview_state_with_note("memo");
+    assert!(state.overview_begin_note());
+    let pane = stripped(&right_pane_contents(&state, 40, 8));
+    assert!(pane.contains("note (編集中)"), "the focused pane shows");
+    assert!(
+        !pane.contains("todos") && !pane.contains("decisions"),
+        "the unfocused panes are dropped, not squeezed:\n{pane}"
+    );
+
+    // Moving the focus swaps which single pane the short overlay shows.
+    state.note_editor_cycle_focus(true); // note -> todos
+    let pane = stripped(&right_pane_contents(&state, 40, 8));
+    assert!(pane.contains("todos (編集中)"));
+    assert!(!pane.contains("─ note"));
+
+    // At nine rows all three fit their one-line bodies again.
+    state.note_editor_cycle_focus(false); // back to note
+    let pane = stripped(&right_pane_contents(&state, 40, 9));
+    for title in ["note (編集中)", "todos", "decisions"] {
+        assert!(pane.contains(title), "`{title}` shows on 9 rows:\n{pane}");
+    }
+}
+
+#[test]
+fn note_overlay_elides_the_unfocused_panes_overflow() {
+    // The unfocused note pane is a compact read-only listing: past its cap the
+    // overflow is elided with `… (N more)` instead of growing the box.
+    let note = (0..10)
+        .map(|i| format!("L{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut state = overview_state_with_note(&note);
+    assert!(state.overview_begin_note());
+    state.note_editor_cycle_focus(true); // focus todos; note is unfocused
+
+    let pane = stripped(&right_pane_contents(&state, 40, 30));
+    assert!(pane.contains("─ note"), "the unfocused note box shows");
+    assert!(pane.contains("L0"), "the top of the note shows");
+    assert!(pane.contains("more)"), "the overflow is elided:\n{pane}");
+    assert!(!pane.contains("L9"), "the tail is behind the elision");
 }
 
 #[test]
@@ -809,11 +881,13 @@ fn render_frame_keeps_the_pane_divider_straight_across_commit_stat_rows() {
 
 #[test]
 fn note_editor_overlay_keeps_the_preview_visible_behind_it() {
-    // Editing is a floating box at the top, so the preview/terminal underneath
-    // stays visible below it (the screen never switches).
+    // Editing is a floating column of boxes at the top, so the preview/terminal
+    // underneath stays visible below it (the screen never switches). The pane is
+    // tall enough here that the vertically-centred mascot sits below the three
+    // stacked boxes (nine rows for one-line bodies).
     let mut state = overview_state_with_note("hi");
     assert!(state.overview_begin_note());
-    let pane = stripped(&right_pane_contents(&state, 40, 16));
+    let pane = stripped(&right_pane_contents(&state, 40, 24));
     assert!(pane.contains("─ note"), "the editor box shows");
     // The idle session's resting mascot still shows behind the box.
     assert!(

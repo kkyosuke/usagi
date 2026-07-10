@@ -469,48 +469,50 @@ impl RenameInput {
     }
 }
 
-/// Which section of the note scratchpad the editor is showing.
+/// Which pane of the note scratchpad has the focus (is the editing target).
 ///
-/// The overlay is a small tabbed panel: the free-form [`Note`](NoteTab::Note)
-/// (editable), the [`Todos`](NoteTab::Todos) checklist, and the
-/// [`Decisions`](NoteTab::Decisions) log. `Tab` cycles forward and `BackTab`
-/// (Shift-Tab) backward. Todos and decisions are shown read-only here — an
-/// agent writes them over MCP (`session_todo_*` / `session_decision_*`); this
-/// view is where a person reads a session's checklist and the reasoning behind
-/// its work at a glance.
+/// The overlay shows all three panes at once, stacked top to bottom: the
+/// free-form [`Note`](NotePane::Note) (editable), the
+/// [`Todos`](NotePane::Todos) checklist (interactively editable), and the
+/// [`Decisions`](NotePane::Decisions) log (read-only — an agent writes it over
+/// MCP `session_decision_*`). `Tab` moves the focus forward and `BackTab`
+/// (Shift-Tab) backward through the same order; only the focused pane receives
+/// the editing keys, and the renderer marks it with the accent frame and the
+/// `(編集中)` / `(表示中)` title suffix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoteTab {
+pub enum NotePane {
     Note,
     Todos,
     Decisions,
 }
 
-impl NoteTab {
-    /// The tab's short label, shown in the box title and the tab strip.
+impl NotePane {
+    /// The pane's short label, shown in its box title.
     pub fn label(self) -> &'static str {
         match self {
-            NoteTab::Note => "note",
-            NoteTab::Todos => "todos",
-            NoteTab::Decisions => "decisions",
+            NotePane::Note => "note",
+            NotePane::Todos => "todos",
+            NotePane::Decisions => "decisions",
         }
     }
 
-    /// The three tabs in display order (also the `Tab` cycle order).
-    pub fn all() -> [NoteTab; 3] {
-        [NoteTab::Note, NoteTab::Todos, NoteTab::Decisions]
+    /// The three panes in display (stacking) order — also the `Tab` focus
+    /// cycle order.
+    pub fn all() -> [NotePane; 3] {
+        [NotePane::Note, NotePane::Todos, NotePane::Decisions]
     }
 
-    /// The next (`forward`) or previous tab, wrapping around the three.
-    fn stepped(self, forward: bool) -> NoteTab {
-        let tabs = NoteTab::all();
-        let i = tabs.iter().position(|t| *t == self).unwrap_or(0);
-        let n = tabs.len();
+    /// The next (`forward`) or previous pane, wrapping around the three.
+    fn stepped(self, forward: bool) -> NotePane {
+        let panes = NotePane::all();
+        let i = panes.iter().position(|t| *t == self).unwrap_or(0);
+        let n = panes.len();
         let next = if forward { i + 1 } else { i + n - 1 } % n;
-        tabs[next]
+        panes[next]
     }
 }
 
-/// The inline single-line input open on the todos tab while adding or editing a
+/// The inline single-line input open on the todos pane while adding or editing a
 /// todo. `editing` is the index being edited, or `None` when adding a new todo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoInput {
@@ -534,18 +536,19 @@ impl TodoInput {
 /// in 没入 (Attached). It holds the session whose scratchpad is open
 /// (`target`, its branch name / identity), the editable note buffer
 /// (pre-filled with the existing note), the session's `todos` (editable on the
-/// todos tab) and read-only `decisions`, the current [`tab`](NoteTab), the todos
-/// tab's selection / inline input, whether the todos were changed (`todos_dirty`,
-/// so the save persists them only when touched), and `reattach` — whether closing
-/// it should re-attach the session's pane (set when opened from 没入). The note
-/// buffer's editing and caret movement live on [`TextArea`].
+/// todos pane) and read-only `decisions`, the focused pane
+/// ([`focus`](Self::focus)), the todos pane's selection / inline input, whether
+/// the todos were changed (`todos_dirty`, so the save persists them only when
+/// touched), and `reattach` — whether closing it should re-attach the session's
+/// pane (set when opened from 没入). The note buffer's editing and caret
+/// movement live on [`TextArea`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEditor {
     target: String,
     area: TextArea,
     todos: Vec<SessionTodo>,
     decisions: Vec<SessionDecision>,
-    tab: NoteTab,
+    focus: NotePane,
     selected: usize,
     input: Option<TodoInput>,
     todos_dirty: bool,
@@ -556,7 +559,7 @@ impl NoteEditor {
     /// Open the editor for session `target`, pre-filled with `initial` (its
     /// current note) and snapshots of its `todos` / `decisions`. `reattach`
     /// records whether to re-attach the session on close (true when opened from
-    /// 没入). Always opens on the [`Note`](NoteTab::Note) tab.
+    /// 没入). Always opens with the focus on the [`Note`](NotePane::Note) pane.
     pub(super) fn new(
         target: impl Into<String>,
         initial: &str,
@@ -569,7 +572,7 @@ impl NoteEditor {
             area: TextArea::from_text(initial),
             todos,
             decisions,
-            tab: NoteTab::Note,
+            focus: NotePane::Note,
             selected: 0,
             input: None,
             todos_dirty: false,
@@ -597,14 +600,14 @@ impl NoteEditor {
         &self.decisions
     }
 
-    /// The tab currently shown.
-    pub fn tab(&self) -> NoteTab {
-        self.tab
+    /// The pane the focus (the editing target) is on.
+    pub fn focus(&self) -> NotePane {
+        self.focus
     }
 
-    /// Switch to the next (`forward`) or previous tab.
-    pub(super) fn cycle_tab(&mut self, forward: bool) {
-        self.tab = self.tab.stepped(forward);
+    /// Move the focus to the next (`forward`) or previous pane.
+    pub(super) fn cycle_focus(&mut self, forward: bool) {
+        self.focus = self.focus.stepped(forward);
     }
 
     /// Whether closing the editor should re-attach the session's pane (it was
@@ -615,18 +618,18 @@ impl NoteEditor {
 
     /// The editable note buffer: the event loop routes editing keys straight to
     /// the [`TextArea`]'s own methods (`insert` / `newline` / `backspace` /
-    /// `move_*` …) while the [`Note`](NoteTab::Note) tab is shown.
+    /// `move_*` …) while the [`Note`](NotePane::Note) pane has the focus.
     pub fn area_mut(&mut self) -> &mut TextArea {
         &mut self.area
     }
 
-    /// The index of the highlighted todo on the todos tab (0 when the list is
+    /// The index of the highlighted todo on the todos pane (0 when the list is
     /// empty). Read by the renderer to mark the selected row.
     pub fn selected_todo(&self) -> usize {
         self.selected
     }
 
-    /// The inline add / edit input open on the todos tab, if any.
+    /// The inline add / edit input open on the todos pane, if any.
     pub fn todo_input(&self) -> Option<&TodoInput> {
         self.input.as_ref()
     }
@@ -636,7 +639,7 @@ impl NoteEditor {
         self.input.is_some()
     }
 
-    /// Move the todos-tab selection down (`down`) or up, clamped to the list
+    /// Move the todos-pane selection down (`down`) or up, clamped to the list
     /// (no wrap). A no-op while the inline input is open or the list is empty.
     pub(super) fn move_todo(&mut self, down: bool) {
         if self.input.is_some() || self.todos.is_empty() {

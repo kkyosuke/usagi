@@ -16,7 +16,7 @@ fn overview_n_opens_the_note_editor_edits_the_buffer_and_saves() {
 
     let mut keys = vec![
         Ok(Key::ArrowDown),        // root -> alpha
-        Ok(Key::Char('n')),        // open the note editor for alpha (note tab)
+        Ok(Key::Char('n')),        // open the note editor for alpha (focus on note)
         Ok(Key::Char('\u{0001}')), // a control char (Ctrl-A): ignored
     ];
     keys.extend(typed("abc"));
@@ -85,9 +85,9 @@ fn overview_n_on_the_root_row_edits_and_saves_the_workspace_root_note() {
 }
 
 #[test]
-fn tab_switches_tabs_and_editing_is_ignored_on_the_read_only_tabs() {
-    // `Tab` cycles note -> todos; typing on the read-only todos tab is ignored,
-    // so only the text typed back on the note tab is saved.
+fn tab_moves_the_focus_and_editing_is_ignored_on_the_read_only_panes() {
+    // `Tab` moves the focus note -> todos; typing on the todos pane (no inline
+    // input open) is ignored, so only the text typed back on the note pane is saved.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
         recorded
@@ -100,10 +100,10 @@ fn tab_switches_tabs_and_editing_is_ignored_on_the_read_only_tabs() {
 
     let mut keys = vec![
         Ok(Key::ArrowDown), // root -> alpha
-        Ok(Key::Char('n')), // open the editor (note tab)
+        Ok(Key::Char('n')), // open the editor (focus on note)
         Ok(Key::Tab),       // note -> todos (read-only)
     ];
-    keys.extend(typed("xyz")); // ignored on the todos tab
+    keys.extend(typed("xyz")); // ignored on the todos pane
     keys.push(Ok(Key::BackTab)); // todos -> note
     keys.extend(typed("ok")); // edits the note buffer
     keys.push(Ok(Key::Char(CTRL_S))); // save
@@ -125,8 +125,8 @@ fn tab_switches_tabs_and_editing_is_ignored_on_the_read_only_tabs() {
 }
 
 #[test]
-fn todos_tab_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
-    // Exercise the todos tab's interactive keys end to end through the loop:
+fn todos_pane_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
+    // Exercise the todos pane's interactive keys end to end through the loop:
     // add / edit (inline input) / toggle / delete / move, then Ctrl-S persists.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -140,7 +140,7 @@ fn todos_tab_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
 
     let mut keys = vec![
         Ok(Key::ArrowDown), // root -> alpha
-        Ok(Key::Char('n')), // open the editor (note tab)
+        Ok(Key::Char('n')), // open the editor (focus on note)
         Ok(Key::Tab),       // note -> todos
         Ok(Key::Char('z')), // an unbound key on the todos list: ignored
         Ok(Key::Char('a')), // add
@@ -173,7 +173,7 @@ fn todos_tab_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
     )
     .unwrap();
     assert!(matches!(outcome, Outcome::Quit));
-    // The note was saved too (empty, since it was never edited on the note tab).
+    // The note was saved too (empty, since it was never edited on the note pane).
     assert_eq!(
         *recorded.borrow(),
         vec![("alpha".to_string(), String::new())]
@@ -182,7 +182,7 @@ fn todos_tab_interactive_editing_drives_add_edit_toggle_delete_and_saves() {
 
 #[test]
 fn keys_on_the_read_only_decisions_tab_are_ignored() {
-    // On the decisions tab a printable key does nothing (an agent writes decisions
+    // On the read-only decisions pane a printable key does nothing (an agent writes decisions
     // over MCP); the note is saved unchanged on Ctrl-S.
     let recorded = RefCell::new(Vec::<(String, String)>::new());
     let mut set_note = |name: &str, text: &str| {
@@ -196,10 +196,10 @@ fn keys_on_the_read_only_decisions_tab_are_ignored() {
 
     let keys = vec![
         Ok(Key::ArrowDown),    // root -> alpha
-        Ok(Key::Char('n')),    // open (note tab)
+        Ok(Key::Char('n')),    // open (focus on note)
         Ok(Key::Tab),          // note -> todos
         Ok(Key::Tab),          // todos -> decisions
-        Ok(Key::Char('x')),    // ignored on the read-only decisions tab
+        Ok(Key::Char('x')),    // ignored on the read-only decisions pane
         Ok(Key::Char(CTRL_S)), // save
         Ok(Key::CtrlC),
     ];
