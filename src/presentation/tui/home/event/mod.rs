@@ -458,6 +458,88 @@ pub(super) fn apply_autostart(
     started
 }
 
+/// Apply every background session task (create / remove) that finished since
+/// the last drain: evict a removed session's pooled shell (via `evict_pool`, on
+/// this — the loop — thread, since the pool is not `Send`), clear the create /
+/// removal skeleton whichever way the task ended, reflect a removal in the
+/// removal modal, then log the result line and refresh the session list without
+/// yanking the cursor. Returns whether anything was drained, so the caller
+/// repaints.
+///
+/// `focus_epoch` is the current user-input epoch when the caller can honor a
+/// finished task's auto-focus (the outer home loop passes
+/// [`Wiring::interaction_epoch`]), or `None` to ignore auto-focus entirely: the
+/// attached pane loop passes `None`, because pulling the user out of 没入 into
+/// 集中 while they operate a live pane would be wrong — and the epoch has
+/// necessarily advanced past the dispatch by then anyway (attaching took
+/// keystrokes), so the outer loop would skip it too.
+///
+/// Shared with the attached pane loop
+/// ([`terminal::pane`](super::terminal::pane)) like [`apply_autostart`]: while
+/// 没入 (Attached) owns the event loop, the outer loop is stopped, so the pane
+/// loop drains finished tasks itself — otherwise a create / remove finishing
+/// while the user operates another session leaves its sidebar skeleton
+/// animating until they detach back to 選択.
+pub(super) fn apply_task_completions(
+    state: &mut HomeState,
+    tasks: &TaskHandle,
+    evict_pool: &mut dyn FnMut(&Path),
+    focus_epoch: Option<u64>,
+) -> bool {
+    let mut applied = false;
+    for completion in tasks.drain_completed() {
+        applied = true;
+        let super::tasks::Completion {
+            line,
+            sessions,
+            target_root,
+            evict,
+            focus,
+            created,
+            removed,
+        } = completion;
+        // A removal reports success by carrying the evicted pool path (set
+        // only on the success branch of `run_remove`); both failure branches
+        // leave it `None`. Captured before `evict` is consumed below.
+        let removal_ok = evict.is_some();
+        if let Some(path) = evict {
+            evict_pool(&path);
+        }
+        if let (Some(root), Some(name)) = (target_root.as_deref(), created.as_deref()) {
+            state.clear_pending_session(root, name);
+        }
+        if let (Some(root), Some(name)) = (target_root.as_deref(), removed.as_deref()) {
+            state.clear_removing_session(root, name);
+            // If the removal modal is still open behind the task, reflect the
+            // outcome in it: a success drops the row (closing the modal once
+            // all succeed), a failure keeps it open with the error shown.
+            state.resolve_remove_modal(root, name, removal_ok, &line.text);
+        }
+        state.apply_task_completion(line, sessions, target_root.as_deref());
+        // A finished create/close may ask to focus a landing session. Done
+        // after the refresh above so the branch is in the list to match.
+        // Unlike that refresh — which deliberately keeps the cursor put for
+        // background changes — this is the user's own task landing, so moving
+        // the cursor onto it is the intended result. A create drops into
+        // 集中 (Closeup) so the user can operate the new session immediately;
+        // a close stays in 選択 (Switch) on the neighbouring session because
+        // the user just asked to leave the closed session.
+        if let (Some(focus), Some(epoch)) = (focus, focus_epoch) {
+            if focus.interaction_epoch == epoch {
+                match focus.landing {
+                    super::tasks::FocusLanding::Closeup => {
+                        state.enter_closeup_named_existing(&focus.name);
+                    }
+                    super::tasks::FocusLanding::Switch => {
+                        state.focus_switch_named(&focus.name);
+                    }
+                }
+            }
+        }
+    }
+    applied
+}
+
 /// Fire a scheduled wake if its target instant has arrived. The wake is consumed
 /// before the callback runs so it is one-shot even if the broadcast reports zero
 /// running agents; the log line records either the sent count or the no-op result.
@@ -620,61 +702,15 @@ pub(super) fn event_loop(
             force_paint = true;
         }
         // Apply any background session task (create / remove) that finished since
-        // the last frame: evict the removed session's pooled shell (on this
-        // thread — the pool is not `Send`), then log the result and refresh the
-        // session list without yanking the cursor. Then refresh the task panel
-        // rows so in-flight work shows in the top-right corner.
-        let mut completed_any = false;
-        for completion in tasks.drain_completed() {
-            completed_any = true;
-            let super::tasks::Completion {
-                line,
-                sessions,
-                target_root,
-                evict,
-                focus,
-                created,
-                removed,
-            } = completion;
-            // A removal reports success by carrying the evicted pool path (set
-            // only on the success branch of `run_remove`); both failure branches
-            // leave it `None`. Captured before `evict` is consumed below.
-            let removal_ok = evict.is_some();
-            if let Some(path) = evict {
-                (wiring.evict_pool)(&path);
-            }
-            if let (Some(root), Some(name)) = (target_root.as_deref(), created.as_deref()) {
-                state.clear_pending_session(root, name);
-            }
-            if let (Some(root), Some(name)) = (target_root.as_deref(), removed.as_deref()) {
-                state.clear_removing_session(root, name);
-                // If the removal modal is still open behind the task, reflect the
-                // outcome in it: a success drops the row (closing the modal once
-                // all succeed), a failure keeps it open with the error shown.
-                state.resolve_remove_modal(root, name, removal_ok, &line.text);
-            }
-            state.apply_task_completion(line, sessions, target_root.as_deref());
-            // A finished create/close may ask to focus a landing session. Done
-            // after the refresh above so the branch is in the list to match.
-            // Unlike that refresh — which deliberately keeps the cursor put for
-            // background changes — this is the user's own task landing, so moving
-            // the cursor onto it is the intended result. A create drops into
-            // 集中 (Closeup) so the user can operate the new session immediately;
-            // a close stays in 選択 (Switch) on the neighbouring session because
-            // the user just asked to leave the closed session.
-            if let Some(focus) = focus {
-                if focus.interaction_epoch == wiring.interaction_epoch {
-                    match focus.landing {
-                        super::tasks::FocusLanding::Closeup => {
-                            state.enter_closeup_named_existing(&focus.name);
-                        }
-                        super::tasks::FocusLanding::Switch => {
-                            state.focus_switch_named(&focus.name);
-                        }
-                    }
-                }
-            }
-        }
+        // the last frame (see [`apply_task_completions`]), honoring auto-focus
+        // when the user has not typed since the dispatch. Then refresh the task
+        // panel rows so in-flight work shows in the top-right corner.
+        let completed_any = apply_task_completions(
+            &mut state,
+            tasks,
+            wiring.evict_pool,
+            Some(wiring.interaction_epoch),
+        );
         state.set_tasks(tasks.view(Instant::now()));
         // Drop any stale surface every frame, then refresh it for the modes that
         // draw the embedded terminal: 没入 (driven directly by `open_pane`, which
