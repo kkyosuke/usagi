@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use console::Key;
 use console::Term;
 
@@ -302,6 +302,12 @@ pub(super) struct Wiring<'a> {
     /// loop appends to the command log. [`super::run`] wires the real pool spawn
     /// (gated by the `autostart_queued_prompts` setting); tests pass a fake.
     pub autostart_queued: &'a mut dyn FnMut(&HomeState) -> Vec<String>,
+    /// Broadcast the wake prompt (`continue`) to every session whose agent pane is
+    /// currently live. Called when a pending `wake -t hhmm` schedule becomes due;
+    /// returns how many agents were messaged so the loop can log the outcome.
+    /// Production wires this to the live-pane / live-prompt stores; tests pass a
+    /// capture or a no-op.
+    pub broadcast_wake: &'a mut dyn FnMut(&HomeState) -> usize,
 }
 
 /// What the user chose to do on the home (workspace) screen.
@@ -426,7 +432,14 @@ fn bump_interaction_epoch(wiring: &mut Wiring) {
 /// repaint (a background spawn changes no key state the skip-paint check would
 /// otherwise notice, and its new badge should show at once). Passed only the
 /// autostart hook — not the whole [`Wiring`] — so it is exercised directly.
-fn apply_autostart(
+///
+/// Shared with the attached pane loop
+/// ([`terminal::pane::drive`](super::terminal::pane)): while 没入 (Attached) owns
+/// the event loop, the outer loop is stopped, so the pane loop calls this on its
+/// idle tick to pick up a prompt queued for a pane-less session (an MCP
+/// `session_delegate_issue` / `session_prompt` made by the coordinator agent
+/// running in the attached pane) without waiting for a detach back to 選択.
+pub(super) fn apply_autostart(
     state: &mut HomeState,
     autostart: &mut dyn FnMut(&HomeState) -> Vec<String>,
 ) -> bool {
@@ -436,6 +449,32 @@ fn apply_autostart(
         state.log_output(line);
     }
     started
+}
+
+/// Fire a scheduled wake if its target instant has arrived. The wake is consumed
+/// before the callback runs so it is one-shot even if the broadcast reports zero
+/// running agents; the log line records either the sent count or the no-op result.
+pub(super) fn apply_due_wake(
+    state: &mut HomeState,
+    now: DateTime<Local>,
+    broadcast: &mut dyn FnMut(&HomeState) -> usize,
+) -> bool {
+    let Some(at) = state.take_due_wake(now) else {
+        return false;
+    };
+    let sent = broadcast(state);
+    if sent == 0 {
+        state.log_output(format!(
+            "Wake fired at {}: no running agents to continue",
+            at.format("%H:%M")
+        ));
+    } else {
+        state.log_output(format!(
+            "Wake fired at {}: sent `continue` to {sent} running agent(s)",
+            at.format("%H:%M")
+        ));
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,6 +592,11 @@ pub(super) fn event_loop(
         // pane logs a line and forces a repaint so its new sidebar badge shows at
         // once. A no-op when the feature is off or nothing is queued.
         force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
+        // Fire the one-shot `wake -t hhmm` schedule once its local wall-clock time
+        // arrives, sending `continue` to every live session agent and logging the
+        // count. The same idle tick that keeps session watching alive also drives
+        // this timer.
+        force_paint |= apply_due_wake(&mut state, Local::now(), wiring.broadcast_wake);
         // Flip the local-LLM `chat` menu row on once the background probe confirms
         // it is usable (drained once); until then the 集中 menu simply omits it.
         // Force a repaint so the change is reflected without waiting for a keypress.
@@ -1402,13 +1446,20 @@ pub(super) fn event_loop(
         // folds a directory or opens a file's diff, and `←` collapses a directory;
         // the right diff pane scrolls with the arrows / `j`/`k` / PageUp/PageDown /
         // Space, `←` returns to the explorer, and `s` toggles the layout. `Tab`
-        // swaps focus from either side and `Esc` / `q` dismiss. It shares the
+        // swaps focus from either side and `Esc` / `q` dismiss. `Ctrl-P` / `Ctrl-N`
+        // (the tab-switch keys) leave the `diff` tab back to the session's panes,
+        // so the diff reads and behaves as a tab beside them. It shares the
         // preview's one-row-header geometry, so it pages by the same measure.
         if let Some(focus) = state.diff_view().map(|d| d.focus()) {
             let page = ui::preview_visible(height as usize, width as usize, &state);
             match key {
                 Key::Tab => state.diff_toggle_focus(),
-                Key::Escape | Key::Char('q') => state.close_diff(),
+                // `v` flips the explorer/diff arrangement between side-by-side and
+                // stacked (works from either focus, like `Tab`).
+                Key::Char('v') => state.diff_toggle_layout(),
+                Key::Escape | Key::Char('q') | Key::Char(CTRL_P) | Key::Char(CTRL_N) => {
+                    state.close_diff()
+                }
                 _ => match focus {
                     DiffFocus::Tree => match key {
                         Key::ArrowUp | Key::Char('k') => state.diff_move_up(),
@@ -1699,6 +1750,9 @@ pub(crate) fn event_loop_compat(
     // starts anything, so the compat-shim loop tests do not touch the pool or the
     // prompt store. The apply path is covered directly in `apply_autostart` tests.
     let mut autostart_queued = |_: &HomeState| Vec::<String>::new();
+    // Timed wakes use real live-prompt IO in `super::run`; the compat shim's
+    // tests do not exercise it, so report that no agents were messaged.
+    let mut broadcast_wake = |_: &HomeState| 0usize;
     // The fakes have no equivalent of the production pane-exit sync thread that
     // fills this, so it stays empty here; the apply path is covered directly in
     // `a_background_refresh_updates_the_session_list`.
@@ -1790,6 +1844,7 @@ pub(crate) fn event_loop_compat(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     // The compat-shim tests do not exercise the local-LLM probe, so a never-filled
     // handle keeps `ai_available` false throughout (matching an unconfigured LLM).

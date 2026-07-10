@@ -107,6 +107,7 @@ fn drive(
     let mut activate_pending: fn(&Path) -> bool = noop_activate_pending;
     let mut clear_pending_spawn: fn() = noop_clear_pending_spawn;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -138,6 +139,7 @@ fn drive(
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event_loop(
         &term,

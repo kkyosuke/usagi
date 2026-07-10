@@ -1,5 +1,6 @@
 use super::*;
 use crate::presentation::tui::home::tasks::TaskKind;
+use chrono::{Local, TimeZone};
 
 /// A minimal recorded session rooted at `/repo/.usagi/sessions/<name>`, used to
 /// give the primary workspace real rows that survive a rebuild.
@@ -19,6 +20,48 @@ fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
         created_at: Utc::now(),
         last_active: None,
     }
+}
+
+fn local_time(hour: u32, minute: u32, second: u32) -> chrono::DateTime<Local> {
+    Local
+        .with_ymd_and_hms(2026, 7, 10, hour, minute, second)
+        .single()
+        .unwrap()
+}
+
+#[test]
+fn wake_schedule_is_one_shot_once_due() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    let at = state.schedule_wake(local_time(14, 0, 0), 14, 30).unwrap();
+    assert_eq!(at, local_time(14, 30, 0));
+    assert_eq!(state.wake_scheduled_at(), Some(local_time(14, 30, 0)));
+
+    assert_eq!(state.take_due_wake(local_time(14, 29, 59)), None);
+    assert_eq!(
+        state.take_due_wake(local_time(14, 30, 0)),
+        Some(local_time(14, 30, 0))
+    );
+    assert_eq!(state.take_due_wake(local_time(14, 30, 1)), None);
+    assert_eq!(state.wake_scheduled_at(), None);
+}
+
+#[test]
+fn scheduling_wake_rejects_a_past_time() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    let err = state
+        .schedule_wake(local_time(14, 0, 0), 13, 59)
+        .unwrap_err();
+    assert!(err.contains("already passed"));
+    assert_eq!(state.wake_scheduled_at(), None);
+}
+
+#[test]
+fn cancelling_wake_clears_the_pending_schedule() {
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.schedule_wake(local_time(14, 0, 0), 14, 30).unwrap();
+    assert_eq!(state.cancel_wake(), Some(local_time(14, 30, 0)));
+    assert_eq!(state.cancel_wake(), None);
+    assert_eq!(state.wake_scheduled_at(), None);
 }
 
 #[test]

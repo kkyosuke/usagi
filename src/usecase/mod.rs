@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_phase;
+pub mod daemon;
 pub mod doctor;
 pub mod font;
 pub mod history;
@@ -16,6 +17,7 @@ pub mod settings;
 pub mod update;
 pub mod update_check;
 pub mod view;
+pub mod wake;
 pub mod workspace;
 pub mod workspace_guard;
 pub mod workspace_state;

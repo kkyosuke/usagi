@@ -887,22 +887,26 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| dir.display().to_string())
                 });
-            let mut pool = pool.borrow_mut();
-            let handle = pool.monitor();
+            // The pool borrow is taken per-operation (never held across the pane
+            // loop below), so the attached pane loop can itself take
+            // `pool.borrow_mut()` on its idle tick to autostart a queued prompt's
+            // agent pane in the background. Holding the guard across `pane::run`
+            // would make that a RefCell double borrow.
+            let handle = pool.borrow().monitor();
             // A session holds at most one agent *per CLI*: a request to add an agent
             // pane (集中's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
             // that already has a pane reuses it — activating its tab below — rather
             // than spawning a duplicate. A *different* CLI still spawns its own agent
             // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
             // spawn).
-            let reuse_agent = run_agent && new_pane && pool.has_agent_pane_of(dir, cli);
+            let reuse_agent = run_agent && new_pane && pool.borrow().has_agent_pane_of(dir, cli);
             // Deliver a prompt queued for this session (via MCP `session_prompt`) only
             // when this attach will *freshly spawn* its agent pane — `add_pane` always
             // spawns; `enter` spawns only when no pane is live yet; reusing an existing
             // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
             // spawn happens it stays queued for the next launch.
             let fresh_agent_spawn =
-                run_agent && !reuse_agent && (new_pane || !pool.has_live_pane(dir));
+                run_agent && !reuse_agent && (new_pane || !pool.borrow().has_live_pane(dir));
             let queued_prompt = if fresh_agent_spawn {
                 crate::infrastructure::agent_prompt_store::take(dir)
             } else {
@@ -931,11 +935,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // when this request will actually spawn a fresh shell. Re-attaching
             // to an existing pane keeps the environment it was originally
             // launched with.
-            let will_spawn = (new_pane && !reuse_agent) || (!new_pane && !pool.has_live_pane(dir));
+            let will_spawn =
+                (new_pane && !reuse_agent) || (!new_pane && !pool.borrow().has_live_pane(dir));
             let pane_env = if will_spawn {
                 resolve_pane_env(term, home, dir)
             } else {
                 std::collections::BTreeMap::new()
+            };
+            // The pane loop's idle-tick autostart hook: pick up prompts queued for
+            // pane-less sessions (an MCP `session_delegate_issue` / `session_prompt`
+            // from the coordinator agent driving this pane) and start their agent
+            // panes in the background while 没入 (Attached) owns the loop and the
+            // outer event loop is stopped. Mirrors the outer loop's `autostart_queued`
+            // hook exactly, spawning through the same `autostart_queued_prompts`; the
+            // per-operation pool borrows above keep this from double-borrowing.
+            let mut autostart_hook = |st: &HomeState| -> Vec<String> {
+                autostart_queued_prompts(
+                    term,
+                    st,
+                    &pool,
+                    &agent_wiring,
+                    default_cli,
+                    autostart_queued_prompts_enabled,
+                )
             };
             // Capture every failure of this launch — the initial spawn (`add_pane`
             // / `enter`) and anything during the pane loop — in one `result`, so a
@@ -946,16 +968,17 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 // Ready the pane to drive: reuse the lone agent when a second was
                 // requested, add a fresh pane (集中's `terminal` / `agent`), or
                 // re-attach the session's active pane (spawning the first when the
-                // session is new).
+                // session is new). Each pool op takes a short-lived borrow so the
+                // pane loop below can autostart under its own `pool.borrow_mut()`.
                 if reuse_agent {
-                    pool.activate_agent_of(dir, cli);
+                    pool.borrow_mut().activate_agent_of(dir, cli);
                 } else if new_pane {
                     let kind = if run_agent {
                         terminal::tabs::PaneKind::Agent
                     } else {
                         terminal::tabs::PaneKind::Terminal
                     };
-                    pool.add_pane(
+                    pool.borrow_mut().add_pane(
                         term,
                         dir,
                         kind,
@@ -967,7 +990,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         },
                     )?;
                 } else {
-                    pool.enter(
+                    pool.borrow_mut().enter(
                         term,
                         dir,
                         run_agent,
@@ -983,15 +1006,22 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 loop {
                     // Publish the tab strip for this session before driving the pane,
                     // so it reflects any add / close / switch from the last step.
-                    let (labels, active_tab) = pool.tabs(dir);
+                    let (labels, active_tab) = pool.borrow().tabs(dir);
                     home.surface_writer(SurfaceOwner::Attached)
                         .set_tabs(labels, active_tab);
-                    let pty = match pool.active_pty(dir) {
-                        Some(pty) => pty,
-                        // No live pane (every one exited): drop back to 集中.
-                        None => return Ok(PaneExit::Closed),
-                    };
-                    match terminal::pane::run(term, home, pty, &handle, &sessions_refresh)? {
+                    // The pane loop resolves the active pane from the pool itself each
+                    // pass (borrowing per iteration), so it can release the borrow on
+                    // its idle tick to autostart; it returns `Closed` when the session
+                    // has no pane left to drive.
+                    match terminal::pane::run(
+                        term,
+                        home,
+                        &pool,
+                        dir,
+                        &handle,
+                        &sessions_refresh,
+                        &mut autostart_hook,
+                    )? {
                         // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
                         terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
                         // `Ctrl-E`: leave the pane to open the note editor over it;
@@ -1001,28 +1031,32 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // next iteration drives the newly active pane (and republishes
                         // the tab strip above it) without leaving 没入.
                         terminal::pane::PaneStep::NextTab => {
-                            let _ = pool.nav(dir, terminal::tabs::TabNav::Next);
+                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Next);
                         }
                         terminal::pane::PaneStep::PrevTab => {
-                            let _ = pool.nav(dir, terminal::tabs::TabNav::Prev);
+                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Prev);
                         }
                         // `Ctrl+Shift+N` / `Ctrl+Shift+P`: reorder the active tab
                         // in place and keep driving that same pane at its new slot.
                         terminal::pane::PaneStep::SwapTabRight => {
-                            let _ = pool.swap_active(dir, terminal::tabs::TabSwap::Right);
+                            let _ = pool
+                                .borrow_mut()
+                                .swap_active(dir, terminal::tabs::TabSwap::Right);
                         }
                         terminal::pane::PaneStep::SwapTabLeft => {
-                            let _ = pool.swap_active(dir, terminal::tabs::TabSwap::Left);
+                            let _ = pool
+                                .borrow_mut()
+                                .swap_active(dir, terminal::tabs::TabSwap::Left);
                         }
                         // A click on a tab chip: jump straight to that pane and loop,
                         // driving it (and republishing the strip) without leaving 没入.
                         terminal::pane::PaneStep::ToTab(i) => {
-                            let _ = pool.nav(dir, terminal::tabs::TabNav::To(i));
+                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::To(i));
                         }
                         // Dragging one tab chip onto another reorders the pane
                         // list; the moved pane stays active at its new slot.
                         terminal::pane::PaneStep::MoveTab { from, to } => {
-                            let _ = pool.move_tab(dir, from, to);
+                            let _ = pool.borrow_mut().move_tab(dir, from, to);
                         }
                         // A right-click tab menu action taken while attached:
                         // reorder / rename / close the chosen tab against the pool
@@ -1032,13 +1066,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // keep every pane alive; `Close` empties the session when it
                         // was the last tab, so drop to 集中 like `CloseTab`.
                         terminal::pane::PaneStep::MenuMoveTab { tab, swap } => {
-                            let _ = pool.move_tab_by(dir, tab, swap);
+                            let _ = pool.borrow_mut().move_tab_by(dir, tab, swap);
                         }
                         terminal::pane::PaneStep::MenuRenameTab { tab, label: name } => {
-                            let _ = pool.rename_tab(dir, tab, &name);
+                            let _ = pool.borrow_mut().rename_tab(dir, tab, &name);
                         }
                         terminal::pane::PaneStep::MenuCloseTab { tab } => {
-                            if !pool.close_tab(dir, tab, &label) {
+                            if !pool.borrow_mut().close_tab(dir, tab, &label) {
                                 return Ok(PaneExit::Closed);
                             }
                         }
@@ -1053,9 +1087,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // resolved for this session drive (the 集中 choice or the
                         // default), so `Ctrl-G` adds/focuses that CLI's agent.
                         terminal::pane::PaneStep::NewAgentTab => {
-                            if !pool.activate_agent_of(dir, cli) {
+                            if !pool.borrow_mut().activate_agent_of(dir, cli) {
                                 let add_env = resolve_pane_env(term, home, dir);
-                                pool.add_pane(
+                                pool.borrow_mut().add_pane(
                                     term,
                                     dir,
                                     terminal::tabs::PaneKind::Agent,
@@ -1076,7 +1110,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // empties, so drop back to 集中 — the same handling as a shell
                         // that exits on its own (`Closed`).
                         terminal::pane::PaneStep::CloseTab => {
-                            if !pool.close_active(dir, &label) {
+                            if !pool.borrow_mut().close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
                         }
@@ -1098,7 +1132,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         // The active pane's shell exited: drop it; keep driving when
                         // a pane remains, else fall to 集中.
                         terminal::pane::PaneStep::Closed => {
-                            if !pool.close_active(dir, &label) {
+                            if !pool.borrow_mut().close_active(dir, &label) {
                                 return Ok(PaneExit::Closed);
                             }
                             // The surviving pane that slides into the active slot is
@@ -1120,7 +1154,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // and the pool reflects the current set, so the on-disk snapshot tracks
             // every add / close. Best-effort: a write failure just means no restore.
             if restore_panes_enabled {
-                match pool.snapshot_open_panes_for(dir) {
+                let snapshot = pool.borrow().snapshot_open_panes_for(dir);
+                match snapshot {
                     Some((active, panes)) => {
                         let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
                     }
@@ -1578,6 +1613,31 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         )
     };
 
+    // When a scheduled `wake` fires, resume every session whose agent pane is
+    // live by enqueueing `continue` on the same live channel the MCP
+    // `session_prompt` tool uses; the terminal pool's watcher then types it into
+    // each pane. Pane-less sessions are skipped (nothing would drain their queue).
+    let mut broadcast_wake = |state: &HomeState| -> usize {
+        let roots: Vec<std::path::PathBuf> =
+            state.sessions().iter().map(|s| s.root.clone()).collect();
+        crate::usecase::wake::broadcast_continue(
+            roots.iter().map(|p| p.as_path()),
+            |root| {
+                crate::infrastructure::agent_live_pane_store::is_live(
+                    root,
+                    crate::infrastructure::resource::process_alive,
+                )
+            },
+            |root| {
+                crate::infrastructure::agent_live_prompt_store::append(
+                    root,
+                    crate::usecase::wake::CONTINUE_PROMPT,
+                )
+                .map_err(|e| e.to_string())
+            },
+        )
+    };
+
     let mut wiring = event::Wiring {
         interaction_epoch: 0,
         // The state.json watcher below is always running, so let the idle loop wake
@@ -1611,6 +1671,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
         autostart_queued: &mut autostart_queued,
+        broadcast_wake: &mut broadcast_wake,
     };
     let outcome = event::event_loop(
         term,

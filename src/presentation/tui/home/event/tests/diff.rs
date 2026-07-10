@@ -148,6 +148,8 @@ fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
     keys.push(Ok(Key::Char(' '))); // Space also pages forward
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('s'))); // toggle to the split layout
+    keys.push(Ok(Key::Char('v'))); // stack the explorer above the diff
+    keys.push(Ok(Key::Char('v'))); // back to side by side
     keys.push(Ok(Key::Char('x'))); // ignored while the diff pane is focused
     keys.push(Ok(Key::Tab)); // toggle focus back to the explorer
     keys.push(Ok(Key::Char('z'))); // ignored while the explorer is focused
@@ -173,6 +175,28 @@ fn diff_command_opens_the_diff_view_from_the_closeup_prompt() {
     keys.push(Ok(Key::Enter)); // run `diff` -> gathers the patch, opens the pane
     keys.push(Ok(Key::Escape)); // dismiss -> back to Closeup
     keys.push(Ok(Key::Escape)); // Closeup -> base Overview; fallback Ctrl-C quits
+    assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
+}
+
+#[test]
+fn diff_tab_is_left_and_reopened_with_the_tab_switch_keys() {
+    // The diff is a session tab: `Ctrl-N` / `Ctrl-P` (the tab-switch keys) leave it
+    // back to 集中, and re-running `diff` (the menu cursor stays on it) reopens it.
+    let dir = tempfile::tempdir().unwrap();
+    let work = repo_with_feature_diff(dir.path());
+    let state = state_with_worktree_at(&work);
+
+    let keys = vec![
+        Ok(Key::ArrowDown),    // cursor root -> the feature session
+        Ok(Key::Enter),        // focus it (idle -> Closeup menu, "agent")
+        Ok(Key::ArrowDown),    // agent -> close
+        Ok(Key::ArrowDown),    // close -> diff
+        Ok(Key::Enter),        // open the diff tab
+        Ok(Key::Char(CTRL_N)), // tab-next leaves the diff tab -> back to 集中
+        Ok(Key::Enter),        // the cursor stayed on `diff`; reopen it
+        Ok(Key::Char(CTRL_P)), // tab-prev leaves the diff tab -> back to 集中
+        Ok(Key::Escape),       // 集中 -> base Overview; fallback Ctrl-C quits
+    ];
     assert!(matches!(run(keys, state).unwrap(), Outcome::Quit));
 }
 

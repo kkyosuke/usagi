@@ -51,6 +51,7 @@ fn run_bg(
     let mut open_external_terminal = |_: &Path| Ok::<(), String>(());
     let mut chat_ask = ready_chat_ask;
     let mut autostart_queued = noop_autostart as fn(&HomeState) -> Vec<String>;
+    let mut broadcast_wake = noop_broadcast_wake as fn(&HomeState) -> usize;
     let mut wiring = Wiring {
         interaction_epoch: 0,
         watch_sessions: false,
@@ -82,6 +83,7 @@ fn run_bg(
         tab_action: &mut tab_action,
         save_resume: &mut save_resume,
         save_last_active: &mut save_last_active,
+        broadcast_wake: &mut broadcast_wake,
     };
     event_loop(
         &term,

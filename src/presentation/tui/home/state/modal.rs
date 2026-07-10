@@ -736,6 +736,11 @@ pub struct DiffView {
     focus: DiffFocus,
     scroll: usize,
     split: bool,
+    /// How the explorer and the diff are arranged: `false` = side by side
+    /// (explorer left, diff right — the default), `true` = stacked (explorer on
+    /// top, diff below). Toggled with `v`; independent of [`split`](Self::split),
+    /// which is the diff *content*'s unified vs. old|new columns.
+    stacked: bool,
 }
 
 impl DiffView {
@@ -765,6 +770,7 @@ impl DiffView {
             focus: DiffFocus::Tree,
             scroll: 0,
             split: false,
+            stacked: false,
         }
     }
 
@@ -787,6 +793,12 @@ impl DiffView {
     /// Whether the side-by-side layout is active.
     pub fn split(&self) -> bool {
         self.split
+    }
+
+    /// Whether the explorer and diff are stacked (explorer on top, diff below)
+    /// rather than side by side (explorer left, diff right — the default).
+    pub fn stacked(&self) -> bool {
+        self.stacked
     }
 
     /// The selected file's section, or `None` for an empty patch.
@@ -956,6 +968,12 @@ impl DiffView {
     pub(super) fn toggle_split(&mut self) {
         self.split = !self.split;
         self.scroll = 0;
+    }
+
+    /// Toggle the explorer/diff arrangement between side-by-side (explorer left,
+    /// diff right) and stacked (explorer on top, diff below).
+    pub(super) fn toggle_layout(&mut self) {
+        self.stacked = !self.stacked;
     }
 }
 

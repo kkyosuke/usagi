@@ -124,6 +124,64 @@ fn diff_pane_with_one_row_shows_only_the_header() {
     assert!(stripped(&rows).contains("feature → main"));
 }
 
+/// Whether any rendered row is a full-width horizontal rule (the stacked layout's
+/// explorer/diff separator) — a non-empty row of only `─`.
+fn has_rule(rows: &[String]) -> bool {
+    rows.iter().any(|r| {
+        let s = console::strip_ansi_codes(r);
+        let s = s.trim_end();
+        !s.is_empty() && s.chars().all(|c| c == '─')
+    })
+}
+
+#[test]
+fn diff_pane_stacks_the_explorer_above_the_diff() {
+    // `v` stacks the explorer on top of the diff, separated by a horizontal rule;
+    // both the file tree and the selected file's diff still render.
+    let mut state = diff_state("feature → main", MULTI);
+    state.diff_toggle_layout();
+    let view = state.diff_view().unwrap();
+    let rows = diff_pane(view, 90, 16);
+    let out = stripped(&rows);
+    assert!(out.contains("render.rs"), "explorer band shows: {out}");
+    assert!(out.contains("one"), "the diff shows below: {out}");
+    assert!(has_rule(&rows), "a horizontal rule separates them");
+    // No vertical column separator in the stacked layout.
+    assert!(
+        !rows
+            .iter()
+            .any(|r| console::strip_ansi_codes(r).contains('│')),
+        "stacked layout has no vertical bar"
+    );
+}
+
+#[test]
+fn diff_pane_stacked_works_on_a_narrow_pane() {
+    // Stacking is full width, so it stays usable on a pane too narrow to sit the
+    // explorer and diff side by side.
+    let mut state = diff_state("feature → main", MULTI);
+    state.diff_toggle_layout();
+    let view = state.diff_view().unwrap();
+    let rows = diff_pane(view, 24, 12);
+    assert!(has_rule(&rows), "narrow stacked pane still has the rule");
+    assert!(stripped(&rows).contains("render.rs"));
+}
+
+#[test]
+fn diff_pane_stacked_falls_back_when_too_short_to_stack() {
+    // With a 2-row body (rows = 3) there is no room to stack, so the diff fills the
+    // body and no rule is drawn.
+    let mut state = diff_state("feature → main", MULTI);
+    state.diff_toggle_layout();
+    let view = state.diff_view().unwrap();
+    let rows = diff_pane(view, 90, 3);
+    assert_eq!(rows.len(), 3);
+    assert!(
+        !has_rule(&rows),
+        "no rule when the body is too short to stack"
+    );
+}
+
 #[test]
 fn diff_pane_narrow_pane_falls_back_to_diff_only() {
     // Too narrow to split usefully: the explorer is dropped and the diff fills the
@@ -155,11 +213,46 @@ fn diff_pane_clips_content_wider_than_the_pane() {
 
 #[test]
 fn diff_pane_goes_through_the_right_pane_dispatch() {
-    // Opened from the palette, the diff view takes over the whole right pane.
+    // Opened outside 集中 (e.g. the base 選択 preview), the diff view takes over the
+    // whole right pane — no session tab strip to sit in.
     let state = diff_state("feature → main", MULTI);
     let out = stripped(&right_pane_contents(&state, 90, 12));
     assert!(out.contains("feature → main"));
     assert!(out.contains("render.rs"));
+}
+
+#[test]
+fn diff_renders_as_a_session_tab_in_closeup() {
+    // In 集中 the diff is a session tab: the tab strip heads it with the session's
+    // pane chips plus an active `diff` chip, and the split view fills the body.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    state.show_attached();
+    state.set_terminal_tabs(vec!["Claude".to_string(), "terminal".to_string()], 0);
+    state.open_diff_result(Ok(("feature → main".to_string(), MULTI.to_string())));
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    // Strip: the live panes' chips plus the `diff` chip.
+    assert!(out.contains("Claude"), "pane chips head the diff: {out}");
+    assert!(out.contains("terminal"));
+    assert!(out.contains("diff"));
+    // Body: the diff explorer + the selected file's diff still render below.
+    assert!(out.contains("render.rs"));
+    assert!(out.contains("feature → main"));
+}
+
+#[test]
+fn diff_tab_shows_a_lone_chip_without_live_panes() {
+    // An idle session (no live pane) still reads the diff as a tab: the strip
+    // carries just the `diff` chip.
+    let mut state = state_with(vec![worktree(Some("main"), true, BranchStatus::Local)]);
+    state.enter_closeup(1);
+    state.open_diff_result(Ok(("feature → main".to_string(), MULTI.to_string())));
+    let out = stripped(&right_pane_contents(&state, 100, 14));
+    assert!(out.contains("diff"));
+    assert!(
+        out.contains("render.rs"),
+        "the diff body still renders: {out}"
+    );
 }
 
 #[test]

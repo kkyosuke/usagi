@@ -2,6 +2,7 @@ pub mod agent_phase;
 pub mod clean;
 pub mod completion;
 pub mod config;
+pub mod daemon;
 pub mod doctor;
 pub mod feature;
 pub mod guard_workspace;
