@@ -14,5 +14,6 @@ pub mod serde_fallback;
 pub mod settings;
 pub mod trace;
 pub mod version;
+pub mod wake;
 pub mod workspace;
 pub mod workspace_state;

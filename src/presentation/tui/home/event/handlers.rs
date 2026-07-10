@@ -9,6 +9,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use chrono::Local;
 use console::Key;
 use console::Term;
 
@@ -167,6 +168,24 @@ pub(super) fn palette_key(
                         state.log_error(format!("\"{name}\" is not in the unite view"));
                     }
                 }
+                // `wake -t hhmm`: schedule a one-shot local-time wake for today.
+                // The state turns hour/minute into a concrete same-day instant so
+                // a time already passed is rejected immediately.
+                Effect::ScheduleWake { hour, minute } => {
+                    match state.schedule_wake(Local::now(), hour, minute) {
+                        Ok(at) => state.log_output(format!(
+                            "Wake scheduled for {} — will send `continue` to running agents",
+                            at.format("%H:%M")
+                        )),
+                        Err(e) => state.log_error(e),
+                    }
+                }
+                Effect::CancelWake => match state.cancel_wake() {
+                    Some(at) => {
+                        state.log_output(format!("Cancelled wake for {}", at.format("%H:%M")))
+                    }
+                    None => state.log_output("No wake is scheduled"),
+                },
                 // `env`: open the workspace-env editor as an overlay *over* the
                 // palette (the palette stayed open — `OpenEnvEditor` does not
                 // close it), so saving / cancelling returns to the command palette. Seed

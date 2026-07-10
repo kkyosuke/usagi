@@ -5,7 +5,7 @@
 use super::builtins::{
     AgentCommand, ChatCommand, ClearCommand, CloseCommand, ComingSoonCommand, ConfigCommand,
     DiffCommand, EnvCommand, HistoryCommand, IssueCommand, ManCommand, PreviewCommand, QuitCommand,
-    SessionCommand, TerminalCommand, UniteCommand,
+    SessionCommand, TerminalCommand, UniteCommand, WakeCommand,
 };
 use super::{
     Command, CommandContext, CommandHint, CommandInfo, CommandResult, CommandScope, Completion,
@@ -52,6 +52,7 @@ impl CommandRegistry {
                 Box::new(SessionCommand),
                 Box::new(TerminalCommand),
                 Box::new(UniteCommand),
+                Box::new(WakeCommand),
             ],
         }
     }

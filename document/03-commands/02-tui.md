@@ -14,7 +14,7 @@
 
 | 入力面 | スコープ | 出るコマンド |
 |---|---|---|
-| コマンドパレット（統括。`:` で開く） | Workspace（全体） | `session` / `unite` / `issue` / `config` / `env` / `preview` |
+| コマンドパレット（統括。`:` で開く） | Workspace（全体） | `session` / `unite` / `wake` / `issue` / `config` / `env` / `preview` |
 | 集中（Closeup）の右ペイン | Session（個別） | `agent` / `chat` / `close` / `diff` / `terminal`（Menu はコマンド名のアルファベット順 agent → chat → close → diff → terminal で並べる。`chat` はローカル LLM が使えるときだけ Menu に出る） |
 | 両方 | 共通 | `man` / `history` / `clear` / `quit` |
 
@@ -33,6 +33,7 @@
 | `quit` / `exit` | usagi を終了してプロジェクト一覧へ戻る |
 | `session` | セッション（branch + worktree）の作成・一覧・選択・削除（Workspace スコープ） |
 | `unite` | 統合(unite)ビューにワークスペースを追加・削除（Workspace スコープ） |
+| `wake -t <hhmm>` | 今日の指定時刻に、起動中の全セッション agent へ `continue` を送る one-shot タイマー（Workspace スコープ） |
 | `issue` | タスク issue を一覧・依存ツリー・ガント・1 件表示で閲覧（Workspace スコープ） |
 | `preview <path\|name>` | Markdown ファイルを右ペインにレンダリング表示（Workspace スコープ） |
 | `terminal [open\|new]` | 選択中セッションの worktree でシェルを開く（Session スコープ）。引数なし / `open` は右ペインに埋め込みタブを追加、`new` は同じディレクトリで OS ネイティブの新規ターミナルを開く |
@@ -70,6 +71,15 @@
 | `unite remove <workspace>`（別名 `rm`） | 統合ビューからそのワークスペースを外す。最後の 1 つを外すと単一ワークスペース表示へ戻る |
 
 Open 画面の複数選択で開く導線は [design/02-open.md#統合uniteモードで開く](../design/02-open.md#統合uniteモードで開く) を参照してください。
+
+## wake
+
+**`:` で開くコマンドパレット**から、起動中の全セッション agent に `continue` を送る one-shot タイマーを設定します。指定時刻になると、その時点でライブ agent ペインを持つセッションだけに `continue` を送信し、送信数をログに出します。agent ペインが開いていないセッションには送らず、キューにも残しません。
+
+| コマンド | 役割 |
+|---|---|
+| `wake -t <hhmm>` | 今日の `<hhmm>` に wake を設定する。`1430` / `930` / `14:30` / `9:05` の形式を受け付ける。同じ日の時刻だけを対象にし、すでに過ぎた時刻は拒否する |
+| `wake cancel` | 予約済みの wake を取り消す。予約が無いときはその旨をログに出す |
 
 ## issue
 
