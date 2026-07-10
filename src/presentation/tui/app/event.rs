@@ -10,7 +10,7 @@ use console::Term;
 
 use crate::domain::workspace::Workspace;
 use crate::presentation::tui::io::screen::AlternateScreenGuard;
-use crate::presentation::tui::new::state::NewProject;
+use crate::presentation::tui::new::state::{FormState, NewProject};
 use crate::presentation::tui::{config, home, new, open, welcome};
 
 /// Plays the startup splash once, before the screen graph opens.
@@ -26,13 +26,15 @@ pub type RunWelcome<'a> = dyn FnMut(&Term, Option<String>) -> Result<welcome::Ou
 /// Runs the project selection screen and returns the user's choice.
 pub type RunOpen<'a> = dyn FnMut(&Term) -> Result<open::Outcome> + 'a;
 
-/// Runs the New Project screen and returns the user's choice.
-pub type RunNew<'a> = dyn FnMut(&Term) -> Result<new::Outcome> + 'a;
+/// Runs the New Project screen and returns the user's choice. An initial form
+/// and notice are supplied when a failed creation is retried.
+pub type RunNew<'a> =
+    dyn FnMut(&Term, Option<FormState>, Option<String>) -> Result<new::Outcome> + 'a;
 
 /// Creates a project from a submitted form: clone the repository (or register
 /// an existing directory), register it as a workspace, and capture its initial
 /// worktree state.
-pub type CreateProject<'a> = dyn FnMut(&NewProject) -> Result<Workspace> + 'a;
+pub type CreateProject<'a> = dyn FnMut(&Term, &NewProject) -> Result<Workspace> + 'a;
 
 /// Runs the home screen for a workspace and returns the user's choice.
 pub type RunHome<'a> = dyn FnMut(&Term, &Workspace) -> Result<home::Outcome> + 'a;
@@ -50,8 +52,8 @@ pub type RunConfig<'a> = dyn FnMut(&Term) -> Result<config::Outcome> + 'a;
 /// On entry it plays the startup splash once; the welcome menu then dispatches
 /// to each sub-screen; a sub-screen returning `Quit` ends the session, `Back`
 /// returns to the menu. Submitting the New form creates the project and opens
-/// its home screen; a creation failure is carried back to the menu as a notice
-/// so the user can correct it and retry.
+/// its home screen; a creation failure reopens New with its submitted values and
+/// an inline notice so the user can correct it and retry.
 #[allow(clippy::too_many_arguments)]
 pub fn event_loop(
     term: &Term,
@@ -68,10 +70,8 @@ pub fn event_loop(
     if let Err(e) = run_splash(term) {
         return dismiss_and_fail(&mut guard, e);
     }
-    let mut notice: Option<String> = None;
-
     loop {
-        match run_welcome(term, notice.take()) {
+        match run_welcome(term, None) {
             Ok(welcome::Outcome::Quit) => return Ok(()),
             Ok(welcome::Outcome::OpenProjects) => match run_open(term) {
                 Ok(open::Outcome::Back) => {}
@@ -83,25 +83,37 @@ pub fn event_loop(
                 Ok(home::Outcome::Quit) => return Ok(()),
                 Err(e) => return dismiss_and_fail(&mut guard, e),
             },
-            Ok(welcome::Outcome::NewProject) => match run_new(term) {
-                Ok(new::Outcome::Back) => {}
-                Ok(new::Outcome::Quit) => return Ok(()),
-                Ok(new::Outcome::Submitted(project)) => {
-                    // Clone/register the new workspace, then jump straight into
-                    // its home screen. A failure (bad URL, network, name clash)
-                    // is carried back to the menu as a notice so the user can
-                    // correct it without losing the menu.
-                    match create_project(&project) {
-                        Ok(workspace) => match run_home(term, &workspace) {
-                            Ok(home::Outcome::Back) => {}
-                            Ok(home::Outcome::Quit) => return Ok(()),
-                            Err(e) => return dismiss_and_fail(&mut guard, e),
-                        },
-                        Err(e) => notice = Some(format!("Could not create project: {e}")),
+            Ok(welcome::Outcome::NewProject) => {
+                let mut initial_form = None;
+                let mut new_notice = None;
+                loop {
+                    match run_new(term, initial_form.take(), new_notice.take()) {
+                        Ok(new::Outcome::Back) => break,
+                        Ok(new::Outcome::Quit) => return Ok(()),
+                        Ok(new::Outcome::Submitted { project, form }) => {
+                            // Clone/register the new workspace, then jump straight
+                            // into its home screen. A failure (bad URL, network,
+                            // name clash) immediately reopens this form with every
+                            // submitted value intact.
+                            match create_project(term, &project) {
+                                Ok(workspace) => {
+                                    match run_home(term, &workspace) {
+                                        Ok(home::Outcome::Back) => {}
+                                        Ok(home::Outcome::Quit) => return Ok(()),
+                                        Err(e) => return dismiss_and_fail(&mut guard, e),
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    initial_form = Some(*form);
+                                    new_notice = Some(format!("Could not create project: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => return dismiss_and_fail(&mut guard, e),
                     }
                 }
-                Err(e) => return dismiss_and_fail(&mut guard, e),
-            },
+            }
             Ok(welcome::Outcome::Configure) => match run_config(term) {
                 Ok(config::Outcome::Back) => {}
                 Ok(config::Outcome::Quit) => return Ok(()),
@@ -169,40 +181,80 @@ mod tests {
     }
 
     // New-screen stubs.
-    fn new_back(_t: &Term) -> Result<new::Outcome> {
+    fn new_back(
+        _t: &Term,
+        _form: Option<FormState>,
+        _notice: Option<String>,
+    ) -> Result<new::Outcome> {
         Ok(new::Outcome::Back)
     }
-    fn new_quit(_t: &Term) -> Result<new::Outcome> {
+    fn new_quit(
+        _t: &Term,
+        _form: Option<FormState>,
+        _notice: Option<String>,
+    ) -> Result<new::Outcome> {
         Ok(new::Outcome::Quit)
     }
-    fn new_submitted(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Submitted(NewProject::Clone(CloneSpec {
-            url: RepoUrl::parse("https://github.com/owner/repo.git").unwrap(),
-            location: std::path::PathBuf::from("/base"),
-            directory: "repo".to_string(),
-            branch: None,
-        })))
+    fn clone_form() -> FormState {
+        let mut form = FormState::new();
+        form.set_location("/base");
+        form.focus_next();
+        for c in "https://github.com/owner/repo.git".chars() {
+            form.insert_char(c);
+        }
+        form.focus_next();
+        form.focus_next();
+        form.focus_next();
+        for c in "feature".chars() {
+            form.insert_char(c);
+        }
+        form
     }
-    fn new_submitted_existing(_t: &Term) -> Result<new::Outcome> {
-        Ok(new::Outcome::Submitted(NewProject::Existing(
-            ExistingSpec {
+    fn new_submitted(
+        _t: &Term,
+        form: Option<FormState>,
+        _notice: Option<String>,
+    ) -> Result<new::Outcome> {
+        let form = form.unwrap_or_else(clone_form);
+        Ok(new::Outcome::Submitted {
+            project: NewProject::Clone(CloneSpec {
+                url: RepoUrl::parse("https://github.com/owner/repo.git").unwrap(),
+                location: std::path::PathBuf::from("/base"),
+                directory: "repo".to_string(),
+                branch: Some("feature".to_string()),
+            }),
+            form: Box::new(form),
+        })
+    }
+    fn new_submitted_existing(
+        _t: &Term,
+        _form: Option<FormState>,
+        _notice: Option<String>,
+    ) -> Result<new::Outcome> {
+        Ok(new::Outcome::Submitted {
+            project: NewProject::Existing(ExistingSpec {
                 path: std::path::PathBuf::from("/base/existing"),
                 name: "existing".to_string(),
-            },
-        )))
+            }),
+            form: Box::new(FormState::new()),
+        })
     }
-    fn new_err(_t: &Term) -> Result<new::Outcome> {
+    fn new_err(
+        _t: &Term,
+        _form: Option<FormState>,
+        _notice: Option<String>,
+    ) -> Result<new::Outcome> {
         Err(anyhow::anyhow!("new screen blew up"))
     }
 
     // Project-creation stubs.
-    fn create_ok(p: &NewProject) -> Result<Workspace> {
+    fn create_ok(_t: &Term, p: &NewProject) -> Result<Workspace> {
         match p {
             NewProject::Clone(spec) => Ok(Workspace::new(spec.directory.clone(), &spec.location)),
             NewProject::Existing(spec) => Ok(Workspace::new(spec.name.clone(), &spec.path)),
         }
     }
-    fn create_err(_p: &NewProject) -> Result<Workspace> {
+    fn create_err(_t: &Term, _p: &NewProject) -> Result<Workspace> {
         Err(anyhow::anyhow!("clone failed"))
     }
 
@@ -525,24 +577,49 @@ mod tests {
     }
 
     #[test]
-    fn new_submitted_create_failure_carries_notice_back_to_menu() {
+    fn new_submitted_create_failure_reopens_the_preserved_form_with_a_notice() {
         let t = term();
-        // Creation fails, so the loop returns to the menu with a notice; the
-        // next welcome iteration quits. The home stub must not be reached.
+        // Creation fails, so New is called a second time before the welcome menu
+        // is shown again. The retry receives the submitted URL/location and the
+        // creation error, then returns Back so the scripted welcome can quit.
         let mut welcome =
             ScriptedWelcome::new(vec![welcome::Outcome::NewProject, welcome::Outcome::Quit]);
+        let mut calls = 0;
+        let mut run_new =
+            |_t: &Term, form: Option<FormState>, notice: Option<String>| -> Result<new::Outcome> {
+                calls += 1;
+                if calls == 1 {
+                    let form = clone_form();
+                    let project = form.validate().unwrap();
+                    return Ok(new::Outcome::Submitted {
+                        project,
+                        form: Box::new(form),
+                    });
+                }
+                let form = form.expect("failed submission must preserve its form");
+                assert_eq!(form.url(), "https://github.com/owner/repo.git");
+                assert_eq!(form.location(), "/base");
+                assert_eq!(form.directory(), "repo");
+                assert_eq!(form.branch(), "feature");
+                assert_eq!(
+                    notice.as_deref(),
+                    Some("Could not create project: clone failed")
+                );
+                Ok(new::Outcome::Back)
+            };
         assert!(event_loop(
             &t,
             &mut splash_noop,
             &mut |tt, n| welcome.next(tt, n),
             &mut open_back,
-            &mut new_submitted,
+            &mut run_new,
             &mut create_err,
             &mut home_err,
             &mut home_back,
             &mut config_back,
         )
         .is_ok());
+        assert_eq!(calls, 2);
     }
 
     #[test]

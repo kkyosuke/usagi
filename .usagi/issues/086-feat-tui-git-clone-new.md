@@ -1,13 +1,13 @@
 ---
 number: 86
 title: feat(tui): git clone を非同期化しローディング表示、失敗時は New フォームを保持する
-status: todo
+status: in-progress
 priority: high
 labels: [tui, review]
 dependson: []
 related: []
 created_at: 2026-07-03T23:20:08.870333+00:00
-updated_at: 2026-07-03T23:20:08.870333+00:00
+updated_at: 2026-07-10T20:30:31.232+00:00
 ---
 
 UI/UX レビュー（2026-07 branch `usagi/ui`）由来。

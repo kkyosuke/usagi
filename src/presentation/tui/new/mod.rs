@@ -13,6 +13,7 @@ use console::Term;
 
 use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::presentation::tui::widgets::dir_picker::FsDirSource;
+use state::FormState;
 
 pub use event::Outcome;
 
@@ -26,10 +27,28 @@ use tests::mock_event_loop as event_loop;
 /// [`event`]. Assumes the alternate screen is already active.
 ///
 /// `default_location` pre-fills the Location field with the base directory new
-/// projects are created under.
-pub fn run(term: &Term, default_location: &str) -> Result<Outcome> {
+/// projects are created under. `initial_form` and `notice` restore a submission
+/// after project creation fails.
+pub fn run(
+    term: &Term,
+    default_location: &str,
+    initial_form: Option<FormState>,
+    notice: Option<String>,
+) -> Result<Outcome> {
     let mut reader = TermKeyReader::new(term.clone());
-    event_loop(term, &mut reader, default_location, &FsDirSource)
+    let state = initial_form.unwrap_or_else(|| {
+        let mut state = FormState::new();
+        state.set_location(default_location);
+        state
+    });
+    event_loop(
+        term,
+        &mut reader,
+        state,
+        notice,
+        default_location,
+        &FsDirSource,
+    )
 }
 
 #[cfg(test)]
@@ -40,10 +59,19 @@ mod tests {
     use anyhow::bail;
     use std::cell::RefCell;
 
+    struct Mock {
+        form: Option<FormState>,
+        notice: Option<String>,
+        result: Result<(), &'static str>,
+    }
+
     thread_local! {
-        /// The pre-filled location `run` forwarded, and the result the mock returns.
-        static MOCK: RefCell<(Option<String>, Result<(), &'static str>)> =
-            const { RefCell::new((None, Ok(()))) };
+        /// The initial form / notice `run` forwarded, and the result the mock returns.
+        static MOCK: RefCell<Mock> = const { RefCell::new(Mock {
+            form: None,
+            notice: None,
+            result: Ok(()),
+        }) };
     }
 
     /// Stands in for the real New Project loop so [`run`]'s wiring is exercised
@@ -51,13 +79,17 @@ mod tests {
     pub(super) fn mock_event_loop(
         _term: &Term,
         _reader: &mut dyn KeyReader,
+        state: FormState,
+        notice: Option<String>,
         default_location: &str,
         _dir_source: &dyn DirSource,
     ) -> Result<Outcome> {
         MOCK.with(|m| {
             let mut m = m.borrow_mut();
-            m.0 = Some(default_location.to_string());
-            match m.1 {
+            assert_eq!(default_location, "/tmp/projects");
+            m.form = Some(state);
+            m.notice = notice;
+            match m.result {
                 Ok(()) => Ok(Outcome::Back),
                 Err(e) => bail!(e),
             }
@@ -66,18 +98,65 @@ mod tests {
 
     #[test]
     fn run_pre_fills_the_location_and_returns_the_outcome() {
-        MOCK.with(|m| *m.borrow_mut() = (None, Ok(())));
-        let outcome = run(&Term::stdout(), "/tmp/projects").unwrap();
+        MOCK.with(|m| {
+            *m.borrow_mut() = Mock {
+                form: None,
+                notice: None,
+                result: Ok(()),
+            }
+        });
+        let outcome = run(&Term::stdout(), "/tmp/projects", None, None).unwrap();
         assert!(matches!(outcome, Outcome::Back));
         // The default location is passed straight through to the form loop.
-        MOCK.with(|m| assert_eq!(m.borrow().0.as_deref(), Some("/tmp/projects")));
+        MOCK.with(|m| {
+            let m = m.borrow();
+            assert_eq!(
+                m.form.as_ref().map(FormState::location),
+                Some("/tmp/projects")
+            );
+            assert_eq!(m.notice, None);
+        });
+    }
+
+    #[test]
+    fn run_forwards_a_preserved_form_and_notice() {
+        MOCK.with(|m| {
+            *m.borrow_mut() = Mock {
+                form: None,
+                notice: None,
+                result: Ok(()),
+            }
+        });
+        let mut form = FormState::new();
+        form.set_location("/kept");
+        let outcome = run(
+            &Term::stdout(),
+            "/tmp/projects",
+            Some(form),
+            Some("clone failed".to_string()),
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Back));
+        MOCK.with(|m| {
+            let m = m.borrow();
+            assert_eq!(m.form.as_ref().map(FormState::location), Some("/kept"));
+            assert_eq!(m.notice.as_deref(), Some("clone failed"));
+        });
     }
 
     #[test]
     fn run_propagates_a_loop_error() {
-        MOCK.with(|m| *m.borrow_mut() = (None, Err("read failed")));
+        MOCK.with(|m| {
+            *m.borrow_mut() = Mock {
+                form: None,
+                notice: None,
+                result: Err("read failed"),
+            }
+        });
         assert_eq!(
-            run(&Term::stdout(), "/tmp").unwrap_err().to_string(),
+            run(&Term::stdout(), "/tmp/projects", None, None)
+                .unwrap_err()
+                .to_string(),
             "read failed"
         );
     }

@@ -18,6 +18,7 @@
 
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use console::Term;
 
 use crate::presentation::tui::install_task::ANIM_TICK;
@@ -58,6 +59,46 @@ where
     run_with_loading_frames(term, work, |hop, face, height, width| {
         widgets::loading_screen(width, height, hop, face, label)
     })
+}
+
+/// Run `work` on a worker thread after synchronously painting the first loading
+/// frame, then animate that frame until the worker finishes.
+///
+/// Unlike [`run_with_loading`], this eager variant has no grace period: it is
+/// intended for an operation such as `git clone` where even a fast completion
+/// must visibly acknowledge the submitted action. A failure to paint the first
+/// frame is returned without starting `work`, so callers never begin the slow
+/// operation behind an unchanged, apparently frozen screen. A worker panic is
+/// reported as `Ok(None)`.
+pub fn run_with_loading_immediate<T, W>(term: &Term, label: &str, work: W) -> Result<Option<T>>
+where
+    T: Send + 'static,
+    W: FnOnce() -> T + Send + 'static,
+{
+    let started = Instant::now();
+    let mut painter = FramePainter::new();
+    let (height, width) = term.size();
+    painter.paint(
+        term,
+        widgets::loading_screen(width as usize, height as usize, 0, 0, label),
+    )?;
+
+    let worker = std::thread::spawn(work);
+    while !worker.is_finished() {
+        let elapsed = started.elapsed();
+        let (height, width) = term.size();
+        let frame = widgets::loading_screen(
+            width as usize,
+            height as usize,
+            hop_frame(elapsed),
+            face_index(elapsed),
+            label,
+        );
+        let _ = painter.paint(term, frame);
+        std::thread::sleep(ANIM_TICK);
+    }
+
+    Ok(worker.join().ok())
 }
 
 /// Like [`run_with_loading`] but the caller supplies the whole frame to paint on
