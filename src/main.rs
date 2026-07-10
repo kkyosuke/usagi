@@ -687,6 +687,7 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
 /// Single-threaded on purpose: with no worker threads there are no locks around
 /// the registry or the client table, and a client's request is answered within
 /// one [`DAEMON_POLL`] tick — fast enough for the session feed.
+#[cfg(unix)]
 struct DaemonIpcServer {
     listener: Option<std::os::unix::net::UnixListener>,
     clients: std::collections::HashMap<u64, IpcClient>,
@@ -712,11 +713,13 @@ struct DaemonIpcServer {
 
 /// One connected client: its stream and the decoder reassembling frames from its
 /// partial reads.
+#[cfg(unix)]
 struct IpcClient {
     stream: std::os::unix::net::UnixStream,
     decoder: usagi::domain::daemon_ipc::FrameDecoder,
 }
 
+#[cfg(unix)]
 impl DaemonIpcServer {
     /// Bind the listener at `path`, removing any stale socket file first. Returns
     /// a server with no listener (IPC disabled) if binding fails, so the daemon
@@ -1187,11 +1190,32 @@ impl DaemonIpcServer {
     }
 }
 
+#[cfg(not(unix))]
+struct DaemonIpcServer;
+
+#[cfg(not(unix))]
+impl DaemonIpcServer {
+    fn bind(_path: &Path) -> Self {
+        Self
+    }
+
+    fn has_clients(&self) -> bool {
+        false
+    }
+
+    fn poll(&mut self, _dir: &Path) {}
+
+    fn broadcast_sessions(&mut self, _dir: &Path) {}
+
+    fn shutdown(&mut self, _path: &Path) {}
+}
+
 /// Bytes of raw output retained per daemon terminal for streaming exact deltas
 /// to attached clients. A client that falls further behind than this is
 /// resynchronised with a full screen snapshot, so the cap only bounds memory,
 /// never correctness. 256 KiB absorbs a solid burst of agent output between two
 /// IPC ticks with plenty of margin.
+#[cfg(unix)]
 const DAEMON_OUTPUT_BACKLOG_BYTES: usize = 256 * 1024;
 
 /// Gather the daemon's view of every monitored session from the real stores.
