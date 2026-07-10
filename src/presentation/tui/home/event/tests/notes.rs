@@ -16,8 +16,7 @@ fn overview_n_opens_the_note_editor_edits_the_buffer_and_saves() {
 
     let mut keys = vec![
         Ok(Key::ArrowDown),        // root -> alpha
-        Ok(Key::Char('n')),        // open the note editor for alpha
-        Ok(Key::Tab),              // ignored inside the editor
+        Ok(Key::Char('n')),        // open the note editor for alpha (note tab)
         Ok(Key::Char('\u{0001}')), // a control char (Ctrl-A): ignored
     ];
     keys.extend(typed("abc"));
@@ -82,6 +81,46 @@ fn overview_n_on_the_root_row_edits_and_saves_the_workspace_root_note() {
     assert_eq!(
         *recorded.borrow(),
         vec![("root".to_string(), "hi".to_string())]
+    );
+}
+
+#[test]
+fn tab_switches_tabs_and_editing_is_ignored_on_the_read_only_tabs() {
+    // `Tab` cycles note -> todos; typing on the read-only todos tab is ignored,
+    // so only the text typed back on the note tab is saved.
+    let recorded = RefCell::new(Vec::<(String, String)>::new());
+    let mut set_note = |name: &str, text: &str| {
+        recorded
+            .borrow_mut()
+            .push((name.to_string(), text.to_string()));
+        noop_set_note(name, text)
+    };
+    let mut open: fn(&mut HomeState, &Path, bool, bool) -> Result<PaneExit> = noop_open;
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = noop_preview;
+
+    let mut keys = vec![
+        Ok(Key::ArrowDown), // root -> alpha
+        Ok(Key::Char('n')), // open the editor (note tab)
+        Ok(Key::Tab),       // note -> todos (read-only)
+    ];
+    keys.extend(typed("xyz")); // ignored on the todos tab
+    keys.push(Ok(Key::BackTab)); // todos -> note
+    keys.extend(typed("ok")); // edits the note buffer
+    keys.push(Ok(Key::Char(CTRL_S))); // save
+    keys.push(Ok(Key::CtrlC)); // quit
+
+    let outcome = run_notes(
+        keys,
+        state_with_sessions(&["alpha", "beta"]),
+        &mut open,
+        &mut preview,
+        &mut set_note,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(
+        *recorded.borrow(),
+        vec![("alpha".to_string(), "ok".to_string())]
     );
 }
 

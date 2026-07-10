@@ -6,6 +6,8 @@ use chrono::{Local, TimeZone};
 /// give the primary workspace real rows that survive a rebuild.
 fn session(name: &str) -> crate::domain::workspace_state::SessionRecord {
     crate::domain::workspace_state::SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: name.to_string(),
         display_name: None,
         note: None,

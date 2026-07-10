@@ -55,6 +55,8 @@ fn state_with_spy() -> (HomeState, SpyLogger) {
 }
 fn session_record(name: &str, worktrees: usize) -> SessionRecord {
     SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: name.to_string(),
         display_name: None,
         note: None,

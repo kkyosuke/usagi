@@ -214,6 +214,8 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
         ["main", "next"]
             .iter()
             .map(|n| SessionRecord {
+                todos: Vec::new(),
+                decisions: Vec::new(),
                 name: n.to_string(),
                 display_name: None,
                 note: None,
@@ -263,6 +265,8 @@ fn an_external_refresh_updates_the_sidebar_without_entering_switch() {
         ["main", "feat", "delegated"]
             .iter()
             .map(|n| SessionRecord {
+                todos: Vec::new(),
+                decisions: Vec::new(),
                 name: n.to_string(),
                 display_name: None,
                 note: None,
@@ -311,6 +315,8 @@ fn a_background_refresh_routes_to_the_workspace_it_names() {
     let refresh = SessionsRefreshHandle::new();
 
     let session = |root: &str, name: &str| SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: name.to_string(),
         display_name: None,
         note: None,

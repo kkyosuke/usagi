@@ -80,6 +80,8 @@ mod tests {
 
     fn sessions(name: &str) -> Vec<SessionRecord> {
         vec![SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
             name: name.to_string(),
             display_name: None,
             note: None,

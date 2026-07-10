@@ -287,6 +287,8 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
 
     let mut state = state();
     state.restore_sessions(vec![SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: "feature".to_string(),
         display_name: None,
         note: None,
@@ -318,6 +320,8 @@ fn multi_repo_session_collapses_to_one_row_with_an_aggregated_status() {
 fn a_session_with_no_worktrees_still_yields_a_row() {
     let mut state = state();
     state.restore_sessions(vec![SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: "empty".to_string(),
         display_name: None,
         note: None,

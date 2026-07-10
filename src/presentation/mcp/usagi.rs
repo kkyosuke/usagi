@@ -583,8 +583,8 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 6 issue + 4 memory + 8 session + 2 composite orchestration tools.
-        assert_eq!(names.len(), 20);
+        // 6 issue + 4 memory + 14 session + 2 composite orchestration tools.
+        assert_eq!(names.len(), 26);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"issue_search"));
@@ -597,6 +597,12 @@ mod tests {
         assert!(names.contains(&"session_remove"));
         assert!(names.contains(&"session_note_get"));
         assert!(names.contains(&"session_note_update"));
+        assert!(names.contains(&"session_todo_list"));
+        assert!(names.contains(&"session_todo_add"));
+        assert!(names.contains(&"session_todo_update"));
+        assert!(names.contains(&"session_todo_remove"));
+        assert!(names.contains(&"session_decision_list"));
+        assert!(names.contains(&"session_decision_log"));
         assert!(names.contains(&"session_delegate_issue"));
         assert!(names.contains(&"session_delegate_brief"));
         // The list / send / update tools were folded into search / session_prompt

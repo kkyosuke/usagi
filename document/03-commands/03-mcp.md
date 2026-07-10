@@ -136,7 +136,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 
 ## 対応 tool 一覧
 
-`tools/list` で以下の 20 tool（issue 6 + memory 4 + session 8 + オーケストレーション 2）を公開します。結果はいずれも JSON テキストで
+`tools/list` で以下の 26 tool（issue 6 + memory 4 + session 14 + オーケストレーション 2）を公開します。結果はいずれも JSON テキストで
 返ります。
 
 | tool | 必須引数 | 任意引数 | 返り値 |
@@ -157,6 +157,14 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
 | `session_prompt` | `name` / `prompt` | `mode`（`auto` / `queue` / `live`、既定 `auto`） / `agent_cli` / `model` | `{ "name": "…", "delivered_to": "queue" \| "live", "detail": "…", "agent": { "cli": "…", "model": "…" } }`（`agent` は `agent_cli` / `model` 指定時のみ。[挙動](#session_prompt-の挙動)） |
 | `session_pr` | `name` | — | `{ "name": "…", "root": "…", "merged": bool, "pr": [{ "number": N, "url": "…", "state": "open" \| "merged" }] }` |
 | `session_remove` | `name` | `force` | `{ "name": "…", "removed": bool, "dirty": [worktree…] }`（[挙動](#session_remove-の挙動)） |
+| `session_note_get` | — | — | `{ "name": "…", "note": string? }`（現在のセッションのメモ。未設定なら `null`）。セッション内限定 |
+| `session_note_update` | `note` | — | `{ "name": "…", "note": string? }`（保存後のメモ。空文字でクリア＝`null`）。セッション内限定 |
+| `session_todo_list` | — | — | `{ "name": "…", "todos": [{ "text": "…", "done": bool }] }`（現在のセッションのチェックリスト）。セッション内限定 |
+| `session_todo_add` | `text` | — | 追加後の `{ "name", "todos" }`（`text` は trim・非空必須）。セッション内限定 |
+| `session_todo_update` | `index` | `done` / `text` | 更新後の `{ "name", "todos" }`（`done` と `text` の少なくとも一方が必須。範囲外 index はエラー）。セッション内限定 |
+| `session_todo_remove` | `index` | — | 削除後の `{ "name", "todos" }`（範囲外 index はエラー）。セッション内限定 |
+| `session_decision_list` | — | — | `{ "name": "…", "decisions": [{ "at": RFC3339, "text": "…" }] }`（意思決定ログ）。セッション内限定 |
+| `session_decision_log` | `text` | — | 追記後の `{ "name", "decisions" }`（`at` はサーバが現在時刻を付与。`text` は trim・非空必須）。セッション内限定 |
 | `session_delegate_issue` | `number` | `name` / `agent_cli` / `model` | `{ "issue": N, "title": "…", "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_issue-の挙動)） |
 | `session_delegate_brief` | `brief` | `name` / `agent_cli` / `model` | `{ "session": "…", "root": "…", "worktrees": […], "delivered_to": "queue" }`（[挙動](#session_delegate_brief-の挙動)） |
 
@@ -207,6 +215,16 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
     設けず素通し**（モデル名は CLI ごとに異なり頻繁に増えるため）。前後空白は除去し、空文字は無指定として落とします。
     起動時に shell エスケープされるため、任意文字列でも安全です。
   - どちらも未指定なら従来どおり、ワークスペースの実効 `agent_cli` と各 CLI の既定モデルにフォールバックします。
+- **セッションスクラッチパッド（`session_note_*` / `session_todo_*` / `session_decision_*`）**は、いずれも
+  **その MCP プロセスが動いているセッション自身**を対象にします（引数でセッション名を取らず、worktree のパスから
+  現在のセッションを導出。ワークスペースルートで起動した場合は実行エラー）。3 区画は用途が分かれています:
+  - **note**（自由記述メモ）: 経緯・リンク・覚え書き。`session_note_update` は verbatim に保存し、末尾空白を trim、
+    空文字でクリアします。
+  - **todo**（軽量チェックリスト）: そのセッション内の使い捨てタスク。`text` は trim・非空必須、`done` の既定は未チェック。
+    **git 管理の issue ストア（`.usagi/issues/`）とは別物**で、起票するほどでない覚え書きに使います。
+  - **decision**（意思決定ログ）: 追記専用。`session_decision_log` は「なぜその方針にしたか」を**サーバが付与する
+    現在時刻（`at`）付きで**追記します。コーディネータが `session_decision_list` で判断根拠を transcript 抜きに追えます。
+  - いずれも保存先は `state.json`（マシンローカル・git 管理外）で、正本は [data/02-workspace.md](../data/02-workspace.md#statejson)。
 - `session_pr` は、対象セッションのエージェント出力から検出され、TUI の PR バッジとして表示される
   PR URL を返します。各 PR には `state`（セッションの全 worktree がデフォルトブランチにマージ済みなら
   `merged`、それ以外は `open`）が付き、返り値トップレベルの `merged` も同じ判定を返します。この状態は

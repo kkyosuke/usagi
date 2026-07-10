@@ -28,6 +28,8 @@ fn master() -> SessionLabelMaster {
 
 fn session(name: &str, label: Option<&str>) -> SessionRecord {
     SessionRecord {
+        todos: Vec::new(),
+        decisions: Vec::new(),
         name: name.to_string(),
         display_name: None,
         note: None,
