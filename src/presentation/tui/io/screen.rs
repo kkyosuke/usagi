@@ -108,21 +108,48 @@ pub trait KeyReader {
 /// expression on the clock, independent of any progress — instead of blocking;
 /// once a key arrives (or no install is in flight) it returns. Read errors
 /// propagate unchanged, so each screen's existing error handling still applies.
+///
+/// A terminal resize while animating returns `Key::Unknown` instead of ticking
+/// in place: the tick would repaint the caller's *old-size* frame (freshly laid
+/// out only on the caller's loop pass), so the screen would keep its stale
+/// layout until the next real key. Returning the same artefact a blocking read
+/// surfaces for a resize (see `term_reader`) sends the caller around its loop,
+/// which re-reads the size and re-renders — a full clear + redraw, since the
+/// painter discards its diff base on the same size change.
 pub fn animated_read(
     reader: &mut dyn KeyReader,
     term: &Term,
     painter: &mut FramePainter,
     handle: &InstallHandle,
 ) -> io::Result<Key> {
+    animated_read_sized(reader, term, painter, handle, &mut || term.size())
+}
+
+/// [`animated_read`] with the terminal-size read injected, so the
+/// resize-while-animating branch is exercised in tests (a real `Term`'s size
+/// cannot be changed from a unit test).
+fn animated_read_sized(
+    reader: &mut dyn KeyReader,
+    term: &Term,
+    painter: &mut FramePainter,
+    handle: &InstallHandle,
+    size: &mut dyn FnMut() -> (u16, u16),
+) -> io::Result<Key> {
+    let entry_size = size();
     loop {
         if !handle.is_active(Instant::now()) {
             return reader.read_key();
         }
         match reader.read_key_timeout(install_task::ANIM_TICK)? {
             Some(key) => return Ok(key),
-            // A tick with no key: repaint so the overlay's time-based animation
-            // moves, then keep waiting.
+            // A tick with no key. On a resize (which interrupts the wait via
+            // SIGWINCH → EINTR, surfacing as this same tick) hand the caller the
+            // resize artefact so it re-renders at the new size; otherwise repaint
+            // so the overlay's time-based animation moves, then keep waiting.
             None => {
+                if size() != entry_size {
+                    return Ok(Key::Unknown);
+                }
                 let _ = painter.tick(term);
             }
         }
@@ -913,6 +940,26 @@ mod tests {
         };
         let key = animated_read(&mut reader, &term, &mut painter, &handle).unwrap();
         assert_eq!(key, Key::Enter);
+    }
+
+    #[test]
+    fn animated_read_surfaces_a_resize_while_animating_as_unknown() {
+        // A resize during the animated wait must not just re-tick the old-size
+        // frame: it returns the resize artefact (`Key::Unknown`) so the caller's
+        // loop re-renders at the new size without waiting for a real key.
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        let handle = InstallHandle::new();
+        handle.begin_at("m", Instant::now());
+        let mut reader = TickReader {
+            timeouts: std::collections::VecDeque::from(vec![Ok(None)]),
+            blocking: Default::default(),
+        };
+        let mut sizes = std::collections::VecDeque::from(vec![(24u16, 80u16)]);
+        let mut size = move || sizes.pop_front().unwrap_or((30, 100));
+        let key =
+            animated_read_sized(&mut reader, &term, &mut painter, &handle, &mut size).unwrap();
+        assert_eq!(key, Key::Unknown);
     }
 
     #[test]
