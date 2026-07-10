@@ -148,6 +148,8 @@ fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
     keys.push(Ok(Key::Char(' '))); // Space also pages forward
     keys.push(Ok(Key::PageUp)); // page up
     keys.push(Ok(Key::Char('s'))); // toggle to the split layout
+    keys.push(Ok(Key::Char('v'))); // stack the explorer above the diff
+    keys.push(Ok(Key::Char('v'))); // back to side by side
     keys.push(Ok(Key::Char('x'))); // ignored while the diff pane is focused
     keys.push(Ok(Key::Tab)); // toggle focus back to the explorer
     keys.push(Ok(Key::Char('z'))); // ignored while the explorer is focused

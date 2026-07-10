@@ -69,11 +69,25 @@ pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<Strin
         return lines;
     }
     let body_h = rows - 1;
+    if view.stacked() {
+        lines.extend(stacked_body(view, file, width, body_h));
+    } else {
+        lines.extend(side_by_side_body(view, file, width, body_h));
+    }
+    lines
+}
 
-    // A pane too narrow to split shows just the diff, full width.
+/// The explorer-left / diff-right body: a `tree_w`-wide explorer column beside the
+/// diff, split by a vertical bar. A pane too narrow to spare the explorer shows
+/// just the diff, full width. Returns exactly `body_h` rows.
+fn side_by_side_body(
+    view: &DiffView,
+    file: &crate::presentation::tui::diff::DiffFile,
+    width: usize,
+    body_h: usize,
+) -> Vec<String> {
     let Some(tree_w) = tree_width(width) else {
-        lines.extend(diff_column(view, file, width, body_h));
-        return lines;
+        return diff_column(view, file, width, body_h);
     };
     let diff_w = width - tree_w - 1;
     // Both columns return exactly `body_h` rows, so zipping them pairs every row.
@@ -84,10 +98,48 @@ pub(super) fn diff_pane(view: &DiffView, width: usize, rows: usize) -> Vec<Strin
     } else {
         style("│").dim().to_string()
     };
-    for (left, right) in tree.into_iter().zip(diff) {
-        lines.push(format!("{left}{sep}{right}"));
+    tree.into_iter()
+        .zip(diff)
+        .map(|(left, right)| format!("{left}{sep}{right}"))
+        .collect()
+}
+
+/// The explorer-on-top / diff-below body: a bounded explorer band, a full-width
+/// horizontal rule, then the diff filling the rest — both full width, so this
+/// stays usable even on a pane too narrow to sit them side by side. Returns
+/// exactly `body_h` rows; falls back to a full-height diff when there is no room
+/// to stack (`body_h < 3`).
+fn stacked_body(
+    view: &DiffView,
+    file: &crate::presentation::tui::diff::DiffFile,
+    width: usize,
+    body_h: usize,
+) -> Vec<String> {
+    let tree_h = stacked_tree_height(view, body_h);
+    if tree_h == 0 {
+        return diff_column(view, file, width, body_h);
     }
-    lines
+    let mut out = tree_column(view, width, tree_h);
+    let rule = "─".repeat(width);
+    out.push(if matches!(view.focus(), DiffFocus::Tree) {
+        style(rule).color256(DIFF_DIR_FG).to_string()
+    } else {
+        style(rule).dim().to_string()
+    });
+    let diff_h = body_h - tree_h - 1;
+    out.extend(diff_column(view, file, width, diff_h));
+    out
+}
+
+/// How many rows the explorer band gets in the stacked layout: as many as it has
+/// visible rows, capped at about a third of the body (min 1) and always leaving at
+/// least the rule plus one diff row. `0` when the body is too short to stack.
+fn stacked_tree_height(view: &DiffView, body_h: usize) -> usize {
+    if body_h < 3 {
+        return 0;
+    }
+    let cap = (body_h / 3).clamp(1, 10);
+    view.visible_rows().len().min(cap).clamp(1, body_h - 2)
 }
 
 /// The diff view's one-row header: an icon, the branch → base title, the changed-

@@ -1996,6 +1996,14 @@ impl HomeState {
         }
     }
 
+    /// Toggle the explorer/diff arrangement between side-by-side and stacked
+    /// (explorer on top, diff below). No-op when the diff view is closed.
+    pub fn diff_toggle_layout(&mut self) {
+        if let Some(diff) = self.diff_view_mut() {
+            diff.toggle_layout();
+        }
+    }
+
     /// The open right-pane preview, if any.
     pub fn preview(&self) -> Option<&Preview> {
         match &self.overlay {

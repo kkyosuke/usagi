@@ -1194,7 +1194,27 @@ fn diff_scroll_and_toggle_are_no_ops_when_closed() {
     state.diff_scroll_up();
     state.diff_scroll_down(5);
     state.diff_toggle_split();
+    state.diff_toggle_layout();
     assert!(state.diff_view().is_none());
+}
+
+#[test]
+fn diff_toggle_layout_flips_between_side_by_side_and_stacked() {
+    let mut state = state();
+    let patch = "diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n".to_string();
+    state.open_diff_result(Ok(("f → main".to_string(), patch)));
+    // Side by side is the default; `v` flips to stacked and back, independent of
+    // the unified/split toggle.
+    assert!(!state.diff_view().unwrap().stacked());
+    state.diff_toggle_layout();
+    assert!(state.diff_view().unwrap().stacked());
+    state.diff_toggle_split();
+    assert!(
+        state.diff_view().unwrap().stacked(),
+        "split is a separate axis"
+    );
+    state.diff_toggle_layout();
+    assert!(!state.diff_view().unwrap().stacked());
 }
 
 // --- session freshness ("heat") dot --------------------------------------

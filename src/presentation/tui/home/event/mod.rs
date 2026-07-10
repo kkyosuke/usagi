@@ -1417,6 +1417,9 @@ pub(super) fn event_loop(
             let page = ui::preview_visible(height as usize, width as usize, &state);
             match key {
                 Key::Tab => state.diff_toggle_focus(),
+                // `v` flips the explorer/diff arrangement between side-by-side and
+                // stacked (works from either focus, like `Tab`).
+                Key::Char('v') => state.diff_toggle_layout(),
                 Key::Escape | Key::Char('q') | Key::Char(CTRL_P) | Key::Char(CTRL_N) => {
                     state.close_diff()
                 }
