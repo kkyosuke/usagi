@@ -93,9 +93,16 @@ impl TerminalRegistry {
     /// Track a freshly spawned terminal, returning the id assigned to it.
     pub fn allocate(&mut self, worktree: PathBuf, pid: u32) -> TerminalId {
         let id = self.next;
-        self.next += 1;
-        self.terminals.insert(id, TerminalEntry { worktree, pid });
+        self.insert_known(id, worktree, pid);
         id
+    }
+
+    /// Track a terminal whose id is already known, advancing the allocator past
+    /// it so future spawns cannot reuse an adopted id.
+    pub fn insert_known(&mut self, terminal: TerminalId, worktree: PathBuf, pid: u32) {
+        self.next = self.next.max(terminal.saturating_add(1));
+        self.terminals
+            .insert(terminal, TerminalEntry { worktree, pid });
     }
 
     /// Forget `terminal`, returning its entry if one was tracked.
@@ -203,6 +210,61 @@ impl AttachTable {
         self.by_terminal
             .get(&terminal)
             .is_some_and(|clients| clients.contains_key(&client))
+    }
+
+    /// Whether any client is attached to `terminal`.
+    pub fn has_terminal(&self, terminal: TerminalId) -> bool {
+        self.by_terminal
+            .get(&terminal)
+            .is_some_and(|clients| !clients.is_empty())
+    }
+}
+
+/// A terminal record persisted so a restarted daemon can decide which child
+/// processes survived an abnormal daemon exit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedTerminal {
+    pub terminal: TerminalId,
+    pub worktree: PathBuf,
+    pub pid: u32,
+}
+
+/// Split persisted terminal records into live processes to adopt and dead/stale
+/// records to discard. The caller supplies the process-table check so this stays
+/// pure and unit-testable.
+pub fn plan_adopt_terminals(
+    persisted: &[PersistedTerminal],
+    alive: &dyn Fn(u32) -> bool,
+) -> (Vec<PersistedTerminal>, Vec<PersistedTerminal>) {
+    persisted
+        .iter()
+        .cloned()
+        .partition(|terminal| alive(terminal.pid))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityNoticeKind {
+    Waiting,
+    Done,
+}
+
+/// Whether a daemon-side notification should fire for a session activity
+/// transition, given whether the session currently has an attached TUI.
+pub fn should_notify_activity(
+    previous: Option<crate::domain::daemon::SessionActivity>,
+    current: Option<crate::domain::daemon::SessionActivity>,
+    attached: bool,
+) -> Option<ActivityNoticeKind> {
+    use crate::domain::daemon::SessionActivity;
+
+    match (previous, current) {
+        (prev, Some(SessionActivity::Waiting)) if prev != Some(SessionActivity::Waiting) => {
+            Some(ActivityNoticeKind::Waiting)
+        }
+        (prev, Some(SessionActivity::Done)) if prev != Some(SessionActivity::Done) && !attached => {
+            Some(ActivityNoticeKind::Done)
+        }
+        _ => None,
     }
 }
 
@@ -333,6 +395,7 @@ mod tests {
         vec![SessionSnapshot {
             workspace: PathBuf::from("/repo"),
             name: "work".to_string(),
+            worktree: None,
             activity: Some(SessionActivity::Running),
         }]
     }
@@ -490,6 +553,20 @@ mod tests {
     }
 
     #[test]
+    fn terminal_registry_advances_past_adopted_ids() {
+        let mut registry = TerminalRegistry::new();
+        registry.insert_known(9, PathBuf::from("/old"), 99);
+        assert_eq!(registry.allocate(PathBuf::from("/new"), 100), 10);
+        assert_eq!(
+            registry.entry(9),
+            Some(&TerminalEntry {
+                worktree: PathBuf::from("/old"),
+                pid: 99
+            })
+        );
+    }
+
+    #[test]
     fn terminal_registry_checks_worktree_ownership() {
         let mut registry = TerminalRegistry::new();
         let id = registry.allocate(PathBuf::from("/a"), 1);
@@ -617,6 +694,69 @@ mod tests {
         assert!(table.clients_for(10).is_empty());
         // Removing an unknown terminal notifies no one.
         assert!(table.remove_terminal(99).is_empty());
+    }
+
+    #[test]
+    fn attach_table_reports_whether_a_terminal_has_viewers() {
+        let mut table = AttachTable::new();
+        assert!(!table.has_terminal(10));
+        table.attach(1, 10);
+        assert!(table.has_terminal(10));
+        table.detach(1, 10);
+        assert!(!table.has_terminal(10));
+    }
+
+    #[test]
+    fn adopt_plan_keeps_live_processes_and_discards_dead_records() {
+        let records = vec![
+            PersistedTerminal {
+                terminal: 1,
+                worktree: PathBuf::from("/live"),
+                pid: 10,
+            },
+            PersistedTerminal {
+                terminal: 2,
+                worktree: PathBuf::from("/dead"),
+                pid: 20,
+            },
+        ];
+        let (adopt, discard) = plan_adopt_terminals(&records, &|pid| pid == 10);
+        assert_eq!(adopt, vec![records[0].clone()]);
+        assert_eq!(discard, vec![records[1].clone()]);
+    }
+
+    #[test]
+    fn notification_policy_waiting_always_fires_but_done_is_background_only() {
+        use crate::domain::daemon::SessionActivity;
+
+        assert_eq!(
+            should_notify_activity(None, Some(SessionActivity::Waiting), true),
+            Some(ActivityNoticeKind::Waiting)
+        );
+        assert_eq!(
+            should_notify_activity(
+                Some(SessionActivity::Running),
+                Some(SessionActivity::Done),
+                false
+            ),
+            Some(ActivityNoticeKind::Done)
+        );
+        assert_eq!(
+            should_notify_activity(
+                Some(SessionActivity::Running),
+                Some(SessionActivity::Done),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            should_notify_activity(
+                Some(SessionActivity::Waiting),
+                Some(SessionActivity::Waiting),
+                false
+            ),
+            None
+        );
     }
 
     #[test]

@@ -643,6 +643,7 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
     // cannot be bound the daemon still runs its monitor, just without IPC.
     let socket_path = usagi::infrastructure::daemon_ipc::socket_path(dir);
     let mut server = DaemonIpcServer::bind(&socket_path);
+    server.adopt_persisted_terminals(dir);
 
     let mut next_control = std::time::Instant::now();
     loop {
@@ -657,8 +658,13 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
             // store error must not tear the daemon down, so it is logged and
             // the loop continues. On a change, push the fresh snapshot to every
             // subscribed client.
+            let previous_sessions =
+                usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
             match usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
-                Ok(true) => server.broadcast_sessions(dir),
+                Ok(true) => {
+                    server.notify_session_transitions(&previous_sessions, dir);
+                    server.broadcast_sessions(dir);
+                }
                 Ok(false) => {}
                 Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
             }
@@ -673,7 +679,7 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
         });
     }
 
-    server.shutdown(&socket_path);
+    server.shutdown(dir, &socket_path);
     usagi::usecase::daemon::deregister(dir)
 }
 
@@ -709,6 +715,11 @@ struct DaemonIpcServer {
     /// Which clients are attached to which terminal's output feed, and how far
     /// into its backlog each has been pushed.
     attach_table: usagi::usecase::daemon_ipc::AttachTable,
+    /// Terminal ids restored from `terminals.json` after an abnormal daemon
+    /// exit. Their processes are alive, but the old PTY master fd is gone, so
+    /// they cannot be screen-attached; the daemon keeps them only to avoid id
+    /// reuse and to kill them on deliberate stop.
+    adopted_terminals: std::collections::HashSet<usagi::domain::daemon_ipc::TerminalId>,
 }
 
 /// One connected client: its stream and the decoder reassembling frames from its
@@ -757,6 +768,31 @@ impl DaemonIpcServer {
             terminals: std::collections::HashMap::new(),
             terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
             attach_table: usagi::usecase::daemon_ipc::AttachTable::new(),
+            adopted_terminals: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Restore live terminal records left by a daemon crash. The PTY stream
+    /// cannot be recovered, but the pid is adopted so stop/kill can reap it and
+    /// new terminal ids do not alias old persisted panes.
+    fn adopt_persisted_terminals(&mut self, dir: &Path) {
+        let records = usagi::infrastructure::daemon_terminals_store::read(dir).unwrap_or_default();
+        let had_persisted_records = !records.is_empty();
+        let persisted: Vec<_> = records.into_iter().map(Into::into).collect();
+        let (adopt, _) = usagi::usecase::daemon_ipc::plan_adopt_terminals(
+            &persisted,
+            &usagi::infrastructure::resource::process_alive,
+        );
+        for terminal in &adopt {
+            self.terminal_registry.insert_known(
+                terminal.terminal,
+                terminal.worktree.clone(),
+                terminal.pid,
+            );
+            self.adopted_terminals.insert(terminal.terminal);
+        }
+        if had_persisted_records {
+            self.persist_terminals(dir);
         }
     }
 
@@ -772,7 +808,7 @@ impl DaemonIpcServer {
         self.accept_pending();
         self.service_clients(dir);
         self.stream_output();
-        self.reap_exited();
+        self.reap_exited(dir);
     }
 
     /// Accept every connection waiting on the listener (non-blocking), assigning
@@ -809,7 +845,7 @@ impl DaemonIpcServer {
         let sessions = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
         let ids: Vec<u64> = self.clients.keys().copied().collect();
         for id in ids {
-            if !self.service_one(id, &sessions) {
+            if !self.service_one(id, dir, &sessions) {
                 self.drop_client(id);
             }
         }
@@ -828,6 +864,7 @@ impl DaemonIpcServer {
     fn service_one(
         &mut self,
         id: u64,
+        dir: &Path,
         sessions: &[usagi::domain::daemon::SessionSnapshot],
     ) -> bool {
         use std::io::Read as _;
@@ -844,7 +881,7 @@ impl DaemonIpcServer {
                     if let Some(client) = self.clients.get_mut(&id) {
                         client.decoder.feed(&buf[..n]);
                     }
-                    if !self.dispatch_frames(id, sessions) {
+                    if !self.dispatch_frames(id, dir, sessions) {
                         return false;
                     }
                 }
@@ -859,6 +896,7 @@ impl DaemonIpcServer {
     fn dispatch_frames(
         &mut self,
         id: u64,
+        dir: &Path,
         sessions: &[usagi::domain::daemon::SessionSnapshot],
     ) -> bool {
         loop {
@@ -902,10 +940,11 @@ impl DaemonIpcServer {
                         rows,
                         scrollback,
                     );
+                    self.persist_terminals(dir);
                     self.send(id, &reply)
                 }
                 Action::Kill(terminal) => {
-                    let reply = self.kill_terminal(terminal, Some(id));
+                    let reply = self.kill_terminal(dir, terminal, Some(id));
                     self.send(id, &reply)
                 }
                 Action::Attach { terminal, worktree } => {
@@ -945,6 +984,17 @@ impl DaemonIpcServer {
                     message: format!(
                         "no daemon terminal {terminal} runs in {}",
                         worktree.display()
+                    ),
+                },
+            );
+        }
+        if !self.terminals.contains_key(&terminal) {
+            return self.send(
+                id,
+                &ServerMessage::Error {
+                    message: format!(
+                        "daemon terminal {terminal} was adopted after a daemon restart; \
+                         its screen stream is unavailable"
                     ),
                 },
             );
@@ -1061,7 +1111,7 @@ impl DaemonIpcServer {
     /// abnormal exit to the error log.
     ///
     /// [`PtySession`]: usagi::infrastructure::pty::PtySession
-    fn reap_exited(&mut self) {
+    fn reap_exited(&mut self, dir: &Path) {
         for terminal in self.terminal_registry.ids() {
             let exited = self
                 .terminals
@@ -1072,7 +1122,7 @@ impl DaemonIpcServer {
             }
             // One last delta flush so no tail output is lost to the removal.
             self.stream_terminal_output(terminal);
-            self.remove_terminal(terminal, None);
+            self.remove_terminal(dir, terminal, None);
         }
     }
 
@@ -1081,9 +1131,15 @@ impl DaemonIpcServer {
     /// removed [`PtySession`] kills / reaps its process group.
     ///
     /// [`PtySession`]: usagi::infrastructure::pty::PtySession
-    fn remove_terminal(&mut self, terminal: u64, skip: Option<u64>) {
+    fn remove_terminal(&mut self, dir: &Path, terminal: u64, skip: Option<u64>) {
         self.terminals.remove(&terminal);
+        if self.adopted_terminals.remove(&terminal) {
+            if let Some(entry) = self.terminal_registry.entry(terminal) {
+                kill_process_group(entry.pid);
+            }
+        }
         self.terminal_registry.remove(terminal);
+        self.persist_terminals(dir);
         for client in self.attach_table.remove_terminal(terminal) {
             if Some(client) == skip {
                 continue;
@@ -1146,10 +1202,11 @@ impl DaemonIpcServer {
     /// attachers learn of the death via `Exited`.
     fn kill_terminal(
         &mut self,
+        dir: &Path,
         terminal: u64,
         killer: Option<u64>,
     ) -> usagi::domain::daemon_ipc::ServerMessage {
-        self.remove_terminal(terminal, killer);
+        self.remove_terminal(dir, terminal, killer);
         usagi::domain::daemon_ipc::ServerMessage::Killed { terminal }
     }
 
@@ -1162,6 +1219,70 @@ impl DaemonIpcServer {
             if !self.send(id, &message) {
                 self.drop_client(id);
             }
+        }
+    }
+
+    fn notify_session_transitions(
+        &mut self,
+        previous: &[usagi::domain::daemon::SessionSnapshot],
+        dir: &Path,
+    ) {
+        let enabled = usagi::infrastructure::storage::Storage::open_default()
+            .and_then(|storage| storage.load_settings())
+            .map(|settings| settings.notifications_enabled)
+            .unwrap_or(true);
+        if !enabled {
+            return;
+        }
+        let previous: std::collections::HashMap<_, _> = previous
+            .iter()
+            .map(|session| {
+                (
+                    (session.workspace.clone(), session.name.clone()),
+                    session.activity,
+                )
+            })
+            .collect();
+        let current = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
+        for session in current {
+            let attached = session.worktree.as_deref().is_some_and(|worktree| {
+                self.terminal_registry.ids().into_iter().any(|terminal| {
+                    self.terminal_registry.belongs_to(terminal, worktree)
+                        && self.attach_table.has_terminal(terminal)
+                })
+            });
+            let key = (session.workspace.clone(), session.name.clone());
+            if let Some(kind) = usagi::usecase::daemon_ipc::should_notify_activity(
+                previous.get(&key).copied().flatten(),
+                session.activity,
+                attached,
+            ) {
+                notify(&session.name, kind);
+            }
+        }
+    }
+
+    fn persist_terminals(&self, dir: &Path) {
+        let records: Vec<_> = self
+            .terminal_registry
+            .ids()
+            .into_iter()
+            .filter_map(|terminal| {
+                self.terminal_registry.entry(terminal).map(|entry| {
+                    usagi::infrastructure::daemon_terminals_store::DaemonTerminalRecord {
+                        terminal,
+                        worktree: entry.worktree.clone(),
+                        pid: entry.pid,
+                        adopted: self.adopted_terminals.contains(&terminal),
+                    }
+                })
+            })
+            .collect();
+        if records.is_empty() && !dir.exists() {
+            return;
+        }
+        if let Err(error) = usagi::infrastructure::daemon_terminals_store::write(dir, &records) {
+            eprintln!("usagi daemon: failed to persist terminals: {error:#}");
         }
     }
 
@@ -1182,10 +1303,17 @@ impl DaemonIpcServer {
     /// shuts down, so a deliberate `daemon stop` does not leak orphaned shells.
     /// (Terminals survive a *client* disconnect — that is the point — but not the
     /// daemon that owns them exiting.)
-    fn shutdown(&mut self, path: &Path) {
+    fn shutdown(&mut self, dir: &Path, path: &Path) {
         // Dropping each session signals its process group; clearing the map does
         // that for all of them.
+        for terminal in self.adopted_terminals.drain() {
+            if let Some(entry) = self.terminal_registry.entry(terminal) {
+                kill_process_group(entry.pid);
+            }
+        }
         self.terminals.clear();
+        self.terminal_registry = usagi::usecase::daemon_ipc::TerminalRegistry::new();
+        self.persist_terminals(dir);
         let _ = std::fs::remove_file(path);
     }
 }
@@ -1203,11 +1331,44 @@ impl DaemonIpcServer {
         false
     }
 
+    fn adopt_persisted_terminals(&mut self, _dir: &Path) {}
+
     fn poll(&mut self, _dir: &Path) {}
+
+    fn notify_session_transitions(
+        &self,
+        _previous_sessions: &[usagi::domain::daemon::SessionSnapshot],
+        _dir: &Path,
+    ) {
+    }
 
     fn broadcast_sessions(&mut self, _dir: &Path) {}
 
-    fn shutdown(&mut self, _path: &Path) {}
+    fn shutdown(&mut self, _dir: &Path, _path: &Path) {}
+}
+
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+fn notify(label: &str, kind: usagi::usecase::daemon_ipc::ActivityNoticeKind) {
+    let message = match kind {
+        usagi::usecase::daemon_ipc::ActivityNoticeKind::Waiting => {
+            format!("{label} が入力待ちです")
+        }
+        usagi::usecase::daemon_ipc::ActivityNoticeKind::Done => {
+            format!("{label} が完了しました")
+        }
+    };
+    let _ = notify_rust::Notification::new()
+        .summary("usagi")
+        .body(&format!("(\\_/)\n(='.'=)\n{message}"))
+        .show();
 }
 
 /// Bytes of raw output retained per daemon terminal for streaming exact deltas

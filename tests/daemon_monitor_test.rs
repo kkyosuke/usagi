@@ -89,6 +89,7 @@ fn gather_reads_sessions_and_phases_from_the_real_stores() {
         vec![SessionSnapshot {
             workspace: root,
             name: "work".to_string(),
+            worktree: Some(worktree),
             activity: Some(SessionActivity::Waiting),
         }]
     );

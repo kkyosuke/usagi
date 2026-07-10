@@ -9,6 +9,7 @@ pub mod daemon_client;
 pub mod daemon_ipc;
 pub mod daemon_sessions_store;
 pub mod daemon_store;
+pub mod daemon_terminals_store;
 pub mod env_resolver;
 pub mod error_log;
 pub mod git;

@@ -152,9 +152,11 @@ pub fn gather(
                 .iter()
                 .find_map(|worktree| read_phase(worktree))
                 .map(SessionActivity::from_phase);
+            let worktree = worktrees.first().cloned();
             snapshots.push(SessionSnapshot {
                 workspace: root.clone(),
                 name,
+                worktree,
                 activity,
             });
         }
@@ -383,16 +385,19 @@ mod tests {
                 SessionSnapshot {
                     workspace: PathBuf::from("/a"),
                     name: "solo".to_string(),
+                    worktree: Some(PathBuf::from("/a/wt")),
                     activity: Some(SessionActivity::Waiting),
                 },
                 SessionSnapshot {
                     workspace: PathBuf::from("/b"),
                     name: "idle".to_string(),
+                    worktree: Some(PathBuf::from("/b/idle")),
                     activity: None,
                 },
                 SessionSnapshot {
                     workspace: PathBuf::from("/b"),
                     name: "busy".to_string(),
+                    worktree: Some(PathBuf::from("/b/busy0")),
                     activity: Some(SessionActivity::Running),
                 },
             ]
@@ -407,6 +412,7 @@ mod tests {
             vec![SessionSnapshot {
                 workspace: PathBuf::from("/repo"),
                 name: "s".to_string(),
+                worktree: None,
                 activity: Some(SessionActivity::Running),
             }]
         };
@@ -425,6 +431,7 @@ mod tests {
             vec![SessionSnapshot {
                 workspace: PathBuf::from("/repo"),
                 name: "s".to_string(),
+                worktree: None,
                 activity: Some(SessionActivity::Running),
             }]
         })
@@ -434,6 +441,7 @@ mod tests {
             vec![SessionSnapshot {
                 workspace: PathBuf::from("/repo"),
                 name: "s".to_string(),
+                worktree: None,
                 activity: Some(SessionActivity::Waiting),
             }]
         };

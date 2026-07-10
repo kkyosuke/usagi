@@ -172,11 +172,13 @@ mod tests {
                 SessionSnapshot {
                     workspace: PathBuf::from("/repo"),
                     name: "work-a".to_string(),
+                    worktree: None,
                     activity: Some(SessionActivity::Waiting),
                 },
                 SessionSnapshot {
                     workspace: PathBuf::from("/repo"),
                     name: "fix-b".to_string(),
+                    worktree: None,
                     activity: None,
                 },
             ],
@@ -404,6 +406,7 @@ mod tests {
             &[SessionSnapshot {
                 workspace: PathBuf::from("/repo"),
                 name: "s".to_string(),
+                worktree: None,
                 activity: Some(SessionActivity::Running),
             }],
         )

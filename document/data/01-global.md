@@ -17,6 +17,7 @@
 - [`pr-links/`](#pr-links)
 - [`open-panes/`（ペイン復旧スナップショット）](#open-panesペイン復旧スナップショット)
 - [`resume-closeup/`（復帰フォーカススナップショット）](#resume-closeup復帰フォーカススナップショット)
+- [`daemon/`（常駐 daemon の状態）](#daemon常駐-daemon-の状態)
 - [`unite-set.json`（直近の統合セット）](#unite-setjson直近の統合セット)
 - [`skills/`（Agent へ配布するスキル）](#skillsagent-へ配布するスキル)
 - [`logs/`（エラーログ）](#logsエラーログ)
@@ -40,7 +41,7 @@
 ├── pr-links/         # セッションのターミナル出力から拾った PR の URL（サイドバーの #N バッジの元。worktree 別）
 ├── open-panes/       # 各セッションの開いていたペイン構成（次回起動時に復旧する。worktree 別）
 ├── resume-closeup/     # 終了時にいたセッションとエンゲージメント段階（次回起動時に復帰する。ワークスペース別）
-├── daemon/           # 常駐 daemon の記録（daemon.json・stop マーカー・IPC ソケット sock・監視スナップショット sessions.json・serve.log。proposals/02-daemon.md 参照）
+├── daemon/           # 常駐 daemon の記録（daemon.json・stop・sock・sessions.json・terminals.json・serve.log）
 ├── unite-set.json    # 直近に統合(unite)モードでまとめて開いたワークスペースの集合（Open 画面が次回プリチェックする）
 ├── skills/           # usagi がバイナリに同梱し Agent へ配布するスキル（起動時に展開。セッション worktree から symlink）
 └── logs/             # 日次のエラーログ（error-YYYY-MM-DD.log）と操作トレース（trace-YYYY-MM-DD.jsonl）
@@ -238,6 +239,60 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 - 書き込みは終了が確定した時（quit 確認モーダルの承認 / 即時 Ctrl-C / `:quit`）。`restore_panes_enabled` が
   OFF のときは書き込まれません。起動時に読み出してカーソル移動（選択）/ 集中 / 自動 attach（没入）を復元し、
   `session` が既に消えている場合は何も復元しません。`infrastructure/resume_closeup_store.rs` が save/load を担います。
+
+## `daemon/`（常駐 daemon の状態）
+
+常駐 daemon の制御プレーン、IPC、監視スナップショット、daemon 所有端末の復旧情報を保持します。daemon の移行設計は
+[../proposals/02-daemon.md](../proposals/02-daemon.md) を参照してください。
+
+| パス | 形式 | 意味 |
+|---|---|---|
+| `daemon/daemon.json` | versioned JSON | 起動中 daemon の pid。`usagi daemon status` / `stop` が生存確認に使う |
+| `daemon/stop` | 空ファイル | `usagi daemon stop` が置く停止要求。daemon が次の制御 tick で消費する |
+| `daemon/sock` | Unix domain socket | TUI attach クライアントが接続する IPC ソケット。Unix では owner 限定 `0600` |
+| `daemon/sessions.json` | versioned JSON | daemon が監視している session activity の最新スナップショット |
+| `daemon/terminals.json` | versioned JSON | daemon 所有端末の terminal id / worktree / pid。異常終了後の orphan adopt と stop 時回収に使う |
+| `daemon/serve.log` | text | detached daemon の標準出力・標準エラー |
+
+`daemon/sessions.json` は `usagi daemon status` と IPC `Sessions` push の元になる再生成可能な view です。
+
+```jsonc
+{
+  "version": 1,
+  "sessions": [
+    {
+      "workspace": "/repo",
+      "name": "issue-168",
+      "worktree": "/repo/.usagi/sessions/issue-168",
+      "activity": "waiting" // ready | running | waiting | done | null
+    }
+  ]
+}
+```
+
+`worktree` は通知調停で「その session を attach 中の TUI が見ているか」を判定するための代表 worktree です。古い
+ファイルで省略されている場合は `null` として扱います。
+
+`daemon/terminals.json` は daemon が spawn した端末を保存する復旧用 registry です。
+
+```jsonc
+{
+  "version": 1,
+  "terminals": [
+    {
+      "terminal": 1,
+      "worktree": "/repo/.usagi/sessions/issue-168",
+      "pid": 12345,
+      "adopted": false
+    }
+  ]
+}
+```
+
+daemon が異常終了すると PTY の master fd は復元できないため、再起動後に `adopted: true` として復元した端末は画面
+stream へ再 attach できません。ただし pid と process group は回収対象として保持され、明示的な `daemon stop` や
+`Kill` で終了できます。通常の daemon 稼働中に spawn された端末は `adopted: false` で、attach / input / resize /
+screen streaming の対象です。
 
 ## `unite-set.json`（直近の統合セット）
 
