@@ -16,6 +16,7 @@ use console::Term;
 use crate::presentation::tui::io::screen::{self, FramePainter};
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi};
+use crate::domain::wake::humanize_until;
 
 use super::super::action;
 use super::super::command::Effect;
@@ -172,10 +173,14 @@ pub(super) fn palette_key(
                 // The state turns hour/minute into a concrete same-day instant so
                 // a time already passed is rejected immediately.
                 Effect::ScheduleWake { hour, minute } => {
-                    match state.schedule_wake(Local::now(), hour, minute) {
+                    // Read the clock once so the stored instant and the countdown
+                    // in the confirmation line agree.
+                    let now = Local::now();
+                    match state.schedule_wake(now, hour, minute) {
                         Ok(at) => state.log_output(format!(
-                            "Wake scheduled for {} — will send `continue` to running agents",
-                            at.format("%H:%M")
+                            "Wake scheduled for {} ({}) — will send `continue` to running agents",
+                            at.format("%H:%M"),
+                            humanize_until(now, at),
                         )),
                         Err(e) => state.log_error(e),
                     }
@@ -184,6 +189,16 @@ pub(super) fn palette_key(
                     Some(at) => {
                         state.log_output(format!("Cancelled wake for {}", at.format("%H:%M")))
                     }
+                    None => state.log_output("No wake is scheduled"),
+                },
+                // `wake status` / bare `wake`: report the pending wake with a live
+                // countdown, or note that none is scheduled.
+                Effect::WakeStatus => match state.wake_scheduled_at() {
+                    Some(at) => state.log_output(format!(
+                        "Wake scheduled for {} ({})",
+                        at.format("%H:%M"),
+                        humanize_until(Local::now(), at),
+                    )),
                     None => state.log_output("No wake is scheduled"),
                 },
                 // `env`: open the workspace-env editor as an overlay *over* the

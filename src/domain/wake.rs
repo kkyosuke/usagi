@@ -98,6 +98,28 @@ pub fn parse_hhmm(raw: &str) -> Result<(u32, u32), String> {
     Ok((hour, minute))
 }
 
+/// Render how long until `at` from `now` as a short human phrase for the wake
+/// confirmation and `wake status` lines — `"in 30m"`, `"in 2h 5m"`, `"in 1h"`,
+/// or `"in under a minute"` for a sub-minute wait. A non-positive delta (the
+/// moment has arrived or already slipped by) reads `"now"`, so a status check the
+/// instant a wake becomes due never shows a negative countdown.
+pub fn humanize_until(now: DateTime<Local>, at: DateTime<Local>) -> String {
+    let delta = at - now;
+    if delta.num_seconds() <= 0 {
+        return "now".to_string();
+    }
+    let total_minutes = delta.num_minutes();
+    if total_minutes == 0 {
+        return "in under a minute".to_string();
+    }
+    let (hours, minutes) = (total_minutes / 60, total_minutes % 60);
+    match (hours, minutes) {
+        (0, m) => format!("in {m}m"),
+        (h, 0) => format!("in {h}h"),
+        (h, m) => format!("in {h}h {m}m"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +213,27 @@ mod tests {
         assert!(WakeSchedule::for_today(now, 14, 60)
             .unwrap_err()
             .contains("not a valid time"));
+    }
+
+    #[test]
+    fn humanize_until_reads_as_a_short_countdown() {
+        let now = at_two_pm();
+        let at = |h, m, s| {
+            Local
+                .with_ymd_and_hms(2026, 7, 10, h, m, s)
+                .single()
+                .unwrap()
+        };
+        // Sub-minute waits collapse to a friendly phrase rather than "0m".
+        assert_eq!(humanize_until(now, at(14, 0, 30)), "in under a minute");
+        // Minutes only, hours only, and the combined form.
+        assert_eq!(humanize_until(now, at(14, 30, 0)), "in 30m");
+        assert_eq!(humanize_until(now, at(16, 0, 0)), "in 2h");
+        assert_eq!(humanize_until(now, at(16, 5, 0)), "in 2h 5m");
+        // The exact moment and a moment already gone both read "now" — never a
+        // negative countdown.
+        assert_eq!(humanize_until(now, at(14, 0, 0)), "now");
+        assert_eq!(humanize_until(now, at(13, 0, 0)), "now");
     }
 
     #[test]
