@@ -160,13 +160,28 @@ fn fold_pr_links(session: &mut SessionRecord) {
 /// sidebar row at once (via `HomeState::set_pr_links`) without waiting for one. A
 /// `pr_key` matching no recorded PR leaves the list unchanged.
 ///
+/// The update works on the **union** of the store and `current` — the PR list the
+/// popup's session row is showing. The row can carry facts the store lacks: a
+/// `gh`-resolved title not yet written back, or PRs that survive only in
+/// `state.json` after the store file was cleared (a recreated session). Writing
+/// the store's contents back over the row would erase those — a click on a state
+/// toggle used to blank every title (or, with a missing store file, wipe the
+/// whole badge and persist an empty list) — so both sides are folded through
+/// [`PrLink::aggregate`] first, and the union is what is persisted and returned.
+///
 /// [`PrState`]: crate::domain::workspace_state::PrState
 pub fn set_pr_state(
     root: &Path,
+    current: &[PrLink],
     pr_key: &str,
     state: crate::domain::workspace_state::PrState,
 ) -> Vec<PrLink> {
-    let mut prs = pr_link_store::get(root);
+    // Store first so its (canonical) order wins; `aggregate` backfills a missing
+    // title from whichever side knows it and keeps a dismissal sticky.
+    let stored = pr_link_store::get(root);
+    let mut prs = PrLink::aggregate(stored.into_iter().chain(current.iter().cloned()));
+    // Apply the click *after* folding: `aggregate` keeps an existing dismissal
+    // sticky, which would otherwise re-dismiss a PR this very click restores.
     for pr in &mut prs {
         // `pr_key()` borrows `pr` immutably; the comparison ends that borrow before
         // the mutation below, so the two never overlap.
@@ -176,7 +191,7 @@ pub fn set_pr_state(
         }
     }
     let _ = pr_link_store::set(root, &prs);
-    PrLink::aggregate(prs)
+    prs
 }
 
 /// Re-derive every session's `#<number>` PR badges from the [`pr_link_store`],
@@ -621,6 +636,7 @@ mod tests {
         // is untouched.
         let updated = set_pr_state(
             root.path(),
+            &[],
             "https://github.com/o/r/pull/1",
             PrState::Merged,
         );
@@ -638,17 +654,82 @@ mod tests {
         // no-op that leaves the list (and its states) exactly as they were.
         let after = set_pr_state(
             root.path(),
+            &[],
             "https://github.com/o/r/pull/1",
             PrState::Dismissed,
         );
         assert_eq!(after[0].state, PrState::Dismissed);
         let unchanged = set_pr_state(
             root.path(),
+            &[],
             "https://github.com/o/r/pull/404",
             PrState::Open,
         );
         assert_eq!(unchanged, pr_link_store::get(root.path()));
         assert_eq!(unchanged[0].state, PrState::Dismissed);
+
+        // Restoring the dismissed PR works even though the store already records
+        // the dismissal: the click is applied after the fold, so the sticky
+        // tombstone does not immediately re-dismiss it.
+        let restored = set_pr_state(
+            root.path(),
+            &[],
+            "https://github.com/o/r/pull/1",
+            PrState::Open,
+        );
+        assert_eq!(restored[0].state, PrState::Open);
+
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn set_pr_state_folds_the_callers_list_in_instead_of_echoing_the_store() {
+        use crate::domain::workspace_state::{PrLink, PrState};
+
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+
+        // The store knows #1 without a title; the caller's (sidebar row's) list
+        // carries the resolved title plus a PR the store never recorded.
+        let root = tempfile::tempdir().unwrap();
+        pr_link_store::add(
+            root.path(),
+            &[PrLink::new(1, "https://github.com/o/r/pull/1")],
+        )
+        .unwrap();
+        let mut titled = PrLink::new(1, "https://github.com/o/r/pull/1");
+        titled.title = Some("Add PR titles".to_string());
+        let mut extra = PrLink::new(2, "https://github.com/o/r/pull/2");
+        extra.title = Some("Fix the thing".to_string());
+        let current = [titled, extra];
+
+        let updated = set_pr_state(
+            root.path(),
+            &current,
+            "https://github.com/o/r/pull/1",
+            PrState::Merged,
+        );
+        // The union survives: the store's entry gained the caller's title, the
+        // store-unknown PR is kept, and the clicked state landed on its target.
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].title.as_deref(), Some("Add PR titles"));
+        assert_eq!(updated[0].state, PrState::Merged);
+        assert_eq!(updated[1].title.as_deref(), Some("Fix the thing"));
+        assert_eq!(pr_link_store::get(root.path()), updated);
+
+        // With no store file at all (a recreated session), the caller's list is
+        // what gets persisted — not an empty one that would wipe the badge.
+        let fresh = tempfile::tempdir().unwrap();
+        let updated = set_pr_state(
+            fresh.path(),
+            &current,
+            "https://github.com/o/r/pull/2",
+            PrState::Dismissed,
+        );
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[1].state, PrState::Dismissed);
+        assert_eq!(pr_link_store::get(fresh.path()), updated);
 
         std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }

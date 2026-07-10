@@ -747,7 +747,7 @@ fn pr_width_is_the_icon_space_and_count_digits() {
 fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
     let mut titled = pr(442);
     titled.title = Some("Add PR titles".to_string());
-    let popup = pr_popup_box(&[titled, pr(447)], false);
+    let popup = pr_popup_box(&[titled, pr(447)], false, PR_POPUP_INNER);
     let plain: Vec<String> = popup
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -766,12 +766,12 @@ fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
     // Each active PR leads with the open glyph and ends with the hide action.
     assert!(plain.iter().any(|l| l.contains('○') && l.contains('✕')));
     // No PR → no box, so the overlay is a no-op for a session without one.
-    assert!(pr_popup_box(&[], false).is_empty());
+    assert!(pr_popup_box(&[], false, PR_POPUP_INNER).is_empty());
 }
 
 #[test]
 fn pr_popup_box_keeps_the_title_clear_for_a_single_digit_pr() {
-    let popup = pr_popup_box(&[pr(7)], false);
+    let popup = pr_popup_box(&[pr(7)], false, PR_POPUP_INNER);
     let plain: Vec<String> = popup
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
@@ -798,11 +798,14 @@ fn pr_popup_box_renders_merged_dismissed_and_the_hidden_toggle() {
 
     // Collapsed: the open and merged PRs show; the dismissed one is folded behind a
     // `1 件非表示 ▸` toggle rather than listed.
-    let collapsed: Vec<String> =
-        pr_popup_box(&[merged.clone(), hidden.clone(), open.clone()], false)
-            .iter()
-            .map(|l| console::strip_ansi_codes(l).into_owned())
-            .collect();
+    let collapsed: Vec<String> = pr_popup_box(
+        &[merged.clone(), hidden.clone(), open.clone()],
+        false,
+        PR_POPUP_INNER,
+    )
+    .iter()
+    .map(|l| console::strip_ansi_codes(l).into_owned())
+    .collect();
     assert!(collapsed
         .iter()
         .any(|l| l.contains('●') && l.contains("#1")));
@@ -814,7 +817,7 @@ fn pr_popup_box_renders_merged_dismissed_and_the_hidden_toggle() {
 
     // Expanded: the toggle flips to `▾` and the dismissed PR appears with the
     // restore action `↺`.
-    let expanded: Vec<String> = pr_popup_box(&[merged, hidden, open], true)
+    let expanded: Vec<String> = pr_popup_box(&[merged, hidden, open], true, PR_POPUP_INNER)
         .iter()
         .map(|l| console::strip_ansi_codes(l).into_owned())
         .collect();
@@ -832,16 +835,41 @@ fn pr_popup_box_lists_every_pr_on_its_own_row_and_clips_a_long_title() {
     // plus the single `owner/repo` header and the two borders — the list stacks
     // vertically rather than packing across a row.
     let many: Vec<PrLink> = (100u32..120).map(pr).collect();
-    let popup = pr_popup_box(&many, false);
+    let popup = pr_popup_box(&many, false, PR_POPUP_INNER);
     assert_eq!(popup.len(), many.len() + 3);
     // A title wider than the cap is clipped so the box never spans the screen:
     // every row stays within the inner cap plus the two borders and a pad space
     // on each side.
     let mut long = pr(7);
     long.title = Some("x".repeat(200));
-    for line in pr_popup_box(std::slice::from_ref(&long), false) {
+    for line in pr_popup_box(std::slice::from_ref(&long), false, PR_POPUP_INNER) {
         assert!(console::measure_text_width(&line) <= PR_POPUP_INNER + 4);
     }
+}
+
+#[test]
+fn pr_popup_box_shrinks_to_a_narrow_cap_and_clips_wide_glyphs_cleanly() {
+    // A screen narrower than [`PR_POPUP_INNER`] passes a smaller cap (see
+    // `pr_popup_placement`); the box obeys it instead of overflowing, and a
+    // full-width (CJK) title is cut on display columns — never mid-glyph — with
+    // an ellipsis marking the cut.
+    let mut wide = pr(412);
+    wide.title = Some("日本語のとても長いプルリクエストのタイトルです".to_string());
+    let cap = 30;
+    let popup = pr_popup_box(std::slice::from_ref(&wide), false, cap);
+    for line in &popup {
+        assert!(console::measure_text_width(line) <= cap + 4);
+    }
+    let plain = console::strip_ansi_codes(&popup.join("\n")).into_owned();
+    // The number, the leading columns of the title, and the trailing action all
+    // still show; the overflow is elided.
+    assert!(plain.contains("#412"));
+    assert!(plain.contains("日本語") && plain.contains('…') && plain.contains('✕'));
+    assert!(!plain.contains("タイトルです"));
+    // A roomier cap is not padded out: the box stays content-fitted below it.
+    let small = pr_popup_box(&[pr(1)], false, cap);
+    let roomy = pr_popup_box(&[pr(1)], false, PR_POPUP_INNER);
+    assert_eq!(small, roomy);
 }
 
 #[test]

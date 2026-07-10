@@ -117,8 +117,16 @@ pub(in crate::presentation::tui::home) fn sidebar_pr_badge_at(
 /// session's PR list stays a tidy box rather than spanning the whole screen. The
 /// popup groups PRs by repository (`owner/repo` header + one indented `#<number>
 /// <title>` row each), so this is the row's full width budget — wide enough for a
-/// title to read comfortably.
+/// title to read comfortably. On a terminal too narrow for this budget the box
+/// shrinks to what fits instead ([`pr_popup_placement`] passes the screen's own
+/// cap), so a cramped screen still shows as much of each title as it can rather
+/// than dropping the popup.
 pub(super) const PR_POPUP_INNER: usize = 72;
+
+/// Columns [`widgets::boxed`] adds around the inner content: the `│` border and
+/// one pad space on each side. [`pr_popup_placement`] subtracts this from the
+/// screen width to know how wide the inner content may grow and still fit.
+const PR_POPUP_FRAME: usize = 4;
 
 /// The popup box's title, embedded in its top border by [`widgets::boxed`] as
 /// `─ PR `. The box must stay at least this wide so the title keeps its closing
@@ -266,9 +274,10 @@ fn row_left_text(row: &PopupRow) -> String {
 }
 
 /// The popup box's inner content width: as wide as its widest row (PR rows reserve
-/// [`ACTION_ZONE`] columns for their trailing `✕`/`↺`), never past
-/// [`PR_POPUP_INNER`], and at least wide enough to keep the `PR` title readable.
-fn pr_popup_inner(rows: &[PopupRow]) -> usize {
+/// [`ACTION_ZONE`] columns for their trailing `✕`/`↺`), never past `cap` — the
+/// smaller of [`PR_POPUP_INNER`] and what the screen can hold — and at least wide
+/// enough to keep the `PR` title readable.
+fn pr_popup_inner(rows: &[PopupRow], cap: usize) -> usize {
     // `boxed` frames the title as `─ {title} ` inside the `inner + 2`-wide top
     // border, so the inner width must clear `title + 1` columns or the trailing
     // space (and the title itself) gets clipped.
@@ -283,7 +292,7 @@ fn pr_popup_inner(rows: &[PopupRow]) -> usize {
         })
         .max()
         .unwrap_or(0)
-        .min(PR_POPUP_INNER)
+        .min(cap)
         .max(title_floor)
 }
 
@@ -347,17 +356,21 @@ fn render_row(row: &PopupRow, inner: usize) -> String {
 /// (glyph + `#<number>` link + title + hide/restore action), a `N 件非表示` toggle
 /// footer when any are hidden, and the dismissed PRs beneath it while
 /// `show_dismissed`. Stacked into a titled box ready to float beside the session's
-/// row (see [`pr_popup_placement`]). Empty `prs` yields no box (the popup only shows
-/// for a PR-bearing session), so the overlay is a no-op.
+/// row (see [`pr_popup_placement`]). `inner_cap` bounds the box's inner width — the
+/// content-fitted width never exceeds it, and a title too long for it is clipped
+/// with an ellipsis by [`render_row`] (display-column aware, so full-width CJK
+/// text cuts cleanly). Empty `prs` yields no box (the popup only shows for a
+/// PR-bearing session), so the overlay is a no-op.
 pub(in crate::presentation::tui::home) fn pr_popup_box(
     prs: &[PrLink],
     show_dismissed: bool,
+    inner_cap: usize,
 ) -> Vec<String> {
     let rows = popup_rows(prs, show_dismissed);
     if rows.is_empty() {
         return Vec::new();
     }
-    let inner = pr_popup_inner(&rows);
+    let inner = pr_popup_inner(&rows, inner_cap);
     let lines: Vec<String> = rows.iter().map(|row| render_row(row, inner)).collect();
     widgets::boxed(PR_POPUP_TITLE, inner, &lines)
 }
@@ -389,12 +402,18 @@ pub(in crate::presentation::tui::home) fn pr_popup_placement(
     }
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let (left_w, _) = super::layout(width, Sidebar::Full);
-    let popup = pr_popup_box(&wt.pr, state.pr_popup_show_dismissed());
+    // Shrink the box to the screen when [`PR_POPUP_INNER`] does not fit: a narrow
+    // terminal still gets the popup — with titles clipped to what fits — rather
+    // than no popup at all.
+    let inner_cap = PR_POPUP_INNER.min(width.saturating_sub(PR_POPUP_FRAME));
+    let popup = pr_popup_box(&wt.pr, state.pr_popup_show_dismissed(), inner_cap);
     let block_w = popup
         .iter()
         .map(|l| console::measure_text_width(l))
         .max()
         .unwrap_or(0);
+    // Degenerate screens narrower than even the floored box (the `PR` title plus
+    // its frame) still can't host it.
     if block_w == 0 || block_w > width {
         return None;
     }

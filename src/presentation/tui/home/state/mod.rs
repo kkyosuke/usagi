@@ -3175,7 +3175,9 @@ impl HomeState {
     ///
     /// The popup pins a session row whose `path` is the session root — the same key
     /// the [`pr_link_store`](crate::infrastructure::pr_link_store) is written under —
-    /// so the persisted state and the in-memory badge stay in lock-step.
+    /// so the persisted state and the in-memory badge stay in lock-step. The row's
+    /// own PR list rides along so a title (or a whole PR) the store has not
+    /// persisted survives the write-back instead of being erased by it.
     pub fn set_pinned_pr_state(
         &mut self,
         pr_key: &str,
@@ -3184,14 +3186,14 @@ impl HomeState {
         let Some(idx) = self.pr_popup else {
             return false;
         };
-        let Some(root) = self
+        let Some((root, current)) = self
             .list
             .worktree_by_global_index(idx)
-            .map(|wt| wt.path.clone())
+            .map(|wt| (wt.path.clone(), wt.pr.clone()))
         else {
             return false;
         };
-        let prs = crate::usecase::workspace_state::set_pr_state(&root, pr_key, state);
+        let prs = crate::usecase::workspace_state::set_pr_state(&root, &current, pr_key, state);
         self.list.set_pr_links(&root, prs)
     }
 
