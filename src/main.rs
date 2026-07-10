@@ -617,9 +617,56 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
         RegisterOutcome::Registered => {}
     }
     while !usagi::infrastructure::daemon_store::take_stop_request(dir)? {
+        // Refresh the monitored-sessions snapshot each tick. Best-effort: a
+        // transient store error must not tear the daemon down, so it is logged
+        // and the loop continues.
+        if let Err(error) = usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
+            eprintln!("usagi daemon: session monitor tick failed: {error:#}");
+        }
         std::thread::sleep(DAEMON_POLL);
     }
     usagi::usecase::daemon::deregister(dir)
+}
+
+/// Gather the daemon's view of every monitored session from the real stores.
+/// The composition-root adapter for [`usagi::usecase::daemon::gather`]: it wires
+/// the workspace list, per-workspace session load, and per-worktree phase read to
+/// their live implementations. Coverage-excluded store IO like the rest of this
+/// file; the aggregation it drives is unit-tested in the usecase.
+fn daemon_gather() -> Vec<usagi::domain::daemon::SessionSnapshot> {
+    usagi::usecase::daemon::gather(
+        &daemon_list_roots,
+        &daemon_load_sessions,
+        &usagi::infrastructure::agent_state_store::read,
+    )
+}
+
+/// The roots of the registered workspaces, or an empty list when they cannot be
+/// read (the daemon simply monitors nothing rather than failing the tick).
+fn daemon_list_roots() -> Vec<std::path::PathBuf> {
+    match usagi::infrastructure::storage::Storage::open_default().and_then(|s| s.load_workspaces())
+    {
+        Ok(workspaces) => workspaces.into_iter().map(|w| w.path).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Each session in the workspace rooted at `root`, as its name and worktree
+/// paths. An unreadable state file yields no sessions for that workspace.
+fn daemon_load_sessions(root: &Path) -> Vec<usagi::usecase::daemon::SessionWorktrees> {
+    match usagi::infrastructure::workspace_store::WorkspaceStore::new(root).load() {
+        Ok(Some(state)) => state
+            .sessions
+            .into_iter()
+            .map(|session| {
+                (
+                    session.name,
+                    session.worktrees.into_iter().map(|w| w.path).collect(),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Spawn `usagi daemon serve` detached in the background, so the daemon outlives
