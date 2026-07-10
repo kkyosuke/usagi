@@ -148,6 +148,13 @@ fn render_settings(settings: &Settings) -> Vec<String> {
             "autostart_queued       {}",
             settings.autostart_queued_prompts
         ),
+        format!(
+            "auto_reclaim_merged    {}",
+            settings
+                .auto_reclaim_merged_sessions
+                .map(|minutes| format!("{minutes} min"))
+                .unwrap_or_else(|| "off".to_string())
+        ),
         format!("agent_cli              {}", agent_label(settings.agent_cli)),
         format!(
             "session_action_ui      {}",
@@ -257,6 +264,7 @@ mod tests {
             notifications_enabled: false,
             restore_panes_enabled: false,
             autostart_queued_prompts: false,
+            auto_reclaim_merged_sessions: Some(30),
             agent_cli: AgentCli::Gemini,
             session_action_ui: crate::domain::settings::SessionActionUi::Prompt,
             sidebar: crate::domain::settings::Sidebar::Rail,
@@ -284,19 +292,20 @@ mod tests {
         assert!(lines[3].contains("false")); // notifications_enabled
         assert!(lines[4].contains("false")); // restore_panes_enabled
         assert!(lines[5].contains("false")); // autostart_queued_prompts
-        assert!(lines[6].contains("gemini"));
-        assert!(lines[7].contains("prompt"));
-        assert!(lines[8].contains("rail"));
-        assert!(lines[9].contains("alt")); // key_scheme
-        assert!(lines[10].contains("false")); // mascot_animation_enabled
-        assert!(lines[11].contains("1234")); // terminal_scrollback
-        assert!(lines[12].contains("true"));
-        assert!(lines[13].contains("qwen2.5-coder:3b"));
-        assert!(lines[14].contains("1 vars"));
-        assert!(lines[15].contains("workspace override"));
+        assert!(lines[6].contains("30 min")); // auto_reclaim_merged_sessions
+        assert!(lines[7].contains("gemini"));
+        assert!(lines[8].contains("prompt"));
+        assert!(lines[9].contains("rail"));
+        assert!(lines[10].contains("alt")); // key_scheme
+        assert!(lines[11].contains("false")); // mascot_animation_enabled
+        assert!(lines[12].contains("1234")); // terminal_scrollback
+        assert!(lines[13].contains("true"));
+        assert!(lines[14].contains("qwen2.5-coder:3b"));
+        assert!(lines[15].contains("1 vars"));
+        assert!(lines[16].contains("workspace override"));
         // The shipped-skill feature line shows its id and effective state.
-        assert!(lines[16].contains("pull-request"));
-        assert!(lines[16].contains("false"));
+        assert!(lines[17].contains("pull-request"));
+        assert!(lines[17].contains("false"));
     }
 
     #[test]
@@ -304,9 +313,10 @@ mod tests {
         let lines = render_settings(&Settings::default());
         assert!(lines[1].contains("(none)"));
         assert!(lines[2].contains("(none)"));
-        assert!(lines[12].contains("false"));
-        assert!(lines[14].contains("0 vars"));
-        assert!(lines[15].contains("workspace override"));
+        assert!(lines[6].contains("off"));
+        assert!(lines[13].contains("false"));
+        assert!(lines[15].contains("0 vars"));
+        assert!(lines[16].contains("workspace override"));
     }
 
     #[test]

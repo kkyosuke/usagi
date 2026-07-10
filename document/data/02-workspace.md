@@ -278,6 +278,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
   "version": 1,
   "agent_cli": "gemini",             // 任意。未設定ならグローバル値
   "notifications_enabled": false,    // 任意。未設定ならグローバル値
+  "auto_reclaim_merged_sessions": 30, // 任意。merged セッションのペイン自動回収猶予（分、未設定ならグローバル値）
   "default_branch": "develop",       // 任意。未設定なら検出済み既定ブランチ（auto）
   "default_branch_source": "local",  // 任意。未設定なら remote
   "local_llm_enabled": true,         // 任意。未設定ならグローバル値（local_llm.enabled）
@@ -298,6 +299,7 @@ session "login"  (/Users/me/git/usagi/.usagi/sessions/login)
 |---|---|---|
 | `agent_cli` | enum? | グローバル `agent_cli` にフォールバック |
 | `notifications_enabled` | bool? | グローバル `notifications_enabled` にフォールバック |
+| `auto_reclaim_merged_sessions` | minutes? | グローバル `auto_reclaim_merged_sessions` にフォールバック |
 | `default_branch` | string? | リポジトリの検出済み既定ブランチ（auto）。**リポジトリ単位**（グローバルに対応項目なし） |
 | `default_branch_source` | enum? | `remote`。**リポジトリ単位**（グローバルに対応項目なし） |
 | `local_llm_enabled` | bool? | グローバル `local_llm.enabled` にフォールバック |

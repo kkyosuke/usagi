@@ -25,6 +25,7 @@
 | `:` | Overview モーダルを開く |
 | `c` / `r` / `n` | 新規セッション作成 / 表示名変更 / メモ編集 |
 | `x` | 選択中セッションのアクティブタブを閉じる |
+| `X` | merged または done のセッションの全ペインを一括で閉じ、agent CLI / shell プロセスを回収する（dirty / running / waiting は除外） |
 | `Esc` | 無効（Switch が基底 mode） |
 | `Ctrl-C` / `Ctrl-Q` | 終了確認モーダル |
 

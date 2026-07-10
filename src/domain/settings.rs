@@ -565,6 +565,9 @@ pub struct Settings {
     /// user disables it; when off, a queued prompt waits to be consumed by the
     /// next fresh launch of that session's agent pane as before.
     pub autostart_queued_prompts: bool,
+    /// Minutes to wait after a merged PR is detected before closing that
+    /// session's panes. `None` disables automatic reclamation.
+    pub auto_reclaim_merged_sessions: Option<u64>,
     /// Which agent CLI usagi drives.
     #[serde(deserialize_with = "crate::domain::serde_fallback::or_default")]
     pub agent_cli: AgentCli,
@@ -633,6 +636,7 @@ impl Default for Settings {
             // Auto-starting queued prompts is opt-out: on unless disabled, so a
             // delegated issue begins work without a human opening the pane.
             autostart_queued_prompts: true,
+            auto_reclaim_merged_sessions: None,
             agent_cli: AgentCli::default(),
             session_action_ui: SessionActionUi::default(),
             key_scheme: KeyScheme::default(),
@@ -724,6 +728,9 @@ impl Settings {
         if let Some(autostart_queued_prompts) = local.autostart_queued_prompts {
             self.autostart_queued_prompts = autostart_queued_prompts;
         }
+        if let Some(auto_reclaim_merged_sessions) = local.auto_reclaim_merged_sessions {
+            self.auto_reclaim_merged_sessions = Some(auto_reclaim_merged_sessions);
+        }
         if let Some(local_llm_enabled) = local.local_llm_enabled {
             self.local_llm.enabled = local_llm_enabled;
         }
@@ -795,6 +802,9 @@ pub struct LocalSettings {
     /// Override whether queued prompts are auto-started for this project's
     /// sessions. `None` defers to the global setting.
     pub autostart_queued_prompts: Option<bool>,
+    /// Override the merged-session reclamation grace period for this project.
+    /// `None` defers to the global setting.
+    pub auto_reclaim_merged_sessions: Option<u64>,
     /// Which ref new session worktrees branch from in this repository. `None`
     /// defers to the default ([`BranchSource::Remote`]). An unrecognised stored
     /// value degrades to `None`.
@@ -847,6 +857,7 @@ impl LocalSettings {
             && self.notifications_enabled.is_none()
             && self.restore_panes_enabled.is_none()
             && self.autostart_queued_prompts.is_none()
+            && self.auto_reclaim_merged_sessions.is_none()
             && self.default_branch_source.is_none()
             && self.default_branch.is_none()
             && self.local_llm_enabled.is_none()
@@ -1160,6 +1171,25 @@ mod tests {
     }
 
     #[test]
+    fn auto_reclaim_merged_sessions_defaults_off() {
+        assert_eq!(Settings::default().auto_reclaim_merged_sessions, None);
+    }
+
+    #[test]
+    fn with_local_overrides_auto_reclaim_merged_sessions_when_set() {
+        let global = Settings::default();
+        let local = LocalSettings {
+            auto_reclaim_merged_sessions: Some(15),
+            ..Default::default()
+        };
+
+        let effective = global.with_local(&local);
+
+        assert_eq!(effective.auto_reclaim_merged_sessions, Some(15));
+        assert!(effective.autostart_queued_prompts);
+    }
+
+    #[test]
     fn with_local_is_a_no_op_when_empty() {
         let global = Settings::default();
         assert_eq!(global.clone().with_local(&LocalSettings::default()), global);
@@ -1199,6 +1229,12 @@ mod tests {
         // As does the autostart-queued-prompts toggle.
         assert!(!LocalSettings {
             autostart_queued_prompts: Some(false),
+            ..Default::default()
+        }
+        .is_empty());
+        // As does the auto-reclaim grace.
+        assert!(!LocalSettings {
+            auto_reclaim_merged_sessions: Some(30),
             ..Default::default()
         }
         .is_empty());
