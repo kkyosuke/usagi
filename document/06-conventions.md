@@ -144,13 +144,14 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | `cargo fmt --check` / `clippy` / `build` / `test`（`ubuntu-latest`） |
+| `.github/workflows/test.yml` | `main` への push / PR | fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
 | `.github/workflows/release-build-check.yml` | `Cargo.toml` / `Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
+- Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
 
 ## リリース
 
