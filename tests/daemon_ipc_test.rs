@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage};
 use usagi::infrastructure::daemon_ipc::{decode_message, encode_message, socket_path};
+use usagi::infrastructure::resource::process_alive;
 
 /// The compiled `usagi` binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_usagi");
@@ -98,6 +99,87 @@ fn client_lists_sessions_over_the_ipc_socket() {
 
     // Always stop the daemon, even if the assertions above failed, so it does
     // not linger past the test.
+    daemon_cmd(home.path(), "stop");
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+/// Poll `cond` until it holds or `budget` elapses; returns whether it held.
+fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    cond()
+}
+
+#[test]
+fn daemon_owned_terminal_survives_client_disconnect() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    // The spawned shell runs with this directory as its cwd.
+    let worktree = tempfile::tempdir().unwrap();
+
+    daemon_cmd(home.path(), "start");
+    assert!(
+        wait_for(&sock, Duration::from_secs(10)),
+        "daemon never created its IPC socket"
+    );
+
+    let outcome = std::panic::catch_unwind(|| {
+        // A client asks the daemon to spawn a terminal, then disconnects.
+        let pid = {
+            let mut client = UnixStream::connect(&sock).expect("connecting client A");
+            client
+                .write_all(
+                    &encode_message(&ClientMessage::Spawn {
+                        worktree: worktree.path().to_path_buf(),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            match read_message(&mut client, Duration::from_secs(5)) {
+                ServerMessage::Spawned { pid, .. } => pid,
+                other => panic!("expected Spawned, got {other:?}"),
+            }
+            // `client` drops here — the connection closes.
+        };
+        assert!(pid != 0, "daemon reported no pid for the spawned terminal");
+
+        // The daemon owns the process, so it stays alive after the client that
+        // requested it has gone. (Give the daemon a tick to notice the drop.)
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            process_alive(pid),
+            "the daemon-owned terminal (pid {pid}) died when its client disconnected"
+        );
+
+        // A fresh client kills it, and the process goes away.
+        let mut killer = UnixStream::connect(&sock).expect("connecting client B");
+        killer
+            .write_all(
+                &encode_message(&ClientMessage::Kill {
+                    worktree: worktree.path().to_path_buf(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        match read_message(&mut killer, Duration::from_secs(5)) {
+            ServerMessage::Killed { .. } => {}
+            other => panic!("expected Killed, got {other:?}"),
+        }
+        assert!(
+            wait_until(|| !process_alive(pid), Duration::from_secs(5)),
+            "the terminal (pid {pid}) was not killed"
+        );
+    });
+
     daemon_cmd(home.path(), "stop");
 
     if let Err(payload) = outcome {

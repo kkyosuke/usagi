@@ -658,6 +658,14 @@ struct DaemonIpcServer {
     clients: std::collections::HashMap<u64, IpcClient>,
     registry: usagi::usecase::daemon_ipc::SubscriberRegistry,
     next_id: u64,
+    /// The daemon-owned terminals, keyed by worktree. Holding the [`PtySession`]
+    /// here — not on any client — is what makes a terminal outlive the client
+    /// that asked for it: a client disconnecting only drops its socket, never
+    /// these. Dropping a session kills its process group.
+    terminals:
+        std::collections::HashMap<std::path::PathBuf, usagi::infrastructure::pty::PtySession>,
+    /// The pure mirror of `terminals` (worktree → pid) for the tested bookkeeping.
+    terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry,
 }
 
 /// One connected client: its stream and the decoder reassembling frames from its
@@ -691,6 +699,8 @@ impl DaemonIpcServer {
             clients: std::collections::HashMap::new(),
             registry: usagi::usecase::daemon_ipc::SubscriberRegistry::new(),
             next_id: 0,
+            terminals: std::collections::HashMap::new(),
+            terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
         }
     }
 
@@ -800,14 +810,72 @@ impl DaemonIpcServer {
                     return false;
                 }
             };
-            if let Some(reply) =
-                usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions)
-            {
+            use usagi::usecase::daemon_ipc::Action;
+            let action =
+                usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions);
+            let reply = match action {
+                Action::Reply(reply) => Some(reply),
+                Action::Spawn(worktree) => Some(self.spawn_terminal(worktree)),
+                Action::Kill(worktree) => Some(self.kill_terminal(worktree)),
+                Action::Nothing => None,
+            };
+            if let Some(reply) = reply {
                 if !self.send(id, &reply) {
                     return false;
                 }
             }
         }
+    }
+
+    /// Spawn (or reuse) the daemon-owned terminal for `worktree` and report the
+    /// running pid. The [`PtySession`] is stored in `self.terminals`, so it lives
+    /// on independently of the requesting client. Reused when one is already
+    /// running there, so a re-`Spawn` is idempotent.
+    fn spawn_terminal(
+        &mut self,
+        worktree: std::path::PathBuf,
+    ) -> usagi::domain::daemon_ipc::ServerMessage {
+        use usagi::domain::daemon_ipc::ServerMessage;
+        if let Some(pid) = self.terminal_registry.pid(&worktree) {
+            return ServerMessage::Spawned { worktree, pid };
+        }
+        // Modest fixed geometry and no opening command: this slice only proves the
+        // daemon owns a live process; screen size and content streaming come with
+        // the screen-streaming slice. No workspace secrets are injected yet.
+        match usagi::infrastructure::pty::PtySession::spawn(
+            &worktree,
+            24,
+            80,
+            None,
+            DAEMON_TERMINAL_SCROLLBACK,
+            &std::collections::BTreeMap::new(),
+        ) {
+            Ok(session) => {
+                let pid = session.process_id().unwrap_or(0);
+                self.terminals.insert(worktree.clone(), session);
+                self.terminal_registry.insert(worktree.clone(), pid);
+                ServerMessage::Spawned { worktree, pid }
+            }
+            Err(error) => ServerMessage::Error {
+                message: format!(
+                    "failed to spawn terminal for {}: {error:#}",
+                    worktree.display()
+                ),
+            },
+        }
+    }
+
+    /// Kill the daemon-owned terminal for `worktree` (a no-op reply when none is
+    /// running). Dropping the removed [`PtySession`] signals its process group.
+    fn kill_terminal(
+        &mut self,
+        worktree: std::path::PathBuf,
+    ) -> usagi::domain::daemon_ipc::ServerMessage {
+        if let Some(session) = self.terminals.remove(&worktree) {
+            drop(session);
+            self.terminal_registry.remove(&worktree);
+        }
+        usagi::domain::daemon_ipc::ServerMessage::Killed { worktree }
     }
 
     /// Push the current snapshot to every subscribed client, dropping any whose
@@ -836,11 +904,21 @@ impl DaemonIpcServer {
         }
     }
 
-    /// Remove the socket file as the daemon shuts down.
-    fn shutdown(&self, path: &Path) {
+    /// Kill every daemon-owned terminal and remove the socket file as the daemon
+    /// shuts down, so a deliberate `daemon stop` does not leak orphaned shells.
+    /// (Terminals survive a *client* disconnect — that is the point — but not the
+    /// daemon that owns them exiting.)
+    fn shutdown(&mut self, path: &Path) {
+        // Dropping each session signals its process group; clearing the map does
+        // that for all of them.
+        self.terminals.clear();
         let _ = std::fs::remove_file(path);
     }
 }
+
+/// Scrollback lines kept for a daemon-owned terminal. A modest fixed cap for this
+/// slice; the configurable value threads down once the TUI attaches as a client.
+const DAEMON_TERMINAL_SCROLLBACK: usize = 1000;
 
 /// Gather the daemon's view of every monitored session from the real stores.
 /// The composition-root adapter for [`usagi::usecase::daemon::gather`]: it wires
