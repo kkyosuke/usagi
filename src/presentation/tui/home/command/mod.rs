@@ -133,6 +133,12 @@ pub enum Effect {
     /// concrete same-day instant against the wall clock (rejecting a time already
     /// passed) and stores it on the screen state.
     ScheduleWake { hour: u32, minute: u32 },
+    /// Schedule a one-shot **wake** `minutes` from now (the user ran `wake -i
+    /// <dur>`): the relative form of [`ScheduleWake`](Self::ScheduleWake). The
+    /// command parses the duration to a positive minute count within a day; the
+    /// event loop adds it to the wall clock (a positive offset is always in the
+    /// future, so there is no "already passed" case).
+    ScheduleWakeIn { minutes: i64 },
     /// Cancel a pending wake (the user ran `wake cancel`). A no-op — with a note —
     /// when none is scheduled.
     CancelWake,
@@ -180,6 +186,7 @@ impl Effect {
             | Effect::OpenEnvEditor
             | Effect::ShowText { .. }
             | Effect::ScheduleWake { .. }
+            | Effect::ScheduleWakeIn { .. }
             | Effect::CancelWake
             | Effect::WakeStatus => false,
         }
