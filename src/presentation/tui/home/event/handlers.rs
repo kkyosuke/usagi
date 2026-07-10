@@ -605,12 +605,13 @@ fn leave_overview(
 }
 
 /// Handle one key in the session-scratchpad editor overlay (opened with `n` in
-/// 選択 or `Ctrl-E` in 没入). `Ctrl-S` saves the note (persisted through the
-/// wiring), `Esc` cancels, and `Tab` / `BackTab` cycle the `note` / `todos` /
-/// `decisions` tabs. Only the `note` tab is editable — its `Enter` / editing /
-/// motion keys edit the multi-line buffer; the todos / decisions tabs are
-/// read-only, so those keys are ignored there. Closing it — saved or cancelled —
-/// re-attaches the session's pane when it was opened from 没入.
+/// 選択 or `Ctrl-E` in 没入). `Ctrl-S` saves the note (and, when touched, the
+/// todos), `Esc` cancels, and `Tab` / `BackTab` cycle the `note` / `todos` /
+/// `decisions` tabs. The `note` tab is a multi-line editor; the `todos` tab is an
+/// interactive checklist (`j`/`k` move, `Space` toggle, `a` add, `e` edit, `d`
+/// delete — add / edit open a one-line inline input); the `decisions` tab is
+/// read-only. Closing it — saved or cancelled — re-attaches the session's pane
+/// when it was opened from 没入.
 pub(super) fn note_editor_key(
     term: &Term,
     state: &mut HomeState,
@@ -620,15 +621,33 @@ pub(super) fn note_editor_key(
 ) {
     // This handler is only entered while the note editor is open (the event loop
     // guards on `note_editor().is_some()`), so the accessors below always resolve.
+
+    // The inline todo input (add / edit on the todos tab) captures the keyboard:
+    // `Enter` commits, `Esc` closes the input (not the overlay), every other key
+    // edits the single-line buffer.
+    if state.note_editor_todo_input_active() {
+        match key {
+            Key::Enter => state.note_editor_commit_todo_input(),
+            Key::Escape => state.note_editor_cancel_todo_input(),
+            key => state.note_editor_todo_input_key(&key),
+        }
+        return;
+    }
+
     match key {
-        // `Ctrl-S` saves: persist the note (clearing it when empty) and close,
-        // re-attaching the pane when the editor was opened from 没入.
+        // `Ctrl-S` saves: persist the changed todos (if any) then the note,
+        // and close, re-attaching the pane when the editor was opened from 没入.
         Key::Char(CTRL_S) => {
-            let (target, text, reattach) = state
+            let (target, text, todos, reattach) = state
                 .confirm_note_editor()
                 .expect("note editor open while editing");
             let root = state.selected_workspace_root();
             state.set_op_target(root.clone());
+            // Persist todos first so the note save's re-read reflects both.
+            if let Some(todos) = todos {
+                let outcome = (wiring.set_todos)(&root, &target, &todos);
+                state.apply_session_outcome(outcome);
+            }
             let outcome = (wiring.set_note)(&root, &target, &text);
             state.apply_session_outcome(outcome);
             if reattach {
@@ -650,9 +669,19 @@ pub(super) fn note_editor_key(
         Key::BackTab => {
             state.note_editor_cycle_tab(false);
         }
+        // The interactive todos list (todos tab, no inline input open).
+        _ if state.note_editor_todos_list_active() => match key {
+            Key::Char('j') | Key::ArrowDown => state.note_editor_move_todo(true),
+            Key::Char('k') | Key::ArrowUp => state.note_editor_move_todo(false),
+            Key::Char(' ') => state.note_editor_toggle_todo(),
+            Key::Char('a') => state.note_editor_begin_add_todo(),
+            Key::Char('e') => state.note_editor_begin_edit_todo(),
+            Key::Char('d') => state.note_editor_remove_todo(),
+            _ => {}
+        },
         // Every other key edits the multi-line buffer in place — but only on the
-        // editable `note` tab. On the read-only todos / decisions tabs these keys
-        // do nothing (an agent writes those over MCP).
+        // editable `note` tab. On the read-only decisions tab these keys do
+        // nothing (an agent writes decisions over MCP).
         _ if state
             .note_editor()
             .expect("note editor open while editing")

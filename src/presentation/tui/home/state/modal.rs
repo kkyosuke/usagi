@@ -510,14 +510,35 @@ impl NoteTab {
     }
 }
 
+/// The inline single-line input open on the todos tab while adding or editing a
+/// todo. `editing` is the index being edited, or `None` when adding a new todo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoInput {
+    input: TextInput,
+    editing: Option<usize>,
+}
+
+impl TodoInput {
+    /// The text being typed (for the renderer's caret split).
+    pub fn input(&self) -> &TextInput {
+        &self.input
+    }
+
+    /// Whether this is editing an existing todo (vs adding a new one).
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+}
+
 /// The session-note editor modal, opened with `n` in 選択 (Overview) or `Ctrl-E`
 /// in 没入 (Attached). It holds the session whose scratchpad is open
 /// (`target`, its branch name / identity), the editable note buffer
-/// (pre-filled with the existing note), read-only snapshots of the session's
-/// `todos` / `decisions`, the current [`tab`](NoteTab), and `reattach` — whether
-/// closing it should re-attach the session's pane (set when opened from 没入, so
-/// the user drops straight back into the live terminal). The note buffer's
-/// editing and caret movement live on [`TextArea`].
+/// (pre-filled with the existing note), the session's `todos` (editable on the
+/// todos tab) and read-only `decisions`, the current [`tab`](NoteTab), the todos
+/// tab's selection / inline input, whether the todos were changed (`todos_dirty`,
+/// so the save persists them only when touched), and `reattach` — whether closing
+/// it should re-attach the session's pane (set when opened from 没入). The note
+/// buffer's editing and caret movement live on [`TextArea`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEditor {
     target: String,
@@ -525,6 +546,9 @@ pub struct NoteEditor {
     todos: Vec<SessionTodo>,
     decisions: Vec<SessionDecision>,
     tab: NoteTab,
+    selected: usize,
+    input: Option<TodoInput>,
+    todos_dirty: bool,
     reattach: bool,
 }
 
@@ -546,6 +570,9 @@ impl NoteEditor {
             todos,
             decisions,
             tab: NoteTab::Note,
+            selected: 0,
+            input: None,
+            todos_dirty: false,
             reattach,
         }
     }
@@ -593,12 +620,133 @@ impl NoteEditor {
         &mut self.area
     }
 
-    /// Accept the note, consuming the editor: the target session, the typed text,
-    /// and whether to re-attach. The text is persisted (and trimmed) by the
-    /// usecase; an empty buffer clears the note. Only the note is editable here,
-    /// so todos / decisions are not part of the result.
-    pub(super) fn confirm(self) -> (String, String, bool) {
-        (self.target, self.area.text(), self.reattach)
+    /// The index of the highlighted todo on the todos tab (0 when the list is
+    /// empty). Read by the renderer to mark the selected row.
+    pub fn selected_todo(&self) -> usize {
+        self.selected
+    }
+
+    /// The inline add / edit input open on the todos tab, if any.
+    pub fn todo_input(&self) -> Option<&TodoInput> {
+        self.input.as_ref()
+    }
+
+    /// Whether the inline todo input is open (adding or editing).
+    pub fn is_editing_todo(&self) -> bool {
+        self.input.is_some()
+    }
+
+    /// Move the todos-tab selection down (`down`) or up, clamped to the list
+    /// (no wrap). A no-op while the inline input is open or the list is empty.
+    pub(super) fn move_todo(&mut self, down: bool) {
+        if self.input.is_some() || self.todos.is_empty() {
+            return;
+        }
+        let last = self.todos.len() - 1;
+        self.selected = if down {
+            (self.selected + 1).min(last)
+        } else {
+            self.selected.saturating_sub(1)
+        };
+    }
+
+    /// Toggle the highlighted todo's done state. A no-op while the input is open
+    /// or the list is empty.
+    pub(super) fn toggle_selected_todo(&mut self) {
+        if self.input.is_some() {
+            return;
+        }
+        if let Some(todo) = self.todos.get_mut(self.selected) {
+            todo.done = !todo.done;
+            self.todos_dirty = true;
+        }
+    }
+
+    /// Remove the highlighted todo, clamping the selection to what remains. A
+    /// no-op while the input is open or the list is empty.
+    pub(super) fn remove_selected_todo(&mut self) {
+        if self.input.is_some() || self.selected >= self.todos.len() {
+            return;
+        }
+        self.todos.remove(self.selected);
+        self.selected = self.selected.min(self.todos.len().saturating_sub(1));
+        self.todos_dirty = true;
+    }
+
+    /// Open the inline input to add a new todo (empty). A no-op if one is already
+    /// open.
+    pub(super) fn begin_add_todo(&mut self) {
+        if self.input.is_none() {
+            self.input = Some(TodoInput {
+                input: TextInput::new(),
+                editing: None,
+            });
+        }
+    }
+
+    /// Open the inline input to edit the highlighted todo (pre-filled). A no-op
+    /// if the list is empty or an input is already open.
+    pub(super) fn begin_edit_todo(&mut self) {
+        if self.input.is_some() {
+            return;
+        }
+        if let Some(todo) = self.todos.get(self.selected) {
+            self.input = Some(TodoInput {
+                input: TextInput::with_value(todo.text.clone()),
+                editing: Some(self.selected),
+            });
+        }
+    }
+
+    /// Route a key to the open inline todo input (returns whether it changed).
+    /// Callers guard on [`is_editing_todo`](Self::is_editing_todo).
+    pub(super) fn todo_input_key(&mut self, key: &console::Key) -> bool {
+        self.input
+            .as_mut()
+            .map(|i| i.input.handle_key(key))
+            .unwrap_or(false)
+    }
+
+    /// Commit the open inline input: add the typed todo, or replace the edited
+    /// one, when the text is non-empty (trimmed); an empty text just closes the
+    /// input. Closes the input either way. A no-op when no input is open.
+    pub(super) fn commit_todo_input(&mut self) {
+        let Some(TodoInput { input, editing }) = self.input.take() else {
+            return;
+        };
+        let text = input.value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match editing {
+            // Replace the edited row's text. `get_mut` guards the (unreachable
+            // through the UI, since the input blocks other edits) vanished-row case.
+            Some(i) => {
+                if let Some(todo) = self.todos.get_mut(i) {
+                    todo.text = text;
+                    self.todos_dirty = true;
+                }
+            }
+            None => {
+                self.todos.push(SessionTodo::new(text));
+                self.selected = self.todos.len() - 1;
+                self.todos_dirty = true;
+            }
+        }
+    }
+
+    /// Close the inline input without applying it.
+    pub(super) fn cancel_todo_input(&mut self) {
+        self.input = None;
+    }
+
+    /// Accept the edit, consuming the editor: the target session, the typed note
+    /// text, the todos to persist (`Some` only when they were changed, so an
+    /// untouched checklist is not rewritten), and whether to re-attach. The note
+    /// is persisted (and trimmed) by the usecase; an empty buffer clears it.
+    pub(super) fn confirm(self) -> (String, String, Option<Vec<SessionTodo>>, bool) {
+        let todos = self.todos_dirty.then_some(self.todos);
+        (self.target, self.area.text(), todos, self.reattach)
     }
 }
 

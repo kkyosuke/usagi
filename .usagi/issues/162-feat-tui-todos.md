@@ -1,13 +1,13 @@
 ---
 number: 162
 title: feat(tui): todos タブを対話編集可能にする（トグル / 追加 / 編集 / 削除）
-status: todo
+status: done
 priority: low
 labels: [feat, tui]
 dependson: [157]
 related: [155, 157]
 created_at: 2026-07-10T00:25:36.220253+00:00
-updated_at: 2026-07-10T00:25:36.220253+00:00
+updated_at: 2026-07-10T12:46:56.635284+00:00
 ---
 
 ## 背景

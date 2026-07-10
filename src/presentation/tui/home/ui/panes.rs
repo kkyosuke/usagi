@@ -8,8 +8,8 @@
 use console::{style, Style};
 
 use super::super::state::{
-    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, NoteTab, Preview, RenameInput,
-    ROOT_NAME,
+    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, NoteEditor, NoteTab, Preview,
+    RenameInput, ROOT_NAME,
 };
 use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
@@ -413,19 +413,58 @@ fn note_box(
     }
 }
 
-/// The todos tab body: one `[x]` / `[ ]` line per checklist item (its text kept
-/// to a single line), or a placeholder when the session has no todos.
-fn todo_lines(todos: &[SessionTodo]) -> Vec<String> {
-    if todos.is_empty() {
-        return vec!["(todo なし)".to_string()];
+/// One checklist row: `[x]` / `[ ]` and the text (kept to a single line).
+fn fmt_todo(todo: &SessionTodo) -> String {
+    let mark = if todo.done { "x" } else { " " };
+    format!("[{}] {}", mark, todo.text.replace('\n', " "))
+}
+
+/// The todos tab box. With no inline input it lists the checklist read-only,
+/// marking the highlighted row with `›` (a placeholder when empty). While the
+/// add / edit input is open it appends a one-line input row (`+`/`✎` prefixed)
+/// and puts a block caret there so typing shows where it lands.
+fn todos_box(editor: &NoteEditor, box_w: usize, edit_cap: usize, read_cap: usize) -> Vec<String> {
+    match editor.todo_input() {
+        None => {
+            let sel = editor.selected_todo();
+            let lines: Vec<String> = if editor.todos().is_empty() {
+                vec!["(todo なし)".to_string()]
+            } else {
+                editor
+                    .todos()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let marker = if i == sel { "› " } else { "  " };
+                        format!("{marker}{}", fmt_todo(t))
+                    })
+                    .collect()
+            };
+            note_box(&lines, None, None, box_w, read_cap, "todos", true)
+        }
+        Some(input) => {
+            // The existing rows (plain) followed by the inline input row, with the
+            // caret on it.
+            let mut lines: Vec<String> = editor
+                .todos()
+                .iter()
+                .map(|t| format!("  {}", fmt_todo(t)))
+                .collect();
+            let label = if input.is_editing() { "✎ " } else { "+ " };
+            lines.push(format!("{label}{}", input.input().value()));
+            let caret_row = lines.len() - 1;
+            let caret_col = label.len() + input.input().cursor();
+            note_box(
+                &lines,
+                Some((caret_row, caret_col)),
+                None,
+                box_w,
+                edit_cap,
+                "todos (編集中)",
+                true,
+            )
+        }
     }
-    todos
-        .iter()
-        .map(|t| {
-            let mark = if t.done { "x" } else { " " };
-            format!("[{}] {}", mark, t.text.replace('\n', " "))
-        })
-        .collect()
 }
 
 /// The decisions tab body: one `MM-DD HH:MM  text` line per logged decision
@@ -492,15 +531,7 @@ fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<Stri
                 "note (編集中)",
                 true,
             ),
-            NoteTab::Todos => note_box(
-                &todo_lines(editor.todos()),
-                None,
-                None,
-                box_w,
-                read_cap,
-                "todos",
-                true,
-            ),
+            NoteTab::Todos => todos_box(editor, box_w, edit_cap, read_cap),
             NoteTab::Decisions => note_box(
                 &decision_lines(editor.decisions()),
                 None,

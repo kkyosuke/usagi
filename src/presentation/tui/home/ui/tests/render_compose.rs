@@ -521,6 +521,57 @@ fn note_overlay_renders_the_todos_and_decisions_tabs() {
 }
 
 #[test]
+fn todos_tab_marks_the_selection_and_shows_the_inline_input() {
+    let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
+    state.restore_sessions(vec![SessionRecord {
+        todos: vec![SessionTodo::new("write tests"), SessionTodo::new("ship it")],
+        decisions: Vec::new(),
+        name: "alpha".to_string(),
+        display_name: None,
+        note: None,
+        label_id: None,
+        agent: Default::default(),
+        origin: Default::default(),
+        started_from: None,
+        root: PathBuf::from("/repo/.usagi/sessions/alpha"),
+        worktrees: vec![worktree(Some("alpha"), false, BranchStatus::Local)],
+        created_at: Utc::now(),
+        last_active: None,
+    }]);
+    state.enter_switch();
+    state.overview_move_down();
+    assert!(state.overview_begin_note());
+    state.note_editor_cycle_tab(true); // note -> todos
+
+    // The highlighted row (first) is marked with `›`.
+    state.note_editor_move_todo(true); // select "ship it"
+    let sel = stripped(&render_frame(24, 80, &state));
+    assert!(
+        sel.contains("› [ ] ship it"),
+        "selected row is marked:\n{sel}"
+    );
+
+    // Opening the add input shows a `+` prompt with the typed text and marks the
+    // box title as editing.
+    state.note_editor_begin_add_todo();
+    for c in "new one".chars() {
+        state.note_editor_todo_input_key(&console::Key::Char(c));
+    }
+    let adding = stripped(&render_frame(24, 80, &state));
+    assert!(
+        adding.contains("todos (編集中)"),
+        "editing title:\n{adding}"
+    );
+    assert!(adding.contains("+ new one"), "add input row:\n{adding}");
+
+    // Editing an existing todo prefills the input with a `✎` prompt.
+    state.note_editor_cancel_todo_input();
+    state.note_editor_begin_edit_todo();
+    let editing = stripped(&render_frame(24, 80, &state));
+    assert!(editing.contains("✎ ship it"), "edit input row:\n{editing}");
+}
+
+#[test]
 fn note_overlay_todos_and_decisions_tabs_show_placeholders_when_empty() {
     let mut state = state_with(vec![worktree(Some("main"), false, BranchStatus::Local)]);
     // A session with a note but no todos / decisions.

@@ -176,10 +176,12 @@ fn note_editor_edits_confirm_and_cancel() {
     assert!(area.is_empty());
     area.insert('h');
     area.insert('i');
-    // Confirm returns the target, the typed text, and reattach=false (選択).
-    let (target, text, reattach) = state.confirm_note_editor().unwrap();
+    // Confirm returns the target, the typed text, no todos (untouched), and
+    // reattach=false (選択).
+    let (target, text, todos, reattach) = state.confirm_note_editor().unwrap();
     assert_eq!(target, "beta");
     assert_eq!(text, "hi");
+    assert!(todos.is_none());
     assert!(!reattach);
     assert!(state.note_editor().is_none());
     // Confirm / cancel with nothing open are no-ops.
@@ -242,6 +244,157 @@ fn note_editor_cycle_tab_wraps_forward_and_backward() {
     // Backward from note wraps to decisions.
     state.note_editor_cycle_tab(false);
     assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Decisions);
+}
+
+fn state_on_alpha_with_todos() -> HomeState {
+    let mut state = state();
+    let mut alpha = session_record("alpha", 1);
+    alpha.todos = vec![SessionTodo::new("first"), SessionTodo::new("second")];
+    state.restore_sessions(vec![alpha]);
+    state.overview_move_down(); // root -> alpha
+    state.overview_begin_note();
+    state.note_editor_cycle_tab(true); // note -> todos
+    state
+}
+
+#[test]
+fn todos_tab_move_toggle_and_delete() {
+    let mut state = state_on_alpha_with_todos();
+    assert!(state.note_editor_todos_list_active());
+    assert!(!state.note_editor_todo_input_active());
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 0);
+
+    // Move down clamps at the last row; up saturates at 0.
+    state.note_editor_move_todo(true);
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 1);
+    state.note_editor_move_todo(true); // clamp at last
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 1);
+    state.note_editor_move_todo(false);
+    state.note_editor_move_todo(false); // saturate at 0
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 0);
+
+    // Toggle the selected todo's done state.
+    state.note_editor_toggle_todo();
+    assert!(state.note_editor().unwrap().todos()[0].done);
+
+    // Delete the selected todo; selection clamps to what remains.
+    state.note_editor_move_todo(true); // select "second"
+    state.note_editor_remove_todo();
+    assert_eq!(state.note_editor().unwrap().todos().len(), 1);
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 0);
+
+    // Confirm reports the changed todos.
+    let (_, _, todos, _) = state.confirm_note_editor().unwrap();
+    let todos = todos.expect("todos were edited");
+    assert_eq!(todos.len(), 1);
+    assert!(todos[0].done);
+    assert_eq!(todos[0].text, "first");
+}
+
+#[test]
+fn todos_tab_add_via_inline_input() {
+    let mut state = state_on_alpha_with_todos();
+    state.note_editor_begin_add_todo();
+    assert!(state.note_editor_todo_input_active());
+    // The list keys are inert while the input is open.
+    assert!(!state.note_editor_todos_list_active());
+    let input = state.note_editor().unwrap().todo_input().unwrap();
+    assert!(!input.is_editing());
+
+    for c in "third".chars() {
+        state.note_editor_todo_input_key(&console::Key::Char(c));
+    }
+    state.note_editor_commit_todo_input();
+    assert!(!state.note_editor_todo_input_active());
+    let todos = state.note_editor().unwrap().todos();
+    assert_eq!(todos.len(), 3);
+    assert_eq!(todos[2].text, "third");
+    // The new row becomes selected.
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 2);
+}
+
+#[test]
+fn todos_tab_edit_and_cancel_inline_input() {
+    let mut state = state_on_alpha_with_todos();
+    // Edit the first todo, prefilled with its text.
+    state.note_editor_begin_edit_todo();
+    assert!(state
+        .note_editor()
+        .unwrap()
+        .todo_input()
+        .unwrap()
+        .is_editing());
+    // Replace the text: clear then type.
+    for _ in 0.."first".len() {
+        state.note_editor_todo_input_key(&console::Key::Backspace);
+    }
+    for c in "edited".chars() {
+        state.note_editor_todo_input_key(&console::Key::Char(c));
+    }
+    state.note_editor_commit_todo_input();
+    assert_eq!(state.note_editor().unwrap().todos()[0].text, "edited");
+
+    // Begin an add, then cancel it — the list is unchanged and the input closes.
+    state.note_editor_begin_add_todo();
+    state.note_editor_todo_input_key(&console::Key::Char('x'));
+    state.note_editor_cancel_todo_input();
+    assert!(!state.note_editor_todo_input_active());
+    assert_eq!(state.note_editor().unwrap().todos().len(), 2);
+}
+
+#[test]
+fn todo_list_ops_are_inert_while_the_inline_input_is_open() {
+    let mut state = state_on_alpha_with_todos();
+    state.note_editor_begin_add_todo();
+    // While the input captures the keyboard, the list keys do nothing.
+    state.note_editor_toggle_todo();
+    state.note_editor_remove_todo();
+    state.note_editor_move_todo(true);
+    state.note_editor_begin_edit_todo();
+    assert!(state.note_editor_todo_input_active());
+    assert_eq!(state.note_editor().unwrap().todos().len(), 2);
+    assert!(!state.note_editor().unwrap().todos()[0].done);
+    assert_eq!(state.note_editor().unwrap().selected_todo(), 0);
+
+    // Committing with no input open is a no-op.
+    state.note_editor_cancel_todo_input();
+    state.note_editor_commit_todo_input();
+    assert_eq!(state.note_editor().unwrap().todos().len(), 2);
+}
+
+#[test]
+fn todos_editing_ops_are_no_ops_on_an_empty_list_and_without_an_editor() {
+    // Empty list: move / toggle / delete / edit do nothing; add still works.
+    let mut state = state();
+    state.restore_sessions(vec![session_record("alpha", 1)]);
+    state.overview_move_down();
+    state.overview_begin_note();
+    state.note_editor_cycle_tab(true); // todos
+    state.note_editor_move_todo(true);
+    state.note_editor_toggle_todo();
+    state.note_editor_remove_todo();
+    state.note_editor_begin_edit_todo(); // no-op: nothing to edit
+    assert!(!state.note_editor_todo_input_active());
+    assert!(state.note_editor().unwrap().todos().is_empty());
+    // An empty commit just closes the input without adding a blank row.
+    state.note_editor_begin_add_todo();
+    state.note_editor_commit_todo_input();
+    assert!(state.note_editor().unwrap().todos().is_empty());
+    // Untouched todos → confirm reports None.
+    let (_, _, todos, _) = state.confirm_note_editor().unwrap();
+    assert!(todos.is_none());
+
+    // With no editor open, the wrappers are inert no-ops.
+    state.note_editor_move_todo(true);
+    state.note_editor_toggle_todo();
+    state.note_editor_remove_todo();
+    state.note_editor_begin_add_todo();
+    state.note_editor_begin_edit_todo();
+    state.note_editor_todo_input_key(&console::Key::Char('x'));
+    state.note_editor_commit_todo_input();
+    state.note_editor_cancel_todo_input();
+    assert!(!state.note_editor_todos_list_active());
+    assert!(!state.note_editor_todo_input_active());
 }
 
 #[test]

@@ -15,6 +15,7 @@ use console::Key;
 use console::Term;
 
 use crate::domain::settings::{AgentCli, KeyScheme, SessionActionUi, Sidebar};
+use crate::domain::workspace_state::SessionTodo;
 use crate::presentation::tui::install_task;
 use crate::presentation::tui::io::screen::{
     ClickEvent, FramePainter, Input, KeyReader, ScrollEvent,
@@ -203,6 +204,10 @@ pub(super) struct Wiring<'a> {
     /// Save (or clear) a session's note in the given workspace, returning the
     /// outcome to apply inline.
     pub set_note: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
+    /// Replace a session's (or the root's) whole todo checklist in the given
+    /// workspace, returning the outcome to apply inline. Called on save when the
+    /// todos tab was edited — like `set_note` it stays synchronous (no git work).
+    pub set_todos: &'a mut dyn FnMut(&Path, &str, &[SessionTodo]) -> SessionOutcome,
     /// Set (`Some(id)`) or clear (`None`) a session's manual status label in the
     /// given workspace, returning the outcome to apply inline. Stays synchronous
     /// (no git work) like `rename_display` / `set_note`.
@@ -1808,6 +1813,15 @@ pub(crate) fn event_loop_compat(
     // the production 3-arg shape, dropping the unite target root.
     let mut rename_display_w = |_root: &Path, name: &str, label: &str| rename_display(name, label);
     let mut set_note_w = |_root: &Path, name: &str, note: &str| set_note(name, note);
+    // The compat-shim loop tests do not drive interactive todo editing (it is
+    // covered directly against `note_editor_key` with a capturing `Wiring`), so a
+    // no-op that reports no session change keeps the loop's apply path a no-op.
+    let mut set_todos_w = |_root: &Path, _name: &str, _todos: &[SessionTodo]| SessionOutcome {
+        line: super::state::LogLine::output("todos"),
+        sessions: None,
+        select: None,
+        root_note: None,
+    };
     // The compat-shim loop tests do not drive manual-status labels; a no-op that
     // reports no session change keeps the loop's apply path a no-op. The label flow
     // is covered directly against `overview_key` with a capturing `Wiring`.
@@ -1868,6 +1882,7 @@ pub(crate) fn event_loop_compat(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename_display_w,
         set_note: &mut set_note_w,
+        set_todos: &mut set_todos_w,
         set_label: &mut set_label_w,
         reorder_session: &mut reorder_session,
         dispatch_remove: &mut dispatch_remove,

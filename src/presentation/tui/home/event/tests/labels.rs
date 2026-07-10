@@ -84,6 +84,8 @@ fn drive(
     let mut dispatch_create = |_: &Path, _: &str, _: u64| {};
     let mut rename = |_: &Path, n: &str, l: &str| noop_rename(n, l);
     let mut set_note_fake = |_: &Path, n: &str, t: &str| noop_set_note(n, t);
+    let mut set_todos_fake =
+        |_: &Path, _: &str, _: &[crate::domain::workspace_state::SessionTodo]| noop_set_todos();
     let mut reorder_fake: fn(&str, bool) -> SessionReorder = noop_reorder;
     let mut dispatch_remove = |_: &Path, _: &str, _: bool, _| {};
     let mut evict = |_: &Path| {};
@@ -116,6 +118,7 @@ fn drive(
         dispatch_create: &mut dispatch_create,
         rename_display: &mut rename,
         set_note: &mut set_note_fake,
+        set_todos: &mut set_todos_fake,
         set_label: &mut set_label,
         reorder_session: &mut reorder_fake,
         dispatch_remove: &mut dispatch_remove,

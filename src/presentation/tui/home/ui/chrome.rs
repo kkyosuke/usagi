@@ -479,8 +479,11 @@ pub(super) fn footer_line(width: usize, state: &HomeState) -> String {
     // underlying mode.
     let help = if let Some(editor) = state.note_editor() {
         match editor.tab() {
+            _ if editor.is_editing_todo() => {
+                "[todo]  Enter: OK / Esc: cancel".to_string()
+            }
             NoteTab::Note => "[note]  Ctrl-S: save / Tab: todos·decisions / Esc: cancel / Enter: newline / ←→↑↓: move / Shift+←→↑↓: select".to_string(),
-            NoteTab::Todos => "[todos]  Tab: switch tab / Ctrl-S: save note / Esc: close  (edit via MCP)".to_string(),
+            NoteTab::Todos => "[todos]  j/k: move / Space: toggle / a: add / e: edit / d: delete / Ctrl-S: save / Tab / Esc".to_string(),
             NoteTab::Decisions => "[decisions]  Tab: switch tab / Ctrl-S: save note / Esc: close  (read-only)".to_string(),
         }
     } else if state.preview().is_some() {
