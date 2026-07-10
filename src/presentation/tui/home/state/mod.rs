@@ -45,7 +45,7 @@ mod mode;
 pub use list::{worktree_name, WorkspaceGroup, WorktreeList, ROOT_NAME};
 pub use log::{LineKind, LogLine};
 pub use modal::{
-    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, NoteTab,
+    CreateInput, DiffFocus, DiffTreeRow, DiffView, EnvEditor, ModalSize, NoteEditor, NotePane,
     Preview, RemoveEntry, RemoveModal, RenameInput, TabMenu, TabMenuItem, TabRenameInput,
     TextModal, TodoInput,
 };
@@ -3273,13 +3273,13 @@ impl HomeState {
         self.note_editor().is_some_and(NoteEditor::reattach)
     }
 
-    /// Switch the open note editor to the next (`forward`) or previous tab
-    /// (`note` / `todos` / `decisions`). Returns whether a switch happened — i.e.
-    /// whether an editor was open — so the loop repaints only then.
-    pub fn note_editor_cycle_tab(&mut self, forward: bool) -> bool {
+    /// Move the open note editor's focus to the next (`forward`) or previous
+    /// pane (`note` / `todos` / `decisions`). Returns whether a move happened —
+    /// i.e. whether an editor was open — so the loop repaints only then.
+    pub fn note_editor_cycle_focus(&mut self, forward: bool) -> bool {
         match self.note_editor_mut() {
             Some(editor) => {
-                editor.cycle_tab(forward);
+                editor.cycle_focus(forward);
                 true
             }
             None => false,
@@ -3292,11 +3292,12 @@ impl HomeState {
         self.overlay = Overlay::None;
     }
 
-    /// Whether the open note editor is on the `todos` tab with no inline input —
-    /// the state in which the todos-list keys (`j`/`k`/`Space`/`a`/`e`/`d`) act.
+    /// Whether the open note editor has the focus on the `todos` pane with no
+    /// inline input — the state in which the todos-list keys
+    /// (`j`/`k`/`Space`/`a`/`e`/`d`) act.
     pub fn note_editor_todos_list_active(&self) -> bool {
         self.note_editor()
-            .is_some_and(|e| e.tab() == NoteTab::Todos && !e.is_editing_todo())
+            .is_some_and(|e| e.focus() == NotePane::Todos && !e.is_editing_todo())
     }
 
     /// Whether the open note editor has its inline todo input open (adding or
@@ -3305,7 +3306,7 @@ impl HomeState {
         self.note_editor().is_some_and(NoteEditor::is_editing_todo)
     }
 
-    /// Move the todos-tab selection down (`down`) or up. No-op unless the todos
+    /// Move the todos-pane selection down (`down`) or up. No-op unless the todos
     /// list is active.
     pub fn note_editor_move_todo(&mut self, down: bool) {
         if let Some(editor) = self.note_editor_mut() {

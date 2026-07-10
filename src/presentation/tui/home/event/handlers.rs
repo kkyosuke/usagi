@@ -21,7 +21,7 @@ use crate::domain::wake::humanize_until;
 use super::super::action;
 use super::super::command::Effect;
 use super::super::pane_input::{is_double_click, PointerShape, DOUBLE_CLICK};
-use super::super::state::{HomeState, ModalSize, NoteTab, PaneExit, ROOT_NAME};
+use super::super::state::{HomeState, ModalSize, NotePane, PaneExit, ROOT_NAME};
 use super::super::terminal::tabs::TabNav;
 use super::super::ui;
 use super::{
@@ -604,13 +604,14 @@ fn leave_overview(
 }
 
 /// Handle one key in the session-scratchpad editor overlay (opened with `n` in
-/// 選択 or `Ctrl-E` in 没入). `Ctrl-S` saves the note (and, when touched, the
-/// todos), `Esc` cancels, and `Tab` / `BackTab` cycle the `note` / `todos` /
-/// `decisions` tabs. The `note` tab is a multi-line editor; the `todos` tab is an
-/// interactive checklist (`j`/`k` move, `Space` toggle, `a` add, `e` edit, `d`
-/// delete — add / edit open a one-line inline input); the `decisions` tab is
-/// read-only. Closing it — saved or cancelled — re-attaches the session's pane
-/// when it was opened from 没入.
+/// 選択 or `Ctrl-E` in 没入). The overlay stacks the `note` / `todos` /
+/// `decisions` panes; `Ctrl-S` saves the note (and, when touched, the todos),
+/// `Esc` cancels, and `Tab` / `BackTab` move the focus (the editing target)
+/// across the panes. The `note` pane is a multi-line editor; the `todos` pane is
+/// an interactive checklist (`j`/`k` move, `Space` toggle, `a` add, `e` edit,
+/// `d` delete — add / edit open a one-line inline input); the `decisions` pane
+/// is read-only. Closing it — saved or cancelled — re-attaches the session's
+/// pane when it was opened from 没入.
 pub(super) fn note_editor_key(
     term: &Term,
     state: &mut HomeState,
@@ -621,7 +622,7 @@ pub(super) fn note_editor_key(
     // This handler is only entered while the note editor is open (the event loop
     // guards on `note_editor().is_some()`), so the accessors below always resolve.
 
-    // The inline todo input (add / edit on the todos tab) captures the keyboard:
+    // The inline todo input (add / edit on the todos pane) captures the keyboard:
     // `Enter` commits, `Esc` closes the input (not the overlay), every other key
     // edits the single-line buffer.
     if state.note_editor_todo_input_active() {
@@ -661,14 +662,15 @@ pub(super) fn note_editor_key(
                 reattach_focused(term, state, painter, wiring);
             }
         }
-        // `Tab` / `BackTab` cycle the note / todos / decisions tabs.
+        // `Tab` / `BackTab` move the focus across the stacked note / todos /
+        // decisions panes (all three stay visible; only the target changes).
         Key::Tab => {
-            state.note_editor_cycle_tab(true);
+            state.note_editor_cycle_focus(true);
         }
         Key::BackTab => {
-            state.note_editor_cycle_tab(false);
+            state.note_editor_cycle_focus(false);
         }
-        // The interactive todos list (todos tab, no inline input open).
+        // The interactive todos list (todos pane focused, no inline input open).
         _ if state.note_editor_todos_list_active() => match key {
             Key::Char('j') | Key::ArrowDown => state.note_editor_move_todo(true),
             Key::Char('k') | Key::ArrowUp => state.note_editor_move_todo(false),
@@ -678,14 +680,14 @@ pub(super) fn note_editor_key(
             Key::Char('d') => state.note_editor_remove_todo(),
             _ => {}
         },
-        // Every other key edits the multi-line buffer in place — but only on the
-        // editable `note` tab. On the read-only decisions tab these keys do
-        // nothing (an agent writes decisions over MCP).
+        // Every other key edits the multi-line buffer in place — but only while
+        // the editable `note` pane has the focus. On the read-only decisions
+        // pane these keys do nothing (an agent writes decisions over MCP).
         _ if state
             .note_editor()
             .expect("note editor open while editing")
-            .tab()
-            != NoteTab::Note => {}
+            .focus()
+            != NotePane::Note => {}
         // Enter splits the line, the editing keys delete / move the caret, and a
         // printable character is inserted at the caret.
         key => {

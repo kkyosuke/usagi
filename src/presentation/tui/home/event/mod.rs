@@ -206,7 +206,7 @@ pub(super) struct Wiring<'a> {
     pub set_note: &'a mut dyn FnMut(&Path, &str, &str) -> SessionOutcome,
     /// Replace a session's (or the root's) whole todo checklist in the given
     /// workspace, returning the outcome to apply inline. Called on save when the
-    /// todos tab was edited — like `set_note` it stays synchronous (no git work).
+    /// todos pane was edited — like `set_note` it stays synchronous (no git work).
     pub set_todos: &'a mut dyn FnMut(&Path, &str, &[SessionTodo]) -> SessionOutcome,
     /// Set (`Some(id)`) or clear (`None`) a session's manual status label in the
     /// given workspace, returning the outcome to apply inline. Stays synchronous

@@ -159,7 +159,7 @@ worktree を束ねます。各 worktree は git ステータス付き（下記 `
 
 これらの更新（作成・削除・表示名変更・再同期）はいずれも `state.json` の read-modify-write（読み込み→編集→保存）です。個々の保存は一時ファイル＋rename でアトミックですが、その**一連**を `.usagi/.lock` に対するプロセス間排他ロックで直列化します。TUI と各セッションの `usagi mcp` サーバなど同一ワークスペースを共有する複数プロセスが同時に書いても、後勝ちで一方の更新を取りこぼす（lost update）ことがありません。
 
-`todos` / `decisions`（およびルート版の `root_todos` / `root_decisions`）は、AI が MCP の `session_todo_*` / `session_decision_*`（[03-commands/03-mcp.md](../03-commands/03-mcp.md#対応-tool-一覧)）で編集します。usecase は `usecase/session` の `add_todo` / `set_todo_done` / `edit_todo` / `remove_todo` / `clear_todos` / `log_decision` / `clear_decisions` で、対象（ルート／セッション）を `NoteTarget` で切り替えつつ `note` と同じロック運用で書き換えます。ホーム画面のメモオーバーレイは `note` / `todos` / `decisions` の 3 タブ構成で、`todos` タブは TUI で**対話編集**でき（トグル/追加/編集/削除、`Ctrl-S` で保存）、`decisions` タブは**読み取り専用の表示**です（[design/home/05-overlays.md](../design/home/05-overlays.md#セッションメモの編集)）。`note` と同じくマシンローカル（git 管理外）で、ブランチや PR では共有されません。
+`todos` / `decisions`（およびルート版の `root_todos` / `root_decisions`）は、AI が MCP の `session_todo_*` / `session_decision_*`（[03-commands/03-mcp.md](../03-commands/03-mcp.md#対応-tool-一覧)）で編集します。usecase は `usecase/session` の `add_todo` / `set_todo_done` / `edit_todo` / `remove_todo` / `clear_todos` / `log_decision` / `clear_decisions` で、対象（ルート／セッション）を `NoteTarget` で切り替えつつ `note` と同じロック運用で書き換えます。ホーム画面のメモオーバーレイは `note` / `todos` / `decisions` の 3 ペインを縦積みで同時に表示し、`todos` ペインは TUI で**対話編集**でき（トグル/追加/編集/削除、`Ctrl-S` で保存）、`decisions` ペインは**読み取り専用の表示**です（[design/home/05-overlays.md](../design/home/05-overlays.md#セッションメモの編集)）。`note` と同じくマシンローカル（git 管理外）で、ブランチや PR では共有されません。
 
 ### スクラッチパッドの要素（`SessionTodo` / `SessionDecision`）
 

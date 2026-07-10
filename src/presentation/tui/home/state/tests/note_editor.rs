@@ -196,7 +196,7 @@ fn note_editor_edits_confirm_and_cancel() {
 }
 
 #[test]
-fn note_editor_opens_on_the_note_tab_with_the_sessions_todos_and_decisions() {
+fn note_editor_opens_focused_on_note_with_the_sessions_todos_and_decisions() {
     let mut state = state();
     let mut alpha = session_record("alpha", 1);
     alpha.note = Some("memo".to_string());
@@ -214,8 +214,8 @@ fn note_editor_opens_on_the_note_tab_with_the_sessions_todos_and_decisions() {
 
     assert!(state.overview_begin_note());
     let editor = state.note_editor().expect("editor open");
-    // Opens on the note tab, pre-filled, carrying read-only snapshots.
-    assert_eq!(editor.tab(), NoteTab::Note);
+    // Opens focused on the note pane, pre-filled, carrying read-only snapshots.
+    assert_eq!(editor.focus(), NotePane::Note);
     assert_eq!(editor.area().text(), "memo");
     assert_eq!(editor.todos().len(), 2);
     assert!(editor.todos()[1].done);
@@ -224,26 +224,26 @@ fn note_editor_opens_on_the_note_tab_with_the_sessions_todos_and_decisions() {
 }
 
 #[test]
-fn note_editor_cycle_tab_wraps_forward_and_backward() {
-    let state_labels: Vec<&str> = NoteTab::all().iter().map(|t| t.label()).collect();
+fn note_editor_cycle_focus_wraps_forward_and_backward() {
+    let state_labels: Vec<&str> = NotePane::all().iter().map(|t| t.label()).collect();
     assert_eq!(state_labels, ["note", "todos", "decisions"]);
 
     let mut state = state_on_alpha();
     // No editor open → cycling is a no-op that reports it did nothing.
-    assert!(!state.note_editor_cycle_tab(true));
+    assert!(!state.note_editor_cycle_focus(true));
 
     assert!(state.overview_begin_note());
-    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Note);
+    assert_eq!(state.note_editor().unwrap().focus(), NotePane::Note);
     // Forward: note -> todos -> decisions -> note (wrap).
-    assert!(state.note_editor_cycle_tab(true));
-    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Todos);
-    state.note_editor_cycle_tab(true);
-    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Decisions);
-    state.note_editor_cycle_tab(true);
-    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Note);
+    assert!(state.note_editor_cycle_focus(true));
+    assert_eq!(state.note_editor().unwrap().focus(), NotePane::Todos);
+    state.note_editor_cycle_focus(true);
+    assert_eq!(state.note_editor().unwrap().focus(), NotePane::Decisions);
+    state.note_editor_cycle_focus(true);
+    assert_eq!(state.note_editor().unwrap().focus(), NotePane::Note);
     // Backward from note wraps to decisions.
-    state.note_editor_cycle_tab(false);
-    assert_eq!(state.note_editor().unwrap().tab(), NoteTab::Decisions);
+    state.note_editor_cycle_focus(false);
+    assert_eq!(state.note_editor().unwrap().focus(), NotePane::Decisions);
 }
 
 fn state_on_alpha_with_todos() -> HomeState {
@@ -253,12 +253,12 @@ fn state_on_alpha_with_todos() -> HomeState {
     state.restore_sessions(vec![alpha]);
     state.overview_move_down(); // root -> alpha
     state.overview_begin_note();
-    state.note_editor_cycle_tab(true); // note -> todos
+    state.note_editor_cycle_focus(true); // note -> todos
     state
 }
 
 #[test]
-fn todos_tab_move_toggle_and_delete() {
+fn todos_pane_move_toggle_and_delete() {
     let mut state = state_on_alpha_with_todos();
     assert!(state.note_editor_todos_list_active());
     assert!(!state.note_editor_todo_input_active());
@@ -292,7 +292,7 @@ fn todos_tab_move_toggle_and_delete() {
 }
 
 #[test]
-fn todos_tab_add_via_inline_input() {
+fn todos_pane_add_via_inline_input() {
     let mut state = state_on_alpha_with_todos();
     state.note_editor_begin_add_todo();
     assert!(state.note_editor_todo_input_active());
@@ -314,7 +314,7 @@ fn todos_tab_add_via_inline_input() {
 }
 
 #[test]
-fn todos_tab_edit_and_cancel_inline_input() {
+fn todos_pane_edit_and_cancel_inline_input() {
     let mut state = state_on_alpha_with_todos();
     // Edit the first todo, prefilled with its text.
     state.note_editor_begin_edit_todo();
@@ -369,7 +369,7 @@ fn todos_editing_ops_are_no_ops_on_an_empty_list_and_without_an_editor() {
     state.restore_sessions(vec![session_record("alpha", 1)]);
     state.overview_move_down();
     state.overview_begin_note();
-    state.note_editor_cycle_tab(true); // todos
+    state.note_editor_cycle_focus(true); // todos
     state.note_editor_move_todo(true);
     state.note_editor_toggle_todo();
     state.note_editor_remove_todo();

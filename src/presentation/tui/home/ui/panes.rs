@@ -8,7 +8,7 @@
 use console::{style, Style};
 
 use super::super::state::{
-    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, NoteEditor, NoteTab, Preview,
+    CreateInput, DiffView, HomeState, LineKind, LogLine, Mode, NoteEditor, NotePane, Preview,
     RenameInput, ROOT_NAME,
 };
 use super::super::terminal::tabs::TabStrip;
@@ -317,6 +317,16 @@ const SWITCH_NOTE_MAX_LINES: usize = 6;
 /// caret, so the box never hides the whole right pane while editing.
 const EDIT_NOTE_MAX_LINES: usize = 12;
 
+/// Most body lines an *unfocused* pane of the open editor shows. The stacked
+/// note / todos / decisions boxes are all visible at once, so the two panes not
+/// being edited stay compact (their overflow elided with `… (N more)`) and the
+/// focused pane keeps the room.
+const UNFOCUSED_NOTE_MAX_LINES: usize = 4;
+
+/// Frame rows the three stacked editor boxes cost (a top and a bottom border
+/// each); what is left of the pane height is the body budget the panes share.
+const NOTE_STACK_FRAME_ROWS: usize = 6;
+
 /// The narrowest the floating note box renders.
 const NOTE_BOX_MIN_WIDTH: usize = 28;
 /// The widest the floating note box renders — past this the box stops growing so
@@ -419,11 +429,41 @@ fn fmt_todo(todo: &SessionTodo) -> String {
     format!("[{}] {}", mark, todo.text.replace('\n', " "))
 }
 
-/// The todos tab box. With no inline input it lists the checklist read-only,
-/// marking the highlighted row with `›` (a placeholder when empty). While the
-/// add / edit input is open it appends a one-line input row (`+`/`✎` prefixed)
-/// and puts a block caret there so typing shows where it lands.
-fn todos_box(editor: &NoteEditor, box_w: usize, edit_cap: usize, read_cap: usize) -> Vec<String> {
+/// The `note` pane box of the open editor. Focused it is the multi-line editor
+/// (block caret, selection, the view windowed around the caret) with the accent
+/// frame and the `note (編集中)` title; unfocused it is a plain-framed read-only
+/// listing capped at `max` (overflow elided).
+fn note_pane_box(editor: &NoteEditor, box_w: usize, max: usize, focused: bool) -> Vec<String> {
+    if focused {
+        note_box(
+            editor.area().lines(),
+            Some(editor.area().cursor()),
+            editor.area().selection(),
+            box_w,
+            max,
+            "note (編集中)",
+            true,
+        )
+    } else {
+        note_box(editor.area().lines(), None, None, box_w, max, "note", false)
+    }
+}
+
+/// The `todos` pane box of the open editor. Focused it is the interactive
+/// checklist — the highlighted row marked with `›`, and, while the add / edit
+/// input is open, a one-line input row (`+`/`✎` prefixed) with a block caret —
+/// under the accent frame and the `todos (編集中)` title. Unfocused it is a
+/// plain-framed read-only listing (no `›`: the selection is a focus concern),
+/// capped at `max`. A placeholder stands in when the checklist is empty.
+fn todos_box(editor: &NoteEditor, box_w: usize, max: usize, focused: bool) -> Vec<String> {
+    if !focused {
+        let lines: Vec<String> = if editor.todos().is_empty() {
+            vec!["(todo なし)".to_string()]
+        } else {
+            editor.todos().iter().map(fmt_todo).collect()
+        };
+        return note_box(&lines, None, None, box_w, max, "todos", false);
+    }
     match editor.todo_input() {
         None => {
             let sel = editor.selected_todo();
@@ -440,7 +480,7 @@ fn todos_box(editor: &NoteEditor, box_w: usize, edit_cap: usize, read_cap: usize
                     })
                     .collect()
             };
-            note_box(&lines, None, None, box_w, read_cap, "todos", true)
+            note_box(&lines, None, None, box_w, max, "todos (編集中)", true)
         }
         Some(input) => {
             // The existing rows (plain) followed by the inline input row, with the
@@ -459,7 +499,7 @@ fn todos_box(editor: &NoteEditor, box_w: usize, edit_cap: usize, read_cap: usize
                 Some((caret_row, caret_col)),
                 None,
                 box_w,
-                edit_cap,
+                max,
                 "todos (編集中)",
                 true,
             )
@@ -467,7 +507,71 @@ fn todos_box(editor: &NoteEditor, box_w: usize, edit_cap: usize, read_cap: usize
     }
 }
 
-/// The decisions tab body: one `MM-DD HH:MM  text` line per logged decision
+/// The `decisions` pane box of the open editor: the read-only decision log,
+/// capped at `max`. The pane never takes editing keys, so its focused title is
+/// `decisions (表示中)` (viewing, not editing) over the accent frame; unfocused
+/// it keeps the plain frame and the bare title.
+fn decisions_box(editor: &NoteEditor, box_w: usize, max: usize, focused: bool) -> Vec<String> {
+    let title = if focused {
+        "decisions (表示中)"
+    } else {
+        "decisions"
+    };
+    note_box(
+        &decision_lines(editor.decisions()),
+        None,
+        None,
+        box_w,
+        max,
+        title,
+        focused,
+    )
+}
+
+/// One pane box of the open editor, dispatched by `pane` (see the per-pane
+/// builders above). `max` caps the body; `focused` selects the editing surface
+/// and the accent frame.
+fn editor_pane_box(
+    editor: &NoteEditor,
+    pane: NotePane,
+    box_w: usize,
+    max: usize,
+    focused: bool,
+) -> Vec<String> {
+    match pane {
+        NotePane::Note => note_pane_box(editor, box_w, max, focused),
+        NotePane::Todos => todos_box(editor, box_w, max, focused),
+        NotePane::Decisions => decisions_box(editor, box_w, max, focused),
+    }
+}
+
+/// The open editor's overlay: the `note` / `todos` / `decisions` boxes stacked
+/// top to bottom in [`NotePane::all`] order, all visible at once. The pane
+/// height minus the three frames ([`NOTE_STACK_FRAME_ROWS`]) is the body
+/// budget: each unfocused pane gets a compact cap (a quarter of the budget, at
+/// most [`UNFOCUSED_NOTE_MAX_LINES`]) and the focused pane the rest (at most
+/// [`EDIT_NOTE_MAX_LINES`]). On a pane too short to give all three panes even
+/// one body line, the overlay falls back to the focused pane alone — the same
+/// single box the editor used to be — so a tiny terminal still edits.
+fn editor_stack(editor: &NoteEditor, box_w: usize, rows: usize) -> Vec<String> {
+    let budget = rows.saturating_sub(NOTE_STACK_FRAME_ROWS);
+    if budget < NotePane::all().len() {
+        let max = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
+        return editor_pane_box(editor, editor.focus(), box_w, max, true);
+    }
+    let unfocused = (budget / 4).clamp(1, UNFOCUSED_NOTE_MAX_LINES);
+    let focused = (budget - 2 * unfocused).min(EDIT_NOTE_MAX_LINES);
+    NotePane::all()
+        .into_iter()
+        .flat_map(|pane| {
+            let has_focus = pane == editor.focus();
+            let max = if has_focus { focused } else { unfocused };
+            editor_pane_box(editor, pane, box_w, max, has_focus)
+        })
+        .collect()
+}
+
+/// The decisions pane body: one `MM-DD HH:MM  text` line per logged decision
 /// (newlines flattened so each entry stays one row), or a placeholder when none
 /// have been recorded.
 fn decision_lines(decisions: &[SessionDecision]) -> Vec<String> {
@@ -505,43 +609,20 @@ fn selection_on_line(
 }
 
 /// The floating note overlay for the right pane, or `None` when none applies. The
-/// **editor** (when open, in any mode) wins; otherwise the highlighted session's
+/// **editor** (when open, in any mode) wins: its `note` / `todos` / `decisions`
+/// boxes stack in one top-right column (see [`editor_stack`]), the focused pane
+/// marked by the accent frame and title. Otherwise the highlighted session's
 /// **read-only** note shows while browsing in 選択 (see
-/// [`HomeState::visible_overview_note`]). The box is a narrow top-right column (see
-/// [`note_box_width`]) composited over the pane by [`right_pane_contents`], so
-/// the preview underneath — the session header, the live terminal — stays
-/// readable to its left and below it. `rows` caps the box height so the pane
-/// stays partly visible behind it; `width` is the full right-pane width (the box
-/// narrows itself within it).
+/// [`HomeState::visible_overview_note`]). The column is narrow (see
+/// [`note_box_width`]) and composited over the pane by [`right_pane_contents`],
+/// so the preview underneath — the session header, the live terminal — stays
+/// readable to its left and below it. `rows` caps the overlay height so the pane
+/// stays partly visible behind it; `width` is the full right-pane width (the
+/// boxes narrow themselves within it).
 fn note_overlay(state: &HomeState, width: usize, rows: usize) -> Option<Vec<String>> {
     let box_w = note_box_width(width);
     if let Some(editor) = state.note_editor() {
-        let edit_cap = EDIT_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
-        let read_cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);
-        // The open editor shows one of three tabs. Only `note` is editable (block
-        // caret + selection, windowed); `todos` / `decisions` are read-only lists.
-        // All three use the accent frame so the open editor stays unmistakable.
-        return Some(match editor.tab() {
-            NoteTab::Note => note_box(
-                editor.area().lines(),
-                Some(editor.area().cursor()),
-                editor.area().selection(),
-                box_w,
-                edit_cap,
-                "note (編集中)",
-                true,
-            ),
-            NoteTab::Todos => todos_box(editor, box_w, edit_cap, read_cap),
-            NoteTab::Decisions => note_box(
-                &decision_lines(editor.decisions()),
-                None,
-                None,
-                box_w,
-                read_cap,
-                "decisions",
-                true,
-            ),
-        });
+        return Some(editor_stack(editor, box_w, rows));
     }
     if let Some(note) = state.visible_overview_note() {
         let cap = SWITCH_NOTE_MAX_LINES.min(rows.saturating_sub(3)).max(1);

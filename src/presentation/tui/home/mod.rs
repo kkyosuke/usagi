@@ -495,7 +495,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     };
 
-    // Saving the todos tab replaces the row's whole checklist in state.json and
+    // Saving the todos pane replaces the row's whole checklist in state.json and
     // re-reads the sessions so the editor / sidebar reflect it. Like `set_note` it
     // routes the `⌂ root` row to the workspace-level list and every other name to
     // the named session, stays synchronous (no git work), and takes the same
