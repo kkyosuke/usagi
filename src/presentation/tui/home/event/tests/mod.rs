@@ -1388,7 +1388,7 @@ fn apply_due_wake_logs_when_no_agents_are_running() {
 fn run_wake_commands_schedules_and_cancels() {
     use chrono::Timelike;
     let now = Local::now();
-    
+
     // Future time today
     let mut future_h = now.hour();
     let mut future_m = now.minute() + 2;
@@ -1401,7 +1401,7 @@ fn run_wake_commands_schedules_and_cancels() {
         future_m = 59;
     }
     let future_time = format!("{:02}:{:02}", future_h, future_m);
-    
+
     // Past time today
     let past_time = if now.hour() > 0 {
         format!("{:02}:00", now.hour() - 1)
@@ -1439,7 +1439,6 @@ fn run_wake_commands_schedules_and_cancels() {
     let outcome = run(keys, sample_state()).unwrap();
     assert!(matches!(outcome, Outcome::Quit));
 }
-
 
 mod attached;
 mod background_tab;

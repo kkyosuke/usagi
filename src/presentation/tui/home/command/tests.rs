@@ -152,7 +152,6 @@ fn wake_completes_its_arguments() {
     assert!(after_cancel.candidates.is_empty());
 }
 
-
 #[test]
 fn man_without_argument_lists_every_command() {
     let registry = registry();
