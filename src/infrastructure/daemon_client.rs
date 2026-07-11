@@ -5,12 +5,12 @@
 //! surface the terminal pool and the pane render loop drive — a bounded local
 //! [`vt100::Parser`] for the current viewport, generation / bell / liveness
 //! counters, input and resize — while the process and full scrollback live in
-//! the daemon. It connects to the daemon's Unix socket, performs the
-//! `Spawn`→`Spawned` and `Attach`→`Attached` handshake, and then a background
-//! thread folds daemon `Screen` viewport snapshots and live raw `Output` deltas
-//! into the local parser. Historical scrolling sends `Scrollback` requests and
-//! receives bounded snapshots instead of replaying or retaining full history in
-//! the TUI process.
+//! the daemon. It connects to the daemon's Unix socket, verifies that both
+//! processes run the same executable generation, performs the `Spawn`→`Spawned`
+//! and `Attach`→`Attached` handshakes, and then a background thread folds daemon
+//! `Screen` viewport snapshots and live raw `Output` deltas into the local
+//! parser. Historical scrolling sends `Scrollback` requests and receives bounded
+//! snapshots instead of replaying or retaining full history in the TUI process.
 //!
 //! Dropping a `DaemonTerminal` only detaches (the daemon keeps the terminal
 //! running — that is the point of daemon ownership); [`DaemonTerminal::kill`]
@@ -23,10 +23,11 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -37,8 +38,8 @@ use crate::infrastructure::daemon_ipc::{decode_message, encode_message, socket_p
 use crate::infrastructure::daemon_store;
 use crate::infrastructure::pty::ScreenCallbacks;
 use crate::usecase::daemon_attach::{
-    attach_reply, drain_buffered_frames, spawn_reply, AttachReply, DrainOutcome, ScreenSink,
-    SpawnReply,
+    attach_reply, build_reply, drain_buffered_frames, spawn_reply, AttachReply, BuildReply,
+    DrainOutcome, ScreenSink, SpawnReply,
 };
 
 /// How long a connect keeps retrying while a daemon record exists (the daemon
@@ -57,6 +58,71 @@ const RETRY_PAUSE: Duration = Duration::from_millis(50);
 /// The reader thread's stack, for the same reason as the PTY reader's: it only
 /// loops over a blocking `read` and hands bytes to the decoder/parser.
 const READER_STACK_BYTES: usize = 256 * 1024;
+
+/// This process's executable generation, captured once. Cargo replaces the
+/// debug binary between `cargo run` builds while an already-running daemon keeps
+/// executing the old inode, so device/inode plus file metadata distinguishes the
+/// two even when both report the same package version.
+static BUILD_IDENTITY: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+
+/// Marks a failure that happened before the daemon's executable generation could
+/// be verified. Restore callers use this distinction to avoid starting a second
+/// agent while the recorded terminal may still be alive in an older daemon.
+#[derive(Debug)]
+pub struct DaemonBuildHandshakeError {
+    detail: String,
+}
+
+impl DaemonBuildHandshakeError {
+    fn new(error: anyhow::Error) -> Self {
+        Self {
+            detail: format!("{error:#}"),
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonBuildHandshakeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "daemon build handshake failed: {}", self.detail)
+    }
+}
+
+impl std::error::Error for DaemonBuildHandshakeError {}
+
+/// Identify the running usagi executable generation for the daemon handshake.
+/// The value is cached before the TUI starts, so a later rebuild cannot make this
+/// still-running process claim the replacement binary's identity.
+pub fn build_identity() -> Result<String> {
+    BUILD_IDENTITY
+        .get_or_init(|| {
+            let exe = std::env::current_exe()
+                .map_err(|error| format!("locating the current usagi executable: {error}"))?;
+            build_identity_for(&exe).map_err(|error| error.to_string())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+/// Identify the executable at `path`. Public so IPC integration tests can
+/// calculate the identity of the separately-built `usagi` test binary that they
+/// launch as the daemon.
+pub fn build_identity_for(path: &Path) -> Result<String> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        format!(
+            "reading metadata for the usagi executable {}",
+            path.display()
+        )
+    })?;
+    Ok(format!(
+        "{}:{:x}:{:x}:{}:{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    ))
+}
 
 /// Cloneable handle for injecting input into a daemon terminal from outside the
 /// render loop — the remote counterpart of
@@ -179,6 +245,38 @@ fn await_reply<T>(
     bail!("timed out waiting for the daemon's handshake reply")
 }
 
+/// Verify that this client and the daemon execute the same binary generation
+/// before sending any terminal operation. An older daemon does not understand
+/// `Hello` and closes the connection; a different current daemon reports a
+/// distinct identity. Both are marked as build-handshake failures so attended
+/// launches can deliberately fall back locally while unattended launches avoid
+/// duplicating daemon-owned agents that may already be running.
+fn negotiate_build(stream: &mut UnixStream, decoder: &mut FrameDecoder) -> Result<()> {
+    negotiate_build_inner(stream, decoder)
+        .map_err(|error| anyhow::Error::new(DaemonBuildHandshakeError::new(error)))
+}
+
+fn negotiate_build_inner(stream: &mut UnixStream, decoder: &mut FrameDecoder) -> Result<()> {
+    let client = build_identity()?;
+    stream
+        .write_all(&encode_message(&ClientMessage::Hello {
+            build: client.clone(),
+        })?)
+        .context("sending the daemon build handshake")?;
+    await_reply(stream, decoder, |message| {
+        match build_reply(message, &client) {
+            BuildReply::Compatible => Some(Ok(())),
+            BuildReply::Incompatible { daemon } => Some(Err(anyhow!(
+                "daemon build mismatch (client {client}, daemon {daemon})"
+            ))),
+            BuildReply::Rejected(reason) => Some(Err(anyhow!(
+                "the daemon refused the build handshake: {reason}"
+            ))),
+            BuildReply::NotYet => None,
+        }
+    })?
+}
+
 /// The reader thread's sink: folds the daemon's screen feed into the shared
 /// parser and wakes the render loop, mirroring what the PTY reader thread does
 /// for a locally-owned session. Holds the parser weakly so a dropped terminal
@@ -240,8 +338,37 @@ impl DaemonTerminal {
         scrollback: usize,
         env: &BTreeMap<String, String>,
     ) -> Result<Self> {
+        Self::spawn_after_build_check(
+            daemon_dir,
+            worktree,
+            rows,
+            cols,
+            command,
+            scrollback,
+            env,
+            &mut || {},
+        )
+    }
+
+    /// Spawn like [`spawn`](Self::spawn), invoking `before_spawn` after the build
+    /// handshake succeeds but before the daemon receives `Spawn`. The terminal
+    /// pool uses this boundary to clear stale agent phase only when a process is
+    /// actually about to start; a rejected old daemon leaves the live phase intact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_after_build_check(
+        daemon_dir: &Path,
+        worktree: &Path,
+        rows: u16,
+        cols: u16,
+        command: Option<&str>,
+        scrollback: usize,
+        env: &BTreeMap<String, String>,
+        before_spawn: &mut dyn FnMut(),
+    ) -> Result<Self> {
         let mut stream = connect(daemon_dir)?;
         let mut decoder = FrameDecoder::new();
+        negotiate_build(&mut stream, &mut decoder)?;
+        before_spawn();
         let spawn = ClientMessage::Spawn {
             worktree: worktree.to_path_buf(),
             command: command.map(str::to_string),
@@ -280,8 +407,9 @@ impl DaemonTerminal {
         cols: u16,
         scrollback: usize,
     ) -> Result<Self> {
-        let stream = connect(daemon_dir)?;
-        let decoder = FrameDecoder::new();
+        let mut stream = connect(daemon_dir)?;
+        let mut decoder = FrameDecoder::new();
+        negotiate_build(&mut stream, &mut decoder)?;
         Self::attach_over(
             stream, decoder, worktree, terminal, 0, rows, cols, scrollback,
         )

@@ -8,13 +8,65 @@
 //! `Output` deltas the client folds into its local vt100 parser, closed by
 //! `Exited` when the terminal's process ends.
 //!
-//! This module is the pure half of that client: matching handshake replies
-//! ([`spawn_reply`] / [`attach_reply`]) and folding feed messages into a
-//! [`ScreenSink`] ([`apply_screen_message`]). The socket, the reader thread and
-//! the real parser live in [`crate::infrastructure::daemon_client`]; injecting
-//! the sink keeps every protocol branch unit-testable without either.
+//! This module is the pure half of that client: matching build and terminal
+//! handshake replies ([`build_reply`] / [`spawn_reply`] / [`attach_reply`]) and
+//! folding feed messages into a [`ScreenSink`] ([`apply_screen_message`]). The
+//! socket, the reader thread and the real parser live in
+//! [`crate::infrastructure::daemon_client`]; injecting the sink keeps every
+//! protocol branch unit-testable without either. It also owns the small policy
+//! that keeps unattended launches from falling back to a potentially duplicate
+//! local agent when daemon ownership is uncertain.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::domain::daemon_ipc::{FrameDecoder, ServerMessage, TerminalId};
+
+/// Whether a daemon failure may degrade a fresh pane to a TUI-local PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonFailureFallback {
+    /// The user explicitly requested this pane and may choose to run it locally.
+    UserInitiated,
+    /// Restore and queued-prompt work must not risk duplicating an existing agent.
+    Unattended,
+}
+
+/// What kind of daemon failure a fresh spawn encountered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonFailureKind {
+    /// The daemon could not be reached or rejected the terminal operation for an
+    /// ordinary reason. Existing behavior falls back locally.
+    Unavailable,
+    /// The executable-generation handshake failed, so an older daemon may own an
+    /// agent that this TUI cannot inspect.
+    BuildUnverified,
+}
+
+/// Decide whether a failed daemon spawn may continue with a local PTY. Ordinary
+/// daemon unavailability preserves the existing fallback; only an unattended
+/// launch across an unverified build is unsafe.
+pub fn should_fallback_to_local(policy: DaemonFailureFallback, failure: DaemonFailureKind) -> bool {
+    matches!(policy, DaemonFailureFallback::UserInitiated)
+        || matches!(failure, DaemonFailureKind::Unavailable)
+}
+
+/// Worktrees whose unattended launch is paused because their daemon build could
+/// not be verified. The guard lasts for this TUI run; a manual launch is not
+/// governed by it, and restarting after replacing/stopping the daemon retries.
+#[derive(Debug, Default)]
+pub struct UnattendedLaunchGuard {
+    blocked: HashSet<PathBuf>,
+}
+
+impl UnattendedLaunchGuard {
+    pub fn block(&mut self, worktree: &Path) {
+        self.blocked.insert(worktree.to_path_buf());
+    }
+
+    pub fn is_blocked(&self, worktree: &Path) -> bool {
+        self.blocked.contains(worktree)
+    }
+}
 
 /// Where an attach client folds the daemon's screen feed. Implemented over the
 /// real vt100 parser by the infrastructure client; over a recording fake in
@@ -108,6 +160,33 @@ pub fn apply_screen_message(
             true
         }
         _ => false,
+    }
+}
+
+/// How one server message answers the build-identity handshake that precedes
+/// every terminal spawn or attach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildReply {
+    /// Client and daemon are the same executable generation.
+    Compatible,
+    /// The daemon belongs to another build and must not receive terminal
+    /// operations from this client.
+    Incompatible { daemon: String },
+    /// The daemon explicitly refused the handshake.
+    Rejected(String),
+    /// Not an answer to the handshake; keep reading.
+    NotYet,
+}
+
+/// Interpret one server message as the answer to a build-identity handshake.
+pub fn build_reply(message: &ServerMessage, client: &str) -> BuildReply {
+    match message {
+        ServerMessage::Hello { build } if build == client => BuildReply::Compatible,
+        ServerMessage::Hello { build } => BuildReply::Incompatible {
+            daemon: build.clone(),
+        },
+        ServerMessage::Error { message } => BuildReply::Rejected(message.clone()),
+        _ => BuildReply::NotYet,
     }
 }
 
@@ -450,6 +529,78 @@ mod tests {
             }),
             SpawnReply::NotYet
         );
+    }
+
+    #[test]
+    fn build_reply_accepts_only_the_same_executable_generation() {
+        assert_eq!(
+            build_reply(
+                &ServerMessage::Hello {
+                    build: "same".to_string(),
+                },
+                "same",
+            ),
+            BuildReply::Compatible
+        );
+        assert_eq!(
+            build_reply(
+                &ServerMessage::Hello {
+                    build: "old".to_string(),
+                },
+                "new",
+            ),
+            BuildReply::Incompatible {
+                daemon: "old".to_string()
+            }
+        );
+        assert_eq!(
+            build_reply(
+                &ServerMessage::Error {
+                    message: "unsupported".to_string(),
+                },
+                "new",
+            ),
+            BuildReply::Rejected("unsupported".to_string())
+        );
+        assert_eq!(
+            build_reply(
+                &ServerMessage::Sessions {
+                    sessions: Vec::new()
+                },
+                "new"
+            ),
+            BuildReply::NotYet
+        );
+    }
+
+    #[test]
+    fn only_user_initiated_launches_fall_back_after_a_daemon_failure() {
+        assert!(should_fallback_to_local(
+            DaemonFailureFallback::UserInitiated,
+            DaemonFailureKind::BuildUnverified,
+        ));
+        assert!(!should_fallback_to_local(
+            DaemonFailureFallback::Unattended,
+            DaemonFailureKind::BuildUnverified,
+        ));
+        assert!(should_fallback_to_local(
+            DaemonFailureFallback::Unattended,
+            DaemonFailureKind::Unavailable,
+        ));
+    }
+
+    #[test]
+    fn unattended_launch_guard_blocks_only_the_recorded_worktrees() {
+        let blocked = PathBuf::from("/repo/blocked");
+        let other = PathBuf::from("/repo/other");
+        let mut guard = UnattendedLaunchGuard::default();
+
+        assert!(!guard.is_blocked(&blocked));
+        guard.block(&blocked);
+        guard.block(&blocked);
+
+        assert!(guard.is_blocked(&blocked));
+        assert!(!guard.is_blocked(&other));
     }
 
     #[test]

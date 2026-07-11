@@ -32,6 +32,7 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::SessionRecord;
 use crate::presentation::tui::io::term_reader::TermKeyReader;
+use crate::usecase::daemon_attach::{DaemonFailureFallback, UnattendedLaunchGuard};
 
 pub use event::Outcome;
 
@@ -263,6 +264,7 @@ struct LaunchJobManager {
     env_by_root: Arc<Mutex<HashMap<PathBuf, SharedEnv>>>,
     in_flight: HashMap<u64, LaunchInFlight>,
     dirs_in_flight: HashMap<PathBuf, usize>,
+    unattended_guard: UnattendedLaunchGuard,
 }
 
 #[derive(Clone, Copy)]
@@ -288,11 +290,16 @@ impl LaunchJobManager {
             env_by_root: Arc::new(Mutex::new(HashMap::new())),
             in_flight: HashMap::new(),
             dirs_in_flight: HashMap::new(),
+            unattended_guard: UnattendedLaunchGuard::default(),
         }
     }
 
     fn in_flight_for(&self, dir: &Path) -> bool {
         self.dirs_in_flight.get(dir).copied().unwrap_or(0) > 0
+    }
+
+    fn unattended_blocked_for(&self, dir: &Path) -> bool {
+        self.unattended_guard.is_blocked(dir)
     }
 
     fn env_slot(&self, ws_root: &Path) -> SharedEnv {
@@ -363,6 +370,7 @@ impl LaunchJobManager {
                             label: &prepared.label,
                             env: &prepared.env,
                             attach: prepared.attach,
+                            daemon_failure_fallback: DaemonFailureFallback::Unattended,
                         },
                     );
                     match spawn {
@@ -402,12 +410,27 @@ impl LaunchJobManager {
                             lines.push(line);
                         }
                         Err(err) => {
+                            #[cfg(unix)]
+                            let build_unverified = err
+                                .downcast_ref::<
+                                    crate::infrastructure::daemon_client::DaemonBuildHandshakeError,
+                                >()
+                                .is_some();
+                            #[cfg(not(unix))]
+                            let build_unverified = false;
+                            if build_unverified {
+                                self.unattended_guard.block(&prepared.dir);
+                            }
                             release_launch_source(pool, &prepared.dir, &prepared.source);
-                            requeue_launch_failure(
-                                &prepared.dir,
-                                &prepared.source,
-                                &err.to_string(),
-                            );
+                            if build_unverified {
+                                requeue_launch_source(&prepared.dir, &prepared.source);
+                            } else {
+                                requeue_launch_failure(
+                                    &prepared.dir,
+                                    &prepared.source,
+                                    &err.to_string(),
+                                );
+                            }
                             let line = format!(
                                 "failed to launch pane for {}: {err:#}",
                                 prepared.dir.display()
@@ -1077,27 +1100,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         }
     }
 
-    // Pick up prompts queued before this screen opened — an issue delegated while
-    // no TUI was running — starting each pane-less target's agent in the background
-    // so a delegated issue is already being worked when the screen opens. Runs
-    // regardless of pane restore (a separate feature) and is gated by its own
-    // setting; a no-op when disabled or nothing is queued. The event loop keeps
-    // scanning for prompts queued *while* the screen runs (see `autostart_queued`).
-    for line in reconcile_orchestrators(&workspace.path, &pool, autostart_queued_prompt_limit)
-        .into_iter()
-        .chain(autostart_queued_prompts(
-            &state,
-            &pool,
-            &launch_jobs,
-            &tasks,
-            &agent_wiring,
-            default_cli,
-            AutostartLaunchSettings {
-                enabled: autostart_queued_prompts_enabled,
-                limit: autostart_queued_prompt_limit,
-            },
-        ))
-    {
+    // Reconcile work delegated while no TUI was running. Queued prompts are
+    // started on the first idle pass below, after every persisted pane has been
+    // dispatched for restore; the per-worktree in-flight count then prevents a
+    // queued launch racing and duplicating the restored agent.
+    for line in reconcile_orchestrators(&workspace.path, &pool, autostart_queued_prompt_limit) {
         state.log_output(line);
     }
 
@@ -1424,6 +1431,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             label: &label,
                             env: &pane_env,
                             attach: None,
+                            daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                         },
                     )?;
                 } else {
@@ -1438,6 +1446,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             label: &label,
                             env: &pane_env,
                             attach: None,
+                            daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                         },
                     )?;
                 }
@@ -1544,6 +1553,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                                         label: &label,
                                         env: &add_env,
                                         attach: None,
+                                        daemon_failure_fallback:
+                                            DaemonFailureFallback::UserInitiated,
                                     },
                                 )?;
                             }
@@ -1831,6 +1842,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         label: &ps.label,
                         env: &env,
                         attach: None,
+                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                     },
                 ) {
                     Ok(id) => {
@@ -2490,7 +2502,10 @@ fn autostart_queued_prompts(
         }
         // A live pane already drives this session (or an agent is running there):
         // leave any queued prompt to the ordinary consume-on-fresh-launch path.
-        if pool.borrow().has_live_pane(&dir) || launch_jobs.borrow().in_flight_for(&dir) {
+        if pool.borrow().has_live_pane(&dir)
+            || launch_jobs.borrow().in_flight_for(&dir)
+            || launch_jobs.borrow().unattended_blocked_for(&dir)
+        {
             continue;
         }
         // Gather any prompt queued for this pane-less session from both channels

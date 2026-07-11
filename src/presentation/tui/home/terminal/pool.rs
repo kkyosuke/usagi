@@ -39,6 +39,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use anyhow::Context;
 use anyhow::Result;
 use console::Term;
 
@@ -46,7 +48,9 @@ use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
 use crate::domain::workspace_state::PrLink;
 #[cfg(unix)]
-use crate::infrastructure::daemon_client::{DaemonInputHandle, DaemonTerminal};
+use crate::infrastructure::daemon_client::{
+    DaemonBuildHandshakeError, DaemonInputHandle, DaemonTerminal,
+};
 #[cfg(unix)]
 use crate::infrastructure::daemon_store;
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
@@ -56,6 +60,9 @@ use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{
     agent_live_pane_store, agent_live_prompt_store, agent_state_store, error_log, session_monitor,
 };
+use crate::usecase::daemon_attach::DaemonFailureFallback;
+#[cfg(unix)]
+use crate::usecase::daemon_attach::{should_fallback_to_local, DaemonFailureKind};
 
 use super::super::pane_input;
 use super::super::ui;
@@ -1126,6 +1133,12 @@ pub struct PaneLaunch<'a> {
     /// (with `agent_command`) if the daemon no longer knows the id. `None` for
     /// a brand-new pane.
     pub attach: Option<u64>,
+    /// Whether a build-unverified daemon spawn may use a TUI-local PTY.
+    /// User-initiated launches allow this so `cargo run` remains usable with an
+    /// older daemon. Restore and queued-prompt launches reject it because that
+    /// daemon may already own an agent for the same worktree. Ordinary daemon
+    /// unavailability keeps the existing local fallback for both policies.
+    pub daemon_failure_fallback: DaemonFailureFallback,
 }
 
 /// The live shells embedded in the workspace screen, keyed by worktree path —
@@ -1709,11 +1722,14 @@ impl TerminalPool {
         // A restored pane whose snapshot recorded a daemon terminal id first
         // tries to re-attach to that still-running terminal: the agent (and its
         // recorded phase) is adopted mid-run, so nothing is cleared or resumed.
-        // Only when the daemon no longer knows the id (the terminal exited, or
-        // the daemon restarted) does this fall through to a fresh spawn.
+        // Only when the compatible daemon no longer knows the id (the terminal
+        // exited, or the daemon restarted) does this fall through to a fresh
+        // spawn. A build-handshake failure is propagated instead: the recorded
+        // agent may still be running in the older daemon, so resuming it locally
+        // would start a duplicate in the same worktree.
         #[cfg(unix)]
         if let Some(terminal) = launch.attach {
-            if let Some(pty) = attach_daemon_terminal(dir, terminal, &geo, self.scrollback_lines) {
+            if let Some(pty) = attach_daemon_terminal(dir, terminal, &geo, self.scrollback_lines)? {
                 let id = self.allocate_pane_id();
                 return Ok(Pane {
                     id,
@@ -1726,12 +1742,23 @@ impl TerminalPool {
             }
         }
 
-        if matches!(kind, PaneKind::Agent) {
-            agent_state_store::clear(dir);
+        let fresh_agent = matches!(kind, PaneKind::Agent);
+        let mut before_spawn = || {
+            if fresh_agent {
+                agent_state_store::clear(dir);
+            }
+        };
+        let pty = spawn_backend(
+            dir,
+            &geo,
+            initial,
+            self.scrollback_lines,
+            launch.env,
+            launch.daemon_failure_fallback,
+            &mut before_spawn,
+        )?;
+        if fresh_agent {
             self.lock().monitor.forget(dir);
-        }
-        let pty = spawn_backend(dir, &geo, initial, self.scrollback_lines, launch.env)?;
-        if matches!(kind, PaneKind::Agent) {
             if let Some(prompt) = launch.opening_prompt {
                 let input = pty.input_handle();
                 let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
@@ -2073,23 +2100,32 @@ impl Drop for TerminalPool {
 
 /// Spawn the backend for a new pane. The normal path asks the daemon (spawned
 /// alongside the TUI) for a terminal it owns, so the shell — and any agent CLI
-/// inside it — survives this TUI process. When the daemon is unreachable (it
-/// failed to start, or died mid-session) the pane falls back to a TUI-local
-/// PTY: everything works as it did pre-daemon, except the pane dies with the
-/// TUI — the fallback is recorded to the error log so a silently-local pane is
-/// diagnosable. Non-Unix platforms always take the local path (the IPC socket
-/// is Unix-only).
+/// inside it — survives this TUI process. An ordinary daemon failure falls back
+/// to a TUI-local PTY. Across an unverified build, a user-initiated pane may also
+/// fall back, while an unattended restore/autostart rejects the launch because
+/// the old daemon may own the same agent. `before_spawn` resets fresh agent state
+/// only after a remote build handshake succeeds, or immediately before a local
+/// spawn. Non-Unix platforms always take the local path.
 fn spawn_backend(
     dir: &Path,
     geo: &ui::TerminalGeometry,
     initial: Option<&str>,
     scrollback: usize,
     env: &BTreeMap<String, String>,
+    _daemon_failure_fallback: DaemonFailureFallback,
+    before_spawn: &mut dyn FnMut(),
 ) -> Result<PaneBackend> {
+    let mut prepared = false;
+    let mut prepare_once = || {
+        if !prepared {
+            before_spawn();
+            prepared = true;
+        }
+    };
     #[cfg(unix)]
     {
         let remote = daemon_store::default_dir().and_then(|daemon_dir| {
-            DaemonTerminal::spawn(
+            DaemonTerminal::spawn_after_build_check(
                 &daemon_dir,
                 dir,
                 geo.rows,
@@ -2097,10 +2133,26 @@ fn spawn_backend(
                 initial,
                 scrollback,
                 env,
+                &mut prepare_once,
             )
         });
         match remote {
             Ok(remote) => return Ok(PaneBackend::Remote(remote)),
+            Err(error)
+                if !should_fallback_to_local(
+                    _daemon_failure_fallback,
+                    if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() {
+                        DaemonFailureKind::BuildUnverified
+                    } else {
+                        DaemonFailureKind::Unavailable
+                    },
+                ) =>
+            {
+                return Err(error).context(
+                    "refusing an unattended local pane launch because the daemon build could not \
+                     be verified; a daemon-owned process may already be running",
+                );
+            }
             Err(error) => error_log::ErrorLog::record(&format!(
                 "daemon terminal unavailable for {}; falling back to a TUI-local PTY \
                  (this pane will close with the TUI): {error:#}",
@@ -2108,26 +2160,40 @@ fn spawn_backend(
             )),
         }
     }
+    prepare_once();
     Ok(PaneBackend::Local(PtySession::spawn(
         dir, geo.rows, geo.cols, initial, scrollback, env,
     )?))
 }
 
 /// Re-attach to the daemon terminal a persisted pane snapshot recorded, or
-/// `None` when the daemon does not know the id any more (the terminal exited,
-/// or the daemon restarted) — the caller then spawns afresh. A failed re-attach
-/// is expected across reboots, so it is not logged as an error.
+/// `None` when the compatible daemon does not know the id any more (the terminal
+/// exited, or the daemon restarted) — the caller then spawns afresh. A build
+/// handshake failure is returned: the recorded process can still be alive in an
+/// older daemon, so automatically resuming it would create a duplicate agent.
 #[cfg(unix)]
 fn attach_daemon_terminal(
     dir: &Path,
     terminal: u64,
     geo: &ui::TerminalGeometry,
     scrollback: usize,
-) -> Option<PaneBackend> {
-    let daemon_dir = daemon_store::default_dir().ok()?;
-    DaemonTerminal::attach(&daemon_dir, dir, terminal, geo.rows, geo.cols, scrollback)
-        .ok()
-        .map(PaneBackend::Remote)
+) -> Result<Option<PaneBackend>> {
+    let daemon_dir = match daemon_store::default_dir() {
+        Ok(dir) => dir,
+        Err(_) => return Ok(None),
+    };
+    match DaemonTerminal::attach(&daemon_dir, dir, terminal, geo.rows, geo.cols, scrollback) {
+        Ok(terminal) => Ok(Some(PaneBackend::Remote(terminal))),
+        Err(error) if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() => Err(error)
+            .with_context(|| {
+                format!(
+                    "cannot safely restore daemon terminal {terminal} for {} because its build \
+                     could not be verified; the original process may still be running",
+                    dir.display()
+                )
+            }),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
