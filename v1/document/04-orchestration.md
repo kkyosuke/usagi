@@ -87,7 +87,7 @@ root（⌂ root 行）
 
 ### status ライフサイクル（単一書き手）
 
-`status` の**書き手は常に当該 issue の session だけ**です（[.agents/workflow.md](../.agents/workflow.md)）。root は
+`status` の**書き手は常に当該 issue の session だけ**です（[.agents/workflow.md](../../.agents/workflow.md)）。root は
 原則 2 で `status` を書けないため、**session が生きているうちに自枝で `done` を立て、PR（マージ）で `main` に運ぶ**のが
 唯一整合する経路です。
 

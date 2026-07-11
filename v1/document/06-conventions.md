@@ -56,7 +56,7 @@
 ## ドキュメント規約
 
 `document/` 配下・`README.md`・`.agents/` を書くときのルール。**実装を変えたら同じ PR で対応ドキュメントも更新する**
-（[ワークフロー](../.agents/workflow.md) ステップ 3）のが大前提で、その上で次を守る。
+（[ワークフロー](../../.agents/workflow.md) ステップ 3）のが大前提で、その上で次を守る。
 
 ### 記載＝実装済み
 
@@ -118,7 +118,7 @@
 |---|---|---|
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 module・target と直接 consumer の test | `cargo fmt --all -- --check` / `cargo check --all-targets` / 変更箇所に対応する `cargo test --lib <module>::`、`cargo test --test <target>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
-| push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --ignore-filename-regex "$COVERAGE_IGNORE" --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --ignore-filename-regex "$COVERAGE_IGNORE" --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
 | CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
 
 push / PR 前の coverage は次のローカル経路で実行してよい。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では

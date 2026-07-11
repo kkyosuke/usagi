@@ -1,7 +1,6 @@
-> **退避された v1 実装** — このディレクトリは旧実装（v1）をそのまま退避したもの。
+> **退避された v1 実装** — このディレクトリは旧実装（v1）を仕様ドキュメント
+> （[document/](document/README.md)）ごとそのまま退避したもの。
 > 現行の開発はリポジトリルート（v2）で行う（[ルートの README](../README.md)）。
-> 本文はリポジトリルート時代のまま残しているため、`document/` などへの相対リンクは
-> `../` を補って読み替えること。
 
 <div align="center">
 
@@ -24,7 +23,7 @@
 [![Coverage](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/coverage.yml)
 [![Release](https://github.com/KKyosuke/usagi/actions/workflows/release.yml/badge.svg)](https://github.com/KKyosuke/usagi/actions/workflows/release.yml)
 <br>
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](../LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2021-orange.svg?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue.svg)](#installation)
 

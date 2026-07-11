@@ -8,7 +8,7 @@
 |---|---|
 | root と session の責務分界 / 起源フロー / status ライフサイクル / ガードレール | [04-orchestration.md#自律オーケストレーション運用モデル](../04-orchestration.md#自律オーケストレーション運用モデル) |
 | MCP tool の一覧・`session_delegate_brief` / `session_delegate_issue` の挙動・root 書き込みガード | [03-commands/03-mcp.md](../03-commands/03-mcp.md) |
-| AI エージェントの作業フロー・status 単一書き手規約 | [../../.agents/workflow.md](../../.agents/workflow.md) |
+| AI エージェントの作業フロー・status 単一書き手規約 | [../../.agents/workflow.md](../../../.agents/workflow.md) |
 | pre-commit backstop と開発規約 | [06-conventions.md](../06-conventions.md) |
 
 設計の履歴は git の履歴で確認します。このファイルは古いリンクから正本へ案内するために残しています。

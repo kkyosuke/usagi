@@ -7,8 +7,7 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
 | 場所 | 内容 |
 |---|---|
 | `/`（ルート） | v2 の実装。CI（fmt / clippy / test / coverage 100%）の対象 |
-| `v1/` | 退避した旧実装。独立した Cargo プロジェクトで、ルートのビルド・CI の対象外 |
-| `document/` | 仕様ドキュメント。v1 実装時点の記述を含む（v2 の実装に合わせて順次更新する） |
+| `v1/` | 退避した旧実装。仕様ドキュメント（`v1/document/`）ごと独立した Cargo プロジェクトで、ルートのビルド・CI の対象外 |
 
 ## 構成（v2）
 
@@ -45,7 +44,7 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
   （テストカバレッジ 100% を維持する）。
 - 依存クレートは必要になった時点で追加する（v1 の依存を先回りで持ち込まない）。
 - コミット・PR・品質チェックの規約はリポジトリ共通の
-  [document/06-conventions.md](document/06-conventions.md) に従う。
+  [v1/document/06-conventions.md](v1/document/06-conventions.md) に従う（v1/v2 共通で有効）。
 
 ## v1 を使う・参照する
 
@@ -57,4 +56,4 @@ cargo build --release
 ```
 
 機能・画面・データ仕様のリファレンスは [v1/README.md](v1/README.md) と
-[document/](document/README.md) を参照する。
+[v1/document/](v1/document/README.md) を参照する。
