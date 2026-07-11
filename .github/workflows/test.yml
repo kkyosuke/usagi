@@ -57,3 +57,6 @@ jobs:
 
     - name: Test recommended-test selector
       run: bash scripts/tests/recommend-tests.sh
+
+    - name: Test nextest JUnit summarizer
+      run: bash scripts/tests/summarize-nextest-junit.sh

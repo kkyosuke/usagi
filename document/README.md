@@ -16,6 +16,7 @@
 | 4 | [04-orchestration.md](04-orchestration.md) | セッション・worktree オーケストレーションの概念とライフサイクル |
 | 5 | [05-settings.md](05-settings.md) | 設定項目・保存場所・変更方法・環境変数 |
 | 6 | [06-conventions.md](06-conventions.md) | 開発規約（ブランチ・コミット・PR・ドキュメント規約・品質チェック・hooks） |
+| 7 | [07-test-observability.md](07-test-observability.md) | slow/flaky test の計測方法・nextest 採否・基準値 |
 
 ### 画面設計 — [design/](design/README.md)
 
