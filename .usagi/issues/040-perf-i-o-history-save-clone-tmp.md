@@ -1,13 +1,13 @@
 ---
 number: 40
 title: perf: 永続化 I/O と検索の最適化（history 追記・save clone・tmp 名統一）
-status: todo
+status: done
 priority: medium
 labels: [perf, core]
 dependson: []
 related: []
 created_at: 2026-06-17T22:50:58.301215+00:00
-updated_at: 2026-06-17T22:50:58.301215+00:00
+updated_at: 2026-07-11T00:54:11.883126+00:00
 ---
 
 ## 背景
