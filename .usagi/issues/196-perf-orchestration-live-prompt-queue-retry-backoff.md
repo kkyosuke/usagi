@@ -1,13 +1,13 @@
 ---
 number: 196
 title: perf(orchestration): live prompt queue に総量上限と retry backoff を導入する
-status: todo
+status: done
 priority: medium
 labels: [perf, orchestration, mcp, review]
 dependson: []
 related: [136, 184]
 created_at: 2026-07-11T01:30:35.617474+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T07:11:29.250926+00:00
 ---
 
 ## 背景
