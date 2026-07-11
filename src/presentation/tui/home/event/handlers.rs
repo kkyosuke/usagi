@@ -1547,6 +1547,10 @@ fn open_pane(
     let dir = selected_dir(state, wiring.workspace_root);
     state.show_attached();
     let outcome = (wiring.open_terminal)(state, &dir, agent, new_pane);
+    // The embedded pane is authoritative while 没入. A background rebuild (or
+    // stale restored cursor) must not make its exit actions operate on another
+    // unite group: re-anchor by the pane's path before handling Ctrl-O o/a.
+    state.focus_attached_dir(&dir);
     // The pane toggled `crossterm`'s raw mode around itself and ran a full-screen
     // child that may have reset the terminal; re-assert the alternate screen and
     // wheel-capture modes so the wheel can't scroll the host terminal once we are

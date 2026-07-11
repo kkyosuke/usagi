@@ -979,6 +979,146 @@ fn restore_focus_attached_focuses_and_arms_a_one_shot_attach() {
 }
 
 #[test]
+fn unite_resume_target_qualifies_and_restores_the_extra_workspace_root() {
+    let mut state = state();
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("feature", 1)],
+        issues: Vec::new(),
+    }]);
+    let tools_root = state.list().group_root_row(1).unwrap();
+    state.overview_select(tools_root);
+
+    assert_eq!(state.resume_focus_target(), "tools:root");
+
+    state.overview_select(0);
+    state.restore_focus("tools:root", ResumeLevel::Attached);
+    assert_eq!(state.list().selected_group(), 1);
+    assert!(state.list().root_selected());
+    assert_eq!(state.selected_workspace_root(), PathBuf::from("/tools"));
+    assert!(state.take_resume_attach());
+}
+
+#[test]
+fn unite_restore_disambiguates_same_named_sessions() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("feature", 1)]);
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("feature", 1)],
+        issues: Vec::new(),
+    }]);
+
+    state.restore_focus("tools:feature", ResumeLevel::Closeup);
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "feature");
+    assert_eq!(state.selected_workspace_root(), PathBuf::from("/tools"));
+}
+
+#[test]
+fn attached_dir_reanchors_an_extra_workspace_root_after_cursor_drift() {
+    let mut state = state();
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![session_record("feature", 1)],
+        issues: Vec::new(),
+    }]);
+    state.overview_select(0); // stale cursor in the upper workspace
+
+    assert!(state.focus_attached_dir(Path::new("/tools")));
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().active_group(), 1);
+    assert!(state.list().root_selected());
+}
+
+#[test]
+fn attached_dir_reanchors_a_same_named_session_in_the_owning_workspace() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("feature", 1)]);
+    let mut extra = session_record("feature", 1);
+    extra.root = PathBuf::from("/tools/.usagi/sessions/feature");
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![extra],
+        issues: Vec::new(),
+    }]);
+    state.overview_select(1); // primary's same-named session
+
+    assert!(state.focus_attached_dir(Path::new("/tools/.usagi/sessions/feature")));
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().active_group(), 1);
+}
+
+#[test]
+fn attached_dir_ignores_a_path_outside_the_open_workspaces() {
+    let mut state = state();
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: Vec::new(),
+        issues: Vec::new(),
+    }]);
+    let tools_root = state.list().group_root_row(1).unwrap();
+    state.overview_select(tools_root);
+    state.toggle_selected_collapsed();
+    assert!(state.list().is_collapsed(1));
+    state.overview_select(0);
+    let selected = state.list().selected_index();
+
+    assert!(state.list().row_of_path(Path::new("/unknown")).is_none());
+    assert!(!state.focus_attached_dir(Path::new("/unknown")));
+    assert_eq!(state.list().selected_index(), selected);
+}
+
+#[test]
+fn attached_dir_expands_a_collapsed_workspace_to_reveal_its_session() {
+    let mut state = state();
+    let mut extra = session_record("feature", 1);
+    extra.root = PathBuf::from("/tools/.usagi/sessions/feature");
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![extra],
+        issues: Vec::new(),
+    }]);
+    let tools_root = state.list().group_root_row(1).unwrap();
+    state.overview_select(tools_root);
+    state.toggle_selected_collapsed();
+    state.overview_select(0);
+
+    assert!(state
+        .list()
+        .row_of_path(Path::new("/tools/.usagi/sessions/feature"))
+        .is_none());
+    assert!(state.focus_attached_dir(Path::new("/tools/.usagi/sessions/feature")));
+    assert!(!state.list().is_collapsed(1));
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "feature");
+}
+
+#[test]
+fn legacy_root_resume_targets_the_primary_workspace_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("feature", 1)]);
+    state.overview_select(1);
+
+    state.restore_focus(ROOT_NAME, ResumeLevel::Switch);
+    assert_eq!(state.list().selected_index(), 0);
+    assert_eq!(state.list().active_index(), 0);
+    assert!(state.list().root_selected());
+}
+
+#[test]
 fn restore_focus_is_a_no_op_for_a_since_removed_session() {
     let mut state = state();
     state.restore_focus("gone", ResumeLevel::Attached);

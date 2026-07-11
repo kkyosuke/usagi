@@ -2898,6 +2898,18 @@ impl HomeState {
         })
     }
 
+    /// The stable row identity persisted for the next home-screen restore.
+    /// Unite mode qualifies the otherwise ambiguous session/root name with its
+    /// workspace; single-workspace snapshots keep the legacy plain name.
+    pub fn resume_focus_target(&self) -> String {
+        let session = self.list.selected_name();
+        if self.is_united() {
+            format!("{}:{session}", self.selected_workspace_name())
+        } else {
+            session.to_string()
+        }
+    }
+
     /// Restore the engagement recorded at the last quit: move the cursor to
     /// `session` (選択), focus it (集中), or focus it and arm an auto-attach (没入).
     /// A no-op when the session no longer exists (it was removed since), so a
@@ -2905,19 +2917,43 @@ impl HomeState {
     /// after the panes are restored, so a 没入 target's pane is already live for
     /// the event loop's first-pass attach.
     pub fn restore_focus(&mut self, session: &str, level: ResumeLevel) {
+        let row = session
+            .split_once(':')
+            .and_then(|(workspace, name)| {
+                let group = self
+                    .list
+                    .groups()
+                    .iter()
+                    .position(|candidate| candidate.name() == workspace)?;
+                if name == ROOT_NAME {
+                    self.list.group_root_row(group)
+                } else {
+                    self.list.row_in_group_of_name(group, name)
+                }
+            })
+            .or_else(|| {
+                if session == ROOT_NAME {
+                    self.list.group_root_row(0)
+                } else {
+                    self.list
+                        .groups()
+                        .iter()
+                        .enumerate()
+                        .find_map(|(group, _)| self.list.row_in_group_of_name(group, session))
+                }
+            });
+        let Some(row) = row else { return };
         match level {
             ResumeLevel::Switch => {
-                // Move the 選択 cursor onto the session (root stays at the default
-                // cursor, which `select_by_name` leaves put by not matching it).
-                self.list.select_by_name(session);
+                self.list.focus_index(row);
+                self.list.activate_selected();
             }
             ResumeLevel::Closeup => {
-                self.enter_closeup_named(session);
+                self.enter_closeup(row);
             }
             ResumeLevel::Attached => {
-                if self.enter_closeup_named(session) {
-                    self.resume_attach = true;
-                }
+                self.enter_closeup(row);
+                self.resume_attach = true;
             }
         }
     }
@@ -2935,6 +2971,18 @@ impl HomeState {
     pub fn focus_session(&mut self, row: usize) {
         self.list
             .focus_index(row.min(self.list.create_row().saturating_sub(1)));
+    }
+
+    /// Re-anchor both cursors to the session/root whose pane is attached.
+    /// Pane exit actions call this with the pane's actual directory so unite mode
+    /// cannot act on a stale cursor in another workspace.
+    pub fn focus_attached_dir(&mut self, dir: &Path) -> bool {
+        let Some(row) = self.list.reveal_path(dir) else {
+            return false;
+        };
+        self.list.focus_index(row);
+        self.list.activate_selected();
+        true
     }
 
     // --- Overview modal (`:`) ----------------------------------------------

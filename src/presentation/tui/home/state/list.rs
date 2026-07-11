@@ -983,6 +983,38 @@ impl WorktreeList {
         })
     }
 
+    /// Resolve an attached pane's working directory back to its exact sidebar
+    /// row. Workspace roots and session roots are both path-qualified, so unite
+    /// groups with the same visible `root`/branch name remain unambiguous.
+    pub fn row_of_path(&self, path: &Path) -> Option<usize> {
+        let mut row = 0;
+        for group in &self.groups {
+            if group.root_path() == path {
+                return Some(row);
+            }
+            if !group.collapsed {
+                if let Some(within) = group.worktrees.iter().position(|w| w.path == path) {
+                    return Some(row + 1 + within);
+                }
+            }
+            row += group.nav_slots();
+        }
+        None
+    }
+
+    /// Reveal the group owning `path`, returning its now-visible row. Attached
+    /// panes remain authoritative even when a background rebuild restored their
+    /// workspace as collapsed, so a hidden session expands its group first.
+    pub fn reveal_path(&mut self, path: &Path) -> Option<usize> {
+        let group = self.groups.iter().position(|group| {
+            group.root_path() == path || group.worktrees.iter().any(|w| w.path == path)
+        })?;
+        if self.groups[group].collapsed && self.groups[group].root_path() != path {
+            self.set_group_collapsed(group, false);
+        }
+        self.row_of_path(path)
+    }
+
     /// The flat row of the first worktree named `name` **within** `group`, or
     /// `None` when that group has no such worktree. Restoring the cursor inside the
     /// same 統合(unite) group keeps it put when another workspace happens to carry a
