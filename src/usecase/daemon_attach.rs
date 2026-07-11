@@ -42,12 +42,30 @@ pub enum DaemonFailureKind {
     BuildUnverified,
 }
 
+/// Whether the durable daemon terminal registry proves ownership for the
+/// worktree an unattended launch wants to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonWorktreeOwnership {
+    /// No trustworthy registry snapshot exists, so ownership is unknown.
+    Unknown,
+    /// At least one daemon-owned terminal is recorded for this worktree.
+    Present,
+    /// A registry snapshot exists and records no terminal for this worktree.
+    Absent,
+}
+
 /// Decide whether a failed daemon spawn may continue with a local PTY. Ordinary
-/// daemon unavailability preserves the existing fallback; only an unattended
-/// launch across an unverified build is unsafe.
-pub fn should_fallback_to_local(policy: DaemonFailureFallback, failure: DaemonFailureKind) -> bool {
+/// daemon unavailability preserves the existing fallback. An unattended launch
+/// across an unverified build may fall back only when the durable registry
+/// proves that the daemon owns no terminal for the target worktree.
+pub fn should_fallback_to_local(
+    policy: DaemonFailureFallback,
+    failure: DaemonFailureKind,
+    ownership: DaemonWorktreeOwnership,
+) -> bool {
     matches!(policy, DaemonFailureFallback::UserInitiated)
         || matches!(failure, DaemonFailureKind::Unavailable)
+        || matches!(ownership, DaemonWorktreeOwnership::Absent)
 }
 
 /// Worktrees whose unattended launch is paused because their daemon build could
@@ -578,14 +596,27 @@ mod tests {
         assert!(should_fallback_to_local(
             DaemonFailureFallback::UserInitiated,
             DaemonFailureKind::BuildUnverified,
+            DaemonWorktreeOwnership::Present,
         ));
         assert!(!should_fallback_to_local(
             DaemonFailureFallback::Unattended,
             DaemonFailureKind::BuildUnverified,
+            DaemonWorktreeOwnership::Present,
+        ));
+        assert!(!should_fallback_to_local(
+            DaemonFailureFallback::Unattended,
+            DaemonFailureKind::BuildUnverified,
+            DaemonWorktreeOwnership::Unknown,
+        ));
+        assert!(should_fallback_to_local(
+            DaemonFailureFallback::Unattended,
+            DaemonFailureKind::BuildUnverified,
+            DaemonWorktreeOwnership::Absent,
         ));
         assert!(should_fallback_to_local(
             DaemonFailureFallback::Unattended,
             DaemonFailureKind::Unavailable,
+            DaemonWorktreeOwnership::Present,
         ));
     }
 

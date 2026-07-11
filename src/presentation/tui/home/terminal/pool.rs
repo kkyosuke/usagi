@@ -62,7 +62,9 @@ use crate::infrastructure::{
 };
 use crate::usecase::daemon_attach::DaemonFailureFallback;
 #[cfg(unix)]
-use crate::usecase::daemon_attach::{should_fallback_to_local, DaemonFailureKind};
+use crate::usecase::daemon_attach::{
+    should_fallback_to_local, DaemonFailureKind, DaemonWorktreeOwnership,
+};
 
 use super::super::pane_input;
 use super::super::ui;
@@ -2124,9 +2126,10 @@ fn spawn_backend(
     };
     #[cfg(unix)]
     {
-        let remote = daemon_store::default_dir().and_then(|daemon_dir| {
-            DaemonTerminal::spawn_after_build_check(
-                &daemon_dir,
+        let daemon_dir = daemon_store::default_dir();
+        let remote = match daemon_dir.as_ref() {
+            Ok(daemon_dir) => DaemonTerminal::spawn_after_build_check(
+                daemon_dir,
                 dir,
                 geo.rows,
                 geo.cols,
@@ -2134,30 +2137,54 @@ fn spawn_backend(
                 scrollback,
                 env,
                 &mut prepare_once,
-            )
-        });
+            ),
+            Err(error) => Err(anyhow::Error::msg(error.to_string())),
+        };
         match remote {
             Ok(remote) => return Ok(PaneBackend::Remote(remote)),
-            Err(error)
-                if !should_fallback_to_local(
-                    _daemon_failure_fallback,
-                    if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() {
-                        DaemonFailureKind::BuildUnverified
-                    } else {
-                        DaemonFailureKind::Unavailable
-                    },
-                ) =>
-            {
-                return Err(error).context(
-                    "refusing an unattended local pane launch because the daemon build could not \
-                     be verified; a daemon-owned process may already be running",
-                );
+            Err(error) => {
+                let failure = if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() {
+                    DaemonFailureKind::BuildUnverified
+                } else {
+                    DaemonFailureKind::Unavailable
+                };
+                let ownership = if matches!(failure, DaemonFailureKind::BuildUnverified) {
+                    daemon_dir
+                        .as_ref()
+                        .ok()
+                        .and_then(|daemon_dir| {
+                            crate::infrastructure::daemon_terminals_store::read_if_present(
+                                daemon_dir,
+                            )
+                            .ok()
+                            .flatten()
+                        })
+                        .map_or(DaemonWorktreeOwnership::Unknown, |terminals| {
+                            let worktree = crate::infrastructure::worktree_keyed_store::key(dir);
+                            if terminals.iter().any(|terminal| {
+                                crate::infrastructure::worktree_keyed_store::key(&terminal.worktree)
+                                    == worktree
+                            }) {
+                                DaemonWorktreeOwnership::Present
+                            } else {
+                                DaemonWorktreeOwnership::Absent
+                            }
+                        })
+                } else {
+                    DaemonWorktreeOwnership::Unknown
+                };
+                if !should_fallback_to_local(_daemon_failure_fallback, failure, ownership) {
+                    return Err(error).context(
+                        "refusing an unattended local pane launch because the daemon build could \
+                         not be verified; a daemon-owned process may already be running",
+                    );
+                }
+                error_log::ErrorLog::record(&format!(
+                    "daemon terminal unavailable for {}; falling back to a TUI-local PTY \
+                     (this pane will close with the TUI): {error:#}",
+                    dir.display()
+                ));
             }
-            Err(error) => error_log::ErrorLog::record(&format!(
-                "daemon terminal unavailable for {}; falling back to a TUI-local PTY \
-                 (this pane will close with the TUI): {error:#}",
-                dir.display()
-            )),
         }
     }
     prepare_once();
