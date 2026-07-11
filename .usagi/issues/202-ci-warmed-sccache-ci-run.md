@@ -1,13 +1,13 @@
 ---
 number: 202
 title: ci: warmed sccache CI run を追加観測する
-status: todo
+status: done
 priority: medium
 labels: [ci, perf]
 dependson: []
 related: [201]
 created_at: 2026-07-11T05:51:18.747834+00:00
-updated_at: 2026-07-11T05:51:18.747834+00:00
+updated_at: 2026-07-11T06:58:09Z
 ---
 
 ## 背景
