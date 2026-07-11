@@ -22,7 +22,9 @@ pub mod update;
 #[cfg(test)]
 mod e2e_tests;
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use console::Term;
@@ -198,6 +200,333 @@ struct PendingSpawn {
     pane_id: Option<u64>,
     /// The resolver thread's handle, dropped (detached) when the launch is cleared.
     _worker: std::thread::JoinHandle<()>,
+}
+
+type PaneEnv = BTreeMap<String, String>;
+type SharedEnv = Arc<(Mutex<Option<PaneEnv>>, Condvar)>;
+
+enum LaunchSource {
+    Restore,
+    Autostart { prompt: String },
+}
+
+struct LaunchRequest {
+    id: u64,
+    dir: PathBuf,
+    label: String,
+    source: LaunchSource,
+    pane_kind: terminal::tabs::PaneKind,
+    cli: crate::domain::settings::AgentCli,
+    session_model: Option<String>,
+    stored_label: Option<String>,
+    attach: Option<u64>,
+    active: Option<usize>,
+    env: SharedEnv,
+}
+
+struct PreparedLaunch {
+    dir: PathBuf,
+    label: String,
+    source: LaunchSource,
+    pane_kind: terminal::tabs::PaneKind,
+    cli: crate::domain::settings::AgentCli,
+    stored_label: Option<String>,
+    attach: Option<u64>,
+    active: Option<usize>,
+    env: PaneEnv,
+    command: Option<String>,
+}
+
+struct LaunchResult {
+    id: u64,
+    prepared: std::result::Result<PreparedLaunch, String>,
+}
+
+struct LaunchInFlight {
+    dir: PathBuf,
+    source: LaunchSource,
+}
+
+struct LaunchJobManager {
+    tx: mpsc::Sender<LaunchResult>,
+    rx: mpsc::Receiver<LaunchResult>,
+    env_by_root: Arc<Mutex<HashMap<PathBuf, SharedEnv>>>,
+    in_flight: HashMap<u64, LaunchInFlight>,
+    dirs_in_flight: HashMap<PathBuf, usize>,
+}
+
+#[derive(Clone, Copy)]
+struct AutostartLaunchSettings {
+    enabled: bool,
+    limit: usize,
+}
+
+impl Drop for LaunchJobManager {
+    fn drop(&mut self) {
+        for job in self.in_flight.values() {
+            requeue_launch_source(&job.dir, &job.source);
+        }
+    }
+}
+
+impl LaunchJobManager {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            tx,
+            rx,
+            env_by_root: Arc::new(Mutex::new(HashMap::new())),
+            in_flight: HashMap::new(),
+            dirs_in_flight: HashMap::new(),
+        }
+    }
+
+    fn in_flight_for(&self, dir: &Path) -> bool {
+        self.dirs_in_flight.get(dir).copied().unwrap_or(0) > 0
+    }
+
+    fn env_slot(&self, ws_root: &Path) -> SharedEnv {
+        let mut envs = self.env_by_root.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(env) = envs.get(ws_root) {
+            return Arc::clone(env);
+        }
+        let env: SharedEnv = Arc::new((Mutex::new(None), Condvar::new()));
+        envs.insert(ws_root.to_path_buf(), Arc::clone(&env));
+        let worker_env = Arc::clone(&env);
+        let root = ws_root.to_path_buf();
+        std::thread::spawn(move || {
+            let resolved = crate::infrastructure::env_resolver::resolve_workspace_env(&root);
+            let (lock, cvar) = &*worker_env;
+            if let Ok(mut slot) = lock.lock() {
+                *slot = Some(resolved);
+                cvar.notify_all();
+            }
+        });
+        env
+    }
+
+    fn dispatch(
+        &mut self,
+        tasks: &tasks::TaskHandle,
+        request: LaunchRequest,
+        agent_wiring: crate::domain::agent::AgentWiring,
+    ) {
+        let id = request.id;
+        *self.dirs_in_flight.entry(request.dir.clone()).or_insert(0) += 1;
+        self.in_flight.insert(
+            id,
+            LaunchInFlight {
+                dir: request.dir.clone(),
+                source: clone_launch_source(&request.source),
+            },
+        );
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = prepare_launch(request, &agent_wiring);
+            let _ = tx.send(result);
+        });
+        let _ = tasks;
+    }
+
+    fn drain(
+        &mut self,
+        term: &Term,
+        pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+        tasks: &tasks::TaskHandle,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        while let Ok(result) = self.rx.try_recv() {
+            let Some(in_flight) = self.in_flight.remove(&result.id) else {
+                continue;
+            };
+            decrement_in_flight_dir(&mut self.dirs_in_flight, &in_flight.dir);
+            match result.prepared {
+                Ok(prepared) => {
+                    let spawn = pool.borrow_mut().add_pane(
+                        term,
+                        &prepared.dir,
+                        prepared.pane_kind,
+                        terminal::pool::PaneLaunch {
+                            agent_command: prepared.command.as_deref(),
+                            cli: prepared.cli,
+                            label: &prepared.label,
+                            env: &prepared.env,
+                            attach: prepared.attach,
+                        },
+                    );
+                    match spawn {
+                        Ok(()) => {
+                            if let Some(label) = prepared.stored_label.as_deref() {
+                                let (labels, _) = pool.borrow().tabs(&prepared.dir);
+                                if let Some(index) = labels.len().checked_sub(1) {
+                                    let _ =
+                                        pool.borrow_mut().rename_tab(&prepared.dir, index, label);
+                                }
+                            }
+                            if let Some(active) = prepared.active {
+                                pool.borrow_mut().set_active(&prepared.dir, active);
+                            }
+                            let line = match &prepared.source {
+                                LaunchSource::Restore => {
+                                    format!("restored pane for {}", prepared.label)
+                                }
+                                LaunchSource::Autostart { prompt } => format!(
+                                    "queued prompt auto-started for {}: {}",
+                                    prepared.label, prompt
+                                ),
+                            };
+                            tasks.complete(
+                                result.id,
+                                true,
+                                tasks::Completion {
+                                    line: LogLine::output(line.clone()),
+                                    sessions: None,
+                                    target_root: None,
+                                    evict: None,
+                                    focus: None,
+                                    created: None,
+                                    removed: None,
+                                },
+                            );
+                            lines.push(line);
+                        }
+                        Err(err) => {
+                            release_launch_source(pool, &prepared.dir, &prepared.source);
+                            requeue_launch_source(&prepared.dir, &prepared.source);
+                            let line = format!(
+                                "failed to launch pane for {}: {err:#}",
+                                prepared.dir.display()
+                            );
+                            crate::infrastructure::error_log::ErrorLog::record(&line);
+                            tasks.complete(
+                                result.id,
+                                false,
+                                tasks::Completion {
+                                    line: LogLine::error(line),
+                                    sessions: None,
+                                    target_root: None,
+                                    evict: None,
+                                    focus: None,
+                                    created: None,
+                                    removed: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    release_launch_source(pool, &in_flight.dir, &in_flight.source);
+                    requeue_launch_source(&in_flight.dir, &in_flight.source);
+                    let line = format!(
+                        "failed to prepare pane launch for {}: {err}",
+                        in_flight.dir.display()
+                    );
+                    crate::infrastructure::error_log::ErrorLog::record(&line);
+                    tasks.complete(
+                        result.id,
+                        false,
+                        tasks::Completion {
+                            line: LogLine::error(line),
+                            sessions: None,
+                            target_root: None,
+                            evict: None,
+                            focus: None,
+                            created: None,
+                            removed: None,
+                        },
+                    );
+                }
+            }
+        }
+        lines
+    }
+}
+
+fn clone_launch_source(source: &LaunchSource) -> LaunchSource {
+    match source {
+        LaunchSource::Restore => LaunchSource::Restore,
+        LaunchSource::Autostart { prompt } => LaunchSource::Autostart {
+            prompt: prompt.clone(),
+        },
+    }
+}
+
+fn requeue_launch_source(dir: &Path, source: &LaunchSource) {
+    if let LaunchSource::Autostart { prompt } = source {
+        let _ = crate::infrastructure::agent_prompt_store::requeue_front(dir, prompt);
+    }
+}
+
+fn release_launch_source(
+    pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+    dir: &Path,
+    source: &LaunchSource,
+) {
+    if matches!(source, LaunchSource::Autostart { .. }) {
+        pool.borrow().release_autostart_dispatch(dir);
+    }
+}
+
+fn decrement_in_flight_dir(in_flight: &mut HashMap<PathBuf, usize>, dir: &Path) {
+    match in_flight.get_mut(dir) {
+        Some(count) if *count > 1 => *count -= 1,
+        Some(_) => {
+            in_flight.remove(dir);
+        }
+        None => {}
+    }
+}
+
+fn wait_env(env: &SharedEnv) -> PaneEnv {
+    let (lock, cvar) = &**env;
+    let mut slot = lock.lock().unwrap_or_else(|p| p.into_inner());
+    loop {
+        if let Some(env) = slot.as_ref() {
+            return env.clone();
+        }
+        slot = cvar.wait(slot).unwrap_or_else(|p| p.into_inner());
+    }
+}
+
+fn prepare_launch(
+    request: LaunchRequest,
+    agent_wiring: &crate::domain::agent::AgentWiring,
+) -> LaunchResult {
+    let result = (|| {
+        let env = wait_env(&request.env);
+        let prompt = match &request.source {
+            LaunchSource::Autostart { prompt } => Some(prompt.as_str()),
+            LaunchSource::Restore => None,
+        };
+        let command = if matches!(request.pane_kind, terminal::tabs::PaneKind::Agent) {
+            let agent = crate::infrastructure::agent::agent_for(request.cli);
+            let resume = agent.has_resumable_session(&request.dir);
+            let launch_wiring =
+                wiring_for_launch(agent_wiring, request.session_model.clone(), &request.dir);
+            agent
+                .provision(&launch_wiring)
+                .map_err(|err| format!("agent provision failed: {err}"))?;
+            Some(agent.launch_command(&launch_wiring, resume, prompt))
+        } else {
+            None
+        };
+        Ok(PreparedLaunch {
+            dir: request.dir,
+            label: request.label,
+            source: request.source,
+            pane_kind: request.pane_kind,
+            cli: request.cli,
+            stored_label: request.stored_label,
+            attach: request.attach,
+            active: request.active,
+            env,
+            command,
+        })
+    })();
+    LaunchResult {
+        id: request.id,
+        prepared: result,
+    }
 }
 
 /// The workspace data [`run`] needs at startup, loaded from disk without a
@@ -689,6 +1018,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         scrollback_lines,
     ));
     let monitor = pool.borrow().monitor();
+    let launch_jobs = std::cell::RefCell::new(LaunchJobManager::new());
 
     // Restore each session's panes from the last run, in the background (nothing is
     // attached yet): an agent relaunches resuming its conversation, a terminal
@@ -696,12 +1026,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // move without the user attaching. Gated by the setting; a fresh workspace or a
     // disabled setting simply starts with no panes.
     if restore_panes_enabled {
-        restore_open_panes(term, &state, &pool, &agent_wiring, default_cli);
         // Restore where the user was at the last quit — the cursor on a session
         // (選択), focused (集中), or armed to auto-attach (没入). Done after the panes
-        // are back, so a 没入 target's pane is live for the event loop's first-pass
-        // attach. Best-effort: a missing snapshot or a since-removed session simply
-        // opens in the default 選択.
+        // are queued, so a since-removed session simply opens in the default 選択.
+        // The actual pane launches are dispatched after the first frame paints.
         if let Some(focus) = crate::infrastructure::resume_focus_store::load(&workspace.path) {
             use crate::infrastructure::resume_focus_store::StoredEngagement;
             let level = match focus.engagement {
@@ -719,18 +1047,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // regardless of pane restore (a separate feature) and is gated by its own
     // setting; a no-op when disabled or nothing is queued. The event loop keeps
     // scanning for prompts queued *while* the screen runs (see `autostart_queued`).
-    for line in autostart_queued_prompts(
-        term,
-        &state,
-        &pool,
-        &agent_wiring,
-        default_cli,
-        autostart_queued_prompts_enabled,
-        autostart_queued_prompt_limit,
-    ) {
-        state.log_output(line);
-    }
-
     // Removing a session deletes its worktrees/branches and forgets it, on a
     // background thread like creation so the screen never freezes. A session with
     // uncommitted changes is left untouched unless `--force`. The git work runs
@@ -996,15 +1312,20 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // hook exactly, spawning through the same `autostart_queued_prompts`; the
             // per-operation pool borrows above keep this from double-borrowing.
             let mut autostart_hook = |st: &HomeState| -> Vec<String> {
-                autostart_queued_prompts(
-                    term,
+                let mut lines = launch_jobs.borrow_mut().drain(term, &pool, &tasks);
+                lines.extend(autostart_queued_prompts(
                     st,
                     &pool,
+                    &launch_jobs,
+                    &tasks,
                     &agent_wiring,
                     default_cli,
-                    autostart_queued_prompts_enabled,
-                    autostart_queued_prompt_limit,
-                )
+                    AutostartLaunchSettings {
+                        enabled: autostart_queued_prompts_enabled,
+                        limit: autostart_queued_prompt_limit,
+                    },
+                ));
+                lines
             };
             // Capture every failure of this launch — the initial spawn (`add_pane`
             // / `enter`) and anything during the pane loop — in one `result`, so a
@@ -1738,16 +2059,25 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // `preview`; the event loop calls one hook at a time, so their `RefCell`
     // borrows never overlap.
     let mut reclaim_tracker = reclaim::ReclaimTracker::default();
+    let mut restore_dispatched = false;
     let mut autostart_queued = |state: &HomeState| -> Vec<String> {
-        let mut lines = autostart_queued_prompts(
-            term,
+        let mut lines = launch_jobs.borrow_mut().drain(term, &pool, &tasks);
+        if restore_panes_enabled && !restore_dispatched {
+            dispatch_restore_open_panes(state, &launch_jobs, &tasks, &agent_wiring, default_cli);
+            restore_dispatched = true;
+        }
+        lines.extend(autostart_queued_prompts(
             state,
             &pool,
+            &launch_jobs,
+            &tasks,
             &agent_wiring,
             default_cli,
-            autostart_queued_prompts_enabled,
-            autostart_queued_prompt_limit,
-        );
+            AutostartLaunchSettings {
+                enabled: autostart_queued_prompts_enabled,
+                limit: autostart_queued_prompt_limit,
+            },
+        ));
         if let Some(grace) = auto_reclaim_grace {
             let badges = state.badges();
             let due = reclaim_tracker.due(
@@ -1906,10 +2236,10 @@ fn wiring_for_launch(
 ///
 /// Best-effort throughout: a missing snapshot skips the session and a failed spawn
 /// skips that one pane, so a partial restore never blocks the screen from opening.
-fn restore_open_panes(
-    term: &Term,
+fn dispatch_restore_open_panes(
     state: &HomeState,
-    pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+    launch_jobs: &std::cell::RefCell<LaunchJobManager>,
+    tasks: &tasks::TaskHandle,
     agent_wiring: &crate::domain::agent::AgentWiring,
     default_cli: crate::domain::settings::AgentCli,
 ) {
@@ -1931,80 +2261,40 @@ fn restore_open_panes(
         dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
     }
 
-    // Secret env is keyed by *workspace root*, and every session worktree of a
-    // workspace strips back to the same root (`session::workspace_root`), so a
-    // restore that spans the root plus N session worktrees would otherwise resolve
-    // the identical `op://` bindings N+1 times — each an `op read` subprocess with
-    // a multi-second timeout, run sequentially on the startup path. Memoize the
-    // resolution per workspace root so the `op` CLI is invoked once and reused,
-    // keeping startup from stalling on redundant 1Password reads.
-    let mut env_by_root: std::collections::HashMap<
-        PathBuf,
-        std::collections::BTreeMap<String, String>,
-    > = std::collections::HashMap::new();
-
     for (dir, label) in dirs {
         let Some(snapshot) = open_panes_store::load(&dir) else {
             continue;
         };
         let ws_root = crate::usecase::session::workspace_root(&dir);
-        let pane_env = env_by_root
-            .entry(ws_root.clone())
-            .or_insert_with(|| crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root))
-            .clone();
         for pane in &snapshot.panes {
-            let spawned = match pane.kind {
-                StoredPaneKind::Terminal => pool.borrow_mut().add_pane(
-                    term,
-                    &dir,
-                    PaneKind::Terminal,
-                    terminal::pool::PaneLaunch {
-                        agent_command: None,
-                        cli: default_cli,
-                        label: &label,
-                        env: &pane_env,
-                        attach: pane.terminal,
-                    },
+            let session_agent = state.session_agent_for(&dir);
+            let (pane_kind, cli) = match pane.kind {
+                StoredPaneKind::Terminal => (PaneKind::Terminal, default_cli),
+                StoredPaneKind::Agent => (
+                    PaneKind::Agent,
+                    pane.cli.or(session_agent.cli).unwrap_or(default_cli),
                 ),
-                StoredPaneKind::Agent => {
-                    // The snapshot records the CLI the pane was launched with; fall
-                    // back to the session's pinned CLI, then the default. The session's
-                    // pinned model rides into the restored launch's wiring.
-                    let session_agent = state.session_agent_for(&dir);
-                    let cli = pane.cli.or(session_agent.cli).unwrap_or(default_cli);
-                    let agent = crate::infrastructure::agent::agent_for(cli);
-                    // Resume the conversation when one exists so the agent continues
-                    // where it left off rather than starting over.
-                    let resume = agent.has_resumable_session(&dir);
-                    let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
-                    let _ = agent.provision(&launch_wiring);
-                    let command = agent.launch_command(&launch_wiring, resume, None);
-                    pool.borrow_mut().add_pane(
-                        term,
-                        &dir,
-                        PaneKind::Agent,
-                        terminal::pool::PaneLaunch {
-                            agent_command: Some(&command),
-                            cli,
-                            label: &label,
-                            env: &pane_env,
-                            attach: pane.terminal,
-                        },
-                    )
-                }
             };
-            // A failed spawn just skips that pane; the rest still restore.
-            if spawned.is_ok() {
-                if let Some(label) = pane.label.as_deref() {
-                    let (labels, _) = pool.borrow().tabs(&dir);
-                    if let Some(index) = labels.len().checked_sub(1) {
-                        let _ = pool.borrow_mut().rename_tab(&dir, index, label);
-                    }
-                }
-            }
+            let id = tasks.begin(tasks::TaskKind::LaunchPane, &format!("restore {label}"));
+            let env = launch_jobs.borrow().env_slot(&ws_root);
+            launch_jobs.borrow_mut().dispatch(
+                tasks,
+                LaunchRequest {
+                    id,
+                    dir: dir.clone(),
+                    label: label.clone(),
+                    source: LaunchSource::Restore,
+                    pane_kind,
+                    cli,
+                    session_model: session_agent.model,
+                    stored_label: pane.label.clone(),
+                    attach: pane.terminal,
+                    active: Some(snapshot.active),
+                    env,
+                },
+                agent_wiring.clone(),
+            );
         }
-        // Re-select the tab that was active when the snapshot was taken.
-        pool.borrow_mut().set_active(&dir, snapshot.active);
     }
 }
 
@@ -2040,25 +2330,25 @@ fn restore_open_panes(
 /// queued; the cheap `any_queued` checks on both stores gate the per-session work so
 /// an idle tick with no queue costs two directory listings.
 fn autostart_queued_prompts(
-    term: &Term,
     state: &HomeState,
     pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+    launch_jobs: &std::cell::RefCell<LaunchJobManager>,
+    tasks: &tasks::TaskHandle,
     agent_wiring: &crate::domain::agent::AgentWiring,
     default_cli: crate::domain::settings::AgentCli,
-    enabled: bool,
-    limit: usize,
+    settings: AutostartLaunchSettings,
 ) -> Vec<String> {
     use terminal::tabs::PaneKind;
 
-    if !enabled
+    if !settings.enabled
         || (!crate::infrastructure::agent_prompt_store::any_queued()
             && !crate::infrastructure::agent_live_prompt_store::any_queued())
     {
         return Vec::new();
     }
 
-    let mut slots_remaining =
-        autostart_slots_remaining(pool.borrow().occupied_agent_slots(), limit);
+    let occupied = pool.borrow().occupied_agent_slots();
+    let mut slots_remaining = autostart_slots_remaining(occupied, settings.limit);
     if slots_remaining == 0 {
         return Vec::new();
     }
@@ -2078,14 +2368,6 @@ fn autostart_queued_prompts(
         dirs.push((wt.path.clone(), state::worktree_name(wt).to_string()));
     }
 
-    // Memoize secret-env resolution per workspace root, exactly as
-    // `restore_open_panes` does, so the `op` CLI is invoked once per root rather
-    // than once per session worktree.
-    let mut env_by_root: std::collections::HashMap<
-        PathBuf,
-        std::collections::BTreeMap<String, String>,
-    > = std::collections::HashMap::new();
-
     let mut logs = Vec::new();
     for (dir, label) in dirs {
         if slots_remaining == 0 {
@@ -2093,7 +2375,7 @@ fn autostart_queued_prompts(
         }
         // A live pane already drives this session (or an agent is running there):
         // leave any queued prompt to the ordinary consume-on-fresh-launch path.
-        if pool.borrow().has_live_pane(&dir) {
+        if pool.borrow().has_live_pane(&dir) || launch_jobs.borrow().in_flight_for(&dir) {
             continue;
         }
         // Gather any prompt queued for this pane-less session from both channels
@@ -2112,7 +2394,7 @@ fn autostart_queued_prompts(
         }
         let prompt = parts.join("\n\n");
         if !pool.borrow().reserve_autostart_dispatch(&dir) {
-            let _ = crate::infrastructure::agent_prompt_store::set(&dir, &prompt);
+            let _ = crate::infrastructure::agent_prompt_store::requeue_front(&dir, &prompt);
             continue;
         }
         // Launch with the session's pinned CLI / model when it has one (a delegated
@@ -2120,46 +2402,30 @@ fn autostart_queued_prompts(
         // primary path a `session_delegate_issue(agent_cli, model)` takes effect on.
         let session_agent = state.session_agent_for(&dir);
         let cli = session_agent.cli.unwrap_or(default_cli);
-        let agent = crate::infrastructure::agent::agent_for(cli);
-        // Resume an existing conversation when one exists (a re-delegated session),
-        // else start fresh; the queued prompt is the opening message either way.
-        let resume = agent.has_resumable_session(&dir);
-        let launch_wiring = wiring_for_launch(agent_wiring, session_agent.model, &dir);
-        let _ = agent.provision(&launch_wiring);
-        let command = agent.launch_command(&launch_wiring, resume, Some(&prompt));
         let ws_root = crate::usecase::session::workspace_root(&dir);
-        let pane_env = env_by_root
-            .entry(ws_root.clone())
-            .or_insert_with(|| crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root))
-            .clone();
-        match pool.borrow_mut().add_pane(
-            term,
-            &dir,
-            PaneKind::Agent,
-            terminal::pool::PaneLaunch {
-                agent_command: Some(&command),
+        let id = tasks.begin(tasks::TaskKind::LaunchPane, &format!("autostart {label}"));
+        let env = launch_jobs.borrow().env_slot(&ws_root);
+        launch_jobs.borrow_mut().dispatch(
+            tasks,
+            LaunchRequest {
+                id,
+                dir: dir.clone(),
+                label: label.clone(),
+                source: LaunchSource::Autostart {
+                    prompt: prompt.clone(),
+                },
+                pane_kind: PaneKind::Agent,
                 cli,
-                label: &label,
-                env: &pane_env,
+                session_model: session_agent.model,
+                stored_label: None,
                 attach: None,
+                active: None,
+                env,
             },
-        ) {
-            Ok(()) => {
-                slots_remaining = slots_remaining.saturating_sub(1);
-                logs.push(format!("queued prompt auto-started for {label}: {prompt}"));
-            }
-            Err(err) => {
-                pool.borrow().release_autostart_dispatch(&dir);
-                // The background spawn failed, so the prompt was not delivered.
-                // Re-queue it (best-effort) so a later tick — or a human opening the
-                // pane — still receives it, and record why the spawn failed.
-                let _ = crate::infrastructure::agent_prompt_store::requeue_front(&dir, &prompt);
-                crate::infrastructure::error_log::ErrorLog::record(&format!(
-                    "failed to auto-start queued prompt for {}: {err:#}",
-                    dir.display()
-                ));
-            }
-        }
+            agent_wiring.clone(),
+        );
+        slots_remaining = slots_remaining.saturating_sub(1);
+        logs.push(format!("queued prompt launch queued for {label}"));
     }
     logs
 }

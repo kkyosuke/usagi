@@ -55,6 +55,8 @@ pub enum TaskKind {
     CreateSession,
     /// Removing a session (git worktree remove + branch delete + cleanup).
     RemoveSession,
+    /// Launching a restored or queued-autostart pane.
+    LaunchPane,
 }
 
 impl TaskKind {
@@ -63,6 +65,7 @@ impl TaskKind {
         match self {
             TaskKind::CreateSession => "作成",
             TaskKind::RemoveSession => "削除",
+            TaskKind::LaunchPane => "起動",
         }
     }
 
@@ -73,6 +76,7 @@ impl TaskKind {
         match self {
             TaskKind::CreateSession => "session create",
             TaskKind::RemoveSession => "session remove",
+            TaskKind::LaunchPane => "pane launch",
         }
     }
 }

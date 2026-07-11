@@ -1,13 +1,13 @@
 ---
 number: 193
 title: perf(tui): pane restore と queue autostart を非同期 launch job 化する
-status: todo
+status: in-progress
 priority: high
 labels: [perf, tui, orchestration, ux, review]
 dependson: []
 related: [98, 136, 148]
 created_at: 2026-07-11T01:30:34.197755+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T05:33:36.474041+00:00
 ---
 
 ## 背景
