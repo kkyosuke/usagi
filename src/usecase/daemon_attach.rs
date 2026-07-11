@@ -226,6 +226,26 @@ mod tests {
         }
     }
 
+    /// Drives [`drain_buffered_frames`] with the test codec, returning the
+    /// outcome and how many messages the sink consumed. One shared pair of
+    /// `decode` / `on_consumed` closures keeps every drain test on the same
+    /// instrumented path.
+    fn drain(
+        decoder: &mut FrameDecoder,
+        terminal: TerminalId,
+        sink: &mut dyn ScreenSink,
+    ) -> (DrainOutcome, usize) {
+        let mut consumed = 0;
+        let outcome = drain_buffered_frames(
+            decoder,
+            terminal,
+            sink,
+            &mut |payload| decode(payload),
+            &mut || consumed += 1,
+        );
+        (outcome, consumed)
+    }
+
     #[test]
     fn drain_folds_frames_buffered_during_the_handshake() {
         // The handshake's read pulled `Attached` plus the initial snapshot and
@@ -235,14 +255,7 @@ mod tests {
         decoder.feed(&frame(b"s:\x1b[2Jhi"));
         decoder.feed(&frame(b"o:there"));
         let mut sink = Recorded::default();
-        let mut consumed = 0;
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            7,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || consumed += 1,
-        );
+        let (outcome, consumed) = drain(&mut decoder, 7, &mut sink);
         assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
         assert_eq!(sink.replaced, vec![b"\x1b[2Jhi".to_vec()]);
         assert_eq!(sink.output, vec![b"there".to_vec()]);
@@ -256,14 +269,9 @@ mod tests {
         let full = frame(b"s:later");
         decoder.feed(&full[..5]);
         let mut sink = Recorded::default();
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            7,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || {},
-        );
+        let (outcome, consumed) = drain(&mut decoder, 7, &mut sink);
         assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
+        assert_eq!(consumed, 0);
         assert!(sink.replaced.is_empty());
     }
 
@@ -272,15 +280,8 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.feed(&frame(b"s:x"));
         let mut sink = Recorded::default();
-        let mut consumed = 0;
         // The decoded message addresses terminal 7; this reader follows 8.
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            8,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || consumed += 1,
-        );
+        let (outcome, consumed) = drain(&mut decoder, 8, &mut sink);
         assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
         assert_eq!(consumed, 0);
         assert!(sink.replaced.is_empty());
@@ -291,13 +292,7 @@ mod tests {
         let mut decoder = FrameDecoder::new();
         decoder.feed(&frame(b"?bogus"));
         let mut sink = Recorded::default();
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            7,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || {},
-        );
+        let (outcome, _) = drain(&mut decoder, 7, &mut sink);
         assert_eq!(outcome, DrainOutcome::Stop);
     }
 
@@ -307,13 +302,7 @@ mod tests {
         // A length prefix beyond MAX_FRAME_LEN is rejected, not buffered.
         decoder.feed(&u32::MAX.to_be_bytes());
         let mut sink = Recorded::default();
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            7,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || {},
-        );
+        let (outcome, _) = drain(&mut decoder, 7, &mut sink);
         assert_eq!(outcome, DrainOutcome::Stop);
     }
 
@@ -323,13 +312,7 @@ mod tests {
         decoder.feed(&frame(b"s:one"));
         decoder.feed(&frame(b"o:two"));
         let mut sink = Orphaned::default();
-        let outcome = drain_buffered_frames(
-            &mut decoder,
-            7,
-            &mut sink,
-            &mut |payload| decode(payload),
-            &mut || {},
-        );
+        let (outcome, _) = drain(&mut decoder, 7, &mut sink);
         assert_eq!(outcome, DrainOutcome::Stop);
         // The first message was applied; the orphaned check then stopped the
         // drain before the second.
