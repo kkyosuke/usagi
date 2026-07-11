@@ -7,6 +7,7 @@ slow/flaky test の計測方法と test runner の採否判断は本書を正本
 ## 目次
 
 - [継続計測](#継続計測)
+- [sccache opt-in](#sccache-opt-in)
 - [runner 比較](#runner-比較)
 - [nextest の採否](#nextest-の採否)
 - [flaky と subprocess](#flaky-と-subprocess)
@@ -27,6 +28,65 @@ slow/flaky test の計測方法と test runner の採否判断は本書を正本
 ```bash
 ruby scripts/summarize-nextest-junit.rb target/nextest/metrics/junit.xml ...
 ```
+
+## sccache opt-in
+
+Rust ビルドの sccache 利用手順とベンチ観測方法は本節を正本とする。repo-wide の `.cargo/config.toml` で
+`rustc-wrapper = "sccache"` は固定しない。未インストール環境では通常の Cargo 実行を維持する。
+
+| 項目 | 仕様 |
+|---|---|
+| 有効化 | `scripts/cargo-sccache.sh <cargo-args...>` を明示的に使う |
+| fallback | `sccache` が `PATH` に無い場合は警告を出し、`RUSTC_WRAPPER` / `SCCACHE_DIR` を付けずに `cargo` を実行する |
+| cache dir | 既定は `<workspace>/.usagi/cache/sccache`。session worktree 間で共有する |
+| target dir | 共有しない。各 session worktree の `<worktree>/target` を使う |
+| cache size | 既定は `SCCACHE_CACHE_SIZE=10G`。必要に応じて環境変数で上書きする |
+| CI | この helper では導入しない。ローカルベンチ結果を受けて別 issue で判断する |
+
+通常の gate を sccache 付きで実行する場合は、Cargo サブコマンドだけを helper に渡す。
+
+```bash
+scripts/cargo-sccache.sh fmt --all -- --check
+scripts/cargo-sccache.sh clippy --all-targets -- -D warnings
+scripts/cargo-sccache.sh test --quiet
+```
+
+`cargo llvm-cov` も cargo サブコマンドなので、helper 経由で `scripts/cargo-sccache.sh llvm-cov ...` と実行できる。
+coverage の正本 command と閾値は [開発規約](06-conventions.md#品質チェックリスク比例の-gate)に従う。
+
+観測では `sccache` の stats を command ごとに残す。
+
+```bash
+sccache --zero-stats
+scripts/cargo-sccache.sh test --quiet
+sccache --show-stats
+```
+
+cache を削除して cold run を作る場合は、helper の既定 `SCCACHE_DIR` である `<workspace>/.usagi/cache/sccache` を削除する。
+stats だけをリセットする場合は `sccache --zero-stats` を使う。cache dir 削除、`sccache --zero-stats`、`cargo clean` は役割が違う。
+
+| 操作 | 消えるもの | 用途 |
+|---|---|---|
+| `cargo clean` | 現在の worktree の `target` | worktree local artifact の影響を消す |
+| `sccache --zero-stats` | sccache の統計値 | 次の command だけの hit/miss を見る |
+| `rm -rf <workspace>/.usagi/cache/sccache` | session 間で共有する sccache object cache | sccache cold run を作る |
+
+ベンチは `scripts/sccache-benchmark.sh` を使う。既定は `cargo test --quiet` を 3 回実行し、raw TSV と
+`sccache --show-stats` を `target/sccache-benchmark/` に保存する。
+
+```bash
+scripts/sccache-benchmark.sh --runs 3 --command "test --quiet"
+scripts/sccache-benchmark.sh --runs 3 --command "clippy --all-targets -- -D warnings" --peer-worktree ../issue-xxx
+```
+
+ベンチ結果には cold/warm、単一 session、複数 session の wall time と stats file を残す。複数 session の warm run は、
+session A で sccache cache を温めたあと、session B の別 worktree で `cargo clean` して同じ command を実行する。
+比較時は中央値を使い、複数 session warm の `cargo test --quiet` または `cargo clippy` が 20% 以上短縮するか、
+短縮しない理由を stats とともに記録する。
+
+sccache の hit rate は proc macro、build script、feature 差、target triple、`RUSTFLAGS`、環境変数差で下がる。
+CI 導入を検討する場合は、既存 Cargo cache と sccache の役割分担、cache restore/save time、workflow wall time、
+billed minutes を同じ PR 上で比較する。
 
 ## runner 比較
 

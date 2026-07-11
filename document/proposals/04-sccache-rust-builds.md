@@ -2,7 +2,7 @@
 
 > [ドキュメント目次](../README.md) ｜ [設計提案一覧](README.md)
 
-`usagi` の複数 workspace / session worktree で Rust コンパイル成果物を共有し、ローカル開発と CI の build latency を下げるための調査メモ。これは導入前の設計提案であり、現在の仕様ではない。
+`usagi` の複数 workspace / session worktree で Rust コンパイル成果物を共有し、ローカル開発と CI の build latency を下げるための調査メモ。ローカル opt-in helper とベンチ手順の現在の仕様は [テスト観測](../07-test-observability.md#sccache-opt-in) を正本とする。本書は CI 導入など、追加判断が必要な設計提案を残す。
 
 ## 目次
 
