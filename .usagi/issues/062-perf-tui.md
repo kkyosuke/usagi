@@ -1,13 +1,13 @@
 ---
 number: 62
 title: perf(tui): 毎フレーム・毎打鍵の無駄な再計算/再確保を削減する
-status: todo
+status: done
 priority: low
 labels: [perf, tui, review]
 dependson: []
 related: [40, 41]
 created_at: 2026-06-19T22:17:07.364869+00:00
-updated_at: 2026-06-19T22:17:07.364869+00:00
+updated_at: 2026-07-11T01:18:56.132387+00:00
 ---
 
 ## 背景
