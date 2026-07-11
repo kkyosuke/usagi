@@ -41,8 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/KKyosuke/usagi/main/scripts/install
 export PATH="$PATH:$HOME/.usagi/bin"   # 案内に従って PATH を通す
 ```
 
-プラットフォーム別アーカイブ・ソースからのビルド（`cargo install --path .`）は
-[README#Installation](../README.md#installation) を参照してください。導入後、依存ツールの状態を確認できます。
+プラットフォーム別アーカイブ・ソースからのビルド（`cargo install --path v1`）は
+[v1 README#Installation](../v1/README.md#installation) を参照してください。導入後、依存ツールの状態を確認できます。
 
 ```bash
 usagi doctor   # git / bash / Agent CLI（claude・codex・sakana.ai・gemini・antigravity）/ 通知 / 設定ストレージの健全性を ok / warn / missing で表示
