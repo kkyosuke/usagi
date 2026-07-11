@@ -59,6 +59,7 @@ src/
 │   ├── frontmatter.rs          # frontmatter 形式の正本（slug 化・--- 分割・リスト escape・timestamp・改行無害化・読み書きの封筒スキャフォールド。issue/memory 共用）
 │   ├── issue/                  # Issue / IssueSummary / IssueStatus / IssuePriority（mod=型 / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
 │   ├── memory/                 # Memory / MemorySummary / MemoryType（mod=型・slug / markdown=frontmatter 読み書き（共通処理は frontmatter に委譲））
+│   ├── orchestrator.rs         # durable plan/node、claim/lease、PR/base、lifecycle event の純データ
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
@@ -77,6 +78,7 @@ src/
 │   ├── doctor/                 # 依存ツール・Agent CLI の導入状況チェック（mod=診断 / runner=CommandRunner / fix=--fix 導入）
 │   ├── issue/                  # issue の CRUD・検索・readiness（mod=型/CRUD/annotate / stats=集計・grouping / tree=依存ツリー / gantt=ガント / render=一覧行・統計行のテキスト整形の SSoT（CLI・TUI 共用） / view=JSON 出力の SSoT（CLI・MCP 共用））
 │   ├── memory/                 # メモリの upsert/CRUD・検索・種別フィルタ（mod=型/save/get/list/search/update/delete / view=JSON 出力の SSoT（CLI・MCP 共用））
+│   ├── orchestrator.rs         # snapshot から work-ready と冪等 action を導く純粋 reconcile
 │   ├── local_llm.rs            # ollama・モデルの有無判定とインストール（ensure）
 │   └── update_check.rs         # リモートのタグから最新リリースを判定（純粋・fetch は注入）
 │
@@ -110,6 +112,7 @@ src/
 │   ├── pr_title.rs             # PR タイトルを gh CLI で解決する純ロジック（argv 生成・stdout パース・未解決分の埋め込み）。実 gh 実行は terminal/pool が注入
 │   ├── agent/                  # Agent port のアダプタ（Claude は MCP・システムプロンプト・フックを serde_json で組み立てて launch コマンド生成 / Codex は MCP・システムプロンプト(developer_instructions)・フックを -c 設定上書きで注入し resume/forget も対応（Codex 互換の codex-fugu は同じ CodexAgent を起動プログラム名と rollout 保存先だけ変えて再利用）/ Gemini はインライン注入不可のため MCP/フック/system prompt は組み込まず resume(-r latest)/初期プロンプト(-i)/forget のみ配線（system prompt を持たないので worktree 閉じ込めの注意書きは開始プロンプト -i/-p の先頭に前置）/ Antigravity(agy, Gemini CLI 後継)も同様にインライン注入不可で resume(-c)/初期プロンプト(-i)/forget(history.jsonl)のみ配線（worktree 注意書きの前置も同じ））・session_system_prompt / session_opening_prompt 共有・agent_for
 │   ├── issue_store.rs          # <repo>/.usagi/issues/ の markdown + index.json（IssueStore）
+│   ├── orchestrator_store.rs   # workspace-local plan CAS、排他的 issue claim、append-only event
 │   └── memory_store.rs         # <repo>/.usagi/memory/ の markdown + MEMORY.md + index.json（MemoryStore）
 │
 └── presentation/               # CLI ルーティング・TUI・MCP

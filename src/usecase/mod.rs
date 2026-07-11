@@ -11,6 +11,7 @@ pub mod issue;
 pub mod local_llm;
 pub mod memory;
 pub mod op_auth;
+pub mod orchestrator;
 pub mod project;
 pub mod search;
 pub mod self_update;
