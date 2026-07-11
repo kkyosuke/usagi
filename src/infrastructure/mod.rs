@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agent_live_pane_store;
 pub mod agent_live_prompt_store;
 pub mod agent_prompt_store;
+pub mod agent_start_store;
 pub mod agent_state_store;
 #[cfg(unix)]
 pub mod daemon_client;

@@ -1,14 +1,14 @@
 ---
 number: 208
 title: feat(daemon): durable start claim と冪等な queued prompt consumer を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, orchestration, architecture]
 dependson: [207]
 related: [185, 207, 209]
 parent: 159
 created_at: 2026-07-11T12:13:48.800921+00:00
-updated_at: 2026-07-11T12:24:02.000000+00:00
+updated_at: 2026-07-12T00:00:00.000000+09:00
 ---
 
 ## 背景

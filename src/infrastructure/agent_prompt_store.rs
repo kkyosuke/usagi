@@ -158,7 +158,12 @@ pub fn set_with_live_handoff(worktree: &Path, prompt: &str, reuse_live_agent: bo
             retry: None,
             reuse_live_agent,
         },
-    )
+    )?;
+    // Publish the launch transaction only after the prompt record is durable.
+    // session_prompt saves its SessionAgent override before calling this API, so
+    // the request pins the authoritative CLI/model generation it belongs to.
+    crate::infrastructure::agent_start_store::publish(worktree, prompt, reuse_live_agent)?;
+    Ok(())
 }
 
 /// Take a queued prompt for background autostart only when its retry backoff has
@@ -194,6 +199,7 @@ fn take_ready_inner(
     now: SystemTime,
     require_live_handoff: bool,
 ) -> Result<TakeReady> {
+    let durable = crate::infrastructure::agent_start_store::read(worktree);
     let key = key(worktree);
     let dir = prompt_dir_for_take_ready()?;
     let _lock = StoreLock::acquire(&dir)?;
@@ -223,7 +229,29 @@ fn take_ready_inner(
     {
         return Ok(TakeReady::Waiting(retry.clone()));
     }
+    let claimed_id = if let Some(request) = durable {
+        match crate::infrastructure::agent_start_store::claim(
+            worktree,
+            &format!("tui:{}", std::process::id()),
+            now,
+        )? {
+            Some(claimed) => Some(claimed.id),
+            None => {
+                return Ok(TakeReady::Waiting(RetryState {
+                    attempts: request.attempts,
+                    next_retry_unix_secs: unix_secs(now) + 1,
+                    last_error: "durable start request is claimed by another consumer".to_string(),
+                    dead: false,
+                }));
+            }
+        }
+    } else {
+        None
+    };
     fs::remove_file(&path)?;
+    if let Some(id) = claimed_id {
+        let _ = crate::infrastructure::agent_start_store::clear(worktree, id);
+    }
     Ok(TakeReady::Ready {
         prompt: file.prompt,
         retry: file.retry,
@@ -301,7 +329,7 @@ pub fn requeue_front_after_failure(
         &path,
         &PromptFile {
             worktree: key,
-            prompt: merged,
+            prompt: merged.clone(),
             retry: Some(retry.clone()),
             reuse_live_agent,
         },
@@ -321,6 +349,17 @@ pub fn take(worktree: &Path) -> Option<String> {
 /// must be restored if the launch is canceled or fails. Unlike [`take_ready`],
 /// an explicit manual launch intentionally bypasses automatic retry backoff.
 pub fn take_with_state(worktree: &Path) -> Option<TakenPrompt> {
+    if crate::infrastructure::agent_start_store::read(worktree).is_some()
+        && crate::infrastructure::agent_start_store::claim(
+            worktree,
+            &format!("tui:{}", std::process::id()),
+            SystemTime::now(),
+        )
+        .ok()?
+        .is_none()
+    {
+        return None;
+    }
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR).ok()?;
     // Serialise the read-then-remove against `set` (see there): without the lock
@@ -333,6 +372,9 @@ pub fn take_with_state(worktree: &Path) -> Option<TakenPrompt> {
     match read_ours::<PromptFile>(&path, &key) {
         Some(file) => {
             let _ = fs::remove_file(&path);
+            if let Some(request) = crate::infrastructure::agent_start_store::read(worktree) {
+                let _ = crate::infrastructure::agent_start_store::clear(worktree, request.id);
+            }
             Some(TakenPrompt {
                 prompt: file.prompt,
                 retry: file.retry,
@@ -421,11 +463,13 @@ pub fn requeue_front_with_state(
         &path,
         &PromptFile {
             worktree: key,
-            prompt: merged,
+            prompt: merged.clone(),
             retry,
             reuse_live_agent,
         },
-    )
+    )?;
+    crate::infrastructure::agent_start_store::publish(worktree, &merged, reuse_live_agent)?;
+    Ok(())
 }
 
 /// Discard any prompt queued for `worktree` (best-effort), so a session removed
@@ -513,7 +557,7 @@ mod tests {
         with_data_dir(|_| {
             let wt = tempfile::tempdir().unwrap();
             set(wt.path(), "queued").unwrap();
-            let now = UNIX_EPOCH + Duration::from_secs(1_000);
+            let now = SystemTime::now();
             let retry = requeue_after_failure(wt.path(), "queued", "spawn failed", now).unwrap();
             assert_eq!(retry.attempts, 1);
             assert!(matches!(
@@ -532,6 +576,49 @@ mod tests {
                 take_ready(wt.path(), now + Duration::from_secs(31)),
                 TakeReady::Empty
             );
+        });
+    }
+
+    #[test]
+    fn durable_claim_blocks_a_second_tui_consumer() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued").unwrap();
+            let now = SystemTime::now();
+            crate::infrastructure::agent_start_store::claim(wt.path(), "daemon", now)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(take_ready(wt.path(), now), TakeReady::Waiting(_)));
+            assert_eq!(take_with_state(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn durable_claim_errors_are_surfaced_without_taking_the_prompt() {
+        with_data_dir(|data| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued").unwrap();
+            let start_dir = data.join("agent-start-requests");
+            let lock = start_dir.join(crate::infrastructure::store_lock::LOCK_FILE_NAME);
+            fs::remove_file(&lock).unwrap();
+            fs::create_dir(&lock).unwrap();
+            assert!(take_ready_strict(wt.path(), SystemTime::now()).is_err());
+            assert!(has_queued(wt.path()).unwrap());
+        });
+    }
+
+    #[test]
+    fn publish_paths_surface_prompt_write_failures() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let store_dir = dir(PROMPT_SUBDIR).unwrap();
+            fs::create_dir_all(&store_dir).unwrap();
+            let path = store_dir.join(file_name(&key(wt.path())));
+            fs::create_dir(&path).unwrap();
+            assert!(set(wt.path(), "queued").is_err());
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir(&path).unwrap();
+            assert!(requeue_front_with_state(wt.path(), "queued", None, false).is_err());
         });
     }
 
