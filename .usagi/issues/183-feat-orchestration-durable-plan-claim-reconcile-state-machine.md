@@ -1,14 +1,14 @@
 ---
 number: 183
 title: feat(orchestration): durable plan・claim・reconcile state machine を追加する
-status: todo
+status: done
 priority: high
 labels: [orchestration, infrastructure]
 dependson: []
 related: []
 parent: 182
 created_at: 2026-07-10T23:56:41.533909+00:00
-updated_at: 2026-07-10T23:56:41.533909+00:00
+updated_at: 2026-07-11T00:28:39.721586+00:00
 ---
 
 ## 背景

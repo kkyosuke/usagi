@@ -9,6 +9,7 @@ pub mod frontmatter;
 pub mod history;
 pub mod issue;
 pub mod memory;
+pub mod orchestrator;
 pub mod repository;
 pub mod resource;
 pub mod serde_fallback;
