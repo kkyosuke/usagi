@@ -37,7 +37,8 @@ use crate::infrastructure::daemon_ipc::{decode_message, encode_message, socket_p
 use crate::infrastructure::daemon_store;
 use crate::infrastructure::pty::ScreenCallbacks;
 use crate::usecase::daemon_attach::{
-    apply_screen_message, attach_reply, spawn_reply, AttachReply, ScreenSink, SpawnReply,
+    attach_reply, drain_buffered_frames, spawn_reply, AttachReply, DrainOutcome, ScreenSink,
+    SpawnReply,
 };
 
 /// How long a connect keeps retrying while a daemon record exists (the daemon
@@ -211,6 +212,10 @@ impl ScreenSink for ParserSink {
     fn exited(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
     }
+
+    fn orphaned(&self) -> bool {
+        self.orphaned
+    }
 }
 
 impl DaemonTerminal {
@@ -369,31 +374,24 @@ impl DaemonTerminal {
                     };
                     let mut stream = reader_stream;
                     let mut buf = vec![0u8; 64 * 1024];
-                    'read: loop {
+                    // Drain before blocking: the attach handshake can pull the
+                    // daemon's initial `Screen` snapshot (sent right behind
+                    // `Attached`) into the decoder, and an idle terminal sends
+                    // nothing further to flush it out — a read-first loop
+                    // would leave the pane blank.
+                    while drain_buffered_frames(
+                        &mut decoder,
+                        terminal,
+                        &mut sink,
+                        &mut |payload| decode_message::<ServerMessage>(payload).ok(),
+                        &mut || {
+                            generation.fetch_add(1, Ordering::SeqCst);
+                        },
+                    ) == DrainOutcome::NeedMoreBytes
+                    {
                         match stream.read(&mut buf) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                decoder.feed(&buf[..n]);
-                                loop {
-                                    match decoder.next_frame() {
-                                        Ok(Some(frame)) => {
-                                            let Ok(message) =
-                                                decode_message::<ServerMessage>(&frame)
-                                            else {
-                                                break 'read;
-                                            };
-                                            if apply_screen_message(&message, terminal, &mut sink) {
-                                                generation.fetch_add(1, Ordering::SeqCst);
-                                            }
-                                            if sink.orphaned {
-                                                break 'read;
-                                            }
-                                        }
-                                        Ok(None) => break,
-                                        Err(_) => break 'read,
-                                    }
-                                }
-                            }
+                            Ok(n) => decoder.feed(&buf[..n]),
                         }
                     }
                 })
