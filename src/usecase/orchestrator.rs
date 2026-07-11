@@ -39,6 +39,8 @@ pub enum Action {
 pub struct ReconcileResult {
     pub plan: Plan,
     pub actions: Vec<Action>,
+    /// Event ids safe to acknowledge after `plan` has been durably committed.
+    pub acknowledgements: Vec<String>,
 }
 
 pub fn work_ready(plan: &Plan, issue: u64) -> Option<Base> {
@@ -78,8 +80,14 @@ pub fn reconcile(
 ) -> ReconcileResult {
     let mut next = plan.clone();
     let mut actions = Vec::new();
+    let mut acknowledgements = Vec::new();
 
     for event in &observation.events {
+        if event.plan == next.id {
+            // Unknown and stale generations are intentionally acknowledged too:
+            // they cannot affect this plan now or in a future generation.
+            acknowledgements.push(event.id.clone());
+        }
         let Some(node) = next.nodes.get_mut(&event.issue) else {
             continue;
         };
@@ -188,6 +196,7 @@ pub fn reconcile(
     ReconcileResult {
         plan: next,
         actions,
+        acknowledgements,
     }
 }
 
@@ -331,6 +340,7 @@ mod tests {
             issue: 1,
             generation: 1,
             kind: EventKind::Succeeded,
+            terminal_revision: 0,
             observed_at: now(),
         };
         let result = reconcile(
@@ -346,6 +356,7 @@ mod tests {
                         issue: 99,
                         generation: 0,
                         kind: EventKind::Succeeded,
+                        terminal_revision: 0,
                         observed_at: now(),
                     },
                 ],
@@ -395,6 +406,7 @@ mod tests {
                 issue: 1,
                 generation: 2,
                 kind,
+                terminal_revision: 0,
                 observed_at: now(),
             };
             let result = reconcile(
@@ -418,6 +430,7 @@ mod tests {
             issue: 1,
             generation: 0,
             kind: EventKind::Succeeded,
+            terminal_revision: 0,
             observed_at: now(),
         };
         let result = reconcile(

@@ -59,9 +59,12 @@ session と PR の不在を再観測した場合だけ置換できる。
 
 ## event
 
-event は `id`、`plan`、`issue`、`generation`、`kind`、`observed_at` を持つ。`kind` は
+event は `id`、`plan`、`issue`、`generation`、`kind`、`terminal_revision`、`observed_at` を持つ。`kind` は
 `pr_opened`、`succeeded`、`failed`、`interrupted`、`timed_out` のいずれかである。id は
-`plan-issue-generation-kind` から決定的に生成し、plan lock 下の同名ファイル検査を重複排除点にする。
+`plan-issue-generation-kind-terminal_revision` から決定的に生成し、plan lock 下の同名ファイル検査を重複排除点にする。
+worker worktree の `.usagi/orchestrator-worker.json` は workspace、plan、issue、generation、owner worktree を
+結び付ける。lifecycle hook は event を先に保存し、owner に live pane があれば live queue、なければ launch queue を
+wake-up として送る。queue は event の正本ではなく、失敗しても event は残る。
 
 ## 整合性
 
@@ -69,3 +72,4 @@ event は `id`、`plan`、`issue`、`generation`、`kind`、`observed_at` を持
 - plan 更新は plan lock 下で期待 `revision` と現在値を比較する。相違時は書き込まない。
 - claim 更新は workspace orchestrator lock 下で直列化する。
 - event は append-only で、同じ lifecycle hook の再実行は no-op になる。
+- reconcile は plan を永続化した後に event を ack（削除）する。ack 前の再起動では同じ event を再適用できる。

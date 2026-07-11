@@ -107,6 +107,9 @@ pub struct Event {
     pub issue: u64,
     pub generation: u64,
     pub kind: EventKind,
+    /// Monotonic revision supplied by the lifecycle boundary. It distinguishes
+    /// two observations of the same terminal kind in one worker generation.
+    pub terminal_revision: u64,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -121,7 +124,13 @@ pub enum EventKind {
 }
 
 impl Event {
-    pub fn deterministic_id(plan: &str, issue: u64, generation: u64, kind: &EventKind) -> String {
+    pub fn deterministic_id(
+        plan: &str,
+        issue: u64,
+        generation: u64,
+        kind: &EventKind,
+        terminal_revision: u64,
+    ) -> String {
         let kind = match kind {
             EventKind::PrOpened => "pr_opened",
             EventKind::Succeeded => "succeeded",
@@ -129,7 +138,7 @@ impl Event {
             EventKind::Interrupted => "interrupted",
             EventKind::TimedOut => "timed_out",
         };
-        format!("{plan}-{issue}-{generation}-{kind}")
+        format!("{plan}-{issue}-{generation}-{kind}-{terminal_revision}")
     }
 }
 
@@ -158,8 +167,8 @@ mod tests {
             (EventKind::TimedOut, "timed_out"),
         ] {
             assert_eq!(
-                Event::deterministic_id("plan", 1, 2, &kind),
-                format!("plan-1-2-{name}")
+                Event::deterministic_id("plan", 1, 2, &kind, 3),
+                format!("plan-1-2-{name}-3")
             );
         }
     }

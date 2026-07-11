@@ -31,6 +31,12 @@ pub enum Phase {
     /// The agent finished — a turn ended (`Stop`) or the process exited
     /// (`SessionEnd`).
     Ended,
+    /// The worker process exited unsuccessfully.
+    Failed,
+    /// The worker was explicitly interrupted.
+    Interrupted,
+    /// The worker exceeded its orchestration deadline.
+    TimedOut,
 }
 
 impl From<Phase> for AgentPhase {
@@ -40,6 +46,7 @@ impl From<Phase> for AgentPhase {
             Phase::Running => AgentPhase::Running,
             Phase::Waiting => AgentPhase::Waiting,
             Phase::Ended => AgentPhase::Ended,
+            Phase::Failed | Phase::Interrupted | Phase::TimedOut => AgentPhase::Ended,
         }
     }
 }
@@ -96,7 +103,18 @@ fn record(phase: Phase, raw: &str, worktree: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    agent_state_store::write(worktree, phase.into())
+    agent_state_store::write(worktree, phase.into())?;
+    let event_kind = match phase {
+        Phase::Ended => Some(crate::domain::orchestrator::EventKind::Succeeded),
+        Phase::Failed => Some(crate::domain::orchestrator::EventKind::Failed),
+        Phase::Interrupted => Some(crate::domain::orchestrator::EventKind::Interrupted),
+        Phase::TimedOut => Some(crate::domain::orchestrator::EventKind::TimedOut),
+        Phase::Ready | Phase::Running | Phase::Waiting => None,
+    };
+    if let Some(kind) = event_kind {
+        crate::infrastructure::orchestrator_event::emit(worktree, kind, 0, chrono::Utc::now())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -121,6 +139,20 @@ mod tests {
         assert_eq!(AgentPhase::from(Phase::Running), AgentPhase::Running);
         assert_eq!(AgentPhase::from(Phase::Waiting), AgentPhase::Waiting);
         assert_eq!(AgentPhase::from(Phase::Ended), AgentPhase::Ended);
+        assert_eq!(AgentPhase::from(Phase::Failed), AgentPhase::Ended);
+        assert_eq!(AgentPhase::from(Phase::Interrupted), AgentPhase::Ended);
+        assert_eq!(AgentPhase::from(Phase::TimedOut), AgentPhase::Ended);
+    }
+
+    #[test]
+    fn terminal_outcomes_record_ended_without_a_worker_binding() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            for phase in [Phase::Failed, Phase::Interrupted, Phase::TimedOut] {
+                record(phase, "", wt.path()).unwrap();
+                assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Ended));
+            }
+        });
     }
 
     #[test]

@@ -687,6 +687,14 @@ fn drive(
             if let Some(prs) = fresh_prs {
                 if let Some(root) = state.list().active().map(|wt| wt.path.clone()) {
                     let _ = crate::infrastructure::pr_link_store::add(&root, &prs);
+                    for pr in &prs {
+                        let _ = crate::infrastructure::orchestrator_event::emit(
+                            &root,
+                            crate::domain::orchestrator::EventKind::PrOpened,
+                            u64::from(pr.number),
+                            chrono::Utc::now(),
+                        );
+                    }
                     let merged = crate::infrastructure::pr_link_store::get(&root);
                     state.set_pr_links(&root, merged);
                 }

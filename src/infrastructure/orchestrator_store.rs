@@ -161,6 +161,19 @@ impl OrchestratorStore {
             })
             .collect()
     }
+
+    /// Acknowledge an event after the plan revision containing its effect has
+    /// been durably saved. Missing events are already acknowledged.
+    pub fn acknowledge_event(&self, plan: &str, event_id: &str) -> Result<bool> {
+        let plan_dir = self.plan_dir(plan);
+        let _lock = StoreLock::acquire(&plan_dir)?;
+        let path = plan_dir.join("events").join(format!("{event_id}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context(format!("failed to acknowledge {}", path.display())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -247,11 +260,12 @@ mod tests {
         let store = OrchestratorStore::new(tmp.path());
         let kind = EventKind::Succeeded;
         let event = Event {
-            id: Event::deterministic_id("p", 1, 2, &kind),
+            id: Event::deterministic_id("p", 1, 2, &kind, 0),
             plan: "p".into(),
             issue: 1,
             generation: 2,
             kind,
+            terminal_revision: 0,
             observed_at: now(),
         };
         assert!(store.append_event(&event).unwrap());
@@ -288,6 +302,7 @@ mod tests {
             issue: 1,
             generation: 1,
             kind,
+            terminal_revision: 0,
             observed_at: now(),
         };
         assert!(store.append_event(&event).is_err());
@@ -296,5 +311,30 @@ mod tests {
         fs::create_dir_all(events.parent().unwrap()).unwrap();
         fs::write(&events, "not a directory").unwrap();
         assert!(store.load_events("q").is_err());
+
+        let ack_dir = tmp
+            .path()
+            .join(".usagi/orchestrators/ack/events/directory.json");
+        fs::create_dir_all(&ack_dir).unwrap();
+        assert!(store.acknowledge_event("ack", "directory").is_err());
+    }
+
+    #[test]
+    fn event_is_retained_until_acknowledged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        let event = Event {
+            id: "p-1-1-succeeded-0".into(),
+            plan: "p".into(),
+            issue: 1,
+            generation: 1,
+            kind: EventKind::Succeeded,
+            terminal_revision: 0,
+            observed_at: now(),
+        };
+        store.append_event(&event).unwrap();
+        assert!(store.acknowledge_event("p", &event.id).unwrap());
+        assert!(!store.acknowledge_event("p", &event.id).unwrap());
+        assert!(store.load_events("p").unwrap().is_empty());
     }
 }
