@@ -614,6 +614,7 @@ pub(super) fn event_loop(
     // always repainting.
     let mut last_update = None;
     let mut force_paint = true;
+    let mut first_paint_done = false;
     // Whether the last paint drew the mascot mid-blink, so the frame that reopens
     // its eyes (an idle tick, not a keypress) still repaints in a quiet 選択 rather
     // than being skipped — leaving the eyes stuck shut.
@@ -705,7 +706,9 @@ pub(super) fn event_loop(
         // and start its agent pane in the background — no human opens it. A started
         // pane logs a line and forces a repaint so its new sidebar badge shows at
         // once. A no-op when the feature is off or nothing is queued.
-        force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
+        if first_paint_done {
+            force_paint |= apply_autostart(&mut state, wiring.autostart_queued);
+        }
         // Fire the one-shot `wake -t hhmm` schedule once its local wall-clock time
         // arrives, sending `continue` to every live session agent and logging the
         // count. The same idle tick that keeps session watching alive also drives
@@ -918,7 +921,8 @@ pub(super) fn event_loop(
             && !state.mascot_blinking()
             && !blink_changed
             && last_update == latest_update;
-        if !skip_paint {
+        let painted = !skip_paint;
+        if painted {
             // Stamp the frame's render time so the left pane's "Nm ago" labels track
             // real time. Only on a real paint — a skipped frame draws nothing, so
             // the label refreshes on the next change rather than ticking every
@@ -927,6 +931,11 @@ pub(super) fn event_loop(
             let frame = ui::render_frame(height as usize, width as usize, &state);
             let columns = ui::column_diff(height as usize, width as usize, state.sidebar());
             painter.paint_columns(term, frame, columns)?;
+        }
+        if painted && !first_paint_done {
+            first_paint_done = true;
+            force_paint = true;
+            continue;
         }
         last_update = latest_update;
         last_blinking = state.mascot_blinking();
