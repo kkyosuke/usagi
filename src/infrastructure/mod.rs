@@ -21,6 +21,7 @@ pub mod markdown_file;
 pub mod markdown_store;
 pub mod memory_store;
 pub mod open_panes_store;
+pub mod orchestrator_event;
 pub mod orchestrator_store;
 pub mod pr_link_store;
 pub mod pr_title;

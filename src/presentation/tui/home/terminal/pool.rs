@@ -431,6 +431,14 @@ fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
         .filter(|result| result.changed)
         .map(|result| {
             let _ = pr_link_store::add(&result.path, &result.prs);
+            for pr in &result.prs {
+                let _ = crate::infrastructure::orchestrator_event::emit(
+                    &result.path,
+                    crate::domain::orchestrator::EventKind::PrOpened,
+                    u64::from(pr.number),
+                    chrono::Utc::now(),
+                );
+            }
             let mut merged = pr_link_store::get(&result.path);
             let mut fetch: fn(&[String]) -> Option<String> = resolve_pr_title;
             if pr_title::resolve(&mut merged, &mut fetch) {
