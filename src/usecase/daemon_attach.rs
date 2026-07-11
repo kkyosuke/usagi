@@ -14,7 +14,7 @@
 //! the real parser live in [`crate::infrastructure::daemon_client`]; injecting
 //! the sink keeps every protocol branch unit-testable without either.
 
-use crate::domain::daemon_ipc::{ServerMessage, TerminalId};
+use crate::domain::daemon_ipc::{FrameDecoder, ServerMessage, TerminalId};
 
 /// Where an attach client folds the daemon's screen feed. Implemented over the
 /// real vt100 parser by the infrastructure client; over a recording fake in
@@ -27,6 +27,58 @@ pub trait ScreenSink {
     fn apply_output(&mut self, data: &[u8]);
     /// The terminal's process has exited; no more updates will come.
     fn exited(&mut self);
+    /// Whether the sink can no longer accept updates (its parser was dropped);
+    /// the reader stops instead of folding into nowhere.
+    fn orphaned(&self) -> bool {
+        false
+    }
+}
+
+/// What the attach reader should do after [`drain_buffered_frames`] returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// Every buffered frame was folded; block on the socket for more bytes.
+    NeedMoreBytes,
+    /// A frame or message could not be decoded, or the sink is orphaned — the
+    /// reader must stop.
+    Stop,
+}
+
+/// Fold every frame already buffered in `decoder` into `sink`, calling
+/// `on_consumed` for each message the sink took (the reader bumps its render
+/// generation there). `decode` turns a frame payload into a message — injected
+/// because the JSON codec lives in the infrastructure layer.
+///
+/// The reader must call this **before** each blocking socket read: the daemon
+/// pushes the initial `Screen` snapshot right behind `Attached`, and one read
+/// can deliver both during the handshake, leaving the snapshot buffered in the
+/// decoder. Blocking on the socket first would keep that snapshot invisible
+/// until the terminal produced new output — which an idle agent never does, so
+/// the pane would stay blank.
+pub fn drain_buffered_frames(
+    decoder: &mut FrameDecoder,
+    terminal: TerminalId,
+    sink: &mut dyn ScreenSink,
+    decode: &mut dyn FnMut(&[u8]) -> Option<ServerMessage>,
+    on_consumed: &mut dyn FnMut(),
+) -> DrainOutcome {
+    loop {
+        match decoder.next_frame() {
+            Ok(Some(frame)) => {
+                let Some(message) = decode(&frame) else {
+                    return DrainOutcome::Stop;
+                };
+                if apply_screen_message(&message, terminal, sink) {
+                    on_consumed();
+                }
+                if sink.orphaned() {
+                    return DrainOutcome::Stop;
+                }
+            }
+            Ok(None) => return DrainOutcome::NeedMoreBytes,
+            Err(_) => return DrainOutcome::Stop,
+        }
+    }
 }
 
 /// Fold one server `message` about `terminal` into `sink`. Messages about other
@@ -129,6 +181,164 @@ mod tests {
         fn exited(&mut self) {
             self.exited = true;
         }
+    }
+
+    /// A sink whose parser is already gone: consumes nothing further.
+    #[derive(Default)]
+    struct Orphaned {
+        applied: usize,
+    }
+
+    impl ScreenSink for Orphaned {
+        fn replace_screen(&mut self, _contents: &[u8]) {
+            self.applied += 1;
+        }
+        fn apply_output(&mut self, _data: &[u8]) {
+            self.applied += 1;
+        }
+        fn exited(&mut self) {}
+        fn orphaned(&self) -> bool {
+            true
+        }
+    }
+
+    /// Length-prefix `payload` the way the daemon frames messages on the wire.
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    /// A decode stand-in for the infrastructure JSON codec: `s:<bytes>` is a
+    /// `Screen` for terminal 7, `o:<bytes>` an `Output`, anything else fails.
+    fn decode(payload: &[u8]) -> Option<ServerMessage> {
+        let rest = payload.get(2..)?.to_vec();
+        match payload.first()? {
+            b's' => Some(ServerMessage::Screen {
+                terminal: 7,
+                contents: rest,
+            }),
+            b'o' => Some(ServerMessage::Output {
+                terminal: 7,
+                data: rest,
+            }),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn drain_folds_frames_buffered_during_the_handshake() {
+        // The handshake's read pulled `Attached` plus the initial snapshot and
+        // an output delta into the decoder; the reader must fold both before
+        // ever blocking on the socket again.
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(&frame(b"s:\x1b[2Jhi"));
+        decoder.feed(&frame(b"o:there"));
+        let mut sink = Recorded::default();
+        let mut consumed = 0;
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            7,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || consumed += 1,
+        );
+        assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
+        assert_eq!(sink.replaced, vec![b"\x1b[2Jhi".to_vec()]);
+        assert_eq!(sink.output, vec![b"there".to_vec()]);
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn drain_reports_need_more_bytes_on_a_partial_frame() {
+        let mut decoder = FrameDecoder::new();
+        // A length prefix promising more bytes than have arrived.
+        let full = frame(b"s:later");
+        decoder.feed(&full[..5]);
+        let mut sink = Recorded::default();
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            7,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || {},
+        );
+        assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
+        assert!(sink.replaced.is_empty());
+    }
+
+    #[test]
+    fn drain_skips_messages_for_other_terminals_without_consuming() {
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(&frame(b"s:x"));
+        let mut sink = Recorded::default();
+        let mut consumed = 0;
+        // The decoded message addresses terminal 7; this reader follows 8.
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            8,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || consumed += 1,
+        );
+        assert_eq!(outcome, DrainOutcome::NeedMoreBytes);
+        assert_eq!(consumed, 0);
+        assert!(sink.replaced.is_empty());
+    }
+
+    #[test]
+    fn drain_stops_on_an_undecodable_message() {
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(&frame(b"?bogus"));
+        let mut sink = Recorded::default();
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            7,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || {},
+        );
+        assert_eq!(outcome, DrainOutcome::Stop);
+    }
+
+    #[test]
+    fn drain_stops_on_a_framing_error() {
+        let mut decoder = FrameDecoder::new();
+        // A length prefix beyond MAX_FRAME_LEN is rejected, not buffered.
+        decoder.feed(&u32::MAX.to_be_bytes());
+        let mut sink = Recorded::default();
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            7,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || {},
+        );
+        assert_eq!(outcome, DrainOutcome::Stop);
+    }
+
+    #[test]
+    fn drain_stops_once_the_sink_is_orphaned() {
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(&frame(b"s:one"));
+        decoder.feed(&frame(b"o:two"));
+        let mut sink = Orphaned::default();
+        let outcome = drain_buffered_frames(
+            &mut decoder,
+            7,
+            &mut sink,
+            &mut |payload| decode(payload),
+            &mut || {},
+        );
+        assert_eq!(outcome, DrainOutcome::Stop);
+        // The first message was applied; the orphaned check then stopped the
+        // drain before the second.
+        assert_eq!(sink.applied, 1);
+    }
+
+    #[test]
+    fn a_default_sink_is_never_orphaned() {
+        assert!(!Recorded::default().orphaned());
     }
 
     #[test]
