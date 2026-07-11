@@ -1079,6 +1079,29 @@ fn attached_dir_ignores_a_path_outside_the_open_workspaces() {
 }
 
 #[test]
+fn attached_dir_expands_a_collapsed_workspace_to_reveal_its_session() {
+    let mut state = state();
+    let mut extra = session_record("feature", 1);
+    extra.root = PathBuf::from("/tools/.usagi/sessions/feature");
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: vec![extra],
+        issues: Vec::new(),
+    }]);
+    let tools_root = state.list().group_root_row(1).unwrap();
+    state.overview_select(tools_root);
+    state.toggle_selected_collapsed();
+    state.overview_select(0);
+
+    assert!(state.focus_attached_dir(Path::new("/tools/.usagi/sessions/feature")));
+    assert!(!state.list().is_collapsed(1));
+    assert_eq!(state.list().selected_group(), 1);
+    assert_eq!(state.list().selected_name(), "feature");
+}
+
+#[test]
 fn legacy_root_resume_targets_the_primary_workspace_root() {
     let mut state = state();
     state.restore_sessions(vec![session_record("feature", 1)]);
@@ -1086,6 +1109,7 @@ fn legacy_root_resume_targets_the_primary_workspace_root() {
 
     state.restore_focus(ROOT_NAME, ResumeLevel::Switch);
     assert_eq!(state.list().selected_index(), 0);
+    assert_eq!(state.list().active_index(), 0);
     assert!(state.list().root_selected());
 }
 

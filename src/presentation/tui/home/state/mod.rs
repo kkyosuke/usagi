@@ -2946,6 +2946,7 @@ impl HomeState {
         match level {
             ResumeLevel::Switch => {
                 self.list.focus_index(row);
+                self.list.activate_selected();
             }
             ResumeLevel::Closeup => {
                 self.enter_closeup(row);
@@ -2976,7 +2977,7 @@ impl HomeState {
     /// Pane exit actions call this with the pane's actual directory so unite mode
     /// cannot act on a stale cursor in another workspace.
     pub fn focus_attached_dir(&mut self, dir: &Path) -> bool {
-        let Some(row) = self.list.row_of_path(dir) else {
+        let Some(row) = self.list.reveal_path(dir) else {
             return false;
         };
         self.list.focus_index(row);
