@@ -32,7 +32,8 @@ ruby scripts/summarize-nextest-junit.rb target/nextest/metrics/junit.xml ...
 ## sccache opt-in
 
 Rust ビルドの sccache 利用手順とベンチ観測方法は本節を正本とする。repo-wide の `.cargo/config.toml` で
-`rustc-wrapper = "sccache"` は固定しない。未インストール環境では通常の Cargo 実行を維持する。
+`rustc-wrapper = "sccache"` は固定しない。未インストール環境では通常の Cargo 実行を維持する。CI 実験の採否と
+観測ログは [sccache による Rust ビルド高速化](proposals/04-sccache-rust-builds.md) に残す。
 
 | 項目 | 仕様 |
 |---|---|
@@ -41,7 +42,7 @@ Rust ビルドの sccache 利用手順とベンチ観測方法は本節を正本
 | cache dir | 既定は `<workspace>/.usagi/cache/sccache`。session worktree 間で共有する |
 | target dir | 共有しない。各 session worktree の `<worktree>/target` を使う |
 | cache size | 既定は `SCCACHE_CACHE_SIZE=10G`。必要に応じて環境変数で上書きする |
-| CI | required Rust gate の ubuntu jobs だけで実験導入する。local helper は CI では使わず、workflow 内で明示的に `RUSTC_WRAPPER=sccache` を設定する |
+| CI | 現在は使わない。required `Test` / `Coverage`、release build check、release workflow、test-metrics は `RUSTC_WRAPPER=sccache` を設定しない |
 
 通常の gate を sccache 付きで実行する場合は、Cargo サブコマンドだけを helper に渡す。
 
@@ -86,19 +87,10 @@ session A で sccache cache を温めたあと、session B の別 worktree で `
 
 sccache の hit rate は proc macro、build script、feature 差、target triple、`RUSTFLAGS`、環境変数差で下がる。
 
-CI 実験は `.github/workflows/test.yml` の `test` / `full-test` job と `.github/workflows/coverage.yml` の
-`coverage` job に限定する。`swatinem/rust-cache@v2` は Cargo registry / git / target cache として残し、sccache
-は rustc invocation の object cache として separate cache dir を `actions/cache` で復元・保存する。cache key は OS、
-`rustc -Vv` 由来の toolchain hash、`Cargo.lock`、workflow/job 名を含め、fmt/clippy、full test、coverage の
-instrumentation 差を過剰共有しない。restore key は同じ OS / toolchain / job の prefix までに留め、`Cargo.lock`
-変更時も同じ job の近い cache だけを候補にする。容量上限は CI では `SCCACHE_CACHE_SIZE=2G` とし、GitHub Actions
-cache の retention / eviction に失効を任せる。
-
-CI log には `if: always()` の `sccache --show-stats` を残す。PR では cache restore/save time を含む job wall time、
-workflow duration、billed minutes、hit/miss/non-cacheable、cache size を sccache なしの直近 main run または同等 PR
-run と比較する。coverage workflow では `cargo llvm-cov` 実行時にも wrapper を有効にするが、採否判断では coverage
-100% gate の結果が sccache なしと同じであることを correctness 条件に含める。release build check / release workflow /
-test-metrics workflow への展開は、この実験の結果を見て別 issue で扱う。
+CI では sccache を使わない。required `Test` / `Coverage` は `swatinem/rust-cache@v2` だけを使い、release build check、
+release workflow、test-metrics へも sccache を展開しない。#203 の no-go 判断では、warmed `Test` でも compile
+request が少なく job duration 合計を短縮できず、`Coverage` では PR branch 間の cache 非共有と save overhead が残った。
+CI 実験の workflow 設定、観測値、採否理由の詳細は [proposal の #203 判断](proposals/04-sccache-rust-builds.md#ci-実験の-203-判断) を参照する。
 
 ## runner 比較
 
