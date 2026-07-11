@@ -583,8 +583,8 @@ mod tests {
         );
         let tools = res["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        // 6 issue + 4 memory + 14 session + 2 composite orchestration tools.
-        assert_eq!(names.len(), 26);
+        // 6 issue + 4 memory + 15 session + 2 composite orchestration tools.
+        assert_eq!(names.len(), 27);
         assert!(names.contains(&"issue_create"));
         assert!(names.contains(&"issue_to_prompt"));
         assert!(names.contains(&"issue_search"));
@@ -593,6 +593,7 @@ mod tests {
         assert!(names.contains(&"session_list"));
         assert!(names.contains(&"session_status"));
         assert!(names.contains(&"session_prompt"));
+        assert!(names.contains(&"session_complete"));
         assert!(names.contains(&"session_pr"));
         assert!(names.contains(&"session_remove"));
         assert!(names.contains(&"session_note_get"));
