@@ -1,14 +1,14 @@
 ---
 number: 141
 title: refactor(tui): TabModel を導入し live pane と +new/pending tab の状態遷移を純粋化する
-status: todo
+status: done
 priority: high
 labels: [refactor, tui, terminal, review]
 dependson: [138]
 related: [128, 129]
 parent: 137
 created_at: 2026-07-06T00:20:19.160346+00:00
-updated_at: 2026-07-06T00:20:19.160346+00:00
+updated_at: 2026-07-12T00:00:00+09:00
 ---
 
 ## 目的

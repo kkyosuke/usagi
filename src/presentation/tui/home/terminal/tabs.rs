@@ -71,6 +71,142 @@ pub struct TabStrip {
     pub active: usize,
 }
 
+/// Pure state of a session's live, virtual `+ new`, and in-flight tabs.
+///
+/// This value deliberately contains no PTY handle.  The pool applies the
+/// returned live index to its owned panes; Closeup can therefore exercise the
+/// exact same transitions without constructing terminal IO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabModel {
+    live: Vec<PaneTab>,
+    active: usize,
+    selected: TabSelection,
+    pending: Option<PendingTab>,
+}
+
+/// The tab selected by the chrome. Pending is separate from a live pane because
+/// environment resolution can precede creation of the PTY-backed pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabSelection {
+    Live(usize),
+    New,
+    Pending(u64),
+}
+
+/// Visual state of an in-flight pane launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTab {
+    pub id: u64,
+    pub label: String,
+    pub ready: bool,
+}
+
+/// A pure tab-selection action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabAction {
+    Next,
+    Prev,
+    ToLive(usize),
+    ToNew,
+}
+
+impl TabModel {
+    pub fn new(live: Vec<PaneTab>, active: usize, on_new: bool) -> Self {
+        let active = resolve_nav(active, live.len(), TabNav::To(active));
+        let selected = if on_new || live.is_empty() {
+            TabSelection::New
+        } else {
+            TabSelection::Live(active)
+        };
+        Self {
+            live,
+            active,
+            selected,
+            pending: None,
+        }
+    }
+
+    pub fn selection(&self) -> TabSelection {
+        self.selected
+    }
+
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    /// Reduce navigation over `[live..., + new]`, returning the live pane the IO
+    /// owner should activate, or `None` for a virtual tab.
+    pub fn reduce(&mut self, action: TabAction) -> Option<usize> {
+        self.selected = reduce_selection(self.selected, self.live.len(), action);
+        if let TabSelection::Live(index) = self.selected {
+            self.active = index;
+            Some(index)
+        } else {
+            None
+        }
+    }
+
+    pub fn begin_pending(&mut self, id: u64, label: String) {
+        self.pending = Some(PendingTab {
+            id,
+            label,
+            ready: false,
+        });
+        self.selected = TabSelection::Pending(id);
+    }
+
+    pub fn pending_ready(&mut self, id: u64) -> bool {
+        let Some(pending) = self.pending.as_mut().filter(|p| p.id == id) else {
+            return false;
+        };
+        pending.ready = true;
+        true
+    }
+
+    pub fn pending_gone(&mut self, id: u64) -> bool {
+        if self.pending.as_ref().is_none_or(|pending| pending.id != id) {
+            return false;
+        }
+        self.pending = None;
+        if self.selected == TabSelection::Pending(id) {
+            self.selected = TabSelection::New;
+        }
+        true
+    }
+
+    pub fn activate_pending(&mut self, id: u64, pane: PaneTab) -> Option<usize> {
+        if self.pending.as_ref().is_none_or(|pending| pending.id != id) {
+            return None;
+        }
+        self.pending = None;
+        self.live.push(pane);
+        self.active = self.live.len() - 1;
+        self.selected = TabSelection::Live(self.active);
+        Some(self.active)
+    }
+}
+
+/// Reduce a selection when the caller owns only the published live count (as
+/// Closeup does), without requiring access to the pool's pane values.
+pub fn reduce_selection(current: TabSelection, len: usize, action: TabAction) -> TabSelection {
+    match action {
+        TabAction::ToNew => TabSelection::New,
+        TabAction::ToLive(index) if len > 0 => TabSelection::Live(index.min(len - 1)),
+        TabAction::ToLive(_) => TabSelection::New,
+        TabAction::Next | TabAction::Prev if len == 0 => TabSelection::New,
+        TabAction::Next => match current {
+            TabSelection::New | TabSelection::Pending(_) => TabSelection::Live(0),
+            TabSelection::Live(index) if index + 1 >= len => TabSelection::New,
+            TabSelection::Live(index) => TabSelection::Live(index + 1),
+        },
+        TabAction::Prev => match current {
+            TabSelection::New | TabSelection::Pending(_) => TabSelection::Live(len - 1),
+            TabSelection::Live(0) => TabSelection::New,
+            TabSelection::Live(index) => TabSelection::Live(index - 1),
+        },
+    }
+}
+
 /// The active tab index after applying `nav` to a session of `len` panes whose
 /// active tab is `active`. `Next` / `Prev` wrap around the ends; `To` clamps to
 /// the last tab. An empty session (`len == 0`) stays at `0`.
@@ -508,5 +644,59 @@ mod tests {
     fn pane_kind_opens_an_agent_only_when_asked() {
         assert_eq!(pane_kind(true), PaneKind::Agent);
         assert_eq!(pane_kind(false), PaneKind::Terminal);
+    }
+
+    fn terminal(id: u64) -> PaneTab {
+        PaneTab {
+            kind: PaneKind::Terminal,
+            cli: None,
+            id,
+        }
+    }
+
+    #[test]
+    fn model_navigates_live_and_new_tabs_without_io() {
+        let mut model = TabModel::new(vec![terminal(1), terminal(2)], 0, false);
+        assert_eq!(model.reduce(TabAction::Next), Some(1));
+        assert_eq!(model.reduce(TabAction::Next), None);
+        assert_eq!(model.selection(), TabSelection::New);
+        assert_eq!(model.reduce(TabAction::Next), Some(0));
+        assert_eq!(model.reduce(TabAction::Prev), None);
+        assert_eq!(model.reduce(TabAction::Prev), Some(1));
+        assert_eq!(model.reduce(TabAction::ToLive(99)), Some(1));
+        assert_eq!(model.reduce(TabAction::ToNew), None);
+    }
+
+    #[test]
+    fn empty_model_keeps_new_selected() {
+        let mut model = TabModel::new(Vec::new(), 8, false);
+        assert_eq!(model.active(), 0);
+        assert_eq!(model.reduce(TabAction::Next), None);
+        assert_eq!(model.reduce(TabAction::Prev), None);
+        assert_eq!(model.reduce(TabAction::ToLive(0)), None);
+        assert_eq!(model.selection(), TabSelection::New);
+    }
+
+    #[test]
+    fn pending_tab_becomes_live_when_ready_and_activated() {
+        let mut model = TabModel::new(vec![terminal(1)], 0, false);
+        model.begin_pending(42, "terminal".to_string());
+        assert_eq!(model.selection(), TabSelection::Pending(42));
+        assert!(!model.pending_ready(41));
+        assert!(model.pending_ready(42));
+        assert_eq!(model.activate_pending(41, terminal(2)), None);
+        assert_eq!(model.activate_pending(42, terminal(2)), Some(1));
+        assert_eq!(model.selection(), TabSelection::Live(1));
+        assert_eq!(model.active(), 1);
+    }
+
+    #[test]
+    fn gone_pending_tab_returns_to_new_without_touching_live_tabs() {
+        let mut model = TabModel::new(vec![terminal(1)], 0, false);
+        model.begin_pending(42, "terminal".to_string());
+        assert!(!model.pending_gone(41));
+        assert!(model.pending_gone(42));
+        assert_eq!(model.selection(), TabSelection::New);
+        assert_eq!(model.reduce(TabAction::Prev), Some(0));
     }
 }
