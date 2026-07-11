@@ -330,10 +330,18 @@ pub struct FramePainter {
     base: Vec<String>,
     /// The last frame actually drawn (base + overlay), for diffing.
     prev: Vec<String>,
+    /// Whether the current unoverlaid base frame is stored in `prev` instead of
+    /// `base`. The common no-install path can then move the freshly painted
+    /// frame into `prev` after diffing, avoiding a full-frame copy before every
+    /// flush; `ensure_base_owned` materializes it only when an install overlay
+    /// later needs a clean base to compose over.
+    base_in_prev: bool,
     /// Optional column-diff layout for the last base frame. Home uses this to
     /// keep the body sidebar and right pane repaint scopes independent; all other
     /// screens leave it `None` and keep the row-diff behaviour.
     columns: Option<ColumnDiff>,
+    /// Caret column extracted from the current base frame's zero-width marker.
+    caret: Option<(usize, usize)>,
     /// A reusable scratch frame the overlay is composed into each flush, then
     /// swapped with `prev`. Holding it across flushes lets the per-paint compose
     /// reuse its row allocations (via `clone_from`) instead of allocating a fresh
@@ -371,6 +379,7 @@ impl FramePainter {
     /// longer fills. The result is a flicker-free full repaint that overwrites
     /// whatever was on screen row by row.
     pub fn reset(&mut self) {
+        self.ensure_base_owned();
         for line in &mut self.prev {
             line.clear();
         }
@@ -395,8 +404,10 @@ impl FramePainter {
 
     /// Draw `frame` (overlaying any in-flight install), rewriting only the rows
     /// that changed since the previous paint, then remember it for the next diff.
-    pub fn paint(&mut self, term: &Term, frame: Vec<String>) -> Result<()> {
+    pub fn paint(&mut self, term: &Term, mut frame: Vec<String>) -> Result<()> {
+        self.caret = take_caret(&mut frame);
         self.base = frame;
+        self.base_in_prev = false;
         self.columns = None;
         self.flush(term)
     }
@@ -409,10 +420,12 @@ impl FramePainter {
     pub(crate) fn paint_columns(
         &mut self,
         term: &Term,
-        frame: Vec<String>,
+        mut frame: Vec<String>,
         columns: ColumnDiff,
     ) -> Result<()> {
+        self.caret = take_caret(&mut frame);
         self.base = frame;
+        self.base_in_prev = false;
         self.columns = Some(columns);
         self.flush(term)
     }
@@ -435,6 +448,7 @@ impl FramePainter {
     /// whole-screen clear also wipes reflow leftovers outside the new frame.
     fn invalidate_on_resize(&mut self, size: (u16, u16)) {
         if self.last_size.is_some_and(|last| last != size) {
+            self.ensure_base_owned();
             self.prev.clear();
         }
         self.last_size = Some(size);
@@ -442,34 +456,43 @@ impl FramePainter {
 
     /// Overlay the global install (if any) onto the base frame and diff-paint it.
     fn flush(&mut self, term: &Term) -> Result<()> {
+        self.flush_with_install(term, install_task::snapshot())
+    }
+
+    fn flush_with_install(
+        &mut self,
+        term: &Term,
+        install: Option<install_task::InstallView>,
+    ) -> Result<()> {
         let size = term.size();
         // A resize since the last flush invalidates everything on screen: drop
         // the diff base so this paint is a full clear + redraw at the new size.
         self.invalidate_on_resize(size);
         let (_, width) = size;
-        // Compose into the reused scratch buffer rather than a fresh clone: copy
-        // the base into it (reusing its rows' allocations) and overlay any install
-        // on top. `prev` is still untouched, so it remains the correct diff base.
-        self.scratch.clone_from(&self.base);
-        install_task::overlay(
-            &mut self.scratch,
-            width as usize,
-            install_task::snapshot().as_ref(),
-        );
+        let frame = if let Some(install) = install.as_ref() {
+            self.ensure_base_owned();
+            // Compose into the reused scratch buffer rather than a fresh clone:
+            // copy the base into it (reusing its rows' allocations) and overlay
+            // the install on top. `prev` is still untouched, so it remains the
+            // correct diff base.
+            self.scratch.clone_from(&self.base);
+            install_task::overlay(&mut self.scratch, width as usize, Some(install));
+            &self.scratch
+        } else if self.base_in_prev {
+            &self.prev
+        } else {
+            &self.base
+        };
         // A text-input screen marks its caret column with a zero-width sentinel
-        // ([`widgets::CARET_MARK`]); pull it out (and strip it from every row)
-        // before diffing so the marker never reaches the terminal and the
-        // diff/`prev` stay clean.
-        let caret = take_caret(&mut self.scratch);
+        // ([`widgets::CARET_MARK`]); `paint` strips it from the base frame before
+        // diffing so the marker never reaches the terminal and the diff/`prev`
+        // stay clean.
+        let caret = self.caret;
         // Emit any queued prefix (a mode re-assertion after the embedded pane)
         // ahead of the diff, so it rides this same terminal write instead of a
         // separate flush. Drained here so it is written exactly once.
         let mut out = std::mem::take(&mut self.prefix);
-        out.push_str(&diff_frame_with_columns(
-            &self.prev,
-            &self.scratch,
-            self.columns,
-        ));
+        out.push_str(&diff_frame_with_columns(&self.prev, frame, self.columns));
         // Park the real cursor over the caret (showing it) so an OS IME draws its
         // preedit text in the input field rather than wherever the cursor was left
         // — otherwise composing Japanese surfaces at the bottom of the screen. With
@@ -479,10 +502,28 @@ impl FramePainter {
         }
         term.write_str(&out)?;
         term.flush()?;
-        // The scratch is now the painted frame: make it `prev` for the next diff
-        // and reclaim the old `prev` as the next scratch, so neither is reallocated.
-        std::mem::swap(&mut self.prev, &mut self.scratch);
+        if install.is_some() {
+            // The scratch is now the painted frame: make it `prev` for the next
+            // diff and reclaim the old `prev` as the next scratch, so neither is
+            // reallocated.
+            std::mem::swap(&mut self.prev, &mut self.scratch);
+            self.base_in_prev = false;
+        } else if !self.base_in_prev {
+            // With no overlay the base itself is the painted frame. Move it into
+            // `prev` instead of copying it into scratch first; if a later idle
+            // tick needs to compose an overlay, `ensure_base_owned` restores a
+            // clean base from this remembered frame then.
+            std::mem::swap(&mut self.prev, &mut self.base);
+            self.base_in_prev = true;
+        }
         Ok(())
+    }
+
+    fn ensure_base_owned(&mut self) {
+        if self.base_in_prev {
+            self.base.clone_from(&self.prev);
+            self.base_in_prev = false;
+        }
     }
 }
 
@@ -999,6 +1040,41 @@ mod tests {
     }
 
     #[test]
+    fn frame_painter_moves_unoverlaid_base_into_prev() {
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+
+        painter.paint(&term, lines(&["plain"])).unwrap();
+
+        assert!(painter.base_in_prev);
+        assert_eq!(painter.prev, lines(&["plain"]));
+        assert!(painter.base.is_empty());
+        assert!(painter.scratch.is_empty());
+    }
+
+    #[test]
+    fn frame_painter_restores_base_before_overlaying_install() {
+        let term = Term::stdout();
+        let mut painter = FramePainter::new();
+        painter.prev = lines(&["base"]);
+        painter.base_in_prev = true;
+
+        painter
+            .flush_with_install(
+                &term,
+                Some(install_task::InstallView::Done {
+                    message: "done".to_string(),
+                    ok: true,
+                }),
+            )
+            .unwrap();
+
+        assert!(!painter.base_in_prev);
+        assert_eq!(painter.base, lines(&["base"]));
+        assert!(!painter.prev.is_empty());
+    }
+
+    #[test]
     fn a_resize_between_flushes_discards_the_diff_base() {
         let mut painter = FramePainter::new();
         painter.prev = lines(&["old", "frame"]);
@@ -1017,6 +1093,20 @@ mod tests {
         let out = diff_frame(&painter.prev, &lines(&["new"]));
         assert!(out.contains("\x1b[2J"));
         assert!(out.contains("\x1b[1;1H\x1b[2Knew"));
+    }
+
+    #[test]
+    fn resize_restores_base_when_it_was_moved_into_prev() {
+        let mut painter = FramePainter::new();
+        painter.prev = lines(&["latest"]);
+        painter.base_in_prev = true;
+        painter.invalidate_on_resize((24, 80));
+
+        painter.invalidate_on_resize((30, 100));
+
+        assert!(!painter.base_in_prev);
+        assert_eq!(painter.base, lines(&["latest"]));
+        assert!(painter.prev.is_empty());
     }
 
     #[test]
