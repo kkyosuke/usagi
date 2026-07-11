@@ -1154,6 +1154,7 @@ pub fn remove(
         agent_state_store::clear(&wt.path);
         pr_link_store::clear(&wt.path);
         agent_prompt_store::clear(&wt.path);
+        crate::infrastructure::agent_start_store::clear_any(&wt.path);
         agent_live_prompt_store::clear(&wt.path);
         open_panes_store::clear(&wt.path);
     }

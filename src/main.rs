@@ -701,6 +701,7 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
                 Ok(None) => {}
                 Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
             }
+            server.consume_queued_start(dir);
         }
         // Accept any newly connected clients, answer whatever they have sent,
         // and stream terminal output to attached clients.
@@ -779,6 +780,133 @@ struct IpcClient {
 
 #[cfg(unix)]
 impl DaemonIpcServer {
+    /// Claim and start at most one durable queued request per control tick.
+    /// Keeping the batch to one bounds environment/provisioning latency while
+    /// repeated ticks fill the configured concurrency budget.
+    fn consume_queued_start(&mut self, dir: &Path) {
+        use usagi::domain::daemon_ipc::ServerMessage;
+        use usagi::infrastructure::agent_start_store::{self, StartState};
+
+        let settings = usagi::infrastructure::storage::Storage::open_default()
+            .and_then(|storage| storage.load_settings())
+            .unwrap_or_default();
+        if !settings.autostart_queued_prompts
+            || self.terminals.len() + self.adopted_terminals.len()
+                >= settings.autostart_queued_prompt_limit
+        {
+            return;
+        }
+        let owner = format!("daemon:{}", std::process::id());
+        let start_dir = usagi::infrastructure::storage::data_dir()
+            .map(|data| data.join("agent-start-requests"))
+            .unwrap_or_default();
+        for worktree in agent_start_store::queued_worktrees_in(&start_dir) {
+            let existing = self
+                .terminal_registry
+                .ids()
+                .iter()
+                .copied()
+                .find(|id| self.terminal_registry.belongs_to(*id, &worktree));
+            if existing.is_some()
+                && !agent_start_store::read(&worktree)
+                    .is_some_and(|request| request.reuse_live_agent)
+            {
+                continue;
+            }
+            let request =
+                match agent_start_store::claim(&worktree, &owner, std::time::SystemTime::now()) {
+                    Ok(Some(request)) => request,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("usagi daemon: claiming queued start failed: {error:#}");
+                        continue;
+                    }
+                };
+            if let Some(terminal) = existing {
+                let mut input = request.prompt.as_bytes().to_vec();
+                input.push(b'\r');
+                match self.write_terminal(terminal, &input) {
+                    Ok(()) => {
+                        let _ = agent_start_store::advance(
+                            &worktree,
+                            request.id,
+                            &owner,
+                            StartState::Running { terminal },
+                        );
+                        let _ = usagi::infrastructure::agent_prompt_store::take(&worktree);
+                    }
+                    Err(error) => {
+                        let _ = agent_start_store::fail(&worktree, request.id, &owner, &error);
+                    }
+                }
+                break;
+            }
+            let result = (|| -> anyhow::Result<u64> {
+                let cli = request.agent.cli.unwrap_or(settings.agent_cli);
+                let agent = usagi::infrastructure::agent::agent_for(cli);
+                let exe = std::env::current_exe()?.to_string_lossy().into_owned();
+                let base = settings.agent_wiring(&exe);
+                let wiring = usagi::usecase::agent::wiring_for_launch(
+                    &base,
+                    request.agent.model.clone(),
+                    &worktree,
+                    usagi::domain::agent::LaunchMode::Interactive,
+                    &usagi::infrastructure::git::git_common_dir,
+                );
+                agent.provision(&wiring).map_err(anyhow::Error::msg)?;
+                let command = usagi::domain::agent::with_exit_phase(
+                    &agent.launch_command(&wiring, agent.has_resumable_session(&worktree), None),
+                    &wiring.usagi_bin,
+                );
+                let workspace = usagi::usecase::session::workspace_root(&worktree);
+                let env = usagi::infrastructure::env_resolver::resolve_workspace_env(&workspace);
+                let terminal =
+                    match self.spawn_terminal(worktree.clone(), Some(&command), &env, 80, 24, 1000)
+                    {
+                        ServerMessage::Spawned { terminal, .. } => terminal,
+                        ServerMessage::Error { message } => anyhow::bail!(message),
+                        _ => unreachable!("spawn_terminal returns spawn result"),
+                    };
+                self.persist_terminals(dir);
+                let mut input = request.prompt.as_bytes().to_vec();
+                input.push(b'\r');
+                if let Err(error) = self.write_terminal(terminal, &input) {
+                    self.kill_terminal(dir, terminal, None);
+                    anyhow::bail!(error);
+                }
+                Ok(terminal)
+            })();
+            match result {
+                Ok(terminal) => {
+                    if let Err(error) = agent_start_store::advance(
+                        &worktree,
+                        request.id,
+                        &owner,
+                        StartState::Running { terminal },
+                    ) {
+                        // The terminal is deliberately retained: killing after a
+                        // successful input write could discard work. Its durable
+                        // registry lets the next daemon detect ownership instead
+                        // of spawning a duplicate.
+                        eprintln!("usagi daemon: committing queued start failed: {error:#}");
+                    } else {
+                        let _ = usagi::infrastructure::agent_prompt_store::take(&worktree);
+                    }
+                }
+                Err(error) => {
+                    let _ = agent_start_store::fail(
+                        &worktree,
+                        request.id,
+                        &owner,
+                        &format!("{error:#}"),
+                    );
+                    eprintln!("usagi daemon: queued start failed: {error:#}");
+                }
+            }
+            break;
+        }
+    }
+
     /// Bind the listener at `path`, removing any stale socket file first. Returns
     /// a server with no listener (IPC disabled) if binding fails, so the daemon
     /// keeps monitoring regardless.
@@ -1450,6 +1578,8 @@ impl DaemonIpcServer {
     fn adopt_persisted_terminals(&mut self, _dir: &Path) {}
 
     fn poll(&mut self, _dir: &Path, _reap_terminals: bool) {}
+
+    fn consume_queued_start(&mut self, _dir: &Path) {}
 
     fn notify_session_transitions(
         &self,
