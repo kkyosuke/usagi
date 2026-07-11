@@ -1034,6 +1034,7 @@ impl Pane {
 #[derive(Clone, Copy)]
 pub struct PaneLaunch<'a> {
     pub agent_command: Option<&'a str>,
+    pub opening_prompt: Option<&'a str>,
     pub cli: AgentCli,
     pub label: &'a str,
     pub env: &'a BTreeMap<String, String>,
@@ -1625,6 +1626,13 @@ impl TerminalPool {
             self.lock().monitor.forget(dir);
         }
         let pty = spawn_backend(dir, &geo, initial, self.scrollback_lines, launch.env)?;
+        if matches!(kind, PaneKind::Agent) {
+            if let Some(prompt) = launch.opening_prompt {
+                let input = pty.input_handle();
+                let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
+                input.write(&bytes)?;
+            }
+        }
         let id = self.allocate_pane_id();
         Ok(Pane {
             id,

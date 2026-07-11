@@ -234,6 +234,7 @@ struct PreparedLaunch {
     active: Option<usize>,
     env: PaneEnv,
     command: Option<String>,
+    opening_prompt: Option<String>,
 }
 
 struct LaunchResult {
@@ -347,6 +348,7 @@ impl LaunchJobManager {
                         prepared.pane_kind,
                         terminal::pool::PaneLaunch {
                             agent_command: prepared.command.as_deref(),
+                            opening_prompt: prepared.opening_prompt.as_deref(),
                             cli: prepared.cli,
                             label: &prepared.label,
                             env: &prepared.env,
@@ -391,7 +393,11 @@ impl LaunchJobManager {
                         }
                         Err(err) => {
                             release_launch_source(pool, &prepared.dir, &prepared.source);
-                            requeue_launch_source(&prepared.dir, &prepared.source);
+                            requeue_launch_failure(
+                                &prepared.dir,
+                                &prepared.source,
+                                &err.to_string(),
+                            );
                             let line = format!(
                                 "failed to launch pane for {}: {err:#}",
                                 prepared.dir.display()
@@ -415,7 +421,7 @@ impl LaunchJobManager {
                 }
                 Err(err) => {
                     release_launch_source(pool, &in_flight.dir, &in_flight.source);
-                    requeue_launch_source(&in_flight.dir, &in_flight.source);
+                    requeue_launch_failure(&in_flight.dir, &in_flight.source, &err);
                     let line = format!(
                         "failed to prepare pane launch for {}: {err}",
                         in_flight.dir.display()
@@ -456,6 +462,26 @@ fn requeue_launch_source(dir: &Path, source: &LaunchSource) {
     }
 }
 
+fn requeue_launch_failure(dir: &Path, source: &LaunchSource, error: &str) {
+    if let LaunchSource::Autostart { prompt } = source {
+        let retry = crate::infrastructure::agent_prompt_store::requeue_after_failure(
+            dir,
+            prompt,
+            error,
+            std::time::SystemTime::now(),
+        );
+        crate::infrastructure::error_log::ErrorLog::record(&format!(
+            "queued prompt autostart for {} will retry after failure: {}{}",
+            dir.display(),
+            error,
+            retry
+                .as_ref()
+                .map(|state| format!(" (attempt {})", state.attempts))
+                .unwrap_or_default()
+        ));
+    }
+}
+
 fn release_launch_source(
     pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
     dir: &Path,
@@ -493,8 +519,8 @@ fn prepare_launch(
 ) -> LaunchResult {
     let result = (|| {
         let env = wait_env(&request.env);
-        let prompt = match &request.source {
-            LaunchSource::Autostart { prompt } => Some(prompt.as_str()),
+        let opening_prompt = match &request.source {
+            LaunchSource::Autostart { prompt } => Some(prompt.clone()),
             LaunchSource::Restore => None,
         };
         let command = if matches!(request.pane_kind, terminal::tabs::PaneKind::Agent) {
@@ -505,7 +531,7 @@ fn prepare_launch(
             agent
                 .provision(&launch_wiring)
                 .map_err(|err| format!("agent provision failed: {err}"))?;
-            Some(agent.launch_command(&launch_wiring, resume, prompt))
+            Some(agent.launch_command(&launch_wiring, resume, None))
         } else {
             None
         };
@@ -520,6 +546,7 @@ fn prepare_launch(
             active: request.active,
             env,
             command,
+            opening_prompt,
         })
     })();
     LaunchResult {
@@ -1280,16 +1307,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             } else {
                 None
             };
-            // The command for this fresh spawn carries the queued MCP prompt; the
-            // command reused for later `Ctrl-O a` agent tabs never re-sends that
-            // one-shot prompt, so only the first launch receives it.
+            // The command stays prompt-free; the queued MCP prompt is submitted
+            // through stdin after the fresh pane starts, so it is not counted
+            // against the shell argv limit and is delivered only once.
             let spawn_prompt = queued_prompt.as_deref();
             let _ = agent.provision(&launch_wiring);
-            let spawn_command = agent.launch_command(&launch_wiring, resume, spawn_prompt);
-            let plain_command = match spawn_prompt {
-                Some(_) => agent.launch_command(&launch_wiring, resume, None),
-                None => spawn_command.clone(),
-            };
+            let spawn_command = agent.launch_command(&launch_wiring, resume, None);
+            let plain_command = spawn_command.clone();
             let initial = Some(spawn_command.as_str());
             let later_initial = Some(plain_command.as_str());
             // Resolve effective secret env (global plus workspace-local) only
@@ -1352,6 +1376,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         kind,
                         terminal::pool::PaneLaunch {
                             agent_command: initial,
+                            opening_prompt: spawn_prompt,
                             cli,
                             label: &label,
                             env: &pane_env,
@@ -1365,6 +1390,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         run_agent,
                         terminal::pool::PaneLaunch {
                             agent_command: initial,
+                            opening_prompt: spawn_prompt,
                             cli,
                             label: &label,
                             env: &pane_env,
@@ -1470,6 +1496,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                                     terminal::tabs::PaneKind::Agent,
                                     terminal::pool::PaneLaunch {
                                         agent_command: later_initial,
+                                        opening_prompt: None,
                                         cli,
                                         label: &label,
                                         env: &add_env,
@@ -1640,14 +1667,13 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             } else {
                 None
             };
-            let spawn_prompt = queued_prompt.as_deref();
             if run_agent {
                 let _ = agent.provision(&launch_wiring);
             }
             let (kind, agent_command, chip) = if run_agent {
                 (
                     terminal::tabs::PaneKind::Agent,
-                    Some(agent.launch_command(&launch_wiring, resume, spawn_prompt)),
+                    Some(agent.launch_command(&launch_wiring, resume, None)),
                     cli.display_name().to_string(),
                 )
             } else {
@@ -1746,6 +1772,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     ps.kind,
                     terminal::pool::PaneLaunch {
                         agent_command: ps.agent_command.as_deref(),
+                        opening_prompt: ps.queued_prompt.as_deref(),
                         cli: ps.cli,
                         label: &ps.label,
                         env: &env,
@@ -2384,7 +2411,24 @@ fn autostart_queued_prompts(
         // hold something (usually only one does). Nothing queued in either simply
         // skips this worktree.
         let mut parts: Vec<String> = Vec::new();
-        parts.extend(crate::infrastructure::agent_prompt_store::take(&dir));
+        match crate::infrastructure::agent_prompt_store::take_ready(
+            &dir,
+            std::time::SystemTime::now(),
+        ) {
+            crate::infrastructure::agent_prompt_store::TakeReady::Ready(prompt) => {
+                parts.push(prompt)
+            }
+            crate::infrastructure::agent_prompt_store::TakeReady::Dead(retry) => {
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "queued prompt autostart for {} is dead-lettered after {} attempt(s): {}",
+                    dir.display(),
+                    retry.attempts,
+                    retry.last_error
+                ));
+            }
+            crate::infrastructure::agent_prompt_store::TakeReady::Waiting(_)
+            | crate::infrastructure::agent_prompt_store::TakeReady::Empty => {}
+        }
         parts.extend(crate::infrastructure::agent_live_prompt_store::take_all(
             &dir,
         ));

@@ -19,6 +19,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,9 @@ use crate::infrastructure::worktree_keyed_store::{
 
 /// Subdirectory of the data dir the queued-prompt files live under.
 const PROMPT_SUBDIR: &str = "agent-prompts";
+const RETRY_BASE: Duration = Duration::from_secs(30);
+const RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+pub const MAX_PROMPT_RETRY_ATTEMPTS: u32 = 5;
 
 /// On-disk shape of a worktree's queued-prompt file.
 #[derive(Serialize, Deserialize)]
@@ -39,11 +43,66 @@ struct PromptFile {
     worktree: PathBuf,
     /// The prompt to hand the session's agent on its next fresh launch.
     prompt: String,
+    /// Retry state for background autostart. Missing on v1 files.
+    #[serde(default)]
+    retry: Option<RetryState>,
 }
 
 impl WorktreeStamped for PromptFile {
     fn stamped(&self) -> &Path {
         &self.worktree
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetryState {
+    pub attempts: u32,
+    pub next_retry_unix_secs: u64,
+    pub last_error: String,
+    #[serde(default)]
+    pub dead: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakeReady {
+    Ready(String),
+    Waiting(RetryState),
+    Dead(RetryState),
+    Empty,
+}
+
+fn unix_secs(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+}
+
+fn retry_delay(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(10);
+    RETRY_BASE.saturating_mul(1u32 << shift).min(RETRY_MAX)
+}
+
+fn prompt_dir_for_take_ready() -> Result<PathBuf> {
+    #[cfg(test)]
+    if std::env::var_os("USAGI_TEST_AGENT_PROMPT_DIR_ERROR").is_some() {
+        anyhow::bail!("forced prompt dir error");
+    }
+    dir(PROMPT_SUBDIR)
+}
+
+pub fn retry_state_after_failure(
+    previous: Option<&RetryState>,
+    error: &str,
+    now: SystemTime,
+) -> RetryState {
+    let attempts = previous.map_or(1, |retry| retry.attempts.saturating_add(1));
+    let dead = attempts >= MAX_PROMPT_RETRY_ATTEMPTS;
+    let next_retry_unix_secs = unix_secs(now + retry_delay(attempts));
+    RetryState {
+        attempts,
+        next_retry_unix_secs,
+        last_error: error.to_string(),
+        dead,
     }
 }
 
@@ -63,8 +122,63 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
         &PromptFile {
             worktree: key,
             prompt: prompt.to_string(),
+            retry: None,
         },
     )
+}
+
+/// Take a queued prompt for background autostart only when its retry backoff has
+/// elapsed. Manual launches still use [`take`] and can deliver a prompt even
+/// while autostart is backing off.
+pub fn take_ready(worktree: &Path, now: SystemTime) -> TakeReady {
+    let key = key(worktree);
+    let dir = match prompt_dir_for_take_ready() {
+        Ok(dir) => dir,
+        Err(_) => return TakeReady::Empty,
+    };
+    let _lock = match StoreLock::acquire(&dir) {
+        Ok(lock) => lock,
+        Err(_) => return TakeReady::Empty,
+    };
+    let path = dir.join(file_name(&key));
+    let Some(file) = read_ours::<PromptFile>(&path, &key) else {
+        return TakeReady::Empty;
+    };
+    if let Some(retry) = file.retry.as_ref().filter(|retry| retry.dead) {
+        return TakeReady::Dead(retry.clone());
+    }
+    if let Some(retry) = file
+        .retry
+        .as_ref()
+        .filter(|retry| retry.next_retry_unix_secs > unix_secs(now))
+    {
+        return TakeReady::Waiting(retry.clone());
+    }
+    let _ = fs::remove_file(&path);
+    TakeReady::Ready(file.prompt)
+}
+
+/// Requeue a prompt that autostart failed to spawn, recording exponential
+/// backoff state so the home loop does not retry every tick forever.
+pub fn requeue_after_failure(
+    worktree: &Path,
+    prompt: &str,
+    error: &str,
+    now: SystemTime,
+) -> Result<RetryState> {
+    let key = key(worktree);
+    let dir = dir(PROMPT_SUBDIR)?;
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    let previous = read_ours::<PromptFile>(&path, &key).and_then(|file| file.retry);
+    let retry = retry_state_after_failure(previous.as_ref(), error, now);
+    let file = PromptFile {
+        worktree: key,
+        prompt: prompt.to_string(),
+        retry: Some(retry.clone()),
+    };
+    write_stamped(&dir, &path, &file)?;
+    Ok(retry)
 }
 
 /// Take (read and remove) the prompt queued for the session rooted at
@@ -93,8 +207,8 @@ pub fn take(worktree: &Path) -> Option<String> {
 /// Put a prompt taken for delivery back in front of the launch queue.
 ///
 /// A pending pane launch removes the one-shot prompt before the PTY exists so it
-/// can build the agent command. If the later spawn/cancel path proves the prompt
-/// was not delivered, this restores it. When another prompt was queued after the
+/// can submit it immediately after spawn. If the later spawn/cancel path proves
+/// the prompt was not delivered, this restores it. When another prompt was queued after the
 /// take, the restored prompt is prepended so retry order stays "old work first,
 /// newly queued work next" rather than losing either side.
 pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
@@ -115,6 +229,7 @@ pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
         &PromptFile {
             worktree: key,
             prompt: merged,
+            retry: None,
         },
     )
 }
@@ -162,6 +277,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::json_file;
     use crate::infrastructure::storage;
+    use std::time::{Duration, UNIX_EPOCH};
 
     /// Point `$USAGI_HOME` at a throwaway directory for the duration of a test,
     /// serialized against other env-mutating tests, and run `body` with it.
@@ -185,6 +301,89 @@ mod tests {
             // Taking again finds nothing: the prompt is one-shot.
             assert_eq!(take(wt.path()), None);
         });
+    }
+
+    #[test]
+    fn take_ready_respects_backoff_and_then_delivers_once() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued").unwrap();
+            let now = UNIX_EPOCH + Duration::from_secs(1_000);
+            let retry = requeue_after_failure(wt.path(), "queued", "spawn failed", now).unwrap();
+            assert_eq!(retry.attempts, 1);
+            assert!(matches!(
+                take_ready(wt.path(), now + Duration::from_secs(29)),
+                TakeReady::Waiting(_)
+            ));
+            assert_eq!(
+                take_ready(wt.path(), now + Duration::from_secs(30)),
+                TakeReady::Ready("queued".to_string())
+            );
+            assert_eq!(
+                take_ready(wt.path(), now + Duration::from_secs(31)),
+                TakeReady::Empty
+            );
+        });
+    }
+
+    #[test]
+    fn take_ready_reports_dead_letter_and_lock_failure_as_empty() {
+        with_data_dir(|data_dir| {
+            let wt = tempfile::tempdir().unwrap();
+            let now = UNIX_EPOCH + Duration::from_secs(2_000);
+            let mut retry = None;
+            for i in 0..MAX_PROMPT_RETRY_ATTEMPTS {
+                retry = Some(
+                    requeue_after_failure(wt.path(), "queued", &format!("err{i}"), now).unwrap(),
+                );
+            }
+            assert!(retry.unwrap().dead);
+            assert!(matches!(take_ready(wt.path(), now), TakeReady::Dead(_)));
+
+            let store_dir = data_dir.join(PROMPT_SUBDIR);
+            let _ = fs::remove_dir_all(&store_dir);
+            fs::write(&store_dir, "not a directory").unwrap();
+            assert_eq!(take_ready(wt.path(), now), TakeReady::Empty);
+        });
+    }
+
+    #[test]
+    fn take_ready_without_a_data_dir_is_empty() {
+        let _guard = crate::test_support::process_env_guard();
+        std::env::remove_var(storage::DATA_DIR_ENV);
+        std::env::remove_var("HOME");
+        assert_eq!(
+            take_ready(Path::new("/tmp/usagi-no-home"), UNIX_EPOCH),
+            TakeReady::Empty
+        );
+    }
+
+    #[test]
+    fn take_ready_returns_empty_when_prompt_dir_cannot_be_resolved() {
+        let _guard = crate::test_support::process_env_guard();
+        std::env::set_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR", "1");
+        assert_eq!(
+            take_ready(Path::new("/tmp/usagi-prompt-dir-error"), UNIX_EPOCH),
+            TakeReady::Empty
+        );
+        std::env::remove_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR");
+    }
+
+    #[test]
+    fn retry_state_exponentially_backs_off_and_dead_letters() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let mut retry = retry_state_after_failure(None, "err1", now);
+        assert_eq!(retry.attempts, 1);
+        assert_eq!(retry.next_retry_unix_secs, 10_030);
+        assert!(!retry.dead);
+        retry = retry_state_after_failure(Some(&retry), "err2", now);
+        assert_eq!(retry.attempts, 2);
+        assert_eq!(retry.next_retry_unix_secs, 10_060);
+        for i in 3..=MAX_PROMPT_RETRY_ATTEMPTS {
+            retry = retry_state_after_failure(Some(&retry), &format!("err{i}"), now);
+        }
+        assert_eq!(retry.attempts, MAX_PROMPT_RETRY_ATTEMPTS);
+        assert!(retry.dead);
     }
 
     #[test]
@@ -308,6 +507,7 @@ mod tests {
                 &PromptFile {
                     worktree: key(other.path()),
                     prompt: "not ours".to_string(),
+                    retry: None,
                 },
             )
             .unwrap();
