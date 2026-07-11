@@ -1,14 +1,14 @@
 ---
 number: 191
 title: perf: Rust ビルドに sccache opt-in とベンチを導入する
-status: todo
+status: done
 priority: medium
 labels: [perf, dev]
 dependson: []
 related: [177, 181]
 parent: 177
-created_at: 2026-07-11T11:37:24+09:00
-updated_at: 2026-07-11T11:37:24+09:00
+created_at: 2026-07-11T02:37:24+00:00
+updated_at: 2026-07-11T03:12:33.669563+00:00
 ---
 
 ## 背景
