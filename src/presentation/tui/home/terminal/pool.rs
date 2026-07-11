@@ -2723,9 +2723,13 @@ fn spawn_watcher(
             }
             std::thread::sleep(POLL_INTERVAL);
             // Nothing has ever been registered (or the previous locked tick observed
-            // the map empty): keep the idle watcher down to one atomic load per tick,
-            // instead of contending with render-time `snapshot()` on `Shared`.
-            if !has_sessions.load(Ordering::Acquire) {
+            // the map empty), and no PR lookup started by the last live session is
+            // still outstanding: keep the idle watcher down to one atomic load per
+            // tick, instead of contending with render-time `snapshot()` on `Shared`.
+            // An outstanding lookup must keep the loop alive long enough to drain its
+            // result even when the session printed its PR URL immediately before its
+            // final pane exited.
+            if watcher_may_idle(has_sessions.load(Ordering::Acquire), &in_flight_pr_lookups) {
                 continue;
             }
 
@@ -3016,6 +3020,14 @@ fn spawn_watcher(
             let _ = worker.join();
         }
     })
+}
+
+/// Whether the watcher can take its lock-free idle path this tick.
+///
+/// A PR lookup can outlive the pane which discovered it, so an empty live-session
+/// set is not sufficient while a worker result still needs draining.
+fn watcher_may_idle(has_sessions: bool, in_flight_pr_lookups: &HashSet<(PathBuf, String)>) -> bool {
+    !has_sessions && in_flight_pr_lookups.is_empty()
 }
 
 /// Drain prompts queued by the MCP live `session_prompt` tool and type them into
@@ -3339,6 +3351,18 @@ mod tests {
             assert!(scheduled_again[0].refreshing);
             assert!(rx.try_recv().is_err(), "duplicate lookup was not enqueued");
         });
+    }
+
+    #[test]
+    fn watcher_stays_awake_until_the_last_pr_lookup_is_drained() {
+        let lookup = (
+            path("finished-session"),
+            "https://github.com/o/r/pull/764".to_string(),
+        );
+
+        assert!(!watcher_may_idle(false, &HashSet::from([lookup])));
+        assert!(watcher_may_idle(false, &HashSet::new()));
+        assert!(!watcher_may_idle(true, &HashSet::new()));
     }
 
     #[test]
