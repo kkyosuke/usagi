@@ -992,6 +992,65 @@ fn left_pane_inserts_the_pending_session_at_the_foot_with_a_session_present() {
 }
 
 #[test]
+fn left_pane_never_draws_a_recorded_session_beside_its_pending_create_skeleton() {
+    // Regression: state.json records a session before its setup commands finish.
+    // If the watcher publishes that record first, the sidebar must keep showing
+    // only the three-row skeleton, then replace it with the real row on clear.
+    let mut state = state_with_sessions(&["main"]);
+    let root = PathBuf::from("/repo");
+    state.set_root_path(root.clone());
+    state.begin_pending_session(root.clone(), "newx".to_string());
+    // The watcher publishes the state.json record after the skeleton has begun,
+    // but before the create worker finishes its setup commands.
+    let main = state.sessions()[0].clone();
+    let mut newx = main.clone();
+    newx.name = "newx".to_string();
+    newx.root = PathBuf::from("/ws/newx");
+    state.refresh_sessions(vec![main, newx]);
+
+    let render = |state: &HomeState| {
+        left_pane(
+            state.list(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            state.pending_sessions(),
+            &HashMap::new(),
+            &crate::domain::settings::SessionLabelMaster::default(),
+            80,
+            10,
+            false,
+            Sidebar::Full,
+            Utc::now(),
+            None,
+        )
+    };
+    let loading = render(&state);
+    assert_eq!(loading.len(), 10);
+    assert_eq!(
+        loading
+            .iter()
+            .filter(|line| console::strip_ansi_codes(line).contains("newx"))
+            .count(),
+        1,
+        "the session name appears only in the loading skeleton"
+    );
+
+    assert!(state.clear_pending_session(&root, "newx"));
+    let created = render(&state);
+    assert_eq!(created.len(), 10);
+    assert_eq!(
+        created
+            .iter()
+            .filter(|line| console::strip_ansi_codes(line).contains("newx"))
+            .count(),
+        1,
+        "the skeleton is replaced by one real session row"
+    );
+}
+
+#[test]
 fn left_pane_replaces_a_removing_session_with_a_leaf_skeleton_in_place() {
     let mut state = state_with(vec![worktree(Some("old"), true, BranchStatus::Pushed)]);
     state.set_root_path("/repo");

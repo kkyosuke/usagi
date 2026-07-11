@@ -1827,13 +1827,45 @@ impl HomeState {
     /// collapsed into a single row by [`session_row`]. The rows follow the session
     /// order from [`display_order`](Self::display_order) — the canonical (manual)
     /// order, or waiting-first when [`sort_waiting`](Self::sort_waiting) is on.
+    /// A record that arrives from the `state.json` watcher while its TUI create
+    /// task is still pending stays in the source snapshot but is omitted from the
+    /// selectable rows until the task clears its skeleton. This keeps the loading
+    /// placeholder and the newly recorded session from appearing at the same time.
     fn rebuild_list(&mut self) {
         let name = self.list.workspace_name().to_string();
         // The primary workspace root lives on the first group's value type; carry
         // it across the rebuild (which replaces the list wholesale), exactly as the
         // workspace name is carried above.
         let root_path = self.list.root_path().to_path_buf();
-        let layout = self.display_layout();
+        // `session::create` records state before it runs the workspace's setup
+        // commands. The watcher can therefore publish the real record while the
+        // worker (and its inline create skeleton) is still active. Keep the full
+        // snapshots in `sessions` / `extra_groups` so a failed or panicked create
+        // can reveal a concurrently-created record when its skeleton clears; only
+        // the derived, selectable list hides matching pending creates.
+        let pending_creates = self
+            .pending_sessions
+            .iter()
+            .filter(|pending| pending.is_create())
+            .fold(
+                HashMap::<PathBuf, HashSet<String>>::new(),
+                |mut by_root, pending| {
+                    by_root
+                        .entry(pending.root().to_path_buf())
+                        .or_default()
+                        .insert(pending.name().to_string());
+                    by_root
+                },
+            );
+        let layout: Vec<_> = self
+            .display_layout()
+            .into_iter()
+            .filter(|(i, _)| {
+                !pending_creates
+                    .get(root_path.as_path())
+                    .is_some_and(|names| names.contains(self.sessions[*i].name.as_str()))
+            })
+            .collect();
         let rows = layout
             .iter()
             .map(|(i, _)| session_row(&self.sessions[*i]))
@@ -1880,10 +1912,22 @@ impl HomeState {
         // 統合(unite) mode: stack the other selected workspaces below the primary
         // one, each collapsed from its recorded sessions the same way the primary is.
         for group in &self.extra_groups {
+            let visible_sessions;
+            let sessions = if let Some(names) = pending_creates.get(group.root_path.as_path()) {
+                visible_sessions = group
+                    .sessions
+                    .iter()
+                    .filter(|session| !names.contains(session.name.as_str()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                visible_sessions.as_slice()
+            } else {
+                group.sessions.as_slice()
+            };
             list.add_group(WorkspaceGroup::from_sessions(
                 &group.name,
                 group.root_path.clone(),
-                &group.sessions,
+                sessions,
                 group.root_note.is_some(),
             ));
         }
@@ -2693,6 +2737,21 @@ impl HomeState {
             .and_then(|p| p.tab.map(|tab| (tab, p.frame)))
     }
 
+    /// Whether the latest source snapshot for `root` already contains `name`.
+    /// The derived [`WorktreeList`] may deliberately hide that record while its
+    /// create skeleton is pending, so this must inspect the retained session
+    /// sources rather than the visible rows.
+    fn has_recorded_session(&self, root: &Path, name: &str) -> bool {
+        if root == self.root_path() {
+            self.sessions.iter().any(|session| session.name == name)
+        } else {
+            self.extra_groups
+                .iter()
+                .find(|group| group.root_path == root)
+                .is_some_and(|group| group.sessions.iter().any(|session| session.name == name))
+        }
+    }
+
     fn begin_pending_session_kind(
         &mut self,
         kind: PendingSessionKind,
@@ -2724,8 +2783,13 @@ impl HomeState {
 
     /// Begin showing an inline skeleton for a session create targeting `root`.
     /// Duplicate begins for the same `(root, name)` are ignored so repeated
-    /// dispatch paths cannot stack identical skeletons.
+    /// dispatch paths cannot stack identical skeletons. A name already present
+    /// in the workspace snapshot is also ignored: the eventual create failure
+    /// must not cover the existing session with a loading placeholder.
     pub fn begin_pending_session(&mut self, root: PathBuf, name: String) {
+        if self.has_recorded_session(&root, &name) {
+            return;
+        }
         self.begin_pending_session_kind(PendingSessionKind::Create, root, name);
     }
 
@@ -2739,7 +2803,15 @@ impl HomeState {
     /// Clear the inline create skeleton for `name` under `root`, returning
     /// whether one was present.
     pub fn clear_pending_session(&mut self, root: &Path, name: &str) -> bool {
-        self.clear_pending_session_kind(PendingSessionKind::Create, root, name)
+        let recorded = self.has_recorded_session(root, name);
+        let cleared = self.clear_pending_session_kind(PendingSessionKind::Create, root, name);
+        // The watcher may have stored the new record while the worker was still
+        // running. Reveal that retained source record as soon as the skeleton is
+        // cleared; the task completion's final refresh may replace it immediately.
+        if cleared && recorded {
+            self.rebuild_list_keep_cursor();
+        }
+        cleared
     }
 
     /// Clear the inline removal skeleton for `name` under `root`, returning
