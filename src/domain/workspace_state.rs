@@ -442,10 +442,11 @@ pub struct SessionAgent {
     pub cli: Option<AgentCli>,
     /// The model the session's agent CLI runs, rendered by the adapter as that
     /// CLI's own model flag (`--model` for Claude, `-m` for Codex / Gemini). `None`
-    /// lets the CLI use its configured default. The value is stored verbatim and
-    /// shell-escaped at launch, so no allowlist is imposed — model names differ per
-    /// CLI and change often, and pass-through keeps usagi from rejecting a model a
-    /// newer CLI added.
+    /// lets the CLI use its configured default. Persistence remains tolerant of
+    /// any string so an older or hand-edited `state.json` stays readable; MCP
+    /// orchestration validates explicit values against the CLI's dynamic model
+    /// catalog before creating or prompting a session. The adapter shell-escapes
+    /// a stored value when rendering the launch command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }

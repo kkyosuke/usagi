@@ -112,9 +112,10 @@ pub fn create(workspace_root: &Path, name: &str) -> Result<CreatedSession> {
 /// Create session `name`, recording `agent` as its per-session agent CLI / model
 /// override so its agent pane launches with that CLI and model ahead of the
 /// workspace's effective settings (see [`SessionAgent`]). An unset `agent` (the
-/// default) behaves exactly like [`create`]. The model, when set, is trimmed and
-/// an empty value is dropped; it is otherwise passed through verbatim (no
-/// allowlist) and shell-escaped at launch time.
+/// default) behaves exactly like [`create`]. This persistence API trims a model,
+/// drops an empty value, and otherwise stores it without external validation;
+/// MCP orchestration performs the dynamic CLI catalog check before calling it.
+/// The stored value is shell-escaped at launch time.
 ///
 /// `origin` records who launched the session — pass [`SessionOrigin::Mcp`] from
 /// the MCP tools (`session_create` / `session_delegate_issue`) and
@@ -379,8 +380,9 @@ fn record(
     // Normalise the model override before it is persisted and later interpolated
     // into a launch command: trim surrounding whitespace and drop a value that
     // trims to empty (so a blank string never renders as an empty `--model ''`).
-    // The value is otherwise passed through — no allowlist — since model names
-    // differ per CLI and change often, and the adapter shell-escapes it at launch.
+    // The persistence layer deliberately remains tolerant of any non-empty value
+    // so old / hand-edited state stays readable. MCP orchestration performs the
+    // dynamic CLI-model availability check before it reaches this write.
     let agent = SessionAgent {
         cli: agent.cli,
         model: agent

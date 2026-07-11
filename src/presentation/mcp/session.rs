@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 use super::{parse_args, to_pretty, McpService};
 use crate::domain::settings::AgentCli;
 use crate::domain::workspace_state::{SessionAgent, SessionOrigin, SessionRecord};
+use crate::usecase::agent::AgentModelProbe;
 use crate::usecase::doctor::CommandRunner;
 use crate::usecase::session;
 
@@ -100,16 +101,29 @@ fn check_prompt_len(tool: &str, prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Apply the same model normalisation used by the session usecase before a
+/// value is validated: surrounding whitespace is irrelevant, and a blank value
+/// clears the override instead of asking a probe about an empty model name.
+fn normalize_session_agent(agent: SessionAgent) -> SessionAgent {
+    SessionAgent {
+        cli: agent.cli,
+        model: agent
+            .model
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty()),
+    }
+}
+
 /// Resolve the optional per-session agent overrides an MCP caller passed
 /// (`agent_cli` / `model`) into a [`SessionAgent`].
 ///
 /// `agent_cli` is matched case-insensitively against each CLI's launch command,
 /// display name, and serde label via [`AgentCli::from_name`]; an unrecognised
 /// name is a tool error naming the accepted values so the caller can correct it.
-/// `model` is passed through untouched (the usecase trims it and drops an empty
-/// value on write) — no allowlist is imposed, since model names differ per CLI
-/// and change often. Both absent yields the default: the session follows the
-/// workspace effective settings and the CLI's own default model. Shared by
+/// `model` is carried to the caller, which resolves the effective CLI and checks
+/// it with [`AgentModelProbe`] before any session state or prompt queue is
+/// changed. Both absent yields the default: the session follows the workspace
+/// effective settings and the CLI's own default model. Shared by
 /// `session_create` and the composite's `session_delegate_issue`.
 pub(crate) fn resolve_session_agent(
     runner: &dyn CommandRunner,
@@ -199,6 +213,9 @@ pub struct SessionMcpServer {
     backend: Box<dyn AgentBackend>,
     /// Probes external tools (like checking if an agent CLI is installed on the PATH).
     pub(crate) runner: Box<dyn CommandRunner>,
+    /// Checks an explicit model against the models currently available to its
+    /// effective agent CLI. A failed or unsupported probe is fail-closed.
+    model_probe: Box<dyn AgentModelProbe>,
 }
 
 impl SessionMcpServer {
@@ -212,6 +229,7 @@ impl SessionMcpServer {
         worktree: &Path,
         backend: Box<dyn AgentBackend>,
         runner: Box<dyn CommandRunner>,
+        model_probe: Box<dyn AgentModelProbe>,
     ) -> Self {
         let current_session = derive_current_session(worktree, &workspace_root);
         Self {
@@ -219,6 +237,7 @@ impl SessionMcpServer {
             current_session,
             backend,
             runner,
+            model_probe,
         }
     }
 
@@ -231,7 +250,7 @@ impl SessionMcpServer {
 
     fn tool_create(&self, arguments: Value) -> Result<String, String> {
         let args: CreateArgs = parse_args(arguments)?;
-        let agent = resolve_session_agent(&*self.runner, args.agent_cli.as_deref(), args.model)?;
+        let agent = self.resolve_agent_override(args.agent_cli.as_deref(), args.model)?;
         let created = self.create_session(&args.name, agent)?;
         Ok(to_pretty(&json!({
             "name": created.name,
@@ -321,24 +340,40 @@ impl SessionMcpServer {
     fn tool_prompt(&self, arguments: Value) -> Result<String, String> {
         let args: PromptArgs = parse_args(arguments)?;
         check_prompt_len("session_prompt", &args.prompt)?;
-        let stored_agent = if args.agent_cli.is_some() || args.model.is_some() {
-            if args.name == ROOT_TARGET {
+        let (target_root, channel) = self.resolve_prompt_delivery(&args.name, args.mode)?;
+        let has_agent_override = args.agent_cli.is_some() || args.model.is_some();
+        let stored_agent = if args.name == ROOT_TARGET {
+            if has_agent_override {
                 return Err(
                     "session_prompt agent_cli/model cannot be used with the :root target"
                         .to_string(),
                 );
             }
+            None
+        } else {
             let existing = self.find_session(&args.name)?.agent;
             let cli = match args.agent_cli.as_deref() {
                 Some(agent_cli) => resolve_session_agent(&*self.runner, Some(agent_cli), None)?.cli,
                 None => existing.cli,
             };
-            let model = args.model.or(existing.model);
-            Some(self.set_session_agent(&args.name, SessionAgent { cli, model })?)
-        } else {
-            None
+            let candidate = self.prepare_session_agent(SessionAgent {
+                cli,
+                model: args.model.or_else(|| existing.model.clone()),
+            })?;
+            // Validate before persisting an override or appending to either
+            // durable prompt queue. Even the live queue can become a fresh-launch
+            // input if its pane exits before the TUI drains it, so every explicit
+            // stored model must be positively checked on every prompt call.
+            // Preparing can also normalise legacy state and bind a model-only
+            // override to the effective CLI that was actually probed. Persist
+            // that checked pair before either queue can launch it.
+            if has_agent_override || candidate != existing {
+                Some(self.set_session_agent(&args.name, candidate)?)
+            } else {
+                None
+            }
         };
-        let (channel, detail) = self.deliver_prompt(&args.name, &args.prompt, args.mode)?;
+        let detail = self.dispatch_prompt(&target_root, &args.prompt, channel)?;
         // Report the channel that actually took the prompt, so a caller using
         // `auto` sees whether it reached a running pane or was queued for launch.
         let mut result = json!({
@@ -366,6 +401,7 @@ impl SessionMcpServer {
         let target = current.started_from.as_deref().unwrap_or(ROOT_TARGET);
         let report = format!("Session \"{name}\" completed:\n\n{}", args.message);
         check_prompt_len("session_complete", &report)?;
+        self.validate_stored_session_agent(target)?;
         let (channel, detail) = self.deliver_prompt(target, &report, PromptMode::Auto)?;
         Ok(to_pretty(&json!({
             "session": name,
@@ -388,20 +424,39 @@ impl SessionMcpServer {
         mode: PromptMode,
     ) -> Result<(Channel, String), String> {
         check_prompt_len("session_prompt", prompt)?;
+        let (target_root, channel) = self.resolve_prompt_delivery(name, mode)?;
+        let detail = self.dispatch_prompt(&target_root, prompt, channel)?;
+        Ok((channel, detail))
+    }
+
+    /// Resolve a target and delivery channel once.
+    fn resolve_prompt_delivery(
+        &self,
+        name: &str,
+        mode: PromptMode,
+    ) -> Result<(PathBuf, Channel), String> {
         let target_root = self.resolve_target(name)?;
-        // Resolve which channel takes the prompt. `auto` asks the backend whether
-        // a live pane exists; the explicit modes force one channel.
         let channel = match mode {
             PromptMode::Queue => Channel::Queue,
             PromptMode::Live => Channel::Live,
             PromptMode::Auto if self.backend.agent_is_live(&target_root) => Channel::Live,
             PromptMode::Auto => Channel::Queue,
         };
+        Ok((target_root, channel))
+    }
+
+    /// Append one already-resolved prompt to its selected backend queue.
+    fn dispatch_prompt(
+        &self,
+        target_root: &Path,
+        prompt: &str,
+        channel: Channel,
+    ) -> Result<String, String> {
         let detail = match channel {
-            Channel::Queue => self.backend.prompt(&target_root, prompt)?,
-            Channel::Live => self.backend.send(&target_root, prompt)?,
+            Channel::Queue => self.backend.prompt(target_root, prompt)?,
+            Channel::Live => self.backend.send(target_root, prompt)?,
         };
-        Ok((channel, detail))
+        Ok(detail)
     }
 
     /// Resolve a `session_prompt` target to the worktree root its prompt is
@@ -428,6 +483,59 @@ impl SessionMcpServer {
     /// keeps whatever CLI/model started it.
     fn set_session_agent(&self, name: &str, agent: SessionAgent) -> Result<SessionAgent, String> {
         session::set_agent(&self.workspace_root, name, agent).map_err(|e| e.to_string())
+    }
+
+    /// Parse and validate a per-session agent override before session creation.
+    /// Shared with the unified server's delegate tools so an unavailable model
+    /// cannot leave behind a worktree whose first queued launch is doomed.
+    pub(crate) fn resolve_agent_override(
+        &self,
+        agent_cli: Option<&str>,
+        model: Option<String>,
+    ) -> Result<SessionAgent, String> {
+        self.prepare_session_agent(resolve_session_agent(&*self.runner, agent_cli, model)?)
+    }
+
+    /// Normalise an override and positively validate an explicit model.
+    ///
+    /// A model without a CLI is resolved against the workspace's effective CLI,
+    /// then that CLI is stored in the returned value. Models are CLI-specific;
+    /// binding the pair prevents a later workspace-default change from launching
+    /// a model with a different, unchecked CLI. `None` intentionally needs no
+    /// probe because it asks the CLI to choose its own current default.
+    fn prepare_session_agent(&self, agent: SessionAgent) -> Result<SessionAgent, String> {
+        let mut agent = normalize_session_agent(agent);
+        let Some(model) = agent.model.as_deref() else {
+            return Ok(agent);
+        };
+        let cli = match agent.cli {
+            Some(cli) => cli,
+            None => {
+                let cli = crate::usecase::settings::effective_for(&self.workspace_root)
+                    .map_err(|e| format!("failed to resolve the effective agent CLI: {e}"))?
+                    .agent_cli;
+                agent.cli = Some(cli);
+                cli
+            }
+        };
+        crate::usecase::agent::require_available_model(&*self.model_probe, cli, model)?;
+        Ok(agent)
+    }
+
+    /// Recheck the stored model of a durable prompt target. Completion reports
+    /// use the same queues as `session_prompt`, so a non-live parent can be
+    /// auto-started by the report even though `session_complete` has no model
+    /// arguments of its own.
+    fn validate_stored_session_agent(&self, name: &str) -> Result<(), String> {
+        if name == ROOT_TARGET {
+            return Ok(());
+        }
+        let existing = self.find_session(name)?.agent;
+        let prepared = self.prepare_session_agent(existing.clone())?;
+        if prepared != existing {
+            self.set_session_agent(name, prepared)?;
+        }
+        Ok(())
     }
 
     fn tool_list_status(&self) -> Result<String, String> {
@@ -710,7 +818,7 @@ pub(crate) enum PromptMode {
 
 /// The channel a prompt was actually delivered over, reported back to the caller
 /// as `delivered_to`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
     Queue,
     Live,
@@ -866,7 +974,7 @@ fn session_tool_schemas() -> Value {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model the session's agent CLI runs, e.g. a specific Claude/Codex/Gemini model (default: the CLI's own default)"
+                        "description": "Explicit model the session's agent CLI runs. It must appear in that CLI's current dynamic model catalog; unavailable or unverifiable models are rejected. Omit this field to use the CLI's own default."
                     }
                 },
                 "required": ["name"]
@@ -934,7 +1042,7 @@ fn session_tool_schemas() -> Value {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model this session's agent CLI should launch with from now on (default: leave the existing model override unchanged; blank clears it)"
+                        "description": "Explicit model this session's agent CLI should launch with from now on. The effective CLI/model pair is checked before state or queues change; unavailable or unverifiable models are rejected. Omit to keep the existing override; blank clears it and uses the CLI default."
                     }
                 },
                 "required": ["name", "prompt"]
@@ -1102,12 +1210,14 @@ mod tests {
     use crate::infrastructure::git::test_command as git_cmd;
     use crate::infrastructure::pr_link_store;
     use crate::presentation::mcp::PROTOCOL_VERSION;
+    use crate::usecase::agent::ModelAvailability;
     use std::cell::RefCell;
     use std::fs;
     use std::rc::Rc;
 
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
     type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
+    type ModelProbeLog = Rc<RefCell<Vec<(AgentCli, String)>>>;
 
     /// A runner that reports a fixed allowlist of programs as available.
     struct FakeRunner(Vec<&'static str>);
@@ -1124,6 +1234,41 @@ mod tests {
         }
         fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// Model probe used by the existing session tests: unless a test is about
+    /// model validation itself, every explicit model is considered available.
+    struct AvailableModelProbe;
+
+    impl AgentModelProbe for AvailableModelProbe {
+        fn probe_model(&self, _cli: AgentCli, _model: &str) -> ModelAvailability {
+            ModelAvailability::Available
+        }
+    }
+
+    struct RecordingModelProbe {
+        result: ModelAvailability,
+        calls: ModelProbeLog,
+    }
+
+    impl RecordingModelProbe {
+        fn new(result: ModelAvailability) -> (Self, ModelProbeLog) {
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            (
+                Self {
+                    result,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl AgentModelProbe for RecordingModelProbe {
+        fn probe_model(&self, cli: AgentCli, model: &str) -> ModelAvailability {
+            self.calls.borrow_mut().push((cli, model.to_string()));
+            self.result.clone()
         }
     }
 
@@ -1253,15 +1398,44 @@ mod tests {
     }
 
     fn server_at(root: &Path, backend: FakeBackend) -> SessionMcpServer {
+        server_at_with_model_probe(root, backend, Box::new(AvailableModelProbe))
+    }
+
+    fn server_at_with_model_probe(
+        root: &Path,
+        backend: FakeBackend,
+        model_probe: Box<dyn AgentModelProbe>,
+    ) -> SessionMcpServer {
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
-        SessionMcpServer::new(root.to_path_buf(), root, Box::new(backend), runner)
+        SessionMcpServer::new(
+            root.to_path_buf(),
+            root,
+            Box::new(backend),
+            runner,
+            model_probe,
+        )
     }
 
     fn server_in_session(root: &Path, name: &str, backend: FakeBackend) -> SessionMcpServer {
+        server_in_session_with_model_probe(root, name, backend, Box::new(AvailableModelProbe))
+    }
+
+    fn server_in_session_with_model_probe(
+        root: &Path,
+        name: &str,
+        backend: FakeBackend,
+        model_probe: Box<dyn AgentModelProbe>,
+    ) -> SessionMcpServer {
         let worktree = root.join(".usagi").join("sessions").join(name);
         fs::create_dir_all(&worktree).unwrap();
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
-        SessionMcpServer::new(root.to_path_buf(), &worktree, Box::new(backend), runner)
+        SessionMcpServer::new(
+            root.to_path_buf(),
+            &worktree,
+            Box::new(backend),
+            runner,
+            model_probe,
+        )
     }
 
     #[test]
@@ -1388,6 +1562,101 @@ mod tests {
             calls.borrow()[0].1,
             "Session \"child\" completed:\n\nPR #42 is ready; tests pass."
         );
+    }
+
+    #[test]
+    fn complete_rechecks_the_parent_model_before_queueing_the_report() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let root_server = server_at(root.path(), FakeBackend::ok("x"));
+        let parent = call(
+            &root_server,
+            "session_create",
+            json!({"name":"parent","agent_cli":"codex","model":"gpt-old"}),
+        );
+        assert_eq!(parent["isError"], false);
+
+        let parent_server = server_in_session(root.path(), "parent", FakeBackend::ok("x"));
+        let child = call(&parent_server, "session_create", json!({"name":"child"}));
+        assert_eq!(child["isError"], false);
+
+        let backend = FakeBackend::ok("queued");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-new".to_string()],
+        });
+        let child_server =
+            server_in_session_with_model_probe(root.path(), "child", backend, Box::new(probe));
+        let result = call(
+            &child_server,
+            "session_complete",
+            json!({"message":"Implementation complete."}),
+        );
+
+        assert_eq!(result["isError"], true);
+        assert!(backend_calls.borrow().is_empty());
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Codex, "gpt-old".to_string())]
+        );
+        assert_eq!(
+            session::list(root.path())
+                .unwrap()
+                .into_iter()
+                .find(|session| session.name == "parent")
+                .unwrap()
+                .agent
+                .model,
+            Some("gpt-old".to_string())
+        );
+    }
+
+    #[test]
+    fn complete_binds_a_legacy_parent_model_to_the_checked_cli() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        session::create_with_agent(
+            root.path(),
+            "parent",
+            SessionAgent {
+                cli: None,
+                model: Some("legacy-model".to_string()),
+            },
+            SessionOrigin::Mcp,
+            None,
+        )
+        .unwrap();
+        let parent_server = server_in_session(root.path(), "parent", FakeBackend::ok("x"));
+        call(&parent_server, "session_create", json!({"name":"child"}));
+
+        let backend = FakeBackend::ok("queued");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Available);
+        let child_server =
+            server_in_session_with_model_probe(root.path(), "child", backend, Box::new(probe));
+        let result = call(
+            &child_server,
+            "session_complete",
+            json!({"message":"Implementation complete."}),
+        );
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(backend_calls.borrow().len(), 1);
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Claude, "legacy-model".to_string())]
+        );
+        let parent = session::list(root.path())
+            .unwrap()
+            .into_iter()
+            .find(|session| session.name == "parent")
+            .unwrap();
+        assert_eq!(parent.agent.cli, Some(AgentCli::Claude));
+        assert_eq!(parent.agent.model.as_deref(), Some("legacy-model"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]
@@ -1729,6 +1998,326 @@ mod tests {
             .unwrap();
         assert_eq!(session.agent.cli, Some(AgentCli::SakanaAi));
         assert_eq!(session.agent.model.as_deref(), Some("fugu-ultra"));
+    }
+
+    #[test]
+    fn unavailable_prompt_model_errors_before_state_or_queue_changes() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-available".to_string()],
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        call(
+            &server,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex"}),
+        );
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"do it","model":"gpt-missing"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        let error = result["content"][0]["text"].as_str().unwrap();
+        assert!(error.contains("gpt-missing"), "{error}");
+        assert!(error.contains("gpt-available"), "{error}");
+        assert!(backend_calls.borrow().is_empty());
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Codex, "gpt-missing".to_string())]
+        );
+        let stored = session::list(root.path()).unwrap().remove(0).agent;
+        assert_eq!(stored.cli, Some(AgentCli::Codex));
+        assert_eq!(stored.model, None);
+    }
+
+    #[test]
+    fn unverifiable_prompt_model_fails_closed_before_queueing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let backend = FakeBackend::ok("done");
+        let backend_calls = backend.calls.clone();
+        let (probe, _) = RecordingModelProbe::new(ModelAvailability::Unverifiable {
+            reason: "the CLI has no model catalog command".to_string(),
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        call(
+            &server,
+            "session_create",
+            json!({"name":"work","agent_cli":"claude"}),
+        );
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"do it","model":"opus"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        let error = result["content"][0]["text"].as_str().unwrap();
+        assert!(error.contains("could not verify"), "{error}");
+        assert!(
+            error.contains("clear the explicit model override"),
+            "{error}"
+        );
+        assert!(backend_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn blank_prompt_model_clears_the_override_without_probing() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let setup = server_at(root.path(), FakeBackend::ok("setup"));
+        call(
+            &setup,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex","model":"gpt-old"}),
+        );
+        drop(setup);
+
+        let backend = FakeBackend::ok("done");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: Vec::new(),
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"use the default","model":"   "}),
+        );
+
+        assert_eq!(result["isError"], false);
+        assert!(probe_calls.borrow().is_empty());
+        assert_eq!(backend_calls.borrow().len(), 1);
+        let stored = session::list(root.path()).unwrap().remove(0).agent;
+        assert_eq!(stored.cli, Some(AgentCli::Codex));
+        assert_eq!(stored.model, None);
+    }
+
+    #[test]
+    fn queued_prompt_rechecks_an_already_stored_model() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let setup = server_at(root.path(), FakeBackend::ok("setup"));
+        call(
+            &setup,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex","model":"gpt-old"}),
+        );
+        drop(setup);
+
+        let backend = FakeBackend::ok("done");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-new".to_string()],
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"start now"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        assert!(backend_calls.borrow().is_empty());
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Codex, "gpt-old".to_string())]
+        );
+        // Revalidation does not erase the user's stored choice; the caller can
+        // explicitly clear or replace it in a later request.
+        assert_eq!(
+            session::list(root.path()).unwrap().remove(0).agent.model,
+            Some("gpt-old".to_string())
+        );
+    }
+
+    #[test]
+    fn live_prompt_to_a_running_pane_rechecks_its_stored_model_before_appending() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let setup = server_at(root.path(), FakeBackend::ok("setup"));
+        call(
+            &setup,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex","model":"gpt-old"}),
+        );
+        drop(setup);
+
+        let backend = FakeBackend::ok("sent").with_live(true);
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-new".to_string()],
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"follow up now"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        assert!(backend_calls.borrow().is_empty());
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Codex, "gpt-old".to_string())]
+        );
+        assert_eq!(
+            session::list(root.path()).unwrap().remove(0).agent.model,
+            Some("gpt-old".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_live_prompt_without_a_running_pane_rechecks_the_stored_model() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let setup = server_at(root.path(), FakeBackend::ok("setup"));
+        call(
+            &setup,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex","model":"gpt-old"}),
+        );
+        drop(setup);
+
+        let backend = FakeBackend::ok("sent").with_live(false);
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-new".to_string()],
+        });
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"start when possible","mode":"live"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        assert!(backend_calls.borrow().is_empty());
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Codex, "gpt-old".to_string())]
+        );
+    }
+
+    #[test]
+    fn unavailable_create_model_leaves_no_session_or_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let (probe, _) = RecordingModelProbe::new(ModelAvailability::Unavailable {
+            available_models: vec!["gpt-available".to_string()],
+        });
+        let server =
+            server_at_with_model_probe(root.path(), FakeBackend::ok("done"), Box::new(probe));
+
+        let result = call(
+            &server,
+            "session_create",
+            json!({"name":"work","agent_cli":"codex","model":"gpt-missing"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        assert!(session::list(root.path()).unwrap().is_empty());
+        assert!(!root.path().join(".usagi/sessions/work").exists());
+    }
+
+    #[test]
+    fn model_without_cli_is_checked_and_bound_to_the_effective_workspace_cli() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Available);
+        let server =
+            server_at_with_model_probe(root.path(), FakeBackend::ok("done"), Box::new(probe));
+
+        let result = call(
+            &server,
+            "session_create",
+            json!({"name":"work","model":"default-cli-model"}),
+        );
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Claude, "default-cli-model".to_string())]
+        );
+        let stored = session::list(root.path()).unwrap().remove(0).agent;
+        assert_eq!(stored.cli, Some(AgentCli::Claude));
+        assert_eq!(stored.model.as_deref(), Some("default-cli-model"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn prompt_binds_a_legacy_model_only_override_before_queueing() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        session::create_with_agent(
+            root.path(),
+            "work",
+            SessionAgent {
+                cli: None,
+                model: Some("legacy-model".to_string()),
+            },
+            SessionOrigin::Mcp,
+            None,
+        )
+        .unwrap();
+        let backend = FakeBackend::ok("queued");
+        let backend_calls = backend.calls.clone();
+        let (probe, probe_calls) = RecordingModelProbe::new(ModelAvailability::Available);
+        let server = server_at_with_model_probe(root.path(), backend, Box::new(probe));
+
+        let result = call(
+            &server,
+            "session_prompt",
+            json!({"name":"work","prompt":"start now"}),
+        );
+
+        assert_eq!(result["isError"], false);
+        assert_eq!(backend_calls.borrow().len(), 1);
+        assert_eq!(
+            *probe_calls.borrow(),
+            vec![(AgentCli::Claude, "legacy-model".to_string())]
+        );
+        let stored = session::list(root.path()).unwrap().remove(0).agent;
+        assert_eq!(stored.cli, Some(AgentCli::Claude));
+        assert_eq!(stored.model.as_deref(), Some("legacy-model"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn model_validation_surfaces_effective_settings_errors_before_creation() {
+        let _guard = crate::test_support::process_env_guard();
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("settings.json"), "not json").unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let server = server_at(root.path(), FakeBackend::ok("done"));
+
+        let result = call(
+            &server,
+            "session_create",
+            json!({"name":"work","model":"some-model"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        let error = result["content"][0]["text"].as_str().unwrap();
+        assert!(error.contains("failed to resolve the effective agent CLI"));
+        assert!(session::list(root.path()).unwrap().is_empty());
+        assert!(!root.path().join(".usagi/sessions/work").exists());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 
     #[test]

@@ -471,6 +471,7 @@ fn main() -> anyhow::Result<()> {
             let stdout = std::io::stdout();
             usagi::presentation::cli::mcp::run(
                 Box::new(CliAgentBackend),
+                Box::new(usagi::usecase::agent::CliAgentModelProbe),
                 stdin.lock(),
                 stdout.lock(),
             )
