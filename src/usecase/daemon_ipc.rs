@@ -25,6 +25,9 @@ pub type ClientId = u64;
 /// process), which is why they are returned rather than executed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
+    /// Compare this client build with the daemon build, then reply with the
+    /// daemon identity supplied by the composition root.
+    Hello { build: String },
     /// Send this message back to the requesting client.
     Reply(ServerMessage),
     /// Spawn a new daemon-owned terminal with this launch configuration, then
@@ -55,6 +58,28 @@ pub enum Action {
     Scrollback(TerminalId, usize),
     /// Nothing to send.
     Nothing,
+}
+
+impl Action {
+    /// Whether this action may touch a daemon-owned terminal and therefore
+    /// requires a successful executable-generation handshake on its connection.
+    pub fn requires_build_handshake(&self) -> bool {
+        matches!(
+            self,
+            Self::Spawn { .. }
+                | Self::Kill(_)
+                | Self::Attach { .. }
+                | Self::Detach(_)
+                | Self::Keys(_, _)
+                | Self::Resize(_, _, _)
+                | Self::Scrollback(_, _)
+        )
+    }
+}
+
+/// Whether a client's executable generation is safe to combine with the daemon.
+pub fn builds_match(client: &str, daemon: &str) -> bool {
+    client == daemon
 }
 
 /// One daemon-owned terminal as the registry tracks it: where it runs and the
@@ -396,6 +421,7 @@ pub fn handle(
     sessions: &[SessionSnapshot],
 ) -> Action {
     match message {
+        ClientMessage::Hello { build } => Action::Hello { build },
         ClientMessage::ListSessions => Action::Reply(ServerMessage::Sessions {
             sessions: sessions.to_vec(),
         }),
@@ -484,6 +510,64 @@ mod tests {
             })
         );
         assert!(!registry.is_subscribed(7));
+    }
+
+    #[test]
+    fn hello_requests_the_composition_roots_build_identity() {
+        let mut registry = SubscriberRegistry::new();
+        assert_eq!(
+            handle(
+                ClientMessage::Hello {
+                    build: "client-build".to_string(),
+                },
+                7,
+                &mut registry,
+                &sample_sessions(),
+            ),
+            Action::Hello {
+                build: "client-build".to_string()
+            }
+        );
+        assert!(!registry.is_subscribed(7));
+    }
+
+    #[test]
+    fn build_policy_guards_every_terminal_action() {
+        let env = BTreeMap::new();
+        let terminal_actions = [
+            Action::Spawn {
+                worktree: PathBuf::from("/repo"),
+                command: None,
+                env,
+                cols: 80,
+                rows: 24,
+                scrollback: 100,
+            },
+            Action::Kill(1),
+            Action::Attach {
+                terminal: 1,
+                worktree: PathBuf::from("/repo"),
+            },
+            Action::Detach(1),
+            Action::Keys(1, Vec::new()),
+            Action::Resize(1, 80, 24),
+            Action::Scrollback(1, 0),
+        ];
+        assert!(terminal_actions
+            .iter()
+            .all(Action::requires_build_handshake));
+        assert!(!Action::Hello {
+            build: "build".to_string()
+        }
+        .requires_build_handshake());
+        assert!(!Action::Reply(ServerMessage::Sessions {
+            sessions: Vec::new()
+        })
+        .requires_build_handshake());
+        assert!(!Action::Nothing.requires_build_handshake());
+
+        assert!(builds_match("same", "same"));
+        assert!(!builds_match("old", "new"));
     }
 
     #[test]

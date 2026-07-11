@@ -34,6 +34,7 @@ fn daemon_e2e_guard() -> MutexGuard<'static, ()> {
 fn daemon_cmd(home: &Path, arg: &str) {
     let status = Command::new(BIN)
         .args(["daemon", arg])
+        .current_dir(home)
         .env("USAGI_HOME", home)
         .env_remove("LLVM_PROFILE_FILE")
         .status()
@@ -72,7 +73,24 @@ fn connect(sock: &Path) -> UnixStream {
     let deadline = Instant::now() + e2e_budget(10);
     loop {
         match UnixStream::connect(sock) {
-            Ok(stream) => return stream,
+            Ok(mut stream) => {
+                let build = usagi::infrastructure::daemon_client::build_identity_for(Path::new(
+                    env!("CARGO_BIN_EXE_usagi"),
+                ))
+                .unwrap();
+                send(
+                    &mut stream,
+                    &ClientMessage::Hello {
+                        build: build.clone(),
+                    },
+                );
+                let mut decoder = FrameDecoder::new();
+                assert_eq!(
+                    recv(&mut stream, &mut decoder, e2e_budget(5)),
+                    ServerMessage::Hello { build }
+                );
+                return stream;
+            }
             Err(e) if Instant::now() < deadline => {
                 let _ = e;
                 std::thread::sleep(Duration::from_millis(100));
@@ -375,6 +393,7 @@ fn stop_daemon(home: &Path, daemon_dir: &Path) {
 
     let _ = Command::new(BIN)
         .args(["daemon", "stop"])
+        .current_dir(home)
         .env("USAGI_HOME", home)
         .env_remove("LLVM_PROFILE_FILE")
         .status();
@@ -523,6 +542,94 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
                 other => panic!("expected Exited, got {other:?}"),
             }
         }
+    });
+
+    stop_daemon(home.path(), &daemon_dir);
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn terminal_client_rejects_a_daemon_from_another_executable_generation() {
+    let _guard = daemon_e2e_guard();
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    let worktree = tempfile::tempdir().unwrap();
+
+    let client_build = usagi::infrastructure::daemon_client::build_identity().unwrap();
+    let daemon_build = usagi::infrastructure::daemon_client::build_identity_for(Path::new(env!(
+        "CARGO_BIN_EXE_usagi"
+    )))
+    .unwrap();
+    assert_ne!(client_build, daemon_build, "the test needs two executables");
+
+    let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, e2e_budget(10)),
+            "daemon never created its IPC socket"
+        );
+
+        let mut before_spawn_called = false;
+        let error = usagi::infrastructure::daemon_client::DaemonTerminal::spawn_after_build_check(
+            &daemon_dir,
+            worktree.path(),
+            24,
+            80,
+            Some("printf should-not-run"),
+            200,
+            &BTreeMap::new(),
+            &mut || before_spawn_called = true,
+        )
+        .err()
+        .expect("a different daemon build must be rejected");
+        assert!(
+            error.to_string().contains("daemon build mismatch"),
+            "unexpected error: {error:#}"
+        );
+        assert!(error
+            .downcast_ref::<usagi::infrastructure::daemon_client::DaemonBuildHandshakeError>()
+            .is_some());
+        assert!(
+            !before_spawn_called,
+            "a rejected daemon build must not clear the existing agent phase"
+        );
+
+        // Restore must be able to distinguish the same pre-attach failure from
+        // an ordinary missing terminal. Otherwise it would resume the recorded
+        // agent locally while the old daemon's process is still running.
+        let attach_error = usagi::infrastructure::daemon_client::DaemonTerminal::attach(
+            &daemon_dir,
+            worktree.path(),
+            1,
+            24,
+            80,
+            200,
+        )
+        .err()
+        .expect("restore attach to a different daemon build must be rejected");
+        assert!(attach_error
+            .downcast_ref::<usagi::infrastructure::daemon_client::DaemonBuildHandshakeError>()
+            .is_some());
+
+        // A pre-handshake client (the previous protocol generation) is refused
+        // server-side as well. Its Spawn payload must not degrade into a plain
+        // shell on the newer daemon.
+        let mut old_client = UnixStream::connect(&sock).unwrap();
+        send(&mut old_client, &spawn_message(worktree.path()));
+        match read_message(&mut old_client, e2e_budget(5)) {
+            ServerMessage::Error { message } => assert!(message.contains("handshake required")),
+            other => panic!("expected build-handshake error, got {other:?}"),
+        }
+        assert!(
+            usagi::infrastructure::daemon_terminals_store::read(&daemon_dir)
+                .unwrap()
+                .is_empty(),
+            "the rejected client must not spawn a plain terminal"
+        );
     });
 
     stop_daemon(home.path(), &daemon_dir);

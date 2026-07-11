@@ -59,6 +59,10 @@ fn default_spawn_scrollback() -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
+    /// Identify the client build before any terminal operation. The daemon
+    /// answers with its own [`ServerMessage::Hello`] build identity; a terminal
+    /// client proceeds only when the two identities match.
+    Hello { build: String },
     /// Request the current monitored-sessions snapshot once.
     ListSessions,
     /// Start receiving a [`ServerMessage::Sessions`] push whenever the snapshot
@@ -122,6 +126,10 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// Identify the daemon build to a terminal client. Build identities include
+    /// the executable generation, so two `cargo run` rebuilds do not compare
+    /// equal even while the package version stays unchanged.
+    Hello { build: String },
     /// The monitored-sessions snapshot, as a one-shot reply or a subscription
     /// push.
     Sessions { sessions: Vec<SessionSnapshot> },
@@ -375,6 +383,27 @@ mod tests {
                 rows: 24,
                 scrollback: 1000,
             }
+        );
+    }
+
+    #[test]
+    fn hello_messages_round_trip_the_build_identity() {
+        let client = ClientMessage::Hello {
+            build: "dev:123".to_string(),
+        };
+        let client_json = serde_json::to_vec(&client).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ClientMessage>(&client_json).unwrap(),
+            client
+        );
+
+        let server = ServerMessage::Hello {
+            build: "dev:456".to_string(),
+        };
+        let server_json = serde_json::to_vec(&server).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ServerMessage>(&server_json).unwrap(),
+            server
         );
     }
 

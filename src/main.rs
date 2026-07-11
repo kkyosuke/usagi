@@ -418,6 +418,11 @@ fn main() -> anyhow::Result<()> {
             // launches any agent, so each session worktree's `.claude/skills`
             // symlink resolves to current content. Best-effort.
             let _ = usagi::infrastructure::skills::materialize_default();
+            // Capture this executable generation before the long-running TUI
+            // starts. A later `cargo run` rebuild may replace target/debug/usagi,
+            // but this process must keep identifying as the binary it began as.
+            #[cfg(unix)]
+            let _ = usagi::infrastructure::daemon_client::build_identity();
             // Autospawn the daemon that owns the agent terminals, so the TUI can
             // attach to it (and agents keep running after the TUI closes).
             // Best-effort and idempotent: with a daemon already running this is
@@ -643,7 +648,11 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
     // single-instance slot, so any leftover is dead). Best-effort: if the socket
     // cannot be bound the daemon still runs its monitor, just without IPC.
     let socket_path = usagi::infrastructure::daemon_ipc::socket_path(dir);
-    let mut server = DaemonIpcServer::bind(&socket_path);
+    #[cfg(unix)]
+    let build = usagi::infrastructure::daemon_client::build_identity().unwrap_or_default();
+    #[cfg(not(unix))]
+    let build = String::new();
+    let mut server = DaemonIpcServer::bind(&socket_path, build);
     server.replace_sessions(usagi::infrastructure::daemon_sessions_store::read(dir)?);
     server.adopt_persisted_terminals(dir);
 
@@ -709,6 +718,9 @@ struct DaemonIpcServer {
     listener: Option<std::os::unix::net::UnixListener>,
     clients: std::collections::HashMap<u64, IpcClient>,
     registry: usagi::usecase::daemon_ipc::SubscriberRegistry,
+    /// The executable generation captured when this daemon started. Terminal
+    /// clients must identify with the same value before spawning or attaching.
+    build: String,
     next_id: u64,
     /// The daemon-owned terminals, keyed by the id assigned at spawn. Holding
     /// the [`PtySession`] here — not on any client — is what makes a terminal
@@ -743,6 +755,9 @@ struct DaemonIpcServer {
 struct IpcClient {
     stream: std::os::unix::net::UnixStream,
     decoder: usagi::domain::daemon_ipc::FrameDecoder,
+    /// Set only after this connection's `Hello` matched the daemon executable
+    /// generation. Session-feed messages do not need it; terminal IO does.
+    terminal_build_verified: bool,
 }
 
 #[cfg(unix)]
@@ -750,7 +765,7 @@ impl DaemonIpcServer {
     /// Bind the listener at `path`, removing any stale socket file first. Returns
     /// a server with no listener (IPC disabled) if binding fails, so the daemon
     /// keeps monitoring regardless.
-    fn bind(path: &Path) -> Self {
+    fn bind(path: &Path, build: String) -> Self {
         let _ = std::fs::remove_file(path);
         let listener = match std::os::unix::net::UnixListener::bind(path) {
             Ok(listener) => match listener.set_nonblocking(true) {
@@ -779,6 +794,7 @@ impl DaemonIpcServer {
             listener,
             clients: std::collections::HashMap::new(),
             registry: usagi::usecase::daemon_ipc::SubscriberRegistry::new(),
+            build,
             next_id: 0,
             terminals: std::collections::HashMap::new(),
             terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
@@ -856,6 +872,7 @@ impl DaemonIpcServer {
                         IpcClient {
                             stream,
                             decoder: usagi::domain::daemon_ipc::FrameDecoder::new(),
+                            terminal_build_verified: false,
                         },
                     );
                 }
@@ -941,7 +958,36 @@ impl DaemonIpcServer {
                 &mut self.registry,
                 &self.session_cache,
             );
+            let build_verified = self
+                .clients
+                .get(&id)
+                .is_some_and(|client| client.terminal_build_verified);
+            if action.requires_build_handshake() && !build_verified {
+                if !self.send(
+                    id,
+                    &usagi::domain::daemon_ipc::ServerMessage::Error {
+                        message: "daemon build handshake required before terminal operations"
+                            .to_string(),
+                    },
+                ) {
+                    return false;
+                }
+                continue;
+            }
             let alive = match action {
+                Action::Hello {
+                    build: client_build,
+                } => {
+                    if let Some(client) = self.clients.get_mut(&id) {
+                        client.terminal_build_verified =
+                            usagi::usecase::daemon_ipc::builds_match(&client_build, &self.build);
+                    }
+                    let build = self.build.clone();
+                    self.send(
+                        id,
+                        &usagi::domain::daemon_ipc::ServerMessage::Hello { build },
+                    )
+                }
                 Action::Reply(reply) => self.send(id, &reply),
                 Action::Spawn {
                     worktree,
@@ -1365,7 +1411,7 @@ struct DaemonIpcServer;
 
 #[cfg(not(unix))]
 impl DaemonIpcServer {
-    fn bind(_path: &Path) -> Self {
+    fn bind(_path: &Path, _build: String) -> Self {
         Self
     }
 

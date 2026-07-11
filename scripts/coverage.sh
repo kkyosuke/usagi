@@ -16,7 +16,7 @@
 #   - infrastructure/pty\.rs  : 擬似端末・スレッドの実 IO。
 #   - infrastructure/daemon_client\.rs : daemon 所有端末への attach クライアント
 #       （Unix ソケット接続・ハンドシェイク・受信スレッド）の実 IO。プロトコル判断
-#       （ハンドシェイク応答の解釈・Screen/Output/Exited の畳み込み）は
+#       （build/terminal ハンドシェイク応答の解釈・Screen/Output/Exited の畳み込み）は
 #       usecase/daemon_attach.rs に、メッセージ形とフレーミング・出力バックログは
 #       domain/daemon_ipc.rs に切り出して計測対象に含めてある。
 #   - infrastructure/resource\.rs : `sysinfo` による実プロセスの CPU/メモリ計測 IO。
