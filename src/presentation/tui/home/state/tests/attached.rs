@@ -1058,6 +1058,15 @@ fn attached_dir_reanchors_a_same_named_session_in_the_owning_workspace() {
 }
 
 #[test]
+fn attached_dir_ignores_a_path_outside_the_open_workspaces() {
+    let mut state = state();
+    let selected = state.list().selected_index();
+
+    assert!(!state.focus_attached_dir(Path::new("/unknown")));
+    assert_eq!(state.list().selected_index(), selected);
+}
+
+#[test]
 fn restore_focus_is_a_no_op_for_a_since_removed_session() {
     let mut state = state();
     state.restore_focus("gone", ResumeLevel::Attached);
