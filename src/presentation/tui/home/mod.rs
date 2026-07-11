@@ -2037,6 +2037,10 @@ fn autostart_queued_prompts(
             continue;
         }
         let prompt = parts.join("\n\n");
+        if !pool.borrow().reserve_autostart_dispatch(&dir) {
+            let _ = crate::infrastructure::agent_prompt_store::set(&dir, &prompt);
+            continue;
+        }
         // Launch with the session's pinned CLI / model when it has one (a delegated
         // issue routed to a specific model), else the workspace default. This is the
         // primary path a `session_delegate_issue(agent_cli, model)` takes effect on.
@@ -2071,6 +2075,7 @@ fn autostart_queued_prompts(
                 logs.push(format!("queued prompt auto-started for {label}: {prompt}"));
             }
             Err(err) => {
+                pool.borrow().release_autostart_dispatch(&dir);
                 // The background spawn failed, so the prompt was not delivered.
                 // Re-queue it (best-effort) so a later tick — or a human opening the
                 // pane — still receives it, and record why the spawn failed.

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use console::Term;
@@ -69,6 +69,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// figures are coarse health indicators, not a profiler, so this halves the
 /// full-system process-table refresh cost while keeping the display fresh enough.
 const RESOURCE_SAMPLE_EVERY: u32 = 10;
+
+/// How long a queued-prompt autostart reservation may occupy a dispatch slot
+/// without being replaced by an authoritative phase or a pane exit. Agents with
+/// lifecycle hooks normally clear this on the next watcher tick; hook-less agents
+/// cannot prove that they are still working, so the reservation eventually ages
+/// out rather than blocking every later queued prompt forever.
+const AUTOSTART_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The handles a background session is watched through, kept separate from the
 /// owned [`PtySession`]s so the watcher thread can poll without holding them.
@@ -136,11 +143,22 @@ struct LivePromptTarget {
     input: PaneInputHandle,
 }
 
+/// An autostart dispatch that has spawned an agent pane but has not yet been
+/// handed off to the watcher's authoritative phase / liveness state.
+#[derive(Debug, Clone, Copy)]
+struct AutostartReservation {
+    expires_at: Instant,
+}
+
 /// State shared between the pool, the watcher thread, and the render loops.
 #[derive(Default)]
 struct Shared {
     monitor: SessionMonitor,
     sessions: HashMap<PathBuf, Watched>,
+    /// Queued-prompt autostarts dispatched between watcher observations. These
+    /// count as occupied slots until the watcher sees a phase, the pane exits, or
+    /// the timeout fallback releases them.
+    autostart_reservations: HashMap<PathBuf, AutostartReservation>,
     /// PR lists the watcher has newly harvested from live panes, keyed by the
     /// session/worktree root. The event loop drains this and calls
     /// `HomeState::set_pr_links`, so background sessions get their sidebar `#N`
@@ -338,6 +356,52 @@ fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
         resources: shared.resources.clone(),
         resource_total: shared.resource_total,
     }
+}
+
+fn prune_expired_autostart_reservations(shared: &mut Shared, now: Instant) {
+    shared
+        .autostart_reservations
+        .retain(|_, reservation| reservation.expires_at > now);
+}
+
+fn reserve_autostart_dispatch_locked(shared: &mut Shared, dir: &Path, now: Instant) -> bool {
+    prune_expired_autostart_reservations(shared, now);
+    if shared.autostart_reservations.contains_key(dir) {
+        return false;
+    }
+    shared.autostart_reservations.insert(
+        dir.to_path_buf(),
+        AutostartReservation {
+            expires_at: now + AUTOSTART_RESERVATION_TIMEOUT,
+        },
+    );
+    true
+}
+
+fn occupied_agent_slots_locked(shared: &Shared, now: Instant) -> usize {
+    shared
+        .monitor
+        .running()
+        .union(shared.monitor.waiting())
+        .chain(
+            shared
+                .autostart_reservations
+                .iter()
+                .filter_map(|(path, reservation)| (reservation.expires_at > now).then_some(path)),
+        )
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn release_handed_off_autostart_reservations(
+    shared: &mut Shared,
+    phase_observed: &HashSet<PathBuf>,
+    now: Instant,
+) {
+    prune_expired_autostart_reservations(shared, now);
+    shared
+        .autostart_reservations
+        .retain(|path, _| shared.sessions.contains_key(path) && !phase_observed.contains(path));
 }
 
 /// One off-lock PR scan the watcher should perform for a pane whose output
@@ -941,11 +1005,31 @@ impl TerminalPool {
         }
     }
 
-    /// Number of queued-autostart agent slots occupied right now, based on the
-    /// monitor's agent phase snapshot rather than pane liveness.
+    /// Number of queued-autostart agent slots occupied right now. Reported
+    /// `running` / `waiting` phases are authoritative; dispatch reservations
+    /// bridge the gap between spawning an agent pane and the watcher seeing that
+    /// pane's first phase / exit.
     pub fn occupied_agent_slots(&self) -> usize {
-        snapshot_locked(&self.shared.lock().unwrap_or_else(|p| p.into_inner()))
-            .occupied_agent_slots()
+        occupied_agent_slots_locked(
+            &self.shared.lock().unwrap_or_else(|p| p.into_inner()),
+            Instant::now(),
+        )
+    }
+
+    /// Reserve one queued-prompt autostart slot for `dir`. Returns `false` if the
+    /// same worktree already has a live reservation, which prevents the same
+    /// queue generation from being dispatched twice before the watcher catches up.
+    pub fn reserve_autostart_dispatch(&self, dir: &Path) -> bool {
+        reserve_autostart_dispatch_locked(&mut self.lock(), dir, Instant::now())
+    }
+
+    /// Release a queued-prompt autostart reservation for `dir`, used when the
+    /// pane spawn failed after the prompt was taken and before watcher ownership
+    /// exists.
+    pub fn release_autostart_dispatch(&self, dir: &Path) {
+        if self.lock().autostart_reservations.remove(dir).is_some() {
+            self.version.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     /// Make `dir`'s active pane ready to attach. With no live pane yet, spawns the
@@ -1544,6 +1628,7 @@ impl TerminalPool {
                 shared.sessions.remove(&key);
                 shared.pr_link_updates.remove(&key);
                 shared.monitor.forget(dir);
+                shared.autostart_reservations.remove(&key);
                 agent_state_store::clear(dir);
                 self.version.fetch_add(1, Ordering::SeqCst);
             }
@@ -1590,6 +1675,7 @@ impl TerminalPool {
             shared.sessions.remove(path);
             shared.pr_link_updates.remove(path);
             shared.monitor.forget(path);
+            shared.autostart_reservations.remove(path);
             agent_state_store::clear(path);
             agent_live_pane_store::clear(path);
         }
@@ -1849,6 +1935,8 @@ fn spawn_watcher(
                     break;
                 }
             };
+            let now = Instant::now();
+            prune_expired_autostart_reservations(&mut shared, now);
             let before = snapshot_locked(&shared);
 
             // Report every newly ended pane to the owning pool before pruning an
@@ -1900,6 +1988,7 @@ fn spawn_watcher(
             for path in dead {
                 shared.sessions.remove(&path);
                 shared.monitor.forget(&path);
+                shared.autostart_reservations.remove(&path);
                 agent_state_store::clear(&path);
                 agent_live_pane_store::clear(&path);
             }
@@ -1931,6 +2020,11 @@ fn spawn_watcher(
                         )
                     })
                     .collect();
+                let phase_observed: HashSet<PathBuf> = readings
+                    .iter()
+                    .filter(|(_, _, phase)| phase.is_some())
+                    .map(|(path, _, _)| path.clone())
+                    .collect();
                 let notices = shared
                     .monitor
                     .observe(&readings)
@@ -1942,6 +2036,7 @@ fn spawn_watcher(
                             .map(|w| (w.label.clone(), notice.kind))
                     })
                     .collect();
+                release_handed_off_autostart_reservations(&mut shared, &phase_observed, now);
                 let pr_jobs = pending_pr_scans(&mut shared);
                 let live_prompt_targets = shared
                     .sessions
@@ -2098,5 +2193,123 @@ impl Default for TerminalPool {
             true,
             crate::domain::settings::DEFAULT_TERMINAL_SCROLLBACK_LINES,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::agent_phase::AgentPhase;
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from(format!("/tmp/{name}"))
+    }
+
+    #[test]
+    fn autostart_reservation_occupies_a_slot_before_phase_arrives() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("queued");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        assert_eq!(occupied_agent_slots_locked(&shared, now), 1);
+        assert!(!reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+    }
+
+    #[test]
+    fn autostart_reservation_does_not_double_count_handed_off_running_phase() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("running");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        shared
+            .monitor
+            .observe(&[(worktree.clone(), 0, Some(AgentPhase::Running))]);
+        release_handed_off_autostart_reservations(
+            &mut shared,
+            &HashSet::from([worktree.clone()]),
+            now,
+        );
+
+        assert!(!shared.autostart_reservations.contains_key(&worktree));
+        assert_eq!(occupied_agent_slots_locked(&shared, now), 1);
+    }
+
+    #[test]
+    fn autostart_reservation_releases_on_ready_phase() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("ready");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        shared
+            .monitor
+            .observe(&[(worktree.clone(), 0, Some(AgentPhase::Ready))]);
+        release_handed_off_autostart_reservations(
+            &mut shared,
+            &HashSet::from([worktree.clone()]),
+            now,
+        );
+
+        assert!(!shared.autostart_reservations.contains_key(&worktree));
+        assert_eq!(occupied_agent_slots_locked(&shared, now), 0);
+    }
+
+    #[test]
+    fn autostart_reservation_timeout_releases_phase_less_cli() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("phase-less");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        let later = now + AUTOSTART_RESERVATION_TIMEOUT + Duration::from_millis(1);
+        assert_eq!(occupied_agent_slots_locked(&shared, later), 0);
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            later
+        ));
+    }
+
+    #[test]
+    fn autostart_reservation_release_allows_spawn_failure_retry() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("spawn-failed");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        shared.autostart_reservations.remove(&worktree);
+
+        assert_eq!(occupied_agent_slots_locked(&shared, now), 0);
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
     }
 }
