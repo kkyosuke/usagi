@@ -334,6 +334,10 @@ mod tests {
         // The first message was applied; the orphaned check then stopped the
         // drain before the second.
         assert_eq!(sink.applied, 1);
+        // The rest of the sink surface stays callable on an orphaned sink.
+        sink.apply_output(b"two");
+        sink.exited();
+        assert_eq!(sink.applied, 2);
     }
 
     #[test]
