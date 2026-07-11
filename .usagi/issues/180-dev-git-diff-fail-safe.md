@@ -1,14 +1,14 @@
 ---
 number: 180
 title: dev: git diff から fail-safe に推奨テストを提示する
-status: todo
+status: done
 priority: medium
 labels: [test, developer-experience]
 dependson: []
 related: []
 parent: 177
 created_at: 2026-07-10T23:35:22.796411+00:00
-updated_at: 2026-07-10T23:35:22.796411+00:00
+updated_at: 2026-07-11T00:08:59.732133+00:00
 ---
 
 ## 目的

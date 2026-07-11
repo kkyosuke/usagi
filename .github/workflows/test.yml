@@ -54,3 +54,6 @@ jobs:
 
     - name: Run tests
       run: cargo test --quiet
+
+    - name: Test recommended-test selector
+      run: bash scripts/tests/recommend-tests.sh

@@ -14,6 +14,7 @@
 - [プルリクエスト](#プルリクエスト)
 - [ドキュメント規約](#ドキュメント規約)
 - [品質チェック（コミット・push 前に必須）](#品質チェックコミットpush-前に必須)
+- [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
 - [リリース](#リリース)
@@ -120,6 +121,20 @@ cargo test                                 # テスト
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（`src/main.rs`）で束ねる。こうすると presentation/CLI のオーケストレーションはユニットテストで 100% を満たせる（例: `cli/agent_phase.rs` は `impl Read`、`cli/mcp.rs` は `impl BufRead`/`impl Write` と `Box<dyn AgentBackend>`、`cli/clean.rs` は spawn 関数を注入）。
   - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層だけ（`main.rs` と、live TTY / 実 PTY / 実ネットワーク / 実スレッドを束ねる薄いオーケストレータ）。理由は `scripts/coverage.sh` のコメントに列挙する。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
+
+## 変更箇所からの推奨テスト
+
+開発中の fast feedback には `scripts/recommend-tests.sh [base]` を明示的に実行する。`base` の既定値は
+`HEAD` で、`git diff` の変更 path、選定理由、近いテストコマンドを表示する。path とテストの対応表は
+`scripts/recommend-tests.tsv` が正本である。
+
+```bash
+scripts/recommend-tests.sh origin/main
+```
+
+推奨された selected tests は PR 前の full gate の代替ではない。未知の path、空 diff、複数層にまたがる変更、
+共有基盤の変更は fail-safe に `cargo test --quiet` を含める。コミット・push 前には、この節の出力にかかわらず
+[品質チェック](#品質チェックコミットpush-前に必須)をすべて実行する。
 
 ## Git Hooks（lefthook）
 
