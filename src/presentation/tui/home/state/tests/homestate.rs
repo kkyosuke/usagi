@@ -802,6 +802,75 @@ fn pending_session_create_skeletons_begin_dedupe_and_clear_by_root_and_name() {
 }
 
 #[test]
+fn a_watcher_refresh_keeps_a_recorded_session_hidden_until_its_create_finishes() {
+    // `session::create` writes state.json before running setup commands, so the
+    // watcher may deliver the real record while the inline skeleton is still
+    // active. Retain that source record, but do not add a second selectable row.
+    let root = PathBuf::from("/repo");
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(root.clone());
+    state.restore_sessions(vec![session("main")]);
+    state.begin_pending_session(root.clone(), "newx".to_string());
+
+    state.refresh_sessions(vec![session("main"), session("newx")]);
+
+    assert_eq!(
+        state.sessions().len(),
+        2,
+        "the watcher snapshot is retained"
+    );
+    assert_eq!(
+        state.list().groups()[0].worktrees().len(),
+        1,
+        "the pending record is omitted from the selectable list"
+    );
+    assert_eq!(state.pending_sessions().len(), 1);
+
+    assert!(state.clear_pending_session(&root, "newx"));
+    assert_eq!(state.list().groups()[0].worktrees().len(), 2);
+    assert!(state.pending_sessions().is_empty());
+}
+
+#[test]
+fn beginning_a_duplicate_create_keeps_the_existing_session_visible() {
+    // The command palette can request a duplicate name and let the worker report
+    // the error. Do not add a skeleton that a later rebuild would mistake for a
+    // not-yet-recorded session and use to hide the real row.
+    let root = PathBuf::from("/repo");
+    let mut state = HomeState::new("usagi", Vec::new(), None);
+    state.set_root_path(root.clone());
+    state.restore_sessions(vec![session("main")]);
+
+    state.begin_pending_session(root, "main".to_string());
+
+    assert!(state.pending_sessions().is_empty());
+    assert_eq!(state.list().groups()[0].worktrees().len(), 1);
+    assert_eq!(
+        worktree_name(&state.list().groups()[0].worktrees()[0]),
+        "main"
+    );
+}
+
+#[test]
+fn a_pending_create_hides_only_its_matching_unite_workspace_record() {
+    let mut state = united_state();
+    // The same name in the primary workspace must stay visible: pending creates
+    // are qualified by workspace root, not name alone.
+    state.refresh_sessions(vec![session("main"), session("b2")]);
+    let root = PathBuf::from("/wsB");
+    state.begin_pending_session(root.clone(), "b2".to_string());
+
+    state.refresh_sessions_for(&root, vec![session("b1"), session("b2")]);
+
+    assert_eq!(state.extra_groups[0].sessions.len(), 2);
+    assert_eq!(state.list().groups()[0].worktrees().len(), 2);
+    assert_eq!(state.list().groups()[1].worktrees().len(), 1);
+
+    assert!(state.clear_pending_session(&root, "b2"));
+    assert_eq!(state.list().groups()[1].worktrees().len(), 2);
+}
+
+#[test]
 fn pending_session_remove_skeletons_begin_dedupe_and_clear_by_root_and_name() {
     let mut state = state();
     let root = PathBuf::from("/repo");
