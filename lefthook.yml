@@ -107,7 +107,7 @@ pre-push:
           echo "No Rust (*.rs) changes to push; skipping clippy."
           exit 0
         fi
-        cargo clippy --all-targets -- -D warnings
+        cargo clippy --workspace --all-targets -- -D warnings
     coverage:
       # 除外条件・閾値は SSoT (scripts/coverage.sh) を Coverage CI と共有する。
       # cargo llvm-cov がテストも実行するため、別途 cargo test は走らせない。

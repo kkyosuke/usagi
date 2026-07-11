@@ -35,7 +35,7 @@ jobs:
       run: cargo fmt --all -- --check
 
     - name: Clippy
-      run: cargo clippy --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-targets -- -D warnings
 
   full-test:
     runs-on: ubuntu-latest
@@ -55,7 +55,7 @@ jobs:
     - name: Run tests
       run: |
         set +e
-        cargo test --quiet > /tmp/usagi-cargo-test.log 2>&1
+        cargo test --workspace --quiet > /tmp/usagi-cargo-test.log 2>&1
         status=$?
         set -e
         tail -n 160 /tmp/usagi-cargo-test.log

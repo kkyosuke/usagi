@@ -1,15 +1,15 @@
 # pattern<TAB>layer<TAB>reason<TAB>commands separated by |
 # First match wins. Keep explicit Rust module exceptions above generic rules.
 src/usecase/daemon_attach.rs	usecase	daemon_attach coordinates daemon and session behavior	cargo test --lib usecase::daemon_attach::|cargo test --lib usecase::session::
-src/infrastructure/git/*	infrastructure	git integration affects session/worktree orchestration	cargo test --lib infrastructure::git::|cargo test --lib usecase::session::|cargo test --quiet
-src/infrastructure/storage.rs	infrastructure	storage is shared persistence infrastructure	cargo test --lib infrastructure::storage::|cargo test --test storage_test|cargo test --quiet
-src/infrastructure/*store*.rs	infrastructure	shared stores affect multiple use cases	cargo test --lib {module}::|cargo test --quiet
+src/infrastructure/git/*	infrastructure	git integration affects session/worktree orchestration	cargo test --lib infrastructure::git::|cargo test --lib usecase::session::|cargo test --workspace --quiet
+src/infrastructure/storage.rs	infrastructure	storage is shared persistence infrastructure	cargo test --lib infrastructure::storage::|cargo test --test storage_test|cargo test --workspace --quiet
+src/infrastructure/*store*.rs	infrastructure	shared stores affect multiple use cases	cargo test --lib {module}::|cargo test --workspace --quiet
 src/domain/*	domain	domain module changed	cargo test --lib {module}::
 src/usecase/*	usecase	usecase module changed	cargo test --lib {module}::|{domain_command}
 src/infrastructure/*	infrastructure	infrastructure module changed	cargo test --lib {module}::|{usecase_command}
 src/presentation/*	presentation	presentation surface changed	cargo test --lib {module}::|{usecase_command}
 tests/*.rs	integration	integration test target changed	cargo test --test {test}
-third_party/vt100/*	third_party	vendored terminal parser affects terminal and TUI behavior	cargo test --manifest-path third_party/vt100/Cargo.toml|cargo test --lib infrastructure::terminal::|cargo test --test tui_e2e|cargo test --quiet
+third_party/vt100/*	third_party	vendored terminal parser affects terminal and TUI behavior	cargo test --manifest-path third_party/vt100/Cargo.toml|cargo test --lib infrastructure::terminal::|cargo test --test tui_e2e|cargo test --workspace --quiet
 *.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
 v1/document/*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
 .agents/*.md	docs	agent workflow documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
