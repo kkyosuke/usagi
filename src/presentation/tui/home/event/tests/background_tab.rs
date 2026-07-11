@@ -8,6 +8,18 @@
 
 use super::*;
 use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Clone, Default)]
+struct SpyLogger {
+    recorded: Rc<RefCell<Vec<String>>>,
+}
+
+impl crate::infrastructure::error_log::Logger for SpyLogger {
+    fn record(&self, message: &str) {
+        self.recorded.borrow_mut().push(message.to_string());
+    }
+}
 
 /// Drive the loop with capturing background-pane hooks. Reaching 集中 on a live
 /// session and pressing `t` dispatches a background terminal; the hooks then
@@ -209,7 +221,10 @@ fn a_starting_background_tab_animates_without_moving() {
     let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
     let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
     let mut start = pending_start;
-    let mut poll = |_d: &Path| PendingPoll::Starting(1);
+    let mut poll = |_d: &Path| PendingPoll::Starting {
+        tab: 1,
+        delivered: Some("queued prompt delivered to feat: prompt".to_string()),
+    };
     let mut activate = |_d: &Path| {
         *activated.borrow_mut() += 1;
         true
@@ -337,6 +352,49 @@ fn a_vanished_background_launch_is_dropped() {
 }
 
 #[test]
+fn a_failed_background_launch_is_logged_and_dropped() {
+    let logger = SpyLogger::default();
+    let recorded = logger.recorded.clone();
+    let activated = RefCell::new(0usize);
+    let cleared = RefCell::new(0usize);
+    let mut open = |_h: &mut HomeState, _d: &Path, _a: bool, _n: bool| Ok(PaneExit::ToFocus);
+    let mut preview: fn(&Path, Sidebar) -> Option<TerminalView> = live_preview;
+    let mut start = pending_start;
+    let mut poll = |_d: &Path| PendingPoll::Failed {
+        error: "failed to launch feat: pty unavailable".to_string(),
+        retryable: true,
+    };
+    let mut activate = |_d: &Path| {
+        *activated.borrow_mut() += 1;
+        true
+    };
+    let mut clear = || {
+        *cleared.borrow_mut() += 1;
+    };
+    let mut state = sample_state();
+    state.set_logger(Box::new(logger));
+    let outcome = run_bg(
+        reach_closeup_and_launch_terminal(),
+        state,
+        &mut open,
+        &mut preview,
+        &mut start,
+        &mut poll,
+        &mut activate,
+        &mut clear,
+    )
+    .unwrap();
+    assert!(matches!(outcome, Outcome::Quit));
+    assert_eq!(*activated.borrow(), 0, "a failed launch is never activated");
+    assert_eq!(*cleared.borrow(), 1, "the failed launch was dropped");
+    assert_eq!(
+        recorded.borrow().as_slice(),
+        ["failed to launch feat: pty unavailable (retryable)"],
+        "the on-screen error also reaches the daily log sink",
+    );
+}
+
+#[test]
 fn reusing_an_agent_tab_re_attaches_without_a_loading_tab() {
     // `start_pending_spawn` reporting `Reused` means no new tab: the launch just
     // re-attaches the existing pane, so no poll / activate happens.
@@ -422,16 +480,24 @@ enum PendingCase {
     ReadySelected,
     ReadyBackground,
     Gone,
+    Failed(bool),
 }
 
 impl PendingCase {
     fn poll(self) -> PendingPoll {
         match self {
             Self::Resolving => PendingPoll::Resolving,
-            Self::Starting(index) => PendingPoll::Starting(index),
+            Self::Starting(index) => PendingPoll::Starting {
+                tab: index,
+                delivered: None,
+            },
             Self::ReadySelected => PendingPoll::Ready { selected: true },
             Self::ReadyBackground => PendingPoll::Ready { selected: false },
             Self::Gone => PendingPoll::Gone,
+            Self::Failed(retryable) => PendingPoll::Failed {
+                error: "failed to launch feat: pty unavailable".to_string(),
+                retryable,
+            },
         }
     }
 }
@@ -488,6 +554,20 @@ fn background_tab_launch_lifecycle_characterization_matrix() {
         (
             "pending gone",
             LaunchCase::Pending(PendingCase::Gone),
+            1,
+            0,
+            1,
+        ),
+        (
+            "pending failed retryable",
+            LaunchCase::Pending(PendingCase::Failed(true)),
+            1,
+            0,
+            1,
+        ),
+        (
+            "pending failed not retryable",
+            LaunchCase::Pending(PendingCase::Failed(false)),
             1,
             0,
             1,

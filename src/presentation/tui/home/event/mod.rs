@@ -157,7 +157,10 @@ pub(super) enum PendingPoll {
     Resolving,
     /// The pane has spawned and is starting; carries its current tab index so the
     /// loading chip animates on the right chip.
-    Starting(usize),
+    Starting {
+        tab: usize,
+        delivered: Option<String>,
+    },
     /// The pane's shell has painted. `selected` is true when the pending pane is
     /// still the selected tab, in which case the loop may attach it immediately;
     /// false means the user selected something else while it loaded, so it should
@@ -165,6 +168,9 @@ pub(super) enum PendingPoll {
     Ready { selected: bool },
     /// The launch is gone (its spawn failed, or the pane vanished): drop it.
     Gone,
+    /// The launch failed before a pane took over the prompt. `retryable` lets the
+    /// caller distinguish transient spawn/env failures from terminal disappearances.
+    Failed { error: String, retryable: bool },
 }
 
 /// Dispatch a background pane launch. See [`Wiring::start_pending_spawn`].
@@ -811,7 +817,12 @@ pub(super) fn event_loop(
                 // the publish above; nothing to do here.
                 PendingPoll::Resolving => {}
                 // Spawned and starting: animate the real chip at its tab index.
-                PendingPoll::Starting(tab) => state.advance_pending_pane(tab, false),
+                PendingPoll::Starting { tab, delivered } => {
+                    if let Some(line) = delivered {
+                        state.log_output(line);
+                    }
+                    state.advance_pending_pane(tab, false);
+                }
                 // Ready: stop showing the loading chip/body. Attach only if the
                 // user still has this session and this tab selected; no delayed
                 // tab selection happens here.
@@ -835,6 +846,17 @@ pub(super) fn event_loop(
                 PendingPoll::Gone => {
                     state.clear_pending_pane();
                     (wiring.clear_pending_spawn)();
+                }
+                PendingPoll::Failed { error, retryable } => {
+                    state.clear_pending_pane();
+                    let suffix = if retryable {
+                        "retryable"
+                    } else {
+                        "not retryable"
+                    };
+                    state.log_error(format!("{error} ({suffix})"));
+                    (wiring.clear_pending_spawn)();
+                    force_paint = true;
                 }
             }
         }
