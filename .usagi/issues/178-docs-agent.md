@@ -1,14 +1,14 @@
 ---
 number: 178
 title: docs: agent と開発者の検証規約をリスク比例へ更新する
-status: todo
+status: done
 priority: high
 labels: [docs, test]
 dependson: [179, 180]
 related: []
 parent: 177
 created_at: 2026-07-10T23:35:22.578241+00:00
-updated_at: 2026-07-10T23:35:34.021491+00:00
+updated_at: 2026-07-11T02:31:02.335280+00:00
 ---
 
 ## 目的

@@ -53,15 +53,13 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 
 - クリーンアーキテクチャ（`domain → usecase → infrastructure ← presentation`）の依存方向を守る。
 - 実装と同時にテストを追加・更新する（カバレッジ 100% を維持。CI / pre-push でチェックされる）。
-- コミット前に必ず以下を通す:
-
-```bash
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
-```
-
-- pre-push フックは `cargo clippy --all-targets -- -D warnings` とカバレッジ 100%（`cargo llvm-cov`）を確認する。`cargo llvm-cov` はテスト実行を兼ねる。
+- 検証は [06-conventions.md#品質チェック（リスク比例の gate）](../document/06-conventions.md#品質チェックリスク比例の-gate)
+  を正本とする。編集中は fmt check / `cargo check --all-targets` / 変更 module・target と直接 consumer の test、
+  commit 前は `cargo clippy --all-targets -- -D warnings` と risk-based selected tests、push / PR 前は Rust 差分に
+  full test + coverage 100% を通す。coverage がテスト実行を兼ねる経路では `cargo test --quiet` を重複実行しない。
+- docs-only（Rust 差分なし）は Rust gate を省略できるが、Markdown link check は必須である。
+- AI エージェントの完了報告には、実行した command、結果、未実行 gate と理由、[full test / coverage gate
+  必須条件](../document/06-conventions.md#品質チェックリスク比例の-gate)への該当有無を含める。
 
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
 
@@ -100,7 +98,7 @@ gh pr create --title "<type>: <説明>" --body "<概要>"
 
 ### 1. 開発する
 
-新規作業と同じ。`cargo fmt` / `clippy` / `test` を通してからコミットする。
+新規作業と同じ。[品質チェック](../document/06-conventions.md#品質チェックリスク比例の-gate)の該当 gate を通してからコミットする。
 
 ### 2. ドキュメントを更新する
 

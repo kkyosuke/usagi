@@ -2,7 +2,7 @@
 
 > [ドキュメント目次](README.md) ｜ ← 前へ [6. 開発規約](06-conventions.md)
 
-slow/flaky test の計測方法と test runner の採否判断は本書を正本とする。correctness と coverage の gate は [開発規約](06-conventions.md#品質チェックコミットpush-前に必須)に従う。
+slow/flaky test の計測方法と test runner の採否判断は本書を正本とする。correctness と coverage の gate は [開発規約](06-conventions.md#品質チェックリスク比例の-gate)に従う。
 
 ## 目次
 
