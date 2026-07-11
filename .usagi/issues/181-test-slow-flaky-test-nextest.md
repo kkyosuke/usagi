@@ -1,14 +1,14 @@
 ---
 number: 181
 title: test: slow/flaky test の計測基盤と nextest 採否を検証する
-status: in-progress
+status: done
 priority: medium
 labels: [test, perf]
 dependson: []
 related: [188, 189, 190]
 parent: 177
 created_at: 2026-07-10T23:35:22.929986+00:00
-updated_at: 2026-07-11T00:56:14.901680+00:00
+updated_at: 2026-07-11T01:05:47.248468+00:00
 ---
 
 ## 背景
