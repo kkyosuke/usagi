@@ -1,14 +1,14 @@
 ---
 number: 184
 title: feat(orchestration): worker 終端 event と durable owner 通知を追加する
-status: in-progress
+status: done
 priority: high
 labels: [orchestration, agent]
 dependson: [183]
 related: []
 parent: 182
 created_at: 2026-07-10T23:56:43.112615+00:00
-updated_at: 2026-07-11T00:35:12.340954+00:00
+updated_at: 2026-07-11T01:00:59.757559+00:00
 ---
 
 ## 背景
