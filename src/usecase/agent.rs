@@ -972,7 +972,7 @@ mod tests {
             ..test_limits()
         };
         let error = SystemCatalogCommandRunner
-            .run("sh", &["-c", "sleep 3 >/dev/null & exit 0"], limits)
+            .run("sh", &["-c", "exec 1>/dev/null; sleep 3 & exit 0"], limits)
             .unwrap_err();
 
         assert!(error.contains("stderr reader"), "{error}");
