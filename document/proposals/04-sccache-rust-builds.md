@@ -11,6 +11,7 @@
 - [実装タスク案](#実装タスク案)
 - [ベンチマークと受け入れ基準](#ベンチマークと受け入れ基準)
 - [CI 実験の初回観測](#ci-実験の初回観測)
+- [CI 実験の warmed 追加観測](#ci-実験の-warmed-追加観測)
 - [go / no-go 判断](#go--no-go-判断)
 
 ## 現状調査
@@ -96,18 +97,43 @@ required Rust jobs の 10% 短縮基準を満たさない。coverage は workflo
 `.usagi/cache/sccache-ci` だけを `actions/cache` で保存している。保存先の重複や restore/save failure は見当たらない。
 ただし初回 run だけでは warmed sccache の効果が未観測であり、billed minutes 相当は `Test` で悪化している。
 
+## CI 実験の warmed 追加観測
+
+2026-07-11 に #747 merge 後の追加 run を確認した。手元で main push は作らず、存在する GitHub Actions run だけを
+`gh run list` / `gh run view --log` で観測した。要求された 3 回観測に対し、同一 key の `Test` main push は追加 1 回、
+`Coverage` PR run は success 1 回と failure 1 回だけだった。
+
+| workflow / run | 対象 | 結果 | workflow duration | job duration | 主 command | cache / stats |
+|---|---|---|---:|---:|---|---|
+| `Test` [29142272434](https://github.com/kkyosuke/usagi/actions/runs/29142272434) | #748 main push | success | 1m10s | `test`: 47s / `full-test`: 1m07s | clippy 20.11s / tests step 45s | sccache restore hit。`test`: restore 45 MiB / 2s、save skipped、1 hit / 0 misses / 12 non-cacheable calls / 45 MiB。`full-test`: restore 143 MiB / 2s、save skipped、2 hits / 0 misses / 11 non-cacheable calls / 144 MiB。 |
+| `Coverage` [29141902810](https://github.com/kkyosuke/usagi/actions/runs/29141902810) | #748 PR | success | 2m03s | `coverage`: 2m00s | coverage step 1m24s、compile 1m04s | sccache restore miss、save 150 MiB / 3s。0 hits / 155 misses / 55 non-cacheable calls / 144 MiB。Lines / Functions とも 100%。 |
+| `Coverage` [29142251100](https://github.com/kkyosuke/usagi/actions/runs/29142251100) | #185 PR | failure | 1m55s | `coverage`: 1m53s | coverage step 1m22s | sccache restore miss、failure のため sccache save skipped。0 hits / 155 misses / 55 non-cacheable calls / 145 MiB。Functions は 100%、Lines は missed line 1 で 100% gate に失敗。 |
+
+追加 `Test` run は sccache の `actions/cache` primary key に hit し、restore/save 自体は正常だった。ただし既存の
+`swatinem/rust-cache` が target を復元しているため、sccache が処理した compile request は `test` job で 1 件、
+`full-test` job で 2 件だけだった。近い sccache なし baseline の job duration 合計は #745 が 107s、#743 が 104s
+で、#748 は 114s だった。workflow wall time は 70s で baseline の 79s / 84s より短いが、並列 job の billed
+minutes 相当は baseline より 6.5%〜9.6% 悪化し、required Rust jobs の 10% 以上短縮基準を満たさない。
+
+`Coverage` は PR branch ごとの run で sccache cache が共有されず、追加観測でも restore miss と 0% hit が続いた。
+success run の job duration は 2m00s で、近い baseline #745 の 1m56s より遅い。sccache save も 3s 追加されるため、
+Coverage では workflow duration と billed minutes 相当の両方を改善できていない。
+
+3 回観測に足りないため統計的な結論は限定的である。ただし現時点の不足分を埋めるために手元で main push は作らない。
+追加観測する場合は、自然な main merge 後の `Test` run をあと 2 回、同一 PR branch 上で rerun した `Coverage` または
+今後の PR run をあと 2 回記録する。ただし PR branch 間の sccache cache 非共有という挙動が見えているため、先に
+#203 で sccache 対象 job の絞り込みまたは撤去を検討する。
+
 ## go / no-go 判断
 
 Go 条件は、ローカル opt-in helper で correctness が変わらず、複数 session warm の build-heavy command で 20% 以上の短縮が確認できること。CI は追加で 10% 以上の required job 短縮と billed minutes 非悪化を満たした場合に go とする。
 
-現時点の判断は「local opt-in と required Rust gate の ubuntu CI 実験は go、repo-wide 強制と CI required 全面導入は
-no-go」。理由は、未インストール環境を壊せないこと、既に `swatinem/rust-cache` が入っていること、`usagi` の test
-wall time にはコンパイル以外の Git/PTY/TUI runtime が大きく含まれることである。CI 実験では setup/cache
-restore/save を含めて required Rust jobs の wall time が 10% 以上短縮し、billed minutes が悪化しない場合だけ、
-release build check / release workflow / test-metrics workflow への展開を別 issue で検討する。
+現時点の判断は「local opt-in は go、required Rust gate の現行 sccache CI 構成は adjustment、repo-wide 強制と
+release build check / release workflow / test-metrics への展開は no-go」。理由は、main push の warmed `Test` でも
+sccache hit が 1〜2 compile request に留まり、setup/cache restore を含む job duration 合計が baseline より短くないこと、
+`Coverage` PR run では branch 間 cache 非共有で 0% hit と save overhead が続くこと、既に `swatinem/rust-cache` が
+主要な target 復元を担っていることである。
 
-#201 / PR #747 merge 後の初回 CI 実測では、required Rust jobs の 10% 短縮は確認できず、`Test` は baseline より遅い。
-これは初回 cache miss と `RUSTC_WRAPPER` による `swatinem/rust-cache` key 変更を含むため、即時 rollback ではなく
-「データ不足」と判断する。実験導入は required ubuntu Rust jobs に限定して継続し、release build check / release workflow /
-test-metrics には広げない。次は warmed sccache cache が効く同一 key の main / PR run を 3 回観測し、hit rate、
-job duration、workflow duration、cache restore/save time、billed minutes 相当を再評価する。
+調整は #203 で扱う。候補は、`Coverage` から sccache を外す、`Test` も `swatinem/rust-cache` だけに戻す、または
+build-heavy で sccache が効く job だけに限定する、のいずれかである。現行データでは required Rust jobs の 10% 以上短縮と
+billed minutes 非悪化を満たさないため、release build check / release workflow / test-metrics には展開しない。
