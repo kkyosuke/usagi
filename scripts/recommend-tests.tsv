@@ -10,3 +10,7 @@ src/infrastructure/*	infrastructure	infrastructure module changed	cargo test --l
 src/presentation/*	presentation	presentation surface changed	cargo test --lib {module}::|{usecase_command}
 tests/*.rs	integration	integration test target changed	cargo test --test {test}
 third_party/vt100/*	third_party	vendored terminal parser affects terminal and TUI behavior	cargo test --manifest-path third_party/vt100/Cargo.toml|cargo test --lib infrastructure::terminal::|cargo test --test tui_e2e|cargo test --quiet
+*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
+document/*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
+.agents/*.md	docs	agent workflow documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
+.github/*.md	docs	GitHub documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'
