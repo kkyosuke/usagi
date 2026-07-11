@@ -390,7 +390,7 @@ pub enum Outcome {
 /// the current mode). Routed through [`Wiring::save_resume`] so the disk write
 /// lives in [`super::run`] and tests observe it through a capture.
 fn save_resume_focus(state: &mut HomeState, wiring: &mut Wiring) {
-    let session = state.list().selected_name().to_string();
+    let session = state.resume_focus_target();
     let level = state.resume_level();
     (wiring.save_resume)(&session, level);
     (wiring.save_last_active)(&state.last_active_flush());

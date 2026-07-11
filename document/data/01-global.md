@@ -242,7 +242,8 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 - ファイル名はワークスペースルートの正規化パスのハッシュ（16 桁 hex）。内容にもワークスペースパスを持ち、
   ハッシュ衝突や別マシン由来の古いファイルは読み捨てます（`open-panes/` と同じ方式）。
 - `{ "workspace": "<path>", "session": "<name>", "engagement": "overview" | "closeup" | "attached" }`。
-  `session` は終了時にカーソルがあったセッション（ルート行は `root`）、`engagement` はその深さ。
+  `session` は終了時にカーソルがあったセッション（ルート行は `root`）、`engagement` はその深さ。unite モードでは、
+  同名セッションとルート行を区別するため `session` を `<workspace>:<name>`（例: `tools:root`）で保存する。
   永続的な状態ではないため `version` は持ちません。
 - 書き込みは終了が確定した時（quit 確認モーダルの承認 / 即時 Ctrl-C / `:quit`）。`restore_panes_enabled` が
   OFF のときは書き込まれません。起動時に読み出してカーソル移動（選択）/ 集中 / 自動 attach（没入）を復元し、
