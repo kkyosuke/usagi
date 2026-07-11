@@ -90,6 +90,35 @@ pub fn take(worktree: &Path) -> Option<String> {
     }
 }
 
+/// Put a prompt taken for delivery back in front of the launch queue.
+///
+/// A pending pane launch removes the one-shot prompt before the PTY exists so it
+/// can build the agent command. If the later spawn/cancel path proves the prompt
+/// was not delivered, this restores it. When another prompt was queued after the
+/// take, the restored prompt is prepended so retry order stays "old work first,
+/// newly queued work next" rather than losing either side.
+pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
+    if prompt.is_empty() {
+        return Ok(());
+    }
+    let key = key(worktree);
+    let dir = dir(PROMPT_SUBDIR)?;
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    let merged = match read_ours::<PromptFile>(&path, &key) {
+        Some(file) if !file.prompt.is_empty() => format!("{prompt}\n\n{}", file.prompt),
+        _ => prompt.to_string(),
+    };
+    write_stamped(
+        &dir,
+        &path,
+        &PromptFile {
+            worktree: key,
+            prompt: merged,
+        },
+    )
+}
+
 /// Discard any prompt queued for `worktree` (best-effort), so a session removed
 /// before its agent ever launched — and later recreated at the same path — does
 /// not inherit a prompt queued for the previous session. Called from session
@@ -181,6 +210,43 @@ mod tests {
             set(wt.path(), "first").unwrap();
             set(wt.path(), "second").unwrap();
             assert_eq!(take(wt.path()), Some("second".to_string()));
+        });
+    }
+
+    #[test]
+    fn requeue_front_restores_a_taken_prompt() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "first").unwrap();
+            assert_eq!(take(wt.path()), Some("first".to_string()));
+            requeue_front(wt.path(), "first").unwrap();
+            assert_eq!(take(wt.path()), Some("first".to_string()));
+        });
+    }
+
+    #[test]
+    fn requeue_front_with_an_empty_prompt_is_a_noop() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "queued").unwrap();
+            requeue_front(wt.path(), "").unwrap();
+            assert_eq!(take(wt.path()), Some("queued".to_string()));
+        });
+    }
+
+    #[test]
+    fn requeue_front_preserves_a_prompt_queued_after_the_take() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "first").unwrap();
+            assert_eq!(take(wt.path()), Some("first".to_string()));
+            set(wt.path(), "second").unwrap();
+            requeue_front(wt.path(), "first").unwrap();
+            assert_eq!(
+                take(wt.path()),
+                Some("first\n\nsecond".to_string()),
+                "retry sees the failed delivery before later queued work",
+            );
         });
     }
 

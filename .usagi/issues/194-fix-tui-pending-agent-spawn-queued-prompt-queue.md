@@ -1,13 +1,13 @@
 ---
 number: 194
 title: fix(tui): pending agent spawn 失敗時に queued prompt を再queueする
-status: todo
+status: done
 priority: high
 labels: [fix, tui, orchestration, ux, review]
 dependson: []
 related: [98, 141, 148]
 created_at: 2026-07-11T01:30:34.596597+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T06:24:58.120193+00:00
 ---
 
 ## 症状

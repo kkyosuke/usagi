@@ -38,6 +38,9 @@ use state::{
     ROOT_NAME,
 };
 
+type PaneEnv = std::collections::BTreeMap<String, String>;
+type PendingEnv = std::result::Result<PaneEnv, String>;
+
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
 /// non-git root it fails harmlessly, so we fall back to the saved sessions
@@ -173,6 +176,9 @@ fn resolve_pane_env(
 /// is spawned as the selected tab. See `start_pending_spawn` /
 /// `poll_pending_spawn` in [`run`].
 struct PendingSpawn {
+    /// The worktree this launch targets; used to requeue an undelivered prompt
+    /// when the launch is canceled outside the poll path.
+    dir: PathBuf,
     /// Whether it opens an agent CLI pane or a plain terminal.
     kind: terminal::tabs::PaneKind,
     /// The launch's agent CLI (recorded on the pane for restore / labelling).
@@ -181,9 +187,12 @@ struct PendingSpawn {
     label: String,
     /// The agent launch command for an agent pane; `None` for a plain terminal.
     agent_command: Option<String>,
+    /// A queued launch prompt taken from disk but not yet delivered to a spawned
+    /// pane. Cleared only after `add_pane_selected` succeeds.
+    queued_prompt: Option<String>,
     /// Filled by the resolver thread with the per-worktree environment; `None`
     /// until it lands (the Resolving phase).
-    env: std::sync::Arc<std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>>,
+    env: std::sync::Arc<std::sync::Mutex<Option<PendingEnv>>>,
     /// The pool id once the pane has been spawned (Starting phase); `None` while
     /// the environment is still resolving.
     pane_id: Option<u64>,
@@ -956,13 +965,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             } else {
                 None
             };
-            // Announce a queued prompt when it is actually delivered: it may have
-            // been sitting in the store since long before this launch (MCP
-            // `session_prompt`), so the log makes visible why the agent opens
-            // already working on something the user did not just type.
-            if let Some(prompt) = queued_prompt.as_deref() {
-                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
-            }
             // The command for this fresh spawn carries the queued MCP prompt; the
             // command reused for later `Ctrl-O a` agent tabs never re-sends that
             // one-shot prompt, so only the first launch receives it.
@@ -1009,6 +1011,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // launch that never gets a live pane is cleaned up and logged just like a
             // mid-session failure instead of returning early past the cleanup and the
             // error log below.
+            let mut prompt_delivered = false;
             let result = (|| -> Result<PaneExit> {
                 // Ready the pane to drive: reuse the lone agent when a second was
                 // requested, add a fresh pane (集中's `terminal` / `agent`), or
@@ -1048,6 +1051,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                             attach: None,
                         },
                     )?;
+                }
+                if let Some(prompt) = queued_prompt.as_deref() {
+                    home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
+                    prompt_delivered = true;
                 }
                 handle.set_attached(Some(dir.to_path_buf()));
                 loop {
@@ -1218,6 +1225,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             if !matches!(result, Ok(PaneExit::OpenNote)) {
                 home.clear_terminal_surface();
             }
+            if result.is_err() && !prompt_delivered {
+                if let Some(prompt) = queued_prompt.as_deref() {
+                    let _ = crate::infrastructure::agent_prompt_store::requeue_front(dir, prompt);
+                }
+            }
             // The user may have committed / pushed / merged while in the pane, so
             // re-sync the worktree statuses now that they have left it. The sync
             // shells out to `git status` for every worktree and waits on the
@@ -1308,9 +1320,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             } else {
                 None
             };
-            if let Some(prompt) = queued_prompt.as_deref() {
-                home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
-            }
             let spawn_prompt = queued_prompt.as_deref();
             if run_agent {
                 let _ = agent.provision(&launch_wiring);
@@ -1334,16 +1343,29 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             let env = std::sync::Arc::new(std::sync::Mutex::new(None));
             let worker_slot = env.clone();
             let worker = std::thread::spawn(move || {
-                let resolved = crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root);
+                let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root)
+                }))
+                .map_err(|payload| {
+                    if let Some(s) = payload.downcast_ref::<&str>() {
+                        format!("environment resolver panicked: {s}")
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        format!("environment resolver panicked: {s}")
+                    } else {
+                        "environment resolver panicked".to_string()
+                    }
+                });
                 if let Ok(mut slot) = worker_slot.lock() {
                     *slot = Some(resolved);
                 }
             });
             *pending_spawn.borrow_mut() = Some(PendingSpawn {
+                dir: dir.to_path_buf(),
                 kind,
                 cli,
                 label,
                 agent_command,
+                queued_prompt,
                 env,
                 pane_id: None,
                 _worker: worker,
@@ -1363,9 +1385,39 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         };
         match ps.pane_id {
             None => {
-                let resolved = ps.env.lock().ok().and_then(|mut slot| slot.take());
-                let Some(env) = resolved else {
-                    return event::PendingPoll::Resolving;
+                let resolved = match ps.env.lock() {
+                    Ok(mut slot) => slot.take(),
+                    Err(_) => {
+                        let label = ps.label.clone();
+                        if let Some(prompt) = ps.queued_prompt.take() {
+                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
+                                dir, &prompt,
+                            );
+                        }
+                        return event::PendingPoll::Failed {
+                            error: format!(
+                                "failed to launch {label}: environment resolver panicked"
+                            ),
+                            retryable: true,
+                        };
+                    }
+                };
+                let env = match resolved {
+                    None => return event::PendingPoll::Resolving,
+                    Some(Ok(env)) => env,
+                    Some(Err(error)) => {
+                        let label = ps.label.clone();
+                        if let Some(prompt) = ps.queued_prompt.take() {
+                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
+                                dir, &prompt,
+                            );
+                        }
+                        pending.take();
+                        return event::PendingPoll::Failed {
+                            error: format!("failed to launch {label}: {error}"),
+                            retryable: true,
+                        };
+                    }
                 };
                 let mut pool = pool.borrow_mut();
                 match pool.add_pane_selected(
@@ -1382,12 +1434,27 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                 ) {
                     Ok(id) => {
                         ps.pane_id = Some(id);
+                        let delivered = ps.queued_prompt.take().map(|prompt| {
+                            format!("queued prompt delivered to {}: {prompt}", ps.label)
+                        });
                         match pool.tab_index_of(dir, id) {
-                            Some(tab) => event::PendingPoll::Starting(tab),
+                            Some(tab) => event::PendingPoll::Starting { tab, delivered },
                             None => event::PendingPoll::Gone,
                         }
                     }
-                    Err(_) => event::PendingPoll::Gone,
+                    Err(err) => {
+                        let label = ps.label.clone();
+                        if let Some(prompt) = ps.queued_prompt.take() {
+                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
+                                dir, &prompt,
+                            );
+                        }
+                        pending.take();
+                        event::PendingPoll::Failed {
+                            error: format!("failed to launch {label}: {err:#}"),
+                            retryable: true,
+                        }
+                    }
                 }
             }
             Some(id) => {
@@ -1400,7 +1467,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                                 selected: pool.pane_is_active(dir, id),
                             }
                         } else {
-                            event::PendingPoll::Starting(tab)
+                            event::PendingPoll::Starting {
+                                tab,
+                                delivered: None,
+                            }
                         }
                     }
                 }
@@ -1422,7 +1492,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // Drop the in-flight launch (user acted, or it vanished): the resolver result
     // is discarded and no pane is spawned.
     let mut clear_pending_spawn = || {
-        pending_spawn.borrow_mut().take();
+        if let Some(mut ps) = pending_spawn.borrow_mut().take() {
+            if let Some(prompt) = ps.queued_prompt.take() {
+                let _ = crate::infrastructure::agent_prompt_store::requeue_front(&ps.dir, &prompt);
+            }
+        }
     };
 
     // Snapshot the selected session's live terminal for the sidebar's right-pane
@@ -2074,7 +2148,7 @@ fn autostart_queued_prompts(
                 // The background spawn failed, so the prompt was not delivered.
                 // Re-queue it (best-effort) so a later tick — or a human opening the
                 // pane — still receives it, and record why the spawn failed.
-                let _ = crate::infrastructure::agent_prompt_store::set(&dir, &prompt);
+                let _ = crate::infrastructure::agent_prompt_store::requeue_front(&dir, &prompt);
                 crate::infrastructure::error_log::ErrorLog::record(&format!(
                     "failed to auto-start queued prompt for {}: {err:#}",
                     dir.display()
