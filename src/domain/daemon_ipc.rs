@@ -9,12 +9,12 @@
 //! daemon-owned terminal. Terminals are addressed by the [`TerminalId`] the
 //! daemon assigns at spawn — a worktree can hold several terminals at once (an
 //! agent pane alongside plain shells), so the worktree path alone is not an
-//! address. An attach is answered with [`ServerMessage::Attached`] and a full
-//! [`ServerMessage::Screen`] snapshot; after that the daemon streams the raw PTY
-//! output bytes as [`ServerMessage::Output`] deltas, which reproduce everything
-//! a directly-owned PTY would have shown (colors, bells, cursor-shape and
-//! bracketed-paste sequences, scrollback growth). A client that falls behind the
-//! bounded [`OutputBacklog`] is resynchronised with a fresh `Screen` snapshot.
+//! address. An attach is answered with [`ServerMessage::Attached`] and a bounded
+//! [`ServerMessage::Screen`] viewport snapshot. The daemon remains the authority
+//! for terminal history: clients replay raw [`ServerMessage::Output`] deltas only
+//! for the live viewport, and request historical viewports with
+//! [`ClientMessage::Scrollback`]. A client that falls behind the bounded
+//! [`OutputBacklog`] is resynchronised with a fresh `Screen` snapshot.
 //!
 //! Everything here is pure: the message *shapes*, a byte-level [`FrameDecoder`]
 //! that reassembles whole frames from arbitrarily chunked reads, and the
@@ -93,8 +93,9 @@ pub enum ClientMessage {
     /// client believes the terminal runs in; the daemon refuses the attach when
     /// it does not match, so a stale id (from a persisted pane snapshot) can
     /// never latch onto some other worktree's terminal. Answered with
-    /// [`ServerMessage::Attached`] followed by a full [`ServerMessage::Screen`]
-    /// snapshot, then [`ServerMessage::Output`] deltas.
+    /// [`ServerMessage::Attached`] followed by a bounded
+    /// [`ServerMessage::Screen`] viewport snapshot, then live
+    /// [`ServerMessage::Output`] deltas.
     Attach {
         terminal: TerminalId,
         worktree: PathBuf,
@@ -111,6 +112,10 @@ pub enum ClientMessage {
         cols: u16,
         rows: u16,
     },
+    /// Request a viewport `offset` lines back in the daemon-owned scrollback.
+    /// The daemon answers with a [`ServerMessage::Screen`] snapshot whose
+    /// `scrollback` field carries the clamped offset actually applied.
+    Scrollback { terminal: TerminalId, offset: usize },
 }
 
 /// A message the daemon sends to a client.
@@ -141,6 +146,11 @@ pub enum ServerMessage {
     Screen {
         terminal: TerminalId,
         contents: Vec<u8>,
+        /// The scrollback offset represented by this snapshot. Missing on older
+        /// daemon messages, where clients treated every snapshot as the live
+        /// viewport.
+        #[serde(default)]
+        scrollback: usize,
     },
     /// The raw PTY output bytes `terminal` produced since the previous push to
     /// this client. Feeding them to the parser that replayed the last `Screen`

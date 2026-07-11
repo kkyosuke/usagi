@@ -981,6 +981,7 @@ impl DaemonIpcServer {
                     self.resize_terminal(terminal, cols, rows);
                     true
                 }
+                Action::Scrollback(terminal, offset) => self.push_screen_at(id, terminal, offset),
                 Action::Nothing => true,
             };
             if !alive {
@@ -1024,28 +1025,39 @@ impl DaemonIpcServer {
             .map(|entry| entry.pid)
             .unwrap_or(0);
         self.attach_table.attach(id, terminal);
-        self.send(id, &ServerMessage::Attached { terminal, pid }) && self.push_screen(id, terminal)
+        self.send(id, &ServerMessage::Attached { terminal, pid })
+            && self.push_screen_at(id, terminal, 0)
     }
 
-    /// Send `terminal`'s full current screen to client `id` and move that
-    /// client's backlog cursor to the offset the snapshot corresponds to.
-    /// Returns `false` only when the write fails (the client is dropped);
-    /// having no terminal is not a failure.
-    fn push_screen(&mut self, id: u64, terminal: u64) -> bool {
-        let Some((contents, offset)) = self
+    /// Send `terminal`'s viewport at `scrollback` to client `id`, clamped by the
+    /// daemon-owned parser, and move that client's backlog cursor to the offset
+    /// the snapshot corresponds to.
+    fn push_screen_at(&mut self, id: u64, terminal: u64, scrollback: usize) -> bool {
+        let Some(snapshot) = self
             .terminals
             .get(&terminal)
-            .map(|session| session.screen_snapshot())
+            .map(|session| session.screen_snapshot_at(scrollback))
         else {
             return true;
         };
         if !self.send(
             id,
-            &usagi::domain::daemon_ipc::ServerMessage::Screen { terminal, contents },
+            &usagi::domain::daemon_ipc::ServerMessage::Screen {
+                terminal,
+                contents: snapshot.contents,
+                scrollback: snapshot.scrollback,
+            },
         ) {
             return false;
         }
-        self.attach_table.set_cursor(id, terminal, offset);
+        self.attach_table
+            .set_cursor(id, terminal, snapshot.backlog_offset);
+        self.attach_table.set_viewport(
+            id,
+            terminal,
+            snapshot.scrollback,
+            snapshot.primary_high_water,
+        );
         true
     }
 
@@ -1090,12 +1102,21 @@ impl DaemonIpcServer {
         else {
             return;
         };
+        let primary_high_water = self
+            .terminals
+            .get(&terminal)
+            .map(|session| session.primary_scrollback_high_water())
+            .unwrap_or(0);
         let (plan, end) = {
             let backlog = backlog
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             (
-                usagi::usecase::daemon_ipc::plan_screen_updates(&backlog, &clients),
+                usagi::usecase::daemon_ipc::plan_screen_updates(
+                    &backlog,
+                    &clients,
+                    primary_high_water,
+                ),
                 backlog.end(),
             )
         };
@@ -1107,6 +1128,8 @@ impl DaemonIpcServer {
                         &usagi::domain::daemon_ipc::ServerMessage::Output { terminal, data },
                     ) {
                         self.attach_table.set_cursor(client, terminal, end);
+                        self.attach_table
+                            .set_viewport(client, terminal, 0, primary_high_water);
                         true
                     } else {
                         false
@@ -1114,7 +1137,7 @@ impl DaemonIpcServer {
                 }
                 // The snapshot re-reads the live screen (and its own offset), so
                 // it also covers anything appended since the plan was made.
-                ScreenUpdate::Snapshot => self.push_screen(client, terminal),
+                ScreenUpdate::Snapshot { offset } => self.push_screen_at(client, terminal, offset),
             };
             if !delivered {
                 self.drop_client(client);
@@ -1396,11 +1419,11 @@ fn notify(label: &str, kind: usagi::usecase::daemon_ipc::ActivityNoticeKind) {
         .show();
 }
 
-/// Bytes of raw output retained per daemon terminal for streaming exact deltas
-/// to attached clients. A client that falls further behind than this is
-/// resynchronised with a full screen snapshot, so the cap only bounds memory,
-/// never correctness. 256 KiB absorbs a solid burst of agent output between two
-/// IPC ticks with plenty of margin.
+/// Bytes of raw output retained per daemon terminal for streaming exact live
+/// viewport deltas to attached clients. A client that falls further behind than
+/// this is resynchronised with a bounded daemon screen snapshot, so the cap only
+/// bounds memory, never correctness. 256 KiB absorbs a solid burst of agent
+/// output between two IPC ticks with plenty of margin.
 #[cfg(unix)]
 const DAEMON_OUTPUT_BACKLOG_BYTES: usize = 256 * 1024;
 

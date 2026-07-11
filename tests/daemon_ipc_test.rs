@@ -169,6 +169,7 @@ fn attach_terminal(
         ServerMessage::Screen {
             terminal: id,
             contents,
+            ..
         } => {
             assert_eq!(id, terminal, "screen was for the wrong terminal");
             contents
@@ -193,6 +194,7 @@ fn wait_for_marker(
             ServerMessage::Screen {
                 terminal: id,
                 contents,
+                ..
             } if id == terminal => contents,
             ServerMessage::Output { terminal: id, data } if id == terminal => data,
             _ => continue,

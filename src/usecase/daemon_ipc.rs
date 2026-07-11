@@ -51,6 +51,8 @@ pub enum Action {
     Keys(TerminalId, Vec<u8>),
     /// Resize this terminal to `cols`×`rows`.
     Resize(TerminalId, u16, u16),
+    /// Send the requesting client a scrollback viewport snapshot.
+    Scrollback(TerminalId, usize),
     /// Nothing to send.
     Nothing,
 }
@@ -132,13 +134,22 @@ impl TerminalRegistry {
     }
 }
 
-/// Which clients are attached to which terminal's screen feed, and how far into
-/// that terminal's [`OutputBacklog`] each has been pushed. A client may be
-/// attached to several terminals, and several clients may share one. Pure
-/// bookkeeping the socket server consults when a terminal produces output.
+/// One client's current view of an attached terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientViewport {
+    pub cursor: u64,
+    pub scrollback: usize,
+    pub primary_high_water: u64,
+}
+
+/// Which clients are attached to which terminal's screen feed, how far into
+/// that terminal's [`OutputBacklog`] each has been pushed, and what scrollback
+/// viewport each currently displays. A client may be attached to several
+/// terminals, and several clients may share one. Pure bookkeeping the socket
+/// server consults when a terminal produces output.
 #[derive(Debug, Default)]
 pub struct AttachTable {
-    by_terminal: HashMap<TerminalId, BTreeMap<ClientId, u64>>,
+    by_terminal: HashMap<TerminalId, BTreeMap<ClientId, ClientViewport>>,
 }
 
 impl AttachTable {
@@ -151,10 +162,14 @@ impl AttachTable {
     /// the caller advances it (see [`set_cursor`](Self::set_cursor)) once the
     /// initial snapshot is sent.
     pub fn attach(&mut self, client: ClientId, terminal: TerminalId) {
-        self.by_terminal
-            .entry(terminal)
-            .or_default()
-            .insert(client, 0);
+        self.by_terminal.entry(terminal).or_default().insert(
+            client,
+            ClientViewport {
+                cursor: 0,
+                scrollback: 0,
+                primary_high_water: 0,
+            },
+        );
     }
 
     /// Record that `client` has been pushed `terminal`'s output up to `cursor`.
@@ -162,8 +177,25 @@ impl AttachTable {
     /// the caller's snapshot and this update).
     pub fn set_cursor(&mut self, client: ClientId, terminal: TerminalId, cursor: u64) {
         if let Some(clients) = self.by_terminal.get_mut(&terminal) {
-            if let Some(slot) = clients.get_mut(&client) {
-                *slot = cursor;
+            if let Some(viewport) = clients.get_mut(&client) {
+                viewport.cursor = cursor;
+            }
+        }
+    }
+
+    /// Record the viewport offset and history watermark represented by the
+    /// latest snapshot sent to `client`.
+    pub fn set_viewport(
+        &mut self,
+        client: ClientId,
+        terminal: TerminalId,
+        scrollback: usize,
+        primary_high_water: u64,
+    ) {
+        if let Some(clients) = self.by_terminal.get_mut(&terminal) {
+            if let Some(viewport) = clients.get_mut(&client) {
+                viewport.scrollback = scrollback;
+                viewport.primary_high_water = primary_high_water;
             }
         }
     }
@@ -196,12 +228,17 @@ impl AttachTable {
             .unwrap_or_default()
     }
 
-    /// The clients attached to `terminal` with their output cursors, in a
-    /// stable (ascending id) order.
-    pub fn clients_for(&self, terminal: TerminalId) -> Vec<(ClientId, u64)> {
+    /// The clients attached to `terminal` with their viewports, in a stable
+    /// (ascending id) order.
+    pub fn clients_for(&self, terminal: TerminalId) -> Vec<(ClientId, ClientViewport)> {
         self.by_terminal
             .get(&terminal)
-            .map(|clients| clients.iter().map(|(&id, &cursor)| (id, cursor)).collect())
+            .map(|clients| {
+                clients
+                    .iter()
+                    .map(|(&id, &viewport)| (id, viewport))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -281,8 +318,9 @@ pub enum ScreenUpdate {
     /// backlog's end.
     Output(Vec<u8>),
     /// The client's cursor no longer addresses retained bytes — send a full
-    /// screen snapshot and reset its cursor to the backlog's end.
-    Snapshot,
+    /// screen snapshot and reset its cursor to the backlog's end. `offset` is
+    /// the scrollback viewport the snapshot should represent.
+    Snapshot { offset: usize },
 }
 
 /// Decide, for each attached client (with its current cursor), what to push so
@@ -290,15 +328,23 @@ pub enum ScreenUpdate {
 /// nothing.
 pub fn plan_screen_updates(
     backlog: &OutputBacklog,
-    clients: &[(ClientId, u64)],
+    clients: &[(ClientId, ClientViewport)],
+    primary_high_water: u64,
 ) -> Vec<(ClientId, ScreenUpdate)> {
     let end = backlog.end();
     clients
         .iter()
-        .filter(|(_, cursor)| *cursor != end)
-        .map(|&(client, cursor)| match backlog.since(cursor) {
-            Some(data) => (client, ScreenUpdate::Output(data)),
-            None => (client, ScreenUpdate::Snapshot),
+        .filter(|(_, viewport)| viewport.cursor != end)
+        .map(|&(client, viewport)| {
+            if viewport.scrollback > 0 {
+                let added = primary_high_water.saturating_sub(viewport.primary_high_water);
+                let offset = viewport.scrollback.saturating_add(added as usize);
+                return (client, ScreenUpdate::Snapshot { offset });
+            }
+            match backlog.since(viewport.cursor) {
+                Some(data) => (client, ScreenUpdate::Output(data)),
+                None => (client, ScreenUpdate::Snapshot { offset: 0 }),
+            }
         })
         .collect()
 }
@@ -387,6 +433,7 @@ pub fn handle(
             cols,
             rows,
         } => Action::Resize(terminal, cols, rows),
+        ClientMessage::Scrollback { terminal, offset } => Action::Scrollback(terminal, offset),
     }
 }
 
@@ -636,14 +683,61 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_returns_a_viewport_action() {
+        let mut registry = SubscriberRegistry::new();
+        assert_eq!(
+            handle(
+                ClientMessage::Scrollback {
+                    terminal: 4,
+                    offset: 12,
+                },
+                1,
+                &mut registry,
+                &[],
+            ),
+            Action::Scrollback(4, 12)
+        );
+    }
+
+    #[test]
     fn attach_table_tracks_multiple_clients_and_terminals() {
         let mut table = AttachTable::new();
         table.attach(1, 10);
         table.attach(2, 10);
         table.attach(1, 20);
         assert!(table.is_attached(1, 10));
-        assert_eq!(table.clients_for(10), vec![(1, 0), (2, 0)]);
-        assert_eq!(table.clients_for(20), vec![(1, 0)]);
+        assert_eq!(
+            table.clients_for(10),
+            vec![
+                (
+                    1,
+                    ClientViewport {
+                        cursor: 0,
+                        scrollback: 0,
+                        primary_high_water: 0,
+                    }
+                ),
+                (
+                    2,
+                    ClientViewport {
+                        cursor: 0,
+                        scrollback: 0,
+                        primary_high_water: 0,
+                    }
+                )
+            ]
+        );
+        assert_eq!(
+            table.clients_for(20),
+            vec![(
+                1,
+                ClientViewport {
+                    cursor: 0,
+                    scrollback: 0,
+                    primary_high_water: 0,
+                }
+            )]
+        );
         // No one attached to an unknown terminal.
         assert!(table.clients_for(99).is_empty());
     }
@@ -654,12 +748,34 @@ mod tests {
         table.attach(1, 10);
         table.attach(2, 10);
         table.set_cursor(1, 10, 42);
-        assert_eq!(table.clients_for(10), vec![(1, 42), (2, 0)]);
+        assert_eq!(table.clients_for(10)[0].1.cursor, 42);
+        assert_eq!(table.clients_for(10)[1].1.cursor, 0);
         // Advancing a cursor for a client that is not attached is a no-op.
         table.set_cursor(3, 10, 7);
         table.set_cursor(1, 99, 7);
-        assert_eq!(table.clients_for(10), vec![(1, 42), (2, 0)]);
+        assert_eq!(table.clients_for(10)[0].1.cursor, 42);
         assert!(table.clients_for(99).is_empty());
+    }
+
+    #[test]
+    fn attach_table_tracks_viewport_metadata() {
+        let mut table = AttachTable::new();
+        table.attach(1, 10);
+        table.set_viewport(1, 10, 5, 90);
+        assert_eq!(
+            table.clients_for(10),
+            vec![(
+                1,
+                ClientViewport {
+                    cursor: 0,
+                    scrollback: 5,
+                    primary_high_water: 90,
+                }
+            )]
+        );
+        table.set_viewport(2, 10, 9, 99);
+        table.set_viewport(1, 20, 9, 99);
+        assert_eq!(table.clients_for(10)[0].1.scrollback, 5);
     }
 
     #[test]
@@ -669,7 +785,7 @@ mod tests {
         table.attach(2, 10);
         table.detach(1, 10);
         assert!(!table.is_attached(1, 10));
-        assert_eq!(table.clients_for(10), vec![(2, 0)]);
+        assert_eq!(table.clients_for(10)[0].0, 2);
         table.detach(2, 10);
         assert!(table.clients_for(10).is_empty());
         // Detaching from an unknown terminal is a no-op.
@@ -683,7 +799,7 @@ mod tests {
         table.attach(2, 10);
         table.attach(1, 20);
         table.remove_client(1);
-        assert_eq!(table.clients_for(10), vec![(2, 0)]);
+        assert_eq!(table.clients_for(10)[0].0, 2);
         // Terminal 20 had only client 1, so it is gone entirely.
         assert!(table.clients_for(20).is_empty());
     }
@@ -783,7 +899,36 @@ mod tests {
         let mut backlog = OutputBacklog::new(16);
         backlog.append(b"hello");
         // Client 1 saw nothing yet, client 2 saw "hel", client 3 is caught up.
-        let plan = plan_screen_updates(&backlog, &[(1, 0), (2, 3), (3, 5)]);
+        let plan = plan_screen_updates(
+            &backlog,
+            &[
+                (
+                    1,
+                    ClientViewport {
+                        cursor: 0,
+                        scrollback: 0,
+                        primary_high_water: 0,
+                    },
+                ),
+                (
+                    2,
+                    ClientViewport {
+                        cursor: 3,
+                        scrollback: 0,
+                        primary_high_water: 0,
+                    },
+                ),
+                (
+                    3,
+                    ClientViewport {
+                        cursor: 5,
+                        scrollback: 0,
+                        primary_high_water: 0,
+                    },
+                ),
+            ],
+            0,
+        );
         assert_eq!(
             plan,
             vec![
@@ -798,7 +943,39 @@ mod tests {
         let mut backlog = OutputBacklog::new(4);
         backlog.append(b"abcdef");
         // Start is now 2: a cursor at 0 addresses evicted bytes.
-        let plan = plan_screen_updates(&backlog, &[(1, 0)]);
-        assert_eq!(plan, vec![(1, ScreenUpdate::Snapshot)]);
+        let plan = plan_screen_updates(
+            &backlog,
+            &[(
+                1,
+                ClientViewport {
+                    cursor: 0,
+                    scrollback: 0,
+                    primary_high_water: 0,
+                },
+            )],
+            0,
+        );
+        assert_eq!(plan, vec![(1, ScreenUpdate::Snapshot { offset: 0 })]);
+    }
+
+    #[test]
+    fn plan_snapshots_scrolled_clients_and_advances_their_offset() {
+        let mut backlog = OutputBacklog::new(16);
+        backlog.append(b"old");
+        let cursor = backlog.end();
+        backlog.append(b"new");
+        let plan = plan_screen_updates(
+            &backlog,
+            &[(
+                1,
+                ClientViewport {
+                    cursor,
+                    scrollback: 3,
+                    primary_high_water: 10,
+                },
+            )],
+            14,
+        );
+        assert_eq!(plan, vec![(1, ScreenUpdate::Snapshot { offset: 7 })]);
     }
 }
