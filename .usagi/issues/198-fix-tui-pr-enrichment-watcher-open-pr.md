@@ -1,13 +1,13 @@
 ---
 number: 198
 title: fix(tui): PR enrichment を watcher から分離して open PR を再照会する
-status: todo
+status: done
 priority: medium
 labels: [fix, tui, pr, orchestration, review]
 dependson: []
 related: [128, 173, 175]
 created_at: 2026-07-11T01:30:36.975434+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T07:00:15.425986+00:00
 ---
 
 ## 症状

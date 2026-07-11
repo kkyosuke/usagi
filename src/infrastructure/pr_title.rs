@@ -16,6 +16,16 @@
 //! `gh` install is needed to cover it.
 
 use crate::domain::workspace_state::{PrLink, PrState};
+use chrono::{DateTime, Duration, Utc};
+
+/// How soon an auto-managed open PR is re-polled after a successful lookup. This
+/// lets OPEN -> MERGED land in the TUI even when the agent never prints the PR URL
+/// again.
+pub const OPEN_REFRESH_AFTER: Duration = Duration::seconds(30);
+/// First retry delay after a failed lookup.
+pub const RETRY_BASE: Duration = Duration::seconds(5);
+/// Maximum retry delay for repeated failures.
+pub const RETRY_MAX: Duration = Duration::minutes(5);
 
 /// The `gh` command line that prints PR `url`'s title and state as a JSON object,
 /// e.g. `{"title":"Fix the thing","state":"MERGED"}`. `state` is one of `OPEN`,
@@ -34,6 +44,12 @@ pub struct PrView {
     pub title: Option<String>,
     /// Whether `gh` reports the PR merged (`state == "MERGED"`).
     pub merged: bool,
+}
+
+/// A completed lookup with enough information to update the PR's retry metadata.
+pub enum LookupOutcome {
+    Found(PrView),
+    Failed(String),
 }
 
 /// Parse `gh`'s JSON stdout into a [`PrView`]. Invalid or empty output (a failed
@@ -89,6 +105,69 @@ pub fn resolve(prs: &mut [PrLink], run: &mut dyn FnMut(&[String]) -> Option<Stri
         }
     }
     changed
+}
+
+/// Whether this PR should be sent to the background lookup worker at `now`.
+///
+/// Only auto-managed open PRs are re-polled. Dismissed, pinned, and already
+/// merged PRs are left alone; a transient in-flight lookup also suppresses a
+/// duplicate enqueue from another pane or watcher tick.
+pub fn lookup_due(pr: &PrLink, now: DateTime<Utc>) -> bool {
+    if pr.refreshing || pr.is_dismissed() || pr.pinned || pr.state == PrState::Merged {
+        return false;
+    }
+    if pr.title.is_none() {
+        return pr.next_retry.is_none_or(|at| at <= now);
+    }
+    pr.state == PrState::Open && pr.next_retry.is_none_or(|at| at <= now)
+}
+
+/// Mark that a worker has started refreshing this PR. Returns whether the flag
+/// changed, so callers can avoid redundant store writes/UI updates.
+pub fn mark_refreshing(pr: &mut PrLink) -> bool {
+    if pr.refreshing {
+        return false;
+    }
+    pr.refreshing = true;
+    true
+}
+
+/// Apply a lookup result to `pr`, updating title/state and retry metadata.
+pub fn apply_lookup(pr: &mut PrLink, outcome: LookupOutcome, now: DateTime<Utc>) -> bool {
+    let before = pr.clone();
+    pr.refreshing = false;
+    pr.last_checked = Some(now);
+    match outcome {
+        LookupOutcome::Found(view) => {
+            pr.attempts = 0;
+            pr.lookup_error = None;
+            if pr.title.is_none() {
+                pr.title = view.title;
+            }
+            if !pr.pinned && pr.state == PrState::Open && view.merged {
+                pr.state = PrState::Merged;
+            }
+            pr.next_retry = if !pr.pinned && pr.state == PrState::Open {
+                Some(now + OPEN_REFRESH_AFTER)
+            } else {
+                None
+            };
+        }
+        LookupOutcome::Failed(error) => {
+            pr.attempts = pr.attempts.saturating_add(1);
+            pr.lookup_error = Some(error);
+            pr.next_retry = Some(now + retry_delay(pr.attempts));
+        }
+    }
+    *pr != before
+}
+
+/// Exponential backoff for failed lookups, capped so an old error still retries
+/// occasionally while the TUI is open.
+pub fn retry_delay(attempts: u32) -> Duration {
+    let exponent = attempts.saturating_sub(1).min(10);
+    let factor = 1_i32.checked_shl(exponent).unwrap_or(1 << 10);
+    (RETRY_BASE * factor).min(RETRY_MAX)
 }
 
 #[cfg(test)]
@@ -264,5 +343,106 @@ mod tests {
         let mut prs = vec![PrLink::new(1, "https://github.com/o/r/pull/1")];
         assert!(resolve(&mut prs, &mut run));
         assert_eq!(prs[0].title.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn lookup_due_repolls_open_prs_and_skips_final_or_manual_states() {
+        let now = Utc::now();
+        let mut open = PrLink::new(1, "https://github.com/o/r/pull/1");
+        open.title = Some("known".to_string());
+        open.next_retry = Some(now);
+        assert!(lookup_due(&open, now));
+        open.next_retry = Some(now + Duration::seconds(1));
+        assert!(!lookup_due(&open, now));
+
+        let mut untitled = PrLink::new(2, "https://github.com/o/r/pull/2");
+        assert!(lookup_due(&untitled, now));
+        untitled.next_retry = Some(now);
+        assert!(lookup_due(&untitled, now));
+        untitled.next_retry = Some(now + Duration::seconds(1));
+        assert!(!lookup_due(&untitled, now));
+        untitled.refreshing = true;
+        assert!(!lookup_due(&untitled, now));
+
+        let mut merged = PrLink::new(3, "https://github.com/o/r/pull/3");
+        merged.state = PrState::Merged;
+        assert!(!lookup_due(&merged, now));
+        let mut pinned = PrLink::new(4, "https://github.com/o/r/pull/4");
+        pinned.pinned = true;
+        assert!(!lookup_due(&pinned, now));
+        let mut dismissed = PrLink::new(5, "https://github.com/o/r/pull/5");
+        dismissed.state = PrState::Dismissed;
+        assert!(!lookup_due(&dismissed, now));
+    }
+
+    #[test]
+    fn mark_refreshing_reports_whether_it_changed_the_flag() {
+        let mut pr = PrLink::new(6, "https://github.com/o/r/pull/6");
+        assert!(mark_refreshing(&mut pr));
+        assert!(pr.refreshing);
+        assert!(!mark_refreshing(&mut pr));
+    }
+
+    #[test]
+    fn apply_lookup_schedules_open_refresh_and_clears_failure_state() {
+        let now = Utc::now();
+        let mut pr = PrLink::new(7, "https://github.com/o/r/pull/7");
+        pr.refreshing = true;
+        pr.attempts = 2;
+        pr.lookup_error = Some("old".to_string());
+
+        assert!(apply_lookup(
+            &mut pr,
+            LookupOutcome::Found(PrView {
+                title: Some("Title".to_string()),
+                merged: false,
+            }),
+            now,
+        ));
+        assert_eq!(pr.title.as_deref(), Some("Title"));
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(pr.last_checked, Some(now));
+        assert_eq!(pr.next_retry, Some(now + OPEN_REFRESH_AFTER));
+        assert_eq!(pr.attempts, 0);
+        assert!(!pr.refreshing);
+        assert!(pr.lookup_error.is_none());
+    }
+
+    #[test]
+    fn apply_lookup_marks_merged_without_rescheduling() {
+        let now = Utc::now();
+        let mut pr = PrLink::new(8, "https://github.com/o/r/pull/8");
+        assert!(apply_lookup(
+            &mut pr,
+            LookupOutcome::Found(PrView {
+                title: None,
+                merged: true,
+            }),
+            now,
+        ));
+        assert_eq!(pr.state, PrState::Merged);
+        assert_eq!(pr.next_retry, None);
+    }
+
+    #[test]
+    fn apply_lookup_failure_uses_exponential_backoff() {
+        let now = Utc::now();
+        let mut pr = PrLink::new(9, "https://github.com/o/r/pull/9");
+        assert!(apply_lookup(
+            &mut pr,
+            LookupOutcome::Failed("gh timed out".to_string()),
+            now,
+        ));
+        assert_eq!(pr.attempts, 1);
+        assert_eq!(pr.next_retry, Some(now + RETRY_BASE));
+        assert_eq!(pr.lookup_error.as_deref(), Some("gh timed out"));
+
+        assert!(apply_lookup(
+            &mut pr,
+            LookupOutcome::Failed("still failing".to_string()),
+            now,
+        ));
+        assert_eq!(pr.attempts, 2);
+        assert_eq!(pr.next_retry, Some(now + RETRY_BASE * 2));
     }
 }

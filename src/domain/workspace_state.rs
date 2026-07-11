@@ -244,6 +244,25 @@ pub struct PrLink {
     /// `false`, and is omitted from persisted files when `false`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// When the background `gh pr view` enrichment last checked this PR. Used to
+    /// re-poll auto-managed open PRs even when the terminal prints no new output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked: Option<chrono::DateTime<chrono::Utc>>,
+    /// The earliest time a failed/open lookup should be retried. Backoff state is
+    /// persisted with the harvested PR so restarting the TUI does not hammer `gh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_retry: Option<chrono::DateTime<chrono::Utc>>,
+    /// Consecutive failed lookup attempts. Reset to zero on a successful lookup.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempts: u32,
+    /// Transient UI flag set while a worker is refreshing this PR. It is never
+    /// written to disk, so a TUI restart cannot leave a PR stuck "refreshing".
+    #[serde(skip)]
+    pub refreshing: bool,
+    /// Last lookup error, if any. Shown only in the PR popup as a quiet hint and
+    /// cleared on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_error: Option<String>,
 }
 
 impl PrLink {
@@ -257,6 +276,11 @@ impl PrLink {
             title: None,
             state: PrState::Open,
             pinned: false,
+            last_checked: None,
+            next_retry: None,
+            attempts: 0,
+            refreshing: false,
+            lookup_error: None,
         }
     }
 
@@ -525,6 +549,10 @@ impl std::fmt::Display for SessionOrigin {
 /// the `done` key from `state.json`.
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// One entry in a session's (or the root's) lightweight checklist — the

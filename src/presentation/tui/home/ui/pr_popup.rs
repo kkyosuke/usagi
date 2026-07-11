@@ -179,6 +179,17 @@ fn glyph_target(state: PrState) -> PrState {
     }
 }
 
+fn lookup_hint(pr: &PrLink) -> Option<String> {
+    if pr.refreshing {
+        Some("更新中".to_string())
+    } else {
+        pr.lookup_error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+            .map(|error| format!("lookup: {}", error.trim()))
+    }
+}
+
 /// The `owner/repo` a PR belongs to, taken from the two path segments right before
 /// `/pull/<N>` in its URL (so `https://github.com/o/r/pull/9` → `o/r`). Used as the
 /// group header. A URL without that shape falls back to everything before `/pull/`.
@@ -263,8 +274,14 @@ fn row_left_text(row: &PopupRow) -> String {
                 " ".repeat(TITLE_GAP)
             );
             match pr.title.as_deref().filter(|t| !t.is_empty()) {
-                Some(title) => format!("{prefix}{title}"),
-                None => prefix,
+                Some(title) => match lookup_hint(pr) {
+                    Some(hint) => format!("{prefix}{title}  {hint}"),
+                    None => format!("{prefix}{title}"),
+                },
+                None => match lookup_hint(pr) {
+                    Some(hint) => format!("{prefix}{hint}"),
+                    None => prefix,
+                },
             }
         }
         PopupRow::Footer { hidden, expanded } => {
@@ -337,6 +354,12 @@ fn render_row(row: &PopupRow, inner: usize) -> String {
                     _ => style(title.to_string()).dim().to_string(),
                 };
                 left.push_str(&title);
+            }
+            if let Some(hint) = lookup_hint(pr) {
+                if pr.title.as_deref().is_some_and(|title| !title.is_empty()) {
+                    left.push_str("  ");
+                }
+                left.push_str(&style(hint).dim().to_string());
             }
             // Reserve the action zone: clip the content to `inner - ACTION_ZONE`,
             // pad to `inner - 1` (so the column before the glyph is always a space),
