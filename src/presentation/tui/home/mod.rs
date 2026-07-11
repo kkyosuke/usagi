@@ -22,7 +22,7 @@ pub mod update;
 #[cfg(test)]
 mod e2e_tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 
@@ -202,7 +202,6 @@ struct PendingSpawn {
     _worker: std::thread::JoinHandle<()>,
 }
 
-type PaneEnv = BTreeMap<String, String>;
 type SharedEnv = Arc<(Mutex<Option<PaneEnv>>, Condvar)>;
 
 enum LaunchSource {
