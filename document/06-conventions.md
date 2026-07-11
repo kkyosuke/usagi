@@ -13,7 +13,7 @@
 - [コミットメッセージ](#コミットメッセージ)
 - [プルリクエスト](#プルリクエスト)
 - [ドキュメント規約](#ドキュメント規約)
-- [品質チェック（コミット・push 前に必須）](#品質チェックコミットpush-前に必須)
+- [品質チェック（リスク比例の gate）](#品質チェックリスク比例の-gate)
 - [変更箇所からの推奨テスト](#変更箇所からの推奨テスト)
 - [Git Hooks（lefthook）](#git-hookslefthook)
 - [CI（GitHub Actions）](#cigithub-actions)
@@ -109,13 +109,35 @@
   （不一致は CI 失敗）。
 - ソースコードは `path:line` で固定参照せず、該当する仕様ドキュメントへリンクする（行番号は陳腐化しやすい）。
 
-## 品質チェック（コミット・push 前に必須）
+## 品質チェック（リスク比例の gate）
+
+検証 gate は「編集中の fast loop」「commit 前」「push / PR 前・CI」に分ける。この節が、開発者・AI
+エージェント双方の品質チェックの正本である。
+
+| 段階 | 必須 gate | コマンド |
+|---|---|---|
+| 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 module・target と直接 consumer の test | `cargo fmt --all -- --check` / `cargo check --all-targets` / 変更箇所に対応する `cargo test --lib <module>::`、`cargo test --test <target>` |
+| commit 前 | Lint / risk-based selected tests | `cargo clippy --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
+| push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --ignore-filename-regex "$COVERAGE_IGNORE" --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
+| CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
+
+push / PR 前の coverage は次のローカル経路で実行してよい。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では
+同じ差分に対して `cargo test --quiet` を重複実行しなくてよい。
 
 ```bash
-cargo fmt                                  # フォーマット
-cargo clippy --all-targets -- -D warnings  # Lint（警告はエラー扱い）
-cargo test                                 # テスト
+. ./scripts/coverage.sh
+coverage_enforce
 ```
+
+docs-only（Rust 差分なし）は Rust gate（`cargo check` / `cargo clippy` / `cargo test` / coverage）を省略できる。ただし
+Markdown 差分を含むため、Markdown link check は必須である。
+
+full test / coverage gate を必須とする条件は次のとおり。
+
+- push / PR 前または CI で Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。
+- docs-only を除き、`scripts/recommend-tests.sh` が fail-safe として `cargo test --quiet` を推奨する（未知の path、空 diff、複数層にまたがる変更、共有基盤の変更など）。
+- 変更が層境界、永続化、process / PTY / terminal IO、設定解決、テスト基盤、coverage 除外、CI / hook の gate に影響する。
+- selected tests で対象リスクを説明できない、または直接 consumer を特定できない。
 
 - テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（`src/main.rs`）で束ねる。こうすると presentation/CLI のオーケストレーションはユニットテストで 100% を満たせる（例: `cli/agent_phase.rs` は `impl Read`、`cli/mcp.rs` は `impl BufRead`/`impl Write` と `Box<dyn AgentBackend>`、`cli/clean.rs` は spawn 関数を注入）。
@@ -124,9 +146,9 @@ cargo test                                 # テスト
 
 ## 変更箇所からの推奨テスト
 
-開発中の fast feedback には `scripts/recommend-tests.sh [base]` を明示的に実行する。`base` の既定値は
-`HEAD` で、`git diff` の変更 path、選定理由、近いテストコマンドを表示する。path とテストの対応表は
-`scripts/recommend-tests.tsv` が正本である。
+開発中の fast feedback と commit 前の selected tests には `scripts/recommend-tests.sh [base]` を明示的に実行する。
+`base` の既定値は `HEAD` で、`git diff` の変更 path、選定理由、近いテストコマンドを表示する。path とテストの
+対応表は `scripts/recommend-tests.tsv` が正本である。
 
 ```bash
 scripts/recommend-tests.sh origin/main
@@ -134,7 +156,7 @@ scripts/recommend-tests.sh origin/main
 
 推奨された selected tests は PR 前の full gate の代替ではない。未知の path、空 diff、複数層にまたがる変更、
 共有基盤の変更は fail-safe に `cargo test --quiet` を含める。コミット・push 前には、この節の出力にかかわらず
-[品質チェック](#品質チェックコミットpush-前に必須)をすべて実行する。
+[品質チェック](#品質チェックリスク比例の-gate)の該当 gate を実行する。
 
 ## Git Hooks（lefthook）
 
