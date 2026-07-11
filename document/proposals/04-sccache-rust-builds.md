@@ -34,7 +34,7 @@
 | 容量上限 | ローカルは `SCCACHE_CACHE_SIZE=10G` を既定候補にする。小さい disk では `5G` に下げられるよう環境変数上書きを許す。 |
 | 削除・失効 | 削除は `sccache --zero-stats` と cache dir の削除を明示する。失効は rustc version、crate hash、features、env、target triple 等に任せ、manual key bump は基本不要。 |
 | 観測 | helper に `sccache --show-stats` / `sccache --zero-stats` を案内するか、`scripts/sccache-stats.sh` を追加する。hit rate、cache size、non-cacheable reasons を PR 前後で記録する。 |
-| CI | いきなり required gate 全体へ入れず、`test.yml` と `coverage.yml` の ubuntu job で実験する。release matrix は target triple 差と LTO release build の特性が違うため後段にする。 |
+| CI | required Rust gate の ubuntu job（`test.yml` と `coverage.yml`）だけで実験する。release matrix は target triple 差と LTO release build の特性が違うため後段にする。 |
 
 `swatinem/rust-cache` は Cargo registry/git cache と `target` 復元を担当し、sccache は rustc のコンパイル出力を compiler invocation 単位で再利用する。役割は重なるが同一ではない。CI では `swatinem/rust-cache` を残し、sccache の cache dir だけ `actions/cache` で追加保存する構成が比較しやすい。
 
@@ -45,10 +45,11 @@
 1. `scripts/cargo-sccache.sh` を追加し、`sccache` がある場合だけ `RUSTC_WRAPPER=sccache` / `SCCACHE_DIR` / `SCCACHE_CACHE_SIZE` を設定して渡された Cargo command を実行する。
 2. `scripts/sccache-benchmark.sh` を追加し、cold/warm、単一 session、複数 session の計測、`sccache --show-stats` 採取、結果 TSV 出力を自動化する。
 3. `document/06-conventions.md` または `document/07-test-observability.md` に、採用後の開発者向け opt-in 手順と観測手順だけを正本として追記する。
-4. CI 実験 PR で `test.yml` / `coverage.yml` の ubuntu job に `mozilla-actions/sccache-action` または explicit install + `actions/cache` を追加し、既存 `swatinem/rust-cache` との併用結果を記録する。
+4. CI 実験 PR で `test.yml` / `coverage.yml` の ubuntu job に explicit install + `actions/cache` を追加し、既存 `swatinem/rust-cache` との併用結果を記録する。
 5. 効果が基準を満たした場合のみ、release build check / release workflow への展開を別 issue に分ける。
 
-初回 issue は「ローカル opt-in helper とベンチスクリプト」に絞る。CI 導入は runner cache の安定性と billed minutes の評価が必要なため、ベンチ結果を受けて別 issue にする。
+初回 issue は「ローカル opt-in helper とベンチスクリプト」に絞った。CI 導入は runner cache の安定性と billed minutes
+の評価が必要なため、次段階の実験 PR として required Rust gate の ubuntu job だけに限定する。
 
 ## ベンチマークと受け入れ基準
 
@@ -75,4 +76,8 @@
 
 Go 条件は、ローカル opt-in helper で correctness が変わらず、複数 session warm の build-heavy command で 20% 以上の短縮が確認できること。CI は追加で 10% 以上の required job 短縮と billed minutes 非悪化を満たした場合に go とする。
 
-現時点の判断は「local opt-in は go、repo-wide 強制と CI required 全面導入は no-go」。理由は、未インストール環境を壊せないこと、既に `swatinem/rust-cache` が入っていること、`usagi` の test wall time にはコンパイル以外の Git/PTY/TUI runtime が大きく含まれることである。まずベンチ可能な opt-in helper を入れ、実測で CI 展開を判断する。
+現時点の判断は「local opt-in と required Rust gate の ubuntu CI 実験は go、repo-wide 強制と CI required 全面導入は
+no-go」。理由は、未インストール環境を壊せないこと、既に `swatinem/rust-cache` が入っていること、`usagi` の test
+wall time にはコンパイル以外の Git/PTY/TUI runtime が大きく含まれることである。CI 実験では setup/cache
+restore/save を含めて required Rust jobs の wall time が 10% 以上短縮し、billed minutes が悪化しない場合だけ、
+release build check / release workflow / test-metrics workflow への展開を別 issue で検討する。

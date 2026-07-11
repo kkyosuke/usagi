@@ -41,7 +41,7 @@ Rust ビルドの sccache 利用手順とベンチ観測方法は本節を正本
 | cache dir | 既定は `<workspace>/.usagi/cache/sccache`。session worktree 間で共有する |
 | target dir | 共有しない。各 session worktree の `<worktree>/target` を使う |
 | cache size | 既定は `SCCACHE_CACHE_SIZE=10G`。必要に応じて環境変数で上書きする |
-| CI | この helper では導入しない。ローカルベンチ結果を受けて別 issue で判断する |
+| CI | required Rust gate の ubuntu jobs だけで実験導入する。local helper は CI では使わず、workflow 内で明示的に `RUSTC_WRAPPER=sccache` を設定する |
 
 通常の gate を sccache 付きで実行する場合は、Cargo サブコマンドだけを helper に渡す。
 
@@ -85,8 +85,20 @@ session A で sccache cache を温めたあと、session B の別 worktree で `
 短縮しない理由を stats とともに記録する。
 
 sccache の hit rate は proc macro、build script、feature 差、target triple、`RUSTFLAGS`、環境変数差で下がる。
-CI 導入を検討する場合は、既存 Cargo cache と sccache の役割分担、cache restore/save time、workflow wall time、
-billed minutes を同じ PR 上で比較する。
+
+CI 実験は `.github/workflows/test.yml` の `test` / `full-test` job と `.github/workflows/coverage.yml` の
+`coverage` job に限定する。`swatinem/rust-cache@v2` は Cargo registry / git / target cache として残し、sccache
+は rustc invocation の object cache として separate cache dir を `actions/cache` で復元・保存する。cache key は OS、
+`rustc -Vv` 由来の toolchain hash、`Cargo.lock`、workflow/job 名を含め、fmt/clippy、full test、coverage の
+instrumentation 差を過剰共有しない。restore key は同じ OS / toolchain / job の prefix までに留め、`Cargo.lock`
+変更時も同じ job の近い cache だけを候補にする。容量上限は CI では `SCCACHE_CACHE_SIZE=2G` とし、GitHub Actions
+cache の retention / eviction に失効を任せる。
+
+CI log には `if: always()` の `sccache --show-stats` を残す。PR では cache restore/save time を含む job wall time、
+workflow duration、billed minutes、hit/miss/non-cacheable、cache size を sccache なしの直近 main run または同等 PR
+run と比較する。coverage workflow では `cargo llvm-cov` 実行時にも wrapper を有効にするが、採否判断では coverage
+100% gate の結果が sccache なしと同じであることを correctness 条件に含める。release build check / release workflow /
+test-metrics workflow への展開は、この実験の結果を見て別 issue で扱う。
 
 ## runner 比較
 

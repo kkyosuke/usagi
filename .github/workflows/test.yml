@@ -12,6 +12,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_CACHE_SIZE: 2G
+  SCCACHE_DIR: ${{ github.workspace }}/.usagi/cache/sccache-ci
+  SCCACHE_IDLE_TIMEOUT: 0
+  RUSTC_WRAPPER: sccache
 
 jobs:
   test:
@@ -25,6 +29,21 @@ jobs:
       with:
         components: rustfmt, clippy
 
+    - name: Capture Rust toolchain cache key
+      id: rust-toolchain-cache-key
+      run: echo "rustc_hash=$(rustc -Vv | sha256sum | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
+
+    - name: Cache sccache objects
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.SCCACHE_DIR }}
+        key: sccache-${{ runner.os }}-${{ steps.rust-toolchain-cache-key.outputs.rustc_hash }}-test-lint-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ steps.rust-toolchain-cache-key.outputs.rustc_hash }}-test-lint-
+
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
       with:
@@ -37,6 +56,12 @@ jobs:
     - name: Clippy
       run: cargo clippy --all-targets -- -D warnings
 
+    - name: Show sccache stats
+      if: always()
+      run: |
+        sccache --show-stats
+        sccache --stop-server || true
+
   full-test:
     runs-on: ubuntu-latest
 
@@ -45,6 +70,21 @@ jobs:
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
+
+    - name: Capture Rust toolchain cache key
+      id: rust-toolchain-cache-key
+      run: echo "rustc_hash=$(rustc -Vv | sha256sum | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+
+    - name: Install sccache
+      uses: taiki-e/install-action@sccache
+
+    - name: Cache sccache objects
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.SCCACHE_DIR }}
+        key: sccache-${{ runner.os }}-${{ steps.rust-toolchain-cache-key.outputs.rustc_hash }}-test-full-test-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ steps.rust-toolchain-cache-key.outputs.rustc_hash }}-test-full-test-
 
     - name: Rust Cache
       uses: swatinem/rust-cache@v2
@@ -60,3 +100,9 @@ jobs:
 
     - name: Test nextest JUnit summarizer
       run: bash scripts/tests/summarize-nextest-junit.sh
+
+    - name: Show sccache stats
+      if: always()
+      run: |
+        sccache --show-stats
+        sccache --stop-server || true
