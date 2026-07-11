@@ -192,7 +192,7 @@ mod tests {
     }
 
     impl ScreenSink for Orphaned {
-        fn replace_screen(&mut self, _contents: &[u8]) {
+        fn replace_screen(&mut self, _contents: &[u8], _scrollback: usize) {
             self.applied += 1;
         }
         fn apply_output(&mut self, _data: &[u8]) {
@@ -219,6 +219,7 @@ mod tests {
             b's' => Some(ServerMessage::Screen {
                 terminal: 7,
                 contents: rest,
+                scrollback: 0,
             }),
             b'o' => Some(ServerMessage::Output {
                 terminal: 7,
