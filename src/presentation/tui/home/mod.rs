@@ -1083,6 +1083,24 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // regardless of pane restore (a separate feature) and is gated by its own
     // setting; a no-op when disabled or nothing is queued. The event loop keeps
     // scanning for prompts queued *while* the screen runs (see `autostart_queued`).
+    for line in reconcile_orchestrators(&workspace.path, &pool, autostart_queued_prompt_limit)
+        .into_iter()
+        .chain(autostart_queued_prompts(
+            &state,
+            &pool,
+            &launch_jobs,
+            &tasks,
+            &agent_wiring,
+            default_cli,
+            AutostartLaunchSettings {
+                enabled: autostart_queued_prompts_enabled,
+                limit: autostart_queued_prompt_limit,
+            },
+        ))
+    {
+        state.log_output(line);
+    }
+
     // Removing a session deletes its worktrees/branches and forgets it, on a
     // background thread like creation so the screen never freezes. A session with
     // uncommitted changes is left untouched unless `--force`. The git work runs
@@ -1356,6 +1374,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // per-operation pool borrows above keep this from double-borrowing.
             let mut autostart_hook = |st: &HomeState| -> Vec<String> {
                 let mut lines = launch_jobs.borrow_mut().drain(term, &pool, &tasks);
+                lines.extend(reconcile_orchestrators(
+                    &terminal_root,
+                    &pool,
+                    autostart_queued_prompt_limit,
+                ));
                 lines.extend(autostart_queued_prompts(
                     st,
                     &pool,
@@ -2123,6 +2146,11 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             dispatch_restore_open_panes(state, &launch_jobs, &tasks, &agent_wiring, default_cli);
             restore_dispatched = true;
         }
+        lines.extend(reconcile_orchestrators(
+            &workspace.path,
+            &pool,
+            autostart_queued_prompt_limit,
+        ));
         lines.extend(autostart_queued_prompts(
             state,
             &pool,
@@ -2355,6 +2383,32 @@ fn dispatch_restore_open_panes(
                 },
                 agent_wiring.clone(),
             );
+        }
+    }
+}
+
+fn reconcile_orchestrators(
+    workspace: &Path,
+    pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+    limit: usize,
+) -> Vec<String> {
+    let slots_remaining = autostart_slots_remaining(pool.borrow().occupied_agent_slots(), limit);
+    match crate::usecase::orchestrator::reconcile_workspace_tick(
+        workspace,
+        slots_remaining,
+        chrono::Utc::now(),
+    ) {
+        Ok(outcome) if outcome.delegated > 0 || outcome.owner_queued > 0 => vec![format!(
+            "orchestrator reconciled {} plan(s): delegated {}, owner wake-ups {}",
+            outcome.plans, outcome.delegated, outcome.owner_queued
+        )],
+        Ok(_) => Vec::new(),
+        Err(error) => {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "orchestrator reconcile failed for {}: {error:#}",
+                workspace.display()
+            ));
+            Vec::new()
         }
     }
 }

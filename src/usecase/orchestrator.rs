@@ -1,10 +1,20 @@
-//! Pure reconciliation of a durable orchestration plan.
+//! Durable issue-orchestration reconciliation and dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 
+use crate::domain::agent_phase::AgentPhase;
 use crate::domain::orchestrator::{Base, Event, EventKind, Lease, NodeState, Plan, PullRequest};
+use crate::domain::workspace_state::{SessionAgent, SessionOrigin};
+use crate::infrastructure::orchestrator_event::{self, WorkerBinding};
+use crate::infrastructure::orchestrator_store::OrchestratorStore;
+use crate::infrastructure::{agent_prompt_store, error_log, issue_store::IssueStore};
+use crate::usecase::{issue, session};
+
+const LEASE_DURATION: Duration = Duration::minutes(5);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Observation {
@@ -41,6 +51,14 @@ pub struct ReconcileResult {
     pub actions: Vec<Action>,
     /// Event ids safe to acknowledge after `plan` has been durably committed.
     pub acknowledgements: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TickOutcome {
+    pub plans: usize,
+    pub delegated: usize,
+    pub owner_queued: usize,
+    pub acknowledgements: usize,
 }
 
 pub fn work_ready(plan: &Plan, issue: u64) -> Option<Base> {
@@ -149,6 +167,17 @@ pub fn reconcile(
         }
     }
 
+    for node in next.nodes.values_mut() {
+        let timed_out = node
+            .deadline
+            .is_some_and(|deadline| deadline <= observation.observed_at);
+        if timed_out && matches!(node.state, NodeState::Delegating | NodeState::Running) {
+            node.state = NodeState::RetryWait;
+            node.lease = None;
+            node.next_retry = Some(observation.observed_at + Duration::seconds(30));
+        }
+    }
+
     let mut capacity = next.max_parallel.saturating_sub(
         next.nodes
             .values()
@@ -200,10 +229,276 @@ pub fn reconcile(
     }
 }
 
+pub fn reconcile_workspace_tick(
+    workspace: &Path,
+    global_slots_remaining: usize,
+    now: DateTime<Utc>,
+) -> Result<TickOutcome> {
+    let store = OrchestratorStore::new(workspace);
+    let mut outcome = TickOutcome::default();
+    let mut slots_remaining = global_slots_remaining;
+    for plan_id in store.plan_ids()? {
+        let stamped = store
+            .load_plan(&plan_id)?
+            .context("orchestrator plan disappeared during tick")?;
+        outcome.plans += 1;
+        let observation = observe(workspace, &stamped.value, now)?;
+        let plan_active = stamped
+            .value
+            .nodes
+            .values()
+            .filter(|node| node.state.occupies_worker())
+            .count();
+        let plan_remaining = stamped.value.max_parallel.saturating_sub(plan_active);
+        let allowed_new = plan_remaining.min(slots_remaining);
+        let mut capacity_plan = stamped.value.clone();
+        capacity_plan.max_parallel = plan_active + allowed_new;
+        let mut result = reconcile(&capacity_plan, &observation, LEASE_DURATION);
+        result.plan.max_parallel = stamped.value.max_parallel;
+
+        let reobserved = reobserve_absent(&result.actions);
+        if !reobserved.is_empty() {
+            let mut observation = observation;
+            observation.sessions.extend(reobserved);
+            result = reconcile(&result.plan, &observation, LEASE_DURATION);
+        }
+
+        let saved = store.save_plan(&result.plan, Some(stamped.revision), now)?;
+        for event_id in &result.acknowledgements {
+            if store.acknowledge_event(&result.plan.id, event_id)? {
+                outcome.acknowledgements += 1;
+            }
+        }
+        let owner_worktree = owner_worktree(workspace, &result.plan.owner);
+        if owner_needs_wakeup(workspace, &result.plan, &result.actions)? {
+            queue_owner_prompt(&owner_worktree, &result.plan, &result.actions)?;
+            outcome.owner_queued += 1;
+        }
+        let delegated = dispatch_actions(workspace, &owner_worktree, &result.plan, result.actions)?;
+        outcome.delegated += delegated;
+        slots_remaining = slots_remaining.saturating_sub(delegated);
+        let _ = saved;
+        if slots_remaining == 0 {
+            continue;
+        }
+    }
+    Ok(outcome)
+}
+
+fn observe(workspace: &Path, plan: &Plan, now: DateTime<Utc>) -> Result<Observation> {
+    let mut observations = BTreeMap::new();
+    for status in session::statuses(workspace)? {
+        let Some(binding) = orchestrator_event::binding(&status.root)? else {
+            continue;
+        };
+        if binding.plan != plan.id {
+            continue;
+        }
+        let Some(node) = plan.nodes.get(&binding.issue) else {
+            continue;
+        };
+        if binding.generation != node.generation {
+            continue;
+        }
+        let merged = status.worktrees.iter().all(|worktree| worktree.merged);
+        let pull_request = node.pull_request.as_ref().map(|pr| PullRequest {
+            merged,
+            ..pr.clone()
+        });
+        observations.insert(
+            binding.issue,
+            SessionObservation {
+                worker: Some(status.name),
+                base: node.base.clone(),
+                pull_request,
+            },
+        );
+    }
+    Ok(Observation {
+        observed_at: now,
+        sessions: observations,
+        events: OrchestratorStore::new(workspace).load_events(&plan.id)?,
+    })
+}
+
+fn reobserve_absent(actions: &[Action]) -> BTreeMap<u64, SessionObservation> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Reobserve { issue, .. } => Some((*issue, SessionObservation::default())),
+            Action::Delegate { .. } => None,
+        })
+        .collect()
+}
+
+fn dispatch_actions(
+    workspace: &Path,
+    owner_worktree: &Path,
+    plan: &Plan,
+    actions: Vec<Action>,
+) -> Result<usize> {
+    let mut delegated = 0;
+    for action in actions {
+        let Action::Delegate {
+            issue,
+            generation,
+            base,
+            ..
+        } = action
+        else {
+            continue;
+        };
+        match delegate_worker(workspace, owner_worktree, plan, issue, generation, &base) {
+            Ok(()) => delegated += 1,
+            Err(error) => {
+                error_log::ErrorLog::record(&format!(
+                    "orchestrator {} failed to delegate issue #{}: {error:#}",
+                    plan.id, issue
+                ));
+            }
+        }
+    }
+    Ok(delegated)
+}
+
+fn delegate_worker(
+    workspace: &Path,
+    owner_worktree: &Path,
+    plan: &Plan,
+    issue_number: u64,
+    generation: u64,
+    base: &Base,
+) -> Result<()> {
+    let name = worker_session_name(&plan.owner, issue_number);
+    let created = match session::create_with_agent(
+        workspace,
+        &name,
+        SessionAgent::default(),
+        SessionOrigin::Mcp,
+        Some(plan.owner.clone()),
+    ) {
+        Ok(created) => created,
+        Err(error) if error.to_string().contains("already exists") => {
+            let existing = session::list(workspace)?
+                .into_iter()
+                .find(|session| session.name == name)
+                .context(format!(
+                    "session \"{name}\" already exists but is not recorded"
+                ))?;
+            session::CreatedSession {
+                name: existing.name,
+                root: existing.root,
+                worktrees: existing
+                    .worktrees
+                    .into_iter()
+                    .map(|worktree| worktree.path)
+                    .collect(),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let binding = WorkerBinding {
+        workspace: workspace.to_path_buf(),
+        plan: plan.id.clone(),
+        issue: issue_number,
+        generation,
+        owner_worktree: owner_worktree.to_path_buf(),
+    };
+    orchestrator_event::register(&created.root, &binding)?;
+    let issue = IssueStore::new(workspace)
+        .read(issue_number as u32)?
+        .context(format!("no issue #{issue_number}"))?;
+    let prompt = format!(
+        "{}\n\n## Orchestrator context\n\n- plan: {}\n- worker generation: {}\n- base reference: {}\n- base commit: {}\n- owner session: {}\n\nDo not create sub-sessions. Work only in this session and report via the normal PR/completion flow.\n",
+        issue::to_prompt(&issue),
+        plan.id,
+        generation,
+        base.reference,
+        base.commit,
+        plan.owner
+    );
+    agent_prompt_store::set(&created.root, &prompt)?;
+    Ok(())
+}
+
+fn owner_needs_wakeup(workspace: &Path, plan: &Plan, actions: &[Action]) -> Result<bool> {
+    if actions.is_empty() {
+        return Ok(false);
+    }
+    let owner = owner_worktree(workspace, &plan.owner);
+    let mut owner_phase = None;
+    for status in session::statuses(workspace)? {
+        if status.name == plan.owner {
+            owner_phase = status.agent_phase;
+            break;
+        }
+    }
+    let ended_or_absent = match owner_phase {
+        Some(phase) => phase == AgentPhase::Ended,
+        None => true,
+    };
+    Ok(ended_or_absent && !owner.as_os_str().is_empty())
+}
+
+fn queue_owner_prompt(owner_worktree: &Path, plan: &Plan, actions: &[Action]) -> Result<()> {
+    let mut lines = vec![format!(
+        "Orchestrator plan {} has {} pending action(s). Reconcile the durable plan and inspect worker progress.",
+        plan.id,
+        actions.len()
+    )];
+    for action in actions {
+        match action {
+            Action::Delegate {
+                issue, generation, ..
+            } => lines.push(format!(
+                "- delegate issue #{issue}, generation {generation}"
+            )),
+            Action::Reobserve { issue, worker, .. } => lines.push(format!(
+                "- reobserve issue #{issue} ({})",
+                worker.as_deref().unwrap_or("no worker")
+            )),
+        }
+    }
+    agent_prompt_store::set(owner_worktree, &lines.join("\n"))?;
+    Ok(())
+}
+
+fn owner_worktree(workspace: &Path, owner: &str) -> PathBuf {
+    if owner == ":root" || owner == "root" {
+        return workspace.to_path_buf();
+    }
+    session::list(workspace)
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .into_iter()
+                .find(|session| session.name == owner)
+                .map(|session| session.root)
+        })
+        .unwrap_or_else(|| workspace.join(".usagi").join("sessions").join(owner))
+}
+
+fn worker_session_name(owner: &str, issue: u64) -> String {
+    let owner = owner
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{owner}-issue-{issue}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::orchestrator::Node;
+    use crate::domain::workspace_state::BranchStatus;
+    use crate::infrastructure::workspace_store::WorkspaceStore;
+    use std::process::Command;
 
     fn now() -> DateTime<Utc> {
         "2026-01-01T00:00:00Z".parse().unwrap()
@@ -230,6 +525,33 @@ mod tests {
             max_parallel: 1,
             nodes: [(node.issue, node)].into(),
         }
+    }
+    fn git(dir: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .status()
+            .unwrap()
+            .success());
+    }
+    fn init_repo(dir: &Path) {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "t@example.com"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("README.md"), "root\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+    }
+    fn set_worktree_status(root: &Path, name: &str, status: BranchStatus) {
+        let store = WorkspaceStore::new(root);
+        let mut state = store.load().unwrap().unwrap();
+        let session = state.sessions.iter_mut().find(|s| s.name == name).unwrap();
+        session.worktrees[0].status = status;
+        store.save(&state).unwrap();
     }
 
     #[test]
@@ -314,6 +636,117 @@ mod tests {
     }
 
     #[test]
+    fn live_lease_and_future_deadline_keep_the_worker_slot() {
+        let mut n = node(1, NodeState::Running);
+        n.lease = Some(Lease {
+            owner: "owner".into(),
+            expires_at: now() + Duration::minutes(1),
+        });
+        n.deadline = Some(now() + Duration::minutes(2));
+
+        let result = reconcile(
+            &plan(n),
+            &Observation {
+                observed_at: now(),
+                ..Default::default()
+            },
+            Duration::minutes(5),
+        );
+
+        assert_eq!(result.plan.nodes[&1].state, NodeState::Running);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn future_retry_and_missing_worker_observation_do_not_dispatch() {
+        let mut retry = node(1, NodeState::RetryWait);
+        retry.next_retry = Some(now() + Duration::seconds(1));
+        let result = reconcile(
+            &plan(retry),
+            &Observation {
+                observed_at: now(),
+                ..Default::default()
+            },
+            Duration::minutes(5),
+        );
+        assert_eq!(result.plan.nodes[&1].state, NodeState::RetryWait);
+        assert!(result.actions.is_empty());
+
+        let mut delegating = node(2, NodeState::Delegating);
+        delegating.generation = 1;
+        let result = reconcile(
+            &plan(delegating),
+            &Observation {
+                observed_at: now(),
+                sessions: [(2, SessionObservation::default())].into(),
+                events: vec![],
+            },
+            Duration::minutes(5),
+        );
+        assert_eq!(result.plan.nodes[&2].state, NodeState::Delegating);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn expired_lease_and_deadline_do_not_move_inactive_states() {
+        let mut n = node(1, NodeState::PrOpen);
+        n.lease = Some(Lease {
+            owner: "owner".into(),
+            expires_at: now(),
+        });
+        n.deadline = Some(now());
+
+        let result = reconcile(
+            &plan(n),
+            &Observation {
+                observed_at: now(),
+                ..Default::default()
+            },
+            Duration::minutes(5),
+        );
+
+        assert_eq!(result.plan.nodes[&1].state, NodeState::PrOpen);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn pr_observation_prevents_stale_lease_recovery() {
+        let mut n = node(1, NodeState::Running);
+        n.lease = Some(Lease {
+            owner: "owner".into(),
+            expires_at: now(),
+        });
+        let pr = PullRequest {
+            number: 1,
+            url: "pr/1".into(),
+            head: "head-1".into(),
+            merged: false,
+        };
+
+        let result = reconcile(
+            &plan(n),
+            &Observation {
+                observed_at: now(),
+                sessions: [(
+                    1,
+                    SessionObservation {
+                        worker: None,
+                        base: None,
+                        pull_request: Some(pr.clone()),
+                    },
+                )]
+                .into(),
+                events: vec![],
+            },
+            Duration::minutes(5),
+        );
+
+        assert_eq!(result.plan.nodes[&1].state, NodeState::PrOpen);
+        assert_eq!(result.plan.nodes[&1].pull_request, Some(pr));
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
     fn join_is_not_work_ready_until_dependencies_merge() {
         let mut p = plan(node(3, NodeState::Runnable));
         p.nodes.get_mut(&3).unwrap().dependencies = vec![1, 2];
@@ -387,6 +820,51 @@ mod tests {
         p.nodes.get_mut(&1).unwrap().pull_request = None;
         assert_eq!(work_ready(&p, 2), None);
         assert_eq!(work_ready(&p, 99), None);
+    }
+
+    #[test]
+    fn work_ready_covers_dependency_shapes() {
+        let mut p = plan(node(4, NodeState::Runnable));
+        p.nodes.get_mut(&4).unwrap().dependencies = vec![1, 2, 3];
+
+        for issue in [1, 2, 3] {
+            p.nodes.insert(issue, node(issue, NodeState::Merged));
+        }
+        let base = work_ready(&p, 4).unwrap();
+        assert_eq!(base.reference, "main");
+        assert_eq!(base.commit, "main");
+
+        {
+            let dependency = p.nodes.get_mut(&2).unwrap();
+            dependency.state = NodeState::PrOpen;
+            dependency.pull_request = Some(PullRequest {
+                number: 2,
+                url: "pr/2".into(),
+                head: "dep-2".into(),
+                merged: false,
+            });
+        }
+        let base = work_ready(&p, 4).unwrap();
+        assert_eq!(base.reference, "dep-2");
+        assert_eq!(base.commit, "dep-2");
+
+        {
+            let dependency = p.nodes.get_mut(&3).unwrap();
+            dependency.state = NodeState::PrOpen;
+            dependency.pull_request = Some(PullRequest {
+                number: 3,
+                url: "pr/3".into(),
+                head: "dep-3".into(),
+                merged: false,
+            });
+        }
+        assert_eq!(work_ready(&p, 4), None);
+
+        p.nodes.get_mut(&3).unwrap().pull_request = None;
+        assert_eq!(work_ready(&p, 4), None);
+
+        p.nodes.remove(&3);
+        assert_eq!(work_ready(&p, 4), None);
     }
 
     #[test]
@@ -550,5 +1028,781 @@ mod tests {
             Duration::minutes(5),
         );
         assert_eq!(result.plan.nodes[&2].state, NodeState::Blocked);
+    }
+
+    #[test]
+    fn timeout_moves_to_retry_without_emitting_delegate_until_retry_is_due() {
+        let mut n = node(1, NodeState::Running);
+        n.deadline = Some(now());
+        let result = reconcile(
+            &plan(n),
+            &Observation {
+                observed_at: now(),
+                ..Default::default()
+            },
+            Duration::minutes(5),
+        );
+        assert_eq!(result.plan.nodes[&1].state, NodeState::RetryWait);
+        assert!(!result.plan.nodes[&1].state.occupies_worker());
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn workspace_tick_waits_when_global_capacity_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Runnable)), None, now())
+            .unwrap();
+        let outcome = reconcile_workspace_tick(tmp.path(), 0, now()).unwrap();
+        assert_eq!(outcome.delegated, 0);
+        let saved = store.load_plan("p").unwrap().unwrap();
+        assert_eq!(saved.value.nodes[&1].state, NodeState::Runnable);
+    }
+
+    #[test]
+    fn workspace_tick_delegates_worker_directly_under_owner() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Do work".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: "Body".into(),
+            },
+        )
+        .unwrap();
+        let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Runnable)), None, now())
+            .unwrap();
+
+        let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(outcome.delegated, 1);
+        assert_eq!(outcome.owner_queued, 1);
+        let sessions = session::list(tmp.path()).unwrap();
+        let worker = sessions
+            .iter()
+            .find(|session| session.name == "owner-issue-1")
+            .unwrap();
+        assert_eq!(worker.started_from.as_deref(), Some("owner"));
+        assert_eq!(sessions.len(), 1);
+        let binding = orchestrator_event::binding(&worker.root).unwrap().unwrap();
+        assert_eq!(binding.plan, "p");
+        assert_eq!(binding.issue, 1);
+        assert!(agent_prompt_store::take(&worker.root)
+            .unwrap()
+            .contains("Do not create sub-sessions"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn workspace_tick_observes_worker_binding_and_acks_events() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let worker = session::create_with_agent(
+            tmp.path(),
+            "worker",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        set_worktree_status(tmp.path(), "worker", BranchStatus::Synced);
+        let mut n = node(1, NodeState::Running);
+        n.pull_request = Some(PullRequest {
+            number: 10,
+            url: "https://example.test/pr/10".into(),
+            head: "worker-head".into(),
+            merged: false,
+        });
+        let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
+        store.save_plan(&plan(n), None, now()).unwrap();
+        orchestrator_event::register(
+            &worker.root,
+            &WorkerBinding {
+                workspace: tmp.path().to_path_buf(),
+                plan: "p".into(),
+                issue: 1,
+                generation: 0,
+                owner_worktree: tmp.path().join(".usagi/sessions/owner"),
+            },
+        )
+        .unwrap();
+        let event = Event {
+            id: "p-1-0-succeeded-0".into(),
+            plan: "p".into(),
+            issue: 1,
+            generation: 0,
+            kind: EventKind::Succeeded,
+            terminal_revision: 0,
+            observed_at: now(),
+        };
+        store.append_event(&event).unwrap();
+
+        let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(outcome.acknowledgements, 1);
+        assert!(store.load_events("p").unwrap().is_empty());
+        let saved = store.load_plan("p").unwrap().unwrap();
+        assert_eq!(saved.value.nodes[&1].worker, None);
+        assert_eq!(saved.value.nodes[&1].state, NodeState::Merged);
+        assert!(saved.value.nodes[&1].pull_request.as_ref().unwrap().merged);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn workspace_tick_reobserves_absent_worker_before_redelegating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut n = node(1, NodeState::Delegating);
+        n.generation = 1;
+        n.lease = Some(Lease {
+            owner: "owner".into(),
+            expires_at: now(),
+        });
+        let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
+        store.save_plan(&plan(n), None, now()).unwrap();
+
+        let outcome = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap();
+
+        assert_eq!(outcome.delegated, 0);
+        assert_eq!(
+            store.load_plan("p").unwrap().unwrap().value.nodes[&1].state,
+            NodeState::Runnable
+        );
+    }
+
+    #[test]
+    fn workspace_tick_reports_unreadable_plan_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
+        std::fs::write(tmp.path().join(".usagi/orchestrators"), "not a directory").unwrap();
+
+        let error = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap_err();
+
+        assert!(error.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn workspace_tick_reports_unreadable_plan_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_dir = tmp.path().join(".usagi/orchestrators/p");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        std::fs::write(plan_dir.join("state.json"), "{").unwrap();
+
+        let error = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn workspace_tick_surfaces_observe_and_owner_queue_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let store = crate::infrastructure::orchestrator_store::OrchestratorStore::new(tmp.path());
+        store
+            .save_plan(&plan(node(1, NodeState::Running)), None, now())
+            .unwrap();
+        let created = session::create_with_agent(
+            tmp.path(),
+            "bad-binding",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        let binding_path = created.root.join(".usagi/orchestrator-worker.json");
+        std::fs::create_dir_all(binding_path.parent().unwrap()).unwrap();
+        std::fs::write(&binding_path, "{").unwrap();
+
+        let error = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+
+        std::fs::write(&binding_path, "").unwrap();
+        let bad_data = tmp.path().join("not-a-data-dir");
+        std::fs::write(&bad_data, "file").unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, &bad_data);
+        let mut queued = plan(node(2, NodeState::Runnable));
+        queued.id = "q".into();
+        store.save_plan(&queued, None, now()).unwrap();
+
+        let error = reconcile_workspace_tick(tmp.path(), 1, now()).unwrap_err();
+        assert!(!error.to_string().is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn observe_reports_bad_worker_binding_and_event_store_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let created = session::create_with_agent(
+            tmp.path(),
+            "bad-binding",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        let binding_path = created.root.join(".usagi/orchestrator-worker.json");
+        std::fs::create_dir_all(binding_path.parent().unwrap()).unwrap();
+        std::fs::write(&binding_path, "{").unwrap();
+
+        let error = observe(tmp.path(), &plan(node(1, NodeState::Running)), now()).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+
+        std::fs::write(&binding_path, "").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".usagi/orchestrators/p")).unwrap();
+        std::fs::write(
+            tmp.path().join(".usagi/orchestrators/p/events"),
+            "not a directory",
+        )
+        .unwrap();
+        let error = observe(tmp.path(), &plan(node(1, NodeState::Running)), now()).unwrap_err();
+        assert!(!error.to_string().is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn observe_reports_session_status_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_workspace = tmp.path().join("not-a-workspace");
+        std::fs::write(&file_workspace, "file").unwrap();
+
+        let error =
+            observe(&file_workspace, &plan(node(1, NodeState::Running)), now()).unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn observe_skips_unbound_mismatched_unknown_and_stale_sessions() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        session::create_with_agent(
+            tmp.path(),
+            "unbound",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        for (name, binding) in [
+            (
+                "other-plan",
+                WorkerBinding {
+                    workspace: tmp.path().to_path_buf(),
+                    plan: "other".into(),
+                    issue: 1,
+                    generation: 0,
+                    owner_worktree: tmp.path().to_path_buf(),
+                },
+            ),
+            (
+                "unknown-issue",
+                WorkerBinding {
+                    workspace: tmp.path().to_path_buf(),
+                    plan: "p".into(),
+                    issue: 99,
+                    generation: 0,
+                    owner_worktree: tmp.path().to_path_buf(),
+                },
+            ),
+            (
+                "stale-generation",
+                WorkerBinding {
+                    workspace: tmp.path().to_path_buf(),
+                    plan: "p".into(),
+                    issue: 1,
+                    generation: 7,
+                    owner_worktree: tmp.path().to_path_buf(),
+                },
+            ),
+        ] {
+            let created = session::create_with_agent(
+                tmp.path(),
+                name,
+                Default::default(),
+                crate::domain::workspace_state::SessionOrigin::Mcp,
+                Some("owner".into()),
+            )
+            .unwrap();
+            orchestrator_event::register(&created.root, &binding).unwrap();
+        }
+
+        let observation = observe(tmp.path(), &plan(node(1, NodeState::Running)), now()).unwrap();
+
+        assert!(observation.sessions.is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn dispatch_reuses_an_existing_worker_session() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Reuse worker".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let existing = session::create_with_agent(
+            tmp.path(),
+            "owner-issue-1",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        let action = Action::Delegate {
+            id: "delegate-1".into(),
+            issue: 1,
+            generation: 2,
+            base: Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        };
+
+        let delegated = dispatch_actions(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            vec![action],
+        )
+        .unwrap();
+
+        assert_eq!(delegated, 1);
+        let binding = orchestrator_event::binding(&existing.root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.generation, 2);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn dispatch_logs_delegate_failures_and_skips_reobserve_actions() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let action = Action::Delegate {
+            id: "delegate-1".into(),
+            issue: 1,
+            generation: 0,
+            base: Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        };
+
+        let delegated = dispatch_actions(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            vec![
+                Action::Reobserve {
+                    id: "reobserve-2".into(),
+                    issue: 2,
+                    worker: Some("missing".into()),
+                },
+                action,
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(delegated, 0);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn reobserve_absent_collects_only_reobserve_actions() {
+        let actions = vec![
+            Action::Delegate {
+                id: "delegate-1".into(),
+                issue: 1,
+                generation: 1,
+                base: Base {
+                    reference: "main".into(),
+                    commit: "main".into(),
+                },
+            },
+            Action::Reobserve {
+                id: "reobserve-2".into(),
+                issue: 2,
+                worker: Some("worker-2".into()),
+            },
+            Action::Reobserve {
+                id: "reobserve-3".into(),
+                issue: 3,
+                worker: None,
+            },
+        ];
+
+        let observations = reobserve_absent(&actions);
+
+        assert_eq!(observations.len(), 2);
+        assert!(observations.contains_key(&2));
+        assert!(observations.contains_key(&3));
+        assert!(!observations.contains_key(&1));
+        assert_eq!(observations[&2], SessionObservation::default());
+        assert_eq!(observations[&3], SessionObservation::default());
+    }
+
+    #[test]
+    fn delegate_reports_register_issue_read_and_prompt_queue_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let existing = session::create_with_agent(
+            tmp.path(),
+            "owner-issue-1",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            Some("owner".into()),
+        )
+        .unwrap();
+        std::fs::create_dir_all(existing.root.join(".usagi/orchestrator-worker.json")).unwrap();
+
+        let error = delegate_worker(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+
+        std::fs::remove_dir_all(existing.root.join(".usagi/orchestrator-worker.json")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
+        std::fs::write(tmp.path().join(".usagi/issues"), "not a directory").unwrap();
+        let error = delegate_worker(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+
+        std::fs::remove_file(tmp.path().join(".usagi/issues")).unwrap();
+        crate::usecase::issue::create(
+            tmp.path(),
+            crate::usecase::issue::NewIssue {
+                title: "Prompt error".into(),
+                priority: Default::default(),
+                labels: Vec::new(),
+                dependson: Vec::new(),
+                related: Vec::new(),
+                parent: None,
+                milestone: None,
+                body: String::new(),
+            },
+        )
+        .unwrap();
+        let bad_data = tmp.path().join("not-a-data-dir");
+        std::fs::write(&bad_data, "file").unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, &bad_data);
+        let error = delegate_worker(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn delegate_reports_exact_existing_branch_without_a_session_record() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        git(tmp.path(), &["branch", "usagi/owner-issue-1"]);
+
+        let error = delegate_worker(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("session \"owner-issue-1\" already exists but is not recorded"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn delegate_reports_branch_namespace_conflicts_before_registering() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        git(tmp.path(), &["branch", "usagi/owner-issue-1/child"]);
+
+        let error = delegate_worker(
+            tmp.path(),
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("conflicts with the existing branch"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn delegate_reports_create_errors_before_registering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_workspace = tmp.path().join("not-a-workspace");
+        std::fs::write(&file_workspace, "file").unwrap();
+
+        let error = delegate_worker(
+            &file_workspace,
+            tmp.path(),
+            &plan(node(1, NodeState::Running)),
+            1,
+            0,
+            &Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn owner_prompt_and_names_cover_reobserve_root_and_sanitized_workers() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plan(node(1, NodeState::Runnable));
+        p.owner = ":root".into();
+        let actions = vec![Action::Reobserve {
+            id: "reobserve-1".into(),
+            issue: 1,
+            worker: None,
+        }];
+
+        assert!(owner_needs_wakeup(tmp.path(), &p, &actions).unwrap());
+        queue_owner_prompt(tmp.path(), &p, &actions).unwrap();
+        assert!(agent_prompt_store::take(tmp.path())
+            .unwrap()
+            .contains("no worker"));
+        assert_eq!(owner_worktree(tmp.path(), ":root"), tmp.path());
+        assert_eq!(owner_worktree(tmp.path(), "root"), tmp.path());
+        assert_eq!(worker_session_name("owner/name", 9), "owner-name-issue-9");
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn owner_prompt_renders_delegate_and_named_reobserve_actions() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let actions = vec![
+            Action::Delegate {
+                id: "delegate-1".into(),
+                issue: 1,
+                generation: 4,
+                base: Base {
+                    reference: "main".into(),
+                    commit: "abc".into(),
+                },
+            },
+            Action::Reobserve {
+                id: "reobserve-2".into(),
+                issue: 2,
+                worker: Some("worker-2".into()),
+            },
+        ];
+
+        queue_owner_prompt(tmp.path(), &plan(node(1, NodeState::Runnable)), &actions).unwrap();
+        let prompt = agent_prompt_store::take(tmp.path()).unwrap();
+
+        assert!(prompt.contains("2 pending action(s)"));
+        assert!(prompt.contains("- delegate issue #1, generation 4"));
+        assert!(prompt.contains("- reobserve issue #2 (worker-2)"));
+        assert!(!prompt.contains("no worker"));
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn owner_wakeup_without_actions_is_false_even_for_bad_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_workspace = tmp.path().join("not-a-workspace");
+        std::fs::write(&file_workspace, "file").unwrap();
+
+        let needs_wakeup =
+            owner_needs_wakeup(&file_workspace, &plan(node(1, NodeState::Runnable)), &[]).unwrap();
+
+        assert!(!needs_wakeup);
+    }
+
+    #[test]
+    fn owner_worktree_prefers_a_recorded_session_root() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        let owner = session::create_with_agent(
+            tmp.path(),
+            "owner",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(owner_worktree(tmp.path(), "owner"), owner.root);
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn owner_wakeup_and_prompt_queue_surface_storage_errors() {
+        let _guard = crate::test_support::process_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let file_workspace = tmp.path().join("not-a-workspace");
+        std::fs::write(&file_workspace, "file").unwrap();
+        let actions = vec![Action::Delegate {
+            id: "delegate-1".into(),
+            issue: 1,
+            generation: 1,
+            base: Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        }];
+
+        let error = owner_needs_wakeup(
+            &file_workspace,
+            &plan(node(1, NodeState::Running)),
+            &actions,
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+
+        let bad_data = tmp.path().join("not-a-data-dir");
+        std::fs::write(&bad_data, "file").unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, &bad_data);
+        let error = queue_owner_prompt(tmp.path(), &plan(node(1, NodeState::Running)), &actions)
+            .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn owner_wakeup_respects_a_recorded_owner_phase() {
+        let _guard = crate::test_support::process_env_guard();
+        let data = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, data.path());
+        let tmp = tempfile::tempdir().unwrap();
+        init_repo(tmp.path());
+        session::create_with_agent(
+            tmp.path(),
+            "other",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            None,
+        )
+        .unwrap();
+        let owner = session::create_with_agent(
+            tmp.path(),
+            "owner",
+            Default::default(),
+            crate::domain::workspace_state::SessionOrigin::Mcp,
+            None,
+        )
+        .unwrap();
+        let p = plan(node(1, NodeState::Runnable));
+        let actions = vec![Action::Delegate {
+            id: "delegate-1".into(),
+            issue: 1,
+            generation: 0,
+            base: Base {
+                reference: "main".into(),
+                commit: "abc".into(),
+            },
+        }];
+
+        crate::infrastructure::agent_state_store::write(&owner.root, AgentPhase::Ready).unwrap();
+        assert!(!owner_needs_wakeup(tmp.path(), &p, &actions).unwrap());
+
+        crate::infrastructure::agent_state_store::write(&owner.root, AgentPhase::Ended).unwrap();
+        assert!(owner_needs_wakeup(tmp.path(), &p, &actions).unwrap());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
     }
 }
