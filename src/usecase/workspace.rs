@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use chrono::Utc;
 
 use crate::domain::issue::IssueStatus;
 use crate::domain::workspace::Workspace;
@@ -112,14 +113,9 @@ pub fn remove(storage: &Storage, name: &str) -> Result<()> {
 /// Update a workspace's last-used time to now.
 pub fn touch(storage: &Storage, name: &str) -> Result<Workspace> {
     let _lock = storage.lock()?;
-    let mut workspaces = storage.load_workspaces()?;
-    let Some(workspace) = workspaces.iter_mut().find(|w| w.name == name) else {
-        bail!("workspace '{name}' not found");
-    };
-    workspace.touch();
-    let touched = workspace.clone();
-    storage.save_workspaces(&workspaces)?;
-    Ok(touched)
+    storage
+        .touch_workspace(name, Utc::now())?
+        .ok_or_else(|| anyhow::anyhow!("workspace '{name}' not found"))
 }
 
 #[cfg(test)]

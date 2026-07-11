@@ -38,20 +38,15 @@ pub fn dependency_tree(items: &[ListedIssue]) -> Vec<String> {
     let mut visited: HashSet<u32> = HashSet::new();
     let mut out = Vec::new();
 
-    // Start from: dependency targets that don't exist as issues (so their
-    // dependents are still shown), then roots (no dependencies), then every
-    // remaining node so nothing is dropped amid orphaned deps or cycles.
+    // Start from dependency targets that don't exist as issues (so their
+    // dependents are still shown), then every real node so nothing is dropped
+    // amid roots, orphaned deps, or cycles. The final all-node pass already
+    // covers roots, and `visited` skips nodes reached from missing deps.
     let mut starts: Vec<u32> = children
         .keys()
         .copied()
         .filter(|d| !by_number.contains_key(d))
         .collect();
-    starts.extend(
-        items
-            .iter()
-            .filter(|i| i.summary.dependson.is_empty())
-            .map(|i| i.summary.number),
-    );
     starts.extend(items.iter().map(|i| i.summary.number));
 
     for num in starts {

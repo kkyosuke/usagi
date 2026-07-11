@@ -56,9 +56,19 @@ pub(super) fn git_capture(repo: &Path, args: &[&str]) -> Result<Option<String>> 
     if !output.status.success() {
         return Ok(None);
     }
-    Ok(Some(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
+    Ok(Some(trimmed_lossy_string(&output.stdout)))
+}
+
+fn trimmed_lossy_string(bytes: &[u8]) -> String {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |pos| pos + 1);
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
 /// The branch names under `refspec`, with the leading `lstrip` path components

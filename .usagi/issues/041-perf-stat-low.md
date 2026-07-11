@@ -1,13 +1,13 @@
 ---
 number: 41
 title: perf: 軽微なアロケーション・stat 重複の整理（Low）
-status: todo
+status: done
 priority: low
 labels: [perf]
 dependson: []
 related: []
 created_at: 2026-06-17T22:51:09.051216+00:00
-updated_at: 2026-06-17T22:51:09.051216+00:00
+updated_at: 2026-07-11T01:07:32.783411+00:00
 ---
 
 ## 背景
