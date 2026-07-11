@@ -44,11 +44,12 @@ use crate::usecase::session;
 /// Names of the session tools this server exposes. The unified `usagi` server
 /// ([`super::usagi`]) uses this to route `tools/call` for these names to the
 /// embedded session server.
-pub const TOOL_NAMES: [&str; 14] = [
+pub const TOOL_NAMES: [&str; 15] = [
     "session_create",
     "session_list",
     "session_status",
     "session_prompt",
+    "session_complete",
     "session_pr",
     "session_remove",
     "session_note_get",
@@ -351,6 +352,29 @@ impl SessionMcpServer {
         Ok(to_pretty(&result))
     }
 
+    /// Report completion to the coordinator that created the current session.
+    ///
+    /// The return address is deliberately not supplied by the agent: session
+    /// creation captured it once in `SessionRecord::started_from`. A top-level
+    /// session therefore reports to the workspace root, while a nested session
+    /// reports to its parent session. This keeps the completion call both small
+    /// and resistant to an agent accidentally notifying the wrong coordinator.
+    fn tool_complete(&self, arguments: Value) -> Result<String, String> {
+        let args: CompleteArgs = parse_args(arguments)?;
+        let name = self.require_session("session_complete")?;
+        let current = self.find_session(name)?;
+        let target = current.started_from.as_deref().unwrap_or(ROOT_TARGET);
+        let report = format!("Session \"{name}\" completed:\n\n{}", args.message);
+        check_prompt_len("session_complete", &report)?;
+        let (channel, detail) = self.deliver_prompt(target, &report, PromptMode::Auto)?;
+        Ok(to_pretty(&json!({
+            "session": name,
+            "reported_to": target,
+            "delivered_to": channel.as_str(),
+            "detail": detail,
+        })))
+    }
+
     /// Deliver `prompt` to `name` over the channel chosen by `mode`, returning the
     /// channel actually used and the backend's confirmation. `name` is either a
     /// session name or the reserved [`ROOT_TARGET`] (the `⌂ root` coordinator).
@@ -584,6 +608,7 @@ impl McpService for SessionMcpServer {
             "session_list" => self.tool_list(),
             "session_status" => self.tool_list_status(),
             "session_prompt" => self.tool_prompt(arguments),
+            "session_complete" => self.tool_complete(arguments),
             "session_pr" => self.tool_pr(arguments),
             "session_remove" => self.tool_remove(arguments),
             "session_note_get" => self.tool_note_get(),
@@ -662,6 +687,12 @@ struct PromptArgs {
     /// Absent leaves any existing per-session model override unchanged.
     #[serde(default)]
     model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CompleteArgs {
+    /// Concise completion report delivered to the session's recorded caller.
+    message: String,
 }
 
 /// How `session_prompt` chooses between the launch queue and the live pane.
@@ -907,6 +938,20 @@ fn session_tool_schemas() -> Value {
                     }
                 },
                 "required": ["name", "prompt"]
+            }
+        },
+        {
+            "name": "session_complete",
+            "description": "Report that the current session has completed. The destination is resolved automatically from the caller recorded when this session was created: a nested session reports to its parent session, and a top-level session reports to the workspace root coordinator. The report is delivered live when that coordinator has a running agent pane and queued otherwise. Only available from inside a session worktree.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Concise completion report, including the result and any useful PR or verification details"
+                    }
+                },
+                "required": ["message"]
             }
         },
         {
@@ -1258,6 +1303,7 @@ mod tests {
                 "session_list",
                 "session_status",
                 "session_prompt",
+                "session_complete",
                 "session_pr",
                 "session_remove",
                 "session_note_get",
@@ -1306,6 +1352,74 @@ mod tests {
         assert_eq!(arr[0]["started_from"], Value::Null);
         // The worktree is checked out on the namespaced session branch.
         assert_eq!(arr[0]["worktrees"][0]["branch"], "usagi/feature-x");
+    }
+
+    #[test]
+    fn complete_reports_to_the_recorded_parent_session() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let root_server = server_at(root.path(), FakeBackend::ok("x"));
+        call(&root_server, "session_create", json!({"name":"parent"}));
+
+        // Creating the child from the parent's worktree captures only the parent
+        // session name as its return address.
+        let parent_server = server_in_session(root.path(), "parent", FakeBackend::ok("x"));
+        call(&parent_server, "session_create", json!({"name":"child"}));
+
+        let backend = FakeBackend::ok("sent").with_live(true);
+        let calls = backend.calls.clone();
+        let child_server = server_in_session(root.path(), "child", backend);
+        let result = call(
+            &child_server,
+            "session_complete",
+            json!({"message":"PR #42 is ready; tests pass."}),
+        );
+
+        assert_eq!(result["isError"], false);
+        let body = tool_json(&result);
+        assert_eq!(body["session"], "child");
+        assert_eq!(body["reported_to"], "parent");
+        assert_eq!(body["delivered_to"], "live");
+        assert_eq!(
+            calls.borrow()[0].0,
+            root.path().join(".usagi/sessions/parent")
+        );
+        assert_eq!(
+            calls.borrow()[0].1,
+            "Session \"child\" completed:\n\nPR #42 is ready; tests pass."
+        );
+    }
+
+    #[test]
+    fn complete_from_a_top_level_session_reports_to_root_and_is_session_only() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        let root_server = server_at(root.path(), FakeBackend::ok("x"));
+        call(&root_server, "session_create", json!({"name":"worker"}));
+
+        let backend = FakeBackend::ok("queued");
+        let calls = backend.calls.clone();
+        let worker_server = server_in_session(root.path(), "worker", backend);
+        let result = call(
+            &worker_server,
+            "session_complete",
+            json!({"message":"Implementation complete."}),
+        );
+        let body = tool_json(&result);
+        assert_eq!(body["reported_to"], ROOT_TARGET);
+        assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(calls.borrow()[0].0, root.path());
+
+        let outside = call(
+            &root_server,
+            "session_complete",
+            json!({"message":"not in a session"}),
+        );
+        assert_eq!(outside["isError"], true);
+        assert!(outside["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("only available from inside a session worktree"));
     }
 
     #[test]
