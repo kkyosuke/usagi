@@ -612,9 +612,16 @@ fn drive(
         // left sidebar until the user detaches back to 選択. Apply the same
         // refresh slot the outer loop drains so external `session_create` /
         // `session_delegate_issue` updates show immediately while attached too.
-        for (root, sessions) in sessions_refresh.take_all() {
-            state.refresh_sessions_for(&root, sessions);
-            interactive = true;
+        for refresh in sessions_refresh.take_all() {
+            match refresh {
+                super::super::sessions_refresh::SessionsRefresh::GitSync(outcome) => {
+                    interactive |= state.apply_git_sync_outcome(outcome);
+                }
+                super::super::sessions_refresh::SessionsRefresh::Recorded { root, sessions } => {
+                    state.refresh_sessions_for(&root, sessions);
+                    interactive = true;
+                }
+            }
         }
         // The sidebar's running / waiting / live-agent / finished markers, read
         // together under a single lock; repaint when they move so sessions

@@ -1,6 +1,10 @@
 use super::*;
+use crate::presentation::tui::home::sessions_refresh::{
+    GitSyncOutcome, GitSyncState, GitSyncStatus,
+};
 use crate::presentation::tui::home::tasks::TaskKind;
 use chrono::{Local, TimeZone};
+use std::time::Instant;
 
 /// A minimal recorded session rooted at `/repo/.usagi/sessions/<name>`, used to
 /// give the primary workspace real rows that survive a rebuild.
@@ -128,6 +132,108 @@ fn united_state() -> HomeState {
         issues: Vec::new(),
     }]);
     state
+}
+
+fn git_sync_outcome(
+    root: &str,
+    generation: u64,
+    result: Result<Vec<crate::domain::workspace_state::SessionRecord>, &str>,
+) -> GitSyncOutcome {
+    let started_at = Instant::now();
+    GitSyncOutcome {
+        root: PathBuf::from(root),
+        generation,
+        started_at,
+        finished_at: started_at,
+        result: result.map_err(str::to_string),
+    }
+}
+
+#[test]
+fn git_sync_outcome_ignores_older_generation() {
+    let mut state = united_state();
+    state.begin_git_sync(
+        PathBuf::from("/usagi"),
+        GitSyncState::syncing(2, Instant::now()),
+    );
+
+    assert!(!state.apply_git_sync_outcome(git_sync_outcome("/usagi", 1, Ok(vec![session("old")]),)));
+    assert_eq!(state.sessions()[0].name, "main");
+    assert_eq!(
+        state
+            .git_sync_state(Path::new("/usagi"))
+            .map(|s| s.generation),
+        Some(2)
+    );
+
+    assert!(state.apply_git_sync_outcome(git_sync_outcome(
+        "/usagi",
+        2,
+        Ok(vec![session("fresh")]),
+    )));
+    assert_eq!(state.sessions()[0].name, "fresh");
+    assert!(state.git_sync_state(Path::new("/usagi")).is_none());
+}
+
+#[test]
+fn git_sync_begin_ignores_older_generation() {
+    let mut state = united_state();
+    state.begin_git_sync(
+        PathBuf::from("/usagi"),
+        GitSyncState::syncing(2, Instant::now()),
+    );
+    state.begin_git_sync(
+        PathBuf::from("/usagi"),
+        GitSyncState::syncing(1, Instant::now()),
+    );
+
+    assert_eq!(
+        state
+            .git_sync_state(Path::new("/usagi"))
+            .map(|s| s.generation),
+        Some(2)
+    );
+}
+
+#[test]
+fn git_sync_failure_keeps_last_known_sessions_and_marks_only_that_root_stale() {
+    let mut state = united_state();
+    state.begin_git_sync(
+        PathBuf::from("/usagi"),
+        GitSyncState::syncing(1, Instant::now()),
+    );
+    state.begin_git_sync(
+        PathBuf::from("/wsB"),
+        GitSyncState::syncing(2, Instant::now()),
+    );
+
+    assert!(state.apply_git_sync_outcome(git_sync_outcome("/usagi", 1, Err("git status failed"),)));
+
+    assert_eq!(state.sessions()[0].name, "main");
+    let primary = state.git_sync_state(Path::new("/usagi")).unwrap();
+    assert_eq!(primary.status, GitSyncStatus::Stale);
+    assert_eq!(primary.error.as_deref(), Some("git status failed"));
+    assert_eq!(
+        state.git_sync_state(Path::new("/wsB")).map(|s| s.status),
+        Some(GitSyncStatus::Syncing)
+    );
+}
+
+#[test]
+fn git_sync_state_is_scoped_by_workspace_root() {
+    let mut state = united_state();
+    state.begin_git_sync(
+        PathBuf::from("/wsB"),
+        GitSyncState::syncing(7, Instant::now()),
+    );
+
+    assert_eq!(
+        state
+            .git_sync_state(Path::new("/wsB"))
+            .map(|s| s.generation),
+        Some(7)
+    );
+    assert!(state.git_sync_state(Path::new("/usagi")).is_none());
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::super::oneshot::OneShot;
+use super::super::sessions_refresh::{GitSyncOutcome, GitSyncState, GitSyncStatus};
 use super::super::state::{GroupSource, LogLine};
 use super::super::tasks::AutoFocus;
 use super::super::terminal::tabs::TabNav;
@@ -11,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A [`ConfigReload`] carrying `ui` — the shape the config-close callback returns
 /// in tests that only care about the 集中 surface.

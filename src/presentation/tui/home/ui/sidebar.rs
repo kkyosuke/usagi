@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use super::super::sessions_refresh::{GitSyncState, GitSyncStatus};
 use super::super::state::{worktree_name, PendingSession, WorktreeList, ROOT_NAME};
 use super::{
     clip_to_width, pad_to_width, ACTIVE_COL, DETACHED, DIRTY_ICON, LOCAL_ICON, NAME_PREFIX,
@@ -49,6 +50,24 @@ pub(super) fn status_style(status: BranchStatus) -> Style {
 pub(super) fn status_label(status: BranchStatus) -> String {
     let text = format!("{} {}", status_icon(status), status.as_str());
     status_style(status).apply_to(text).to_string()
+}
+
+/// The git status label when a workspace-level background sync is in flight or
+/// failed. While syncing, the saved branch status is deliberately not drawn as a
+/// confident lifecycle colour; on failure the last-known value remains but is
+/// marked stale.
+pub(super) fn sync_status_label(status: BranchStatus, sync: Option<&GitSyncState>) -> String {
+    match sync.map(|s| s.status) {
+        Some(GitSyncStatus::Syncing) => Style::new()
+            .info()
+            .apply_to(format!("↻ {}", status.as_str()))
+            .to_string(),
+        Some(GitSyncStatus::Stale) => Style::new()
+            .warning()
+            .apply_to(format!("! {}", status.as_str()))
+            .to_string(),
+        _ => status_label(status),
+    }
 }
 
 /// The largest column width the manual-status label cell may claim on the full

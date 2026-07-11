@@ -96,6 +96,7 @@ pub(super) use pr_popup::{pr_popup_click, PopupClick};
 use super::state::{HomeState, ModalSize, Mode, PendingSession, WorktreeList};
 use crate::domain::resource::ResourceUsage;
 use crate::domain::settings::{SessionActionUi, Sidebar};
+use crate::presentation::theme::Palette;
 
 /// The detail shown on the root row's second line (it has no git status).
 const ROOT_DETAIL: &str = "workspace root";
@@ -406,6 +407,28 @@ fn sidebar_scroll_indicator_row(
     let blank = pad_to_width(String::new(), width);
     if sidebar != Sidebar::Full {
         return blank;
+    }
+    let selected_root = state.selected_workspace_root();
+    if let Some(sync) = state.git_sync_state(&selected_root) {
+        if sync.status == super::sessions_refresh::GitSyncStatus::Syncing {
+            let raw = "↻ git syncing ";
+            let clipped = clip_to_width(raw, left_w);
+            let text = console::style(clipped).info().to_string();
+            let pad = left_w.saturating_sub(console::measure_text_width(&text));
+            return pad_to_width(format!("{}{}", " ".repeat(pad), text), width);
+        }
+        if sync.status == super::sessions_refresh::GitSyncStatus::Stale {
+            let suffix = sync
+                .error
+                .as_deref()
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default();
+            let raw = format!("! git stale{suffix} ");
+            let clipped = clip_to_width(&raw, left_w);
+            let text = console::style(clipped).warning().to_string();
+            let pad = left_w.saturating_sub(console::measure_text_width(&text));
+            return pad_to_width(format!("{}{}", " ".repeat(pad), text), width);
+        }
     }
     let Some((start, end, total)) =
         sidebar::sidebar_scroll_position(state.list(), true, body_rows, state.pending_sessions())

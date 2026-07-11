@@ -1,13 +1,13 @@
 ---
 number: 200
 title: fix(tui): background git sync の freshness と error を表示する
-status: todo
+status: done
 priority: medium
 labels: [fix, tui, git, ux, review]
 dependson: []
 related: [36, 84]
 created_at: 2026-07-11T01:30:38.509508+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T07:30:23.738747+00:00
 ---
 
 ## 症状

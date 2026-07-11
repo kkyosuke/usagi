@@ -242,6 +242,29 @@ fn status_label_pairs_a_git_icon_with_each_word() {
 }
 
 #[test]
+fn sync_status_label_marks_inflight_and_stale_statuses() {
+    let syncing = crate::presentation::tui::home::sessions_refresh::GitSyncState::syncing(
+        1,
+        std::time::Instant::now(),
+    );
+    let stale = crate::presentation::tui::home::sessions_refresh::GitSyncState::stale(
+        2,
+        Some(std::time::Instant::now()),
+        std::time::Instant::now(),
+        "failed",
+    );
+
+    let syncing_plain =
+        console::strip_ansi_codes(&sync_status_label(BranchStatus::Pushed, Some(&syncing)))
+            .into_owned();
+    let stale_plain =
+        console::strip_ansi_codes(&sync_status_label(BranchStatus::Pushed, Some(&stale)))
+            .into_owned();
+    assert_eq!(syncing_plain, "↻ pushed");
+    assert_eq!(stale_plain, "! pushed");
+}
+
+#[test]
 fn left_pane_omits_branch_lifecycle_status_from_session_rows() {
     // The left pane is reserved for session identity, agent lifecycle, and
     // operational metrics. The branch/worktree lifecycle still exists for the
@@ -3429,6 +3452,68 @@ fn render_frame_hides_the_sidebar_indicator_when_the_list_fits() {
     let state = overview_state_with_worktrees(1);
     let frame = render_frame(40, 80, &state);
     assert!(!console::strip_ansi_codes(&frame[1]).contains('⋮'));
+}
+
+#[test]
+fn render_frame_shows_git_syncing_in_the_sidebar_separator() {
+    let mut state = overview_state_with_worktrees(1);
+    state.set_root_path("/repo");
+    state.begin_git_sync(
+        PathBuf::from("/repo"),
+        crate::presentation::tui::home::sessions_refresh::GitSyncState::syncing(
+            1,
+            std::time::Instant::now(),
+        ),
+    );
+
+    let frame = render_frame(40, 80, &state);
+    let sep = console::strip_ansi_codes(&frame[1]);
+    assert!(
+        sep.contains("git syncing"),
+        "sync marker is visible: {sep:?}"
+    );
+}
+
+#[test]
+fn render_frame_shows_git_stale_error_in_the_sidebar_separator() {
+    let mut state = overview_state_with_worktrees(1);
+    state.set_root_path("/repo");
+    state.begin_git_sync(
+        PathBuf::from("/repo"),
+        crate::presentation::tui::home::sessions_refresh::GitSyncState::stale(
+            2,
+            Some(std::time::Instant::now()),
+            std::time::Instant::now(),
+            "git failed",
+        ),
+    );
+
+    let frame = render_frame(40, 80, &state);
+    let sep = console::strip_ansi_codes(&frame[1]);
+    assert!(
+        sep.contains("git stale") && sep.contains("git failed"),
+        "stale marker includes the error: {sep:?}"
+    );
+}
+
+#[test]
+fn render_frame_ignores_fresh_git_sync_state_in_the_sidebar_separator() {
+    let mut state = overview_state_with_worktrees(30);
+    state.set_root_path("/repo");
+    state.force_git_sync_state_for_test(
+        PathBuf::from("/repo"),
+        crate::presentation::tui::home::sessions_refresh::GitSyncState::fresh(
+            3,
+            std::time::Instant::now(),
+        ),
+    );
+
+    let frame = render_frame(12, 80, &state);
+    let sep = console::strip_ansi_codes(&frame[1]);
+    assert!(
+        !sep.contains("git") && sep.contains('⋮'),
+        "fresh sync state falls back to the scroll indicator: {sep:?}"
+    );
 }
 
 #[test]
