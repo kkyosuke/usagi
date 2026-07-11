@@ -12,6 +12,7 @@
 - [ベンチマークと受け入れ基準](#ベンチマークと受け入れ基準)
 - [CI 実験の初回観測](#ci-実験の初回観測)
 - [CI 実験の warmed 追加観測](#ci-実験の-warmed-追加観測)
+- [CI 実験の #203 判断](#ci-実験の-203-判断)
 - [go / no-go 判断](#go--no-go-判断)
 
 ## 現状調査
@@ -36,9 +37,9 @@
 | 容量上限 | ローカルは `SCCACHE_CACHE_SIZE=10G` を既定候補にする。小さい disk では `5G` に下げられるよう環境変数上書きを許す。 |
 | 削除・失効 | 削除は `sccache --zero-stats` と cache dir の削除を明示する。失効は rustc version、crate hash、features、env、target triple 等に任せ、manual key bump は基本不要。 |
 | 観測 | helper に `sccache --show-stats` / `sccache --zero-stats` を案内するか、`scripts/sccache-stats.sh` を追加する。hit rate、cache size、non-cacheable reasons を PR 前後で記録する。 |
-| CI | required Rust gate の ubuntu job（`test.yml` と `coverage.yml`）だけで実験する。release matrix は target triple 差と LTO release build の特性が違うため後段にする。 |
+| CI | required Rust gate（`test.yml` と `coverage.yml`）では sccache を使わず、`swatinem/rust-cache` だけを使う。release matrix は target triple 差と LTO release build の特性が違い、required gate でも採用基準を満たしていないため展開しない。 |
 
-`swatinem/rust-cache` は Cargo registry/git cache と `target` 復元を担当し、sccache は rustc のコンパイル出力を compiler invocation 単位で再利用する。役割は重なるが同一ではない。CI では `swatinem/rust-cache` を残し、sccache の cache dir だけ `actions/cache` で追加保存する構成が比較しやすい。
+`swatinem/rust-cache` は Cargo registry/git cache と `target` 復元を担当し、sccache は rustc のコンパイル出力を compiler invocation 単位で再利用する。役割は重なるが同一ではない。CI 実験では `swatinem/rust-cache` を残し、sccache の cache dir だけ `actions/cache` で追加保存する構成を比較したが、required gate の採用基準を満たさなかった。
 
 複数 session worktree 間での共有は安全と判断する。sccache の key は rustc、target、crate inputs、features、compiler flags、関連 env を含むため、worktree path が違っても同じソース・同じ lock・同じ toolchain なら hit し、差があれば miss する。ただし `build.rs` が volatile な env や絶対 path を出力する場合、hit rate は下がる。`usagi` には `build.rs` は無く、proc macro は依存 crate 側に限定されるため、初期導入の correctness risk は低い。
 
@@ -48,10 +49,11 @@
 2. `scripts/sccache-benchmark.sh` を追加し、cold/warm、単一 session、複数 session の計測、`sccache --show-stats` 採取、結果 TSV 出力を自動化する。
 3. `document/06-conventions.md` または `document/07-test-observability.md` に、採用後の開発者向け opt-in 手順と観測手順だけを正本として追記する。
 4. CI 実験 PR で `test.yml` / `coverage.yml` の ubuntu job に explicit install + `actions/cache` を追加し、既存 `swatinem/rust-cache` との併用結果を記録する。
-5. 効果が基準を満たした場合のみ、release build check / release workflow への展開を別 issue に分ける。
+5. #203 で required `Test` / `Coverage` から sccache を外し、`swatinem/rust-cache` だけの構成へ戻す。
 
 初回 issue は「ローカル opt-in helper とベンチスクリプト」に絞った。CI 導入は runner cache の安定性と billed minutes
-の評価が必要なため、次段階の実験 PR として required Rust gate の ubuntu job だけに限定する。
+の評価が必要なため、required Rust gate の ubuntu job だけに限定して実験した。#202 の warmed 追加観測でも採用基準を
+満たさなかったため、required gate からは撤去し、release build check / release workflow / test-metrics には展開しない。
 
 ## ベンチマークと受け入れ基準
 
@@ -124,16 +126,32 @@ Coverage では workflow duration と billed minutes 相当の両方を改善で
 今後の PR run をあと 2 回記録する。ただし PR branch 間の sccache cache 非共有という挙動が見えているため、先に
 #203 で sccache 対象 job の絞り込みまたは撤去を検討する。
 
+## CI 実験の #203 判断
+
+#203 では限定継続できる build-heavy job が required `Test` / `Coverage` 内にないと判断し、両 workflow から sccache を
+撤去した。`swatinem/rust-cache` は Cargo registry/git cache と `target` 復元のため維持する。
+
+| 構成 | workflow / run | workflow duration | job duration / billed minutes 相当 | 判断 |
+|---|---|---:|---:|---|
+| sccache なし + `swatinem/rust-cache` | `Test` #745 / #743 baseline | 1m19s / 1m24s | 107s / 104s | required gate の既存基準。 |
+| sccache あり + `swatinem/rust-cache` | `Test` #748 warmed | 1m10s | 114s | workflow wall time は短いが、並列 job 合計は baseline より 6.5%〜9.6% 悪化。compile request は 1 件 / 2 件だけで 10% 短縮を満たさない。 |
+| sccache なし + `swatinem/rust-cache` | `Coverage` #745 baseline | 1m58s | 116s | required coverage の既存基準。 |
+| sccache あり + `swatinem/rust-cache` | `Coverage` #748 success | 2m03s | 120s | PR branch 間で sccache cache が共有されず 0% hit。save overhead もあり悪化。 |
+
+このため required Rust gate は `swatinem/rust-cache` のみに戻す。repo-wide `.cargo/config.toml` で `rustc-wrapper` は固定しない。
+release build check / release workflow / test-metrics は required gate と異なる workload だが、現行データでは展開する根拠がないため
+sccache を追加しない。
+
 ## go / no-go 判断
 
 Go 条件は、ローカル opt-in helper で correctness が変わらず、複数 session warm の build-heavy command で 20% 以上の短縮が確認できること。CI は追加で 10% 以上の required job 短縮と billed minutes 非悪化を満たした場合に go とする。
 
-現時点の判断は「local opt-in は go、required Rust gate の現行 sccache CI 構成は adjustment、repo-wide 強制と
-release build check / release workflow / test-metrics への展開は no-go」。理由は、main push の warmed `Test` でも
+現時点の判断は「local opt-in は go、required Rust gate の sccache CI 構成は no-go、repo-wide 強制と
+release build check / release workflow / test-metrics への展開も no-go」。理由は、main push の warmed `Test` でも
 sccache hit が 1〜2 compile request に留まり、setup/cache restore を含む job duration 合計が baseline より短くないこと、
 `Coverage` PR run では branch 間 cache 非共有で 0% hit と save overhead が続くこと、既に `swatinem/rust-cache` が
 主要な target 復元を担っていることである。
 
-調整は #203 で扱う。候補は、`Coverage` から sccache を外す、`Test` も `swatinem/rust-cache` だけに戻す、または
-build-heavy で sccache が効く job だけに限定する、のいずれかである。現行データでは required Rust jobs の 10% 以上短縮と
-billed minutes 非悪化を満たさないため、release build check / release workflow / test-metrics には展開しない。
+調整は #203 で実施し、`Coverage` と `Test` の両方を `swatinem/rust-cache` だけに戻した。現行データでは required
+Rust jobs の 10% 以上短縮と billed minutes 非悪化を満たさないため、release build check / release workflow /
+test-metrics には展開しない。

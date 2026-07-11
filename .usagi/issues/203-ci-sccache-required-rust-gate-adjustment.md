@@ -1,13 +1,13 @@
 ---
 number: 203
 title: ci: required Rust gate の sccache 対象を絞る
-status: todo
+status: done
 priority: medium
 labels: [ci, perf]
 dependson: [202]
 related: [201, 202]
 created_at: 2026-07-11T06:50:52Z
-updated_at: 2026-07-11T06:50:52Z
+updated_at: 2026-07-11T07:32:00Z
 ---
 
 ## 背景
