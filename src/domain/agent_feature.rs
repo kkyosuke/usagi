@@ -19,7 +19,7 @@ pub enum AgentFeature {
     Mcp,
     /// The `usagi-llm` MCP server for delegating light work to a local LLM.
     LocalLlmMcp,
-    /// Lifecycle-hook phase reporting (ready / running / waiting / ended).
+    /// Lifecycle phase reporting (ready / running / waiting / ended / exited).
     PhaseReporting,
     /// Starting the session already working on a queued `session_prompt`.
     InitialPrompt,
@@ -89,7 +89,7 @@ pub struct AgentCapabilities {
     pub mcp: bool,
     /// The `usagi-llm` MCP server for delegating light work to a local LLM.
     pub local_llm_mcp: bool,
-    /// Lifecycle-hook phase reporting (ready / running / waiting / ended).
+    /// Lifecycle phase reporting (ready / running / waiting / ended / exited).
     pub phase_reporting: bool,
     /// Starting the session already working on a queued `session_prompt`.
     pub initial_prompt: bool,

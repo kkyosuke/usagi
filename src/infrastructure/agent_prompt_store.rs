@@ -3,9 +3,10 @@
 //! The MCP `session_prompt` tool runs in the `usagi mcp` process, which is
 //! separate from a running TUI: it cannot reach into the home screen and drive a
 //! pane directly. Instead it *queues* the prompt here, keyed by the session's
-//! worktree, and the home screen delivers it the next time it freshly launches
-//! that session's agent pane — the agent opens with the queued prompt as its
-//! first message (see [`crate::domain::agent::Agent::launch_command`]).
+//! worktree. Explicit queue requests remain opening messages for the next fresh
+//! agent launch (see [`crate::domain::agent::Agent::launch_command`]); an `auto`
+//! request that fell back here only because the TUI was absent may instead opt
+//! into delivery to an eligible existing agent when the TUI resumes.
 //!
 //! Like [`super::agent_state_store`], the writer (the MCP process) and the reader
 //! (the TUI) never share memory, so they agree on a file path purely from the
@@ -21,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::infrastructure::store_lock::{self, StoreLock};
@@ -41,11 +42,17 @@ struct PromptFile {
     /// The worktree this prompt belongs to. Stored so a hashed-name collision is
     /// caught: a read whose recorded worktree differs is treated as absent.
     worktree: PathBuf,
-    /// The prompt to hand the session's agent on its next fresh launch.
+    /// The queued launch-channel prompt. `reuse_live_agent` below decides
+    /// whether it requires a fresh launch or may use an existing agent.
     prompt: String,
     /// Retry state for background autostart. Missing on v1 files.
     #[serde(default)]
     retry: Option<RetryState>,
+    /// Whether an autostart pass may deliver this launch prompt to an eligible
+    /// existing agent. Only `session_prompt(mode=auto)` falling back to the launch
+    /// channel opts in; explicit `mode=queue` remains fresh-only.
+    #[serde(default)]
+    reuse_live_agent: bool,
 }
 
 impl WorktreeStamped for PromptFile {
@@ -63,9 +70,27 @@ pub struct RetryState {
     pub dead: bool,
 }
 
+/// One launch prompt removed from the durable store for an in-flight delivery.
+/// Callers that may fail or cancel before delivery keep this whole value and
+/// restore it with [`requeue_taken`], rather than losing retry/policy metadata by
+/// carrying only the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakenPrompt {
+    pub prompt: String,
+    pub retry: Option<RetryState>,
+    pub reuse_live_agent: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TakeReady {
-    Ready(String),
+    Ready {
+        prompt: String,
+        retry: Option<RetryState>,
+        reuse_live_agent: bool,
+    },
+    /// A prompt exists and is ready, but its contract requires a fresh launch.
+    /// Returned only by [`take_ready_for_live_agent`] and left on disk.
+    FreshLaunch,
     Waiting(RetryState),
     Dead(RetryState),
     Empty,
@@ -109,6 +134,14 @@ pub fn retry_state_after_failure(
 /// Queue `prompt` for the agent of the session rooted at `worktree`, replacing
 /// any prompt already queued there.
 pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
+    set_with_live_handoff(worktree, prompt, false)
+}
+
+/// Queue `prompt`, optionally allowing an eligible existing agent to consume
+/// it. Explicit queue callers use [`set`] (fresh-only); `session_prompt(auto)`
+/// uses this opt-in when it chose the launch channel only because no TUI marker
+/// was present.
+pub fn set_with_live_handoff(worktree: &Path, prompt: &str, reuse_live_agent: bool) -> Result<()> {
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR)?;
     // Hold the store lock across the write so a concurrent `take` (in the TUI
@@ -123,6 +156,7 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
             worktree: key,
             prompt: prompt.to_string(),
             retry: None,
+            reuse_live_agent,
         },
     )
 }
@@ -131,31 +165,70 @@ pub fn set(worktree: &Path, prompt: &str) -> Result<()> {
 /// elapsed. Manual launches still use [`take`] and can deliver a prompt even
 /// while autostart is backing off.
 pub fn take_ready(worktree: &Path, now: SystemTime) -> TakeReady {
+    take_ready_inner(worktree, now, false).unwrap_or(TakeReady::Empty)
+}
+
+/// Strict unattended take used by restore ownership decisions. Store/path/lock
+/// failures are surfaced so restore can fail closed instead of fresh-spawning
+/// past a prompt it could not inspect.
+pub fn take_ready_strict(worktree: &Path, now: SystemTime) -> Result<TakeReady> {
+    take_ready_inner(worktree, now, false)
+}
+
+/// Take a ready launch prompt only when its producer allowed delivery to an
+/// already-live eligible agent. A fresh-only prompt is reported without removing it,
+/// preserving explicit `mode=queue` and pinned CLI/model launch semantics.
+pub fn take_ready_for_live_agent(worktree: &Path, now: SystemTime) -> TakeReady {
+    take_ready_for_live_agent_strict(worktree, now).unwrap_or(TakeReady::Empty)
+}
+
+/// Strict existing-agent take for ordering-sensitive watcher delivery. A store
+/// inspection failure must keep the newer live queue untouched rather than
+/// pretending the older launch channel is empty.
+pub fn take_ready_for_live_agent_strict(worktree: &Path, now: SystemTime) -> Result<TakeReady> {
+    take_ready_inner(worktree, now, true)
+}
+
+fn take_ready_inner(
+    worktree: &Path,
+    now: SystemTime,
+    require_live_handoff: bool,
+) -> Result<TakeReady> {
     let key = key(worktree);
-    let dir = match prompt_dir_for_take_ready() {
-        Ok(dir) => dir,
-        Err(_) => return TakeReady::Empty,
-    };
-    let _lock = match StoreLock::acquire(&dir) {
-        Ok(lock) => lock,
-        Err(_) => return TakeReady::Empty,
-    };
+    let dir = prompt_dir_for_take_ready()?;
+    let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
+    if !path.exists() {
+        return Ok(TakeReady::Empty);
+    }
     let Some(file) = read_ours::<PromptFile>(&path, &key) else {
-        return TakeReady::Empty;
+        return Err(anyhow!(
+            "queued prompt file {} is unreadable or belongs to another worktree",
+            path.display()
+        ));
     };
+    // Delivery policy outranks retry state for an existing agent. A fresh-only
+    // record belongs to another channel entirely, so neither its backoff nor its
+    // dead-letter state may head-of-line block newer explicit live work.
+    if require_live_handoff && !file.reuse_live_agent {
+        return Ok(TakeReady::FreshLaunch);
+    }
     if let Some(retry) = file.retry.as_ref().filter(|retry| retry.dead) {
-        return TakeReady::Dead(retry.clone());
+        return Ok(TakeReady::Dead(retry.clone()));
     }
     if let Some(retry) = file
         .retry
         .as_ref()
         .filter(|retry| retry.next_retry_unix_secs > unix_secs(now))
     {
-        return TakeReady::Waiting(retry.clone());
+        return Ok(TakeReady::Waiting(retry.clone()));
     }
-    let _ = fs::remove_file(&path);
-    TakeReady::Ready(file.prompt)
+    fs::remove_file(&path)?;
+    Ok(TakeReady::Ready {
+        prompt: file.prompt,
+        retry: file.retry,
+        reuse_live_agent: file.reuse_live_agent,
+    })
 }
 
 /// Requeue a prompt that autostart failed to spawn, recording exponential
@@ -170,14 +243,69 @@ pub fn requeue_after_failure(
     let dir = dir(PROMPT_SUBDIR)?;
     let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
-    let previous = read_ours::<PromptFile>(&path, &key).and_then(|file| file.retry);
-    let retry = retry_state_after_failure(previous.as_ref(), error, now);
+    let existing = read_ours::<PromptFile>(&path, &key);
+    let previous = existing.as_ref().and_then(|file| file.retry.as_ref());
+    let reuse_live_agent = existing.as_ref().is_some_and(|file| file.reuse_live_agent);
+    let retry = retry_state_after_failure(previous, error, now);
     let file = PromptFile {
         worktree: key,
         prompt: prompt.to_string(),
         retry: Some(retry.clone()),
+        reuse_live_agent,
     };
     write_stamped(&dir, &path, &file)?;
+    Ok(retry)
+}
+
+/// Restore a taken prompt at the front of the launch queue after its delivery
+/// failed, preserving both its retry history and any prompt queued concurrently
+/// after the take.
+///
+/// The read/merge/write is one store-lock transaction. `previous_retry` belongs
+/// to the prompt returned by [`take_ready`]; when absent, retry metadata already
+/// on a concurrently queued file is the fallback baseline. The resulting retry
+/// state applies to the merged oldest-first work and enforces the same bounded
+/// backoff/dead-letter policy as background spawn failures.
+pub fn requeue_front_after_failure(
+    worktree: &Path,
+    prompt: &str,
+    previous_retry: Option<&RetryState>,
+    reuse_live_agent: bool,
+    error: &str,
+    now: SystemTime,
+) -> Result<RetryState> {
+    let key = key(worktree);
+    let dir = dir(PROMPT_SUBDIR)?;
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    let existing = read_ours::<PromptFile>(&path, &key);
+    // A concurrent fresh-only prompt may carry pinned CLI/model semantics. Once
+    // two records are merged into one oldest-first message, live handoff is safe
+    // only when both records opted in.
+    let reuse_live_agent =
+        reuse_live_agent && existing.as_ref().is_none_or(|file| file.reuse_live_agent);
+    let retry = retry_state_after_failure(
+        previous_retry.or_else(|| existing.as_ref().and_then(|file| file.retry.as_ref())),
+        error,
+        now,
+    );
+    let merged = match existing {
+        Some(file) if !file.prompt.is_empty() && !prompt.is_empty() => {
+            format!("{prompt}\n\n{}", file.prompt)
+        }
+        Some(file) if prompt.is_empty() => file.prompt,
+        _ => prompt.to_string(),
+    };
+    write_stamped(
+        &dir,
+        &path,
+        &PromptFile {
+            worktree: key,
+            prompt: merged,
+            retry: Some(retry.clone()),
+            reuse_live_agent,
+        },
+    )?;
     Ok(retry)
 }
 
@@ -186,6 +314,13 @@ pub fn requeue_after_failure(
 /// worktree). Removing it makes the prompt one-shot: a later launch that finds
 /// nothing queued starts the agent without one.
 pub fn take(worktree: &Path) -> Option<String> {
+    take_with_state(worktree).map(|taken| taken.prompt)
+}
+
+/// Take a queued prompt for a manual/fresh launch, including the metadata that
+/// must be restored if the launch is canceled or fails. Unlike [`take_ready`],
+/// an explicit manual launch intentionally bypasses automatic retry backoff.
+pub fn take_with_state(worktree: &Path) -> Option<TakenPrompt> {
     let key = key(worktree);
     let dir = dir(PROMPT_SUBDIR).ok()?;
     // Serialise the read-then-remove against `set` (see there): without the lock
@@ -198,10 +333,42 @@ pub fn take(worktree: &Path) -> Option<String> {
     match read_ours::<PromptFile>(&path, &key) {
         Some(file) => {
             let _ = fs::remove_file(&path);
-            Some(file.prompt)
+            Some(TakenPrompt {
+                prompt: file.prompt,
+                retry: file.retry,
+                reuse_live_agent: file.reuse_live_agent,
+            })
         }
         None => None,
     }
+}
+
+/// Whether `worktree` currently owns a durable launch prompt. Unlike
+/// [`any_queued`], this validates the stamped worktree under the store lock and
+/// is therefore suitable for deciding whether a restore fallback must yield to
+/// the queued launch owner.
+pub fn has_queued(worktree: &Path) -> Result<bool> {
+    let key = key(worktree);
+    let dir = dir(PROMPT_SUBDIR)?;
+    let _lock = StoreLock::acquire(&dir)?;
+    let path = dir.join(file_name(&key));
+    if !path.exists() {
+        return Ok(false);
+    }
+    read_ours::<PromptFile>(&path, &key)
+        .map(|_| true)
+        .ok_or_else(|| {
+            anyhow!(
+                "queued prompt file {} is unreadable or belongs to another worktree",
+                path.display()
+            )
+        })
+}
+
+/// Restore a state-carrying prompt removed by [`take_with_state`] without
+/// counting a new failure.
+pub fn requeue_taken(worktree: &Path, taken: TakenPrompt) -> Result<()> {
+    requeue_front_with_state(worktree, &taken.prompt, taken.retry, taken.reuse_live_agent)
 }
 
 /// Put a prompt taken for delivery back in front of the launch queue.
@@ -212,6 +379,28 @@ pub fn take(worktree: &Path) -> Option<String> {
 /// take, the restored prompt is prepended so retry order stays "old work first,
 /// newly queued work next" rather than losing either side.
 pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
+    requeue_front_with_live_handoff(worktree, prompt, false)
+}
+
+/// Put a taken prompt back at the front while preserving whether it may be
+/// handed to an eligible live agent.
+pub fn requeue_front_with_live_handoff(
+    worktree: &Path,
+    prompt: &str,
+    reuse_live_agent: bool,
+) -> Result<()> {
+    requeue_front_with_state(worktree, prompt, None, reuse_live_agent)
+}
+
+/// Put a taken prompt back at the front without counting another failure,
+/// preserving its retry state and live-handoff contract. This is used when a
+/// prepared launch is canceled or cannot reserve a slot before delivery begins.
+pub fn requeue_front_with_state(
+    worktree: &Path,
+    prompt: &str,
+    retry: Option<RetryState>,
+    reuse_live_agent: bool,
+) -> Result<()> {
     if prompt.is_empty() {
         return Ok(());
     }
@@ -219,7 +408,11 @@ pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
     let dir = dir(PROMPT_SUBDIR)?;
     let _lock = StoreLock::acquire(&dir)?;
     let path = dir.join(file_name(&key));
-    let merged = match read_ours::<PromptFile>(&path, &key) {
+    let existing = read_ours::<PromptFile>(&path, &key);
+    let reuse_live_agent =
+        reuse_live_agent && existing.as_ref().is_none_or(|file| file.reuse_live_agent);
+    let retry = retry.or_else(|| existing.as_ref().and_then(|file| file.retry.clone()));
+    let merged = match existing {
         Some(file) if !file.prompt.is_empty() => format!("{prompt}\n\n{}", file.prompt),
         _ => prompt.to_string(),
     };
@@ -229,7 +422,8 @@ pub fn requeue_front(worktree: &Path, prompt: &str) -> Result<()> {
         &PromptFile {
             worktree: key,
             prompt: merged,
-            retry: None,
+            retry,
+            reuse_live_agent,
         },
     )
 }
@@ -289,6 +483,17 @@ mod tests {
         std::env::remove_var(storage::DATA_DIR_ENV);
     }
 
+    fn ready_parts(taken: TakeReady) -> Option<(String, Option<RetryState>, bool)> {
+        match taken {
+            TakeReady::Ready {
+                prompt,
+                retry,
+                reuse_live_agent,
+            } => Some((prompt, retry, reuse_live_agent)),
+            _ => None,
+        }
+    }
+
     #[test]
     fn set_then_take_round_trips_and_is_one_shot() {
         with_data_dir(|_| {
@@ -317,12 +522,191 @@ mod tests {
             ));
             assert_eq!(
                 take_ready(wt.path(), now + Duration::from_secs(30)),
-                TakeReady::Ready("queued".to_string())
+                TakeReady::Ready {
+                    prompt: "queued".to_string(),
+                    retry: Some(retry),
+                    reuse_live_agent: false,
+                }
             );
             assert_eq!(
                 take_ready(wt.path(), now + Duration::from_secs(31)),
                 TakeReady::Empty
             );
+        });
+    }
+
+    #[test]
+    fn only_opted_in_launch_prompts_can_be_taken_for_a_live_agent() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let now = UNIX_EPOCH + Duration::from_secs(1_000);
+
+            set(wt.path(), "fresh only").unwrap();
+            assert_eq!(
+                take_ready_for_live_agent(wt.path(), now),
+                TakeReady::FreshLaunch
+            );
+            assert_eq!(take(wt.path()).as_deref(), Some("fresh only"));
+
+            set(wt.path(), "fresh backing off").unwrap();
+            requeue_after_failure(wt.path(), "fresh backing off", "spawn failed", now).unwrap();
+            assert_eq!(
+                take_ready_for_live_agent(wt.path(), now),
+                TakeReady::FreshLaunch,
+                "fresh-only retry state must not block the independent live channel",
+            );
+            for attempt in 1..MAX_PROMPT_RETRY_ATTEMPTS {
+                requeue_after_failure(
+                    wt.path(),
+                    "fresh backing off",
+                    &format!("spawn failed {attempt}"),
+                    now,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                take_ready_for_live_agent(wt.path(), now),
+                TakeReady::FreshLaunch,
+                "fresh-only dead-letter must not block the independent live channel",
+            );
+            assert_eq!(take(wt.path()).as_deref(), Some("fresh backing off"));
+
+            set_with_live_handoff(wt.path(), "reuse idle", true).unwrap();
+            assert_eq!(
+                take_ready_for_live_agent(wt.path(), now),
+                TakeReady::Ready {
+                    prompt: "reuse idle".to_string(),
+                    retry: None,
+                    reuse_live_agent: true,
+                }
+            );
+            assert_eq!(take(wt.path()), None);
+        });
+    }
+
+    #[test]
+    fn legacy_prompt_without_a_handoff_policy_remains_fresh_launch_only() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let key = key(wt.path());
+            let store_dir = dir(PROMPT_SUBDIR).unwrap();
+            fs::create_dir_all(&store_dir).unwrap();
+            let path = store_dir.join(file_name(&key));
+            fs::write(
+                &path,
+                serde_json::to_vec(&serde_json::json!({
+                    "worktree": key,
+                    "prompt": "legacy fresh work",
+                    "retry": null,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            assert_eq!(
+                take_ready_for_live_agent(wt.path(), UNIX_EPOCH),
+                TakeReady::FreshLaunch
+            );
+            assert!(
+                path.exists(),
+                "live handoff must not consume the legacy file"
+            );
+            assert_eq!(take(wt.path()).as_deref(), Some("legacy fresh work"));
+        });
+    }
+
+    #[test]
+    fn repeated_take_then_failure_preserves_retry_history_until_dead_letter() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set_with_live_handoff(wt.path(), "retry me", true).unwrap();
+            let mut now = UNIX_EPOCH + Duration::from_secs(2_000);
+
+            for expected_attempt in 1..=MAX_PROMPT_RETRY_ATTEMPTS {
+                let (prompt, retry, reuse_live_agent) =
+                    ready_parts(take_ready(wt.path(), now)).unwrap();
+                let state = requeue_front_after_failure(
+                    wt.path(),
+                    &prompt,
+                    retry.as_ref(),
+                    reuse_live_agent,
+                    "spawn failed",
+                    now,
+                )
+                .unwrap();
+                assert_eq!(state.attempts, expected_attempt);
+                assert_eq!(state.dead, expected_attempt == MAX_PROMPT_RETRY_ATTEMPTS);
+                now = UNIX_EPOCH + Duration::from_secs(state.next_retry_unix_secs);
+            }
+
+            assert!(matches!(take_ready(wt.path(), now), TakeReady::Dead(_)));
+        });
+    }
+
+    #[test]
+    fn requeue_merge_requires_every_prompt_to_allow_live_handoff() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            set_with_live_handoff(wt.path(), "auto fallback", true).unwrap();
+            let (prompt, retry, reuse_live_agent) =
+                ready_parts(take_ready_for_live_agent(wt.path(), UNIX_EPOCH)).unwrap();
+
+            // An explicit queue request lands after the take but before the
+            // failed delivery is restored.
+            set(wt.path(), "fresh pinned work").unwrap();
+            requeue_front_after_failure(
+                wt.path(),
+                &prompt,
+                retry.as_ref(),
+                reuse_live_agent,
+                "input failed",
+                UNIX_EPOCH,
+            )
+            .unwrap();
+
+            assert!(matches!(
+                take_ready_for_live_agent(
+                    wt.path(),
+                    UNIX_EPOCH + Duration::from_secs(RETRY_BASE.as_secs())
+                ),
+                TakeReady::FreshLaunch
+            ));
+            assert_eq!(
+                take(wt.path()).as_deref(),
+                Some("auto fallback\n\nfresh pinned work")
+            );
+        });
+    }
+
+    #[test]
+    fn failure_restore_handles_empty_old_work_and_surfaces_write_errors() {
+        with_data_dir(|_| {
+            assert_eq!(ready_parts(TakeReady::Empty), None);
+
+            let wt = tempfile::tempdir().unwrap();
+            set(wt.path(), "concurrent fresh work").unwrap();
+            requeue_front_after_failure(wt.path(), "", None, true, "old input failed", UNIX_EPOCH)
+                .unwrap();
+            assert_eq!(take(wt.path()).as_deref(), Some("concurrent fresh work"));
+
+            // Leave a directory at the addressed file path: the store lock is
+            // still usable, but the atomic rename cannot replace a directory.
+            // The error must reach the caller so it can log/escalate rather than
+            // claim that the undelivered prompt was restored.
+            let broken = tempfile::tempdir().unwrap();
+            let store_dir = dir(PROMPT_SUBDIR).unwrap();
+            fs::create_dir_all(&store_dir).unwrap();
+            let prompt_path = store_dir.join(file_name(&key(broken.path())));
+            fs::create_dir(&prompt_path).unwrap();
+            assert!(requeue_front_after_failure(
+                broken.path(),
+                "undelivered",
+                None,
+                true,
+                "input failed",
+                UNIX_EPOCH,
+            )
+            .is_err());
         });
     }
 
@@ -367,6 +751,61 @@ mod tests {
             TakeReady::Empty
         );
         std::env::remove_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR");
+    }
+
+    #[test]
+    fn strict_take_surfaces_store_errors_instead_of_reporting_empty() {
+        let _guard = crate::test_support::process_env_guard();
+        std::env::set_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR", "1");
+        let error = take_ready_strict(Path::new("/tmp/usagi-prompt-dir-error-strict"), UNIX_EPOCH)
+            .unwrap_err()
+            .to_string();
+        std::env::remove_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR");
+
+        assert!(error.contains("forced prompt dir error"));
+    }
+
+    #[test]
+    fn strict_take_and_has_queued_reject_corrupt_prompt_metadata() {
+        with_data_dir(|_| {
+            let take_wt = tempfile::tempdir().unwrap();
+            assert!(!has_queued(take_wt.path()).unwrap());
+
+            set(take_wt.path(), "must remain attributable").unwrap();
+            let take_path = dir(PROMPT_SUBDIR)
+                .unwrap()
+                .join(file_name(&key(take_wt.path())));
+            fs::write(&take_path, "not json").unwrap();
+
+            let take_error = take_ready_strict(take_wt.path(), UNIX_EPOCH)
+                .unwrap_err()
+                .to_string();
+            assert!(take_error.contains("unreadable or belongs to another worktree"));
+
+            let inspect_wt = tempfile::tempdir().unwrap();
+            set(inspect_wt.path(), "inspect without consuming").unwrap();
+            let inspect_path = dir(PROMPT_SUBDIR)
+                .unwrap()
+                .join(file_name(&key(inspect_wt.path())));
+            fs::write(inspect_path, "not json").unwrap();
+            let inspect_error = has_queued(inspect_wt.path()).unwrap_err().to_string();
+            assert!(inspect_error.contains("unreadable or belongs to another worktree"));
+        });
+    }
+
+    #[test]
+    fn strict_live_handoff_surfaces_store_errors_instead_of_reporting_empty() {
+        let _guard = crate::test_support::process_env_guard();
+        std::env::set_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR", "1");
+        let error = take_ready_for_live_agent_strict(
+            Path::new("/tmp/usagi-live-handoff-dir-error-strict"),
+            UNIX_EPOCH,
+        )
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("USAGI_TEST_AGENT_PROMPT_DIR_ERROR");
+
+        assert!(error.contains("forced prompt dir error"));
     }
 
     #[test]
@@ -420,6 +859,35 @@ mod tests {
             assert_eq!(take(wt.path()), Some("first".to_string()));
             requeue_front(wt.path(), "first").unwrap();
             assert_eq!(take(wt.path()), Some("first".to_string()));
+        });
+    }
+
+    #[test]
+    fn state_carrying_manual_take_restores_retry_and_handoff_policy() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            let now = UNIX_EPOCH + Duration::from_secs(4_000);
+            set_with_live_handoff(wt.path(), "manual retry", true).unwrap();
+            let expected_retry =
+                requeue_after_failure(wt.path(), "manual retry", "spawn failed", now).unwrap();
+
+            let taken = take_with_state(wt.path()).unwrap();
+            assert_eq!(taken.prompt, "manual retry");
+            assert_eq!(taken.retry.as_ref(), Some(&expected_retry));
+            assert!(taken.reuse_live_agent);
+            requeue_taken(wt.path(), taken).unwrap();
+
+            assert_eq!(
+                take_ready_for_live_agent(
+                    wt.path(),
+                    UNIX_EPOCH + Duration::from_secs(expected_retry.next_retry_unix_secs)
+                ),
+                TakeReady::Ready {
+                    prompt: "manual retry".to_string(),
+                    retry: Some(expected_retry),
+                    reuse_live_agent: true,
+                }
+            );
         });
     }
 
@@ -508,6 +976,7 @@ mod tests {
                     worktree: key(other.path()),
                     prompt: "not ours".to_string(),
                     retry: None,
+                    reuse_live_agent: false,
                 },
             )
             .unwrap();

@@ -15,7 +15,8 @@
 //! - **Lifecycle hooks** — Codex's hook events (`SessionStart`, `UserPromptSubmit`,
 //!   `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`) each run
 //!   `<usagi_bin> agent-phase <phase>`, so the agent reports its own
-//!   ready / running / waiting / ended state instead of usagi guessing from the
+//!   ready / running / waiting / ended state, while the common shell wrapper
+//!   records exited, instead of usagi guessing from the
 //!   terminal bell. Codex delivers the hook payload on stdin with the same `cwd`
 //!   and `source` fields Claude Code uses, so `usagi agent-phase` records the
 //!   phase for the right worktree with no Codex-specific handling. Because these

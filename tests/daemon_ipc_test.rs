@@ -15,7 +15,9 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use usagi::domain::daemon_ipc::{ClientMessage, FrameDecoder, ServerMessage, TerminalId};
+use usagi::domain::daemon_ipc::{
+    AttachFailure, ClientMessage, FrameDecoder, ServerMessage, TerminalId,
+};
 use usagi::infrastructure::daemon_ipc::{decode_message, encode_message, socket_path};
 use usagi::infrastructure::daemon_store;
 use usagi::infrastructure::resource::process_alive;
@@ -299,17 +301,17 @@ fn client_attaches_and_receives_the_terminal_screen() {
         let deadline = Instant::now() + e2e_budget(5);
         loop {
             match recv(&mut stream, &mut decoder, e2e_budget(5)) {
-                ServerMessage::Error { message } => {
-                    assert!(
-                        message.contains("no daemon terminal"),
-                        "odd error: {message}"
-                    );
+                ServerMessage::AttachRejected {
+                    terminal: rejected,
+                    reason: AttachFailure::Missing,
+                } => {
+                    assert_eq!(rejected, terminal);
                     break;
                 }
                 // Terminal output may still be in flight ahead of the reply.
                 ServerMessage::Screen { .. } | ServerMessage::Output { .. }
                     if Instant::now() < deadline => {}
-                other => panic!("expected Error for a worktree mismatch, got {other:?}"),
+                other => panic!("expected Missing attach refusal, got {other:?}"),
             }
         }
     });
@@ -349,6 +351,7 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
             &ClientMessage::Keys {
                 terminal,
                 data: b"printf usagi-keys-ok\n".to_vec(),
+                request_id: None,
             },
         );
         assert!(
@@ -361,6 +364,76 @@ fn keys_written_to_a_terminal_appear_on_its_screen() {
             ),
             "the typed marker never appeared on the terminal screen"
         );
+    });
+
+    stop_daemon(home.path(), &daemon_dir);
+
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn acknowledged_keys_report_pty_delivery_and_missing_terminal() {
+    let _guard = daemon_e2e_guard();
+    let home = tempfile::tempdir().unwrap();
+    let daemon_dir = home.path().join("daemon");
+    let sock = socket_path(&daemon_dir);
+    let worktree = tempfile::tempdir().unwrap();
+
+    let outcome = std::panic::catch_unwind(|| {
+        daemon_cmd(home.path(), "start");
+        assert!(
+            wait_for(&sock, e2e_budget(10)),
+            "daemon never created its IPC socket"
+        );
+        let mut stream = connect(&sock);
+        let mut decoder = FrameDecoder::new();
+        let (terminal, _) = spawn_terminal(&mut stream, &mut decoder, worktree.path());
+
+        // No screen feed is attached, so the next message is precisely the
+        // acknowledgement emitted after the daemon PTY writer accepts all
+        // bytes.
+        send(
+            &mut stream,
+            &ClientMessage::Keys {
+                terminal,
+                data: b"printf acknowledged-input\n".to_vec(),
+                request_id: Some(101),
+            },
+        );
+        assert_eq!(
+            recv(&mut stream, &mut decoder, e2e_budget(5)),
+            ServerMessage::InputResult {
+                request_id: 101,
+                terminal,
+                error: None,
+            }
+        );
+
+        // An acknowledged write to an absent terminal is rejected immediately
+        // with the same correlation id instead of looking successful at the
+        // socket boundary or timing out client-side.
+        let missing = terminal + 10_000;
+        send(
+            &mut stream,
+            &ClientMessage::Keys {
+                terminal: missing,
+                data: b"never written".to_vec(),
+                request_id: Some(102),
+            },
+        );
+        match recv(&mut stream, &mut decoder, e2e_budget(5)) {
+            ServerMessage::InputResult {
+                request_id: 102,
+                terminal,
+                error: Some(error),
+            } => {
+                assert_eq!(terminal, missing);
+                assert!(error.contains("no daemon terminal"), "odd error: {error}");
+            }
+            other => panic!("expected rejected InputResult, got {other:?}"),
+        }
     });
 
     stop_daemon(home.path(), &daemon_dir);

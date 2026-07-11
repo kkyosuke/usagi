@@ -30,7 +30,7 @@ use anyhow::Result;
 use console::Term;
 
 use crate::domain::workspace::Workspace;
-use crate::domain::workspace_state::SessionRecord;
+use crate::domain::workspace_state::{SessionAgent, SessionRecord};
 use crate::presentation::tui::io::term_reader::TermKeyReader;
 use crate::usecase::daemon_attach::{DaemonFailureFallback, UnattendedLaunchGuard};
 
@@ -43,6 +43,11 @@ use state::{
 
 type PaneEnv = std::collections::BTreeMap<String, String>;
 type PendingEnv = std::result::Result<PaneEnv, String>;
+
+/// Bound environment resolution plus agent provisioning for an unattended
+/// pane. A timed-out preparation is forgotten before it can spawn late; its
+/// prompt re-enters the bounded retry state machine.
+const LAUNCH_PREPARATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Refresh the workspace's session state from git (best-effort) and return the
 /// sessions to show. `sync` rewrites each session worktree's status; for a
@@ -202,7 +207,7 @@ struct PendingSpawn {
     agent_command: Option<String>,
     /// A queued launch prompt taken from disk but not yet delivered to a spawned
     /// pane. Cleared only after `add_pane_selected` succeeds.
-    queued_prompt: Option<String>,
+    queued_prompt: Option<crate::infrastructure::agent_prompt_store::TakenPrompt>,
     /// Filled by the resolver thread with the per-worktree environment; `None`
     /// until it lands (the Resolving phase).
     env: std::sync::Arc<std::sync::Mutex<Option<PendingEnv>>>,
@@ -215,9 +220,38 @@ struct PendingSpawn {
 
 type SharedEnv = Arc<(Mutex<Option<PaneEnv>>, Condvar)>;
 
+#[derive(Debug, Clone)]
+struct AutostartPrompts {
+    /// Ready launch-channel work claimed for this attempt. A dead or backing-off
+    /// record remains on disk and is therefore never represented here.
+    launch: Option<crate::infrastructure::agent_prompt_store::TakenPrompt>,
+    /// Live-channel work claimed for this attempt, preserved separately so a
+    /// failed spawn returns it to the live queue instead of inheriting launch
+    /// retry/dead-letter state.
+    live: Option<crate::infrastructure::agent_live_prompt_store::TakenLivePromptBatch>,
+}
+
+impl AutostartPrompts {
+    fn is_empty(&self) -> bool {
+        self.launch.is_none() && self.live.is_none()
+    }
+
+    fn opening_prompt(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(launch) = self.launch.as_ref() {
+            parts.push(launch.prompt.as_str());
+        }
+        if let Some(live) = self.live.as_ref() {
+            parts.extend(live.prompts.iter().map(String::as_str));
+        }
+        parts.join("\n\n")
+    }
+}
+
+#[derive(Debug, Clone)]
 enum LaunchSource {
     Restore,
-    Autostart { prompt: String },
+    Autostart(AutostartPrompts),
 }
 
 struct LaunchRequest {
@@ -230,6 +264,7 @@ struct LaunchRequest {
     session_model: Option<String>,
     stored_label: Option<String>,
     attach: Option<u64>,
+    fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt,
     active: Option<usize>,
     env: SharedEnv,
 }
@@ -242,6 +277,7 @@ struct PreparedLaunch {
     cli: crate::domain::settings::AgentCli,
     stored_label: Option<String>,
     attach: Option<u64>,
+    fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt,
     active: Option<usize>,
     env: PaneEnv,
     command: Option<String>,
@@ -256,6 +292,7 @@ struct LaunchResult {
 struct LaunchInFlight {
     dir: PathBuf,
     source: LaunchSource,
+    started_at: std::time::Instant,
 }
 
 struct LaunchJobManager {
@@ -265,12 +302,70 @@ struct LaunchJobManager {
     in_flight: HashMap<u64, LaunchInFlight>,
     dirs_in_flight: HashMap<PathBuf, usize>,
     unattended_guard: UnattendedLaunchGuard,
+    persist_open_panes: bool,
 }
 
 #[derive(Clone, Copy)]
 struct AutostartLaunchSettings {
     enabled: bool,
     limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedPromptAction {
+    DeliverToLiveAgent,
+    SpawnAgent,
+    WaitForSlot,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchQueuePoll {
+    Ready {
+        prompt: String,
+        retry: Option<crate::infrastructure::agent_prompt_store::RetryState>,
+        reuse_live_agent: bool,
+    },
+    BackingOff,
+    Dead(crate::infrastructure::agent_prompt_store::RetryState),
+    Empty,
+}
+
+/// Classify a durable launch record before touching the newer live queue. In
+/// particular, backoff is a stop signal rather than an empty launch result, so
+/// a live prompt cannot overtake it and spawn the agent first.
+fn classify_launch_queue(
+    taken: crate::infrastructure::agent_prompt_store::TakeReady,
+) -> LaunchQueuePoll {
+    use crate::infrastructure::agent_prompt_store::TakeReady;
+    match taken {
+        TakeReady::Ready {
+            prompt,
+            retry,
+            reuse_live_agent,
+        } => LaunchQueuePoll::Ready {
+            prompt,
+            retry,
+            reuse_live_agent,
+        },
+        TakeReady::Waiting(_) => LaunchQueuePoll::BackingOff,
+        TakeReady::Dead(retry) => LaunchQueuePoll::Dead(retry),
+        // `FreshLaunch` is only returned by the existing-agent take API, not by
+        // this fresh-spawn poll. Treat it conservatively as no consumable work.
+        TakeReady::FreshLaunch | TakeReady::Empty => LaunchQueuePoll::Empty,
+    }
+}
+
+/// Choose whether one queued target consumes a new agent slot. Keeping this
+/// independent of traversal is important: a zero fresh-spawn budget must not
+/// prevent a later daemon-surviving agent from receiving work.
+fn queued_prompt_action(has_live_agent: bool, slots_remaining: usize) -> QueuedPromptAction {
+    if has_live_agent {
+        QueuedPromptAction::DeliverToLiveAgent
+    } else if slots_remaining > 0 {
+        QueuedPromptAction::SpawnAgent
+    } else {
+        QueuedPromptAction::WaitForSlot
+    }
 }
 
 impl Drop for LaunchJobManager {
@@ -282,7 +377,7 @@ impl Drop for LaunchJobManager {
 }
 
 impl LaunchJobManager {
-    fn new() -> Self {
+    fn new(persist_open_panes: bool) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             tx,
@@ -291,6 +386,7 @@ impl LaunchJobManager {
             in_flight: HashMap::new(),
             dirs_in_flight: HashMap::new(),
             unattended_guard: UnattendedLaunchGuard::default(),
+            persist_open_panes,
         }
     }
 
@@ -300,6 +396,33 @@ impl LaunchJobManager {
 
     fn unattended_blocked_for(&self, dir: &Path) -> bool {
         self.unattended_guard.is_blocked(dir)
+    }
+
+    fn block_unattended_for(&mut self, dir: &Path) {
+        self.unattended_guard.block(dir);
+    }
+
+    fn persist_pool_snapshot(
+        &self,
+        pool: &std::cell::RefCell<terminal::pool::TerminalPool>,
+        dir: &Path,
+    ) {
+        if !self.persist_open_panes {
+            return;
+        }
+        match pool.borrow().snapshot_open_panes_for(dir) {
+            Some((active, panes)) => {
+                if let Err(error) =
+                    crate::infrastructure::open_panes_store::save(dir, active, &panes)
+                {
+                    crate::infrastructure::error_log::ErrorLog::record(&format!(
+                        "failed to persist background pane snapshot for {}: {error:#}",
+                        dir.display()
+                    ));
+                }
+            }
+            None => crate::infrastructure::open_panes_store::clear(dir),
+        }
     }
 
     fn env_slot(&self, ws_root: &Path) -> SharedEnv {
@@ -335,6 +458,7 @@ impl LaunchJobManager {
             LaunchInFlight {
                 dir: request.dir.clone(),
                 source: clone_launch_source(&request.source),
+                started_at: std::time::Instant::now(),
             },
         );
         let tx = self.tx.clone();
@@ -352,6 +476,43 @@ impl LaunchJobManager {
         tasks: &tasks::TaskHandle,
     ) -> Vec<String> {
         let mut lines = Vec::new();
+        let now = std::time::Instant::now();
+        let expired: Vec<u64> = self
+            .in_flight
+            .iter()
+            .filter_map(|(id, launch)| {
+                (now.saturating_duration_since(launch.started_at) >= LAUNCH_PREPARATION_TIMEOUT)
+                    .then_some(*id)
+            })
+            .collect();
+        for id in expired {
+            let Some(launch) = self.in_flight.remove(&id) else {
+                continue;
+            };
+            decrement_in_flight_dir(&mut self.dirs_in_flight, &launch.dir);
+            pool.borrow().release_autostart_dispatch(&launch.dir);
+            let error = format!(
+                "timed out after {}s while preparing pane launch for {}",
+                LAUNCH_PREPARATION_TIMEOUT.as_secs(),
+                launch.dir.display()
+            );
+            requeue_launch_failure(&launch.dir, &launch.source, &error);
+            crate::infrastructure::error_log::ErrorLog::record(&error);
+            tasks.complete(
+                id,
+                false,
+                tasks::Completion {
+                    line: LogLine::error(error.clone()),
+                    sessions: None,
+                    target_root: None,
+                    evict: None,
+                    focus: None,
+                    created: None,
+                    removed: None,
+                },
+            );
+            lines.push(error);
+        }
         while let Ok(result) = self.rx.try_recv() {
             let Some(in_flight) = self.in_flight.remove(&result.id) else {
                 continue;
@@ -370,6 +531,7 @@ impl LaunchJobManager {
                             label: &prepared.label,
                             env: &prepared.env,
                             attach: prepared.attach,
+                            fresh_fallback_prompt: prepared.fresh_fallback_prompt,
                             daemon_failure_fallback: DaemonFailureFallback::Unattended,
                         },
                     );
@@ -385,13 +547,15 @@ impl LaunchJobManager {
                             if let Some(active) = prepared.active {
                                 pool.borrow_mut().set_active(&prepared.dir, active);
                             }
+                            self.persist_pool_snapshot(pool, &prepared.dir);
                             let line = match &prepared.source {
                                 LaunchSource::Restore => {
                                     format!("restored pane for {}", prepared.label)
                                 }
-                                LaunchSource::Autostart { prompt } => format!(
+                                LaunchSource::Autostart(prompts) => format!(
                                     "queued prompt auto-started for {}: {}",
-                                    prepared.label, prompt
+                                    prepared.label,
+                                    prompts.opening_prompt()
                                 ),
                             };
                             tasks.complete(
@@ -410,19 +574,39 @@ impl LaunchJobManager {
                             lines.push(line);
                         }
                         Err(err) => {
-                            #[cfg(unix)]
-                            let build_unverified = err
-                                .downcast_ref::<
-                                    crate::infrastructure::daemon_client::DaemonBuildHandshakeError,
-                                >()
-                                .is_some();
-                            #[cfg(not(unix))]
-                            let build_unverified = false;
-                            if build_unverified {
+                            if err
+                                .downcast_ref::<terminal::pool::QueuedPromptOwnsFreshFallback>()
+                                .is_some()
+                            {
+                                release_launch_source(pool, &prepared.dir, &prepared.source);
+                                let line = format!(
+                                    "queued prompt will launch the current agent for {}",
+                                    prepared.label
+                                );
+                                tasks.complete(
+                                    result.id,
+                                    true,
+                                    tasks::Completion {
+                                        line: LogLine::output(line.clone()),
+                                        sessions: None,
+                                        target_root: None,
+                                        evict: None,
+                                        focus: None,
+                                        created: None,
+                                        removed: None,
+                                    },
+                                );
+                                lines.push(line);
+                                continue;
+                            }
+                            let ownership_unverified =
+                                matches!(prepared.pane_kind, terminal::tabs::PaneKind::Agent)
+                                    && pane_error_requires_unattended_guard(&err);
+                            if ownership_unverified {
                                 self.unattended_guard.block(&prepared.dir);
                             }
                             release_launch_source(pool, &prepared.dir, &prepared.source);
-                            if build_unverified {
+                            if ownership_unverified {
                                 requeue_launch_source(&prepared.dir, &prepared.source);
                             } else {
                                 requeue_launch_failure(
@@ -481,37 +665,127 @@ impl LaunchJobManager {
 }
 
 fn clone_launch_source(source: &LaunchSource) -> LaunchSource {
-    match source {
-        LaunchSource::Restore => LaunchSource::Restore,
-        LaunchSource::Autostart { prompt } => LaunchSource::Autostart {
-            prompt: prompt.clone(),
-        },
-    }
+    source.clone()
 }
 
 fn requeue_launch_source(dir: &Path, source: &LaunchSource) {
-    if let LaunchSource::Autostart { prompt } = source {
-        let _ = crate::infrastructure::agent_prompt_store::requeue_front(dir, prompt);
+    let LaunchSource::Autostart(prompts) = source else {
+        return;
+    };
+    restore_autostart_prompts(dir, prompts, "canceled queued prompt autostart");
+}
+
+fn restore_autostart_prompts(dir: &Path, prompts: &AutostartPrompts, context: &str) {
+    if let Some(taken) = prompts.launch.clone() {
+        restore_taken_prompt(dir, taken, context);
+    }
+    if let Some(live) = prompts.live.as_ref() {
+        if let Err(error) = crate::infrastructure::agent_live_prompt_store::requeue_taken(dir, live)
+        {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "failed to restore live prompt autostart for {} after {context}: {error:#}",
+                dir.display(),
+            ));
+        }
     }
 }
 
+fn restore_taken_prompt(
+    dir: &Path,
+    taken: crate::infrastructure::agent_prompt_store::TakenPrompt,
+    context: &str,
+) {
+    if let Err(error) = crate::infrastructure::agent_prompt_store::requeue_taken(dir, taken) {
+        crate::infrastructure::error_log::ErrorLog::record(&format!(
+            "failed to restore queued prompt for {} after {context}: {error:#}",
+            dir.display()
+        ));
+    }
+}
+
+fn pane_error_requires_unattended_guard(error: &anyhow::Error) -> bool {
+    #[cfg(unix)]
+    let daemon_ownership_unverified = error
+        .downcast_ref::<crate::infrastructure::daemon_client::DaemonBuildHandshakeError>()
+        .is_some();
+    #[cfg(not(unix))]
+    let daemon_ownership_unverified = false;
+
+    daemon_ownership_unverified
+        || error
+            .downcast_ref::<terminal::pool::UnconfirmedPaneCleanup>()
+            .is_some()
+        || error
+            .downcast_ref::<terminal::pool::UnverifiedDaemonOwnership>()
+            .is_some()
+}
+
 fn requeue_launch_failure(dir: &Path, source: &LaunchSource, error: &str) {
-    if let LaunchSource::Autostart { prompt } = source {
-        let retry = crate::infrastructure::agent_prompt_store::requeue_after_failure(
+    if let LaunchSource::Autostart(prompts) = source {
+        if let Some(live) = prompts.live.as_ref() {
+            let requeued =
+                crate::infrastructure::agent_live_prompt_store::requeue_after_spawn_failure(
+                    dir,
+                    live,
+                    error,
+                    std::time::SystemTime::now(),
+                );
+            let message = match requeued {
+                Ok(state) if state.dead => format!(
+                    "live prompt autostart for {} is dead-lettered after {} attempts: {}",
+                    dir.display(),
+                    state.attempts,
+                    error,
+                ),
+                Ok(state) => format!(
+                    "live prompt autostart for {} will retry after failure: {} (attempt {})",
+                    dir.display(),
+                    error,
+                    state.attempts,
+                ),
+                Err(requeue_error) => format!(
+                    "live prompt autostart for {} failed and its prompt could not be restored: \
+                     {} (launch error: {})",
+                    dir.display(),
+                    requeue_error,
+                    error,
+                ),
+            };
+            crate::infrastructure::error_log::ErrorLog::record(&message);
+        }
+        let Some(launch) = prompts.launch.as_ref() else {
+            return;
+        };
+        let retry = crate::infrastructure::agent_prompt_store::requeue_front_after_failure(
             dir,
-            prompt,
+            &launch.prompt,
+            launch.retry.as_ref(),
+            launch.reuse_live_agent,
             error,
             std::time::SystemTime::now(),
         );
-        crate::infrastructure::error_log::ErrorLog::record(&format!(
-            "queued prompt autostart for {} will retry after failure: {}{}",
-            dir.display(),
-            error,
-            retry
-                .as_ref()
-                .map(|state| format!(" (attempt {})", state.attempts))
-                .unwrap_or_default()
-        ));
+        let message = match retry {
+            Ok(state) if state.dead => format!(
+                "queued prompt autostart for {} is dead-lettered after {} attempts: {}",
+                dir.display(),
+                state.attempts,
+                error,
+            ),
+            Ok(state) => format!(
+                "queued prompt autostart for {} will retry after failure: {} (attempt {})",
+                dir.display(),
+                error,
+                state.attempts,
+            ),
+            Err(requeue_error) => format!(
+                "queued prompt autostart for {} failed and its prompt could not be restored: {} \
+                 (launch error: {})",
+                dir.display(),
+                requeue_error,
+                error,
+            ),
+        };
+        crate::infrastructure::error_log::ErrorLog::record(&message);
     }
 }
 
@@ -520,7 +794,7 @@ fn release_launch_source(
     dir: &Path,
     source: &LaunchSource,
 ) {
-    if matches!(source, LaunchSource::Autostart { .. }) {
+    if matches!(source, LaunchSource::Autostart(_)) {
         pool.borrow().release_autostart_dispatch(dir);
     }
 }
@@ -553,7 +827,7 @@ fn prepare_launch(
     let result = (|| {
         let env = wait_env(&request.env);
         let opening_prompt = match &request.source {
-            LaunchSource::Autostart { prompt } => Some(prompt.clone()),
+            LaunchSource::Autostart(prompts) => Some(prompts.opening_prompt()),
             LaunchSource::Restore => None,
         };
         let command = if matches!(request.pane_kind, terminal::tabs::PaneKind::Agent) {
@@ -564,7 +838,10 @@ fn prepare_launch(
             agent
                 .provision(&launch_wiring)
                 .map_err(|err| format!("agent provision failed: {err}"))?;
-            Some(agent.launch_command(&launch_wiring, resume, None))
+            Some(crate::domain::agent::with_exit_phase(
+                &agent.launch_command(&launch_wiring, resume, None),
+                &launch_wiring.usagi_bin,
+            ))
         } else {
             None
         };
@@ -576,6 +853,7 @@ fn prepare_launch(
             cli: request.cli,
             stored_label: request.stored_label,
             attach: request.attach,
+            fresh_fallback_prompt: request.fresh_fallback_prompt,
             active: request.active,
             env,
             command,
@@ -1077,7 +1355,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         scrollback_lines,
     ));
     let monitor = pool.borrow().monitor();
-    let launch_jobs = std::cell::RefCell::new(LaunchJobManager::new());
+    let launch_jobs = std::cell::RefCell::new(LaunchJobManager::new(restore_panes_enabled));
 
     // Restore each session's panes from the last run, in the background (nothing is
     // attached yet): an agent relaunches resuming its conversation, a terminal
@@ -1290,385 +1568,422 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // event loop is stopped while 没入 owns the screen), so hand it its own
     // handle onto the shared board.
     let pane_tasks = tasks.clone();
-    let mut open_terminal =
-        |home: &mut HomeState, dir: &Path, run_agent: bool, new_pane: bool| -> Result<PaneExit> {
-            // Resolve which agent CLI this launch drives. Priority: the user's 集中
-            // choice (menu picker / `agent <name>`), then the session's own pinned CLI
-            // (recorded when it was created / delegated), then the configured default.
-            // `take` clears the choice whether or not a fresh agent spawn follows, so a
-            // stale choice never leaks into a later launch. The default is read from
-            // the state (not captured at startup) so a CLI switched in Config takes
-            // effect on the next launch without restarting.
-            let session_agent = home.session_agent_for(dir);
-            let choice = home.take_agent_choice();
-            let cli = choice
-                .or(session_agent.cli)
-                .unwrap_or_else(|| home.default_agent());
-            // The session's pinned model (if any) rides into this launch's wiring; an
-            // unpinned session keeps the base wiring (the CLI's own default model).
-            let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
-            let agent = crate::infrastructure::agent::agent_for(cli);
-            // Build the agent command for this worktree on demand: when it already
-            // has a Claude conversation, launch with `--continue` so `:agent` resumes
-            // where it left off; otherwise it starts fresh. The pool only sends it on
-            // a fresh agent-pane spawn (re-attaching / terminal panes never use it).
-            // It is built unconditionally (not just for `run_agent`) so a later
-            // `Ctrl-O a` can spawn an agent pane too.
-            let resume = agent.has_resumable_session(dir);
-            let label = home
-                .list()
-                .worktrees()
-                .iter()
-                .find(|w| w.path.as_path() == dir)
-                .map(state::worktree_name)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    dir.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| dir.display().to_string())
-                });
-            // The pool borrow is taken per-operation (never held across the pane
-            // loop below), so the attached pane loop can itself take
-            // `pool.borrow_mut()` on its idle tick to autostart a queued prompt's
-            // agent pane in the background. Holding the guard across `pane::run`
-            // would make that a RefCell double borrow.
-            let handle = pool.borrow().monitor();
-            // A session holds at most one agent *per CLI*: a request to add an agent
-            // pane (集中's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
-            // that already has a pane reuses it — activating its tab below — rather
-            // than spawning a duplicate. A *different* CLI still spawns its own agent
-            // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
-            // spawn).
-            let reuse_agent = run_agent && new_pane && pool.borrow().has_agent_pane_of(dir, cli);
-            // Deliver a prompt queued for this session (via MCP `session_prompt`) only
-            // when this attach will *freshly spawn* its agent pane — `add_pane` always
-            // spawns; `enter` spawns only when no pane is live yet; reusing an existing
-            // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
-            // spawn happens it stays queued for the next launch.
-            let fresh_agent_spawn =
-                run_agent && !reuse_agent && (new_pane || !pool.borrow().has_live_pane(dir));
-            let queued_prompt = if fresh_agent_spawn {
-                crate::infrastructure::agent_prompt_store::take(dir)
-            } else {
-                None
-            };
-            // The command stays prompt-free; the queued MCP prompt is submitted
-            // through stdin after the fresh pane starts, so it is not counted
-            // against the shell argv limit and is delivered only once.
-            let spawn_prompt = queued_prompt.as_deref();
-            let _ = agent.provision(&launch_wiring);
-            let spawn_command = agent.launch_command(&launch_wiring, resume, None);
-            let plain_command = spawn_command.clone();
-            let initial = Some(spawn_command.as_str());
-            let later_initial = Some(plain_command.as_str());
-            // Resolve effective secret env (global plus workspace-local) only
-            // when this request will actually spawn a fresh shell. Re-attaching
-            // to an existing pane keeps the environment it was originally
-            // launched with.
-            let will_spawn =
-                (new_pane && !reuse_agent) || (!new_pane && !pool.borrow().has_live_pane(dir));
-            let pane_env = if will_spawn {
-                resolve_pane_env(term, home, dir)
-            } else {
-                std::collections::BTreeMap::new()
-            };
-            // The pane loop's idle-tick autostart hook: pick up prompts queued for
-            // pane-less sessions (an MCP `session_delegate_issue` / `session_prompt`
-            // from the coordinator agent driving this pane) and start their agent
-            // panes in the background while 没入 (Attached) owns the loop and the
-            // outer event loop is stopped. Mirrors the outer loop's `autostart_queued`
-            // hook exactly, spawning through the same `autostart_queued_prompts`; the
-            // per-operation pool borrows above keep this from double-borrowing.
-            let mut autostart_hook = |st: &HomeState| -> Vec<String> {
-                let mut lines = launch_jobs.borrow_mut().drain(term, &pool, &tasks);
-                lines.extend(reconcile_orchestrators(
-                    &terminal_root,
-                    &pool,
-                    autostart_queued_prompt_limit,
-                ));
-                lines.extend(autostart_queued_prompts(
-                    st,
-                    &pool,
-                    &launch_jobs,
-                    &tasks,
-                    &agent_wiring,
-                    default_cli,
-                    AutostartLaunchSettings {
-                        enabled: autostart_queued_prompts_enabled,
-                        limit: autostart_queued_prompt_limit,
-                    },
-                ));
-                lines
-            };
-            // Capture every failure of this launch — the initial spawn (`add_pane`
-            // / `enter`) and anything during the pane loop — in one `result`, so a
-            // launch that never gets a live pane is cleaned up and logged just like a
-            // mid-session failure instead of returning early past the cleanup and the
-            // error log below.
-            let mut prompt_delivered = false;
-            let result = (|| -> Result<PaneExit> {
-                // Ready the pane to drive: reuse the lone agent when a second was
-                // requested, add a fresh pane (集中's `terminal` / `agent`), or
-                // re-attach the session's active pane (spawning the first when the
-                // session is new). Each pool op takes a short-lived borrow so the
-                // pane loop below can autostart under its own `pool.borrow_mut()`.
-                if reuse_agent {
-                    pool.borrow_mut().activate_agent_of(dir, cli);
-                } else if new_pane {
-                    let kind = if run_agent {
-                        terminal::tabs::PaneKind::Agent
-                    } else {
-                        terminal::tabs::PaneKind::Terminal
-                    };
-                    pool.borrow_mut().add_pane(
-                        term,
-                        dir,
-                        kind,
-                        terminal::pool::PaneLaunch {
-                            agent_command: initial,
-                            opening_prompt: spawn_prompt,
-                            cli,
-                            label: &label,
-                            env: &pane_env,
-                            attach: None,
-                            daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
-                        },
-                    )?;
-                } else {
-                    pool.borrow_mut().enter(
-                        term,
-                        dir,
-                        run_agent,
-                        terminal::pool::PaneLaunch {
-                            agent_command: initial,
-                            opening_prompt: spawn_prompt,
-                            cli,
-                            label: &label,
-                            env: &pane_env,
-                            attach: None,
-                            daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
-                        },
-                    )?;
+    let mut open_terminal = |home: &mut HomeState,
+                             dir: &Path,
+                             run_agent: bool,
+                             new_pane: bool|
+     -> Result<PaneExit> {
+        // Resolve which agent CLI this launch drives. Priority: the user's 集中
+        // choice (menu picker / `agent <name>`), then the session's own pinned CLI
+        // (recorded when it was created / delegated), then the configured default.
+        // `take` clears the choice whether or not a fresh agent spawn follows, so a
+        // stale choice never leaks into a later launch. The default is read from
+        // the state (not captured at startup) so a CLI switched in Config takes
+        // effect on the next launch without restarting.
+        let session_agent =
+            persisted_session_agent_for(dir).unwrap_or_else(|_| home.session_agent_for(dir));
+        let choice = home.take_agent_choice();
+        let cli = choice
+            .or(session_agent.cli)
+            .unwrap_or_else(|| home.default_agent());
+        // The session's pinned model (if any) rides into this launch's wiring; an
+        // unpinned session keeps the base wiring (the CLI's own default model).
+        let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
+        let agent = crate::infrastructure::agent::agent_for(cli);
+        // Build the agent command for this worktree on demand: when it already
+        // has a Claude conversation, launch with `--continue` so `:agent` resumes
+        // where it left off; otherwise it starts fresh. The pool only sends it on
+        // a fresh agent-pane spawn (re-attaching / terminal panes never use it).
+        // It is built unconditionally (not just for `run_agent`) so a later
+        // `Ctrl-O a` can spawn an agent pane too.
+        let resume = agent.has_resumable_session(dir);
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
+            });
+        // `SessionEnd` leaves a writable bare shell behind. Retire that
+        // non-consumer before deciding reuse/fresh spawn; an unacknowledged
+        // daemon teardown fails this attended launch instead of duplicating it.
+        if run_agent {
+            match pool.borrow_mut().retire_exited_agent_panes(dir, &label) {
+                    terminal::pool::ExitedPaneRetirement::NotNeeded
+                    | terminal::pool::ExitedPaneRetirement::Retired => {}
+                    terminal::pool::ExitedPaneRetirement::Ambiguous => anyhow::bail!(
+                        "cannot choose which exited agent pane to relaunch for {}; close the stale pane first",
+                        dir.display()
+                    ),
+                    terminal::pool::ExitedPaneRetirement::Unconfirmed => anyhow::bail!(
+                        "cannot relaunch agent for {} because teardown of its exited pane was not acknowledged",
+                        dir.display()
+                    ),
                 }
-                if let Some(prompt) = queued_prompt.as_deref() {
-                    home.log_output(format!("queued prompt delivered to {label}: {prompt}"));
-                    prompt_delivered = true;
-                }
-                handle.set_attached(Some(dir.to_path_buf()));
-                loop {
-                    // Publish the tab strip for this session before driving the pane,
-                    // so it reflects any add / close / switch from the last step.
-                    let (labels, active_tab) = pool.borrow().tabs(dir);
-                    home.surface_writer(SurfaceOwner::Attached)
-                        .set_tabs(labels, active_tab);
-                    // The pane loop resolves the active pane from the pool itself each
-                    // pass (borrowing per iteration), so it can release the borrow on
-                    // its idle tick to autostart; it returns `Closed` when the session
-                    // has no pane left to drive.
-                    match terminal::pane::run(
-                        term,
-                        home,
-                        &pool,
-                        dir,
-                        &handle,
-                        &sessions_refresh,
-                        &pane_tasks,
-                        &mut autostart_hook,
-                    )? {
-                        // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
-                        terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
-                        // `Ctrl-E`: leave the pane to open the note editor over it;
-                        // the event loop re-attaches when the editor closes.
-                        terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
-                        // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
-                        // next iteration drives the newly active pane (and republishes
-                        // the tab strip above it) without leaving 没入.
-                        terminal::pane::PaneStep::NextTab => {
-                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Next);
-                        }
-                        terminal::pane::PaneStep::PrevTab => {
-                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Prev);
-                        }
-                        // `Ctrl+Shift+N` / `Ctrl+Shift+P`: reorder the active tab
-                        // in place and keep driving that same pane at its new slot.
-                        terminal::pane::PaneStep::SwapTabRight => {
-                            let _ = pool
-                                .borrow_mut()
-                                .swap_active(dir, terminal::tabs::TabSwap::Right);
-                        }
-                        terminal::pane::PaneStep::SwapTabLeft => {
-                            let _ = pool
-                                .borrow_mut()
-                                .swap_active(dir, terminal::tabs::TabSwap::Left);
-                        }
-                        // A click on a tab chip: jump straight to that pane and loop,
-                        // driving it (and republishing the strip) without leaving 没入.
-                        terminal::pane::PaneStep::ToTab(i) => {
-                            let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::To(i));
-                        }
-                        // Dragging one tab chip onto another reorders the pane
-                        // list; the moved pane stays active at its new slot.
-                        terminal::pane::PaneStep::MoveTab { from, to } => {
-                            let _ = pool.borrow_mut().move_tab(dir, from, to);
-                        }
-                        // A right-click tab menu action taken while attached:
-                        // reorder / rename / close the chosen tab against the pool
-                        // and keep driving (staying in 没入) — the same operations
-                        // the menu runs from 選択 / 集中 via `tab_action`, but here the
-                        // pool mutation loops back into the pane. `Move` / `Rename`
-                        // keep every pane alive; `Close` empties the session when it
-                        // was the last tab, so drop to 集中 like `CloseTab`.
-                        terminal::pane::PaneStep::MenuMoveTab { tab, swap } => {
-                            let _ = pool.borrow_mut().move_tab_by(dir, tab, swap);
-                        }
-                        terminal::pane::PaneStep::MenuRenameTab { tab, label: name } => {
-                            let _ = pool.borrow_mut().rename_tab(dir, tab, &name);
-                        }
-                        terminal::pane::PaneStep::MenuCloseTab { tab } => {
-                            if !pool.borrow_mut().close_tab(dir, tab, &label) {
-                                return Ok(PaneExit::Closed);
-                            }
-                        }
-                        // `Ctrl-T`: zoom out to 集中 (Closeup) so the user picks the next
-                        // action from the session's menu, leaving every pane alive in
-                        // the pool (like `Ctrl-O`, but one level shallower).
-                        terminal::pane::PaneStep::ToCloseup => return Ok(PaneExit::ToFocus),
-                        // `Ctrl-G`: a session holds at most one agent per CLI — jump
-                        // to this CLI's existing agent tab when present, else add one
-                        // (then loop, so the next iteration drives it and republishes
-                        // the tab strip without leaving 没入). `cli` is the launch CLI
-                        // resolved for this session drive (the 集中 choice or the
-                        // default), so `Ctrl-G` adds/focuses that CLI's agent.
-                        terminal::pane::PaneStep::NewAgentTab => {
-                            if !pool.borrow_mut().activate_agent_of(dir, cli) {
-                                let add_env = resolve_pane_env(term, home, dir);
-                                pool.borrow_mut().add_pane(
-                                    term,
-                                    dir,
-                                    terminal::tabs::PaneKind::Agent,
-                                    terminal::pool::PaneLaunch {
-                                        agent_command: later_initial,
-                                        opening_prompt: None,
-                                        cli,
-                                        label: &label,
-                                        env: &add_env,
-                                        attach: None,
-                                        daemon_failure_fallback:
-                                            DaemonFailureFallback::UserInitiated,
-                                    },
-                                )?;
-                            }
-                            // Jumped to / opened the agent pane: the next loop pass
-                            // drives that pane and republishes the tab strip.
-                        }
-                        // `Ctrl-O x` / `Alt-x`: close the active tab and keep driving
-                        // the surviving pane that slides into the active slot (a
-                        // different shell); when it was the last pane the session
-                        // empties, so drop back to 集中 — the same handling as a shell
-                        // that exits on its own (`Closed`).
-                        terminal::pane::PaneStep::CloseTab => {
-                            if !pool.borrow_mut().close_active(dir, &label) {
-                                return Ok(PaneExit::Closed);
-                            }
-                        }
-                        // `Ctrl-^`: leave the pane to jump to the previously focused
-                        // session; the event loop re-roots on it (attaching when live),
-                        // leaving every pane alive in the pool (like `Ctrl-O`).
-                        terminal::pane::PaneStep::PrevSession => {
-                            return Ok(PaneExit::ToPreviousSession)
-                        }
-                        // A double click on a sidebar session row: leave the pane so
-                        // the event loop re-roots on that focus row (attaching when
-                        // live), every pane staying alive in the pool (like `Ctrl-^`).
-                        terminal::pane::PaneStep::ToSession(row) => {
-                            return Ok(PaneExit::ToSession(row))
-                        }
-                        // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
-                        // the pool; the event loop raises the quit-confirmation modal.
-                        terminal::pane::PaneStep::Quit => return Ok(PaneExit::Quit),
-                        // The active pane's shell exited: drop it; keep driving when
-                        // a pane remains, else fall to 集中.
-                        terminal::pane::PaneStep::Closed => {
-                            if !pool.borrow_mut().close_active(dir, &label) {
-                                return Ok(PaneExit::Closed);
-                            }
-                            // The surviving pane that slides into the active slot is
-                            // driven on the next loop pass.
-                        }
-                    }
-                }
-            })();
-            // Leaving the pane (Ctrl-O → 選択, every pane closing, or an error) means
-            // nothing is attached any more; the shells themselves stay alive in the
-            // pool. Clear the whole surface (snapshot + tab strip) here, where the
-            // pane yields control, rather than relying on the event loop's next frame
-            // to mop up the stale screen snapshot — so the cleanup holds no matter
-            // when control changes hands.
-            handle.set_attached(None);
-            // Persist this session's open panes (or clear when the last one closed) so
-            // the next startup restores them — an agent resumes its conversation, a
-            // terminal reopens a fresh shell. Done here, where the pane yields control
-            // and the pool reflects the current set, so the on-disk snapshot tracks
-            // every add / close. Best-effort: a write failure just means no restore.
-            if restore_panes_enabled {
-                let snapshot = pool.borrow().snapshot_open_panes_for(dir);
-                match snapshot {
-                    Some((active, panes)) => {
-                        let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
-                    }
-                    None => crate::infrastructure::open_panes_store::clear(dir),
-                }
-            }
-            // Leaving only to edit the note (`Ctrl-E` → `PaneExit::OpenNote`) keeps
-            // the last screen snapshot: the note editor floats over the right pane,
-            // so the live terminal stays visible behind it, and the event loop
-            // re-attaches the moment the editor closes. Every other exit clears it.
-            if !matches!(result, Ok(PaneExit::OpenNote)) {
-                home.clear_terminal_surface();
-            }
-            if result.is_err() && !prompt_delivered {
-                if let Some(prompt) = queued_prompt.as_deref() {
-                    let _ = crate::infrastructure::agent_prompt_store::requeue_front(dir, prompt);
-                }
-            }
-            // The user may have committed / pushed / merged while in the pane, so
-            // re-sync the worktree statuses now that they have left it. The sync
-            // shells out to `git status` for every worktree and waits on the
-            // cross-process state lock, which is slow precisely when several sessions
-            // are running agents — so run it off the loop thread instead of freezing
-            // the detach here. The refreshed list is published to `sessions_refresh`
-            // for the event loop to apply on a later frame (keeping the cursor where
-            // it is); until then the just-left statuses stay on screen. The worker is
-            // tracked so a sync in flight at quit finishes its `state.json` write.
-            // Best-effort: a sync failure simply leaves the last-known statuses.
-            let refresh_handle = sessions_refresh.clone();
-            let refresh_root = terminal_root.clone();
-            if root_supports_git_sync(&refresh_root) {
-                let (refresh_root, generation, sync_state) =
-                    refresh_handle.begin_git_sync(refresh_root);
-                home.begin_git_sync(refresh_root.clone(), sync_state);
-                track_worker(
-                    &workers,
-                    std::thread::spawn(move || {
-                        let started_at = std::time::Instant::now();
-                        let result = sync_sessions_result(&refresh_root);
-                        refresh_handle.complete_git_sync(sessions_refresh::GitSyncOutcome {
-                            root: refresh_root,
-                            generation,
-                            started_at,
-                            finished_at: std::time::Instant::now(),
-                            result,
-                        });
-                    }),
-                );
-            }
-            // A launch / pane failure is surfaced and persisted by the event loop's
-            // single error sink: `open_pane` logs the failure through
-            // `HomeState::log_error`, which both shows it and writes it to the daily
-            // log file. No separate `ErrorLog::record` here, so the failure is recorded
-            // exactly once, by the same path as every other on-screen operation error.
-            result
+        }
+        // The pool borrow is taken per-operation (never held across the pane
+        // loop below), so the attached pane loop can itself take
+        // `pool.borrow_mut()` on its idle tick to autostart a queued prompt's
+        // agent pane in the background. Holding the guard across `pane::run`
+        // would make that a RefCell double borrow.
+        let handle = pool.borrow().monitor();
+        // A session holds at most one agent *per CLI*: a request to add an agent
+        // pane (集中's `agent`, or `Ctrl-G` routed through `new_pane`) for a CLI
+        // that already has a pane reuses it — activating its tab below — rather
+        // than spawning a duplicate. A *different* CLI still spawns its own agent
+        // pane alongside. Reuse also keeps the queued prompt unconsumed (no fresh
+        // spawn).
+        let reuse_agent = run_agent && new_pane && pool.borrow().has_agent_pane_of(dir, cli);
+        // Deliver a prompt queued for this session (via MCP `session_prompt`) only
+        // when this attach will *freshly spawn* its agent pane — `add_pane` always
+        // spawns; `enter` spawns only when no pane is live yet; reusing an existing
+        // agent never spawns. Taking it makes the prompt one-shot; if no fresh agent
+        // spawn happens it stays queued for the next launch.
+        let fresh_agent_spawn =
+            run_agent && !reuse_agent && (new_pane || !pool.borrow().has_live_pane(dir));
+        let mut queued_prompt = if fresh_agent_spawn {
+            crate::infrastructure::agent_prompt_store::take_with_state(dir)
+        } else {
+            None
         };
+        // The command stays prompt-free; the queued MCP prompt is submitted
+        // through stdin after the fresh pane starts, so it is not counted
+        // against the shell argv limit and is delivered only once.
+        let spawn_prompt = queued_prompt.as_ref().map(|taken| taken.prompt.as_str());
+        let _ = agent.provision(&launch_wiring);
+        let spawn_command = crate::domain::agent::with_exit_phase(
+            &agent.launch_command(&launch_wiring, resume, None),
+            &launch_wiring.usagi_bin,
+        );
+        let plain_command = spawn_command.clone();
+        let initial = Some(spawn_command.as_str());
+        let later_initial = Some(plain_command.as_str());
+        // Resolve effective secret env (global plus workspace-local) only
+        // when this request will actually spawn a fresh shell. Re-attaching
+        // to an existing pane keeps the environment it was originally
+        // launched with.
+        let will_spawn =
+            (new_pane && !reuse_agent) || (!new_pane && !pool.borrow().has_live_pane(dir));
+        let pane_env = if will_spawn {
+            resolve_pane_env(term, home, dir)
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        // The pane loop's idle-tick autostart hook: pick up prompts queued for
+        // pane-less sessions (an MCP `session_delegate_issue` / `session_prompt`
+        // from the coordinator agent driving this pane) and start their agent
+        // panes in the background while 没入 (Attached) owns the loop and the
+        // outer event loop is stopped. Mirrors the outer loop's `autostart_queued`
+        // hook exactly, spawning through the same `autostart_queued_prompts`; the
+        // per-operation pool borrows above keep this from double-borrowing.
+        let mut autostart_hook = |st: &HomeState| -> Vec<String> {
+            let mut lines = launch_jobs.borrow_mut().drain(term, &pool, &tasks);
+            lines.extend(reconcile_orchestrators(
+                &terminal_root,
+                &pool,
+                autostart_queued_prompt_limit,
+            ));
+            lines.extend(autostart_queued_prompts(
+                st,
+                &pool,
+                &launch_jobs,
+                &tasks,
+                &agent_wiring,
+                default_cli,
+                AutostartLaunchSettings {
+                    enabled: autostart_queued_prompts_enabled,
+                    limit: autostart_queued_prompt_limit,
+                },
+            ));
+            lines
+        };
+        // Capture every failure of this launch — the initial spawn (`add_pane`
+        // / `enter`) and anything during the pane loop — in one `result`, so a
+        // launch that never gets a live pane is cleaned up and logged just like a
+        // mid-session failure instead of returning early past the cleanup and the
+        // error log below.
+        let mut prompt_delivered = false;
+        let result = (|| -> Result<PaneExit> {
+            // Ready the pane to drive: reuse the lone agent when a second was
+            // requested, add a fresh pane (集中's `terminal` / `agent`), or
+            // re-attach the session's active pane (spawning the first when the
+            // session is new). Each pool op takes a short-lived borrow so the
+            // pane loop below can autostart under its own `pool.borrow_mut()`.
+            if reuse_agent {
+                pool.borrow_mut().activate_agent_of(dir, cli);
+            } else if new_pane {
+                let kind = if run_agent {
+                    terminal::tabs::PaneKind::Agent
+                } else {
+                    terminal::tabs::PaneKind::Terminal
+                };
+                pool.borrow_mut().add_pane(
+                    term,
+                    dir,
+                    kind,
+                    terminal::pool::PaneLaunch {
+                        agent_command: initial,
+                        opening_prompt: spawn_prompt,
+                        cli,
+                        label: &label,
+                        env: &pane_env,
+                        attach: None,
+                        fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
+                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
+                    },
+                )?;
+            } else {
+                pool.borrow_mut().enter(
+                    term,
+                    dir,
+                    run_agent,
+                    terminal::pool::PaneLaunch {
+                        agent_command: initial,
+                        opening_prompt: spawn_prompt,
+                        cli,
+                        label: &label,
+                        env: &pane_env,
+                        attach: None,
+                        fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
+                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
+                    },
+                )?;
+            }
+            if let Some(taken) = queued_prompt.as_ref() {
+                home.log_output(format!(
+                    "queued prompt delivered to {label}: {}",
+                    taken.prompt
+                ));
+                prompt_delivered = true;
+            }
+            handle.set_attached(Some(dir.to_path_buf()));
+            loop {
+                // Publish the tab strip for this session before driving the pane,
+                // so it reflects any add / close / switch from the last step.
+                let (labels, active_tab) = pool.borrow().tabs(dir);
+                home.surface_writer(SurfaceOwner::Attached)
+                    .set_tabs(labels, active_tab);
+                // The pane loop resolves the active pane from the pool itself each
+                // pass (borrowing per iteration), so it can release the borrow on
+                // its idle tick to autostart; it returns `Closed` when the session
+                // has no pane left to drive.
+                match terminal::pane::run(
+                    term,
+                    home,
+                    &pool,
+                    dir,
+                    &handle,
+                    &sessions_refresh,
+                    &pane_tasks,
+                    &mut autostart_hook,
+                )? {
+                    // `Ctrl-O`: zoom out to 選択, leaving every pane alive.
+                    terminal::pane::PaneStep::Detach => return Ok(PaneExit::ToSwitch),
+                    // `Ctrl-E`: leave the pane to open the note editor over it;
+                    // the event loop re-attaches when the editor closes.
+                    terminal::pane::PaneStep::OpenNote => return Ok(PaneExit::OpenNote),
+                    // `Ctrl-N` / `Ctrl-P`: move the active tab and loop, so the
+                    // next iteration drives the newly active pane (and republishes
+                    // the tab strip above it) without leaving 没入.
+                    terminal::pane::PaneStep::NextTab => {
+                        let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Next);
+                    }
+                    terminal::pane::PaneStep::PrevTab => {
+                        let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::Prev);
+                    }
+                    // `Ctrl+Shift+N` / `Ctrl+Shift+P`: reorder the active tab
+                    // in place and keep driving that same pane at its new slot.
+                    terminal::pane::PaneStep::SwapTabRight => {
+                        let _ = pool
+                            .borrow_mut()
+                            .swap_active(dir, terminal::tabs::TabSwap::Right);
+                    }
+                    terminal::pane::PaneStep::SwapTabLeft => {
+                        let _ = pool
+                            .borrow_mut()
+                            .swap_active(dir, terminal::tabs::TabSwap::Left);
+                    }
+                    // A click on a tab chip: jump straight to that pane and loop,
+                    // driving it (and republishing the strip) without leaving 没入.
+                    terminal::pane::PaneStep::ToTab(i) => {
+                        let _ = pool.borrow_mut().nav(dir, terminal::tabs::TabNav::To(i));
+                    }
+                    // Dragging one tab chip onto another reorders the pane
+                    // list; the moved pane stays active at its new slot.
+                    terminal::pane::PaneStep::MoveTab { from, to } => {
+                        let _ = pool.borrow_mut().move_tab(dir, from, to);
+                    }
+                    // A right-click tab menu action taken while attached:
+                    // reorder / rename / close the chosen tab against the pool
+                    // and keep driving (staying in 没入) — the same operations
+                    // the menu runs from 選択 / 集中 via `tab_action`, but here the
+                    // pool mutation loops back into the pane. `Move` / `Rename`
+                    // keep every pane alive; `Close` empties the session when it
+                    // was the last tab, so drop to 集中 like `CloseTab`.
+                    terminal::pane::PaneStep::MenuMoveTab { tab, swap } => {
+                        let _ = pool.borrow_mut().move_tab_by(dir, tab, swap);
+                    }
+                    terminal::pane::PaneStep::MenuRenameTab { tab, label: name } => {
+                        let _ = pool.borrow_mut().rename_tab(dir, tab, &name);
+                    }
+                    terminal::pane::PaneStep::MenuCloseTab { tab } => {
+                        if !pool.borrow_mut().close_tab(dir, tab, &label) {
+                            return Ok(PaneExit::Closed);
+                        }
+                    }
+                    // `Ctrl-T`: zoom out to 集中 (Closeup) so the user picks the next
+                    // action from the session's menu, leaving every pane alive in
+                    // the pool (like `Ctrl-O`, but one level shallower).
+                    terminal::pane::PaneStep::ToCloseup => return Ok(PaneExit::ToFocus),
+                    // `Ctrl-G`: a session holds at most one agent per CLI — jump
+                    // to this CLI's existing agent tab when present, else add one
+                    // (then loop, so the next iteration drives it and republishes
+                    // the tab strip without leaving 没入). `cli` is the launch CLI
+                    // resolved for this session drive (the 集中 choice or the
+                    // default), so `Ctrl-G` adds/focuses that CLI's agent.
+                    terminal::pane::PaneStep::NewAgentTab => {
+                        if !pool.borrow_mut().activate_agent_of(dir, cli) {
+                            let add_env = resolve_pane_env(term, home, dir);
+                            pool.borrow_mut().add_pane(
+                                term,
+                                dir,
+                                terminal::tabs::PaneKind::Agent,
+                                terminal::pool::PaneLaunch {
+                                    agent_command: later_initial,
+                                    opening_prompt: None,
+                                    cli,
+                                    label: &label,
+                                    env: &add_env,
+                                    attach: None,
+                                    fresh_fallback_prompt:
+                                        terminal::pool::FreshFallbackPrompt::Ignore,
+                                    daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
+                                },
+                            )?;
+                        }
+                        // Jumped to / opened the agent pane: the next loop pass
+                        // drives that pane and republishes the tab strip.
+                    }
+                    // `Ctrl-O x` / `Alt-x`: close the active tab and keep driving
+                    // the surviving pane that slides into the active slot (a
+                    // different shell); when it was the last pane the session
+                    // empties, so drop back to 集中 — the same handling as a shell
+                    // that exits on its own (`Closed`).
+                    terminal::pane::PaneStep::CloseTab => {
+                        if !pool.borrow_mut().close_active(dir, &label) {
+                            return Ok(PaneExit::Closed);
+                        }
+                    }
+                    // `Ctrl-^`: leave the pane to jump to the previously focused
+                    // session; the event loop re-roots on it (attaching when live),
+                    // leaving every pane alive in the pool (like `Ctrl-O`).
+                    terminal::pane::PaneStep::PrevSession => {
+                        return Ok(PaneExit::ToPreviousSession)
+                    }
+                    // A double click on a sidebar session row: leave the pane so
+                    // the event loop re-roots on that focus row (attaching when
+                    // live), every pane staying alive in the pool (like `Ctrl-^`).
+                    terminal::pane::PaneStep::ToSession(row) => {
+                        return Ok(PaneExit::ToSession(row))
+                    }
+                    // `Ctrl-Q`: leave 没入 to quit usagi. Every pane stays alive in
+                    // the pool; the event loop raises the quit-confirmation modal.
+                    terminal::pane::PaneStep::Quit => return Ok(PaneExit::Quit),
+                    // The active pane's shell exited: drop it; keep driving when
+                    // a pane remains, else fall to 集中.
+                    terminal::pane::PaneStep::Closed => {
+                        if !pool.borrow_mut().close_active(dir, &label) {
+                            return Ok(PaneExit::Closed);
+                        }
+                        // The surviving pane that slides into the active slot is
+                        // driven on the next loop pass.
+                    }
+                }
+            }
+        })();
+        // Leaving the pane (Ctrl-O → 選択, every pane closing, or an error) means
+        // nothing is attached any more; the shells themselves stay alive in the
+        // pool. Clear the whole surface (snapshot + tab strip) here, where the
+        // pane yields control, rather than relying on the event loop's next frame
+        // to mop up the stale screen snapshot — so the cleanup holds no matter
+        // when control changes hands.
+        handle.set_attached(None);
+        // Persist this session's open panes (or clear when the last one closed) so
+        // the next startup restores them — an agent resumes its conversation, a
+        // terminal reopens a fresh shell. Done here, where the pane yields control
+        // and the pool reflects the current set, so the on-disk snapshot tracks
+        // every add / close. Best-effort: a write failure just means no restore.
+        if restore_panes_enabled {
+            let snapshot = pool.borrow().snapshot_open_panes_for(dir);
+            match snapshot {
+                Some((active, panes)) => {
+                    let _ = crate::infrastructure::open_panes_store::save(dir, active, &panes);
+                }
+                None => crate::infrastructure::open_panes_store::clear(dir),
+            }
+        }
+        // Leaving only to edit the note (`Ctrl-E` → `PaneExit::OpenNote`) keeps
+        // the last screen snapshot: the note editor floats over the right pane,
+        // so the live terminal stays visible behind it, and the event loop
+        // re-attaches the moment the editor closes. Every other exit clears it.
+        if !matches!(result, Ok(PaneExit::OpenNote)) {
+            home.clear_terminal_surface();
+        }
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(pane_error_requires_unattended_guard)
+        {
+            launch_jobs.borrow_mut().block_unattended_for(dir);
+        }
+        if result.is_err() && !prompt_delivered {
+            if let Some(taken) = queued_prompt.take() {
+                restore_taken_prompt(dir, taken, "manual pane launch failure");
+            }
+        }
+        // The user may have committed / pushed / merged while in the pane, so
+        // re-sync the worktree statuses now that they have left it. The sync
+        // shells out to `git status` for every worktree and waits on the
+        // cross-process state lock, which is slow precisely when several sessions
+        // are running agents — so run it off the loop thread instead of freezing
+        // the detach here. The refreshed list is published to `sessions_refresh`
+        // for the event loop to apply on a later frame (keeping the cursor where
+        // it is); until then the just-left statuses stay on screen. The worker is
+        // tracked so a sync in flight at quit finishes its `state.json` write.
+        // Best-effort: a sync failure simply leaves the last-known statuses.
+        let refresh_handle = sessions_refresh.clone();
+        let refresh_root = terminal_root.clone();
+        if root_supports_git_sync(&refresh_root) {
+            let (refresh_root, generation, sync_state) =
+                refresh_handle.begin_git_sync(refresh_root);
+            home.begin_git_sync(refresh_root.clone(), sync_state);
+            track_worker(
+                &workers,
+                std::thread::spawn(move || {
+                    let started_at = std::time::Instant::now();
+                    let result = sync_sessions_result(&refresh_root);
+                    refresh_handle.complete_git_sync(sessions_refresh::GitSyncOutcome {
+                        root: refresh_root,
+                        generation,
+                        started_at,
+                        finished_at: std::time::Instant::now(),
+                        result,
+                    });
+                }),
+            );
+        }
+        // A launch / pane failure is surfaced and persisted by the event loop's
+        // single error sink: `open_pane` logs the failure through
+        // `HomeState::log_error`, which both shows it and writes it to the daily
+        // log file. No separate `ErrorLog::record` here, so the failure is recorded
+        // exactly once, by the same path as every other on-screen operation error.
+        result
+    };
 
     // Spawn a new pane for `dir` through the unified pending-tab path. Mirrors the
     // launch resolution `open_terminal` does (agent CLI choice, resume,
@@ -1689,100 +2004,120 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // the selected pane once the environment lands. Reusing an existing agent tab
     // opens no new pane: it activates that tab and returns `Reused` so the caller
     // re-attaches instead of tracking a loading tab.
-    let mut start_pending_spawn =
-        |home: &mut HomeState, dir: &Path, run_agent: bool| -> Result<event::StartPending> {
-            // CLI priority mirrors `open_terminal`: 集中 choice, then the session's
-            // pinned CLI, then the configured default; the session's pinned model
-            // rides into this launch's wiring.
-            let session_agent = home.session_agent_for(dir);
-            let choice = home.take_agent_choice();
-            let cli = choice
-                .or(session_agent.cli)
-                .unwrap_or_else(|| home.default_agent());
-            let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
-            let agent = crate::infrastructure::agent::agent_for(cli);
-            let resume = agent.has_resumable_session(dir);
-            let label = home
-                .list()
-                .worktrees()
-                .iter()
-                .find(|w| w.path.as_path() == dir)
-                .map(state::worktree_name)
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    dir.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| dir.display().to_string())
-                });
-            // A session holds at most one agent per CLI: a request to add one that
-            // already exists reuses its tab rather than a duplicate — so there is no
-            // new (loading) tab, and the caller just re-attaches it.
-            {
-                let mut pool = pool.borrow_mut();
-                if run_agent && pool.has_agent_pane_of(dir, cli) {
-                    pool.activate_agent_of(dir, cli);
-                    return Ok(event::StartPending::Reused);
-                }
-            }
-            // A fresh spawn: deliver a prompt queued for this session (MCP
-            // `session_prompt`), exactly as `open_terminal` does on a fresh
-            // agent-pane spawn.
-            let queued_prompt = if run_agent {
-                crate::infrastructure::agent_prompt_store::take(dir)
-            } else {
-                None
-            };
-            if run_agent {
-                let _ = agent.provision(&launch_wiring);
-            }
-            let (kind, agent_command, chip) = if run_agent {
-                (
-                    terminal::tabs::PaneKind::Agent,
-                    Some(agent.launch_command(&launch_wiring, resume, None)),
-                    cli.display_name().to_string(),
-                )
-            } else {
-                (
-                    terminal::tabs::PaneKind::Terminal,
-                    None,
-                    "terminal".to_string(),
-                )
-            };
-            // Resolve the per-worktree environment off the UI thread so the tab bar
-            // keeps animating and stays responsive; the pane is spawned once it lands.
-            let ws_root = crate::usecase::session::workspace_root(dir);
-            let env = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let worker_slot = env.clone();
-            let worker = std::thread::spawn(move || {
-                let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root)
-                }))
-                .map_err(|payload| {
-                    if let Some(s) = payload.downcast_ref::<&str>() {
-                        format!("environment resolver panicked: {s}")
-                    } else if let Some(s) = payload.downcast_ref::<String>() {
-                        format!("environment resolver panicked: {s}")
-                    } else {
-                        "environment resolver panicked".to_string()
-                    }
-                });
-                if let Ok(mut slot) = worker_slot.lock() {
-                    *slot = Some(resolved);
-                }
+    let mut start_pending_spawn = |home: &mut HomeState,
+                                   dir: &Path,
+                                   run_agent: bool|
+     -> Result<event::StartPending> {
+        // CLI priority mirrors `open_terminal`: 集中 choice, then the session's
+        // pinned CLI, then the configured default; the session's pinned model
+        // rides into this launch's wiring.
+        let session_agent =
+            persisted_session_agent_for(dir).unwrap_or_else(|_| home.session_agent_for(dir));
+        let choice = home.take_agent_choice();
+        let cli = choice
+            .or(session_agent.cli)
+            .unwrap_or_else(|| home.default_agent());
+        let launch_wiring = wiring_for_launch(&agent_wiring, session_agent.model, dir);
+        let agent = crate::infrastructure::agent::agent_for(cli);
+        let resume = agent.has_resumable_session(dir);
+        let label = home
+            .list()
+            .worktrees()
+            .iter()
+            .find(|w| w.path.as_path() == dir)
+            .map(state::worktree_name)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string())
             });
-            *pending_spawn.borrow_mut() = Some(PendingSpawn {
-                dir: dir.to_path_buf(),
-                kind,
-                cli,
-                label,
-                agent_command,
-                queued_prompt,
-                env,
-                pane_id: None,
-                _worker: worker,
-            });
-            Ok(event::StartPending::Pending { label: chip })
+        if run_agent {
+            match pool.borrow_mut().retire_exited_agent_panes(dir, &label) {
+                    terminal::pool::ExitedPaneRetirement::NotNeeded
+                    | terminal::pool::ExitedPaneRetirement::Retired => {}
+                    terminal::pool::ExitedPaneRetirement::Ambiguous => anyhow::bail!(
+                        "cannot choose which exited agent pane to relaunch for {}; close the stale pane first",
+                        dir.display()
+                    ),
+                    terminal::pool::ExitedPaneRetirement::Unconfirmed => anyhow::bail!(
+                        "cannot relaunch agent for {} because teardown of its exited pane was not acknowledged",
+                        dir.display()
+                    ),
+                }
+        }
+        // A session holds at most one agent per CLI: a request to add one that
+        // already exists reuses its tab rather than a duplicate — so there is no
+        // new (loading) tab, and the caller just re-attaches it.
+        {
+            let mut pool = pool.borrow_mut();
+            if run_agent && pool.has_agent_pane_of(dir, cli) {
+                pool.activate_agent_of(dir, cli);
+                return Ok(event::StartPending::Reused);
+            }
+        }
+        // A fresh spawn: deliver a prompt queued for this session (MCP
+        // `session_prompt`), exactly as `open_terminal` does on a fresh
+        // agent-pane spawn.
+        let queued_prompt = if run_agent {
+            crate::infrastructure::agent_prompt_store::take_with_state(dir)
+        } else {
+            None
         };
+        if run_agent {
+            let _ = agent.provision(&launch_wiring);
+        }
+        let (kind, agent_command, chip) = if run_agent {
+            (
+                terminal::tabs::PaneKind::Agent,
+                Some(crate::domain::agent::with_exit_phase(
+                    &agent.launch_command(&launch_wiring, resume, None),
+                    &launch_wiring.usagi_bin,
+                )),
+                cli.display_name().to_string(),
+            )
+        } else {
+            (
+                terminal::tabs::PaneKind::Terminal,
+                None,
+                "terminal".to_string(),
+            )
+        };
+        // Resolve the per-worktree environment off the UI thread so the tab bar
+        // keeps animating and stays responsive; the pane is spawned once it lands.
+        let ws_root = crate::usecase::session::workspace_root(dir);
+        let env = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_slot = env.clone();
+        let worker = std::thread::spawn(move || {
+            let resolved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::infrastructure::env_resolver::resolve_workspace_env(&ws_root)
+            }))
+            .map_err(|payload| {
+                if let Some(s) = payload.downcast_ref::<&str>() {
+                    format!("environment resolver panicked: {s}")
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    format!("environment resolver panicked: {s}")
+                } else {
+                    "environment resolver panicked".to_string()
+                }
+            });
+            if let Ok(mut slot) = worker_slot.lock() {
+                *slot = Some(resolved);
+            }
+        });
+        *pending_spawn.borrow_mut() = Some(PendingSpawn {
+            dir: dir.to_path_buf(),
+            kind,
+            cli,
+            label,
+            agent_command,
+            queued_prompt,
+            env,
+            pane_id: None,
+            _worker: worker,
+        });
+        Ok(event::StartPending::Pending { label: chip })
+    };
 
     // Drive the in-flight launch one frame. While its environment is still
     // resolving, report `Resolving`; on the frame it lands, spawn the pane selected
@@ -1800,10 +2135,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Ok(mut slot) => slot.take(),
                     Err(_) => {
                         let label = ps.label.clone();
-                        if let Some(prompt) = ps.queued_prompt.take() {
-                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
-                                dir, &prompt,
-                            );
+                        if let Some(taken) = ps.queued_prompt.take() {
+                            restore_taken_prompt(&ps.dir, taken, "environment resolver panic");
                         }
                         return event::PendingPoll::Failed {
                             error: format!(
@@ -1818,10 +2151,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     Some(Ok(env)) => env,
                     Some(Err(error)) => {
                         let label = ps.label.clone();
-                        if let Some(prompt) = ps.queued_prompt.take() {
-                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
-                                dir, &prompt,
-                            );
+                        if let Some(taken) = ps.queued_prompt.take() {
+                            restore_taken_prompt(&ps.dir, taken, "environment resolution failure");
                         }
                         pending.take();
                         return event::PendingPoll::Failed {
@@ -1837,18 +2168,22 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     ps.kind,
                     terminal::pool::PaneLaunch {
                         agent_command: ps.agent_command.as_deref(),
-                        opening_prompt: ps.queued_prompt.as_deref(),
+                        opening_prompt: ps
+                            .queued_prompt
+                            .as_ref()
+                            .map(|taken| taken.prompt.as_str()),
                         cli: ps.cli,
                         label: &ps.label,
                         env: &env,
                         attach: None,
+                        fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
                         daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                     },
                 ) {
                     Ok(id) => {
                         ps.pane_id = Some(id);
-                        let delivered = ps.queued_prompt.take().map(|prompt| {
-                            format!("queued prompt delivered to {}: {prompt}", ps.label)
+                        let delivered = ps.queued_prompt.take().map(|taken| {
+                            format!("queued prompt delivered to {}: {}", ps.label, taken.prompt)
                         });
                         match pool.tab_index_of(dir, id) {
                             Some(tab) => event::PendingPoll::Starting { tab, delivered },
@@ -1857,15 +2192,18 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     }
                     Err(err) => {
                         let label = ps.label.clone();
-                        if let Some(prompt) = ps.queued_prompt.take() {
-                            let _ = crate::infrastructure::agent_prompt_store::requeue_front(
-                                dir, &prompt,
-                            );
+                        let ownership_unverified = pane_error_requires_unattended_guard(&err);
+                        if ownership_unverified {
+                            launch_jobs.borrow_mut().block_unattended_for(&ps.dir);
+                        }
+                        let retryable = !ownership_unverified;
+                        if let Some(taken) = ps.queued_prompt.take() {
+                            restore_taken_prompt(&ps.dir, taken, "pending pane launch failure");
                         }
                         pending.take();
                         event::PendingPoll::Failed {
                             error: format!("failed to launch {label}: {err:#}"),
-                            retryable: true,
+                            retryable,
                         }
                     }
                 }
@@ -1906,8 +2244,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     // is discarded and no pane is spawned.
     let mut clear_pending_spawn = || {
         if let Some(mut ps) = pending_spawn.borrow_mut().take() {
-            if let Some(prompt) = ps.queued_prompt.take() {
-                let _ = crate::infrastructure::agent_prompt_store::requeue_front(&ps.dir, &prompt);
+            if let Some(taken) = ps.queued_prompt.take() {
+                restore_taken_prompt(&ps.dir, taken, "pending pane launch cancellation");
             }
         }
     };
@@ -2328,6 +2666,26 @@ fn wiring_for_launch(
     )
 }
 
+/// Read the launch pair from the authoritative workspace state immediately
+/// before claiming queued work. `session_prompt` persists an override before it
+/// writes the prompt file, so loading after the take observes that pair even
+/// when the home screen's 500 ms state watcher has not refreshed `HomeState`
+/// yet. The workspace root has no per-session override and returns the default.
+fn persisted_session_agent_for(dir: &Path) -> Result<SessionAgent> {
+    let workspace = crate::usecase::session::workspace_root(dir);
+    Ok(crate::usecase::session::list(&workspace)?
+        .into_iter()
+        .find(|session| {
+            session.root == dir
+                || session
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == dir)
+        })
+        .map(|session| session.agent)
+        .unwrap_or_default())
+}
+
 /// Restore each session's persisted panes into the pool on startup, in the
 /// background (nothing is attached yet): a terminal pane reopens a fresh shell, an
 /// agent pane relaunches its CLI — resuming the conversation when one exists, so it
@@ -2367,14 +2725,22 @@ fn dispatch_restore_open_panes(
             continue;
         };
         let ws_root = crate::usecase::session::workspace_root(&dir);
+        let session_agent =
+            persisted_session_agent_for(&dir).unwrap_or_else(|_| state.session_agent_for(&dir));
+        // Restore may reattach an existing daemon process, but an attach miss
+        // never claims queued work itself: the queue dispatcher owns claim →
+        // authoritative CLI/model reload → fresh spawn as one ordered path.
         for pane in &snapshot.panes {
-            let session_agent = state.session_agent_for(&dir);
             let (pane_kind, cli) = match pane.kind {
                 StoredPaneKind::Terminal => (PaneKind::Terminal, default_cli),
                 StoredPaneKind::Agent => (
                     PaneKind::Agent,
                     pane.cli.or(session_agent.cli).unwrap_or(default_cli),
                 ),
+            };
+            let fresh_fallback_prompt = match pane.kind {
+                StoredPaneKind::Terminal => terminal::pool::FreshFallbackPrompt::Ignore,
+                StoredPaneKind::Agent => terminal::pool::FreshFallbackPrompt::DeferIfQueued,
             };
             let id = tasks.begin(tasks::TaskKind::LaunchPane, &format!("restore {label}"));
             let env = launch_jobs.borrow().env_slot(&ws_root);
@@ -2387,9 +2753,10 @@ fn dispatch_restore_open_panes(
                     source: LaunchSource::Restore,
                     pane_kind,
                     cli,
-                    session_model: session_agent.model,
+                    session_model: session_agent.model.clone(),
                     stored_label: pane.label.clone(),
                     attach: pane.terminal,
+                    fresh_fallback_prompt,
                     active: Some(snapshot.active),
                     env,
                 },
@@ -2436,15 +2803,16 @@ fn reconcile_orchestrators(
 /// ([`agent_prompt_store`](crate::infrastructure::agent_prompt_store)) rather than
 /// the open-panes snapshot. Candidate dirs are the workspace root and every session
 /// worktree — the same set `restore_open_panes` scans. A session that already has a
-/// live pane is skipped, so its queued prompt is consumed the ordinary way (the
-/// next fresh launch, or the live pane's drain) instead.
+/// live agent pane reuses it: the watcher delivers an eligible `auto`-fallback
+/// launch prompt before its ordinary live queue. A terminal-only session still
+/// gets a new agent pane; explicit queue records remain fresh-launch-only.
 ///
-/// For a pane-less session it drains *both* delivery channels: the launch queue
+/// For a session without an agent pane it drains *both* delivery channels: the launch queue
 /// (the ordinary opening-message channel) and the
 /// [live queue](crate::infrastructure::agent_live_prompt_store). The latter holds
 /// prompts `session_prompt`'s explicit `mode="live"` appended for this session:
 /// that mode always queues to the live channel without checking for a live pane, so
-/// a prompt sent when none is open waits there. (`auto` mode does not strand prompts
+/// a prompt sent when no agent is open waits there. (`auto` mode does not strand prompts
 /// here — it routes live only when a pid-stamped live-pane marker confirms a running
 /// consumer.) With no pane to receive them they would otherwise strand forever, so
 /// they are folded into the fresh agent's opening message too. Taking each is
@@ -2476,9 +2844,6 @@ fn autostart_queued_prompts(
 
     let occupied = pool.borrow().occupied_agent_slots();
     let mut slots_remaining = autostart_slots_remaining(occupied, settings.limit);
-    if slots_remaining == 0 {
-        return Vec::new();
-    }
 
     // The dirs a queued prompt may be keyed by — the workspace root and each
     // session worktree — paired with the label shown when its pane starts. Deduped
@@ -2497,57 +2862,156 @@ fn autostart_queued_prompts(
 
     let mut logs = Vec::new();
     for (dir, label) in dirs {
-        if slots_remaining == 0 {
-            break;
-        }
-        // A live pane already drives this session (or an agent is running there):
-        // leave any queued prompt to the ordinary consume-on-fresh-launch path.
-        if pool.borrow().has_live_pane(&dir)
-            || launch_jobs.borrow().in_flight_for(&dir)
+        if launch_jobs.borrow().in_flight_for(&dir)
             || launch_jobs.borrow().unattended_blocked_for(&dir)
         {
             continue;
         }
-        // Gather any prompt queued for this pane-less session from both channels
-        // (see the fn doc): the launch queue's one-shot opening message, then any
-        // live-queue prompts stranded because their target pane no longer exists.
-        // Both takes are one-shot; joined into a single opening message when both
-        // hold something (usually only one does). Nothing queued in either simply
-        // skips this worktree.
-        let mut parts: Vec<String> = Vec::new();
-        match crate::infrastructure::agent_prompt_store::take_ready(
-            &dir,
-            std::time::SystemTime::now(),
-        ) {
-            crate::infrastructure::agent_prompt_store::TakeReady::Ready(prompt) => {
-                parts.push(prompt)
+        // A daemon-owned agent can outlive the TUI. Prompts queued while no TUI
+        // was present land in the launch channel, so a later re-attach must hand
+        // them to that existing agent instead of waiting forever for a fresh pane
+        // or spawning a duplicate. The watcher owns the actual take/write/requeue
+        // transaction; repeated UI passes collapse into one in-memory request.
+        let has_live_agent = pool.borrow().has_live_agent_pane(&dir);
+        if has_live_agent && !pool.borrow().live_agent_accepts_launch_prompt(&dir) {
+            continue;
+        }
+        match queued_prompt_action(has_live_agent, slots_remaining) {
+            QueuedPromptAction::DeliverToLiveAgent => {
+                pool.borrow().request_launch_prompt_delivery(&dir);
+                continue;
             }
-            crate::infrastructure::agent_prompt_store::TakeReady::Dead(retry) => {
-                crate::infrastructure::error_log::ErrorLog::record(&format!(
-                    "queued prompt autostart for {} is dead-lettered after {} attempt(s): {}",
-                    dir.display(),
-                    retry.attempts,
-                    retry.last_error
+            QueuedPromptAction::WaitForSlot => {
+                // Existing-agent delivery consumes no new process slot. Keep
+                // scanning so a later row can still hand off at zero spawn budget.
+                continue;
+            }
+            QueuedPromptAction::SpawnAgent => {}
+        }
+        // Gather work for this pane-less (or terminal-only) session from both
+        // channels. Keep each origin intact while the spawn is in flight: launch
+        // retry/dead-letter metadata belongs only to the launch record, while a
+        // failed live-only spawn must return its batch to the live queue.
+        let now = std::time::SystemTime::now();
+        let launch_poll =
+            match crate::infrastructure::agent_prompt_store::take_ready_strict(&dir, now) {
+                Ok(taken) => classify_launch_queue(taken),
+                Err(error) => {
+                    crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "deferred queued prompt launch for {} because the launch queue could not be \
+                     inspected: {error:#}",
+                    dir.display()
                 ));
+                    continue;
+                }
+            };
+        let launch = match launch_poll {
+            LaunchQueuePoll::Ready {
+                prompt,
+                retry,
+                reuse_live_agent,
+            } => Some(crate::infrastructure::agent_prompt_store::TakenPrompt {
+                prompt,
+                retry,
+                reuse_live_agent,
+            }),
+            // A dead record is terminal until a human intervenes. Leave it on
+            // disk, but do not let it permanently head-of-line block independent
+            // newer live work. Because origins stay separate, a failure below
+            // cannot copy the dead retry state onto that live work.
+            LaunchQueuePoll::Dead(_) => None,
+            // Keep the newer live channel untouched while older launch work is
+            // backing off. Otherwise the live prompt would spawn an agent first
+            // and invert the same cross-channel ordering the live-agent handoff
+            // path preserves.
+            LaunchQueuePoll::BackingOff => continue,
+            LaunchQueuePoll::Empty => None,
+        };
+        let live =
+            match crate::infrastructure::agent_live_prompt_store::take_ready_for_spawn(&dir, now) {
+                Ok(crate::infrastructure::agent_live_prompt_store::TakeReadyForSpawn::Ready(
+                    taken,
+                )) => Some(taken),
+                Ok(
+                    crate::infrastructure::agent_live_prompt_store::TakeReadyForSpawn::Waiting(_)
+                    | crate::infrastructure::agent_live_prompt_store::TakeReadyForSpawn::Dead(_)
+                    | crate::infrastructure::agent_live_prompt_store::TakeReadyForSpawn::Empty,
+                ) => None,
+                Err(error) => {
+                    restore_autostart_prompts(
+                        &dir,
+                        &AutostartPrompts { launch, live: None },
+                        "live queue inspection failure",
+                    );
+                    crate::infrastructure::error_log::ErrorLog::record(&format!(
+                        "deferred queued prompt launch for {} because the live queue could not be \
+                     inspected: {error:#}",
+                        dir.display()
+                    ));
+                    continue;
+                }
+            };
+        let prompts = AutostartPrompts { launch, live };
+        if prompts.is_empty() {
+            continue;
+        }
+        match pool.borrow_mut().retire_exited_agent_panes(&dir, &label) {
+            terminal::pool::ExitedPaneRetirement::NotNeeded => {}
+            terminal::pool::ExitedPaneRetirement::Retired => {
+                launch_jobs.borrow().persist_pool_snapshot(pool, &dir);
             }
-            crate::infrastructure::agent_prompt_store::TakeReady::Waiting(_)
-            | crate::infrastructure::agent_prompt_store::TakeReady::Empty => {}
+            terminal::pool::ExitedPaneRetirement::Ambiguous => {
+                restore_autostart_prompts(&dir, &prompts, "ambiguous exited panes");
+                launch_jobs.borrow_mut().block_unattended_for(&dir);
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "queued prompt launch blocked for {} because worktree-scoped exited phase \
+                     cannot identify one of multiple Agent panes; resolve or close the stale \
+                     pane, then restart the TUI",
+                    dir.display()
+                ));
+                continue;
+            }
+            terminal::pool::ExitedPaneRetirement::Unconfirmed => {
+                restore_autostart_prompts(&dir, &prompts, "unconfirmed exited-pane teardown");
+                launch_jobs.borrow_mut().block_unattended_for(&dir);
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "queued prompt launch blocked for {} because teardown of an exited daemon \
+                     pane was not acknowledged",
+                    dir.display()
+                ));
+                continue;
+            }
         }
-        parts.extend(crate::infrastructure::agent_live_prompt_store::take_all(
-            &dir,
-        ));
-        if parts.is_empty() {
+        // Phase/pane state may change between the first classification and an
+        // exited-pane retirement attempt. Never fresh-spawn from a stale
+        // pane-less decision; restore the exact claim and let the next tick
+        // choose live handoff (or keep a fresh-only record queued).
+        if pool.borrow().has_live_agent_pane(&dir) {
+            restore_autostart_prompts(&dir, &prompts, "live-agent race");
             continue;
         }
-        let prompt = parts.join("\n\n");
         if !pool.borrow().reserve_autostart_dispatch(&dir) {
-            let _ = crate::infrastructure::agent_prompt_store::requeue_front(&dir, &prompt);
+            restore_autostart_prompts(&dir, &prompts, "autostart reservation race");
             continue;
         }
-        // Launch with the session's pinned CLI / model when it has one (a delegated
-        // issue routed to a specific model), else the workspace default. This is the
-        // primary path a `session_delegate_issue(agent_cli, model)` takes effect on.
-        let session_agent = state.session_agent_for(&dir);
+        // Resolve the authoritative pair only after claiming the prompt:
+        // `session_prompt` commits the override before the queue file, whereas
+        // the in-memory HomeState may trail state.json by one watcher interval.
+        // A read failure restores the exact claim and its reservation rather
+        // than risking a stale CLI/model launch.
+        let session_agent = match persisted_session_agent_for(&dir) {
+            Ok(agent) => agent,
+            Err(error) => {
+                pool.borrow().release_autostart_dispatch(&dir);
+                restore_autostart_prompts(&dir, &prompts, "session-agent read failure");
+                crate::infrastructure::error_log::ErrorLog::record(&format!(
+                    "deferred queued prompt launch for {} because the persisted agent config \
+                     could not be read: {error:#}",
+                    dir.display()
+                ));
+                continue;
+            }
+        };
         let cli = session_agent.cli.unwrap_or(default_cli);
         let ws_root = crate::usecase::session::workspace_root(&dir);
         let id = tasks.begin(tasks::TaskKind::LaunchPane, &format!("autostart {label}"));
@@ -2558,14 +3022,13 @@ fn autostart_queued_prompts(
                 id,
                 dir: dir.clone(),
                 label: label.clone(),
-                source: LaunchSource::Autostart {
-                    prompt: prompt.clone(),
-                },
+                source: LaunchSource::Autostart(prompts),
                 pane_kind: PaneKind::Agent,
                 cli,
                 session_model: session_agent.model,
                 stored_label: None,
                 attach: None,
+                fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
                 active: None,
                 env,
             },
@@ -2722,9 +3185,21 @@ fn local_llm_available(settings: &crate::domain::settings::Settings) -> bool {
 #[cfg(test)]
 mod tests {
     use super::terminal::pool::MonitorSnapshot;
-    use super::{autostart_slots_remaining, state_fingerprint};
+    use super::{
+        autostart_slots_remaining, classify_launch_queue, persisted_session_agent_for,
+        queued_prompt_action, requeue_launch_failure, state_fingerprint, AutostartPrompts,
+        LaunchQueuePoll, LaunchSource, QueuedPromptAction,
+    };
     use std::collections::HashSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    fn with_data_dir(body: impl FnOnce(&Path)) {
+        let _guard = crate::test_support::process_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, dir.path());
+        body(dir.path());
+        std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+    }
 
     #[test]
     fn state_fingerprint_tracks_contents_not_mtime() {
@@ -2778,5 +3253,144 @@ mod tests {
         assert_eq!(autostart_slots_remaining(1, 4), 3);
         assert_eq!(autostart_slots_remaining(4, 4), 0);
         assert_eq!(autostart_slots_remaining(5, 4), 0);
+    }
+
+    #[test]
+    fn queued_prompt_action_reuses_live_agent_without_a_fresh_spawn_slot() {
+        assert_eq!(
+            queued_prompt_action(true, 0),
+            QueuedPromptAction::DeliverToLiveAgent
+        );
+        assert_eq!(
+            queued_prompt_action(false, 0),
+            QueuedPromptAction::WaitForSlot
+        );
+        assert_eq!(
+            queued_prompt_action(false, 1),
+            QueuedPromptAction::SpawnAgent,
+            "a terminal-only session has no live agent and may spawn one",
+        );
+    }
+
+    #[test]
+    fn launch_queue_backoff_blocks_the_newer_live_channel() {
+        use crate::infrastructure::agent_prompt_store::{RetryState, TakeReady};
+
+        let retry = RetryState {
+            attempts: 2,
+            next_retry_unix_secs: 60,
+            last_error: "spawn failed".to_string(),
+            dead: false,
+        };
+        assert_eq!(
+            classify_launch_queue(TakeReady::Waiting(retry)),
+            LaunchQueuePoll::BackingOff
+        );
+        assert_eq!(
+            classify_launch_queue(TakeReady::FreshLaunch),
+            LaunchQueuePoll::Empty
+        );
+    }
+
+    #[test]
+    fn dead_launch_retry_never_contaminates_a_newer_live_spawn_failure() {
+        use crate::infrastructure::agent_live_prompt_store::{self, TakeReadyForSpawn};
+        use crate::infrastructure::agent_prompt_store::{self, RetryState};
+
+        with_data_dir(|_| {
+            let worktree = tempfile::tempdir().unwrap();
+            let dead = RetryState {
+                attempts: agent_prompt_store::MAX_PROMPT_RETRY_ATTEMPTS,
+                next_retry_unix_secs: u64::MAX,
+                last_error: "old launch failed".to_string(),
+                dead: true,
+            };
+            agent_prompt_store::requeue_front_with_state(
+                worktree.path(),
+                "old dead launch",
+                Some(dead.clone()),
+                false,
+            )
+            .unwrap();
+            agent_live_prompt_store::append(worktree.path(), "new live work").unwrap();
+            let live = match agent_live_prompt_store::take_ready_for_spawn(
+                worktree.path(),
+                std::time::SystemTime::now(),
+            )
+            .unwrap()
+            {
+                TakeReadyForSpawn::Ready(taken) => taken,
+                other => panic!("expected ready live batch, got {other:?}"),
+            };
+
+            requeue_launch_failure(
+                worktree.path(),
+                &LaunchSource::Autostart(AutostartPrompts {
+                    launch: None,
+                    live: Some(live),
+                }),
+                "daemon unavailable",
+            );
+
+            let launch = agent_prompt_store::take_with_state(worktree.path()).unwrap();
+            assert_eq!(launch.prompt, "old dead launch");
+            assert_eq!(launch.retry, Some(dead));
+            assert!(matches!(
+                agent_live_prompt_store::take_ready_for_spawn(
+                    worktree.path(),
+                    std::time::SystemTime::now(),
+                )
+                .unwrap(),
+                TakeReadyForSpawn::Waiting(retry) if retry.attempts == 1 && !retry.dead
+            ));
+        });
+    }
+
+    #[test]
+    fn queued_launch_reads_the_persisted_agent_pair_without_waiting_for_home_refresh() {
+        use crate::domain::settings::AgentCli;
+        use crate::domain::workspace_state::{SessionAgent, SessionRecord, WorkspaceState};
+        use crate::infrastructure::workspace_store::WorkspaceStore;
+        use chrono::Utc;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join(".usagi/sessions/work");
+        let record = SessionRecord {
+            todos: Vec::new(),
+            decisions: Vec::new(),
+            name: "work".to_string(),
+            display_name: None,
+            note: None,
+            label_id: None,
+            agent: SessionAgent {
+                cli: Some(AgentCli::Codex),
+                model: Some("old-model".to_string()),
+            },
+            origin: Default::default(),
+            started_from: None,
+            root: root.clone(),
+            worktrees: Vec::new(),
+            created_at: Utc::now(),
+            last_active: None,
+        };
+        let mut state = WorkspaceState {
+            sessions: vec![record],
+            ..WorkspaceState::default()
+        };
+        let store = WorkspaceStore::new(workspace.path());
+        store.save(&state).unwrap();
+
+        // This is the MCP ordering: update state.json, then publish the prompt.
+        // The home screen may still hold the old pair, but dispatch reloads it.
+        state.sessions[0].agent = SessionAgent {
+            cli: Some(AgentCli::Claude),
+            model: Some("new-model".to_string()),
+        };
+        store.save(&state).unwrap();
+
+        assert_eq!(
+            persisted_session_agent_for(&root).unwrap(),
+            state.sessions[0].agent
+        );
     }
 }

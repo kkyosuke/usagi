@@ -434,7 +434,7 @@ fn owner_needs_wakeup(workspace: &Path, plan: &Plan, actions: &[Action]) -> Resu
         }
     }
     let ended_or_absent = match owner_phase {
-        Some(phase) => phase == AgentPhase::Ended,
+        Some(phase) => matches!(phase, AgentPhase::Ended | AgentPhase::Exited),
         None => true,
     };
     Ok(ended_or_absent && !owner.as_os_str().is_empty())

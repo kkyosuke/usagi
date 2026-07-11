@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::domain::daemon_ipc::{FrameDecoder, ServerMessage, TerminalId};
+use crate::domain::daemon_ipc::{AttachFailure, FrameDecoder, ServerMessage, TerminalId};
 
 /// Whether a daemon failure may degrade a fresh pane to a TUI-local PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,18 +54,19 @@ pub enum DaemonWorktreeOwnership {
     Absent,
 }
 
-/// Decide whether a failed daemon spawn may continue with a local PTY. Ordinary
-/// daemon unavailability preserves the existing fallback. An unattended launch
-/// across an unverified build may fall back only when the durable registry
-/// proves that the daemon owns no terminal for the target worktree.
+/// Decide whether a failed daemon spawn may continue with a local PTY. Attended
+/// launches preserve the interactive fallback. Unattended queued work never
+/// falls back merely because the daemon is unavailable — doing so would stop the
+/// worker when the TUI exits. Across an unverified build mismatch, a known-empty
+/// registry is the sole safe unattended fallback case.
 pub fn should_fallback_to_local(
     policy: DaemonFailureFallback,
     failure: DaemonFailureKind,
     ownership: DaemonWorktreeOwnership,
 ) -> bool {
     matches!(policy, DaemonFailureFallback::UserInitiated)
-        || matches!(failure, DaemonFailureKind::Unavailable)
-        || matches!(ownership, DaemonWorktreeOwnership::Absent)
+        || (matches!(failure, DaemonFailureKind::BuildUnverified)
+            && matches!(ownership, DaemonWorktreeOwnership::Absent))
 }
 
 /// Worktrees whose unattended launch is paused because their daemon build could
@@ -238,7 +239,11 @@ pub enum AttachReply {
     /// The attach took: the client now receives this terminal's feed. Carries
     /// the shell's pid (the spawn-less re-attach path never saw `Spawned`).
     Ready { pid: u32 },
-    /// The daemon refused the attach (unknown id, or a worktree mismatch).
+    /// The daemon definitively has no matching terminal, so a fresh fallback is
+    /// safe.
+    Missing,
+    /// The terminal may still be alive (adopted after restart), or the daemon
+    /// returned an untyped error. Fresh fallback is unsafe.
     Rejected(String),
     /// Not an answer to the attach — keep reading.
     NotYet,
@@ -251,6 +256,17 @@ pub fn attach_reply(message: &ServerMessage, terminal: TerminalId) -> AttachRepl
         ServerMessage::Attached { terminal: id, pid } if *id == terminal => {
             AttachReply::Ready { pid: *pid }
         }
+        ServerMessage::AttachRejected {
+            terminal: id,
+            reason: AttachFailure::Missing,
+        } if *id == terminal => AttachReply::Missing,
+        ServerMessage::AttachRejected {
+            terminal: id,
+            reason: AttachFailure::Adopted,
+        } if *id == terminal => AttachReply::Rejected(
+            "daemon adopted the terminal after restart; its live process cannot be attached"
+                .to_string(),
+        ),
         ServerMessage::Error { message } => AttachReply::Rejected(message.clone()),
         _ => AttachReply::NotYet,
     }
@@ -613,10 +629,15 @@ mod tests {
             DaemonFailureKind::BuildUnverified,
             DaemonWorktreeOwnership::Absent,
         ));
-        assert!(should_fallback_to_local(
+        assert!(!should_fallback_to_local(
             DaemonFailureFallback::Unattended,
             DaemonFailureKind::Unavailable,
             DaemonWorktreeOwnership::Present,
+        ));
+        assert!(!should_fallback_to_local(
+            DaemonFailureFallback::Unattended,
+            DaemonFailureKind::Unavailable,
+            DaemonWorktreeOwnership::Absent,
         ));
     }
 
@@ -657,6 +678,26 @@ mod tests {
             ),
             AttachReply::NotYet
         );
+        assert_eq!(
+            attach_reply(
+                &ServerMessage::AttachRejected {
+                    terminal: 3,
+                    reason: AttachFailure::Missing,
+                },
+                3
+            ),
+            AttachReply::Missing
+        );
+        assert!(matches!(
+            attach_reply(
+                &ServerMessage::AttachRejected {
+                    terminal: 3,
+                    reason: AttachFailure::Adopted,
+                },
+                3
+            ),
+            AttachReply::Rejected(reason) if reason.contains("adopted")
+        ));
         assert_eq!(
             attach_reply(
                 &ServerMessage::Error {

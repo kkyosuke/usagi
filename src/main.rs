@@ -4,7 +4,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use usagi::presentation::mcp::child_io::{read_capped, wait_with_timeout, WaitableChild};
 use usagi::presentation::mcp::llm::LlmBackend;
-use usagi::presentation::mcp::session::AgentBackend;
+use usagi::presentation::mcp::session::{AgentBackend, LaunchPromptDelivery};
 use usagi::usecase::session;
 
 /// The production [`AgentBackend`] for `usagi mcp`, wired in here at the
@@ -12,9 +12,9 @@ use usagi::usecase::session;
 /// and unit-testable.
 ///
 /// `prompt` *queues* the prompt for the target session's worktree rather than
-/// running an agent itself: it leaves the prompt in `agent_prompt_store` and the
-/// home screen delivers it the next time it freshly launches that session's
-/// agent pane. `send` is the live counterpart: it appends the prompt to
+/// running an agent itself: explicit launch requests are reserved for a fresh
+/// agent, while an `auto` fallback may be handed to an eligible existing agent
+/// after the TUI returns. `send` is the live counterpart: it appends the prompt to
 /// `agent_live_prompt_store`, which a currently running TUI drains into the
 /// session's existing agent pane.
 ///
@@ -24,15 +24,32 @@ use usagi::usecase::session;
 struct CliAgentBackend;
 
 impl AgentBackend for CliAgentBackend {
-    fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
-        usagi::infrastructure::agent_prompt_store::set(worktree, prompt)
-            .map_err(|e| e.to_string())?;
-        Ok(
-            "Queued the prompt for this session's agent. It is delivered as the agent's \
-            opening message the next time the session's agent pane is launched from the \
-            usagi home screen (focus the session, then run `agent`)."
-                .to_string(),
+    fn prompt(
+        &self,
+        worktree: &Path,
+        prompt: &str,
+        delivery: LaunchPromptDelivery,
+    ) -> Result<String, String> {
+        let reuse_live_agent = delivery == LaunchPromptDelivery::ReuseLiveAgent;
+        usagi::infrastructure::agent_prompt_store::set_with_live_handoff(
+            worktree,
+            prompt,
+            reuse_live_agent,
         )
+        .map_err(|e| e.to_string())?;
+        match delivery {
+            LaunchPromptDelivery::FreshLaunch => Ok(
+                "Queued the prompt for this session's next fresh agent launch. The usagi home \
+                 screen delivers it as that agent's opening message."
+                    .to_string(),
+            ),
+            LaunchPromptDelivery::ReuseLiveAgent => Ok(
+                "Queued the prompt after auto mode found no live TUI consumer. When a TUI is \
+                 available, it may deliver the prompt to an existing agent that is not reported \
+                 running/waiting, or use it as the opening message for a fresh agent launch."
+                    .to_string(),
+            ),
+        }
     }
 
     fn send(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
@@ -53,7 +70,7 @@ impl AgentBackend for CliAgentBackend {
             Ok(
                 "Appended the prompt to this session's live queue, but no live agent pane is \
                 open for it right now, so nothing will deliver it until one opens (launch the \
-                session's agent from the usagi home screen). To have the prompt run on the \
+                session's agent from the usagi home screen). To reserve the prompt for the \
                 next fresh launch instead, send it with mode \"queue\"."
                     .to_string(),
             )
@@ -1019,9 +1036,18 @@ impl DaemonIpcServer {
                     self.attach_table.detach(id, terminal);
                     true
                 }
-                Action::Keys(terminal, data) => {
-                    self.write_terminal(terminal, &data);
-                    true
+                Action::Keys {
+                    terminal,
+                    data,
+                    request_id,
+                } => {
+                    let result = self.write_terminal(terminal, &data);
+                    match usagi::usecase::daemon_ipc::build_input_result(
+                        request_id, terminal, result,
+                    ) {
+                        Some(reply) => self.send(id, &reply),
+                        None => true,
+                    }
                 }
                 Action::Resize(terminal, cols, rows) => {
                     self.resize_terminal(terminal, cols, rows);
@@ -1046,22 +1072,18 @@ impl DaemonIpcServer {
         if !self.terminal_registry.belongs_to(terminal, worktree) {
             return self.send(
                 id,
-                &ServerMessage::Error {
-                    message: format!(
-                        "no daemon terminal {terminal} runs in {}",
-                        worktree.display()
-                    ),
+                &ServerMessage::AttachRejected {
+                    terminal,
+                    reason: usagi::domain::daemon_ipc::AttachFailure::Missing,
                 },
             );
         }
         if !self.terminals.contains_key(&terminal) {
             return self.send(
                 id,
-                &ServerMessage::Error {
-                    message: format!(
-                        "daemon terminal {terminal} was adopted after a daemon restart; \
-                         its screen stream is unavailable"
-                    ),
+                &ServerMessage::AttachRejected {
+                    terminal,
+                    reason: usagi::domain::daemon_ipc::AttachFailure::Adopted,
                 },
             );
         }
@@ -1107,14 +1129,20 @@ impl DaemonIpcServer {
         true
     }
 
-    /// Write input bytes to `terminal`, if it is running. Best-effort: a write
-    /// error (e.g. the shell just exited) is logged, not fatal.
-    fn write_terminal(&mut self, terminal: u64, data: &[u8]) {
-        if let Some(session) = self.terminals.get_mut(&terminal) {
-            if let Err(error) = session.write(data) {
-                eprintln!("usagi daemon: writing to terminal {terminal}: {error:#}");
-            }
-        }
+    /// Write input bytes to `terminal`. The returned result is correlated back
+    /// to acknowledged callers; fire-and-forget interactive input simply logs
+    /// the same error and continues serving the connection.
+    fn write_terminal(&mut self, terminal: u64, data: &[u8]) -> Result<(), String> {
+        let Some(session) = self.terminals.get_mut(&terminal) else {
+            let message = format!("no daemon terminal {terminal} is available for input");
+            eprintln!("usagi daemon: {message}");
+            return Err(message);
+        };
+        session.write(data).map_err(|error| {
+            let message = format!("writing to daemon terminal {terminal}: {error:#}");
+            eprintln!("usagi daemon: {message}");
+            message
+        })
     }
 
     /// Resize `terminal`, if it is running.
@@ -1550,7 +1578,40 @@ fn spawn_daemon(dir: &Path) -> anyhow::Result<()> {
         use std::os::unix::process::CommandExt;
         builder.process_group(0);
     }
-    builder.spawn().context("spawning the usagi daemon")?;
+    let child = builder.spawn().context("spawning the usagi daemon")?;
+    #[cfg(unix)]
+    {
+        let mut child = child;
+        // `start` is the TUI's daemon autospawn barrier. Do not return in the
+        // fork→register→bind gap: an immediate queued autostart would otherwise
+        // see no record/socket and fall back to a TUI-owned PTY.
+        let socket = usagi::infrastructure::daemon_ipc::socket_path(dir);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let registered = usagi::infrastructure::daemon_store::read(dir)
+                .ok()
+                .flatten()
+                .is_some_and(|record| usagi::infrastructure::resource::process_alive(record.pid));
+            if registered && socket.exists() {
+                break;
+            }
+            if let Some(status) = child
+                .try_wait()
+                .context("checking the spawned usagi daemon")?
+            {
+                anyhow::bail!("usagi daemon exited before becoming ready: {status}");
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for the usagi daemon socket {}",
+                    socket.display()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    #[cfg(not(unix))]
+    drop(child);
     Ok(())
 }
 

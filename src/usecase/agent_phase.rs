@@ -56,7 +56,7 @@ pub fn ready_overwrite_allowed(current: Option<AgentPhase>, source: Option<&str>
 /// completed turn is `done`, not `waiting`. Codex never wires a `Notification`
 /// hook, so this only ever fires for Claude.
 pub fn waiting_overwrite_allowed(current: Option<AgentPhase>) -> bool {
-    !matches!(current, Some(AgentPhase::Ended))
+    !matches!(current, Some(AgentPhase::Ended | AgentPhase::Exited))
 }
 
 #[cfg(test)]
@@ -115,6 +115,7 @@ mod tests {
         // Claude's post-`Stop` idle notification: a `waiting` landing on an
         // `Ended` phase is the spurious one that flips ✓ back to ◆. Refuse it.
         assert!(!waiting_overwrite_allowed(Some(AgentPhase::Ended)));
+        assert!(!waiting_overwrite_allowed(Some(AgentPhase::Exited)));
     }
 
     #[test]

@@ -21,13 +21,13 @@
 //! and screen-feed folding — live in [`crate::usecase::daemon_attach`] and the
 //! message/framing shapes in [`crate::domain::daemon_ipc`], all unit-tested.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,7 @@ use crate::usecase::daemon_attach::{
     attach_reply, build_reply, drain_buffered_frames, spawn_reply, AttachReply, BuildReply,
     DrainOutcome, ScreenSink, SpawnReply,
 };
+use crate::usecase::daemon_ipc::{input_reply, InputReply};
 
 /// How long a connect keeps retrying while a daemon record exists (the daemon
 /// was just autospawned and is still binding its socket). Without a record the
@@ -52,12 +53,20 @@ const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
 /// How long an explicit `Kill` waits for the daemon's `Killed` acknowledgement
 /// before reporting teardown failure to the caller.
 const KILL_ACK_DEADLINE: Duration = Duration::from_secs(2);
+/// How long prompt injection waits for the daemon to confirm that the bytes
+/// reached the PTY writer. A missing acknowledgement is an unknown delivery
+/// outcome and must be surfaced so the durable prompt can be retried.
+const INPUT_ACK_DEADLINE: Duration = Duration::from_secs(2);
 /// The pause between connect retries, and the read timeout the handshake polls
 /// the socket with.
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
 /// The reader thread's stack, for the same reason as the PTY reader's: it only
 /// loops over a blocking `read` and hands bytes to the decoder/parser.
 const READER_STACK_BYTES: usize = 256 * 1024;
+
+type InputWriteResult = std::result::Result<(), String>;
+type InputAck = (TerminalId, InputWriteResult);
+type InputWaiters = Arc<Mutex<HashMap<u64, mpsc::Sender<InputAck>>>>;
 
 /// This process's executable generation, captured once. Cargo replaces the
 /// debug binary between `cargo run` builds while an already-running daemon keeps
@@ -88,6 +97,28 @@ impl std::fmt::Display for DaemonBuildHandshakeError {
 }
 
 impl std::error::Error for DaemonBuildHandshakeError {}
+
+/// Marks the one attach refusal that proves a persisted daemon terminal is no
+/// longer present. Restore may fresh-spawn only for this typed outcome; transport
+/// errors and adopted terminals retain unknown/live ownership.
+#[derive(Debug)]
+pub struct DaemonTerminalMissingError {
+    terminal: TerminalId,
+}
+
+impl DaemonTerminalMissingError {
+    fn new(terminal: TerminalId) -> Self {
+        Self { terminal }
+    }
+}
+
+impl std::fmt::Display for DaemonTerminalMissingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "daemon terminal {} is missing", self.terminal)
+    }
+}
+
+impl std::error::Error for DaemonTerminalMissingError {}
 
 /// Identify the running usagi executable generation for the daemon handshake.
 /// The value is cached before the TUI starts, so a later rebuild cannot make this
@@ -133,6 +164,8 @@ pub struct DaemonInputHandle {
     stream: Arc<Mutex<UnixStream>>,
     terminal: TerminalId,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+    input_waiters: InputWaiters,
+    next_input_request: Arc<AtomicU64>,
 }
 
 impl DaemonInputHandle {
@@ -147,15 +180,59 @@ impl DaemonInputHandle {
             .bracketed_paste()
     }
 
-    /// Forward raw input bytes to the daemon terminal as a `Keys` message.
+    /// Forward raw input bytes and wait boundedly until the daemon confirms the
+    /// real PTY write. Socket acceptance alone is not delivery: a missing
+    /// terminal, PTY write failure, connection loss, or acknowledgement timeout
+    /// is returned to the durable prompt dispatcher.
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        send(
+        let request_id = self.next_input_request.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        self.input_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(request_id, sender);
+
+        if let Err(error) = send(
             &self.stream,
             &ClientMessage::Keys {
                 terminal: self.terminal,
                 data: bytes.to_vec(),
+                request_id: Some(request_id),
             },
-        )
+        ) {
+            self.remove_waiter(request_id);
+            return Err(error);
+        }
+
+        match receiver.recv_timeout(INPUT_ACK_DEADLINE) {
+            Ok((terminal, _)) if terminal != self.terminal => Err(anyhow!(
+                "daemon acknowledged input request {request_id} for terminal {terminal}, expected {}",
+                self.terminal
+            )),
+            Ok((_, Ok(()))) => Ok(()),
+            Ok((_, Err(error))) => Err(anyhow!(
+                "daemon rejected input for terminal {}: {error}",
+                self.terminal
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.remove_waiter(request_id);
+                bail!(
+                    "timed out waiting for daemon input acknowledgement for terminal {}",
+                    self.terminal
+                )
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => bail!(
+                "daemon connection closed before acknowledging input for terminal {}",
+                self.terminal
+            ),
+        }
+    }
+
+    fn remove_waiter(&self, request_id: u64) {
+        self.input_waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&request_id);
     }
 }
 
@@ -168,6 +245,8 @@ pub struct DaemonTerminal {
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
     killed_ack: Arc<AtomicBool>,
+    input_waiters: InputWaiters,
+    next_input_request: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     bell: Arc<AtomicU64>,
     cursor_shape: Arc<AtomicU16>,
@@ -187,6 +266,30 @@ fn send(stream: &Arc<Mutex<UnixStream>>, message: &ClientMessage) -> Result<()> 
     stream
         .write_all(&bytes)
         .context("writing to the daemon socket")
+}
+
+/// Settle one correlated input waiter. Removing before sending makes duplicate
+/// replies harmless and ensures no sender stays retained after completion.
+fn route_input_reply(waiters: &InputWaiters, reply: InputReply) {
+    let (request_id, terminal, result) = match reply {
+        InputReply::Applied {
+            request_id,
+            terminal,
+        } => (request_id, terminal, Ok(())),
+        InputReply::Rejected {
+            request_id,
+            terminal,
+            error,
+        } => (request_id, terminal, Err(error)),
+        InputReply::NotInput => return,
+    };
+    let sender = waiters
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&request_id);
+    if let Some(sender) = sender {
+        let _ = sender.send((terminal, result));
+    }
 }
 
 /// Connect to the daemon socket under `daemon_dir`. Retries while a daemon
@@ -438,6 +541,9 @@ impl DaemonTerminal {
         let pid = await_reply(&mut stream, &mut decoder, |message| {
             match attach_reply(message, terminal) {
                 AttachReply::Ready { pid } => Some(Ok(pid)),
+                AttachReply::Missing => Some(Err(anyhow::Error::new(
+                    DaemonTerminalMissingError::new(terminal),
+                ))),
                 AttachReply::Rejected(reason) => {
                     Some(Err(anyhow!("the daemon refused the attach: {reason}")))
                 }
@@ -476,6 +582,8 @@ impl DaemonTerminal {
         let generation = Arc::new(AtomicU64::new(0));
         let scrollback_state = Arc::new(AtomicUsize::new(0));
         let killed_ack = Arc::new(AtomicBool::new(false));
+        let input_waiters: InputWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let next_input_request = Arc::new(AtomicU64::new(1));
 
         let reader_stream = stream
             .try_clone()
@@ -490,6 +598,7 @@ impl DaemonTerminal {
             let generation = Arc::clone(&generation);
             let alive = Arc::clone(&alive);
             let killed_ack = Arc::clone(&killed_ack);
+            let input_waiters = Arc::clone(&input_waiters);
             std::thread::Builder::new()
                 .name("usagi-daemon-attach".to_string())
                 .stack_size(READER_STACK_BYTES)
@@ -501,16 +610,22 @@ impl DaemonTerminal {
                     struct DeathBell {
                         alive: Arc<AtomicBool>,
                         generation: Arc<AtomicU64>,
+                        input_waiters: InputWaiters,
                     }
                     impl Drop for DeathBell {
                         fn drop(&mut self) {
                             self.alive.store(false, Ordering::SeqCst);
                             self.generation.fetch_add(1, Ordering::SeqCst);
+                            self.input_waiters
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clear();
                         }
                     }
                     let _death = DeathBell {
                         alive,
                         generation: Arc::clone(&generation),
+                        input_waiters: Arc::clone(&input_waiters),
                     };
                     let mut stream = reader_stream;
                     let mut buf = vec![0u8; 64 * 1024];
@@ -525,6 +640,7 @@ impl DaemonTerminal {
                         &mut sink,
                         &mut |payload| {
                             let message = decode_message::<ServerMessage>(payload).ok()?;
+                            route_input_reply(&input_waiters, input_reply(&message));
                             if matches!(
                                 message,
                                 ServerMessage::Killed { terminal: id } if id == terminal
@@ -555,6 +671,8 @@ impl DaemonTerminal {
             parser,
             alive,
             killed_ack,
+            input_waiters,
+            next_input_request,
             generation,
             bell,
             cursor_shape,
@@ -631,12 +749,23 @@ impl DaemonTerminal {
             stream: Arc::clone(&self.stream),
             terminal: self.terminal,
             parser: Arc::clone(&self.parser),
+            input_waiters: Arc::clone(&self.input_waiters),
+            next_input_request: Arc::clone(&self.next_input_request),
         }
     }
 
-    /// Forward raw input bytes to the daemon terminal.
+    /// Forward ordinary interactive input without waiting for a daemon reply.
+    /// The cloneable [`DaemonInputHandle`] is the acknowledged path reserved for
+    /// durable prompt injection.
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.input_handle().write(bytes)
+        send(
+            &self.stream,
+            &ClientMessage::Keys {
+                terminal: self.terminal,
+                data: bytes.to_vec(),
+                request_id: None,
+            },
+        )
     }
 
     /// Resize the daemon terminal (and the local grid) to `rows`×`cols`. The
@@ -693,7 +822,10 @@ impl DaemonTerminal {
     /// closing the pane, as opposed to `Drop`'s detach-and-leave-running.
     pub fn kill(&mut self) -> bool {
         if self.killed {
-            return true;
+            // A previous request that timed out is not retroactively successful.
+            // The reader may still deliver its ACK later; until then ownership
+            // remains unknown and callers must not remove/replace the pane.
+            return self.killed_ack.load(Ordering::SeqCst);
         }
         if send(
             &self.stream,
@@ -708,7 +840,11 @@ impl DaemonTerminal {
         self.killed = true;
         let deadline = Instant::now() + KILL_ACK_DEADLINE;
         while Instant::now() < deadline {
-            if self.killed_ack.load(Ordering::SeqCst) || !self.alive.load(Ordering::SeqCst) {
+            // A dead reader only proves this client lost the socket/decoder; the
+            // daemon deliberately keeps terminals alive across detach and client
+            // loss. Teardown is confirmed solely by the correlated Killed reply
+            // (the daemon emits it even when the id is already absent).
+            if self.killed_ack.load(Ordering::SeqCst) {
                 self.alive.store(false, Ordering::SeqCst);
                 return true;
             }
@@ -739,5 +875,55 @@ impl Drop for DaemonTerminal {
         if let Some(thread) = self.reader_thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_replies_route_by_request_id_across_shared_waiters() {
+        let waiters: InputWaiters = Arc::new(Mutex::new(HashMap::new()));
+        let first_clone = Arc::clone(&waiters);
+        let second_clone = Arc::clone(&waiters);
+        let (first_sender, first_receiver) = mpsc::channel();
+        let (second_sender, second_receiver) = mpsc::channel();
+        waiters.lock().unwrap().insert(1, first_sender);
+        waiters.lock().unwrap().insert(2, second_sender);
+
+        route_input_reply(
+            &second_clone,
+            InputReply::Rejected {
+                request_id: 2,
+                terminal: 8,
+                error: "pty closed".to_string(),
+            },
+        );
+        route_input_reply(
+            &first_clone,
+            InputReply::Applied {
+                request_id: 1,
+                terminal: 7,
+            },
+        );
+
+        assert_eq!(first_receiver.recv().unwrap(), (7, Ok(())));
+        assert_eq!(
+            second_receiver.recv().unwrap(),
+            (8, Err("pty closed".to_string()))
+        );
+        assert!(waiters.lock().unwrap().is_empty());
+
+        // A duplicate or unrelated reply finds no waiter and remains harmless.
+        route_input_reply(
+            &waiters,
+            InputReply::Applied {
+                request_id: 1,
+                terminal: 7,
+            },
+        );
+        route_input_reply(&waiters, InputReply::NotInput);
+        assert!(waiters.lock().unwrap().is_empty());
     }
 }

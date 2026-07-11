@@ -50,8 +50,13 @@ pub enum Action {
     },
     /// Detach the requesting client from this terminal's screen feed.
     Detach(TerminalId),
-    /// Write these input bytes to this terminal.
-    Keys(TerminalId, Vec<u8>),
+    /// Write these input bytes to this terminal, replying when `request_id` is
+    /// present.
+    Keys {
+        terminal: TerminalId,
+        data: Vec<u8>,
+        request_id: Option<u64>,
+    },
     /// Resize this terminal to `cols`×`rows`.
     Resize(TerminalId, u16, u16),
     /// Send the requesting client a scrollback viewport snapshot.
@@ -70,7 +75,7 @@ impl Action {
                 | Self::Kill(_)
                 | Self::Attach { .. }
                 | Self::Detach(_)
-                | Self::Keys(_, _)
+                | Self::Keys { .. }
                 | Self::Resize(_, _, _)
                 | Self::Scrollback(_, _)
         )
@@ -80,6 +85,61 @@ impl Action {
 /// Whether a client's executable generation is safe to combine with the daemon.
 pub fn builds_match(client: &str, daemon: &str) -> bool {
     client == daemon
+}
+
+/// A correlated daemon input reply after stripping its wire representation.
+/// The attach reader uses this to route replies to the correct waiting input
+/// handle while leaving unrelated screen-feed messages alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputReply {
+    Applied {
+        request_id: u64,
+        terminal: TerminalId,
+    },
+    Rejected {
+        request_id: u64,
+        terminal: TerminalId,
+        error: String,
+    },
+    NotInput,
+}
+
+/// Classify one server message for the acknowledged-input router.
+pub fn input_reply(message: &ServerMessage) -> InputReply {
+    match message {
+        ServerMessage::InputResult {
+            request_id,
+            terminal,
+            error: None,
+        } => InputReply::Applied {
+            request_id: *request_id,
+            terminal: *terminal,
+        },
+        ServerMessage::InputResult {
+            request_id,
+            terminal,
+            error: Some(error),
+        } => InputReply::Rejected {
+            request_id: *request_id,
+            terminal: *terminal,
+            error: error.clone(),
+        },
+        _ => InputReply::NotInput,
+    }
+}
+
+/// Build the optional correlated reply for a terminal input attempt. Ordinary
+/// interactive input has no request id and deliberately produces no reply.
+pub fn build_input_result(
+    request_id: Option<u64>,
+    terminal: TerminalId,
+    result: std::result::Result<(), String>,
+) -> Option<ServerMessage> {
+    request_id.map(|request_id| ServerMessage::InputResult {
+        request_id,
+        terminal,
+        error: result.err(),
+    })
 }
 
 /// One daemon-owned terminal as the registry tracks it: where it runs and the
@@ -453,7 +513,15 @@ pub fn handle(
         ClientMessage::Kill { terminal } => Action::Kill(terminal),
         ClientMessage::Attach { terminal, worktree } => Action::Attach { terminal, worktree },
         ClientMessage::Detach { terminal } => Action::Detach(terminal),
-        ClientMessage::Keys { terminal, data } => Action::Keys(terminal, data),
+        ClientMessage::Keys {
+            terminal,
+            data,
+            request_id,
+        } => Action::Keys {
+            terminal,
+            data,
+            request_id,
+        },
         ClientMessage::Resize {
             terminal,
             cols,
@@ -549,7 +617,11 @@ mod tests {
                 worktree: PathBuf::from("/repo"),
             },
             Action::Detach(1),
-            Action::Keys(1, Vec::new()),
+            Action::Keys {
+                terminal: 1,
+                data: Vec::new(),
+                request_id: None,
+            },
             Action::Resize(1, 80, 24),
             Action::Scrollback(1, 0),
         ];
@@ -744,12 +816,17 @@ mod tests {
                 ClientMessage::Keys {
                     terminal: 4,
                     data: b"ls\n".to_vec(),
+                    request_id: Some(9),
                 },
                 1,
                 &mut registry,
                 &[],
             ),
-            Action::Keys(4, b"ls\n".to_vec())
+            Action::Keys {
+                terminal: 4,
+                data: b"ls\n".to_vec(),
+                request_id: Some(9),
+            }
         );
         assert_eq!(
             handle(
@@ -763,6 +840,61 @@ mod tests {
                 &[],
             ),
             Action::Resize(4, 120, 40)
+        );
+    }
+
+    #[test]
+    fn input_result_is_correlated_and_preserves_rejection() {
+        assert_eq!(
+            input_reply(&ServerMessage::InputResult {
+                request_id: 11,
+                terminal: 4,
+                error: None,
+            }),
+            InputReply::Applied {
+                request_id: 11,
+                terminal: 4,
+            }
+        );
+        assert_eq!(
+            input_reply(&ServerMessage::InputResult {
+                request_id: 12,
+                terminal: 5,
+                error: Some("pty closed".to_string()),
+            }),
+            InputReply::Rejected {
+                request_id: 12,
+                terminal: 5,
+                error: "pty closed".to_string(),
+            }
+        );
+        assert_eq!(
+            input_reply(&ServerMessage::Output {
+                terminal: 4,
+                data: Vec::new(),
+            }),
+            InputReply::NotInput
+        );
+    }
+
+    #[test]
+    fn input_result_reply_is_optional_for_fire_and_forget_writes() {
+        assert_eq!(build_input_result(None, 4, Ok(())), None);
+        assert_eq!(
+            build_input_result(Some(21), 4, Ok(())),
+            Some(ServerMessage::InputResult {
+                request_id: 21,
+                terminal: 4,
+                error: None,
+            })
+        );
+        assert_eq!(
+            build_input_result(Some(22), 4, Err("missing terminal".to_string())),
+            Some(ServerMessage::InputResult {
+                request_id: 22,
+                terminal: 4,
+                error: Some("missing terminal".to_string()),
+            })
         );
     }
 
