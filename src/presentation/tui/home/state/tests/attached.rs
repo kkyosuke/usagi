@@ -1060,10 +1060,33 @@ fn attached_dir_reanchors_a_same_named_session_in_the_owning_workspace() {
 #[test]
 fn attached_dir_ignores_a_path_outside_the_open_workspaces() {
     let mut state = state();
+    state.set_extra_groups(vec![GroupSource {
+        name: "tools".to_string(),
+        root_path: PathBuf::from("/tools"),
+        root_note: None,
+        sessions: Vec::new(),
+        issues: Vec::new(),
+    }]);
+    let tools_root = state.list().group_root_row(1).unwrap();
+    state.overview_select(tools_root);
+    state.toggle_selected_collapsed();
+    assert!(state.list().is_collapsed(1));
+    state.overview_select(0);
     let selected = state.list().selected_index();
 
     assert!(!state.focus_attached_dir(Path::new("/unknown")));
     assert_eq!(state.list().selected_index(), selected);
+}
+
+#[test]
+fn legacy_root_resume_targets_the_primary_workspace_root() {
+    let mut state = state();
+    state.restore_sessions(vec![session_record("feature", 1)]);
+    state.overview_select(1);
+
+    state.restore_focus(ROOT_NAME, ResumeLevel::Switch);
+    assert_eq!(state.list().selected_index(), 0);
+    assert!(state.list().root_selected());
 }
 
 #[test]
