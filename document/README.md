@@ -39,6 +39,7 @@
 | — | [proposals/README.md](proposals/README.md) | 設計提案の位置づけと一覧 |
 | 1 | [proposals/01-root-orchestration.md](proposals/01-root-orchestration.md) | 自律オーケストレーション運用モデル（正本へ畳み込み済み → [04-orchestration.md](04-orchestration.md#自律オーケストレーション運用モデル)） |
 | 4 | [proposals/04-sccache-rust-builds.md](proposals/04-sccache-rust-builds.md) | sccache による Rust ビルド高速化の導入計画 |
+| 5 | [proposals/05-session-lifecycle.md](proposals/05-session-lifecycle.md) | session lifecycle の `state.json` 一元化、競合制御、クラッシュ回復 |
 
 ### データ永続化 — [data/](data/README.md)
 
