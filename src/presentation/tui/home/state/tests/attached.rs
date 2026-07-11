@@ -1074,6 +1074,7 @@ fn attached_dir_ignores_a_path_outside_the_open_workspaces() {
     state.overview_select(0);
     let selected = state.list().selected_index();
 
+    assert!(state.list().row_of_path(Path::new("/unknown")).is_none());
     assert!(!state.focus_attached_dir(Path::new("/unknown")));
     assert_eq!(state.list().selected_index(), selected);
 }
@@ -1095,6 +1096,10 @@ fn attached_dir_expands_a_collapsed_workspace_to_reveal_its_session() {
     state.toggle_selected_collapsed();
     state.overview_select(0);
 
+    assert!(state
+        .list()
+        .row_of_path(Path::new("/tools/.usagi/sessions/feature"))
+        .is_none());
     assert!(state.focus_attached_dir(Path::new("/tools/.usagi/sessions/feature")));
     assert!(!state.list().is_collapsed(1));
     assert_eq!(state.list().selected_group(), 1);
