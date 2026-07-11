@@ -644,9 +644,11 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
     // cannot be bound the daemon still runs its monitor, just without IPC.
     let socket_path = usagi::infrastructure::daemon_ipc::socket_path(dir);
     let mut server = DaemonIpcServer::bind(&socket_path);
+    server.replace_sessions(usagi::infrastructure::daemon_sessions_store::read(dir)?);
     server.adopt_persisted_terminals(dir);
 
     let mut next_control = std::time::Instant::now();
+    let mut next_reap = std::time::Instant::now();
     loop {
         // The control-plane beat runs on the slow cadence regardless of how
         // fast the IPC endpoint is being serviced.
@@ -659,20 +661,28 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
             // store error must not tear the daemon down, so it is logged and
             // the loop continues. On a change, push the fresh snapshot to every
             // subscribed client.
-            let previous_sessions =
-                usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
-            match usagi::usecase::daemon::monitor_tick(dir, &daemon_gather) {
-                Ok(true) => {
-                    server.notify_session_transitions(&previous_sessions, dir);
-                    server.broadcast_sessions(dir);
+            let previous_sessions = server.sessions().to_vec();
+            match usagi::usecase::daemon::monitor_tick_cached(
+                dir,
+                &previous_sessions,
+                &daemon_gather,
+            ) {
+                Ok(Some(current_sessions)) => {
+                    server.notify_session_transitions(&previous_sessions, &current_sessions);
+                    server.replace_sessions(current_sessions);
+                    server.broadcast_sessions();
                 }
-                Ok(false) => {}
+                Ok(None) => {}
                 Err(error) => eprintln!("usagi daemon: session monitor tick failed: {error:#}"),
             }
         }
         // Accept any newly connected clients, answer whatever they have sent,
         // and stream terminal output to attached clients.
-        server.poll(dir);
+        let reap_terminals = std::time::Instant::now() >= next_reap;
+        if reap_terminals {
+            next_reap = std::time::Instant::now() + DAEMON_POLL;
+        }
+        server.poll(dir, reap_terminals);
         std::thread::sleep(if server.has_clients() {
             DAEMON_IPC_TICK
         } else {
@@ -721,6 +731,10 @@ struct DaemonIpcServer {
     /// they cannot be screen-attached; the daemon keeps them only to avoid id
     /// reuse and to kill them on deliberate stop.
     adopted_terminals: std::collections::HashSet<usagi::domain::daemon_ipc::TerminalId>,
+    /// Latest monitored-session snapshot. The daemon monitor owns refreshes;
+    /// IPC `ListSessions` / `Subscribe` answer from this cache instead of
+    /// re-reading `sessions.json` on every socket poll.
+    session_cache: Vec<usagi::domain::daemon::SessionSnapshot>,
 }
 
 /// One connected client: its stream and the decoder reassembling frames from its
@@ -770,7 +784,16 @@ impl DaemonIpcServer {
             terminal_registry: usagi::usecase::daemon_ipc::TerminalRegistry::new(),
             attach_table: usagi::usecase::daemon_ipc::AttachTable::new(),
             adopted_terminals: std::collections::HashSet::new(),
+            session_cache: Vec::new(),
         }
+    }
+
+    fn sessions(&self) -> &[usagi::domain::daemon::SessionSnapshot] {
+        &self.session_cache
+    }
+
+    fn replace_sessions(&mut self, sessions: Vec<usagi::domain::daemon::SessionSnapshot>) {
+        self.session_cache = sessions;
     }
 
     /// Restore live terminal records left by a daemon crash. The PTY stream
@@ -805,11 +828,13 @@ impl DaemonIpcServer {
 
     /// Accept pending connections, service each client's buffered input, push
     /// new terminal output to attached clients, and reap exited terminals.
-    fn poll(&mut self, dir: &Path) {
+    fn poll(&mut self, dir: &Path, reap_terminals: bool) {
         self.accept_pending();
         self.service_clients(dir);
         self.stream_output();
-        self.reap_exited(dir);
+        if reap_terminals {
+            self.reap_exited(dir);
+        }
     }
 
     /// Accept every connection waiting on the listener (non-blocking), assigning
@@ -843,10 +868,9 @@ impl DaemonIpcServer {
     /// Read and answer whatever each client has sent, dropping clients that have
     /// disconnected.
     fn service_clients(&mut self, dir: &Path) {
-        let sessions = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
         let ids: Vec<u64> = self.clients.keys().copied().collect();
         for id in ids {
-            if !self.service_one(id, dir, &sessions) {
+            if !self.service_one(id, dir) {
                 self.drop_client(id);
             }
         }
@@ -862,12 +886,7 @@ impl DaemonIpcServer {
     /// Drain one client's readable bytes, dispatch each complete message, and
     /// write its reply. Returns `false` when the client has disconnected (or
     /// errored) and should be dropped.
-    fn service_one(
-        &mut self,
-        id: u64,
-        dir: &Path,
-        sessions: &[usagi::domain::daemon::SessionSnapshot],
-    ) -> bool {
+    fn service_one(&mut self, id: u64, dir: &Path) -> bool {
         use std::io::Read as _;
         let mut buf = [0u8; 4096];
         loop {
@@ -882,7 +901,7 @@ impl DaemonIpcServer {
                     if let Some(client) = self.clients.get_mut(&id) {
                         client.decoder.feed(&buf[..n]);
                     }
-                    if !self.dispatch_frames(id, dir, sessions) {
+                    if !self.dispatch_frames(id, dir) {
                         return false;
                     }
                 }
@@ -894,12 +913,7 @@ impl DaemonIpcServer {
 
     /// Pull every complete frame the client has buffered, dispatch it, and write
     /// any reply. Returns `false` on a framing error or a failed write.
-    fn dispatch_frames(
-        &mut self,
-        id: u64,
-        dir: &Path,
-        sessions: &[usagi::domain::daemon::SessionSnapshot],
-    ) -> bool {
+    fn dispatch_frames(&mut self, id: u64, dir: &Path) -> bool {
         loop {
             let frame = match self.clients.get_mut(&id) {
                 Some(client) => client.decoder.next_frame(),
@@ -921,8 +935,12 @@ impl DaemonIpcServer {
                 }
             };
             use usagi::usecase::daemon_ipc::Action;
-            let action =
-                usagi::usecase::daemon_ipc::handle(message, id, &mut self.registry, sessions);
+            let action = usagi::usecase::daemon_ipc::handle(
+                message,
+                id,
+                &mut self.registry,
+                &self.session_cache,
+            );
             let alive = match action {
                 Action::Reply(reply) => self.send(id, &reply),
                 Action::Spawn {
@@ -1053,7 +1071,7 @@ impl DaemonIpcServer {
     /// client fell so far behind that its bytes were evicted. Terminals with no
     /// attached client are skipped, so an unobserved terminal costs nothing.
     fn stream_output(&mut self) {
-        for terminal in self.terminal_registry.ids() {
+        for terminal in self.attach_table.terminals() {
             self.stream_terminal_output(terminal);
         }
     }
@@ -1213,9 +1231,10 @@ impl DaemonIpcServer {
 
     /// Push the current snapshot to every subscribed client, dropping any whose
     /// write fails.
-    fn broadcast_sessions(&mut self, dir: &Path) {
-        let sessions = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
-        let message = usagi::domain::daemon_ipc::ServerMessage::Sessions { sessions };
+    fn broadcast_sessions(&mut self) {
+        let message = usagi::domain::daemon_ipc::ServerMessage::Sessions {
+            sessions: self.session_cache.clone(),
+        };
         for id in self.registry.subscribers() {
             if !self.send(id, &message) {
                 self.drop_client(id);
@@ -1226,7 +1245,7 @@ impl DaemonIpcServer {
     fn notify_session_transitions(
         &mut self,
         previous: &[usagi::domain::daemon::SessionSnapshot],
-        dir: &Path,
+        current: &[usagi::domain::daemon::SessionSnapshot],
     ) {
         let enabled = usagi::infrastructure::storage::Storage::open_default()
             .and_then(|storage| storage.load_settings())
@@ -1244,7 +1263,6 @@ impl DaemonIpcServer {
                 )
             })
             .collect();
-        let current = usagi::infrastructure::daemon_sessions_store::read(dir).unwrap_or_default();
         for session in current {
             let attached = session.worktree.as_deref().is_some_and(|worktree| {
                 self.terminal_registry.ids().into_iter().any(|terminal| {
@@ -1334,16 +1352,22 @@ impl DaemonIpcServer {
 
     fn adopt_persisted_terminals(&mut self, _dir: &Path) {}
 
-    fn poll(&mut self, _dir: &Path) {}
+    fn poll(&mut self, _dir: &Path, _reap_terminals: bool) {}
 
     fn notify_session_transitions(
         &self,
         _previous_sessions: &[usagi::domain::daemon::SessionSnapshot],
-        _dir: &Path,
+        _current_sessions: &[usagi::domain::daemon::SessionSnapshot],
     ) {
     }
 
-    fn broadcast_sessions(&mut self, _dir: &Path) {}
+    fn broadcast_sessions(&mut self) {}
+
+    fn sessions(&self) -> &[usagi::domain::daemon::SessionSnapshot] {
+        &[]
+    }
+
+    fn replace_sessions(&mut self, _sessions: Vec<usagi::domain::daemon::SessionSnapshot>) {}
 
     fn shutdown(&mut self, _dir: &Path, _path: &Path) {}
 }
