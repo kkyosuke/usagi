@@ -1,14 +1,14 @@
 ---
 number: 199
 title: perf(daemon): vt100 scrollback の権威を daemon に一元化する
-status: todo
+status: done
 priority: medium
 labels: [perf, daemon, tui, terminal, review]
 dependson: []
 related: [167, 172, 174]
 parent: 159
 created_at: 2026-07-11T01:30:37.458832+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T06:35:43.520859+00:00
 ---
 
 ## 背景

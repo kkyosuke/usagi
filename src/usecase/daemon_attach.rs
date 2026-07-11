@@ -4,9 +4,9 @@
 //! The TUI (and any other attach client) drives a daemon-owned terminal in two
 //! phases. First a short synchronous handshake on a fresh connection — `Spawn`
 //! answered by `Spawned`, then `Attach` answered by `Attached` — and from there
-//! an asynchronous feed of `Screen` snapshots and raw `Output` deltas the client
-//! folds into its local vt100 parser, closed by `Exited` when the terminal's
-//! process ends.
+//! an asynchronous feed of bounded `Screen` viewport snapshots and live raw
+//! `Output` deltas the client folds into its local vt100 parser, closed by
+//! `Exited` when the terminal's process ends.
 //!
 //! This module is the pure half of that client: matching handshake replies
 //! ([`spawn_reply`] / [`attach_reply`]) and folding feed messages into a
@@ -22,7 +22,7 @@ use crate::domain::daemon_ipc::{FrameDecoder, ServerMessage, TerminalId};
 pub trait ScreenSink {
     /// Replace the whole screen with a snapshot's replayable bytes (sent right
     /// after attach, and again when this client fell behind the output backlog).
-    fn replace_screen(&mut self, contents: &[u8]);
+    fn replace_screen(&mut self, contents: &[u8], scrollback: usize);
     /// Fold a raw output delta into the screen.
     fn apply_output(&mut self, data: &[u8]);
     /// The terminal's process has exited; no more updates will come.
@@ -94,8 +94,9 @@ pub fn apply_screen_message(
         ServerMessage::Screen {
             terminal: id,
             contents,
+            scrollback,
         } if *id == terminal => {
-            sink.replace_screen(contents);
+            sink.replace_screen(contents, *scrollback);
             true
         }
         ServerMessage::Output { terminal: id, data } if *id == terminal => {
@@ -172,7 +173,8 @@ mod tests {
     }
 
     impl ScreenSink for Recorded {
-        fn replace_screen(&mut self, contents: &[u8]) {
+        fn replace_screen(&mut self, contents: &[u8], scrollback: usize) {
+            assert_eq!(scrollback, 0);
             self.replaced.push(contents.to_vec());
         }
         fn apply_output(&mut self, data: &[u8]) {
@@ -190,7 +192,7 @@ mod tests {
     }
 
     impl ScreenSink for Orphaned {
-        fn replace_screen(&mut self, _contents: &[u8]) {
+        fn replace_screen(&mut self, _contents: &[u8], _scrollback: usize) {
             self.applied += 1;
         }
         fn apply_output(&mut self, _data: &[u8]) {
@@ -217,6 +219,7 @@ mod tests {
             b's' => Some(ServerMessage::Screen {
                 terminal: 7,
                 contents: rest,
+                scrollback: 0,
             }),
             b'o' => Some(ServerMessage::Output {
                 terminal: 7,
@@ -335,6 +338,7 @@ mod tests {
             &ServerMessage::Screen {
                 terminal: 7,
                 contents: b"\x1b[2Jhello".to_vec(),
+                scrollback: 0,
             },
             7,
             &mut sink,
@@ -377,6 +381,7 @@ mod tests {
             &ServerMessage::Screen {
                 terminal: 8,
                 contents: b"x".to_vec(),
+                scrollback: 0,
             },
             7,
             &mut sink,

@@ -30,6 +30,15 @@ use crate::domain::daemon_ipc::OutputBacklog;
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::{pty_exit, terminal};
 
+/// A daemon-terminal viewport snapshot paired with the bookkeeping needed to
+/// resume raw deltas or keep a scrolled-back client pinned.
+pub struct ScreenSnapshot {
+    pub contents: Vec<u8>,
+    pub backlog_offset: u64,
+    pub scrollback: usize,
+    pub primary_high_water: u64,
+}
+
 /// Side-channel signals the parser pulls out of the shell's output stream as it
 /// processes it — sequences `vt100` does not fold into the screen grid but the
 /// presentation layer still needs.
@@ -54,8 +63,8 @@ pub struct ScreenCallbacks {
 
 impl ScreenCallbacks {
     /// Wire the callbacks to the shared counters their readers poll. Also used
-    /// by the daemon attach client, whose local parser replays the same byte
-    /// stream a directly-owned PTY would have produced.
+    /// by the daemon attach client, whose bounded local parser replays the live
+    /// viewport stream.
     pub(crate) fn new(count: Arc<AtomicU64>, cursor_shape: Arc<AtomicU16>) -> Self {
         Self {
             count,
@@ -575,15 +584,41 @@ impl PtySession {
     /// parser lock (the same lock the reader tees under), so the pair is
     /// consistent even while output is streaming in. The offset is `0` for a
     /// session spawned without a backlog.
-    pub fn screen_snapshot(&self) -> (Vec<u8>, u64) {
-        let parser = self.parser();
+    pub fn screen_snapshot(&self) -> ScreenSnapshot {
+        self.screen_snapshot_at(0)
+    }
+
+    /// Build a replayable viewport snapshot `scrollback` lines into the
+    /// daemon-owned history, clamped by vt100. The parser's own viewport is
+    /// restored before returning so one client's scroll position never becomes
+    /// global daemon state.
+    pub fn screen_snapshot_at(&self, scrollback: usize) -> ScreenSnapshot {
+        let mut parser = self.parser();
+        let previous = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(scrollback);
+        let actual_scrollback = parser.screen().scrollback();
         let contents = parser.screen().state_formatted();
-        let offset = self
+        let primary_high_water = parser.screen().scrollback_high_water().primary();
+        if previous != actual_scrollback {
+            parser.screen_mut().set_scrollback(previous);
+        }
+        let backlog_offset = self
             .output_backlog
             .as_ref()
             .and_then(|backlog| backlog.lock().ok().map(|backlog| backlog.end()))
             .unwrap_or(0);
-        (contents, offset)
+        ScreenSnapshot {
+            contents,
+            backlog_offset,
+            scrollback: actual_scrollback,
+            primary_high_water,
+        }
+    }
+
+    /// The primary-screen scrollback high-water mark. The daemon uses this to
+    /// keep attached clients' historical viewports pinned while output streams.
+    pub fn primary_scrollback_high_water(&self) -> u64 {
+        self.parser().screen().scrollback_high_water().primary()
     }
 
     /// Whether the shell is still running (the reader has not hit EOF).

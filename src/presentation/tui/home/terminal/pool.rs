@@ -599,9 +599,9 @@ fn apply_pr_results(
 /// daemon owns (the normal case), or a TUI-local [`PtySession`] (non-Unix
 /// platforms, or the daemon was unavailable at spawn).
 ///
-/// Both variants expose the same surface — a vt100 parser to draw from,
-/// generation / bell / liveness counters, input and resize — so the pool, the
-/// pane drive loop, and the watcher stay backend-agnostic. What differs is the
+/// Both variants expose the same surface — a vt100 parser to draw the current
+/// viewport from, generation / bell / liveness counters, input and resize — so
+/// the pool, the pane drive loop, and the watcher stay backend-agnostic. What differs is the
 /// teardown: dropping a `Remote` pane only detaches (the terminal — and the
 /// agent inside it — keeps running in the daemon; that is what lets the TUI
 /// close without killing agents), so the close paths call [`kill`](Self::kill)

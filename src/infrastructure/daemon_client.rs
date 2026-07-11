@@ -2,15 +2,15 @@
 //!
 //! A [`DaemonTerminal`] is the remote counterpart of a directly-owned
 //! [`PtySession`](crate::infrastructure::pty::PtySession), exposing the same
-//! surface the terminal pool and the pane render loop drive — a local
-//! [`vt100::Parser`] to draw from, generation / bell / liveness counters, input
-//! and resize — while the process itself lives in the daemon. It connects to
-//! the daemon's Unix socket, performs the `Spawn`→`Spawned` and
-//! `Attach`→`Attached` handshake, and then a background thread folds the
-//! daemon's `Screen` snapshot and raw `Output` deltas into the local parser.
-//! Because the deltas are the exact bytes the daemon's PTY produced, the local
-//! parser sees everything a directly-owned PTY would have shown — colors,
-//! bells, cursor-shape and bracketed-paste sequences, scrollback growth.
+//! surface the terminal pool and the pane render loop drive — a bounded local
+//! [`vt100::Parser`] for the current viewport, generation / bell / liveness
+//! counters, input and resize — while the process and full scrollback live in
+//! the daemon. It connects to the daemon's Unix socket, performs the
+//! `Spawn`→`Spawned` and `Attach`→`Attached` handshake, and then a background
+//! thread folds daemon `Screen` viewport snapshots and live raw `Output` deltas
+//! into the local parser. Historical scrolling sends `Scrollback` requests and
+//! receives bounded snapshots instead of replaying or retaining full history in
+//! the TUI process.
 //!
 //! Dropping a `DaemonTerminal` only detaches (the daemon keeps the terminal
 //! running — that is the point of daemon ownership); [`DaemonTerminal::kill`]
@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -101,6 +101,7 @@ pub struct DaemonTerminal {
     generation: Arc<AtomicU64>,
     bell: Arc<AtomicU64>,
     cursor_shape: Arc<AtomicU16>,
+    scrollback: Arc<AtomicUsize>,
     /// Set once [`kill`](Self::kill) ran, so `Drop` neither detaches (the
     /// terminal is gone) nor leaves the terminal running.
     killed: bool,
@@ -181,6 +182,7 @@ fn await_reply<T>(
 struct ParserSink {
     parser: Weak<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
+    scrollback: Arc<AtomicUsize>,
     /// Set when the parser has been dropped — the thread's signal to stop.
     orphaned: bool,
 }
@@ -199,13 +201,15 @@ impl ParserSink {
 }
 
 impl ScreenSink for ParserSink {
-    fn replace_screen(&mut self, contents: &[u8]) {
+    fn replace_screen(&mut self, contents: &[u8], scrollback: usize) {
         // A snapshot begins with a full clear, so processing it repaints the
         // grid without accumulating stale rows.
+        self.scrollback.store(scrollback, Ordering::SeqCst);
         self.process(contents);
     }
 
     fn apply_output(&mut self, data: &[u8]) {
+        self.scrollback.store(0, Ordering::SeqCst);
         self.process(data);
     }
 
@@ -291,7 +295,7 @@ impl DaemonTerminal {
         spawned_pid: u32,
         rows: u16,
         cols: u16,
-        scrollback: usize,
+        _scrollback: usize,
     ) -> Result<Self> {
         stream
             .write_all(&encode_message(&ClientMessage::Attach {
@@ -333,11 +337,12 @@ impl DaemonTerminal {
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
             rows,
             cols,
-            scrollback,
+            0,
             ScreenCallbacks::new(Arc::clone(&bell), Arc::clone(&cursor_shape)),
         )));
         let alive = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(0));
+        let scrollback_state = Arc::new(AtomicUsize::new(0));
 
         let reader_stream = stream
             .try_clone()
@@ -346,6 +351,7 @@ impl DaemonTerminal {
             let mut sink = ParserSink {
                 parser: Arc::downgrade(&parser),
                 alive: Arc::clone(&alive),
+                scrollback: Arc::clone(&scrollback_state),
                 orphaned: false,
             };
             let generation = Arc::clone(&generation);
@@ -407,6 +413,7 @@ impl DaemonTerminal {
             generation,
             bell,
             cursor_shape,
+            scrollback: scrollback_state,
             killed: false,
             reader_thread: Some(reader_thread),
         })
@@ -507,18 +514,20 @@ impl DaemonTerminal {
     /// Scroll the local screen `offset` lines back into the replayed history
     /// (`0` is the live screen), returning the offset actually applied.
     pub fn set_scrollback(&mut self, offset: usize) -> usize {
-        if let Ok(mut parser) = self.parser.lock() {
-            let screen = parser.screen_mut();
-            screen.set_scrollback(offset);
-            screen.scrollback()
-        } else {
-            0
-        }
+        let _ = send(
+            &self.stream,
+            &ClientMessage::Scrollback {
+                terminal: self.terminal,
+                offset,
+            },
+        );
+        self.scrollback.store(offset, Ordering::SeqCst);
+        offset
     }
 
     /// The scroll offset currently applied to the replayed history.
     pub fn scrollback(&self) -> usize {
-        self.parser().screen().scrollback()
+        self.scrollback.load(Ordering::SeqCst)
     }
 
     /// Whether the daemon terminal is still running, as far as this client
