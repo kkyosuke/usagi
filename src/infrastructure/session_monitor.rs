@@ -210,8 +210,8 @@ impl SessionMonitor {
                         });
                     }
                 }
-                // The agent finished — a turn completed or it exited: the task is
-                // done. One-shot on a genuine transition, but stay silent for the
+                // The agent finished a turn successfully. One-shot on a genuine
+                // transition, but stay silent for the
                 // attached session — `Stop` fires at every turn end, so notifying
                 // the foreground session would ding on each reply.
                 Some(AgentPhase::Ended) => {
@@ -225,6 +225,15 @@ impl SessionMonitor {
                             kind: NoticeKind::Done,
                         });
                     }
+                }
+                // Process exit is a liveness fact, not proof that the turn
+                // succeeded. Keep the non-running/done badge for compatibility,
+                // but never emit the success-like desktop notification.
+                Some(AgentPhase::Exited) => {
+                    self.running.remove(path);
+                    self.waiting.remove(path);
+                    self.baselines.insert(path.clone(), count);
+                    self.done.insert(path.clone());
                 }
                 // No reported phase: we cannot assert the agent is working, so it
                 // is not running from our side; the bell heuristic decides waiting.
@@ -507,6 +516,23 @@ mod tests {
         let again = monitor.observe(&[phased("/a", 0, AgentPhase::Ended)]);
         assert!(again.is_empty());
         assert!(monitor.is_done(&p("/a")));
+    }
+
+    #[test]
+    fn an_exited_phase_marks_done_without_a_success_notice() {
+        let mut monitor = SessionMonitor::new();
+        monitor.observe(&[phased("/a", 6, AgentPhase::Waiting)]);
+
+        let notices = monitor.observe(&[phased("/a", 7, AgentPhase::Exited)]);
+        assert!(notices.is_empty());
+        assert!(!monitor.is_running(&p("/a")));
+        assert!(!monitor.is_waiting(&p("/a")));
+        assert!(monitor.is_done(&p("/a")));
+
+        // The exit reading becomes the bell baseline, so only a later bell can
+        // turn the surviving shell back into a waiting session.
+        assert!(monitor.observe(&[bell("/a", 7)]).is_empty());
+        assert_eq!(monitor.observe(&[bell("/a", 8)]), vec![waiting("/a")]);
     }
 
     #[test]

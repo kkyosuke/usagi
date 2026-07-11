@@ -15,7 +15,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 
 use crate::domain::agent_phase::AgentPhase;
-use crate::infrastructure::agent_state_store;
+use crate::infrastructure::{agent_live_pane_store, agent_state_store};
 use crate::usecase::agent_phase as agent_phase_policy;
 
 /// The phase a hook reports, as accepted on the command line.
@@ -28,9 +28,10 @@ pub enum Phase {
     /// The agent paused mid-turn for the user's input or permission (the
     /// `Notification` hook).
     Waiting,
-    /// The agent finished — a turn ended (`Stop`) or the process exited
-    /// (`SessionEnd`).
+    /// The agent finished one turn (`Stop`) and remains interactive.
     Ended,
+    /// The agent process exited (`SessionEnd`); its parent shell may remain.
+    Exited,
     /// The worker process exited unsuccessfully.
     Failed,
     /// The worker was explicitly interrupted.
@@ -46,6 +47,7 @@ impl From<Phase> for AgentPhase {
             Phase::Running => AgentPhase::Running,
             Phase::Waiting => AgentPhase::Waiting,
             Phase::Ended => AgentPhase::Ended,
+            Phase::Exited => AgentPhase::Exited,
             Phase::Failed | Phase::Interrupted | Phase::TimedOut => AgentPhase::Ended,
         }
     }
@@ -104,12 +106,18 @@ fn record(phase: Phase, raw: &str, worktree: &Path) -> Result<()> {
         return Ok(());
     }
     agent_state_store::write(worktree, phase.into())?;
+    if matches!(phase, Phase::Exited) {
+        // SessionEnd/launch-wrapper exit can leave the parent shell writable.
+        // Retract the cross-process consumer marker in the reporting process,
+        // without waiting for the TUI watcher's next 200 ms sample.
+        agent_live_pane_store::clear(worktree);
+    }
     let event_kind = match phase {
         Phase::Ended => Some(crate::domain::orchestrator::EventKind::Succeeded),
         Phase::Failed => Some(crate::domain::orchestrator::EventKind::Failed),
         Phase::Interrupted => Some(crate::domain::orchestrator::EventKind::Interrupted),
         Phase::TimedOut => Some(crate::domain::orchestrator::EventKind::TimedOut),
-        Phase::Ready | Phase::Running | Phase::Waiting => None,
+        Phase::Ready | Phase::Running | Phase::Waiting | Phase::Exited => None,
     };
     if let Some(kind) = event_kind {
         crate::infrastructure::orchestrator_event::emit(worktree, kind, 0, chrono::Utc::now())?;
@@ -139,6 +147,7 @@ mod tests {
         assert_eq!(AgentPhase::from(Phase::Running), AgentPhase::Running);
         assert_eq!(AgentPhase::from(Phase::Waiting), AgentPhase::Waiting);
         assert_eq!(AgentPhase::from(Phase::Ended), AgentPhase::Ended);
+        assert_eq!(AgentPhase::from(Phase::Exited), AgentPhase::Exited);
         assert_eq!(AgentPhase::from(Phase::Failed), AgentPhase::Ended);
         assert_eq!(AgentPhase::from(Phase::Interrupted), AgentPhase::Ended);
         assert_eq!(AgentPhase::from(Phase::TimedOut), AgentPhase::Ended);
@@ -152,6 +161,20 @@ mod tests {
                 record(phase, "", wt.path()).unwrap();
                 assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Ended));
             }
+        });
+    }
+
+    #[test]
+    fn exited_retracts_the_live_agent_consumer_marker_immediately() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            agent_live_pane_store::set(wt.path(), std::process::id()).unwrap();
+            assert!(agent_live_pane_store::is_live(wt.path(), |_| true));
+
+            record(Phase::Exited, "", wt.path()).unwrap();
+
+            assert!(!agent_live_pane_store::is_live(wt.path(), |_| true));
+            assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Exited));
         });
     }
 

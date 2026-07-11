@@ -58,8 +58,10 @@ pub enum SessionActivity {
     Running,
     /// The agent paused mid-turn for the user's input or permission (`Waiting`).
     Waiting,
-    /// The agent finished a turn or its process exited (`Ended`).
+    /// The agent finished a turn successfully (`Ended`).
     Done,
+    /// The Agent process exited; this is liveness only, not turn success.
+    Exited,
 }
 
 impl SessionActivity {
@@ -70,6 +72,7 @@ impl SessionActivity {
             AgentPhase::Running => Self::Running,
             AgentPhase::Waiting => Self::Waiting,
             AgentPhase::Ended => Self::Done,
+            AgentPhase::Exited => Self::Exited,
         }
     }
 
@@ -80,6 +83,7 @@ impl SessionActivity {
             Self::Running => "running",
             Self::Waiting => "waiting",
             Self::Done => "done",
+            Self::Exited => "exited",
         }
     }
 }
@@ -140,6 +144,10 @@ mod tests {
             SessionActivity::from_phase(AgentPhase::Ended),
             SessionActivity::Done
         );
+        assert_eq!(
+            SessionActivity::from_phase(AgentPhase::Exited),
+            SessionActivity::Exited
+        );
     }
 
     #[test]
@@ -148,5 +156,6 @@ mod tests {
         assert_eq!(SessionActivity::Running.as_str(), "running");
         assert_eq!(SessionActivity::Waiting.as_str(), "waiting");
         assert_eq!(SessionActivity::Done.as_str(), "done");
+        assert_eq!(SessionActivity::Exited.as_str(), "exited");
     }
 }

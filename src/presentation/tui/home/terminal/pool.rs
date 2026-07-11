@@ -49,7 +49,7 @@ use crate::domain::settings::{AgentCli, Sidebar};
 use crate::domain::workspace_state::PrLink;
 #[cfg(unix)]
 use crate::infrastructure::daemon_client::{
-    DaemonBuildHandshakeError, DaemonInputHandle, DaemonTerminal,
+    DaemonBuildHandshakeError, DaemonInputHandle, DaemonTerminal, DaemonTerminalMissingError,
 };
 #[cfg(unix)]
 use crate::infrastructure::daemon_store;
@@ -58,7 +58,8 @@ use crate::infrastructure::pty::{PtyInputHandle, PtySession, ScreenCallbacks};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
 use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{
-    agent_live_pane_store, agent_live_prompt_store, agent_state_store, error_log, session_monitor,
+    agent_live_pane_store, agent_live_prompt_store, agent_prompt_store, agent_state_store,
+    error_log, session_monitor,
 };
 use crate::usecase::daemon_attach::DaemonFailureFallback;
 #[cfg(unix)]
@@ -73,6 +74,159 @@ use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// A freshly spawned pane rejected its opening prompt and could not confirm
+/// teardown. The daemon terminal may still be alive, so unattended retry must
+/// stop instead of creating another agent in the same worktree.
+#[derive(Debug)]
+pub(crate) struct UnconfirmedPaneCleanup {
+    detail: String,
+}
+
+impl UnconfirmedPaneCleanup {
+    fn after(error: &anyhow::Error) -> Self {
+        Self {
+            detail: format!(
+                "opening prompt failed ({error:#}) and pane teardown was not acknowledged"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for UnconfirmedPaneCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for UnconfirmedPaneCleanup {}
+
+/// A persisted daemon terminal could not be proven absent. It may still own a
+/// live process (for example after daemon adoption or a transient IPC failure),
+/// so unattended prompt launches for this worktree must pause.
+#[derive(Debug)]
+pub(crate) struct UnverifiedDaemonOwnership {
+    detail: String,
+}
+
+impl UnverifiedDaemonOwnership {
+    fn after(terminal: u64, dir: &Path, error: &anyhow::Error) -> Self {
+        Self {
+            detail: format!(
+                "cannot verify ownership of daemon terminal {terminal} for {}: {error:#}",
+                dir.display()
+            ),
+        }
+    }
+
+    fn for_worktree(dir: &Path, detail: impl std::fmt::Display) -> Self {
+        Self {
+            detail: format!(
+                "cannot safely spawn another daemon terminal for {}: {detail}",
+                dir.display()
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for UnverifiedDaemonOwnership {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for UnverifiedDaemonOwnership {}
+
+/// The durable registry currently contains another terminal for a worktree
+/// whose pool has no known pane. This is retryable: daemon startup may still be
+/// pruning a dead persisted pid. Rechecking under bounded backoff is safe because
+/// a genuinely live owner keeps the registry entry and eventually dead-letters
+/// the start instead of spawning a duplicate.
+#[derive(Debug)]
+pub(crate) struct DaemonRegistryOwnershipConflict {
+    detail: String,
+}
+
+impl DaemonRegistryOwnershipConflict {
+    fn for_worktree(dir: &Path) -> Self {
+        Self {
+            detail: format!(
+                "daemon registry does not yet prove {} is terminal-free",
+                dir.display()
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonRegistryOwnershipConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for DaemonRegistryOwnershipConflict {}
+
+/// A restored agent pane could not reattach and deliberately yielded its fresh
+/// fallback to a durable queued prompt. The queue dispatcher owns the next
+/// launch with the current pinned CLI/model, so this is not a spawn failure.
+#[derive(Debug)]
+pub(crate) struct QueuedPromptOwnsFreshFallback;
+
+impl std::fmt::Display for QueuedPromptOwnsFreshFallback {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("queued prompt owns the restored pane's fresh fallback")
+    }
+}
+
+impl std::error::Error for QueuedPromptOwnsFreshFallback {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExitedPaneRetirement {
+    NotNeeded,
+    Retired,
+    /// Worktree-scoped phase cannot identify an exited pane among multiple
+    /// Agent panes; leave every process untouched for human resolution.
+    Ambiguous,
+    /// The sole exited pane's daemon teardown was not acknowledged.
+    Unconfirmed,
+}
+
+/// How one restored pane treats a launch prompt after daemon attach has
+/// definitively missed and the operation is about to become a fresh spawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FreshFallbackPrompt {
+    /// Ordinary fresh launches already carry their opening prompt explicitly.
+    #[default]
+    Ignore,
+    /// A restored agent pane must not steal work pinned to the current launch
+    /// pair. If work exists, let the queue dispatcher claim it and then reload
+    /// the authoritative CLI/model.
+    DeferIfQueued,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FreshFallbackDecision {
+    Proceed,
+    Defer,
+    InspectionFailed(String),
+}
+
+fn claim_fresh_fallback_prompt(dir: &Path, policy: FreshFallbackPrompt) -> FreshFallbackDecision {
+    match policy {
+        FreshFallbackPrompt::Ignore => FreshFallbackDecision::Proceed,
+        FreshFallbackPrompt::DeferIfQueued => {
+            let launch = agent_prompt_store::has_queued(dir);
+            let live = agent_live_prompt_store::has_queued(dir);
+            match (launch, live) {
+                (Err(error), _) | (_, Err(error)) => {
+                    FreshFallbackDecision::InspectionFailed(error.to_string())
+                }
+                (Ok(true), _) | (_, Ok(true)) => FreshFallbackDecision::Defer,
+                (Ok(false), Ok(false)) => FreshFallbackDecision::Proceed,
+            }
+        }
+    }
+}
 
 /// How many [`POLL_INTERVAL`] bell ticks pass between resource (CPU / memory)
 /// samples. Reading every process is far heavier than reading a bell counter, and
@@ -160,13 +314,20 @@ struct WatchedPrPane {
 struct LivePromptTarget {
     path: PathBuf,
     input: PaneInputHandle,
+    /// The TUI autostart pass found a launch-channel prompt for an already-live
+    /// agent. Deliver that durable opening prompt before the ordinary live queue
+    /// instead of spawning a duplicate pane.
+    deliver_launch_prompt: bool,
 }
 
 /// An autostart dispatch that has spawned an agent pane but has not yet been
 /// handed off to the watcher's authoritative phase / liveness state.
 #[derive(Debug, Clone, Copy)]
 struct AutostartReservation {
-    expires_at: Instant,
+    /// `None` while launch preparation has not registered a pane yet. The
+    /// LaunchJobManager owns that timeout. Once a pane/live handoff exists this
+    /// becomes the phase-less fallback deadline.
+    phase_deadline: Option<Instant>,
 }
 
 /// The off-lock work a watcher tick collected while holding [`Shared`].
@@ -186,6 +347,10 @@ struct Shared {
     /// count as occupied slots until the watcher sees a phase, the pane exits, or
     /// the timeout fallback releases them.
     autostart_reservations: HashMap<PathBuf, AutostartReservation>,
+    /// Worktrees whose already-live agent should consume one launch-channel
+    /// prompt on the next watcher tick. The autostart pass inserts requests only
+    /// while the feature is enabled; a set makes repeated UI ticks idempotent.
+    launch_prompt_deliveries: HashSet<PathBuf>,
     /// PR lists the watcher has newly harvested from live panes, keyed by the
     /// session/worktree root. The event loop drains this and calls
     /// `HomeState::set_pr_links`, so background sessions get their sidebar `#N`
@@ -386,9 +551,11 @@ fn snapshot_locked(shared: &Shared) -> MonitorSnapshot {
 }
 
 fn prune_expired_autostart_reservations(shared: &mut Shared, now: Instant) {
-    shared
-        .autostart_reservations
-        .retain(|_, reservation| reservation.expires_at > now);
+    shared.autostart_reservations.retain(|_, reservation| {
+        reservation
+            .phase_deadline
+            .is_none_or(|deadline| deadline > now)
+    });
 }
 
 fn reserve_autostart_dispatch_locked(shared: &mut Shared, dir: &Path, now: Instant) -> bool {
@@ -399,7 +566,7 @@ fn reserve_autostart_dispatch_locked(shared: &mut Shared, dir: &Path, now: Insta
     shared.autostart_reservations.insert(
         dir.to_path_buf(),
         AutostartReservation {
-            expires_at: now + AUTOSTART_RESERVATION_TIMEOUT,
+            phase_deadline: None,
         },
     );
     true
@@ -414,7 +581,12 @@ fn occupied_agent_slots_locked(shared: &Shared, now: Instant) -> usize {
             shared
                 .autostart_reservations
                 .iter()
-                .filter_map(|(path, reservation)| (reservation.expires_at > now).then_some(path)),
+                .filter_map(|(path, reservation)| {
+                    reservation
+                        .phase_deadline
+                        .is_none_or(|deadline| deadline > now)
+                        .then_some(path)
+                }),
         )
         .collect::<HashSet<_>>()
         .len()
@@ -422,13 +594,39 @@ fn occupied_agent_slots_locked(shared: &Shared, now: Instant) -> usize {
 
 fn release_handed_off_autostart_reservations(
     shared: &mut Shared,
-    phase_observed: &HashSet<PathBuf>,
+    active_phase_observed: &HashSet<PathBuf>,
     now: Instant,
 ) {
     prune_expired_autostart_reservations(shared, now);
     shared
         .autostart_reservations
-        .retain(|path, _| shared.sessions.contains_key(path) && !phase_observed.contains(path));
+        .retain(|path, _| !active_phase_observed.contains(path));
+}
+
+/// Forget an Agent pane that disappeared while preserving a replacement launch
+/// already claimed after the watcher/UI snapshot. A phase-less reservation is
+/// the preparation generation: its CLI may already have emitted `Ready` before
+/// `refresh_watched` registers the new input, so neither that reservation nor
+/// its phase file belongs to the stale pane.
+fn clear_stale_agent_tracking(shared: &mut Shared, dir: &Path) {
+    shared.monitor.forget(dir);
+    shared.launch_prompt_deliveries.remove(dir);
+    let replacement_preparing = shared
+        .autostart_reservations
+        .get(dir)
+        .is_some_and(|reservation| reservation.phase_deadline.is_none());
+    if replacement_preparing {
+        return;
+    }
+    shared.autostart_reservations.remove(dir);
+    agent_state_store::clear(dir);
+}
+
+/// Launch-channel work is a next-turn instruction, not an answer to a prompt the
+/// agent is currently handling. Keep it queued while the live agent is running or
+/// waiting for input; ready/ended/phase-less panes may accept the next message.
+fn can_deliver_launch_prompt(requested: bool, running: bool, waiting: bool) -> bool {
+    requested && !running && !waiting
 }
 
 /// One off-lock PR scan the watcher should perform for a pane whose output
@@ -1003,6 +1201,16 @@ pub enum PaneInputHandle {
     Local(PtyInputHandle),
     #[cfg(unix)]
     Remote(DaemonInputHandle),
+    #[cfg(test)]
+    Spy(TestPaneInputHandle),
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct TestPaneInputHandle {
+    writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    bracketed_paste: bool,
+    fail: bool,
 }
 
 impl PaneInputHandle {
@@ -1012,6 +1220,8 @@ impl PaneInputHandle {
             PaneInputHandle::Local(handle) => handle.bracketed_paste(),
             #[cfg(unix)]
             PaneInputHandle::Remote(handle) => handle.bracketed_paste(),
+            #[cfg(test)]
+            PaneInputHandle::Spy(handle) => handle.bracketed_paste,
         }
     }
 
@@ -1021,6 +1231,19 @@ impl PaneInputHandle {
             PaneInputHandle::Local(handle) => handle.write(bytes),
             #[cfg(unix)]
             PaneInputHandle::Remote(handle) => handle.write(bytes),
+            #[cfg(test)]
+            PaneInputHandle::Spy(handle) => {
+                if handle.fail {
+                    Err(anyhow::anyhow!("spy input failure"))
+                } else {
+                    handle
+                        .writes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(bytes.to_vec());
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -1135,11 +1358,15 @@ pub struct PaneLaunch<'a> {
     /// (with `agent_command`) if the daemon no longer knows the id. `None` for
     /// a brand-new pane.
     pub attach: Option<u64>,
+    /// Prompt ownership policy used only when `attach` misses and this restore
+    /// is about to spawn a new agent process.
+    pub fresh_fallback_prompt: FreshFallbackPrompt,
     /// Whether a build-unverified daemon spawn may use a TUI-local PTY.
     /// User-initiated launches allow this so `cargo run` remains usable with an
     /// older daemon. Restore and queued-prompt launches reject it because that
-    /// daemon may already own an agent for the same worktree. Ordinary daemon
-    /// unavailability keeps the existing local fallback for both policies.
+    /// daemon may already own an agent for the same worktree. Daemon
+    /// unavailability also keeps unattended work queued instead of starting a
+    /// TUI-owned worker that would die when the TUI closes.
     pub daemon_failure_fallback: DaemonFailureFallback,
 }
 
@@ -1254,7 +1481,15 @@ impl TerminalPool {
     /// same worktree already has a live reservation, which prevents the same
     /// queue generation from being dispatched twice before the watcher catches up.
     pub fn reserve_autostart_dispatch(&self, dir: &Path) -> bool {
-        reserve_autostart_dispatch_locked(&mut self.lock(), dir, Instant::now())
+        let mut shared = self.lock();
+        let reserved = reserve_autostart_dispatch_locked(&mut shared, dir, Instant::now());
+        if reserved {
+            // A terminal-only pane may retain the previous agent's ready/ended
+            // phase. Clear it while the shared lock prevents a watcher tick from
+            // mistaking that stale phase for this dispatch's handoff.
+            agent_state_store::clear(dir);
+        }
+        reserved
     }
 
     /// Release a queued-prompt autostart reservation for `dir`, used when the
@@ -1264,6 +1499,15 @@ impl TerminalPool {
         if self.lock().autostart_reservations.remove(dir).is_some() {
             self.version.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    /// Ask the watcher to deliver a launch-channel prompt to `dir`'s existing
+    /// agent pane. Repeated requests collapse until the next watcher snapshot;
+    /// the prompt itself stays durable on disk until the PTY write is attempted.
+    pub fn request_launch_prompt_delivery(&self, dir: &Path) {
+        self.lock()
+            .launch_prompt_deliveries
+            .insert(dir.to_path_buf());
     }
 
     /// Make `dir`'s active pane ready to attach. With no live pane yet, spawns the
@@ -1638,6 +1882,100 @@ impl TerminalPool {
             .is_some_and(|sp| sp.panes.iter().any(Pane::is_alive))
     }
 
+    /// Whether `dir` has an alive agent pane, as distinct from a plain terminal.
+    /// Queued-prompt autostart reuses this pane, but must still be allowed to add
+    /// an agent alongside a terminal-only session.
+    pub fn has_live_agent_pane(&self, dir: &Path) -> bool {
+        if matches!(
+            agent_state_store::read(dir),
+            Some(crate::domain::agent_phase::AgentPhase::Exited)
+        ) {
+            return false;
+        }
+        self.sessions.get(dir).is_some_and(|sp| {
+            sp.panes
+                .iter()
+                .any(|pane| pane.is_alive() && matches!(pane.kind, PaneKind::Agent))
+        })
+    }
+
+    /// Turn agent panes whose process reported `SessionEnd` into absent
+    /// consumers before a fresh queued launch. Their parent shells can still be
+    /// writable, so leaving them marked as Agent would make an acknowledged
+    /// prompt disappear as a shell command. Every daemon kill must be
+    /// acknowledged before the panes are removed; otherwise the caller leaves
+    /// the durable queue untouched and retries no spawn.
+    pub(crate) fn retire_exited_agent_panes(
+        &mut self,
+        dir: &Path,
+        label: &str,
+    ) -> ExitedPaneRetirement {
+        if !matches!(
+            agent_state_store::read(dir),
+            Some(crate::domain::agent_phase::AgentPhase::Exited)
+        ) {
+            return ExitedPaneRetirement::NotNeeded;
+        }
+        let Some(session) = self.sessions.get_mut(dir) else {
+            return ExitedPaneRetirement::NotNeeded;
+        };
+        // Phase storage is worktree-scoped. With more than one Agent pane it
+        // cannot identify which process emitted SessionEnd, so destructive
+        // retirement is unsafe; pause automation for human resolution instead.
+        let agent_count = session
+            .panes
+            .iter()
+            .filter(|pane| matches!(pane.kind, PaneKind::Agent))
+            .count();
+        if agent_count == 0 {
+            // A terminal-only session can retain the phase of an Agent tab that
+            // was already closed. It has no process to retire and is eligible
+            // for the fresh autostart this call is preparing.
+            agent_state_store::clear(dir);
+            return ExitedPaneRetirement::NotNeeded;
+        }
+        if agent_count > 1 {
+            return ExitedPaneRetirement::Ambiguous;
+        }
+        if !session
+            .panes
+            .iter_mut()
+            .filter(|pane| matches!(pane.kind, PaneKind::Agent))
+            .all(Pane::kill_backend)
+        {
+            return ExitedPaneRetirement::Unconfirmed;
+        }
+        session
+            .panes
+            .retain(|pane| !matches!(pane.kind, PaneKind::Agent));
+        if session.panes.is_empty() {
+            self.sessions.remove(dir);
+        } else {
+            session.active = session.active.min(session.panes.len().saturating_sub(1));
+            session.rebuild_tab_labels();
+        }
+        self.preview_cache = None;
+        self.refresh_watched(dir, label);
+        ExitedPaneRetirement::Retired
+    }
+
+    /// Whether an existing agent pane is idle enough for a next-turn launch
+    /// prompt. Running/waiting work keeps the durable request queued; ready,
+    /// completed-turn, and phase-less CLIs may accept it.
+    pub fn live_agent_accepts_launch_prompt(&self, dir: &Path) -> bool {
+        if !self.has_live_agent_pane(dir) {
+            return false;
+        }
+        if matches!(
+            agent_state_store::read(dir),
+            Some(crate::domain::agent_phase::AgentPhase::Exited)
+        ) {
+            return false;
+        }
+        let shared = self.lock();
+        !shared.monitor.running().contains(dir) && !shared.monitor.waiting().contains(dir)
+    }
+
     /// Whether `dir` already holds an agent pane running `cli`. A session keeps
     /// at most one agent *per CLI*, so a request to add another of the same CLI
     /// (集中's `agent`, or `Ctrl-G`) reads this to jump to the existing tab
@@ -1745,26 +2083,68 @@ impl TerminalPool {
         }
 
         let fresh_agent = matches!(kind, PaneKind::Agent);
+        // Reaching this point means any persisted daemon attach definitively
+        // fell through toward a fresh process. A restore yields when durable
+        // queued work exists, so the queue dispatcher can claim it and reload
+        // the current CLI/model instead of an old snapshot stealing it.
+        if fresh_agent && launch.opening_prompt.is_none() {
+            match claim_fresh_fallback_prompt(dir, launch.fresh_fallback_prompt) {
+                FreshFallbackDecision::Proceed => {}
+                FreshFallbackDecision::Defer => {
+                    return Err(anyhow::Error::new(QueuedPromptOwnsFreshFallback));
+                }
+                FreshFallbackDecision::InspectionFailed(error) => {
+                    return Err(anyhow::Error::new(UnverifiedDaemonOwnership::for_worktree(
+                        dir,
+                        format!("queued prompt ownership could not be inspected: {error}"),
+                    )));
+                }
+            }
+        }
+        let opening_prompt = launch.opening_prompt.map(str::to_owned);
         let mut before_spawn = || {
             if fresh_agent {
                 agent_state_store::clear(dir);
             }
         };
-        let pty = spawn_backend(
+        let known_daemon_terminals = self
+            .sessions
+            .get(dir)
+            .into_iter()
+            .flat_map(|session| &session.panes)
+            .filter(|pane| pane.is_alive())
+            .filter_map(|pane| pane.pty.as_ref().and_then(PaneBackend::terminal_id))
+            .collect();
+        let spawned = spawn_backend(
             dir,
             &geo,
             initial,
             self.scrollback_lines,
             launch.env,
-            launch.daemon_failure_fallback,
+            SpawnBackendPolicy {
+                daemon_failure_fallback: launch.daemon_failure_fallback,
+                known_daemon_terminals,
+                guard_agent_ownership: fresh_agent,
+            },
             &mut before_spawn,
-        )?;
+        );
+        let mut pty = spawned?;
         if fresh_agent {
             self.lock().monitor.forget(dir);
-            if let Some(prompt) = launch.opening_prompt {
+            if let Some(prompt) = opening_prompt.as_deref() {
                 let input = pty.input_handle();
                 let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
-                input.write(&bytes)?;
+                if let Err(error) = input.write(&bytes) {
+                    // The pane has not been inserted into the pool yet. Do not
+                    // leave a daemon-owned agent detached and untracked. The
+                    // owning caller restores a supplied prompt; its retry
+                    // would otherwise start a duplicate beside this orphan.
+                    let cleaned = pty.kill();
+                    if !cleaned {
+                        return Err(anyhow::Error::new(UnconfirmedPaneCleanup::after(&error)));
+                    }
+                    return Err(error);
+                }
             }
         }
         let id = self.allocate_pane_id();
@@ -1856,11 +2236,22 @@ impl TerminalPool {
                     })
                 })
                 .collect();
-            let agent_inputs = sp
+            let mut agent_inputs: Vec<(usize, u64, PaneInputHandle)> = sp
                 .panes
                 .iter()
-                .filter(|p| matches!(p.kind, PaneKind::Agent))
-                .filter_map(|p| p.pty.as_ref().map(|pty| (p.id, pty.input_handle())))
+                .enumerate()
+                .filter(|(_, p)| matches!(p.kind, PaneKind::Agent))
+                .filter_map(|(index, p)| {
+                    p.pty.as_ref().map(|pty| (index, p.id, pty.input_handle()))
+                })
+                .collect();
+            // The active Agent is the intended live consumer. A fresh queued
+            // launch appends and activates its pane, while an exited pane's bare
+            // shell may still be present until retirement.
+            agent_inputs.sort_by_key(|(index, _, _)| *index != sp.active);
+            let agent_inputs = agent_inputs
+                .into_iter()
+                .map(|(_, id, input)| (id, input))
                 .collect();
             let has_antigravity = sp
                 .panes
@@ -1895,7 +2286,20 @@ impl TerminalPool {
         let mut shared = self.lock();
         match watched {
             Some(watched) => {
+                let has_agent_inputs = !watched.agent_inputs.is_empty();
                 shared.sessions.insert(key, watched);
+                if has_agent_inputs {
+                    if let Some(reservation) = shared.autostart_reservations.get_mut(dir) {
+                        reservation.phase_deadline =
+                            Some(Instant::now() + AUTOSTART_RESERVATION_TIMEOUT);
+                    }
+                } else {
+                    // A surviving plain terminal is not an Agent slot. Forget
+                    // the phase/bell state of the Agent tab that was closed so a
+                    // stale running/waiting phase cannot permanently consume the
+                    // concurrency budget and prevent the replacement spawn.
+                    clear_stale_agent_tracking(&mut shared, dir);
+                }
                 self.version.fetch_add(1, Ordering::SeqCst);
                 // Wake the watcher out of its no-session cheap path. Store before
                 // dropping the lock so the next tick will take the lock and observe
@@ -1907,6 +2311,7 @@ impl TerminalPool {
                 shared.pr_link_updates.remove(&key);
                 shared.monitor.forget(dir);
                 shared.autostart_reservations.remove(&key);
+                shared.launch_prompt_deliveries.remove(&key);
                 agent_state_store::clear(dir);
                 self.version.fetch_add(1, Ordering::SeqCst);
             }
@@ -1954,6 +2359,7 @@ impl TerminalPool {
             shared.pr_link_updates.remove(path);
             shared.monitor.forget(path);
             shared.autostart_reservations.remove(path);
+            shared.launch_prompt_deliveries.remove(path);
             agent_state_store::clear(path);
             agent_live_pane_store::clear(path);
         }
@@ -2102,21 +2508,63 @@ impl Drop for TerminalPool {
 
 /// Spawn the backend for a new pane. The normal path asks the daemon (spawned
 /// alongside the TUI) for a terminal it owns, so the shell — and any agent CLI
-/// inside it — survives this TUI process. An ordinary daemon failure falls back
-/// to a TUI-local PTY. Across an unverified build, a user-initiated pane may also
-/// fall back, while an unattended restore/autostart rejects the launch because
-/// the old daemon may own the same agent. `before_spawn` resets fresh agent state
-/// only after a remote build handshake succeeds, or immediately before a local
-/// spawn. Non-Unix platforms always take the local path.
+/// inside it — survives this TUI process. A user-initiated daemon failure falls
+/// back to a TUI-local PTY. Unattended restore/autostart stays durable instead;
+/// only a build mismatch with a registry-proven empty worktree may fall back,
+/// because every other failure could leave an unobservable owner or a worker that
+/// dies with the TUI. `before_spawn` resets fresh agent state only after a remote
+/// build handshake succeeds, or immediately before a local spawn. Non-Unix
+/// platforms always take the local path.
+struct SpawnBackendPolicy {
+    daemon_failure_fallback: DaemonFailureFallback,
+    /// Live remote terminal ids this pool already represents for the worktree.
+    /// The durable registry must match this set exactly before an unattended
+    /// additional Agent may be spawned beside known terminal-only panes.
+    known_daemon_terminals: HashSet<u64>,
+    guard_agent_ownership: bool,
+}
+
+#[cfg(unix)]
+fn registry_ownership_against_known(
+    dir: &Path,
+    records: Option<&[crate::infrastructure::daemon_terminals_store::DaemonTerminalRecord]>,
+    known: &HashSet<u64>,
+    alive: impl Fn(u32) -> bool,
+) -> DaemonWorktreeOwnership {
+    let Some(records) = records else {
+        return if known.is_empty() {
+            DaemonWorktreeOwnership::Absent
+        } else {
+            DaemonWorktreeOwnership::Unknown
+        };
+    };
+    let worktree = crate::infrastructure::worktree_keyed_store::key(dir);
+    let registered: HashSet<u64> = records
+        .iter()
+        .filter(|terminal| {
+            crate::infrastructure::worktree_keyed_store::key(&terminal.worktree) == worktree
+                && alive(terminal.pid)
+        })
+        .map(|terminal| terminal.terminal)
+        .collect();
+    if registered == *known {
+        DaemonWorktreeOwnership::Absent
+    } else {
+        DaemonWorktreeOwnership::Present
+    }
+}
+
 fn spawn_backend(
     dir: &Path,
     geo: &ui::TerminalGeometry,
     initial: Option<&str>,
     scrollback: usize,
     env: &BTreeMap<String, String>,
-    _daemon_failure_fallback: DaemonFailureFallback,
+    policy: SpawnBackendPolicy,
     before_spawn: &mut dyn FnMut(),
 ) -> Result<PaneBackend> {
+    #[cfg(not(unix))]
+    let _ = policy;
     let mut prepared = false;
     let mut prepare_once = || {
         if !prepared {
@@ -2127,6 +2575,32 @@ fn spawn_backend(
     #[cfg(unix)]
     {
         let daemon_dir = daemon_store::default_dir();
+        if matches!(
+            policy.daemon_failure_fallback,
+            DaemonFailureFallback::Unattended
+        ) && policy.guard_agent_ownership
+        {
+            let ownership = match daemon_dir.as_ref() {
+                Ok(daemon_dir) => {
+                    match crate::infrastructure::daemon_terminals_store::read_if_present(daemon_dir)
+                    {
+                        Ok(terminals) => registry_ownership_against_known(
+                            dir,
+                            terminals.as_deref(),
+                            &policy.known_daemon_terminals,
+                            crate::infrastructure::resource::process_alive,
+                        ),
+                        Err(_) => DaemonWorktreeOwnership::Unknown,
+                    }
+                }
+                Err(_) => DaemonWorktreeOwnership::Unknown,
+            };
+            if !matches!(ownership, DaemonWorktreeOwnership::Absent) {
+                return Err(anyhow::Error::new(
+                    DaemonRegistryOwnershipConflict::for_worktree(dir),
+                ));
+            }
+        }
         let remote = match daemon_dir.as_ref() {
             Ok(daemon_dir) => DaemonTerminal::spawn_after_build_check(
                 daemon_dir,
@@ -2164,6 +2638,7 @@ fn spawn_backend(
                             if terminals.iter().any(|terminal| {
                                 crate::infrastructure::worktree_keyed_store::key(&terminal.worktree)
                                     == worktree
+                                    && crate::infrastructure::resource::process_alive(terminal.pid)
                             }) {
                                 DaemonWorktreeOwnership::Present
                             } else {
@@ -2173,10 +2648,10 @@ fn spawn_backend(
                 } else {
                     DaemonWorktreeOwnership::Unknown
                 };
-                if !should_fallback_to_local(_daemon_failure_fallback, failure, ownership) {
+                if !should_fallback_to_local(policy.daemon_failure_fallback, failure, ownership) {
                     return Err(error).context(
-                        "refusing an unattended local pane launch because the daemon build could \
-                         not be verified; a daemon-owned process may already be running",
+                        "refusing an unattended local pane launch because durable daemon \
+                         ownership is unavailable or unverified",
                     );
                 }
                 error_log::ErrorLog::record(&format!(
@@ -2194,10 +2669,10 @@ fn spawn_backend(
 }
 
 /// Re-attach to the daemon terminal a persisted pane snapshot recorded, or
-/// `None` when the compatible daemon does not know the id any more (the terminal
-/// exited, or the daemon restarted) — the caller then spawns afresh. A build
-/// handshake failure is returned: the recorded process can still be alive in an
-/// older daemon, so automatically resuming it would create a duplicate agent.
+/// `None` only when the compatible daemon explicitly reports the id missing —
+/// the caller may then spawn afresh. Every transport/build/adoption error keeps
+/// ownership unverified and is returned, because the recorded process may still
+/// be alive and automatically replacing it would create a duplicate agent.
 #[cfg(unix)]
 fn attach_daemon_terminal(
     dir: &Path,
@@ -2205,21 +2680,19 @@ fn attach_daemon_terminal(
     geo: &ui::TerminalGeometry,
     scrollback: usize,
 ) -> Result<Option<PaneBackend>> {
-    let daemon_dir = match daemon_store::default_dir() {
-        Ok(dir) => dir,
-        Err(_) => return Ok(None),
-    };
+    let daemon_dir = daemon_store::default_dir().map_err(|error| {
+        anyhow::Error::new(UnverifiedDaemonOwnership::after(
+            terminal,
+            dir,
+            &anyhow::Error::msg(error.to_string()),
+        ))
+    })?;
     match DaemonTerminal::attach(&daemon_dir, dir, terminal, geo.rows, geo.cols, scrollback) {
         Ok(terminal) => Ok(Some(PaneBackend::Remote(terminal))),
-        Err(error) if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() => Err(error)
-            .with_context(|| {
-                format!(
-                    "cannot safely restore daemon terminal {terminal} for {} because its build \
-                     could not be verified; the original process may still be running",
-                    dir.display()
-                )
-            }),
-        Err(_) => Ok(None),
+        Err(error) if error.downcast_ref::<DaemonTerminalMissingError>().is_some() => Ok(None),
+        Err(error) => Err(anyhow::Error::new(UnverifiedDaemonOwnership::after(
+            terminal, dir, &error,
+        ))),
     }
 }
 
@@ -2299,6 +2772,7 @@ fn spawn_watcher(
                 }
                 // Drop watcher-side strong parser/input handles immediately; the
                 // pool dropping its PTY cannot release the grid while these remain.
+                let mut lost_agent_inputs = Vec::new();
                 for (path, watched) in &mut shared.sessions {
                     let dead_ids: HashSet<u64> = watched
                         .alive
@@ -2312,10 +2786,14 @@ fn spawn_watcher(
                         .retain(|(id, _)| !dead_ids.contains(id));
                     if had_agent_inputs && watched.agent_inputs.is_empty() {
                         agent_live_pane_store::clear(path);
+                        lost_agent_inputs.push(path.clone());
                     }
                     watched
                         .alive
                         .retain(|(_, alive)| alive.load(Ordering::SeqCst));
+                }
+                for path in lost_agent_inputs {
+                    clear_stale_agent_tracking(&mut shared, &path);
                 }
 
                 // Prune sessions whose every pane has exited so they stop being
@@ -2330,6 +2808,7 @@ fn spawn_watcher(
                     shared.sessions.remove(&path);
                     shared.monitor.forget(&path);
                     shared.autostart_reservations.remove(&path);
+                    shared.launch_prompt_deliveries.remove(&path);
                     agent_state_store::clear(&path);
                     agent_live_pane_store::clear(&path);
                 }
@@ -2337,7 +2816,12 @@ fn spawn_watcher(
                 // pruned just above and those a session removal took straight out of
                 // `shared.sessions` (which never enter the `dead` list). Keyed on the
                 // live set so the cache cannot grow unbounded across a long run.
-                phase_reader.retain(|path| shared.sessions.contains_key(path));
+                phase_reader.retain(|path| {
+                    shared
+                        .sessions
+                        .get(path)
+                        .is_some_and(|watched| !watched.agent_inputs.is_empty())
+                });
                 let work = if shared.sessions.is_empty() {
                     shared.resources.clear();
                     shared.resource_total = ResourceUsage::default();
@@ -2358,6 +2842,7 @@ fn spawn_watcher(
                     let readings: Vec<session_monitor::Reading> = shared
                         .sessions
                         .iter()
+                        .filter(|(_, watched)| !watched.agent_inputs.is_empty())
                         .map(|(path, w)| {
                             (
                                 path.clone(),
@@ -2366,11 +2851,32 @@ fn spawn_watcher(
                             )
                         })
                         .collect();
-                    let phase_observed: HashSet<PathBuf> = readings
+                    let active_phase_observed: HashSet<PathBuf> = readings
                         .iter()
-                        .filter(|(_, _, phase)| phase.is_some())
+                        .filter(|(_, _, phase)| {
+                            matches!(
+                                phase,
+                                Some(
+                                    crate::domain::agent_phase::AgentPhase::Running
+                                        | crate::domain::agent_phase::AgentPhase::Waiting
+                                )
+                            )
+                        })
                         .map(|(path, _, _)| path.clone())
                         .collect();
+                    let exited_agents: HashSet<PathBuf> = readings
+                        .iter()
+                        .filter(|(_, _, phase)| {
+                            matches!(phase, Some(crate::domain::agent_phase::AgentPhase::Exited))
+                        })
+                        .map(|(path, _, _)| path.clone())
+                        .collect();
+                    for path in &exited_agents {
+                        // SessionEnd can leave the parent shell alive. Stop
+                        // advertising/draining it as an Agent consumer before a
+                        // successful PTY write can silently become a shell command.
+                        agent_live_pane_store::clear(path);
+                    }
                     let notices = shared
                         .monitor
                         .observe(&readings)
@@ -2382,11 +2888,18 @@ fn spawn_watcher(
                                 .map(|w| (w.label.clone(), notice.kind))
                         })
                         .collect();
-                    release_handed_off_autostart_reservations(&mut shared, &phase_observed, now);
+                    release_handed_off_autostart_reservations(
+                        &mut shared,
+                        &active_phase_observed,
+                        now,
+                    );
                     let pr_jobs = pending_pr_scans(&mut shared);
+                    let launch_prompt_deliveries =
+                        std::mem::take(&mut shared.launch_prompt_deliveries);
                     let live_prompt_targets = shared
                         .sessions
                         .iter()
+                        .filter(|(path, _)| !exited_agents.contains(*path))
                         .filter_map(|(path, watched)| {
                             watched
                                 .agent_inputs
@@ -2394,6 +2907,11 @@ fn spawn_watcher(
                                 .map(|(_, input)| LivePromptTarget {
                                     path: path.clone(),
                                     input: input.clone(),
+                                    deliver_launch_prompt: can_deliver_launch_prompt(
+                                        launch_prompt_deliveries.contains(path),
+                                        shared.monitor.running().contains(path),
+                                        shared.monitor.waiting().contains(path),
+                                    ),
                                 })
                         })
                         .collect();
@@ -2508,7 +3026,86 @@ fn spawn_watcher(
 /// batch, so a wedged write never silently drops a prompt the sender was told
 /// was queued; the failure is also logged for diagnosis.
 fn deliver_live_prompts(targets: Vec<LivePromptTarget>) {
-    for LivePromptTarget { path, input } in targets {
+    for LivePromptTarget {
+        path,
+        input,
+        deliver_launch_prompt,
+    } in targets
+    {
+        // Re-read immediately before queue take/write. The watcher snapshot can
+        // race a SessionEnd hook; ACK from the remaining bare shell would not
+        // prove that an Agent received the natural-language prompt.
+        if matches!(
+            agent_state_store::read(&path),
+            Some(crate::domain::agent_phase::AgentPhase::Exited)
+        ) {
+            continue;
+        }
+        if deliver_launch_prompt {
+            let taken = match agent_prompt_store::take_ready_for_live_agent_strict(
+                &path,
+                std::time::SystemTime::now(),
+            ) {
+                Ok(agent_prompt_store::TakeReady::Ready {
+                    prompt,
+                    retry,
+                    reuse_live_agent,
+                }) => Some((prompt, retry, reuse_live_agent)),
+                // An older reusable launch instruction is still backing off. Do
+                // not let newer live work overtake an attempt that will resume.
+                Ok(agent_prompt_store::TakeReady::Waiting(_)) => continue,
+                // Dead-letter is terminal and remains durable for human
+                // inspection, but must not head-of-line block newer explicit
+                // live work forever. A fresh-only launch prompt likewise stays
+                // on disk while the live channel continues independently.
+                Ok(
+                    agent_prompt_store::TakeReady::Dead(_)
+                    | agent_prompt_store::TakeReady::FreshLaunch
+                    | agent_prompt_store::TakeReady::Empty,
+                ) => None,
+                Err(error) => {
+                    error_log::ErrorLog::record(&format!(
+                        "deferred live prompt delivery for {} because the launch queue could not \
+                         be inspected: {error:#}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            if let Some((prompt, retry, reuse_live_agent)) = taken {
+                let bytes = pane_input::encode_prompt_submit(&prompt, input.bracketed_paste());
+                if let Err(err) = input.write(&bytes) {
+                    match agent_prompt_store::requeue_front_after_failure(
+                        &path,
+                        &prompt,
+                        retry.as_ref(),
+                        reuse_live_agent,
+                        &err.to_string(),
+                        std::time::SystemTime::now(),
+                    ) {
+                        Ok(retry) if retry.dead => error_log::ErrorLog::record(&format!(
+                            "launch prompt for {} is dead-lettered after {} failed input \
+                             attempts: {}",
+                            path.display(),
+                            retry.attempts,
+                            retry.last_error,
+                        )),
+                        Ok(_) => {}
+                        Err(requeue_err) => error_log::ErrorLog::record(&format!(
+                            "failed to restore undelivered launch prompt for {}: {requeue_err:#}",
+                            path.display()
+                        )),
+                    }
+                    error_log::ErrorLog::record(&format!(
+                        "failed to inject launch prompt into {}: {err:#}",
+                        path.display()
+                    ));
+                    // Keep the live queue untouched until the older launch prompt
+                    // succeeds, preserving the two channels' delivery order.
+                    continue;
+                }
+            }
+        }
         let prompts = agent_live_prompt_store::take_all(&path);
         for (index, prompt) in prompts.iter().enumerate() {
             let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
@@ -2631,7 +3228,7 @@ mod tests {
     }
 
     #[test]
-    fn autostart_reservation_releases_on_ready_phase() {
+    fn autostart_reservation_stays_held_on_ready_until_work_starts() {
         let mut shared = Shared::default();
         let now = Instant::now();
         let worktree = path("ready");
@@ -2644,18 +3241,14 @@ mod tests {
         shared
             .monitor
             .observe(&[(worktree.clone(), 0, Some(AgentPhase::Ready))]);
-        release_handed_off_autostart_reservations(
-            &mut shared,
-            &HashSet::from([worktree.clone()]),
-            now,
-        );
+        release_handed_off_autostart_reservations(&mut shared, &HashSet::new(), now);
 
-        assert!(!shared.autostart_reservations.contains_key(&worktree));
-        assert_eq!(occupied_agent_slots_locked(&shared, now), 0);
+        assert!(shared.autostart_reservations.contains_key(&worktree));
+        assert_eq!(occupied_agent_slots_locked(&shared, now), 1);
     }
 
     #[test]
-    fn autostart_reservation_timeout_releases_phase_less_cli() {
+    fn registered_autostart_reservation_timeout_releases_phase_less_cli() {
         let mut shared = Shared::default();
         let now = Instant::now();
         let worktree = path("phase-less");
@@ -2665,6 +3258,11 @@ mod tests {
             &worktree,
             now
         ));
+        shared
+            .autostart_reservations
+            .get_mut(&worktree)
+            .unwrap()
+            .phase_deadline = Some(now + AUTOSTART_RESERVATION_TIMEOUT);
         let later = now + AUTOSTART_RESERVATION_TIMEOUT + Duration::from_millis(1);
         assert_eq!(occupied_agent_slots_locked(&shared, later), 0);
         assert!(reserve_autostart_dispatch_locked(
@@ -2672,6 +3270,24 @@ mod tests {
             &worktree,
             later
         ));
+    }
+
+    #[test]
+    fn preparing_reservation_does_not_expire_before_pane_registration() {
+        let mut shared = Shared::default();
+        let now = Instant::now();
+        let worktree = path("slow-env");
+
+        assert!(reserve_autostart_dispatch_locked(
+            &mut shared,
+            &worktree,
+            now
+        ));
+        let much_later = now + AUTOSTART_RESERVATION_TIMEOUT * 10;
+
+        assert_eq!(occupied_agent_slots_locked(&shared, much_later), 1);
+        release_handed_off_autostart_reservations(&mut shared, &HashSet::new(), much_later);
+        assert!(shared.autostart_reservations.contains_key(&worktree));
     }
 
     #[test]
@@ -2693,6 +3309,14 @@ mod tests {
             &worktree,
             now
         ));
+    }
+
+    #[test]
+    fn launch_prompt_delivery_waits_until_the_existing_agent_is_idle() {
+        assert!(can_deliver_launch_prompt(true, false, false));
+        assert!(!can_deliver_launch_prompt(false, false, false));
+        assert!(!can_deliver_launch_prompt(true, true, false));
+        assert!(!can_deliver_launch_prompt(true, false, true));
     }
 
     #[test]
@@ -2769,6 +3393,502 @@ mod tests {
     fn insert_spy_session(pool: &mut TerminalPool, dir: &Path, panes: Vec<Pane>) {
         pool.sessions
             .insert(dir.to_path_buf(), SessionPanes::new(panes, 0));
+    }
+
+    fn spy_input(
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+        bracketed_paste: bool,
+        fail: bool,
+    ) -> PaneInputHandle {
+        PaneInputHandle::Spy(TestPaneInputHandle {
+            writes,
+            bracketed_paste,
+            fail,
+        })
+    }
+
+    #[test]
+    fn live_agent_detection_does_not_treat_terminal_only_as_an_agent() {
+        let dir = path("pane-kind");
+        let kill_count = Arc::new(AtomicU64::new(0));
+        let mut pool = TerminalPool::new(false, 0);
+        insert_spy_session(
+            &mut pool,
+            &dir,
+            vec![spy_pane(Arc::clone(&kill_count), true, PaneKind::Terminal)],
+        );
+
+        assert!(pool.has_live_pane(&dir));
+        assert!(!pool.has_live_agent_pane(&dir));
+
+        pool.sessions.get_mut(&dir).unwrap().panes.push(spy_pane(
+            kill_count,
+            true,
+            PaneKind::Agent,
+        ));
+        assert!(pool.has_live_agent_pane(&dir));
+    }
+
+    #[test]
+    fn terminal_only_session_clears_stale_exited_phase_without_removing_terminal() {
+        with_data_dir(|| {
+            let dir = path("terminal-after-agent");
+            let kill_count = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![spy_pane(Arc::clone(&kill_count), true, PaneKind::Terminal)],
+            );
+            agent_state_store::write(&dir, AgentPhase::Exited).unwrap();
+
+            assert_eq!(
+                pool.retire_exited_agent_panes(&dir, "terminal-only"),
+                ExitedPaneRetirement::NotNeeded
+            );
+            assert_eq!(kill_count.load(Ordering::SeqCst), 0);
+            assert!(pool.has_live_pane(&dir));
+            assert_eq!(agent_state_store::read(&dir), None);
+        });
+    }
+
+    #[test]
+    fn closing_the_last_agent_releases_stale_phase_from_the_spawn_limit() {
+        with_data_dir(|| {
+            let dir = path("terminal-after-running-agent");
+            let kill_count = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![
+                    spy_pane(Arc::clone(&kill_count), true, PaneKind::Terminal),
+                    spy_pane(kill_count, true, PaneKind::Agent),
+                ],
+            );
+            agent_state_store::write(&dir, AgentPhase::Running).unwrap();
+            pool.lock()
+                .monitor
+                .observe(&[(dir.clone(), 0, Some(AgentPhase::Running))]);
+            pool.lock().autostart_reservations.insert(
+                dir.clone(),
+                AutostartReservation {
+                    phase_deadline: Some(Instant::now() + AUTOSTART_RESERVATION_TIMEOUT),
+                },
+            );
+            assert_eq!(pool.occupied_agent_slots(), 1);
+
+            pool.sessions
+                .get_mut(&dir)
+                .unwrap()
+                .panes
+                .retain(|pane| matches!(pane.kind, PaneKind::Terminal));
+            pool.refresh_watched(&dir, "terminal-only");
+
+            assert_eq!(agent_state_store::read(&dir), None);
+            assert_eq!(pool.occupied_agent_slots(), 0);
+            assert!(!pool.lock().autostart_reservations.contains_key(&dir));
+            assert!(pool.has_live_pane(&dir));
+            assert!(!pool.has_live_agent_pane(&dir));
+
+            // A replacement may already be preparing after the old input was
+            // snapshotted. Its phase-less reservation and newly emitted Ready
+            // phase belong to the new generation and must survive stale cleanup.
+            pool.lock().autostart_reservations.insert(
+                dir.clone(),
+                AutostartReservation {
+                    phase_deadline: None,
+                },
+            );
+            agent_state_store::write(&dir, AgentPhase::Ready).unwrap();
+            pool.refresh_watched(&dir, "replacement-preparing");
+            assert!(pool.lock().autostart_reservations.contains_key(&dir));
+            assert_eq!(agent_state_store::read(&dir), Some(AgentPhase::Ready));
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unattended_registry_allows_only_the_exact_known_remote_terminal_set() {
+        use crate::infrastructure::daemon_terminals_store::DaemonTerminalRecord;
+
+        let dir = path("registry-owner");
+        let record = |terminal| DaemonTerminalRecord {
+            terminal,
+            worktree: dir.clone(),
+            pid: terminal as u32 + 100,
+            adopted: false,
+        };
+        let known = HashSet::from([1]);
+
+        assert_eq!(
+            registry_ownership_against_known(&dir, Some(&[record(1)]), &known, |_| true),
+            DaemonWorktreeOwnership::Absent,
+            "the only registered remote terminal is represented by the pool",
+        );
+        assert_eq!(
+            registry_ownership_against_known(&dir, Some(&[record(1), record(2)]), &known, |_| true,),
+            DaemonWorktreeOwnership::Present,
+            "a hidden daemon terminal blocks a duplicate Agent",
+        );
+        assert_eq!(
+            registry_ownership_against_known(&dir, Some(&[record(2)]), &HashSet::new(), |_| true,),
+            DaemonWorktreeOwnership::Present,
+            "a local terminal contributes no daemon id and cannot hide registry ownership",
+        );
+        assert_eq!(
+            registry_ownership_against_known(&dir, None, &known, |_| true),
+            DaemonWorktreeOwnership::Unknown,
+            "a missing registry cannot account for a known remote terminal",
+        );
+        assert_eq!(
+            registry_ownership_against_known(&dir, None, &HashSet::new(), |_| true),
+            DaemonWorktreeOwnership::Absent,
+        );
+    }
+
+    #[test]
+    fn ambiguous_exited_phase_never_kills_multiple_agent_panes() {
+        with_data_dir(|| {
+            let dir = path("multiple-agents");
+            let kill_count = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![
+                    spy_pane(Arc::clone(&kill_count), true, PaneKind::Agent),
+                    spy_pane(Arc::clone(&kill_count), true, PaneKind::Agent),
+                ],
+            );
+            agent_state_store::write(&dir, AgentPhase::Exited).unwrap();
+
+            assert_eq!(
+                pool.retire_exited_agent_panes(&dir, "ambiguous"),
+                ExitedPaneRetirement::Ambiguous
+            );
+            assert_eq!(kill_count.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.sessions[&dir].panes.len(), 2);
+        });
+    }
+
+    #[test]
+    fn sole_exited_agent_is_retired_after_ack_without_closing_plain_terminal() {
+        with_data_dir(|| {
+            let dir = path("one-exited-agent");
+            let terminal_kills = Arc::new(AtomicU64::new(0));
+            let agent_kills = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![
+                    spy_pane(Arc::clone(&terminal_kills), true, PaneKind::Terminal),
+                    spy_pane(Arc::clone(&agent_kills), true, PaneKind::Agent),
+                ],
+            );
+            agent_state_store::write(&dir, AgentPhase::Exited).unwrap();
+
+            assert_eq!(
+                pool.retire_exited_agent_panes(&dir, "retired"),
+                ExitedPaneRetirement::Retired
+            );
+            assert_eq!(agent_kills.load(Ordering::SeqCst), 1);
+            assert_eq!(terminal_kills.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.sessions[&dir].panes.len(), 1);
+            assert!(matches!(
+                pool.sessions[&dir].panes[0].kind,
+                PaneKind::Terminal
+            ));
+        });
+    }
+
+    #[test]
+    fn exited_agent_remains_owned_when_kill_is_not_acknowledged() {
+        with_data_dir(|| {
+            let dir = path("unconfirmed-exited-agent");
+            let kill_count = Arc::new(AtomicU64::new(0));
+            let mut pool = TerminalPool::new(false, 0);
+            insert_spy_session(
+                &mut pool,
+                &dir,
+                vec![spy_pane(Arc::clone(&kill_count), false, PaneKind::Agent)],
+            );
+            agent_state_store::write(&dir, AgentPhase::Exited).unwrap();
+
+            assert_eq!(
+                pool.retire_exited_agent_panes(&dir, "unconfirmed"),
+                ExitedPaneRetirement::Unconfirmed
+            );
+            assert_eq!(kill_count.load(Ordering::SeqCst), 1);
+            assert_eq!(pool.sessions[&dir].panes.len(), 1);
+        });
+    }
+
+    #[test]
+    fn exited_phase_gate_leaves_live_prompt_queued_for_a_fresh_agent() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_state_store::write(worktree.path(), AgentPhase::Exited).unwrap();
+            agent_live_prompt_store::append(worktree.path(), "not a shell command").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), false, false),
+                deliver_launch_prompt: false,
+            }]);
+
+            assert!(writes.lock().unwrap().is_empty());
+            assert_eq!(
+                agent_live_prompt_store::take_all(worktree.path()),
+                vec!["not a shell command"]
+            );
+        });
+    }
+
+    #[test]
+    fn launch_prompt_delivery_requests_are_idempotent() {
+        let pool = TerminalPool::new(false, 0);
+        let dir = path("restored-agent");
+
+        pool.request_launch_prompt_delivery(&dir);
+        pool.request_launch_prompt_delivery(&dir);
+
+        assert_eq!(pool.lock().launch_prompt_deliveries, HashSet::from([dir]));
+    }
+
+    #[test]
+    fn restore_fallback_defers_ready_prompt_to_authoritative_queue_dispatch() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set_with_live_handoff(worktree.path(), "ready", true).unwrap();
+
+            let decision =
+                claim_fresh_fallback_prompt(worktree.path(), FreshFallbackPrompt::DeferIfQueued);
+
+            assert_eq!(decision, FreshFallbackDecision::Defer);
+            assert!(agent_prompt_store::has_queued(worktree.path()).unwrap());
+        });
+    }
+
+    #[test]
+    fn restore_fallback_defers_backoff_and_dead_letter_without_consuming_them() {
+        with_data_dir(|| {
+            let waiting = tempfile::tempdir().unwrap();
+            let now = std::time::SystemTime::now();
+            agent_prompt_store::set(waiting.path(), "waiting").unwrap();
+            agent_prompt_store::requeue_after_failure(
+                waiting.path(),
+                "waiting",
+                "spawn failed",
+                now,
+            )
+            .unwrap();
+            assert_eq!(
+                claim_fresh_fallback_prompt(waiting.path(), FreshFallbackPrompt::DeferIfQueued,),
+                FreshFallbackDecision::Defer
+            );
+            assert!(agent_prompt_store::has_queued(waiting.path()).unwrap());
+
+            let dead = tempfile::tempdir().unwrap();
+            agent_prompt_store::set(dead.path(), "dead").unwrap();
+            for attempt in 0..agent_prompt_store::MAX_PROMPT_RETRY_ATTEMPTS {
+                agent_prompt_store::requeue_after_failure(
+                    dead.path(),
+                    "dead",
+                    &format!("failure {attempt}"),
+                    now,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                claim_fresh_fallback_prompt(dead.path(), FreshFallbackPrompt::DeferIfQueued,),
+                FreshFallbackDecision::Defer
+            );
+            assert!(matches!(
+                agent_prompt_store::take_ready(dead.path(), now),
+                agent_prompt_store::TakeReady::Dead(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn sibling_restore_fallback_yields_without_stealing_queued_prompt() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set(worktree.path(), "pinned for current cli").unwrap();
+
+            assert_eq!(
+                claim_fresh_fallback_prompt(worktree.path(), FreshFallbackPrompt::DeferIfQueued,),
+                FreshFallbackDecision::Defer
+            );
+            assert_eq!(
+                agent_prompt_store::take(worktree.path()).as_deref(),
+                Some("pinned for current cli")
+            );
+        });
+    }
+
+    #[test]
+    fn requested_launch_prompt_is_delivered_before_the_live_queue_once() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set_with_live_handoff(worktree.path(), "launch", true).unwrap();
+            agent_live_prompt_store::append(worktree.path(), "live").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), false, false),
+                deliver_launch_prompt: true,
+            }]);
+
+            assert_eq!(
+                *writes.lock().unwrap(),
+                vec![b"launch\r".to_vec(), b"live\r".to_vec()]
+            );
+            assert_eq!(agent_prompt_store::take(worktree.path()), None);
+            assert!(agent_live_prompt_store::take_all(worktree.path()).is_empty());
+        });
+    }
+
+    #[test]
+    fn explicit_fresh_launch_prompt_stays_queued_while_live_work_is_delivered() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set(worktree.path(), "fresh pinned work").unwrap();
+            agent_live_prompt_store::append(worktree.path(), "live follow-up").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), false, false),
+                deliver_launch_prompt: true,
+            }]);
+
+            assert_eq!(*writes.lock().unwrap(), vec![b"live follow-up\r".to_vec()]);
+            assert_eq!(
+                agent_prompt_store::take(worktree.path()).as_deref(),
+                Some("fresh pinned work")
+            );
+        });
+    }
+
+    #[test]
+    fn failed_launch_prompt_write_restores_it_and_preserves_live_queue() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set_with_live_handoff(worktree.path(), "launch", true).unwrap();
+            agent_live_prompt_store::append(worktree.path(), "live").unwrap();
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::new(Mutex::new(Vec::new())), false, true),
+                deliver_launch_prompt: true,
+            }]);
+
+            assert_eq!(
+                agent_prompt_store::take(worktree.path()).as_deref(),
+                Some("launch")
+            );
+            assert_eq!(
+                agent_live_prompt_store::take_all(worktree.path()),
+                vec!["live"]
+            );
+        });
+    }
+
+    #[test]
+    fn launch_prompt_handoff_respects_existing_retry_backoff() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set_with_live_handoff(worktree.path(), "backing off", true)
+                .unwrap();
+            agent_prompt_store::requeue_after_failure(
+                worktree.path(),
+                "backing off",
+                "spawn failed",
+                std::time::SystemTime::now(),
+            )
+            .unwrap();
+            agent_live_prompt_store::append(worktree.path(), "must wait").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), false, false),
+                deliver_launch_prompt: true,
+            }]);
+
+            assert!(writes.lock().unwrap().is_empty());
+            assert_eq!(
+                agent_prompt_store::take(worktree.path()).as_deref(),
+                Some("backing off")
+            );
+            assert_eq!(
+                agent_live_prompt_store::take_all(worktree.path()),
+                vec!["must wait"],
+                "newer live work must not overtake reusable launch work in backoff",
+            );
+        });
+    }
+
+    #[test]
+    fn dead_launch_prompt_does_not_block_a_later_live_prompt() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set_with_live_handoff(worktree.path(), "dead work", true).unwrap();
+            let now = std::time::SystemTime::now();
+            for attempt in 0..agent_prompt_store::MAX_PROMPT_RETRY_ATTEMPTS {
+                agent_prompt_store::requeue_after_failure(
+                    worktree.path(),
+                    "dead work",
+                    &format!("failure {attempt}"),
+                    now,
+                )
+                .unwrap();
+            }
+            agent_live_prompt_store::append(worktree.path(), "still live").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), false, false),
+                deliver_launch_prompt: true,
+            }]);
+
+            assert_eq!(*writes.lock().unwrap(), vec![b"still live\r".to_vec()]);
+            assert!(matches!(
+                agent_prompt_store::take_ready(worktree.path(), now),
+                agent_prompt_store::TakeReady::Dead(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn watcher_without_handoff_request_leaves_launch_prompt_for_fresh_start() {
+        with_data_dir(|| {
+            let worktree = tempfile::tempdir().unwrap();
+            agent_prompt_store::set(worktree.path(), "later").unwrap();
+            agent_live_prompt_store::append(worktree.path(), "now").unwrap();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+
+            deliver_live_prompts(vec![LivePromptTarget {
+                path: worktree.path().to_path_buf(),
+                input: spy_input(Arc::clone(&writes), true, false),
+                deliver_launch_prompt: false,
+            }]);
+
+            assert_eq!(
+                *writes.lock().unwrap(),
+                vec![b"\x1b[200~now\x1b[201~\r".to_vec()]
+            );
+            assert_eq!(
+                agent_prompt_store::take(worktree.path()).as_deref(),
+                Some("later")
+            );
+        });
     }
 
     #[test]

@@ -108,8 +108,18 @@ pub enum ClientMessage {
     /// running — detaching is how a client leaves an agent working unobserved.
     Detach { terminal: TerminalId },
     /// Write input bytes to `terminal` (keystrokes, pasted text). The resulting
-    /// output flows back as [`ServerMessage::Output`] to its attachers.
-    Keys { terminal: TerminalId, data: Vec<u8> },
+    /// output flows back as [`ServerMessage::Output`] to its attachers. A caller
+    /// that needs delivery confirmation supplies `request_id`; the daemon then
+    /// answers with the correlated [`ServerMessage::InputResult`]. Ordinary
+    /// interactive input omits it and remains fire-and-forget.
+    Keys {
+        terminal: TerminalId,
+        data: Vec<u8>,
+        /// Correlation id for acknowledged input. Missing on older clients and
+        /// ordinary interactive writes, which require no reply.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
     /// Resize `terminal` to `cols`×`rows`.
     Resize {
         terminal: TerminalId,
@@ -120,6 +130,19 @@ pub enum ClientMessage {
     /// The daemon answers with a [`ServerMessage::Screen`] snapshot whose
     /// `scrollback` field carries the clamped offset actually applied.
     Scrollback { terminal: TerminalId, offset: usize },
+}
+
+/// Why a daemon refused a persisted-terminal attach. Keeping this typed lets a
+/// restore distinguish a definitively absent terminal (safe fresh fallback)
+/// from an adopted process that is still alive but no longer streamable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachFailure {
+    /// The terminal id does not belong to the requested worktree.
+    Missing,
+    /// A restarted daemon adopted the live process but cannot reconstruct its
+    /// screen stream. Starting a replacement would duplicate that process.
+    Adopted,
 }
 
 /// A message the daemon sends to a client.
@@ -145,6 +168,12 @@ pub enum ServerMessage {
     /// attaching to an already-running terminal (which never saw `Spawned`)
     /// still learns it. A full [`ServerMessage::Screen`] snapshot follows.
     Attached { terminal: TerminalId, pid: u32 },
+    /// A typed refusal of [`ClientMessage::Attach`]. Only `Missing` proves a
+    /// fresh fallback is safe; `Adopted` preserves unknown/live ownership.
+    AttachRejected {
+        terminal: TerminalId,
+        reason: AttachFailure,
+    },
     /// The terminal has been killed (or none was running under that id).
     Killed { terminal: TerminalId },
     /// A full snapshot of `terminal`'s screen, as the vt100 escape-sequence
@@ -167,6 +196,15 @@ pub enum ServerMessage {
     /// `terminal`'s process has exited. Any final [`ServerMessage::Output`] was
     /// pushed before this; the id is dead afterwards.
     Exited { terminal: TerminalId },
+    /// Result of an acknowledged [`ClientMessage::Keys`] request. `error` is
+    /// absent only after the daemon successfully wrote every byte to the PTY;
+    /// otherwise it explains the missing terminal or PTY write failure.
+    InputResult {
+        request_id: u64,
+        terminal: TerminalId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// A request could not be handled; carries a human-readable reason.
     Error { message: String },
 }
@@ -383,6 +421,38 @@ mod tests {
                 rows: 24,
                 scrollback: 1000,
             }
+        );
+    }
+
+    #[test]
+    fn keys_without_a_request_id_decode_as_fire_and_forget() {
+        let json = br#"{"type":"keys","terminal":7,"data":[97]}"#;
+        let message: ClientMessage = serde_json::from_slice(json).unwrap();
+        assert_eq!(
+            message,
+            ClientMessage::Keys {
+                terminal: 7,
+                data: b"a".to_vec(),
+                request_id: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            serde_json::json!({"type": "keys", "terminal": 7, "data": [97]})
+        );
+    }
+
+    #[test]
+    fn acknowledged_input_result_round_trips() {
+        let message = ServerMessage::InputResult {
+            request_id: 41,
+            terminal: 7,
+            error: Some("terminal exited".to_string()),
+        };
+        let json = serde_json::to_vec(&message).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ServerMessage>(&json).unwrap(),
+            message
         );
     }
 

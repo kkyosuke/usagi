@@ -446,12 +446,14 @@ impl McpService for UsagiMcpServer {
 mod tests {
     use super::*;
     use crate::infrastructure::git::test_command as git_cmd;
-    use crate::presentation::mcp::session::AgentBackend;
+    use crate::presentation::mcp::session::{AgentBackend, LaunchPromptDelivery};
     use crate::presentation::mcp::PROTOCOL_VERSION;
     use crate::usecase::agent::ModelAvailability;
     use serde_json::json;
+    use std::cell::RefCell;
     use std::fs;
     use std::path::Path;
+    use std::rc::Rc;
 
     use crate::usecase::doctor::CommandRunner;
 
@@ -488,9 +490,21 @@ mod tests {
     /// A backend that returns a fixed reply, so the unified server's routing of
     /// session prompt/send routing to the session server can be exercised without a real
     /// agent.
-    struct StubBackend;
+    type PromptDeliveryLog = Rc<RefCell<Vec<LaunchPromptDelivery>>>;
+
+    #[derive(Default)]
+    struct StubBackend {
+        prompt_deliveries: PromptDeliveryLog,
+    }
+
     impl AgentBackend for StubBackend {
-        fn prompt(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+        fn prompt(
+            &self,
+            _worktree: &Path,
+            _prompt: &str,
+            delivery: LaunchPromptDelivery,
+        ) -> Result<String, String> {
+            self.prompt_deliveries.borrow_mut().push(delivery);
             Ok("delegated".to_string())
         }
 
@@ -516,13 +530,22 @@ mod tests {
     }
 
     fn server_at(root: &Path) -> UsagiMcpServer {
+        server_at_with_prompt_delivery_log(root).0
+    }
+
+    fn server_at_with_prompt_delivery_log(root: &Path) -> (UsagiMcpServer, PromptDeliveryLog) {
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
-        UsagiMcpServer::new(
-            root.to_path_buf(),
-            root.to_path_buf(),
-            Box::new(StubBackend),
-            runner,
-            Box::new(AvailableModelProbe),
+        let backend = StubBackend::default();
+        let prompt_deliveries = backend.prompt_deliveries.clone();
+        (
+            UsagiMcpServer::new(
+                root.to_path_buf(),
+                root.to_path_buf(),
+                Box::new(backend),
+                runner,
+                Box::new(AvailableModelProbe),
+            ),
+            prompt_deliveries,
         )
     }
 
@@ -537,7 +560,7 @@ mod tests {
         let server = UsagiMcpServer::new(
             worktree.clone(),
             root.to_path_buf(),
-            Box::new(StubBackend),
+            Box::new(StubBackend::default()),
             runner,
             Box::new(AvailableModelProbe),
         );
@@ -671,7 +694,7 @@ mod tests {
         let server = UsagiMcpServer::new(
             worktree.clone(),
             workspace.path().to_path_buf(),
-            Box::new(StubBackend),
+            Box::new(StubBackend::default()),
             runner,
             Box::new(AvailableModelProbe),
         );
@@ -777,7 +800,7 @@ mod tests {
     fn delegate_issue_renders_creates_and_queues_in_one_call() {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
-        let server = server_at(root.path());
+        let (server, prompt_deliveries) = server_at_with_prompt_delivery_log(root.path());
         // An issue to delegate. Seed it straight through the issue sub-server: at
         // the workspace root the composite refuses issue_create, but a coordinator
         // still delegates issues that already exist in the tracked store.
@@ -799,6 +822,10 @@ mod tests {
         // Default session name is issue-<number>, freshly created (queue channel).
         assert_eq!(body["session"], "issue-1");
         assert_eq!(body["delivered_to"], "queue");
+        assert_eq!(
+            *prompt_deliveries.borrow(),
+            vec![LaunchPromptDelivery::FreshLaunch]
+        );
 
         // The session really exists now (create ran through to the workspace).
         let listed = call(&server, "session_list", json!({}));
@@ -991,7 +1018,7 @@ mod tests {
         let server = UsagiMcpServer::new(
             link,
             real,
-            Box::new(StubBackend),
+            Box::new(StubBackend::default()),
             runner,
             Box::new(AvailableModelProbe),
         );

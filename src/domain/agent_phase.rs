@@ -7,6 +7,7 @@ const READY_NAME: &str = "ready";
 const RUNNING_NAME: &str = "running";
 const WAITING_NAME: &str = "waiting";
 const ENDED_NAME: &str = "ended";
+const EXITED_NAME: &str = "exited";
 
 /// The lifecycle phase of an agent CLI (e.g. Claude Code) running inside a
 /// session's embedded shell, as reported by the agent's own lifecycle hooks.
@@ -22,8 +23,9 @@ const ENDED_NAME: &str = "ended";
 /// The phases follow the agent's turn lifecycle: a freshly started (or resumed)
 /// session is [`Ready`](Self::Ready); submitting a prompt makes it
 /// [`Running`](Self::Running); pausing mid-turn for the user's input or
-/// permission makes it [`Waiting`](Self::Waiting); finishing a turn or the
-/// process exiting makes it [`Ended`](Self::Ended).
+/// permission makes it [`Waiting`](Self::Waiting); finishing a turn makes it
+/// [`Ended`](Self::Ended); the agent process itself
+/// exiting makes it [`Exited`](Self::Exited).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPhase {
@@ -36,14 +38,17 @@ pub enum AgentPhase {
     /// The agent paused mid-turn and is waiting for the user's input or
     /// permission (it asked something or needs a tool approved).
     Waiting,
-    /// The agent finished: it completed a turn (`Stop`) or its process exited
-    /// (`SessionEnd`). The bare shell it launched in may still be alive.
+    /// The agent completed a turn (`Stop`) and remains available for the next
+    /// prompt.
     Ended,
+    /// The agent process exited (`SessionEnd`). The bare shell it launched in
+    /// may still be alive, so PTY write success no longer proves prompt delivery.
+    Exited,
 }
 
 impl AgentPhase {
     /// The lowercase name of this phase (`ready` / `running` / `waiting` /
-    /// `ended`), matching its serde representation.
+    /// `ended` / `exited`), matching its serde representation.
     ///
     /// Used where a phase is surfaced as a plain string rather than serialized
     /// through serde — e.g. the `session_status` MCP tool, which reports a
@@ -54,6 +59,7 @@ impl AgentPhase {
             AgentPhase::Running => RUNNING_NAME,
             AgentPhase::Waiting => WAITING_NAME,
             AgentPhase::Ended => ENDED_NAME,
+            AgentPhase::Exited => EXITED_NAME,
         }
     }
 
@@ -61,8 +67,8 @@ impl AgentPhase {
     ///
     /// [`Ready`](Self::Ready), [`Running`](Self::Running) and
     /// [`Waiting`](Self::Waiting) come straight from the agent and override the
-    /// bell heuristic; [`Ended`](Self::Ended) means the agent is gone, so the
-    /// state falls back to the bare shell's bell.
+    /// bell heuristic. [`Ended`](Self::Ended) and [`Exited`](Self::Exited) are
+    /// terminal for the current turn and therefore do not override it.
     pub fn is_active(self) -> bool {
         matches!(
             self,
@@ -93,6 +99,10 @@ mod tests {
             serde_json::to_string(&AgentPhase::Ended).unwrap(),
             "\"ended\""
         );
+        assert_eq!(
+            serde_json::to_string(&AgentPhase::Exited).unwrap(),
+            "\"exited\""
+        );
     }
 
     #[test]
@@ -120,6 +130,7 @@ mod tests {
             AgentPhase::Running,
             AgentPhase::Waiting,
             AgentPhase::Ended,
+            AgentPhase::Exited,
         ] {
             assert_eq!(
                 serde_json::to_string(&phase).unwrap(),
@@ -129,10 +140,11 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_but_ended_is_active() {
+    fn only_ready_running_and_waiting_are_active() {
         assert!(AgentPhase::Ready.is_active());
         assert!(AgentPhase::Running.is_active());
         assert!(AgentPhase::Waiting.is_active());
         assert!(!AgentPhase::Ended.is_active());
+        assert!(!AgentPhase::Exited.is_active());
     }
 }

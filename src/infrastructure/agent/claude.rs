@@ -58,8 +58,8 @@ struct HookEntry {
 /// `waiting`). A tool-permission prompt is also a wait, but `Notification` only
 /// fires for it when the user is away; the dedicated `PermissionRequest` →
 /// `waiting` hook catches it reliably (it fires right as the prompt appears, even
-/// while the session is focused). The session ending is also done (`SessionEnd` →
-/// `ended`).
+/// while the session is focused). The process ending is distinct (`SessionEnd` →
+/// `exited`) because its parent shell can remain writable after the agent is gone.
 ///
 /// Hooks deliberately left unwired: `SubagentStop` (a finished subagent does not
 /// end the main turn — the main agent keeps working, and its own `PostToolUse`
@@ -163,7 +163,7 @@ fn claude_hooks_settings(usagi_bin: &str) -> String {
             notification: phase(AgentPhase::Waiting),
             permission_request: phase(AgentPhase::Waiting),
             session_start: phase(AgentPhase::Ready),
-            session_end: phase(AgentPhase::Ended),
+            session_end: phase(AgentPhase::Exited),
         },
     };
     serde_json::to_string(&settings).expect("hook settings serialize to JSON")
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(tokens[5], "--settings");
         assert_eq!(
             tokens[6],
-            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}]}}"
+            "{\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi guard-workspace\"}]}],\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase running\"}]}],\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ended\"}]}],\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase waiting\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase ready\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"usagi agent-phase exited\"}]}]}}"
         );
     }
 

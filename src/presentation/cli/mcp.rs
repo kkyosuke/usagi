@@ -66,6 +66,7 @@ mod tests {
     use std::path::Path;
 
     use crate::domain::settings::AgentCli;
+    use crate::presentation::mcp::session::LaunchPromptDelivery;
     use crate::usecase::agent::ModelAvailability;
 
     /// An in-memory [`AgentBackend`] that records what it was asked to do, so the
@@ -74,7 +75,12 @@ mod tests {
     struct FakeBackend;
 
     impl AgentBackend for FakeBackend {
-        fn prompt(&self, _worktree: &Path, _prompt: &str) -> Result<String, String> {
+        fn prompt(
+            &self,
+            _worktree: &Path,
+            _prompt: &str,
+            _delivery: LaunchPromptDelivery,
+        ) -> Result<String, String> {
             Ok("queued".to_string())
         }
 
@@ -167,7 +173,13 @@ mod tests {
         // `session_prompt` only reaches the backend for an existing session, which
         // needs a real worktree; cover the prompt delegate directly instead.
         assert_eq!(
-            FakeBackend.prompt(Path::new("/tmp/wt"), "do it").unwrap(),
+            FakeBackend
+                .prompt(
+                    Path::new("/tmp/wt"),
+                    "do it",
+                    LaunchPromptDelivery::FreshLaunch,
+                )
+                .unwrap(),
             "queued"
         );
     }

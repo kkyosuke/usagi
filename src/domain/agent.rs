@@ -137,6 +137,26 @@ pub fn shell_single_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// Append a POSIX-shell lifecycle fallback that records `exited` after an
+/// interactive Agent process returns, while preserving that process's exit
+/// status. Some CLIs have no SessionEnd hook; without this, the pane can remain
+/// advertised as an Agent input consumer until PTY exit is observed.
+#[cfg(not(windows))]
+pub fn with_exit_phase(command: &str, usagi_bin: &str) -> String {
+    format!(
+        "{command}; _usagi_agent_status=$?; {} 'agent-phase' 'exited' </dev/null; exit $_usagi_agent_status",
+        shell_single_quote(usagi_bin)
+    )
+}
+
+/// Windows shells do not share the POSIX status/quoting syntax. Until their
+/// adapters expose a shell-neutral exit hook, preserve the existing launch
+/// command; native lifecycle hooks still report the phases they support.
+#[cfg(windows)]
+pub fn with_exit_phase(command: &str, _usagi_bin: &str) -> String {
+    command.to_string()
+}
+
 /// What usagi requires of the agent CLI it drives, as one interface.
 ///
 /// Implemented once per CLI in `infrastructure::agent`. `Send + Sync` so the
@@ -265,6 +285,24 @@ mod tests {
         assert_eq!(shell_single_quote("plain"), "'plain'");
         assert_eq!(shell_single_quote("a'b"), r"'a'\''b'");
         assert_eq!(shell_single_quote("$x `y` \"z\""), "'$x `y` \"z\"'");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn exit_phase_wrapper_runs_after_the_agent_and_quotes_the_usagi_binary() {
+        assert_eq!(
+            with_exit_phase("codex --resume", "/opt/usagi build/usagi"),
+            "codex --resume; _usagi_agent_status=$?; '/opt/usagi build/usagi' 'agent-phase' 'exited' </dev/null; exit $_usagi_agent_status"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn exit_phase_wrapper_preserves_the_command_on_windows() {
+        assert_eq!(
+            with_exit_phase("codex --resume", r"C:\Program Files\usagi.exe"),
+            "codex --resume"
+        );
     }
 
     #[test]

@@ -10,12 +10,12 @@
 //! delegate work into them, watch them for completion, and tear them down again.
 //!
 //! A single `session_prompt` tool delivers work to a session over two channels —
-//! the *launch queue* (delivered as the agent's opening message the next time its
-//! pane is freshly launched) and the *live queue* (typed into an already-running
-//! pane) — chosen by its `mode`. `auto` (the default) picks the live channel when
-//! a live agent pane is detected for the session and the launch queue otherwise,
-//! so a caller need not know whether the session's agent is currently running;
-//! the result reports which channel actually took the prompt.
+//! the *launch queue* and the *live queue* (typed into an already-running pane) —
+//! chosen by its `mode`. An explicit `queue` is reserved for the next fresh agent
+//! launch. `auto` (the default) picks the live channel when a live agent pane is
+//! detected and otherwise stores a launch prompt that may also be handed to an
+//! eligible existing agent after a TUI restart. The result reports which channel
+//! actually took the prompt.
 //!
 //! Session creation and listing delegate to [`crate::usecase::session`], so the
 //! MCP surface stays a thin protocol adapter over the same logic the CLI and
@@ -81,9 +81,9 @@ const MAX_PROMPT_BYTES: usize = 128 * 1024;
 /// row** — the `⌂ root` coordinator — instead of a named session. A child
 /// session's agent reports its completion by prompting this target (push-style
 /// completion report): with the default `auto` mode the report is delivered live
-/// to the coordinator's running agent pane, or queued for its next launch when
-/// none is open. Spelled with a leading `:` so it can never be mistaken for — or
-/// shadowed by — a real session, whose name is a git branch / directory component
+/// to the coordinator's running agent pane, or persisted for a later existing/fresh
+/// agent when none is open. Spelled with a leading `:` so it can never be mistaken
+/// for — or shadowed by — a real session, whose name is a git branch / directory component
 /// (a leading `-` is rejected, but a `:` is legal, so the sentinel stays outside
 /// the space of names usagi itself creates).
 pub(crate) const ROOT_TARGET: &str = ":root";
@@ -158,6 +158,19 @@ pub(crate) fn resolve_session_agent(
     Ok(SessionAgent { cli, model })
 }
 
+/// Whether a prompt persisted in the launch queue must start a fresh agent or
+/// may be handed to an eligible existing agent after the TUI resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchPromptDelivery {
+    /// Preserve the explicit launch-queue contract: this prompt is the opening
+    /// message for the next fresh agent process.
+    FreshLaunch,
+    /// The prompt reached the launch queue only because `auto` found no live TUI
+    /// consumer. A later TUI may hand it to an existing agent that is not
+    /// reported running/waiting instead of waiting behind that pane forever.
+    ReuseLiveAgent,
+}
+
 /// Drives the parts of session orchestration that touch a real agent or a real
 /// filesystem — handing a session's agent a launch-time prompt, live-sending a
 /// prompt, and removing a session (which discards that agent's conversation).
@@ -165,11 +178,16 @@ pub(crate) fn resolve_session_agent(
 /// protocol handling can be tested with a fake backend that never touches the
 /// filesystem or a real agent.
 pub trait AgentBackend {
-    /// Deliver `prompt` to the agent rooted at `worktree` — the production
-    /// backend queues it for the session's next fresh agent launch — returning a
+    /// Persist `prompt` in the launch queue rooted at `worktree`, returning a
     /// confirmation message (`Ok`) or an error message to surface to the agent
-    /// (`Err`).
-    fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String>;
+    /// (`Err`). `delivery` preserves whether the caller explicitly requested a
+    /// fresh launch or `auto` merely fell back because no live TUI was detected.
+    fn prompt(
+        &self,
+        worktree: &Path,
+        prompt: &str,
+        delivery: LaunchPromptDelivery,
+    ) -> Result<String, String>;
 
     /// Deliver `prompt` to the agent that is already running in the session
     /// rooted at `worktree`. The production backend appends it to a live queue
@@ -181,9 +199,9 @@ pub trait AgentBackend {
     /// `worktree`. `session_prompt`'s `auto` mode uses this to choose between the
     /// live channel ([`send`](Self::send)) and the launch queue
     /// ([`prompt`](Self::prompt)). The production backend answers from the
-    /// per-worktree agent-phase file the TUI maintains (present while a pane is
-    /// alive, cleared when it dies); a wrong answer is not fatal — the live queue
-    /// simply waits for a pane if one is not actually open.
+    /// pid-stamped live-pane marker a running TUI publishes and clears. A stale
+    /// marker whose TUI pid is dead is treated as absent, so `auto` falls back to
+    /// the durable launch channel instead of stranding work in the live queue.
     fn agent_is_live(&self, worktree: &Path) -> bool;
 
     /// Remove session `name` under `workspace_root`, resolving the workspace's
@@ -373,7 +391,7 @@ impl SessionMcpServer {
                 None
             }
         };
-        let detail = self.dispatch_prompt(&target_root, &args.prompt, channel)?;
+        let detail = self.dispatch_prompt(&target_root, &args.prompt, channel, args.mode)?;
         // Report the channel that actually took the prompt, so a caller using
         // `auto` sees whether it reached a running pane or was queued for launch.
         let mut result = json!({
@@ -425,7 +443,7 @@ impl SessionMcpServer {
     ) -> Result<(Channel, String), String> {
         check_prompt_len("session_prompt", prompt)?;
         let (target_root, channel) = self.resolve_prompt_delivery(name, mode)?;
-        let detail = self.dispatch_prompt(&target_root, prompt, channel)?;
+        let detail = self.dispatch_prompt(&target_root, prompt, channel, mode)?;
         Ok((channel, detail))
     }
 
@@ -451,9 +469,19 @@ impl SessionMcpServer {
         target_root: &Path,
         prompt: &str,
         channel: Channel,
+        mode: PromptMode,
     ) -> Result<String, String> {
         let detail = match channel {
-            Channel::Queue => self.backend.prompt(target_root, prompt)?,
+            Channel::Queue => {
+                let delivery = match mode {
+                    PromptMode::Auto => LaunchPromptDelivery::ReuseLiveAgent,
+                    // `Live` cannot currently resolve to the launch channel, but
+                    // fail closed to the stricter fresh-launch contract if that
+                    // routing changes later.
+                    PromptMode::Queue | PromptMode::Live => LaunchPromptDelivery::FreshLaunch,
+                };
+                self.backend.prompt(target_root, prompt, delivery)?
+            }
             Channel::Live => self.backend.send(target_root, prompt)?,
         };
         Ok(detail)
@@ -477,10 +505,10 @@ impl SessionMcpServer {
     /// Persist a new per-session agent CLI / model override for `name`.
     ///
     /// This is used by `session_prompt` when a caller supplies `agent_cli` and/or
-    /// `model`: the override is recorded before the prompt is delivered, so a
-    /// queued prompt is opened by the requested agent on the next fresh launch.
-    /// Live delivery can only affect future launches; the already-running pane
-    /// keeps whatever CLI/model started it.
+    /// `model`: the override is recorded before the prompt is delivered. An
+    /// explicit queued prompt is opened by the requested agent on the next fresh
+    /// launch. Live delivery and a reusable `auto` fallback can only affect future
+    /// launches; an already-running agent keeps whatever CLI/model started it.
     fn set_session_agent(&self, name: &str, agent: SessionAgent) -> Result<SessionAgent, String> {
         session::set_agent(&self.workspace_root, name, agent).map_err(|e| e.to_string())
     }
@@ -990,7 +1018,7 @@ fn session_tool_schemas() -> Value {
             "name": "session_status",
             "description": "Report each session's orchestration status for a \
                 coordinating agent to poll: its agent lifecycle phase (\"ready\" / \
-                \"running\" / \"waiting\" / \"ended\", or \"none\" when no agent \
+                \"running\" / \"waiting\" / \"ended\" / \"exited\", or \"none\" when no agent \
                 pane has run in it) and, per worktree, the git status (\"new\" / \
                 \"dirty\" / \"local\" / \"pushed\" / \"synced\") plus `dirty` and \
                 `merged` booleans. `merged` is true when the default branch \
@@ -998,9 +1026,10 @@ fn session_tool_schemas() -> Value {
                 Read-only and cheap — it reads the cached state.json and the \
                 agent-phase files with no git spawn, so the values are as fresh \
                 as the latest workspace sync. A coordinator watches for \
-                agent_phase \"ended\" (child finished) and `merged` (work landed) \
-                to know a session is done, then removes it and delegates the next \
-                issue.",
+                agent_phase \"ended\" (the child turn completed), \"exited\" (the process \
+                disappeared; its outcome still requires inspection), and `merged` \
+                (work landed), then removes successful sessions or retries/escalates \
+                incomplete work.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1009,13 +1038,13 @@ fn session_tool_schemas() -> Value {
                 can delegate a task to a parallel session. Work stays isolated on \
                 the session's worktree branch. It does not run the agent or return \
                 its response here. Two delivery channels, chosen by `mode`: the \
-                launch queue delivers the prompt as the agent's opening message the \
-                next time that session's pane is freshly launched from the usagi \
-                home screen; the live queue types it into an already-running agent \
-                pane (waiting if none is open yet). `mode` defaults to `auto`, \
-                which delivers live when the session has a live agent pane and \
-                queues for launch otherwise — so you need not know whether the \
-                agent is currently running. Optionally set `agent_cli` and/or \
+                launch queue persists the prompt; explicit `queue` reserves it as \
+                the opening message for the next fresh launch, while an `auto` \
+                fallback may also reach an eligible existing agent after the TUI returns. \
+                The live queue types it into an already-running agent pane (waiting \
+                if none is open yet). `mode` defaults to `auto`, which delivers live \
+                when the session has a live agent pane and queues otherwise — so you \
+                need not know whether the agent is currently running. Optionally set `agent_cli` and/or \
                 `model` to re-pin the session's future agent launches before the \
                 prompt is delivered; a currently running live pane is not \
                 restarted, so the override applies after it is relaunched. The \
@@ -1216,6 +1245,7 @@ mod tests {
     use std::rc::Rc;
 
     type CallLog = Rc<RefCell<Vec<(PathBuf, String)>>>;
+    type PromptDeliveryLog = Rc<RefCell<Vec<LaunchPromptDelivery>>>;
     type RemoveLog = Rc<RefCell<Vec<(PathBuf, String, bool)>>>;
     type ModelProbeLog = Rc<RefCell<Vec<(AgentCli, String)>>>;
 
@@ -1279,6 +1309,7 @@ mod tests {
     struct FakeBackend {
         result: Result<String, String>,
         calls: CallLog,
+        prompt_deliveries: PromptDeliveryLog,
         remove_result: Result<session::RemovalOutcome, String>,
         remove_calls: RemoveLog,
         /// What `agent_is_live` reports, so a test can steer `auto` mode toward the
@@ -1291,6 +1322,7 @@ mod tests {
             Self {
                 result: Ok(reply.to_string()),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                prompt_deliveries: Rc::new(RefCell::new(Vec::new())),
                 // A clean removal by default; tests that exercise the remove tool
                 // override this with `with_remove`.
                 remove_result: Ok(session::RemovalOutcome {
@@ -1306,6 +1338,7 @@ mod tests {
             Self {
                 result: Err(message.to_string()),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                prompt_deliveries: Rc::new(RefCell::new(Vec::new())),
                 remove_result: Ok(session::RemovalOutcome {
                     removed: true,
                     dirty: Vec::new(),
@@ -1329,10 +1362,16 @@ mod tests {
     }
 
     impl AgentBackend for FakeBackend {
-        fn prompt(&self, worktree: &Path, prompt: &str) -> Result<String, String> {
+        fn prompt(
+            &self,
+            worktree: &Path,
+            prompt: &str,
+            delivery: LaunchPromptDelivery,
+        ) -> Result<String, String> {
             self.calls
                 .borrow_mut()
                 .push((worktree.to_path_buf(), prompt.to_string()));
+            self.prompt_deliveries.borrow_mut().push(delivery);
             self.result.clone()
         }
 
@@ -1968,6 +2007,7 @@ mod tests {
         init_repo(root.path());
         let backend = FakeBackend::ok("done").with_live(false);
         let calls = backend.calls.clone();
+        let prompt_deliveries = backend.prompt_deliveries.clone();
         let server = server_at(root.path(), backend);
         call(&server, "session_create", json!({"name":"work"}));
 
@@ -1990,6 +2030,10 @@ mod tests {
             json!({"cli":"codex-fugu","model":"fugu-ultra"})
         );
         assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(
+            *prompt_deliveries.borrow(),
+            vec![LaunchPromptDelivery::FreshLaunch]
+        );
 
         let session = session::list(root.path())
             .unwrap()
@@ -2514,12 +2558,18 @@ mod tests {
         );
 
         // `queue` forces the launch channel even though a pane is live…
+        let queued_backend = FakeBackend::ok("q").with_live(true);
+        let queued_deliveries = queued_backend.prompt_deliveries.clone();
         let queued = call(
-            &server_at(root.path(), FakeBackend::ok("q").with_live(true)),
+            &server_at(root.path(), queued_backend),
             "session_prompt",
             json!({"name":"w","prompt":"hi","mode":"queue"}),
         );
         assert_eq!(tool_json(&queued)["delivered_to"], "queue");
+        assert_eq!(
+            *queued_deliveries.borrow(),
+            vec![LaunchPromptDelivery::FreshLaunch]
+        );
 
         // …and `live` forces the live channel even though none is detected.
         let live = call(
@@ -2564,9 +2614,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         init_repo(root.path());
         // No live coordinator pane, so `auto` queues the report for the root row's
-        // next fresh agent launch — again without requiring any session.
+        // durable fallback — again without requiring any session. Unlike an
+        // explicit `queue`, this fallback may be handed to an eligible agent that
+        // survived a TUI restart.
         let backend = FakeBackend::ok("queued").with_live(false);
         let calls = backend.calls.clone();
+        let prompt_deliveries = backend.prompt_deliveries.clone();
         let server = server_at(root.path(), backend);
 
         let result = call(
@@ -2580,6 +2633,10 @@ mod tests {
         let calls = calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, root.path());
+        assert_eq!(
+            *prompt_deliveries.borrow(),
+            vec![LaunchPromptDelivery::ReuseLiveAgent]
+        );
     }
 
     #[test]
