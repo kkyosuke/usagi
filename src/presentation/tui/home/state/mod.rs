@@ -34,7 +34,7 @@ use super::command::{
 };
 use super::tasks::TaskRow;
 use super::terminal::pool::MonitorSnapshot;
-use super::terminal::tabs::TabStrip;
+use super::terminal::tabs::{reduce_selection, TabAction, TabSelection, TabStrip};
 use super::terminal::view::TerminalView;
 use crate::presentation::tui::widgets::text_input::TextInput;
 
@@ -3873,22 +3873,7 @@ impl HomeState {
     pub fn closeup_tab_next(&mut self) -> Option<usize> {
         // Walking the strip is browsing previews: any floating menu steps aside.
         self.closeup_action_over_pane = false;
-        let panes = self.closeup_pane_count();
-        if panes == 0 {
-            self.closeup_new_tab = true;
-            return None;
-        }
-        if self.closeup_on_new_tab() {
-            // "+ new" wraps to the first pane.
-            self.closeup_new_tab = false;
-            Some(0)
-        } else if self.closeup_active_pane() + 1 >= panes {
-            // The last pane steps onto the "+ new" tab.
-            self.closeup_new_tab = true;
-            None
-        } else {
-            Some(self.closeup_active_pane() + 1)
-        }
+        self.reduce_closeup_tab(TabAction::Next)
     }
 
     /// Move 集中's tab selector to the previous tab, wrapping through the live
@@ -3900,22 +3885,7 @@ impl HomeState {
     pub fn closeup_tab_prev(&mut self) -> Option<usize> {
         // Walking the strip is browsing previews: any floating menu steps aside.
         self.closeup_action_over_pane = false;
-        let panes = self.closeup_pane_count();
-        if panes == 0 {
-            self.closeup_new_tab = true;
-            return None;
-        }
-        if self.closeup_on_new_tab() {
-            // "+ new" wraps back to the last pane.
-            self.closeup_new_tab = false;
-            Some(panes - 1)
-        } else if self.closeup_active_pane() == 0 {
-            // The first pane steps back onto the "+ new" tab.
-            self.closeup_new_tab = true;
-            None
-        } else {
-            Some(self.closeup_active_pane() - 1)
-        }
+        self.reduce_closeup_tab(TabAction::Prev)
     }
 
     /// Select a concrete live-pane tab in 集中 (Closeup), returning the clamped
@@ -3925,13 +3895,25 @@ impl HomeState {
     pub fn closeup_select_pane_tab(&mut self, index: usize) -> Option<usize> {
         // Clicking a tab is browsing previews: any floating menu steps aside.
         self.closeup_action_over_pane = false;
-        let panes = self.closeup_pane_count();
-        if panes == 0 {
-            self.closeup_new_tab = true;
-            return None;
+        self.reduce_closeup_tab(TabAction::ToLive(index))
+    }
+
+    fn reduce_closeup_tab(&mut self, action: TabAction) -> Option<usize> {
+        let current = if self.closeup_on_new_tab() {
+            TabSelection::New
+        } else {
+            TabSelection::Live(self.closeup_active_pane())
+        };
+        match reduce_selection(current, self.closeup_pane_count(), action) {
+            TabSelection::Live(index) => {
+                self.closeup_new_tab = false;
+                Some(index)
+            }
+            TabSelection::New | TabSelection::Pending(_) => {
+                self.closeup_new_tab = true;
+                None
+            }
         }
-        self.closeup_new_tab = false;
-        Some(index.min(panes - 1))
     }
 
     /// Discard 集中's "+ new" launch surface when it sits over live panes — the
