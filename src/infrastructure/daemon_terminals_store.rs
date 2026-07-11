@@ -62,10 +62,16 @@ impl From<&PersistedTerminal> for DaemonTerminalRecord {
 /// Read persisted terminal records, returning an empty list before the daemon
 /// has spawned any terminal.
 pub fn read(dir: &Path) -> Result<Vec<DaemonTerminalRecord>> {
+    Ok(read_if_present(dir)?.unwrap_or_default())
+}
+
+/// Read the persisted terminal registry without collapsing a missing file into
+/// an empty registry. That distinction lets callers tell a known-empty registry
+/// from an old daemon that never persisted ownership at all.
+pub fn read_if_present(dir: &Path) -> Result<Option<Vec<DaemonTerminalRecord>>> {
     Ok(
         json_file::read_versioned::<TerminalsOwned>(&dir.join(TERMINALS_FILE))?
-            .map(|file| file.terminals)
-            .unwrap_or_default(),
+            .map(|file| file.terminals),
     )
 }
 
@@ -91,6 +97,7 @@ mod tests {
     fn read_is_empty_before_any_write() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(read(tmp.path()).unwrap().is_empty());
+        assert_eq!(read_if_present(tmp.path()).unwrap(), None);
     }
 
     #[test]
@@ -100,6 +107,7 @@ mod tests {
         let terminals = vec![record(1, false), record(2, true)];
         write(&dir, &terminals).unwrap();
         assert_eq!(read(&dir).unwrap(), terminals);
+        assert_eq!(read_if_present(&dir).unwrap(), Some(terminals));
     }
 
     #[test]
