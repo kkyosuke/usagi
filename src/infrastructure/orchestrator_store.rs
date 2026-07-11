@@ -311,6 +311,12 @@ mod tests {
         fs::create_dir_all(events.parent().unwrap()).unwrap();
         fs::write(&events, "not a directory").unwrap();
         assert!(store.load_events("q").is_err());
+
+        let ack_dir = tmp
+            .path()
+            .join(".usagi/orchestrators/ack/events/directory.json");
+        fs::create_dir_all(&ack_dir).unwrap();
+        assert!(store.acknowledge_event("ack", "directory").is_err());
     }
 
     #[test]

@@ -145,6 +145,17 @@ mod tests {
     }
 
     #[test]
+    fn terminal_outcomes_record_ended_without_a_worker_binding() {
+        with_data_dir(|_| {
+            let wt = tempfile::tempdir().unwrap();
+            for phase in [Phase::Failed, Phase::Interrupted, Phase::TimedOut] {
+                record(phase, "", wt.path()).unwrap();
+                assert_eq!(agent_state_store::read(wt.path()), Some(AgentPhase::Ended));
+            }
+        });
+    }
+
+    #[test]
     fn run_records_the_worktree_from_the_hook_payload() {
         with_data_dir(|_| {
             let wt = tempfile::tempdir().unwrap();
