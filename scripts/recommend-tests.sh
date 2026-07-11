@@ -33,6 +33,14 @@ add_unique() {
   commands+=("$value")
 }
 
+requires_full_test() {
+  case "$1" in
+    Cargo.toml|Cargo.lock|build.rs|rust-toolchain*|src/lib.rs|src/main.rs|src/test_support.rs) return 0 ;;
+    scripts/*|hooks/*|.githooks/*|.github/workflows/*|lefthook*.yml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 module_for_path() {
   local path=$1
   path=${path#src/}
@@ -74,6 +82,11 @@ for path in "${paths[@]}"; do
         ;;
     esac
   done <"$map_file"
+  if requires_full_test "$path"; then
+    matched=true
+    reasons+=("$path — shared build/test/CI surface; fail-safe full test")
+    fallback=true
+  fi
   if [ "$matched" = false ]; then
     reasons+=("$path — unknown path; fail-safe full test")
     fallback=true
@@ -94,10 +107,6 @@ for layer in "${layers[@]}"; do
   fi
   first_layer=$layer
 done
-
-case " ${paths[*]:-} " in
-  *" Cargo.toml "*|*" Cargo.lock "*|*" src/lib.rs "*|*" src/main.rs "*|*" src/test_support.rs "*|*" scripts/"*|*" .github/workflows/"*|*|*" hooks/"*) fallback=true ;;
-esac
 
 if [ "$fallback" = true ]; then add_unique "cargo test --quiet"; fi
 

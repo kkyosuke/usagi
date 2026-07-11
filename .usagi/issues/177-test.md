@@ -1,13 +1,13 @@
 ---
 number: 177
 title: test: リスク比例の段階的テスト戦略を導入する（親）
-status: todo
+status: done
 priority: high
 labels: [test, ci, developer-experience]
 dependson: []
 related: []
 created_at: 2026-07-10T23:34:48.985142+00:00
-updated_at: 2026-07-10T23:34:48.985142+00:00
+updated_at: 2026-07-11T03:12:12.778377+00:00
 ---
 
 ## 背景
