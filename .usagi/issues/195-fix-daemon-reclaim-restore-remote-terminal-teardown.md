@@ -1,14 +1,14 @@
 ---
 number: 195
 title: fix(daemon): reclaim と restore無効終了で remote terminal を明示teardownする
-status: todo
+status: done
 priority: high
 labels: [fix, daemon, tui, orchestration, review]
 dependson: []
 related: [167, 173]
 parent: 159
 created_at: 2026-07-11T01:30:35.010294+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T06:20:29.148892+00:00
 ---
 
 ## 症状

@@ -2214,6 +2214,10 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         &mut wiring,
     );
 
+    if !restore_panes_enabled && matches!(outcome, Ok(event::Outcome::Quit)) {
+        pool.borrow_mut().teardown_all_for_quit();
+    }
+
     // The loop has exited (quit / back), so wait for any background create /
     // remove still running before returning — otherwise the process could tear
     // down the worker mid-`worktree add` / `remove` and leave a half-written

@@ -31,6 +31,8 @@
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicU16;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -749,6 +751,46 @@ pub enum PaneBackend {
     /// A daemon-owned terminal this TUI is attached to.
     #[cfg(unix)]
     Remote(DaemonTerminal),
+    #[cfg(test)]
+    Spy(TestPaneBackend),
+}
+
+#[cfg(test)]
+pub struct TestPaneBackend {
+    kill_count: Arc<AtomicU64>,
+    kill_ok: bool,
+    alive: Arc<AtomicBool>,
+    bell: Arc<AtomicU64>,
+    generation: Arc<AtomicU64>,
+    parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
+}
+
+#[cfg(test)]
+impl TestPaneBackend {
+    fn new(kill_count: Arc<AtomicU64>, kill_ok: bool) -> Self {
+        let bell = Arc::new(AtomicU64::new(0));
+        Self {
+            kill_count,
+            kill_ok,
+            alive: Arc::new(AtomicBool::new(true)),
+            bell: Arc::clone(&bell),
+            generation: Arc::new(AtomicU64::new(0)),
+            parser: Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
+                24,
+                80,
+                0,
+                ScreenCallbacks::new(bell, Arc::new(AtomicU16::new(0))),
+            ))),
+        }
+    }
+
+    fn kill(&mut self) -> bool {
+        self.kill_count.fetch_add(1, Ordering::SeqCst);
+        if self.kill_ok {
+            self.alive.store(false, Ordering::SeqCst);
+        }
+        self.kill_ok
+    }
 }
 
 impl PaneBackend {
@@ -758,6 +800,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.parser(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.parser(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => spy.parser.lock().unwrap_or_else(|p| p.into_inner()),
         }
     }
 
@@ -767,6 +811,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.bracketed_paste(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.bracketed_paste(),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => false,
         }
     }
 
@@ -776,6 +822,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.bell_handle(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.bell_handle(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => Arc::clone(&spy.bell),
         }
     }
 
@@ -785,6 +833,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.parser_handle(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.parser_handle(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => Arc::clone(&spy.parser),
         }
     }
 
@@ -794,6 +844,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.generation_handle(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.generation_handle(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => Arc::clone(&spy.generation),
         }
     }
 
@@ -803,6 +855,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.process_id(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.process_id(),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => None,
         }
     }
 
@@ -812,6 +866,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.cursor_shape(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.cursor_shape(),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => 0,
         }
     }
 
@@ -821,6 +877,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.alive_handle(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.alive_handle(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => Arc::clone(&spy.alive),
         }
     }
 
@@ -830,6 +888,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => PaneInputHandle::Local(pty.input_handle()),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => PaneInputHandle::Remote(remote.input_handle()),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => unreachable!("spy backend is not used for input"),
         }
     }
 
@@ -839,6 +899,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.write(bytes),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.write(bytes),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => Ok(()),
         }
     }
 
@@ -848,6 +910,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.resize(rows, cols),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.resize(rows, cols),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => {}
         }
     }
 
@@ -858,6 +922,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.set_scrollback(offset),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.set_scrollback(offset),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => offset,
         }
     }
 
@@ -867,6 +933,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.scrollback(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.scrollback(),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => 0,
         }
     }
 
@@ -876,6 +944,8 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.is_alive(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.is_alive(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => spy.alive.load(Ordering::SeqCst),
         }
     }
 
@@ -885,17 +955,21 @@ impl PaneBackend {
             PaneBackend::Local(pty) => pty.generation(),
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.generation(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => spy.generation.load(Ordering::SeqCst),
         }
     }
 
     /// Kill the terminal process — the explicit teardown for the close paths.
     /// A local pane needs nothing here (its `Drop` kills the shell); a remote
     /// pane must ask the daemon, since its `Drop` only detaches.
-    fn kill(&mut self) {
+    fn kill(&mut self) -> bool {
         match self {
-            PaneBackend::Local(_) => {}
+            PaneBackend::Local(_) => true,
             #[cfg(unix)]
             PaneBackend::Remote(remote) => remote.kill(),
+            #[cfg(test)]
+            PaneBackend::Spy(spy) => spy.kill(),
         }
     }
 
@@ -907,6 +981,8 @@ impl PaneBackend {
             PaneBackend::Local(_) => None,
             #[cfg(unix)]
             PaneBackend::Remote(remote) => Some(remote.terminal_id()),
+            #[cfg(test)]
+            PaneBackend::Spy(_) => None,
         }
     }
 }
@@ -1024,6 +1100,12 @@ impl Pane {
         }
         self.ended_view = Some(TerminalView::from_screen(pty.parser().screen()));
         drop(pty);
+    }
+
+    /// Explicitly terminate the backend for teardown paths where dropping is not
+    /// enough (remote drop detaches). Returns whether teardown was acknowledged.
+    fn kill_backend(&mut self) -> bool {
+        self.pty.as_mut().is_none_or(PaneBackend::kill)
     }
 }
 
@@ -1457,18 +1539,41 @@ impl TerminalPool {
     }
 
     /// Close every pane owned by `dir`, killing all child shells and agents.
-    /// Returns the number of panes reclaimed.
+    /// Returns the number of panes reclaimed. If a daemon-owned terminal does
+    /// not acknowledge the kill, the session remains in the pool and the caller
+    /// gets `0`, so it does not display a successful reclaim or clear the open
+    /// pane snapshot before teardown is confirmed.
     pub fn close_all(&mut self, dir: &Path, label: &str) -> usize {
         let count = self
             .sessions
             .get(dir)
             .map_or(0, |session| session.panes.len());
         if count > 0 {
+            let killed = self
+                .sessions
+                .get_mut(dir)
+                .is_some_and(|session| session.panes.iter_mut().all(Pane::kill_backend));
+            if !killed {
+                return 0;
+            }
             self.sessions.remove(dir);
             self.preview_cache = None;
             self.refresh_watched(dir, label);
         }
         count
+    }
+
+    /// Explicitly teardown every live backend this pool opened, used when the
+    /// user quits with pane restore disabled. With restore disabled there is no
+    /// persisted terminal id to find these daemon-owned terminals next time, so
+    /// the safe quit policy is to kill them now instead of relying on remote
+    /// drop's detach semantics.
+    pub fn teardown_all_for_quit(&mut self) {
+        for session in self.sessions.values_mut() {
+            for pane in &mut session.panes {
+                let _ = pane.kill_backend();
+            }
+        }
     }
 
     /// Close `dir`'s active pane, killing its shell (its [`PtySession`] drops).
@@ -2555,5 +2660,80 @@ mod tests {
                 crate::domain::workspace_state::PrState::Merged
             );
         });
+    }
+
+    fn spy_pane(kill_count: Arc<AtomicU64>, kill_ok: bool, kind: PaneKind) -> Pane {
+        Pane {
+            id: 0,
+            pty: Some(PaneBackend::Spy(TestPaneBackend::new(kill_count, kill_ok))),
+            ended_view: None,
+            kind,
+            label_override: None,
+            cli: None,
+        }
+    }
+
+    fn insert_spy_session(pool: &mut TerminalPool, dir: &Path, panes: Vec<Pane>) {
+        pool.sessions
+            .insert(dir.to_path_buf(), SessionPanes::new(panes, 0));
+    }
+
+    #[test]
+    fn close_all_kills_every_backend_before_reclaiming_session() {
+        let dir = PathBuf::from("/tmp/usagi-close-all");
+        let kill_count = Arc::new(AtomicU64::new(0));
+        let mut pool = TerminalPool::new(false, 0);
+        insert_spy_session(
+            &mut pool,
+            &dir,
+            vec![
+                spy_pane(Arc::clone(&kill_count), true, PaneKind::Agent),
+                spy_pane(Arc::clone(&kill_count), true, PaneKind::Terminal),
+            ],
+        );
+
+        assert_eq!(pool.close_all(&dir, "session"), 2);
+
+        assert_eq!(kill_count.load(Ordering::SeqCst), 2);
+        assert!(!pool.sessions.contains_key(&dir));
+    }
+
+    #[test]
+    fn close_all_keeps_session_when_backend_teardown_fails() {
+        let dir = PathBuf::from("/tmp/usagi-close-all-fails");
+        let kill_count = Arc::new(AtomicU64::new(0));
+        let mut pool = TerminalPool::new(false, 0);
+        insert_spy_session(
+            &mut pool,
+            &dir,
+            vec![spy_pane(Arc::clone(&kill_count), false, PaneKind::Agent)],
+        );
+
+        assert_eq!(pool.close_all(&dir, "session"), 0);
+
+        assert_eq!(kill_count.load(Ordering::SeqCst), 1);
+        assert!(pool.sessions.contains_key(&dir));
+    }
+
+    #[test]
+    fn teardown_all_for_quit_kills_every_backend_in_the_pool() {
+        let first = PathBuf::from("/tmp/usagi-quit-first");
+        let second = PathBuf::from("/tmp/usagi-quit-second");
+        let kill_count = Arc::new(AtomicU64::new(0));
+        let mut pool = TerminalPool::new(false, 0);
+        insert_spy_session(
+            &mut pool,
+            &first,
+            vec![spy_pane(Arc::clone(&kill_count), true, PaneKind::Terminal)],
+        );
+        insert_spy_session(
+            &mut pool,
+            &second,
+            vec![spy_pane(Arc::clone(&kill_count), true, PaneKind::Agent)],
+        );
+
+        pool.teardown_all_for_quit();
+
+        assert_eq!(kill_count.load(Ordering::SeqCst), 2);
     }
 }
