@@ -26,9 +26,4 @@ impl Workspace {
             updated_at: now,
         }
     }
-
-    /// Mark the workspace as used now.
-    pub fn touch(&mut self) {
-        self.updated_at = Utc::now();
-    }
 }

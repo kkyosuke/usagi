@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::settings::Settings;
@@ -94,6 +95,21 @@ impl Storage {
             &self.dir.join(WORKSPACES_FILE),
             &WorkspacesRef { workspaces },
         )
+    }
+
+    pub fn touch_workspace(
+        &self,
+        name: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<Option<Workspace>> {
+        let mut workspaces = self.load_workspaces()?;
+        let Some(workspace) = workspaces.iter_mut().find(|w| w.name == name) else {
+            return Ok(None);
+        };
+        workspace.updated_at = updated_at;
+        let touched = workspace.clone();
+        self.save_workspaces(&workspaces)?;
+        Ok(Some(touched))
     }
 
     /// Load settings; returns defaults if the file does not exist.
