@@ -17,6 +17,7 @@ use anyhow::Result;
 
 use crate::presentation::mcp::session::AgentBackend;
 use crate::presentation::mcp::usagi::UsagiMcpServer;
+use crate::usecase::agent::AgentModelProbe;
 use crate::usecase::session;
 
 /// Entry point for `usagi mcp`: serve the unified `usagi` tools (issue, memory,
@@ -36,9 +37,15 @@ use crate::usecase::session;
 ///   back to its root (see [`session::workspace_root`]).
 ///
 /// `backend` performs the session side effects (queueing a delegated prompt,
-/// removing a session); it is injected so the transport and root resolution are
+/// removing a session), while `model_probe` verifies explicit agent models before
+/// orchestration. Both are injected so the transport and root resolution are
 /// exercised in tests without shelling out to a real agent CLI.
-pub fn run(backend: Box<dyn AgentBackend>, input: impl BufRead, output: impl Write) -> Result<()> {
+pub fn run(
+    backend: Box<dyn AgentBackend>,
+    model_probe: Box<dyn AgentModelProbe>,
+    input: impl BufRead,
+    output: impl Write,
+) -> Result<()> {
     let worktree = std::env::current_dir()?;
     let workspace_root = session::workspace_root(&worktree);
     let server = UsagiMcpServer::new(
@@ -46,6 +53,7 @@ pub fn run(backend: Box<dyn AgentBackend>, input: impl BufRead, output: impl Wri
         workspace_root,
         backend,
         Box::new(crate::usecase::doctor::SystemRunner),
+        model_probe,
     );
     crate::presentation::mcp::serve(&server, input, output)?;
     Ok(())
@@ -56,6 +64,9 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::path::Path;
+
+    use crate::domain::settings::AgentCli;
+    use crate::usecase::agent::ModelAvailability;
 
     /// An in-memory [`AgentBackend`] that records what it was asked to do, so the
     /// transport can be driven without touching a real agent CLI or workspace.
@@ -85,13 +96,29 @@ mod tests {
         }
     }
 
+    /// A deterministic model probe for transport tests, where the catalog itself
+    /// is outside the behaviour under test.
+    struct AlwaysAvailableModelProbe;
+
+    impl AgentModelProbe for AlwaysAvailableModelProbe {
+        fn probe_model(&self, _cli: AgentCli, _model: &str) -> ModelAvailability {
+            ModelAvailability::Available
+        }
+    }
+
     #[test]
     fn run_returns_when_the_input_stream_is_empty() {
         // An empty input means immediate EOF: the transport loop reads nothing and
         // returns, so `run` resolves the roots, builds the server, and exits Ok.
         let input = Cursor::new(Vec::new());
         let mut output = Vec::new();
-        run(Box::new(FakeBackend), input, &mut output).unwrap();
+        run(
+            Box::new(FakeBackend),
+            Box::new(AlwaysAvailableModelProbe),
+            input,
+            &mut output,
+        )
+        .unwrap();
         assert!(output.is_empty());
     }
 
@@ -102,7 +129,13 @@ mod tests {
         let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n";
         let input = Cursor::new(request.as_bytes().to_vec());
         let mut output = Vec::new();
-        run(Box::new(FakeBackend), input, &mut output).unwrap();
+        run(
+            Box::new(FakeBackend),
+            Box::new(AlwaysAvailableModelProbe),
+            input,
+            &mut output,
+        )
+        .unwrap();
         let reply = String::from_utf8(output).unwrap();
         // The reply echoes the request id and is valid JSON-RPC.
         assert!(reply.contains("\"id\":1"));
@@ -119,7 +152,13 @@ mod tests {
                         \"arguments\":{\"name\":\"ghost\"}}}\n";
         let input = Cursor::new(request.as_bytes().to_vec());
         let mut output = Vec::new();
-        run(Box::new(FakeBackend), input, &mut output).unwrap();
+        run(
+            Box::new(FakeBackend),
+            Box::new(AlwaysAvailableModelProbe),
+            input,
+            &mut output,
+        )
+        .unwrap();
         assert!(String::from_utf8(output).unwrap().contains("\"id\":7"));
     }
 
@@ -147,5 +186,13 @@ mod tests {
     fn fake_backend_reports_no_live_pane() {
         // The fake has no agent state, so `auto` mode resolves to the launch queue.
         assert!(!FakeBackend.agent_is_live(Path::new("/tmp/wt")));
+    }
+
+    #[test]
+    fn fake_model_probe_reports_every_model_available() {
+        assert_eq!(
+            AlwaysAvailableModelProbe.probe_model(AgentCli::Codex, "test-model"),
+            ModelAvailability::Available
+        );
     }
 }

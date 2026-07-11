@@ -308,6 +308,12 @@ diff --git a/b.rs b/b.rs\n\
     )));
 
     let keys = vec![
+        Ok(Key::Char('v')),  // either focus: stack the explorer above the diff
+        Ok(Key::Char('v')),  // either focus: return to side-by-side layout
+        Ok(Key::Tab),        // tree -> diff focus
+        Ok(Key::Char('x')),  // diff: ignore an unbound key
+        Ok(Key::Tab),        // diff -> tree focus
+        Ok(Key::Char('z')),  // tree: ignore an unbound key
         Ok(Key::ArrowDown),  // tree: next row
         Ok(Key::Char('j')),  // tree: next row, vi
         Ok(Key::ArrowUp),    // tree: previous row

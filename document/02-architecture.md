@@ -63,7 +63,7 @@ src/
 │   └── version.rs              # セマンティックバージョン Version（パース・比較）
 │
 ├── usecase/                    # ビジネスロジック
-│   ├── agent.rs                # PATH 上にインストール済みの Agent CLI を列挙（Config 画面の選択肢・doctor の有無チェックが共用）
+│   ├── agent.rs                # PATH 上にインストール済みの Agent CLI を列挙（Config 画面・doctor 共用）し、CLI の動的一覧による明示モデルの fail-closed 検証と、timeout・出力上限付き subprocess runner を提供
 │   ├── agent_phase.rs          # Agent phase の遷移ポリシー（SessionStart→ready を記録してよいかの判断）
 │   ├── project.rs              # クローン・既存登録 + 状態同期（.gitignore の行編集は infrastructure/gitignore に委譲）
 │   ├── workspace.rs            # グローバル登録の add/list/remove/touch

@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::usecase::agent::AgentModelProbe;
 use crate::usecase::doctor::CommandRunner;
 
 use serde::Deserialize;
@@ -24,7 +25,7 @@ use serde_json::{json, Value};
 
 use super::issue::McpServer as IssueServer;
 use super::memory::MemoryMcpServer;
-use super::session::{resolve_session_agent, AgentBackend, PromptMode, SessionMcpServer};
+use super::session::{AgentBackend, PromptMode, SessionMcpServer};
 use super::McpService;
 
 /// The composite-only orchestration tool that delegates a committed issue to a
@@ -96,12 +97,19 @@ impl UsagiMcpServer {
         workspace_root: PathBuf,
         backend: Box<dyn AgentBackend>,
         runner: Box<dyn CommandRunner>,
+        model_probe: Box<dyn AgentModelProbe>,
     ) -> Self {
         let at_workspace_root = same_dir(&worktree, &workspace_root);
         Self {
             issue: IssueServer::new(&worktree),
             memory: MemoryMcpServer::new(&worktree),
-            session: SessionMcpServer::new(workspace_root.clone(), &worktree, backend, runner),
+            session: SessionMcpServer::new(
+                workspace_root.clone(),
+                &worktree,
+                backend,
+                runner,
+                model_probe,
+            ),
             at_workspace_root,
             workspace_root,
         }
@@ -128,8 +136,9 @@ impl UsagiMcpServer {
     /// issue(s) on its own branch.
     fn tool_delegate_brief(&self, arguments: Value) -> Result<String, String> {
         let args: DelegateBriefArgs = super::parse_args(arguments)?;
-        let agent =
-            resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+        let agent = self
+            .session
+            .resolve_agent_override(args.agent_cli.as_deref(), args.model)?;
         let name = match args.name {
             Some(name) => name,
             None => self.next_triage_session_name()?,
@@ -178,8 +187,9 @@ impl UsagiMcpServer {
         //
         // 1. Resolve and validate the agent override. An unknown agent_cli is surfaced
         //    early, before reading files or committing validation.
-        let agent =
-            resolve_session_agent(&*self.session.runner, args.agent_cli.as_deref(), args.model)?;
+        let agent = self
+            .session
+            .resolve_agent_override(args.agent_cli.as_deref(), args.model)?;
 
         // 2. Render the issue as a ready-to-run prompt (errors if it is missing).
         let rendered = self.issue.render_prompt(args.number)?;
@@ -298,7 +308,7 @@ fn delegate_issue_schema() -> Value {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model the session's agent CLI runs (default: the CLI's own default)"
+                    "description": "Explicit model for the delegated session. It must appear in the agent CLI's current dynamic model catalog; unavailable or unverifiable models are rejected. Omit to use the CLI default."
                 }
             },
             "required": ["number"]
@@ -338,7 +348,7 @@ fn delegate_brief_schema() -> Value {
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model the session's agent CLI runs (default: the CLI's own default)"
+                    "description": "Explicit model for the delegated session. It must appear in the agent CLI's current dynamic model catalog; unavailable or unverifiable models are rejected. Omit to use the CLI default."
                 }
             },
             "required": ["brief"]
@@ -438,6 +448,7 @@ mod tests {
     use crate::infrastructure::git::test_command as git_cmd;
     use crate::presentation::mcp::session::AgentBackend;
     use crate::presentation::mcp::PROTOCOL_VERSION;
+    use crate::usecase::agent::ModelAvailability;
     use serde_json::json;
     use std::fs;
     use std::path::Path;
@@ -459,6 +470,18 @@ mod tests {
         }
         fn spawn(&self, _program: &str, _args: &[&str]) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct AvailableModelProbe;
+
+    impl AgentModelProbe for AvailableModelProbe {
+        fn probe_model(
+            &self,
+            _cli: crate::domain::settings::AgentCli,
+            _model: &str,
+        ) -> ModelAvailability {
+            ModelAvailability::Available
         }
     }
 
@@ -499,6 +522,7 @@ mod tests {
             root.to_path_buf(),
             Box::new(StubBackend),
             runner,
+            Box::new(AvailableModelProbe),
         )
     }
 
@@ -515,6 +539,7 @@ mod tests {
             root.to_path_buf(),
             Box::new(StubBackend),
             runner,
+            Box::new(AvailableModelProbe),
         );
         (server, worktree)
     }
@@ -648,6 +673,7 @@ mod tests {
             workspace.path().to_path_buf(),
             Box::new(StubBackend),
             runner,
+            Box::new(AvailableModelProbe),
         );
 
         let created = call(&server, "issue_create", json!({"title": "in session"}));
@@ -962,7 +988,13 @@ mod tests {
         assert_ne!(link, real, "paths must differ textually for this test");
 
         let runner = Box::new(FakeRunner(vec!["claude", "codex", "codex-fugu"]));
-        let server = UsagiMcpServer::new(link, real, Box::new(StubBackend), runner);
+        let server = UsagiMcpServer::new(
+            link,
+            real,
+            Box::new(StubBackend),
+            runner,
+            Box::new(AvailableModelProbe),
+        );
         let result = call(&server, "issue_create", json!({"title": "x"}));
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
