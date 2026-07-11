@@ -1,13 +1,13 @@
 ---
 number: 192
 title: fix(orchestration): queued prompt autostart に dispatch 予約を導入する
-status: in-progress
+status: done
 priority: high
 labels: [fix, orchestration, tui, review]
 dependson: []
 related: [185]
 created_at: 2026-07-11T01:30:33.641601+00:00
-updated_at: 2026-07-11T05:33:37.936509+00:00
+updated_at: 2026-07-11T06:12:19.956117+00:00
 ---
 
 ## 背景
