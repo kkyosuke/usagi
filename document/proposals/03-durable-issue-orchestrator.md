@@ -11,6 +11,8 @@
 - [設計目標](#設計目標)
 - [既存機能と不足](#既存機能と不足)
 - [基本構造](#基本構造)
+- [現状可否](#現状可否)
+- [agent skill](#agent-skill)
 - [二種類の readiness](#二種類の-readiness)
 - [永続状態](#永続状態)
 - [reconcile](#reconcile)
@@ -56,6 +58,55 @@ TUI sync/autostart tick
 ```
 
 plan は `orchestrator_id`、対象 issue 集合、owner session、同時実行上限を持つ。worker の `started_from` はすべて owner を指す。作業枠は `min(plan.max_parallel, agent 同時実行上限の空き)` とし、同じ issue に active claim があれば生成しない。
+
+## 現状可否
+
+| 要求 | 現状 | 判定 |
+|---|---|---|
+| 複数 issue の取得・DAG 判定 | `dependson`、issue graph/search/get、main 基準の ready | 手動 reconcile なら可能 |
+| 子・孫 session への委譲 | `session_delegate_issue` と `started_from`。sandbox 条件により子から sibling 作成できない場合は root へ戻す | 可能だが、多段 tree は復旧と容量計算が難しいため非推奨 |
+| PR 作成後の親報告 | worker が `session_prompt` で呼び出し元または `:root` へ報告でき、queue は永続化される | agent の遵守に依存するため部分的 |
+| CLI・model 指定 | delegate/create/prompt の `agent_cli` / `model` と session record 上書き | 実装済み |
+| queue・自動開始・同時数制限 | launch/live prompt queue、TUI autostart、`autostart_queued_prompt_limit` | 個別 session には実装済み。plan 単位の公平性・予約は未実装 |
+| timeout・retry・CI/review 待ち | phase、session/PR/merged 観測は可能 | policy、attempt、deadline、CI/review adapter が未実装 |
+| 親 agent 終了後の復旧 | queue と session record は残り、TUI が queued prompt を起動する | 判断状態・ack が無いため部分的 |
+| merge 完了を依存 gate にする | main の issue `done` と `session_status.merged` / `session_pr` | 通常委譲では可能。stacked work-ready は未実装 |
+| Claude/Codex 共通 skill | bundled skill は `.claude/skills` のみに symlink | skill 本文は共通化可能だが Codex discovery への配布が未実装 |
+
+したがって、現行機能だけで提供できるのは「生存中の統括 agent が main-ready を観測して委譲し、worker の規約ベース報告を受けて再走査する」best-effort 運用である。全 issue 完了までの無人継続、exactly-once に近い委譲、失敗分類、親終了後の自動収束は durable coordinator の追加実装を要する。
+
+## agent skill
+
+### 責務境界
+
+`usagi-orchestrate-issues` skill は coordinator/worker が同じ MCP 語彙と安全規約を使うための薄いクライアントにする。DAG state、claim、retry count、時刻、PR/CI 観測結果を会話や skill ファイルに保持せず、durable coordinator API の結果に従う。
+
+```text
+SKILL.md
+  ├─ coordinator: plan 作成/再開 → reconcile → 提示 action の実行 → ack
+  ├─ worker: issue 着手 → PR 作成 → terminal result の記録
+  └─ safety: main merge と work-ready を混同しない、join/drift/conflict を escalate
+
+usagi durable coordinator
+  └─ state/event/claim/queue/dependency/timeout/retry の正本
+```
+
+skill は `name` と `description` だけの YAML frontmatter と、両 agent で通じる Markdown 命令を正本にする。Claude 固有の `context`、`agent`、`allowed-tools`、動的 shell 展開や Codex 固有 UI metadata は共通 `SKILL.md` に入れない。必要になった surface 固有 metadata は生成物または別ファイルに分離する。詳細 schema を skill 本文へ複製せず、必要なら同梱 `references/` に MCP workflow と状態の読み方だけを置く。
+
+### 配置と注入
+
+```text
+assets/skills/usagi-orchestrate-issues/SKILL.md  # binary 埋め込み正本
+                 │ materialize
+                 v
+<data-dir>/skills/usagi-orchestrate-issues/
+                 ├─ symlink → <worktree>/.claude/skills/usagi-orchestrate-issues
+                 └─ symlink → <worktree>/.agents/skills/usagi-orchestrate-issues
+```
+
+Claude Code は project skill を `.claude/skills`、Codex は repo skill を `.agents/skills` から発見し、どちらも symlink された directory と Agent Skills の基本形式を扱える。現行 `infrastructure::skills` は前者だけを作るため、後者と両 path の git exclude、衝突時に project 所有 directory を上書きしない規則を追加する。workspace root coordinator と全 session worktree の作成・復旧時に同じ link 処理を通し、選択した `agent_cli` にかかわらず skill が見えるようにする。
+
+旧 `.claude/commands` は Claude で互換だが Codex と共有できず、supporting files も持ちにくいため新規経路には採用しない。初期段階の skill は既存 MCP だけを用いる best-effort mode と、durable coordinator tool が利用可能な mode を明示的に分け、存在しない tool を推測して呼ばない。
 
 ## 二種類の readiness
 
@@ -153,13 +204,18 @@ retry policy は既定で attempt 3 回、指数 backoff、最大遅延を持つ
 
 ## 段階的導入
 
-| 段階 | 内容 |
-|---|---|
-| 現状運用 | 一つの統括 session が DAG を保持し、main-ready を通常委譲する。直列 chain のみ先行 head から後続 branch を開始し、PR 本文に依存を明記する。人が `session_status`/CI を確認する |
-| 最小実装 | plan/state/event store、純粋 reconcile、claim/lease、TUI tick wake-up、終端 hook、同時実行上限、retry/timeout/escalation、stack metadata 検証を入れる |
-| 将来拡張 | GitHub webhook/poll adapter、daemon からの同じ reconcile 呼び出し、可視化、policy の workspace 設定化、明示 integration branch |
+| 段階 | issue | 内容 | 主な受け入れ条件 |
+|---|---|---|---|
+| 現状運用 | 実装 issue 外 | 一つの統括 session が DAG を保持し、main-ready を通常委譲する。直列 chain のみ先行 head から後続 branch を開始し、PR 本文に依存を明記する。人が `session_status`/CI を確認する | PR 作成を依存完了と誤認せず、main merge を確認する |
+| durable core | #183 | plan/state/event store、純粋 reconcile、claim/lease | crash point と競合 owner から二重委譲せず収束する |
+| lifecycle event | #184 | worker generation、決定的 event、delivery/ack、owner wake-up | 重複・遅延・owner 不在でも event を失わない |
+| scheduler | #185 | TUI sync reconcile、capacity、dispatch、timeout/wait | 上限到達時は queue に残り、再起動後に一度だけ進む |
+| PR policy | #186 | stacked metadata、GitHub PR/CI/review 観測、retry/escalation | merge-ready を弱めず、join/drift/conflict を自動統合しない |
+| 共通 skill | #187 | 共通 `SKILL.md` と Claude/Codex discovery path への配布 | 両 CLI で同じ workflow が発見され、durable state を skill に複製しない |
+| 正本化 | Epic #182 完了時 | 実装済み事項を orchestration/settings/data/command 文書へ移し proposal を畳む | 正本に未実装事項を混ぜない |
+| 将来拡張 | 別途起票 | GitHub webhook adapter、daemon からの同じ reconcile 呼び出し、可視化、policy の workspace 設定化、明示 integration branch | poll/tick 実測で必要性を確認してから追加する |
 
-最小実装は issue を分割し、永続 core → lifecycle event → TUI reconcile/worker dispatch → PR/CI policy の順に積む。前段 PR 未 mergeで後段を開発する場合も、各 PR は `main` base と依存表示を維持する。
+最小実装は永続 core → lifecycle event → TUI reconcile/worker dispatch → PR/CI policy の順に積む。共通 skill は #183 の API が固まった後に並行着手できる。前段 PR 未 mergeで後段を開発する場合も、各 PR は `main` base と依存表示を維持する。
 
 ## 検証計画
 
