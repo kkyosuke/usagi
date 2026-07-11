@@ -1,0 +1,19 @@
+# usagi v2 の共通クレート（common）。TUI 面・daemon 面の両方が共有する
+# domain / usecase / 共有 infrastructure（IPC プロトコル型・永続化）を置く。
+# 他の usagi クレートに依存しない（依存方向の詳細はルート Cargo.toml 参照）。
+#
+# version は持たない（配布 version はルートパッケージが持つ。内部クレートは
+# publish しないため不要）。
+[package]
+name = "usagi-core"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints]
+workspace = true
