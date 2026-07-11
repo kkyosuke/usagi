@@ -15,7 +15,7 @@ use super::super::terminal::tabs::TabStrip;
 use super::super::terminal::view::TerminalView;
 use super::diff_render::diff_pane;
 use super::markdown_render::markdown_row;
-use super::sidebar::{dim_row, status_label, AgentLifecycle};
+use super::sidebar::{dim_row, sync_status_label, AgentLifecycle};
 use super::tabs_hit::header_tab_rows;
 use super::{clip_to_width, pad_to_width, DETACHED, ROOT_DETAIL, STATUS_COL, TERMINAL_STARTING};
 use crate::domain::settings::Sidebar;
@@ -52,7 +52,14 @@ const HEADER_DETAIL_COL: usize = STATUS_COL + 2 + HEADER_AGENT_COL;
 /// real session) or the workspace-root note (the root row, no status). Each field
 /// is padded to a constant width so the block is the same size for every session.
 /// Shared by 選択 (Overview) and 没入 (Attached) so both carry the same identity.
-fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String>) -> String {
+fn preview_header(
+    name: &str,
+    status: Option<(
+        BranchStatus,
+        Option<&super::super::sessions_refresh::GitSyncState>,
+    )>,
+    agent: Option<String>,
+) -> String {
     // Measure by plain display width (matching [`name_cell`]) so a name carrying
     // wide characters keeps the identity block a constant width instead of pushing
     // the status / agent fields — and the tab strip laid beside it — sideways.
@@ -64,8 +71,8 @@ fn preview_header(name: &str, status: Option<BranchStatus>, agent: Option<String
         HEADER_NAME_COL,
     );
     let detail = match status {
-        Some(status) => {
-            let status = pad_to_width(status_label(status), STATUS_COL);
+        Some((status, sync)) => {
+            let status = pad_to_width(sync_status_label(status, sync), STATUS_COL);
             let agent = pad_to_width(agent.unwrap_or_default(), HEADER_AGENT_COL);
             format!("{status}  {agent}")
         }
@@ -95,9 +102,14 @@ pub(super) fn active_session_header(state: &HomeState) -> String {
                 state.is_done(&w.path),
             )
             .detail(HEADER_AGENT_COL);
+            let groups = state.list().groups();
+            let active_group = state.list().active_group();
+            let active_root = groups
+                .get(active_group)
+                .map_or(state.root_path(), |group| group.root_path());
             preview_header(
                 w.branch.as_deref().unwrap_or(DETACHED),
-                Some(w.status),
+                Some((w.status, state.git_sync_state(active_root))),
                 agent,
             )
         }
@@ -801,14 +813,17 @@ pub(super) fn overview_preview_header(state: &HomeState) -> (String, bool) {
     // row and `None` on the root row (which carries no git status / tracked
     // path), so the match doubles as the root/session split.
     let (name, live, running, waiting, done, status) = match state.list().selected() {
-        Some(w) => (
-            w.branch.as_deref().unwrap_or(DETACHED).to_string(),
-            state.is_live(&w.path),
-            state.is_running(&w.path),
-            state.is_waiting(&w.path),
-            state.is_done(&w.path),
-            Some(w.status),
-        ),
+        Some(w) => {
+            let selected_root = state.selected_workspace_root();
+            (
+                w.branch.as_deref().unwrap_or(DETACHED).to_string(),
+                state.is_live(&w.path),
+                state.is_running(&w.path),
+                state.is_waiting(&w.path),
+                state.is_done(&w.path),
+                Some((w.status, state.git_sync_state(&selected_root))),
+            )
+        }
         None => {
             // The root row carries no worktree, but its embedded session is
             // keyed by the workspace root path, so match it against the same

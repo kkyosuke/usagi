@@ -61,6 +61,16 @@ fn reload_sessions(root: &Path) -> Option<Vec<SessionRecord>> {
     crate::usecase::workspace_state::recorded_sessions(root)
 }
 
+fn sync_sessions_result(root: &Path) -> Result<Vec<SessionRecord>, String> {
+    crate::usecase::workspace_state::sync(root)
+        .map(|state| state.sessions)
+        .map_err(|error| error.to_string())
+}
+
+fn root_supports_git_sync(root: &Path) -> bool {
+    crate::infrastructure::git::is_repository(root)
+}
+
 /// How often the background watcher reads `state.json` for an external change (a
 /// create / remove made by an agent's MCP call, another usagi window, or the CLI).
 /// Paired with the event loop's own `WATCH_SESSIONS_TICK`, so a change lands in the
@@ -1159,11 +1169,21 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
     {
         let handle = sessions_refresh.clone();
         let root = workspace.path.clone();
-        std::thread::spawn(move || {
-            if let Ok(state) = crate::usecase::workspace_state::sync(&root) {
-                handle.set(root, state.sessions);
-            }
-        });
+        if root_supports_git_sync(&root) {
+            let (root, generation, sync_state) = handle.begin_git_sync(root);
+            state.begin_git_sync(root.clone(), sync_state);
+            std::thread::spawn(move || {
+                let started_at = std::time::Instant::now();
+                let result = sync_sessions_result(&root);
+                handle.complete_git_sync(sessions_refresh::GitSyncOutcome {
+                    root,
+                    generation,
+                    started_at,
+                    finished_at: std::time::Instant::now(),
+                    result,
+                });
+            });
+        }
     }
 
     // Reflect session create / remove made outside this screen — an agent's MCP
@@ -1218,7 +1238,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     last[i] = fingerprint;
                     if let Some(sessions) = crate::usecase::workspace_state::recorded_sessions(root)
                     {
-                        handle.set(root.clone(), sessions);
+                        handle.set_recorded(root.clone(), sessions);
                     }
                 }
             }
@@ -1589,14 +1609,25 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             // Best-effort: a sync failure simply leaves the last-known statuses.
             let refresh_handle = sessions_refresh.clone();
             let refresh_root = terminal_root.clone();
-            track_worker(
-                &workers,
-                std::thread::spawn(move || {
-                    if let Some(sessions) = reload_sessions(&refresh_root) {
-                        refresh_handle.set(refresh_root, sessions);
-                    }
-                }),
-            );
+            if root_supports_git_sync(&refresh_root) {
+                let (refresh_root, generation, sync_state) =
+                    refresh_handle.begin_git_sync(refresh_root);
+                home.begin_git_sync(refresh_root.clone(), sync_state);
+                track_worker(
+                    &workers,
+                    std::thread::spawn(move || {
+                        let started_at = std::time::Instant::now();
+                        let result = sync_sessions_result(&refresh_root);
+                        refresh_handle.complete_git_sync(sessions_refresh::GitSyncOutcome {
+                            root: refresh_root,
+                            generation,
+                            started_at,
+                            finished_at: std::time::Instant::now(),
+                            result,
+                        });
+                    }),
+                );
+            }
             // A launch / pane failure is surfaced and persisted by the event loop's
             // single error sink: `open_pane` logs the failure through
             // `HomeState::log_error`, which both shows it and writes it to the daily

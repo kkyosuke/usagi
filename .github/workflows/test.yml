@@ -53,7 +53,13 @@ jobs:
         shared-key: rust-full-test
 
     - name: Run tests
-      run: cargo test --quiet
+      run: |
+        set +e
+        cargo test --quiet > /tmp/usagi-cargo-test.log 2>&1
+        status=$?
+        set -e
+        tail -n 160 /tmp/usagi-cargo-test.log
+        exit "$status"
 
     - name: Test recommended-test selector
       run: bash scripts/tests/recommend-tests.sh

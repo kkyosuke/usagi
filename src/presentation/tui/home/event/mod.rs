@@ -421,9 +421,16 @@ fn click_selects_session(state: &HomeState) -> bool {
 fn apply_pending_refresh(state: &mut HomeState, refresh: &SessionsRefreshHandle) -> bool {
     let pending = refresh.take_all();
     let mut changed = false;
-    for (root, sessions) in pending {
-        state.refresh_sessions_for(&root, sessions);
-        changed = true;
+    for refresh in pending {
+        match refresh {
+            super::sessions_refresh::SessionsRefresh::GitSync(outcome) => {
+                changed |= state.apply_git_sync_outcome(outcome);
+            }
+            super::sessions_refresh::SessionsRefresh::Recorded { root, sessions } => {
+                state.refresh_sessions_for(&root, sessions);
+                changed = true;
+            }
+        }
     }
     changed
 }

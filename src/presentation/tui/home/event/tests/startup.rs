@@ -249,6 +249,29 @@ fn a_background_refresh_updates_the_session_list_exactly_once() {
 }
 
 #[test]
+fn a_background_git_sync_refresh_updates_freshness_state() {
+    let mut state = state_with_sessions(&["main"]);
+    let root = state.root_path().to_path_buf();
+    let refresh = SessionsRefreshHandle::new();
+    state.begin_git_sync(root.clone(), GitSyncState::syncing(1, Instant::now()));
+    let started_at = Instant::now();
+
+    refresh.complete_git_sync(GitSyncOutcome {
+        root: root.clone(),
+        generation: 1,
+        started_at,
+        finished_at: started_at,
+        result: Err("git status failed".to_string()),
+    });
+
+    assert!(apply_pending_refresh(&mut state, &refresh));
+    assert_eq!(
+        state.git_sync_state(&root).map(|sync| sync.status),
+        Some(GitSyncStatus::Stale)
+    );
+}
+
+#[test]
 fn an_external_refresh_updates_the_sidebar_without_entering_switch() {
     // Regression for MCP-created sessions not appearing until the user manually
     // opened Switch mode: the watcher feeds the same refresh handle while the

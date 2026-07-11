@@ -57,6 +57,9 @@ use modal::{CloseupMenu, CloseupSubmenu, Overlay};
 
 use crate::presentation::tui::chat::state::Chat;
 use crate::presentation::tui::home::action::{self, ActionPicker};
+use crate::presentation::tui::home::sessions_refresh::{
+    GitSyncOutcome, GitSyncState, GitSyncStatus,
+};
 
 /// The 集中 (Closeup) menu commands in alphabetical order by name, independent of
 /// registry order, so the menu is predictable regardless of how the registry is
@@ -769,6 +772,10 @@ pub struct HomeState {
     /// the screen driver updating it is explicit. Rendering precedence among
     /// them (done > waiting > running, atop live) lives in the sidebar renderer.
     badges: MonitorSnapshot,
+    /// Background git sync freshness keyed by workspace root. In 統合(unite)
+    /// mode each workspace root progresses independently, so a slow or failed
+    /// sync in one group does not make another group's statuses look stale.
+    git_sync: HashMap<PathBuf, GitSyncState>,
     /// Which screen driver last replaced [`badges`](Self::badges). The value is
     /// not needed to merge the snapshot (replacement is atomic), but recording it
     /// in the same owner vocabulary as [`terminal`](Self::terminal) makes badge
@@ -980,6 +987,7 @@ impl HomeState {
             sessions: Vec::new(),
             terminal: TerminalSurface::default(),
             badges: MonitorSnapshot::default(),
+            git_sync: HashMap::new(),
             badge_owner: None,
             sort_waiting: false,
             response_start: 0,
@@ -1477,6 +1485,72 @@ impl HomeState {
     pub fn set_extra_groups(&mut self, groups: Vec<GroupSource>) {
         self.extra_groups = groups;
         self.rebuild_list_keep_cursor();
+    }
+
+    /// Mark a workspace root as currently being refreshed from git.
+    pub fn begin_git_sync(&mut self, root: PathBuf, state: GitSyncState) {
+        self.apply_git_sync_state(root, state);
+    }
+
+    /// The background git sync state for a workspace root, when one has been
+    /// dispatched in this UI session.
+    pub fn git_sync_state(&self, root: &Path) -> Option<&GitSyncState> {
+        self.git_sync.get(root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_git_sync_state_for_test(&mut self, root: PathBuf, state: GitSyncState) {
+        self.git_sync.insert(root, state);
+    }
+
+    /// Apply one background git sync completion. Returns `true` when it changed
+    /// the visible screen. A completion older than the root's current generation
+    /// is ignored completely, preventing a slow stale sync from overwriting a
+    /// newer session list or clearing its freshness marker.
+    pub fn apply_git_sync_outcome(&mut self, outcome: GitSyncOutcome) -> bool {
+        if self
+            .git_sync
+            .get(&outcome.root)
+            .is_some_and(|state| outcome.generation < state.generation)
+        {
+            return false;
+        }
+        match outcome.result {
+            Ok(sessions) => {
+                self.refresh_sessions_for(&outcome.root, sessions);
+                self.apply_git_sync_state(
+                    outcome.root,
+                    GitSyncState::fresh(outcome.generation, outcome.finished_at),
+                );
+            }
+            Err(error) => {
+                self.apply_git_sync_state(
+                    outcome.root,
+                    GitSyncState::stale(
+                        outcome.generation,
+                        Some(outcome.started_at),
+                        outcome.finished_at,
+                        error,
+                    ),
+                );
+            }
+        }
+        true
+    }
+
+    fn apply_git_sync_state(&mut self, root: PathBuf, state: GitSyncState) {
+        if self
+            .git_sync
+            .get(&root)
+            .is_some_and(|current| state.generation < current.generation)
+        {
+            return;
+        }
+        if state.status == GitSyncStatus::Fresh {
+            self.git_sync.remove(&root);
+        } else {
+            self.git_sync.insert(root, state);
+        }
     }
 
     /// Whether the home screen is showing more than one workspace (統合/unite mode).
