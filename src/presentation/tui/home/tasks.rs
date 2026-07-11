@@ -509,6 +509,31 @@ mod tests {
     }
 
     #[test]
+    fn launch_pane_rows_use_launch_wording() {
+        let handle = TaskHandle::new();
+        let t0 = Instant::now();
+        let id = handle.begin_at(TaskKind::LaunchPane, "feature", t0);
+        assert_eq!(
+            handle.view(t0),
+            vec![TaskRow {
+                kind: TaskKind::LaunchPane,
+                label: "起動中… feature".to_string(),
+                mark: TaskMark::Running(0),
+            }]
+        );
+
+        handle.complete_at(id, true, completion(), t0);
+        assert_eq!(
+            handle.view(t0 + MIN_SPIN),
+            vec![TaskRow {
+                kind: TaskKind::LaunchPane,
+                label: "起動完了 feature".to_string(),
+                mark: TaskMark::Done(true),
+            }]
+        );
+    }
+
+    #[test]
     fn an_instant_finish_still_spins_for_min_spin_before_settling() {
         // A task that finishes almost immediately keeps showing its spinner until
         // MIN_SPIN has elapsed, so the row reads as live work rather than a result
@@ -639,5 +664,22 @@ mod tests {
             log_line,
             "session create \"gamma\" worker panicked: unknown panic payload"
         );
+    }
+
+    #[test]
+    fn panic_outcome_names_launch_pane_failures() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("launch panic");
+        let (log_line, completion) = panic_outcome(TaskKind::LaunchPane, "delta", payload);
+
+        assert_eq!(
+            log_line,
+            "pane launch \"delta\" worker panicked: launch panic"
+        );
+        assert_eq!(
+            completion.line.text,
+            "起動が異常終了しました（delta）。詳細はログを確認してください"
+        );
+        assert!(completion.created.is_none());
+        assert!(completion.removed.is_none());
     }
 }
