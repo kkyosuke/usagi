@@ -2253,7 +2253,7 @@ fn wiring_for_launch(
         model,
         dir,
         crate::domain::agent::LaunchMode::Interactive,
-        crate::infrastructure::git::git_common_dir,
+        &crate::infrastructure::git::git_common_dir,
     )
 }
 

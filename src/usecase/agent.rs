@@ -265,7 +265,7 @@ fn ignore_missing_process_group(result: std::io::Result<()>) -> std::io::Result<
 }
 
 fn wait_for_catalog_child(
-    child: &mut impl WaitableCatalogChild,
+    child: &mut dyn WaitableCatalogChild,
     timeout: Duration,
     poll: Duration,
     cleanup_timeout: Duration,
@@ -295,7 +295,7 @@ fn wait_for_catalog_child(
     }
 }
 
-fn read_capped(reader: &mut impl Read, cap: usize) -> ReaderResult {
+fn read_capped(reader: &mut dyn Read, cap: usize) -> ReaderResult {
     let mut output = Vec::new();
     reader.take(cap as u64 + 1).read_to_end(&mut output)?;
     let truncated = output.len() > cap;
@@ -582,7 +582,7 @@ pub fn wiring_for_launch(
     model: Option<String>,
     dir: &Path,
     mode: LaunchMode,
-    resolve_git_common_dir: impl FnOnce(&Path) -> Option<PathBuf>,
+    resolve_git_common_dir: &dyn Fn(&Path) -> Option<PathBuf>,
 ) -> AgentWiring {
     let mut sandbox_writable_roots = base.sandbox_writable_roots.clone();
     if mode == LaunchMode::Interactive {
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn cli_model_probe_rejects_clis_without_a_queryable_catalog_without_running_a_command() {
-        for cli in [AgentCli::Claude, AgentCli::SakanaAi] {
+        fn assert_unqueryable_cli(cli: AgentCli) {
             let runner = FakeCatalogRunner::returning(Err("must not run".to_string()));
             let result = probe_model_with(&runner, cli, "explicit", test_limits());
 
@@ -1034,6 +1034,8 @@ mod tests {
             );
             assert!(runner.calls.borrow().is_empty());
         }
+        assert_unqueryable_cli(AgentCli::Claude);
+        assert_unqueryable_cli(AgentCli::SakanaAi);
 
         let runner = FakeCatalogRunner::returning(Err("must not run".to_string()));
         assert_eq!(
@@ -1046,10 +1048,13 @@ mod tests {
 
         // Exercise the public production implementation while staying on the
         // deterministic no-subprocess branch.
-        assert!(matches!(
+        assert_eq!(
             CliAgentModelProbe.probe_model(AgentCli::Claude, "explicit"),
-            ModelAvailability::Unverifiable { .. }
-        ));
+            ModelAvailability::Unverifiable {
+                reason: "Claude does not expose a model catalog that usagi can safely query"
+                    .to_string()
+            }
+        );
     }
 
     #[test]
@@ -1366,7 +1371,7 @@ mod tests {
             Some("gpt-5-codex".to_string()),
             dir,
             LaunchMode::Interactive,
-            |_| Some(PathBuf::from("/repo/.git")),
+            &|_| Some(PathBuf::from("/repo/.git")),
         );
 
         assert_eq!(wiring.usagi_bin, "usagi");
@@ -1386,8 +1391,9 @@ mod tests {
     #[test]
     fn launch_wiring_still_carries_workspace_state_dir_when_git_common_dir_is_unresolved() {
         let dir = Path::new("/repo/.usagi/sessions/fix");
-        let wiring =
-            wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, |_| None);
+        let wiring = wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, &|_| {
+            None
+        });
 
         assert_eq!(wiring.model, None);
         assert_eq!(
@@ -1399,8 +1405,9 @@ mod tests {
     #[test]
     fn launch_wiring_carries_workspace_state_dir_for_workspace_root() {
         let dir = Path::new("/repo");
-        let wiring =
-            wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, |_| None);
+        let wiring = wiring_for_launch(&base_wiring(), None, dir, LaunchMode::Interactive, &|_| {
+            None
+        });
 
         assert!(wiring.is_root);
         assert_eq!(
@@ -1430,7 +1437,7 @@ mod tests {
             None,
             dir,
             LaunchMode::Headless,
-            resolve_git_common_dir,
+            &resolve_git_common_dir,
         );
 
         assert!(wiring.is_root);
