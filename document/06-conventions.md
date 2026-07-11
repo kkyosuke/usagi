@@ -1,6 +1,6 @@
 # 6. 開発規約
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [5. 設定](05-settings.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [5. 設定](05-settings.md) ｜ 次へ → [7. テスト観測](07-test-observability.md)
 
 `usagi` の開発で守るべき規約。**開発者・AI エージェントの双方**が従う。
 プロジェクト全体像は [1. プロジェクト概要](01-overview.md) を参照。
@@ -160,6 +160,7 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 | ファイル | トリガー | 役割 |
 |---|---|---|
 | `.github/workflows/test.yml` | `main` への push / PR | fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
+| `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/release-build-check.yml` | `Cargo.toml` / `Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
