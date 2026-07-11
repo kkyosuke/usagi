@@ -38,6 +38,27 @@ impl OrchestratorStore {
         json_file::read(&self.state_path(id))
     }
 
+    pub fn plan_ids(&self) -> Result<Vec<String>> {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).context(format!("failed to read {}", self.root.display())),
+        };
+        let mut ids = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .and_then(|_| entry.file_name().into_string().ok())
+            })
+            .filter(|id| self.state_path(id).exists())
+            .collect::<Vec<_>>();
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Lock-protected compare-and-swap. `expected_revision=None` creates a plan
     /// only when absent; otherwise the current revision must match exactly.
     pub fn save_plan(
@@ -271,6 +292,40 @@ mod tests {
         assert!(store.append_event(&event).unwrap());
         assert!(!store.append_event(&event).unwrap());
         assert_eq!(store.load_events("p").unwrap(), vec![event]);
+    }
+
+    #[test]
+    fn plan_ids_lists_saved_plans_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = OrchestratorStore::new(tmp.path());
+        assert!(store.plan_ids().unwrap().is_empty());
+        for id in ["b", "a"] {
+            store
+                .save_plan(
+                    &Plan {
+                        id: id.into(),
+                        owner: "owner".into(),
+                        max_parallel: 1,
+                        nodes: BTreeMap::new(),
+                    },
+                    None,
+                    now(),
+                )
+                .unwrap();
+        }
+        fs::create_dir_all(tmp.path().join(".usagi/orchestrators/empty")).unwrap();
+        assert_eq!(store.plan_ids().unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn plan_ids_reports_a_read_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
+        fs::write(tmp.path().join(".usagi/orchestrators"), "not a dir").unwrap();
+
+        let error = OrchestratorStore::new(tmp.path()).plan_ids().unwrap_err();
+
+        assert!(error.to_string().contains("failed to read"));
     }
 
     #[test]

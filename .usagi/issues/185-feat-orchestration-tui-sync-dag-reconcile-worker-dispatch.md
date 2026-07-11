@@ -1,14 +1,14 @@
 ---
 number: 185
 title: feat(orchestration): TUI sync で DAG reconcile と worker dispatch を再開する
-status: todo
+status: done
 priority: high
 labels: [orchestration, tui]
 dependson: [183, 184]
 related: []
 parent: 182
 created_at: 2026-07-10T23:56:44.521611+00:00
-updated_at: 2026-07-10T23:56:44.521611+00:00
+updated_at: 2026-07-11T02:36:48.463415+00:00
 ---
 
 ## 背景
