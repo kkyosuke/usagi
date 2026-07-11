@@ -10,6 +10,7 @@
 - [推奨構成](#推奨構成)
 - [実装タスク案](#実装タスク案)
 - [ベンチマークと受け入れ基準](#ベンチマークと受け入れ基準)
+- [CI 実験の初回観測](#ci-実験の初回観測)
 - [go / no-go 判断](#go--no-go-判断)
 
 ## 現状調査
@@ -72,6 +73,29 @@
 | 観測性 | PR に `sccache --show-stats` の hit/miss/non-cacheable と cache size が残る。 |
 | 失敗時 fallback | `sccache` 未インストール、cache dir 削除、cache miss で通常 Cargo 実行に戻せる。 |
 
+## CI 実験の初回観測
+
+2026-07-11 に #201 / PR #747 の merge commit `40f4ffb` 以降の GitHub Actions を確認した。
+`Test` は main push run、`Coverage` は #747 の PR run を観測対象にした。`Coverage` workflow は PR trigger のため、
+main push run は存在しない。
+
+| workflow / run | 対象 | 結果 | workflow duration | job duration | 主 command | cache / stats |
+|---|---|---|---:|---:|---|---|
+| `Test` [29141744270](https://github.com/kkyosuke/usagi/actions/runs/29141744270) | #747 main push | success | 1m54s | `test`: 1m14s / `full-test`: 1m51s | clippy 47.34s / tests 1m26s | sccache cache miss。`test`: 0 hits / 165 misses / 51 non-cacheable calls / 45 MiB。`full-test`: 0 hits / 155 misses / 50 non-cacheable calls / 144 MiB。 |
+| `Test` [29141389888](https://github.com/kkyosuke/usagi/actions/runs/29141389888) | #745 main push baseline | success | 1m19s | `test`: 37s / `full-test`: 1m10s | clippy 20.19s / tests 46s | swatinem/rust-cache hit。sccache なし。 |
+| `Test` [29138072798](https://github.com/kkyosuke/usagi/actions/runs/29138072798) | #743 main push baseline | success | 1m24s | `test`: 39s / `full-test`: 1m05s | clippy 18s / tests 44s | swatinem/rust-cache hit。sccache なし。 |
+| `Coverage` [29141542248](https://github.com/kkyosuke/usagi/actions/runs/29141542248) | #747 PR | success | 1m58s | `coverage`: 1m56s | coverage command 1m22s | sccache cache miss。0 hits / 155 misses / 55 non-cacheable calls / 144 MiB。Lines / Functions とも 100%。 |
+| `Coverage` [29138217046](https://github.com/kkyosuke/usagi/actions/runs/29138217046) | #745 PR baseline | success | 1m58s | `coverage`: 1m56s | coverage command 1m28s | swatinem/rust-cache miss。sccache なし。Lines / Functions とも 100%。 |
+
+初回 #747 は `RUSTC_WRAPPER=sccache` が `swatinem/rust-cache` の環境 hash に入ったため、既存 baseline の
+`rust-lint` / `rust-full-test` cache とは別 key になった。sccache の `actions/cache` も初回 miss で、`test` / `full-test`
+/ `coverage` の sccache hit rate はすべて 0% だった。その結果、`Test` の wall time は近い baseline より悪化し、
+required Rust jobs の 10% 短縮基準を満たさない。coverage は workflow duration が baseline と同等で、100% gate は維持した。
+
+ログ上、`swatinem/rust-cache` は Cargo registry / git / `target` を対象にし、sccache は
+`.usagi/cache/sccache-ci` だけを `actions/cache` で保存している。保存先の重複や restore/save failure は見当たらない。
+ただし初回 run だけでは warmed sccache の効果が未観測であり、billed minutes 相当は `Test` で悪化している。
+
 ## go / no-go 判断
 
 Go 条件は、ローカル opt-in helper で correctness が変わらず、複数 session warm の build-heavy command で 20% 以上の短縮が確認できること。CI は追加で 10% 以上の required job 短縮と billed minutes 非悪化を満たした場合に go とする。
@@ -81,3 +105,9 @@ no-go」。理由は、未インストール環境を壊せないこと、既に
 wall time にはコンパイル以外の Git/PTY/TUI runtime が大きく含まれることである。CI 実験では setup/cache
 restore/save を含めて required Rust jobs の wall time が 10% 以上短縮し、billed minutes が悪化しない場合だけ、
 release build check / release workflow / test-metrics workflow への展開を別 issue で検討する。
+
+#201 / PR #747 merge 後の初回 CI 実測では、required Rust jobs の 10% 短縮は確認できず、`Test` は baseline より遅い。
+これは初回 cache miss と `RUSTC_WRAPPER` による `swatinem/rust-cache` key 変更を含むため、即時 rollback ではなく
+「データ不足」と判断する。実験導入は required ubuntu Rust jobs に限定して継続し、release build check / release workflow /
+test-metrics には広げない。次は warmed sccache cache が効く同一 key の main / PR run を 3 回観測し、hit rate、
+job duration、workflow duration、cache restore/save time、billed minutes 相当を再評価する。
