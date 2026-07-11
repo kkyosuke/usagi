@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -76,6 +77,13 @@ const RESOURCE_SAMPLE_EVERY: u32 = 10;
 /// cannot prove that they are still working, so the reservation eventually ages
 /// out rather than blocking every later queued prompt forever.
 const AUTOSTART_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of concurrent `gh pr view` lookups. The watcher only enqueues
+/// and drains results; these workers own the potentially slow subprocesses.
+const PR_LOOKUP_WORKERS: usize = 2;
+/// Bounded mailbox size for pending PR lookups. If it ever fills, the next watcher
+/// tick will try again from the persisted retry metadata instead of blocking.
+const PR_LOOKUP_QUEUE: usize = 64;
 
 /// The handles a background session is watched through, kept separate from the
 /// owned [`PtySession`]s so the watcher thread can poll without holding them.
@@ -148,6 +156,14 @@ struct LivePromptTarget {
 #[derive(Debug, Clone, Copy)]
 struct AutostartReservation {
     expires_at: Instant,
+}
+
+/// The off-lock work a watcher tick collected while holding [`Shared`].
+struct WatcherTickWork {
+    notices: Vec<(String, session_monitor::NoticeKind)>,
+    pr_jobs: Vec<PrScanJob>,
+    live_prompt_targets: Vec<LivePromptTarget>,
+    live_paths: Vec<PathBuf>,
 }
 
 /// State shared between the pool, the watcher thread, and the render loops.
@@ -423,6 +439,21 @@ struct PrScanResult {
     changed: bool,
 }
 
+/// One background PR enrichment job. `pr_key` is the canonical `/pull/<N>` URL
+/// used for de-duping in-flight work across panes and watcher ticks.
+struct PrLookupJob {
+    path: PathBuf,
+    pr_key: String,
+    url: String,
+}
+
+/// A completed background PR enrichment lookup.
+struct PrLookupResult {
+    path: PathBuf,
+    pr_key: String,
+    outcome: crate::infrastructure::pr_title::LookupOutcome,
+}
+
 /// Collect the panes whose output changed since their last watcher scan, and
 /// mark their current generation as observed. The actual parser locks and disk
 /// writes happen after the shared watcher mutex is released.
@@ -470,6 +501,120 @@ fn scan_pr_jobs(jobs: Vec<PrScanJob>) -> Vec<PrScanResult> {
         .collect()
 }
 
+fn spawn_pr_lookup_workers(
+    worker_count: usize,
+) -> (
+    SyncSender<PrLookupJob>,
+    Receiver<PrLookupResult>,
+    Vec<JoinHandle<()>>,
+) {
+    let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<PrLookupJob>(PR_LOOKUP_QUEUE);
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<PrLookupResult>();
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let handles = (0..worker_count)
+        .map(|_| {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            std::thread::spawn(move || loop {
+                let job = match job_rx.lock() {
+                    Ok(rx) => rx.recv(),
+                    Err(poisoned) => poisoned.into_inner().recv(),
+                };
+                let Ok(job) = job else { break };
+                let argv = crate::infrastructure::pr_title::view_argv(&job.url);
+                let outcome = resolve_pr_title(&argv)
+                    .as_deref()
+                    .and_then(crate::infrastructure::pr_title::parse_view)
+                    .map(crate::infrastructure::pr_title::LookupOutcome::Found)
+                    .unwrap_or_else(|| {
+                        crate::infrastructure::pr_title::LookupOutcome::Failed(
+                            "gh lookup failed".to_string(),
+                        )
+                    });
+                if result_tx
+                    .send(PrLookupResult {
+                        path: job.path,
+                        pr_key: job.pr_key,
+                        outcome,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            })
+        })
+        .collect();
+    (job_tx, result_rx, handles)
+}
+
+/// Apply worker results from the mailbox, returning updated PR lists for the UI.
+fn drain_pr_lookup_results(
+    result_rx: &Receiver<PrLookupResult>,
+    in_flight: &mut HashSet<(PathBuf, String)>,
+) -> Vec<(PathBuf, Vec<PrLink>)> {
+    use crate::infrastructure::{pr_link_store, pr_title};
+    let mut updates = Vec::new();
+    while let Ok(result) = result_rx.try_recv() {
+        in_flight.remove(&(result.path.clone(), result.pr_key.clone()));
+        let mut prs = pr_link_store::get(&result.path);
+        let now = chrono::Utc::now();
+        let Some(pr) = prs.iter_mut().find(|pr| pr.pr_key() == result.pr_key) else {
+            continue;
+        };
+        if pr_title::apply_lookup(pr, result.outcome, now) {
+            let _ = pr_link_store::set(&result.path, &prs);
+        }
+        updates.push((result.path, prs));
+    }
+    updates
+}
+
+/// Enqueue due lookups for one session root without blocking the watcher.
+fn schedule_due_pr_lookups(
+    path: &Path,
+    job_tx: &SyncSender<PrLookupJob>,
+    in_flight: &mut HashSet<(PathBuf, String)>,
+) -> Option<Vec<PrLink>> {
+    use crate::infrastructure::{pr_link_store, pr_title};
+    let mut prs = pr_link_store::get(path);
+    if prs.is_empty() {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    let mut changed = false;
+    let path_buf = path.to_path_buf();
+    for pr in &mut prs {
+        let key = pr.pr_key().to_string();
+        let in_flight_key = (path_buf.clone(), key.clone());
+        if in_flight.contains(&in_flight_key) {
+            changed |= pr_title::mark_refreshing(pr);
+            continue;
+        }
+        if !pr_title::lookup_due(pr, now) {
+            continue;
+        }
+        let job = PrLookupJob {
+            path: path_buf.clone(),
+            pr_key: key,
+            url: pr.url.clone(),
+        };
+        match job_tx.try_send(job) {
+            Ok(()) => {
+                in_flight.insert(in_flight_key);
+                changed |= pr_title::mark_refreshing(pr);
+            }
+            Err(TrySendError::Full(_)) => break,
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+    }
+    if changed {
+        let _ = pr_link_store::set(path, &prs);
+        Some(prs)
+    } else {
+        None
+    }
+}
+
 fn lock_parser(
     parser: &Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
 ) -> MutexGuard<'_, vt100::Parser<ScreenCallbacks>> {
@@ -480,16 +625,11 @@ fn lock_parser(
 
 /// Persist newly harvested PRs and return the store's accumulated list for each
 /// session root whose harvested PRs changed. Disk IO is kept out of the watcher
-/// mutex; failures are best-effort like the attached-pane harvest path.
-///
-/// After merging the freshly seen PRs, any accumulated PR still missing a title —
-/// or still open and so possibly since merged — is resolved through the `gh` CLI
-/// ([`resolve_pr_title`]) and the updated list is written back, so the sidebar's
-/// PR popup can show `#<number>  <title>` and mark a merged PR (see
-/// [`crate::infrastructure::pr_title::resolve`]). A dismissed or user-pinned PR is
-/// left untouched, and a failed lookup simply leaves the PR for a later retry.
+/// mutex; failures are best-effort like the attached-pane harvest path. Title and
+/// merge-state enrichment is deliberately not done here; the watcher only queues
+/// due jobs for the bounded lookup workers after persistence.
 fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
-    use crate::infrastructure::{pr_link_store, pr_title};
+    use crate::infrastructure::pr_link_store;
     results
         .iter()
         .filter(|result| result.changed)
@@ -503,11 +643,7 @@ fn persist_pr_results(results: &[PrScanResult]) -> Vec<(PathBuf, Vec<PrLink>)> {
                     chrono::Utc::now(),
                 );
             }
-            let mut merged = pr_link_store::get(&result.path);
-            let mut fetch: fn(&[String]) -> Option<String> = resolve_pr_title;
-            if pr_title::resolve(&mut merged, &mut fetch) {
-                let _ = pr_link_store::set(&result.path, &merged);
-            }
+            let merged = pr_link_store::get(&result.path);
             (result.path.clone(), merged)
         })
         .collect()
@@ -1899,172 +2035,34 @@ fn spawn_watcher(
     // Counts bell ticks so the heavier resource sample runs only every
     // `RESOURCE_SAMPLE_EVERY`th of them (≈ two seconds).
     let mut tick: u32 = 0;
-    std::thread::spawn(move || loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        std::thread::sleep(POLL_INTERVAL);
-        // Nothing has ever been registered (or the previous locked tick observed
-        // the map empty): keep the idle watcher down to one atomic load per tick,
-        // instead of contending with render-time `snapshot()` on `Shared`.
-        if !has_sessions.load(Ordering::Acquire) {
-            continue;
-        }
-
-        // Snapshot the bookkeeping under the lock: prune dead sessions, observe
-        // the phases/bells, and clone the lightweight handles needed by the
-        // off-lock work below (PR scans and live-prompt delivery).
-        let (notices, pr_jobs, live_prompt_targets): (
-            Vec<(String, session_monitor::NoticeKind)>,
-            Vec<PrScanJob>,
-            Vec<LivePromptTarget>,
-        ) = {
-            let mut shared = match shared.lock() {
-                Ok(shared) => shared,
-                // The shared state's mutex is poisoned: a thread panicked while
-                // holding it, so the bookkeeping can no longer be trusted and the
-                // watcher must stop. Record why before breaking — otherwise every
-                // session's bell / phase badge silently freezes with no trace.
-                // (Best-effort, like every other failure in this thread; the
-                // decision here is trivial enough — poison ⇒ fatal — to inline
-                // rather than route through a tested layer.)
-                Err(_) => {
-                    crate::infrastructure::error_log::ErrorLog::record(
-                        "terminal pool watcher stopped: shared state mutex poisoned",
-                    );
-                    break;
-                }
-            };
-            let now = Instant::now();
-            prune_expired_autostart_reservations(&mut shared, now);
-            let before = snapshot_locked(&shared);
-
-            // Report every newly ended pane to the owning pool before pruning an
-            // all-dead session from watcher bookkeeping. Hash sets make repeated
-            // ticks idempotent until the UI thread drains the queue.
-            let ended: Vec<(PathBuf, u64)> = shared
-                .sessions
-                .iter()
-                .flat_map(|(path, watched)| {
-                    watched
-                        .alive
-                        .iter()
-                        .filter(|(_, alive)| !alive.load(Ordering::SeqCst))
-                        .map(|(id, _)| (path.clone(), *id))
-                })
-                .collect();
-            for (path, id) in ended {
-                shared.ended_panes.entry(path).or_default().insert(id);
+    std::thread::spawn(move || {
+        let (lookup_tx, lookup_rx, lookup_workers) = spawn_pr_lookup_workers(PR_LOOKUP_WORKERS);
+        let mut in_flight_pr_lookups: HashSet<(PathBuf, String)> = HashSet::new();
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
             }
-            // Drop watcher-side strong parser/input handles immediately; the
-            // pool dropping its PTY cannot release the grid while these remain.
-            for (path, watched) in &mut shared.sessions {
-                let dead_ids: HashSet<u64> = watched
-                    .alive
-                    .iter()
-                    .filter_map(|(id, alive)| (!alive.load(Ordering::SeqCst)).then_some(*id))
-                    .collect();
-                watched.pr_panes.retain(|pane| !dead_ids.contains(&pane.id));
-                let had_agent_inputs = !watched.agent_inputs.is_empty();
-                watched
-                    .agent_inputs
-                    .retain(|(id, _)| !dead_ids.contains(id));
-                if had_agent_inputs && watched.agent_inputs.is_empty() {
-                    agent_live_pane_store::clear(path);
-                }
-                watched
-                    .alive
-                    .retain(|(_, alive)| alive.load(Ordering::SeqCst));
+            std::thread::sleep(POLL_INTERVAL);
+            // Nothing has ever been registered (or the previous locked tick observed
+            // the map empty): keep the idle watcher down to one atomic load per tick,
+            // instead of contending with render-time `snapshot()` on `Shared`.
+            if !has_sessions.load(Ordering::Acquire) {
+                continue;
             }
 
-            // Prune sessions whose every pane has exited so they stop being
-            // tracked (the path is live while any pane is alive).
-            let dead: Vec<PathBuf> = shared
-                .sessions
-                .iter()
-                .filter(|(_, w)| !w.any_alive())
-                .map(|(path, _)| path.clone())
-                .collect();
-            for path in dead {
-                shared.sessions.remove(&path);
-                shared.monitor.forget(&path);
-                shared.autostart_reservations.remove(&path);
-                agent_state_store::clear(&path);
-                agent_live_pane_store::clear(&path);
-            }
-            // Release phase-cache entries for sessions no longer tracked — those
-            // pruned just above and those a session removal took straight out of
-            // `shared.sessions` (which never enter the `dead` list). Keyed on the
-            // live set so the cache cannot grow unbounded across a long run.
-            phase_reader.retain(|path| shared.sessions.contains_key(path));
-            let (notices, pr_jobs, live_prompt_targets) = if shared.sessions.is_empty() {
-                shared.resources.clear();
-                shared.resource_total = ResourceUsage::default();
-                // The authoritative empty observation happens while holding the
-                // lock. Future ticks can skip the lock until `refresh_watched`
-                // registers a session and flips this back to true.
-                has_sessions.store(false, Ordering::Release);
-                (Vec::new(), Vec::new(), Vec::new())
-            } else {
-                // Each session's reading pairs its bell count with the phase its
-                // agent's hooks last recorded (if any); the monitor prefers the phase
-                // and falls back to the bell.
-                let readings: Vec<session_monitor::Reading> = shared
-                    .sessions
-                    .iter()
-                    .map(|(path, w)| {
-                        (
-                            path.clone(),
-                            w.bell.load(Ordering::SeqCst),
-                            phase_reader.read(path),
-                        )
-                    })
-                    .collect();
-                let phase_observed: HashSet<PathBuf> = readings
-                    .iter()
-                    .filter(|(_, _, phase)| phase.is_some())
-                    .map(|(path, _, _)| path.clone())
-                    .collect();
-                let notices = shared
-                    .monitor
-                    .observe(&readings)
-                    .into_iter()
-                    .filter_map(|notice| {
-                        shared
-                            .sessions
-                            .get(&notice.path)
-                            .map(|w| (w.label.clone(), notice.kind))
-                    })
-                    .collect();
-                release_handed_off_autostart_reservations(&mut shared, &phase_observed, now);
-                let pr_jobs = pending_pr_scans(&mut shared);
-                let live_prompt_targets = shared
-                    .sessions
-                    .iter()
-                    .filter_map(|(path, watched)| {
-                        watched
-                            .agent_inputs
-                            .first()
-                            .map(|(_, input)| LivePromptTarget {
-                                path: path.clone(),
-                                input: input.clone(),
-                            })
-                    })
-                    .collect();
-                (notices, pr_jobs, live_prompt_targets)
-            };
-            if snapshot_locked(&shared) != before {
-                version.fetch_add(1, Ordering::SeqCst);
-            }
-            (notices, pr_jobs, live_prompt_targets)
-        };
-
-        let pr_results = scan_pr_jobs(pr_jobs);
-        let merged_prs = persist_pr_results(&pr_results);
-        if !pr_results.is_empty() {
-            let pr_changed = {
+            // Snapshot the bookkeeping under the lock: prune dead sessions, observe
+            // the phases/bells, and clone the lightweight handles needed by the
+            // off-lock work below (PR scans and live-prompt delivery).
+            let tick_work = {
                 let mut shared = match shared.lock() {
                     Ok(shared) => shared,
+                    // The shared state's mutex is poisoned: a thread panicked while
+                    // holding it, so the bookkeeping can no longer be trusted and the
+                    // watcher must stop. Record why before breaking — otherwise every
+                    // session's bell / phase badge silently freezes with no trace.
+                    // (Best-effort, like every other failure in this thread; the
+                    // decision here is trivial enough — poison ⇒ fatal — to inline
+                    // rather than route through a tested layer.)
                     Err(_) => {
                         crate::infrastructure::error_log::ErrorLog::record(
                             "terminal pool watcher stopped: shared state mutex poisoned",
@@ -2072,61 +2070,226 @@ fn spawn_watcher(
                         break;
                     }
                 };
-                apply_pr_results(&mut shared, pr_results, merged_prs)
-            };
-            if pr_changed {
-                version.fetch_add(1, Ordering::SeqCst);
-            }
-        }
+                let now = Instant::now();
+                prune_expired_autostart_reservations(&mut shared, now);
+                let before = snapshot_locked(&shared);
 
-        deliver_live_prompts(live_prompt_targets);
-
-        if notifications_enabled {
-            for (label, kind) in notices {
-                notify(&label, kind);
-            }
-        }
-
-        // Sample CPU / memory on the slower beat. The shell pids are read under
-        // the lock, then the (heavy) system sample and the pure aggregation run
-        // off-lock, and only the results are written back — so the render loops
-        // contend for the mutex no longer than a bell poll already does. With no
-        // live session the sample is skipped and the figures cleared, so an idle
-        // workspace carries none.
-        tick = tick.wrapping_add(1);
-        if tick.is_multiple_of(RESOURCE_SAMPLE_EVERY) {
-            let active_sessions: Vec<_> = match shared.lock() {
-                Ok(shared) => shared
+                // Report every newly ended pane to the owning pool before pruning an
+                // all-dead session from watcher bookkeeping. Hash sets make repeated
+                // ticks idempotent until the UI thread drains the queue.
+                let ended: Vec<(PathBuf, u64)> = shared
                     .sessions
                     .iter()
-                    .filter(|(_, w)| w.any_alive())
-                    .map(|(path, w)| (path.clone(), w.roots.clone(), w.has_antigravity))
-                    .collect(),
-                Err(_) => break,
-            };
-            let (resources, total) = if active_sessions.is_empty() {
-                (HashMap::new(), ResourceUsage::default())
-            } else {
-                let roots: Vec<(PathBuf, Vec<u32>)> = active_sessions
+                    .flat_map(|(path, watched)| {
+                        watched
+                            .alive
+                            .iter()
+                            .filter(|(_, alive)| !alive.load(Ordering::SeqCst))
+                            .map(|(id, _)| (path.clone(), *id))
+                    })
+                    .collect();
+                for (path, id) in ended {
+                    shared.ended_panes.entry(path).or_default().insert(id);
+                }
+                // Drop watcher-side strong parser/input handles immediately; the
+                // pool dropping its PTY cannot release the grid while these remain.
+                for (path, watched) in &mut shared.sessions {
+                    let dead_ids: HashSet<u64> = watched
+                        .alive
+                        .iter()
+                        .filter_map(|(id, alive)| (!alive.load(Ordering::SeqCst)).then_some(*id))
+                        .collect();
+                    watched.pr_panes.retain(|pane| !dead_ids.contains(&pane.id));
+                    let had_agent_inputs = !watched.agent_inputs.is_empty();
+                    watched
+                        .agent_inputs
+                        .retain(|(id, _)| !dead_ids.contains(id));
+                    if had_agent_inputs && watched.agent_inputs.is_empty() {
+                        agent_live_pane_store::clear(path);
+                    }
+                    watched
+                        .alive
+                        .retain(|(_, alive)| alive.load(Ordering::SeqCst));
+                }
+
+                // Prune sessions whose every pane has exited so they stop being
+                // tracked (the path is live while any pane is alive).
+                let dead: Vec<PathBuf> = shared
+                    .sessions
                     .iter()
-                    .map(|(p, r, _)| (p.clone(), r.clone()))
+                    .filter(|(_, w)| !w.any_alive())
+                    .map(|(path, _)| path.clone())
                     .collect();
-                let global_daemon_keys: Vec<PathBuf> = active_sessions
-                    .into_iter()
-                    .filter_map(|(p, _, has_ag)| has_ag.then_some(p))
-                    .collect();
-                let samples = sampler.sample();
-                let (per_root, total) = aggregate_by_root(&samples, &roots, &global_daemon_keys);
-                (per_root.into_iter().collect(), total)
+                for path in dead {
+                    shared.sessions.remove(&path);
+                    shared.monitor.forget(&path);
+                    shared.autostart_reservations.remove(&path);
+                    agent_state_store::clear(&path);
+                    agent_live_pane_store::clear(&path);
+                }
+                // Release phase-cache entries for sessions no longer tracked — those
+                // pruned just above and those a session removal took straight out of
+                // `shared.sessions` (which never enter the `dead` list). Keyed on the
+                // live set so the cache cannot grow unbounded across a long run.
+                phase_reader.retain(|path| shared.sessions.contains_key(path));
+                let work = if shared.sessions.is_empty() {
+                    shared.resources.clear();
+                    shared.resource_total = ResourceUsage::default();
+                    // The authoritative empty observation happens while holding the
+                    // lock. Future ticks can skip the lock until `refresh_watched`
+                    // registers a session and flips this back to true.
+                    has_sessions.store(false, Ordering::Release);
+                    WatcherTickWork {
+                        notices: Vec::new(),
+                        pr_jobs: Vec::new(),
+                        live_prompt_targets: Vec::new(),
+                        live_paths: Vec::new(),
+                    }
+                } else {
+                    // Each session's reading pairs its bell count with the phase its
+                    // agent's hooks last recorded (if any); the monitor prefers the phase
+                    // and falls back to the bell.
+                    let readings: Vec<session_monitor::Reading> = shared
+                        .sessions
+                        .iter()
+                        .map(|(path, w)| {
+                            (
+                                path.clone(),
+                                w.bell.load(Ordering::SeqCst),
+                                phase_reader.read(path),
+                            )
+                        })
+                        .collect();
+                    let phase_observed: HashSet<PathBuf> = readings
+                        .iter()
+                        .filter(|(_, _, phase)| phase.is_some())
+                        .map(|(path, _, _)| path.clone())
+                        .collect();
+                    let notices = shared
+                        .monitor
+                        .observe(&readings)
+                        .into_iter()
+                        .filter_map(|notice| {
+                            shared
+                                .sessions
+                                .get(&notice.path)
+                                .map(|w| (w.label.clone(), notice.kind))
+                        })
+                        .collect();
+                    release_handed_off_autostart_reservations(&mut shared, &phase_observed, now);
+                    let pr_jobs = pending_pr_scans(&mut shared);
+                    let live_prompt_targets = shared
+                        .sessions
+                        .iter()
+                        .filter_map(|(path, watched)| {
+                            watched
+                                .agent_inputs
+                                .first()
+                                .map(|(_, input)| LivePromptTarget {
+                                    path: path.clone(),
+                                    input: input.clone(),
+                                })
+                        })
+                        .collect();
+                    let live_paths = shared.sessions.keys().cloned().collect();
+                    WatcherTickWork {
+                        notices,
+                        pr_jobs,
+                        live_prompt_targets,
+                        live_paths,
+                    }
+                };
+                if snapshot_locked(&shared) != before {
+                    version.fetch_add(1, Ordering::SeqCst);
+                }
+                work
             };
-            if let Ok(mut shared) = shared.lock() {
-                let changed = shared.resources != resources || shared.resource_total != total;
-                shared.resources = resources;
-                shared.resource_total = total;
-                if changed {
+
+            let pr_results = scan_pr_jobs(tick_work.pr_jobs);
+            let mut merged_prs = persist_pr_results(&pr_results);
+            merged_prs.extend(drain_pr_lookup_results(
+                &lookup_rx,
+                &mut in_flight_pr_lookups,
+            ));
+            for path in tick_work.live_paths {
+                if let Some(prs) =
+                    schedule_due_pr_lookups(&path, &lookup_tx, &mut in_flight_pr_lookups)
+                {
+                    merged_prs.push((path, prs));
+                }
+            }
+            if !pr_results.is_empty() || !merged_prs.is_empty() {
+                let pr_changed = {
+                    let mut shared = match shared.lock() {
+                        Ok(shared) => shared,
+                        Err(_) => {
+                            crate::infrastructure::error_log::ErrorLog::record(
+                                "terminal pool watcher stopped: shared state mutex poisoned",
+                            );
+                            break;
+                        }
+                    };
+                    apply_pr_results(&mut shared, pr_results, merged_prs)
+                };
+                if pr_changed {
                     version.fetch_add(1, Ordering::SeqCst);
                 }
             }
+
+            deliver_live_prompts(tick_work.live_prompt_targets);
+
+            if notifications_enabled {
+                for (label, kind) in tick_work.notices {
+                    notify(&label, kind);
+                }
+            }
+
+            // Sample CPU / memory on the slower beat. The shell pids are read under
+            // the lock, then the (heavy) system sample and the pure aggregation run
+            // off-lock, and only the results are written back — so the render loops
+            // contend for the mutex no longer than a bell poll already does. With no
+            // live session the sample is skipped and the figures cleared, so an idle
+            // workspace carries none.
+            tick = tick.wrapping_add(1);
+            if tick.is_multiple_of(RESOURCE_SAMPLE_EVERY) {
+                let active_sessions: Vec<_> = match shared.lock() {
+                    Ok(shared) => shared
+                        .sessions
+                        .iter()
+                        .filter(|(_, w)| w.any_alive())
+                        .map(|(path, w)| (path.clone(), w.roots.clone(), w.has_antigravity))
+                        .collect(),
+                    Err(_) => break,
+                };
+                let (resources, total) = if active_sessions.is_empty() {
+                    (HashMap::new(), ResourceUsage::default())
+                } else {
+                    let roots: Vec<(PathBuf, Vec<u32>)> = active_sessions
+                        .iter()
+                        .map(|(p, r, _)| (p.clone(), r.clone()))
+                        .collect();
+                    let global_daemon_keys: Vec<PathBuf> = active_sessions
+                        .into_iter()
+                        .filter_map(|(p, _, has_ag)| has_ag.then_some(p))
+                        .collect();
+                    let samples = sampler.sample();
+                    let (per_root, total) =
+                        aggregate_by_root(&samples, &roots, &global_daemon_keys);
+                    (per_root.into_iter().collect(), total)
+                };
+                if let Ok(mut shared) = shared.lock() {
+                    let changed = shared.resources != resources || shared.resource_total != total;
+                    shared.resources = resources;
+                    shared.resource_total = total;
+                    if changed {
+                        version.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        drop(lookup_tx);
+        for worker in lookup_workers {
+            let _ = worker.join();
         }
     })
 }
@@ -2200,9 +2363,22 @@ impl Default for TerminalPool {
 mod tests {
     use super::*;
     use crate::domain::agent_phase::AgentPhase;
+    use crate::infrastructure::{pr_link_store, storage};
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/tmp/{name}"))
+    }
+
+    fn with_data_dir(body: impl FnOnce()) {
+        let _guard = crate::test_support::process_env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(storage::DATA_DIR_ENV, dir.path());
+        body();
+        std::env::remove_var(storage::DATA_DIR_ENV);
+    }
+
+    fn pr(number: u32) -> PrLink {
+        PrLink::new(number, format!("https://github.com/o/r/pull/{number}"))
     }
 
     #[test]
@@ -2311,5 +2487,65 @@ mod tests {
             &worktree,
             now
         ));
+    }
+
+    #[test]
+    fn schedule_due_pr_lookups_enqueues_once_and_marks_refreshing() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            pr_link_store::add(wt.path(), &[pr(1)]).unwrap();
+            let (tx, rx) = std::sync::mpsc::sync_channel(8);
+            let mut in_flight = HashSet::new();
+
+            let scheduled = schedule_due_pr_lookups(wt.path(), &tx, &mut in_flight)
+                .expect("new open PR is due");
+            assert!(scheduled[0].refreshing);
+            let job = rx.try_recv().expect("one lookup job");
+            assert_eq!(job.pr_key, "https://github.com/o/r/pull/1");
+            assert_eq!(job.url, "https://github.com/o/r/pull/1");
+
+            let scheduled_again = schedule_due_pr_lookups(wt.path(), &tx, &mut in_flight)
+                .expect("in-flight state is still surfaced to the UI");
+            assert!(scheduled_again[0].refreshing);
+            assert!(rx.try_recv().is_err(), "duplicate lookup was not enqueued");
+        });
+    }
+
+    #[test]
+    fn drain_pr_lookup_results_applies_merged_state_for_auto_reclaim() {
+        with_data_dir(|| {
+            let wt = tempfile::tempdir().unwrap();
+            pr_link_store::add(wt.path(), &[pr(2)]).unwrap();
+            let (tx, result_rx) = std::sync::mpsc::channel();
+            tx.send(PrLookupResult {
+                path: wt.path().to_path_buf(),
+                pr_key: "https://github.com/o/r/pull/2".to_string(),
+                outcome: crate::infrastructure::pr_title::LookupOutcome::Found(
+                    crate::infrastructure::pr_title::PrView {
+                        title: Some("Done".to_string()),
+                        merged: true,
+                    },
+                ),
+            })
+            .unwrap();
+            drop(tx);
+            let mut in_flight = HashSet::from([(
+                wt.path().to_path_buf(),
+                "https://github.com/o/r/pull/2".to_string(),
+            )]);
+
+            let updates = drain_pr_lookup_results(&result_rx, &mut in_flight);
+            assert!(in_flight.is_empty());
+            assert_eq!(updates.len(), 1);
+            assert_eq!(
+                updates[0].1[0].state,
+                crate::domain::workspace_state::PrState::Merged
+            );
+            assert_eq!(updates[0].1[0].title.as_deref(), Some("Done"));
+            assert_eq!(
+                pr_link_store::get(wt.path())[0].state,
+                crate::domain::workspace_state::PrState::Merged
+            );
+        });
     }
 }

@@ -770,6 +770,20 @@ fn pr_popup_box_lists_one_pr_per_line_with_its_title() {
 }
 
 #[test]
+fn pr_popup_box_shows_lookup_refresh_and_error_quietly() {
+    let mut refreshing = pr(440);
+    refreshing.title = Some("Refreshing title".to_string());
+    refreshing.refreshing = true;
+    let mut failed = pr(441);
+    failed.lookup_error = Some("gh lookup failed".to_string());
+
+    let plain = stripped(&pr_popup_box(&[refreshing, failed], false, PR_POPUP_INNER));
+    assert!(plain.contains("Refreshing title  更新中"));
+    assert!(plain.contains("更新中"));
+    assert!(plain.contains("lookup: gh lookup failed"));
+}
+
+#[test]
 fn pr_popup_box_keeps_the_title_clear_for_a_single_digit_pr() {
     let popup = pr_popup_box(&[pr(7)], false, PR_POPUP_INNER);
     let plain: Vec<String> = popup
