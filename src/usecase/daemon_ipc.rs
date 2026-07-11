@@ -218,6 +218,11 @@ impl AttachTable {
             .get(&terminal)
             .is_some_and(|clients| !clients.is_empty())
     }
+
+    /// Terminal ids that currently have at least one attached client.
+    pub fn terminals(&self) -> Vec<TerminalId> {
+        self.by_terminal.keys().copied().collect()
+    }
 }
 
 /// A terminal record persisted so a restarted daemon can decide which child
@@ -704,6 +709,20 @@ mod tests {
         assert!(table.has_terminal(10));
         table.detach(1, 10);
         assert!(!table.has_terminal(10));
+    }
+
+    #[test]
+    fn attach_table_lists_only_viewed_terminals() {
+        let mut table = AttachTable::new();
+        table.attach(1, 10);
+        table.attach(2, 20);
+        table.attach(3, 10);
+        let mut terminals = table.terminals();
+        terminals.sort_unstable();
+        assert_eq!(terminals, vec![10, 20]);
+        table.detach(1, 10);
+        table.detach(3, 10);
+        assert_eq!(table.terminals(), vec![20]);
     }
 
     #[test]

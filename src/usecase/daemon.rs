@@ -177,6 +177,23 @@ pub fn monitor_tick(dir: &Path, gather_fn: &dyn Fn() -> Vec<SessionSnapshot>) ->
     Ok(true)
 }
 
+/// Refresh the monitored-sessions snapshot using the caller's in-memory
+/// `previous` snapshot as the change detector. Unlike [`monitor_tick`], this
+/// does not read `sessions.json`; the daemon owns the latest snapshot in memory
+/// and only writes the file when the freshly gathered view changed.
+pub fn monitor_tick_cached(
+    dir: &Path,
+    previous: &[SessionSnapshot],
+    gather_fn: &dyn Fn() -> Vec<SessionSnapshot>,
+) -> Result<Option<Vec<SessionSnapshot>>> {
+    let current = gather_fn();
+    if current == previous {
+        return Ok(None);
+    }
+    daemon_sessions_store::write(dir, &current)?;
+    Ok(Some(current))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +464,48 @@ mod tests {
         };
         assert!(monitor_tick(dir, &next).unwrap());
         assert_eq!(daemon_sessions_store::read(dir).unwrap(), next());
+    }
+
+    #[test]
+    fn monitor_tick_cached_skips_store_read_when_snapshot_is_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let previous = vec![SessionSnapshot {
+            workspace: PathBuf::from("/repo"),
+            name: "one".to_string(),
+            worktree: Some(PathBuf::from("/repo/.usagi/sessions/one")),
+            activity: Some(SessionActivity::Running),
+        }];
+        let gathers = Cell::new(0);
+
+        let changed = monitor_tick_cached(dir, &previous, &|| {
+            gathers.set(gathers.get() + 1);
+            previous.clone()
+        })
+        .unwrap();
+
+        assert_eq!(changed, None);
+        assert_eq!(gathers.get(), 1);
+        assert!(
+            daemon_sessions_store::read(dir).unwrap().is_empty(),
+            "an unchanged cached tick must not create or read-rewrite sessions.json"
+        );
+    }
+
+    #[test]
+    fn monitor_tick_cached_writes_and_returns_changed_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let next = vec![SessionSnapshot {
+            workspace: PathBuf::from("/repo"),
+            name: "two".to_string(),
+            worktree: None,
+            activity: Some(SessionActivity::Waiting),
+        }];
+
+        let changed = monitor_tick_cached(dir, &[], &|| next.clone()).unwrap();
+
+        assert_eq!(changed, Some(next.clone()));
+        assert_eq!(daemon_sessions_store::read(dir).unwrap(), next);
     }
 }

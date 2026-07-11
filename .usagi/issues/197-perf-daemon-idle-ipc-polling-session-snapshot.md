@@ -1,14 +1,14 @@
 ---
 number: 197
 title: perf(daemon): idle IPC polling と session snapshot 再読込を削減する
-status: todo
+status: done
 priority: medium
 labels: [perf, daemon, ipc, review]
 dependson: []
 related: [161, 163, 167]
 parent: 159
 created_at: 2026-07-11T01:30:36.160437+00:00
-updated_at: 2026-07-11T02:45:02Z
+updated_at: 2026-07-11T06:20:20.119195+00:00
 ---
 
 ## 背景
