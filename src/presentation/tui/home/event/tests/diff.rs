@@ -110,6 +110,72 @@ fn selected_diff_fails_when_the_base_ref_is_unresolvable() {
 }
 
 #[test]
+fn selected_diff_request_uses_the_highlighted_worktree_and_detached_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = HomeState::new(
+        "usagi",
+        vec![worktree(None, dir.path().to_str().unwrap())],
+        None,
+    );
+    state.overview_select(1);
+
+    let request = selected_diff_request(&state).expect("diff request");
+    assert_eq!(request.path, dir.path());
+    assert_eq!(request.branch, "(detached)");
+}
+
+#[test]
+fn selected_diff_request_fails_without_a_highlighted_session() {
+    let state = sample_state(); // starts on the root row
+    let err = match selected_diff_request(&state) {
+        Ok(_) => panic!("expected a selection error"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("highlight a session"), "err: {err}");
+}
+
+#[test]
+fn load_selected_diff_returns_the_patch_for_the_highlighted_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = repo_with_feature_diff(dir.path());
+    let mut state = state_with_worktree_at(&work);
+    state.overview_select(1);
+
+    let (title, patch) = load_selected_diff(&state)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("diff worker responds")
+        .expect("diff is loaded");
+    assert_eq!(title, "feature → main");
+    assert!(patch.contains("added.txt"), "patch: {patch}");
+}
+
+#[test]
+fn load_selected_diff_returns_selection_errors_without_spawning() {
+    let state = sample_state(); // starts on the root row
+
+    let err = load_selected_diff(&state)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("diff loader responds")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("highlight a session"), "err: {err}");
+}
+
+#[test]
+fn load_selected_diff_returns_git_errors_from_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state_with_worktree_at(dir.path());
+    state.overview_select(1);
+
+    let err = load_selected_diff(&state)
+        .recv_timeout(Duration::from_secs(5))
+        .expect("diff worker responds")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("base branch"), "err: {err}");
+}
+
+#[test]
 fn diff_command_opens_the_diff_view_from_the_closeup_menu_for_a_real_repo() {
     // Driving the 集中 (Closeup) `diff` command end-to-end over a real repo opens the
     // GitHub-style diff view: focus the session, move the menu cursor onto `diff`
