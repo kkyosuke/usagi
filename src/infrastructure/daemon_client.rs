@@ -48,6 +48,9 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(3);
 /// How long the `Spawn` / `Attach` handshake waits for its reply. Generous: the
 /// daemon answers within one of its fast ticks, but it may be busy spawning.
 const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+/// How long an explicit `Kill` waits for the daemon's `Killed` acknowledgement
+/// before reporting teardown failure to the caller.
+const KILL_ACK_DEADLINE: Duration = Duration::from_secs(2);
 /// The pause between connect retries, and the read timeout the handshake polls
 /// the socket with.
 const RETRY_PAUSE: Duration = Duration::from_millis(50);
@@ -98,6 +101,7 @@ pub struct DaemonTerminal {
     stream: Arc<Mutex<UnixStream>>,
     parser: Arc<Mutex<vt100::Parser<ScreenCallbacks>>>,
     alive: Arc<AtomicBool>,
+    killed_ack: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     bell: Arc<AtomicU64>,
     cursor_shape: Arc<AtomicU16>,
@@ -343,6 +347,7 @@ impl DaemonTerminal {
         let alive = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(0));
         let scrollback_state = Arc::new(AtomicUsize::new(0));
+        let killed_ack = Arc::new(AtomicBool::new(false));
 
         let reader_stream = stream
             .try_clone()
@@ -356,6 +361,7 @@ impl DaemonTerminal {
             };
             let generation = Arc::clone(&generation);
             let alive = Arc::clone(&alive);
+            let killed_ack = Arc::clone(&killed_ack);
             std::thread::Builder::new()
                 .name("usagi-daemon-attach".to_string())
                 .stack_size(READER_STACK_BYTES)
@@ -389,7 +395,17 @@ impl DaemonTerminal {
                         &mut decoder,
                         terminal,
                         &mut sink,
-                        &mut |payload| decode_message::<ServerMessage>(payload).ok(),
+                        &mut |payload| {
+                            let message = decode_message::<ServerMessage>(payload).ok()?;
+                            if matches!(
+                                message,
+                                ServerMessage::Killed { terminal: id } if id == terminal
+                            ) {
+                                killed_ack.store(true, Ordering::SeqCst);
+                                return None;
+                            }
+                            Some(message)
+                        },
                         &mut || {
                             generation.fetch_add(1, Ordering::SeqCst);
                         },
@@ -410,6 +426,7 @@ impl DaemonTerminal {
             stream: Arc::new(Mutex::new(stream)),
             parser,
             alive,
+            killed_ack,
             generation,
             bell,
             cursor_shape,
@@ -546,15 +563,30 @@ impl DaemonTerminal {
 
     /// Kill the daemon-owned terminal — the explicit teardown for a user
     /// closing the pane, as opposed to `Drop`'s detach-and-leave-running.
-    pub fn kill(&mut self) {
-        let _ = send(
+    pub fn kill(&mut self) -> bool {
+        if self.killed {
+            return true;
+        }
+        if send(
             &self.stream,
             &ClientMessage::Kill {
                 terminal: self.terminal,
             },
-        );
+        )
+        .is_err()
+        {
+            return false;
+        }
         self.killed = true;
-        self.alive.store(false, Ordering::SeqCst);
+        let deadline = Instant::now() + KILL_ACK_DEADLINE;
+        while Instant::now() < deadline {
+            if self.killed_ack.load(Ordering::SeqCst) || !self.alive.load(Ordering::SeqCst) {
+                self.alive.store(false, Ordering::SeqCst);
+                return true;
+            }
+            std::thread::sleep(RETRY_PAUSE);
+        }
+        false
     }
 }
 
