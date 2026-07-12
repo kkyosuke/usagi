@@ -6,6 +6,7 @@
 //! [`FakeBackend`] の command log と event queue を使う。
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use usagi_core::domain::id::{AgentRuntimeRef, SessionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
@@ -443,6 +444,21 @@ pub enum Effect {
     /// The identity is deliberately not a name or path: a delayed completion for
     /// a different workspace must never replace the Home currently being opened.
     AttachWorkspace { workspace: WorkspaceId },
+    /// Clone a repository through the backend git port, then register the
+    /// resulting project through its project/registry ports.
+    CloneProject {
+        repository: String,
+        destination: PathBuf,
+        branch: Option<String>,
+        token: PendingToken,
+    },
+    /// Register an already-existing directory through the backend
+    /// project/registry ports.
+    RegisterWorkspace {
+        path: PathBuf,
+        name: String,
+        token: PendingToken,
+    },
 }
 
 /// One selectable workspace in the entry surfaces.
@@ -682,6 +698,299 @@ pub fn run_entry_fake_cycle(
     backend.effects.extend(effects);
     while let Some(event) = backend.events.pop_front() {
         let _ = update_entry(state, event);
+    }
+}
+
+/// The New form's two backend-backed operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewMode {
+    /// Clone a git repository into a new child directory.
+    Clone,
+    /// Register an existing directory as a workspace.
+    Existing,
+}
+
+/// TUI-local editable fields for the New form. The reducer deliberately owns
+/// strings rather than presentation widgets, keeping backend validation and
+/// retry independent from terminal IO.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NewForm {
+    pub repository: String,
+    pub location: String,
+    pub directory: String,
+    pub branch: String,
+    pub path: String,
+    pub name: String,
+}
+
+/// A validated request retained across a failed operation so retry never loses
+/// the user's form values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewRequest {
+    Clone {
+        repository: String,
+        destination: PathBuf,
+        branch: Option<String>,
+    },
+    Existing {
+        path: PathBuf,
+        name: String,
+    },
+}
+
+/// Validation errors that are safe to render in the New form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewValidationError {
+    RepositoryRequired,
+    LocationRequired,
+    DirectoryRequired,
+    PathRequired,
+    NameRequired,
+}
+
+impl NewValidationError {
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::RepositoryRequired => "repository URL is required",
+            Self::LocationRequired => "clone location is required",
+            Self::DirectoryRequired => "directory name is required",
+            Self::PathRequired => "directory path is required",
+            Self::NameRequired => "workspace name is required",
+        }
+    }
+}
+
+/// Build a backend request from a form after trimming optional whitespace.
+///
+/// # Errors
+///
+/// Returns a safe field-specific validation error when a required value is
+/// empty after trimming.
+pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, NewValidationError> {
+    match mode {
+        NewMode::Clone => {
+            let repository = required(&form.repository, NewValidationError::RepositoryRequired)?;
+            let location = required(&form.location, NewValidationError::LocationRequired)?;
+            let directory = required(&form.directory, NewValidationError::DirectoryRequired)?;
+            let branch = trimmed(&form.branch);
+            Ok(NewRequest::Clone {
+                repository,
+                destination: PathBuf::from(location).join(directory),
+                branch,
+            })
+        }
+        NewMode::Existing => Ok(NewRequest::Existing {
+            path: PathBuf::from(required(&form.path, NewValidationError::PathRequired)?),
+            name: required(&form.name, NewValidationError::NameRequired)?,
+        }),
+    }
+}
+
+fn required(value: &str, error: NewValidationError) -> Result<String, NewValidationError> {
+    trimmed(value).ok_or(error)
+}
+
+fn trimmed(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// The New surface either keeps its form or has attached its freshly created
+/// workspace to Home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewRoute {
+    Form,
+    Home(Box<AppState>),
+}
+
+/// New-form reducer input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewEvent {
+    /// Submit the current form.
+    Submit,
+    /// Retry the most recently failed backend request without clearing fields.
+    Retry,
+    /// Backend completion for a pending clone or registration operation.
+    Result {
+        token: PendingToken,
+        result: Result<HomeSnapshot, Notice>,
+    },
+}
+
+/// Stateful New flow. A token fences late completions, while the form itself is
+/// never replaced on failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewState {
+    route: NewRoute,
+    mode: NewMode,
+    form: NewForm,
+    pending: Option<PendingToken>,
+    failed: Option<NewRequest>,
+    error: Option<Notice>,
+    progress: Option<SafeMessage>,
+    next_token: u64,
+}
+
+impl NewState {
+    #[must_use]
+    pub fn new(mode: NewMode, form: NewForm) -> Self {
+        Self {
+            route: NewRoute::Form,
+            mode,
+            form,
+            pending: None,
+            failed: None,
+            error: None,
+            progress: None,
+            next_token: 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn route(&self) -> &NewRoute {
+        &self.route
+    }
+    #[must_use]
+    pub const fn mode(&self) -> NewMode {
+        self.mode
+    }
+    #[must_use]
+    pub const fn form(&self) -> &NewForm {
+        &self.form
+    }
+    #[must_use]
+    pub const fn pending(&self) -> Option<PendingToken> {
+        self.pending
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<&Notice> {
+        self.error.as_ref()
+    }
+    #[must_use]
+    pub fn progress(&self) -> Option<&SafeMessage> {
+        self.progress.as_ref()
+    }
+
+    fn request(&mut self, request: NewRequest) -> Vec<Effect> {
+        if self.pending.is_some() {
+            return Vec::new();
+        }
+        let token = PendingToken(self.next_token);
+        self.next_token += 1;
+        self.pending = Some(token);
+        self.failed = None;
+        self.error = None;
+        match request {
+            NewRequest::Clone {
+                repository,
+                destination,
+                branch,
+            } => {
+                self.progress = Some(SafeMessage::new("Cloning repository…"));
+                vec![Effect::CloneProject {
+                    repository,
+                    destination,
+                    branch,
+                    token,
+                }]
+            }
+            NewRequest::Existing { path, name } => {
+                self.progress = Some(SafeMessage::new("Registering workspace…"));
+                vec![Effect::RegisterWorkspace { path, name, token }]
+            }
+        }
+    }
+}
+
+/// Reduce one New-form event and return the project/git/registry port request.
+#[must_use]
+pub fn update_new(state: &mut NewState, event: NewEvent) -> Vec<Effect> {
+    match event {
+        NewEvent::Submit if matches!(state.route, NewRoute::Form) && state.pending.is_none() => {
+            match validate_new_form(state.mode, &state.form) {
+                Ok(request) => state.request(request),
+                Err(error) => {
+                    state.error = Some(Notice::new(error.message()));
+                    Vec::new()
+                }
+            }
+        }
+        NewEvent::Retry if matches!(state.route, NewRoute::Form) && state.pending.is_none() => {
+            state
+                .failed
+                .clone()
+                .map_or_else(Vec::new, |request| state.request(request))
+        }
+        NewEvent::Result { token, result } if state.pending == Some(token) => {
+            state.pending = None;
+            state.progress = None;
+            match result {
+                Ok(snapshot) => {
+                    state.route = NewRoute::Home(Box::new(AppState::home(
+                        snapshot.workspace,
+                        snapshot.sessions,
+                    )));
+                    state.failed = None;
+                    state.error = None;
+                }
+                Err(error) => {
+                    state.failed = validate_new_form(state.mode, &state.form).ok();
+                    state.error = Some(error);
+                }
+            }
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Backend seam for New. Implementations route clone through git then project
+/// registration, and Existing directly through project/registry registration.
+pub trait NewProjectPort {
+    /// Dispatch one New operation.
+    fn dispatch(&mut self, effect: Effect);
+    /// Return the next completion, if any.
+    fn next_event(&mut self) -> Option<NewEvent>;
+}
+
+/// IO-free backend used by New reducer scenarios.
+#[derive(Debug, Default)]
+pub struct FakeNewBackend {
+    effects: Vec<Effect>,
+    events: VecDeque<NewEvent>,
+}
+
+impl FakeNewBackend {
+    pub fn push_event(&mut self, event: NewEvent) {
+        self.events.push_back(event);
+    }
+    #[must_use]
+    pub fn effects(&self) -> &[Effect] {
+        &self.effects
+    }
+}
+
+impl NewProjectPort for FakeNewBackend {
+    fn dispatch(&mut self, effect: Effect) {
+        self.effects.push(effect);
+    }
+    fn next_event(&mut self) -> Option<NewEvent> {
+        self.events.pop_front()
+    }
+}
+
+/// Dispatch New effects and replay queued fake-backend completions.
+pub fn run_new_fake_cycle(
+    state: &mut NewState,
+    backend: &mut impl NewProjectPort,
+    effects: Vec<Effect>,
+) {
+    for effect in effects {
+        backend.dispatch(effect);
+    }
+    while let Some(event) = backend.next_event() {
+        let _ = update_new(state, event);
     }
 }
 
@@ -944,6 +1253,24 @@ mod tests {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
     }
 
+    fn clone_form() -> NewForm {
+        NewForm {
+            repository: " https://example.com/acme/app.git ".to_owned(),
+            location: " /work ".to_owned(),
+            directory: " app ".to_owned(),
+            branch: " main ".to_owned(),
+            ..NewForm::default()
+        }
+    }
+
+    fn existing_form() -> NewForm {
+        NewForm {
+            path: " /work/existing ".to_owned(),
+            name: " existing ".to_owned(),
+            ..NewForm::default()
+        }
+    }
+
     fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
         AgentRuntimeRef::new(
             AgentRuntimeId::new(),
@@ -967,6 +1294,148 @@ mod tests {
         assert_eq!(state.selected(), Selection::Target(Target::Root(workspace)));
         assert_eq!(state.active(), Target::Root(workspace));
         assert_eq!(state.sessions(), &[first, second]);
+    }
+
+    #[test]
+    fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
+        let (workspace, session, _) = ids();
+        let mut state = NewState::new(NewMode::Clone, clone_form());
+        let mut backend = FakeNewBackend::default();
+        let effects = update_new(&mut state, NewEvent::Submit);
+        assert_eq!(state.pending(), Some(PendingToken(1)));
+        assert_eq!(
+            state.progress().map(SafeMessage::as_str),
+            Some("Cloning repository…")
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::CloneProject {
+                repository: "https://example.com/acme/app.git".to_owned(),
+                destination: PathBuf::from("/work/app"),
+                branch: Some("main".to_owned()),
+                token: PendingToken(1),
+            }]
+        );
+        backend.push_event(NewEvent::Result {
+            token: PendingToken(1),
+            result: Ok(HomeSnapshot::new(workspace, vec![session])),
+        });
+        run_new_fake_cycle(&mut state, &mut backend, effects);
+        assert_eq!(backend.effects().len(), 1);
+        assert_eq!(state.pending(), None);
+        assert_eq!(state.progress(), None);
+        assert!(matches!(
+            state.route(),
+            NewRoute::Home(home) if home.workspace() == workspace && home.sessions() == [session]
+        ));
+    }
+
+    #[test]
+    fn new_existing_failure_retains_form_and_retry_reuses_the_request() {
+        let mut state = NewState::new(NewMode::Existing, existing_form());
+        let effects = update_new(&mut state, NewEvent::Submit);
+        let expected = Effect::RegisterWorkspace {
+            path: PathBuf::from("/work/existing"),
+            name: "existing".to_owned(),
+            token: PendingToken(1),
+        };
+        assert_eq!(effects, vec![expected]);
+        let _ = update_new(
+            &mut state,
+            NewEvent::Result {
+                token: PendingToken(1),
+                result: Err(Notice::new("directory is not a project")),
+            },
+        );
+        assert!(matches!(state.route(), NewRoute::Form));
+        assert_eq!(state.form(), &existing_form());
+        assert_eq!(
+            state.error().map(|notice| notice.message.as_str()),
+            Some("directory is not a project")
+        );
+        assert_eq!(state.progress(), None);
+
+        assert_eq!(
+            update_new(&mut state, NewEvent::Retry),
+            vec![Effect::RegisterWorkspace {
+                path: PathBuf::from("/work/existing"),
+                name: "existing".to_owned(),
+                token: PendingToken(2),
+            }]
+        );
+        assert_eq!(
+            state.progress().map(SafeMessage::as_str),
+            Some("Registering workspace…")
+        );
+    }
+
+    #[test]
+    fn new_validation_and_late_completion_keep_the_form_route() {
+        let mut invalid = NewState::new(NewMode::Clone, NewForm::default());
+        assert!(update_new(&mut invalid, NewEvent::Submit).is_empty());
+        assert_eq!(
+            invalid.error().map(|notice| notice.message.as_str()),
+            Some("repository URL is required")
+        );
+
+        let mut state = NewState::new(NewMode::Existing, existing_form());
+        let _ = update_new(&mut state, NewEvent::Submit);
+        let _ = update_new(
+            &mut state,
+            NewEvent::Result {
+                token: PendingToken(99),
+                result: Err(Notice::new("late failure")),
+            },
+        );
+        assert_eq!(state.pending(), Some(PendingToken(1)));
+        assert!(matches!(state.route(), NewRoute::Form));
+        assert_eq!(state.error(), None);
+    }
+
+    #[test]
+    fn new_validation_reports_every_required_clone_and_existing_field() {
+        let cases = [
+            (
+                NewMode::Clone,
+                NewForm::default(),
+                NewValidationError::RepositoryRequired,
+            ),
+            (
+                NewMode::Clone,
+                NewForm {
+                    repository: "repo".to_owned(),
+                    ..NewForm::default()
+                },
+                NewValidationError::LocationRequired,
+            ),
+            (
+                NewMode::Clone,
+                NewForm {
+                    repository: "repo".to_owned(),
+                    location: "/work".to_owned(),
+                    ..NewForm::default()
+                },
+                NewValidationError::DirectoryRequired,
+            ),
+            (
+                NewMode::Existing,
+                NewForm::default(),
+                NewValidationError::PathRequired,
+            ),
+            (
+                NewMode::Existing,
+                NewForm {
+                    path: "/work/existing".to_owned(),
+                    ..NewForm::default()
+                },
+                NewValidationError::NameRequired,
+            ),
+        ];
+        for (mode, form, expected) in cases {
+            assert_eq!(validate_new_form(mode, &form), Err(expected));
+            assert!(!expected.message().is_empty());
+            assert!(!format!("{expected:?}").is_empty());
+        }
     }
 
     #[test]
