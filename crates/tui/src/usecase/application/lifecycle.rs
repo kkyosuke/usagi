@@ -895,4 +895,36 @@ mod tests {
         );
         assert_eq!(state.mode(), Mode::Switch);
     }
+
+    #[test]
+    fn stale_failure_does_not_remove_a_newer_pending_operation() {
+        let operation = OperationId::new();
+        let mut state = state(vec![]);
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Accepted {
+                operation_id: operation,
+                row: PendingRow::Creating {
+                    label: "new".into(),
+                },
+            }),
+        );
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Progress {
+                operation_id: operation,
+                revision: 2,
+                message: "newer".into(),
+            }),
+        );
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Failed {
+                operation_id: operation,
+                revision: 1,
+                message: "stale".into(),
+            }),
+        );
+        assert_eq!(state.pending().len(), 1);
+    }
 }
