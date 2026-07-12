@@ -50,9 +50,15 @@ impl Terminal for CrosstermTerminal {
             cursor::MoveTo(0, 0),
             terminal::Clear(terminal::ClearType::All)
         )?;
-        for line in frame {
-            // raw mode では改行だけでは行頭へ戻らないため `\r\n` で送る。
-            write!(self.out, "{line}\r\n")?;
+        // 行の「間」だけを `\r\n` で区切り、最終行の後には改行を出さない。フレームは端末の
+        // 高さちょうどなので、最下行で改行するとその 1 行分だけ画面がスクロールしてしまう
+        // （代替スクリーン内でも起きる）。raw mode では改行だけでは行頭へ戻らないため区切りは
+        // `\r\n` を使う。
+        for (i, line) in frame.iter().enumerate() {
+            if i > 0 {
+                write!(self.out, "\r\n")?;
+            }
+            write!(self.out, "{line}")?;
         }
         self.out.flush()
     }
