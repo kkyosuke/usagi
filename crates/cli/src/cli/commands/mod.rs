@@ -8,17 +8,21 @@
 //!
 //! TUI を開くハンドラは起動要求を返し、それ以外の未実装ハンドラは案内を出して終了する。
 
+pub mod agent_phase;
 pub mod completion;
 pub mod config;
 pub mod doctor;
+pub mod guard_workspace;
 pub mod hop;
 pub mod open;
 pub mod update;
 pub mod version;
 
+pub use agent_phase::AgentPhase;
 pub use completion::Completion;
 pub use config::Config;
 pub use doctor::Doctor;
+pub use guard_workspace::GuardWorkspace;
 pub use hop::Hop;
 pub use open::Open;
 pub use update::Update;

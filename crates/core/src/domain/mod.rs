@@ -7,7 +7,11 @@ pub mod daemon;
 pub mod frontmatter;
 pub mod issue;
 pub mod memory;
+pub mod note;
+pub mod pullrequest;
 pub mod recent;
+pub mod session;
+pub mod trace;
 pub mod workspace;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。

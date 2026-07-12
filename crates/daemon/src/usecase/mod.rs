@@ -6,15 +6,20 @@
 
 use usagi_core::domain::AppInfo;
 
+pub mod status;
+
 /// `usagi daemon <subcommand>` の 1 つのサブコマンドを表すコマンド（コマンドパターン）。
 ///
 /// 各コマンドは実 IO を持たない純粋なアプリケーション操作で、実行結果として
 /// 標準出力へ出す 1 行を組み立てて返す。実際の書き出し・常駐ループ・プロセス
-/// 起動などの実 IO は presentation / 合成ルートが担う。制御プレーンの verb
-/// （`start` / `stop` / `status` / `restart`）は現状 IF（コマンド型と routing）だけを
-/// 用意したスタブで、daemon レコード store・単一インスタンスロック・プロセス管理が
-/// 入った段階で各コマンドの `execute` に実処理を入れる（注入した依存を引数に取る形で
-/// この trait を拡張する。[document/proposals/02-daemon.md] の Step 1）。
+/// 起動などの実 IO は presentation / 合成ルートが担う。まだ実処理（daemon レコード
+/// store・単一インスタンスロック・プロセス管理）が入っていない制御プレーンの verb
+/// （`start` / `stop` / `restart`）は IF（コマンド型と routing）だけを用意したスタブで、
+/// 実装が入った段階で各コマンドの `execute` に実処理を入れる。
+///
+/// 状態問い合わせの `status` は store 読取と生存判定という実 IO の注入を要するため、
+/// この純粋な trait ではなく [`status::report`] が担う（[`crate::presentation::run`]
+/// が振り分ける）。
 ///
 /// [`interpret`] がサブコマンド文字列を対応するコマンドへ解決するファクトリである。
 pub trait Command {
@@ -75,15 +80,6 @@ impl Command for Stop {
     }
 }
 
-/// daemon の状態（alive / stale / absent）を報告する `status`。
-pub struct Status;
-
-impl Command for Status {
-    fn execute(&self, info: &AppInfo) -> String {
-        not_yet_implemented(info, "status")
-    }
-}
-
 /// 稼働中の daemon を止めてから起動し直す `restart`（`stop` → `start` の複合）。
 pub struct Restart;
 
@@ -102,17 +98,17 @@ fn not_yet_implemented(info: &AppInfo, verb: &str) -> String {
 
 /// `usagi daemon` に続くサブコマンド（無しは `None`）を対応する [`Command`] へ解決する。
 ///
-/// サブコマンド無しと `serve` は同じ前景実行（[`Serve`]）にまとめ、制御プレーンの verb
-/// （`start` / `stop` / `status` / `restart`）はそれぞれの実装型へ、それ以外は [`Unknown`]
-/// にする。返り値を動的ディスパッチにして、verb ごとに実装型を増やしても呼び出し側
-/// （entry point）を変えずに済むようにする。
+/// サブコマンド無しと `serve` は同じ前景実行（[`Serve`]）にまとめ、制御プレーンの
+/// スタブ verb（`start` / `stop` / `restart`）はそれぞれの実装型へ、それ以外は
+/// [`Unknown`] にする。`status` は実 IO を要するため [`crate::presentation::run`] が
+/// [`status::report`] へ先に振り分け、ここには渡らない。返り値を動的ディスパッチに
+/// して、verb ごとに実装型を増やしても呼び出し側を変えずに済むようにする。
 #[must_use]
 pub fn interpret(subcommand: Option<&str>) -> Box<dyn Command> {
     match subcommand {
         None | Some("serve") => Box::new(Serve),
         Some("start") => Box::new(Start),
         Some("stop") => Box::new(Stop),
-        Some("status") => Box::new(Status),
         Some("restart") => Box::new(Restart),
         Some(other) => Box::new(Unknown::new(other)),
     }
@@ -165,7 +161,7 @@ mod tests {
 
     #[test]
     fn interpret_resolves_control_plane_verbs_to_not_yet_implemented_stubs() {
-        for verb in ["start", "stop", "status", "restart"] {
+        for verb in ["start", "stop", "restart"] {
             assert_eq!(
                 interpret(Some(verb)).execute(&info()),
                 format!("usagi v0.1.0: daemon {verb} is not yet implemented")

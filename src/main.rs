@@ -8,6 +8,7 @@
 //! CLI の起動要求を TUI の初期画面へ変換する。
 
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use crossterm::cursor;
@@ -20,6 +21,8 @@ use crossterm::{execute, queue};
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::workspace::Workspace;
+use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, RecordFile};
+use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::{self, BannerScreenRunner, Exit};
@@ -131,6 +134,52 @@ fn run_interactive(out: &mut dyn Write, info: &AppInfo, now: DateTime<Utc>) -> s
     }
 }
 
+/// The real `daemon.json` file: reads and writes `<data-dir>/daemon/daemon.json`.
+struct FsRecordFile {
+    path: PathBuf,
+}
+
+impl RecordFile for FsRecordFile {
+    fn read(&self) -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn write(&self, contents: &str) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.path, contents)
+    }
+
+    fn remove(&self) -> std::io::Result<()> {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// Probes process liveness with signal 0, which performs the kernel's permission
+/// and existence checks without delivering a signal.
+struct KillProbe;
+
+impl LivenessProbe for KillProbe {
+    #[cfg(unix)]
+    fn is_alive(&self, pid: u32) -> bool {
+        libc::pid_t::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+    }
+
+    #[cfg(not(unix))]
+    fn is_alive(&self, _pid: u32) -> bool {
+        false
+    }
+}
+
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -181,7 +230,18 @@ fn main() -> std::io::Result<()> {
     match args.get(1).and_then(|arg| arg.to_str()) {
         Some("daemon") => {
             let command = args.get(2).map(|arg| arg.to_string_lossy());
-            usagi_daemon::presentation::run(&mut stdout, command.as_deref(), &info)
+            let path = paths::data_dir()
+                .map_err(|err| std::io::Error::other(format!("{err:#}")))?
+                .join("daemon")
+                .join("daemon.json");
+            let store = DaemonRecordStore::new(FsRecordFile { path });
+            usagi_daemon::presentation::run(
+                &mut stdout,
+                command.as_deref(),
+                &info,
+                &store,
+                &KillProbe,
+            )
         }
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
         None if args.get(1).is_none() => launch_tui(&mut stdout, &info, &EntryScreen::Welcome),

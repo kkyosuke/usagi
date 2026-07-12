@@ -803,6 +803,7 @@ version = "2.6.0"
 dependencies = [
  "chrono",
  "crossterm",
+ "libc",
  "usagi-cli",
  "usagi-core",
  "usagi-daemon",
@@ -814,6 +815,7 @@ name = "usagi-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "serde_json",
  "usagi-core",
 ]
 

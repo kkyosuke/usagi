@@ -14,6 +14,8 @@ usagi-core.workspace = true
 clap.workspace = true
 
 [dev-dependencies]
+# MCP tool の入力スキーマ（JSON 文字列）が妥当な JSON であることをテストで検証する。
+serde_json.workspace = true
 
 [lints]
 workspace = true

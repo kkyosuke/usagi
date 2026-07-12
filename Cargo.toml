@@ -28,6 +28,8 @@ usagi-tui.workspace = true
 # recent カードの相対時刻に渡す現在時刻（実時計）をここで読むために使う。
 crossterm.workspace = true
 chrono.workspace = true
+# daemon の pid 生存判定（signal 0）を合成ルートで束ねるため。
+libc.workspace = true
 
 [dev-dependencies]
 
@@ -78,6 +80,9 @@ crossterm = "0.29"
 # CLI の引数解析。入口面クレート（usagi-cli）がコマンドツリーの定義に使う。
 # `string`: 配布 version など実行時に決まる文字列を clap コマンドに載せるため。
 clap = { version = "4.5", features = ["derive", "string"] }
+
+# 合成ルートが daemon の pid 生存判定（Unix の signal 0）に使う。
+libc = "0.2"
 
 # clippy は CI / pre-push で `-D warnings` になるため、
 # 日常のビルドから pedantic まで warning として表面化させておく。

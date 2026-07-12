@@ -8,3 +8,4 @@ pub mod config;
 pub mod new;
 pub mod open;
 pub mod welcome;
+pub mod workspace;
