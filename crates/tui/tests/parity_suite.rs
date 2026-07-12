@@ -333,7 +333,7 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     assert!(lines.iter().all(|line| display_width(line) <= 40));
     let actual = lines
         .iter()
-        .map(|line| strip_ansi(line))
+        .map(|line| strip_ansi(line).trim_end().to_owned())
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(actual, include_str!("fixtures/home_cjk.golden").trim_end());

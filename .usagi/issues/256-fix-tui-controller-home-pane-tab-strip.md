@@ -7,7 +7,7 @@ labels: [tui, bug, render, pane]
 dependson: []
 related: [225, 232, 235, 238, 245, 246]
 created_at: 2026-07-12T23:27:17.697286+00:00
-updated_at: 2026-07-12T23:27:23.994628+00:00
+updated_at: 2026-07-12T23:55:39.190812+00:00
 ---
 
 ## 概要
