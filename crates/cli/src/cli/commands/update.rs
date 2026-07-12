@@ -10,7 +10,7 @@ pub struct Update;
 
 impl Run for Update {
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
-        unimplemented(out, "update", "")
+        unimplemented(out, "update")
     }
 }
 

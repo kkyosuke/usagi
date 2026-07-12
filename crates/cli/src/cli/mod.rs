@@ -16,7 +16,8 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap_complete::Shell;
 
 /// CLI が合成ルートへ依頼する TUI の起動画面。
 ///
@@ -119,19 +120,6 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
-}
-
-/// 補完スクリプトを生成する対象シェル。
-///
-/// 生成そのものは未実装のため、いまはシェル種別の受け付けだけを表す
-/// （実装時に `clap_complete` を導入する）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Shell {
-    Bash,
-    Zsh,
-    Fish,
-    Powershell,
-    Elvish,
 }
 
 impl Command {

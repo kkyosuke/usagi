@@ -80,6 +80,8 @@ crossterm = "0.29"
 # CLI の引数解析。入口面クレート（usagi-cli）がコマンドツリーの定義に使う。
 # `string`: 配布 version など実行時に決まる文字列を clap コマンドに載せるため。
 clap = { version = "4.5", features = ["derive", "string"] }
+# `usagi completion <shell>` がシェル補完スクリプトを clap のコマンドツリーから生成する。
+clap_complete = "4.5"
 
 # 合成ルートが daemon の pid 生存判定（Unix の signal 0）に使う。
 libc = "0.2"

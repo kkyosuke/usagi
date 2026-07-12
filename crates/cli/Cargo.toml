@@ -12,6 +12,8 @@ publish = false
 [dependencies]
 usagi-core.workspace = true
 clap.workspace = true
+# `usagi completion <shell>` の補完スクリプト生成に使う。
+clap_complete.workspace = true
 # MCP サーバの stdio JSON-RPC 2.0 のパース・整形と、tool の入力スキーマ埋め込みに使う。
 serde_json.workspace = true
 
