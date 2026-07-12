@@ -489,8 +489,8 @@ fn content_lines(ws: &Workspace) -> Vec<String> {
 /// 右ペインの footer（キー操作ヒント、dim）。
 fn right_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "←→ tab / Enter closeup / : commands / p PR / Esc back / q quit",
-        Mode::Closeup => "←→ tab / ↑↓ action / : commands / p PR / Esc switch / q quit",
+        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / Esc back / q quit",
+        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / Esc switch / q quit",
     };
     Style::new()
         .dim()
@@ -1089,8 +1089,8 @@ mod tests {
         let mut ws = workspace();
         let switch = joined(&ws);
         assert!(switch.contains("[switch] ↑↓ session"));
-        assert!(switch.contains("←→ tab"));
-        assert!(switch.contains("Enter closeup"));
+        assert!(switch.contains("←→/hl tab"));
+        assert!(switch.contains("Enter/t closeup"));
         assert!(switch.contains("p PR"));
         for label in ["Preview", "Terminal", "Diff", "Notes"] {
             assert!(switch.contains(label));
@@ -1105,9 +1105,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(closeup.contains("[closeup] session selected"));
-        assert!(closeup.contains("←→ tab"));
+        assert!(closeup.contains("←→/hl tab"));
         assert!(closeup.contains("Esc switch"));
-        assert!(closeup.contains("↑↓ action"));
+        assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal — session 'UI work'"));
         assert!(
             closeup_frame
