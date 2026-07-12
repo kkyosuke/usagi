@@ -5,4 +5,5 @@
 //! 色は [`super::theme`] の意味的な役割で載せる。
 
 pub mod config;
+pub mod new;
 pub mod welcome;
