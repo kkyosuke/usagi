@@ -19,7 +19,14 @@ fn main() -> std::io::Result<()> {
             usagi_daemon::presentation::run(&mut stdout, args.get(2).map(String::as_str), &info)
         }
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
-        Some(command) => usagi_cli::cli::write_unknown_command(&mut stdout, &info, command),
-        None => usagi_tui::presentation::write_banner(&mut stdout, &info),
+        None | Some("hop") => usagi_tui::presentation::write_banner(&mut stdout, &info),
+        // その他のサブコマンドは入口面の CLI へ。clap がコマンドツリーを解析し、
+        // ハンドラが実行され、プロセス終了コードが返る。実 stdout / stderr をここで束ねる。
+        Some(_) => {
+            let mut stderr = std::io::stderr();
+            let args = std::env::args_os().collect();
+            let code = usagi_cli::cli::run(args, info.version, &mut stdout, &mut stderr)?;
+            std::process::exit(code);
+        }
     }
 }
