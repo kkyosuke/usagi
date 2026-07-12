@@ -725,6 +725,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
             )
         }
         Some(Feedback::Disconnected) => "disconnected; reconnect to continue".to_string(),
+        Some(Feedback::Reconnected) => "reconnected; synchronizing state".to_string(),
+        Some(Feedback::ResyncRequired) => "resync required; synchronizing state".to_string(),
     }
 }
 

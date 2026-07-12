@@ -179,6 +179,12 @@ pub enum Feedback {
     OperationError(SafeError),
     TerminalError(SafeError),
     Disconnected,
+    /// The connection was restored; the next snapshot or replay can reconcile
+    /// the visible state without requiring a key press.
+    Reconnected,
+    /// The daemon requested a snapshot replacement rather than applying a
+    /// potentially incomplete replay.
+    ResyncRequired,
 }
 
 /// controller が所有する application state。

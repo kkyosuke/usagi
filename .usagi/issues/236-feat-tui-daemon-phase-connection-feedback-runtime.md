@@ -1,14 +1,14 @@
 ---
 number: 236
 title: feat(tui): daemon phase と connection feedback を runtime に結合する
-status: todo
+status: done
 priority: high
 labels: [tui, ipc, feedback]
 dependson: [219, 220, 233]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:47.627+00:00
-updated_at: 2026-07-12T21:11:47.627+00:00
+updated_at: 2026-07-12T22:53:42.072956+00:00
 ---
 
 ## 目的
