@@ -8,3 +8,4 @@
 //! 出せるようにする。
 
 pub mod mascot_screen;
+pub mod panes;
