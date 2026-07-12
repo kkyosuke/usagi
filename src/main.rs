@@ -36,6 +36,7 @@ use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::workspace as workspace_usecase;
+use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_tui::presentation::views::config;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
@@ -275,6 +276,63 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Bind the OS-specific daemon transport at the composition boundary.  The
+/// protocol handler remains in `usagi-daemon`, while this root owns threads and
+/// the real socket.  Each accepted peer is credential-checked by the listener
+/// before a frame is decoded.
+fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
+    let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
+        usagi_core::domain::id::DaemonGeneration::new()
+            .as_str()
+            .clone(),
+    );
+    let listener = SecureUnixListener::bind(data_dir, generation.clone())?;
+    let server = usagi_daemon::presentation::ipc::server_protocol(
+        generation.clone(),
+        generation.0.clone(),
+        usagi_core::infrastructure::ipc::BuildIdentity {
+            version: info.version.to_owned(),
+            commit: "unknown".to_owned(),
+            target: std::env::consts::ARCH.to_owned(),
+        },
+    );
+    std::thread::Builder::new()
+        .name("usagi-ipc".to_string())
+        .spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok(stream) => {
+                        let server = server.clone();
+                        // One blocked peer cannot prevent accepts or another
+                        // client's control response from being serviced.
+                        let _ = std::thread::Builder::new()
+                            .name("usagi-ipc-client".to_string())
+                            .spawn(move || {
+                                let _ = stream.set_nonblocking(false);
+                                let Ok(mut writer) = stream.try_clone() else {
+                                    return;
+                                };
+                                let mut reader = stream;
+                                let _ = usagi_daemon::presentation::ipc::handle_connection(
+                                    &mut reader,
+                                    &mut writer,
+                                    &server,
+                                );
+                            });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    // The listener is owned for the daemon lifetime. A credential
+                    // failure has already closed its peer; retain the endpoint and
+                    // continue serving later clients.
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        })
+        .map(|_| ())
 }
 
 /// The real `daemon.json` file: reads and writes `<data-dir>/daemon/daemon.json`.
@@ -528,6 +586,18 @@ fn main() -> std::io::Result<()> {
             let daemon_dir = paths::data_dir()
                 .map_err(|err| std::io::Error::other(format!("{err:#}")))?
                 .join("daemon");
+            if matches!(command.as_deref(), None | Some("serve")) {
+                let data_dir = daemon_dir
+                    .parent()
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "daemon data path has no parent",
+                        )
+                    })?
+                    .to_path_buf();
+                spawn_ipc_server(&data_dir, &info)?;
+            }
             let store = DaemonRecordStore::new(FsRecordFile {
                 path: daemon_dir.join("daemon.json"),
             });

@@ -8,7 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
@@ -18,12 +18,114 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets;
-use crate::usecase::application::controller::HomeMode;
+use crate::usecase::application::controller::{AppState, HomeMode, Selection, Target};
+use usagi_core::domain::id::{SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
 const LEFT_WIDTH: usize = 28;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
+
+/// Home snapshot の session 表示情報。
+///
+/// `id` が selection / active と照合する唯一の identity である。`label` は表示専用で、
+/// 同名・変更・並び替えがあっても target の同一性には使わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedSession {
+    /// daemon / snapshot が与える stable session identity。
+    pub id: SessionId,
+    /// sidebar に表示する名前。
+    pub label: String,
+    /// sidebar に表示する起源などの補足。
+    pub detail: String,
+    /// session pane の cwd。
+    pub cwd: PathBuf,
+}
+
+/// controller の Home state を描画可能な root / session / action row へ投影した値。
+///
+/// session の順番は controller snapshot の `SessionId` 順を使い、表示情報は ID で結合する。
+/// そのため表示名や入力 `Vec` の index を identity として扱わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HomeProjection {
+    workspace: WorkspaceId,
+    workspace_name: String,
+    root_cwd: PathBuf,
+    sessions: Vec<ProjectedSession>,
+    selected: Selection,
+    active: Target,
+    mode: HomeMode,
+}
+
+impl HomeProjection {
+    /// `state` を snapshot 表示情報へ安全に結合する。
+    ///
+    /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
+    /// 側の snapshot reconciliation が selected / active を root に縮退させる。
+    #[must_use]
+    pub fn from_state(
+        state: &AppState,
+        workspace_name: impl Into<String>,
+        root_cwd: impl Into<PathBuf>,
+        snapshot_sessions: &[ProjectedSession],
+    ) -> Self {
+        let sessions = state
+            .sessions()
+            .iter()
+            .filter_map(|id| snapshot_sessions.iter().find(|session| session.id == *id))
+            .cloned()
+            .collect();
+        Self {
+            workspace: state.workspace(),
+            workspace_name: workspace_name.into(),
+            root_cwd: root_cwd.into(),
+            sessions,
+            selected: state.selected(),
+            active: state.active(),
+            mode: match state.route() {
+                crate::usecase::application::controller::Route::Home(mode) => mode,
+            },
+        }
+    }
+
+    /// 左 sidebar の rows。root と `+ new session` は session 数にかかわらず常設する。
+    #[must_use]
+    pub fn rows(&self) -> Vec<Selection> {
+        let mut rows = Vec::with_capacity(self.sessions.len() + 2);
+        rows.push(Selection::Target(Target::Root(self.workspace)));
+        rows.extend(
+            self.sessions
+                .iter()
+                .map(|session| Selection::Target(Target::Session(session.id))),
+        );
+        rows.push(Selection::NewSession);
+        rows
+    }
+
+    fn active_cwd(&self) -> &Path {
+        match self.active {
+            Target::Root(id) if id == self.workspace => &self.root_cwd,
+            Target::Session(id) => self
+                .sessions
+                .iter()
+                .find(|session| session.id == id)
+                .map_or(self.root_cwd.as_path(), |session| session.cwd.as_path()),
+            Target::Root(_) => &self.root_cwd,
+        }
+    }
+
+    fn active_label(&self) -> &str {
+        match self.active {
+            Target::Root(id) if id == self.workspace => "root",
+            Target::Session(id) => self
+                .sessions
+                .iter()
+                .find(|session| session.id == id)
+                .map_or("root", |session| session.label.as_str()),
+            Target::Root(_) => "root",
+        }
+    }
+}
 
 /// Workspace 画面でキーボードが操作する対象。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -434,13 +536,161 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
     frame
 }
 
+/// controller projection の Home frame を描く。
+///
+/// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の `>` は
+/// navigation cursor、`*` は command target であり、異なる行でも同時に残る。
+#[must_use]
+pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -> Vec<String> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let body_height = height.saturating_sub(CHROME_ROWS);
+    let mut frame = Vec::with_capacity(height);
+    frame.push(home_header_line(width, home));
+    frame.push(rule_line(width));
+    frame.extend(panes::join(
+        body_height,
+        &home_left_pane(body_height, split.left, home),
+        &home_right_pane(body_height, split.right, home),
+        split,
+    ));
+    frame.truncate(height);
+    frame
+}
+
+fn home_header_line(width: usize, home: &HomeProjection) -> String {
+    let mode = match home.mode {
+        HomeMode::Switch => "Switch",
+        HomeMode::Closeup => "Closeup",
+    };
+    widgets::pad_to_width(
+        &format!(
+            " {}{}{}{}{}{}",
+            Role::Success.style().bold().paint("USAGI"),
+            Style::new().dim().paint(" › "),
+            Role::Success.style().bold().paint(&home.workspace_name),
+            Style::new().dim().paint(" · "),
+            Style::new()
+                .dim()
+                .paint(&format!("{} sessions", home.sessions.len())),
+            Style::new().dim().paint(&format!(" · {mode}")),
+        ),
+        width,
+    )
+}
+
+fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
+    if height == 0 {
+        return Vec::new();
+    }
+    let rows = home.rows();
+    if height == 1 {
+        return vec![home_row(width, home, rows[0])];
+    }
+    let body_capacity = height - 1;
+    let show_heading = body_capacity > 1;
+    let viewport_capacity = body_capacity - usize::from(show_heading);
+    let selected_index = rows
+        .iter()
+        .position(|row| *row == home.selected)
+        .unwrap_or(0);
+    let start = viewport_start(selected_index, rows.len(), viewport_capacity);
+    let end = (start + viewport_capacity).min(rows.len());
+    let mut lines = Vec::with_capacity(height);
+    if show_heading {
+        lines.push(Role::Success.style().bold().paint("Sessions"));
+    }
+    lines.extend(
+        rows[start..end]
+            .iter()
+            .map(|row| home_row(width, home, *row)),
+    );
+    lines.resize(body_capacity, String::new());
+    lines.push(Style::new().dim().paint(&widgets::clip_to_width(
+        "[switch] ↑↓ cursor · Enter target",
+        width,
+    )));
+    lines
+}
+
+fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
+    let cursor = if home.selected == row {
+        Role::Danger.style().bold().paint(">")
+    } else {
+        " ".to_string()
+    };
+    let target = match row {
+        Selection::Target(target) => Some(target),
+        Selection::NewSession => None,
+    };
+    let active = if target == Some(home.active) {
+        Role::Accent.style().bold().paint("*")
+    } else {
+        " ".to_string()
+    };
+    let (label, detail) = match row {
+        Selection::Target(Target::Root(_)) => ("root", "workspace root"),
+        Selection::Target(Target::Session(id)) => home
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .map_or(("root", "workspace root"), |session| {
+                (session.label.as_str(), session.detail.as_str())
+            }),
+        Selection::NewSession => ("+ new session", "action"),
+    };
+    let label = if home.selected == row {
+        Role::Accent.style().bold().paint(label)
+    } else {
+        label.to_string()
+    };
+    widgets::pad_to_width(
+        &format!(
+            "{cursor}{active} {label}  {}",
+            Style::new().dim().paint(detail)
+        ),
+        width,
+    )
+}
+
+fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
+    let mode = match home.mode {
+        HomeMode::Switch => "Switch",
+        HomeMode::Closeup => "Closeup",
+    };
+    with_footer(
+        vec![
+            widgets::pad_to_width(
+                &format!(
+                    " {}  {}",
+                    Role::Accent.style().bold().paint(home.active_label()),
+                    Style::new().dim().paint("active target"),
+                ),
+                width,
+            ),
+            String::new(),
+            Style::new()
+                .dim()
+                .paint(&format!("  cwd: {}", home.active_cwd().display())),
+        ],
+        height,
+        Style::new().dim().paint(&widgets::clip_to_width(
+            &format!("[{mode}] active pane"),
+            width,
+        )),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Workspace, render};
+    use super::{HomeProjection, Mode, ProjectedSession, Workspace, render, render_home};
     use crate::presentation::widgets::display_width;
-    use crate::usecase::application::controller::HomeMode;
+    use crate::usecase::application::controller::{
+        AppEvent, AppKey, AppState, BackendEvent, HomeMode, Selection, Target, update,
+    };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
+    use usagi_core::domain::id::{SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -515,6 +765,123 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
+        ProjectedSession {
+            id,
+            label: label.to_string(),
+            detail: "snapshot".to_string(),
+            cwd: PathBuf::from(cwd),
+        }
+    }
+
+    fn joined_home(home: &HomeProjection) -> String {
+        render_home(30, 100, home)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn home_projection_keeps_root_sessions_and_new_in_identity_order() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let state = AppState::home(workspace, vec![second, first]);
+        let snapshot = vec![
+            projected_session(first, "same label", "/work/first"),
+            projected_session(second, "same label", "/work/second"),
+        ];
+        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+
+        assert_eq!(
+            home.rows(),
+            vec![
+                Selection::Target(Target::Root(workspace)),
+                Selection::Target(Target::Session(second)),
+                Selection::Target(Target::Session(first)),
+                Selection::NewSession,
+            ]
+        );
+        let text = joined_home(&home);
+        assert!(text.contains("root  workspace root"));
+        assert_eq!(text.matches("same label  snapshot").count(), 2);
+        assert!(text.contains("+ new session  action"));
+        assert!(text.contains("cwd: /work"));
+    }
+
+    #[test]
+    fn home_projection_draws_selected_and_active_markers_on_different_rows() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[
+                projected_session(first, "first", "/work/first"),
+                projected_session(second, "second", "/work/second"),
+            ],
+        );
+
+        let lines = render_home(30, 100, &home)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>();
+        assert!(lines.iter().any(|line| line.contains(" * first")));
+        assert!(lines.iter().any(|line| line.contains(">  second")));
+        assert!(joined_home(&home).contains("cwd: /work/first"));
+    }
+
+    #[test]
+    fn home_projection_never_marks_new_as_active_and_refresh_falls_back_to_root_cwd() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        );
+        let text = joined_home(&home);
+        assert!(text.contains(">  + new session"));
+        assert!(!text.contains("*> + new session"));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
+        );
+        let refreshed = HomeProjection::from_state(&state, "work", "/work", &[]);
+        // `+ new` は常設 action row のため refresh で消えない。一方、消えた active
+        // session は typed identity で検出され root へ縮退する。
+        assert_eq!(state.selected(), Selection::NewSession);
+        assert_eq!(state.active(), Target::Root(workspace));
+        assert!(joined_home(&refreshed).contains("cwd: /work"));
+    }
+
+    #[test]
+    fn home_projection_handles_tiny_geometry_and_an_unrelated_root_target_safely() {
+        let workspace = WorkspaceId::new();
+        let state = AppState::home(workspace, Vec::new());
+        let mut home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        home.active = Target::Root(WorkspaceId::new());
+
+        let zero_body = render_home(2, 20, &home);
+        let one_row_body = render_home(3, 20, &home);
+        assert_eq!(zero_body.len(), 2);
+        assert_eq!(one_row_body.len(), 3);
+        assert!(joined_home(&home).contains("cwd: /work"));
     }
 
     #[test]

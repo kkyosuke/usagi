@@ -52,7 +52,7 @@ jobs:
         report=$(coverage_report --summary-only)
         total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
 
-        # Lines カバレッジが99%に満たないファイルをMarkdownテーブルの行に整形する。
+        # Lines カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
         # Lines のカバレッジ帯に応じて信号機の絵文字を付ける。
         rows=$(echo "$report" | awk '
           function emoji(c,   v) {
@@ -77,9 +77,9 @@ jobs:
           echo "> 🚀 **いまのカバレッジ (Lines): ${total}** — この調子でいこう！"
           echo ""
           if [ -z "$rows" ]; then
-            echo "🎉✨ Lines カバレッジ 99% を達成しました 🏆🐰"
+            echo "🎉✨ パーフェクト！全ファイル Lines カバレッジ 100% を達成しました 🏆🐰"
           else
-            echo "99% に届いていないファイルだけピックアップしました 👇"
+            echo "100% に届いていないファイルだけピックアップしました 👇"
             echo ""
             echo "| 📄 ファイル | 🌐 Regions | 🔧 Functions | 📈 Lines |"
             echo "| :--- | ---: | ---: | ---: |"
@@ -96,7 +96,7 @@ jobs:
         recreate: true
         path: coverage-comment.md
 
-    - name: Enforce 99% coverage
+    - name: Enforce 100% coverage
       run: |
         . ./scripts/coverage.sh
         coverage_report \

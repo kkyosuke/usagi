@@ -11,7 +11,7 @@
 #                 ※ usagi のセッション worktree (.usagi/sessions/<name>/) はブランチ名が usagi/<name> になるため対象外
 #   - コミットメッセージ: Conventional Commits (例: feat: 〇〇を追加 / fix(cli): 〇〇を修正)
 #   - コミット時に staged な .rs ファイルを自動フォーマット
-#   - push 時に clippy とテストカバレッジ99%を確認 (Coverage CI と同条件)
+#   - push 時に clippy とテストカバレッジ100%を確認 (Coverage CI と同条件)
 #     ※ カバレッジ計測 (cargo llvm-cov) はテストも実行するため、push 時のテスト実行を兼ねる
 #     ※ *.rs 差分が無い push では clippy / coverage を skip する。
 #     ※ v1/ は退避された旧実装 (独立した Cargo プロジェクトでルートのビルド対象外) のため、
@@ -123,7 +123,7 @@ pre-push:
         }
         base=$(rust_diff_base)
         # v1/ は退避された旧実装でルートのビルド対象外のため、差分判定から除外する。
-        # v1/ だけの push には v2 のカバレッジ 99% を強制しない。
+        # v1/ だけの push には v2 のカバレッジ 100% を強制しない。
         if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' ':(exclude)v1/**' | grep -q .; then
           echo "No Rust (*.rs) changes to push (v1/ excluded); skipping coverage."
           exit 0
