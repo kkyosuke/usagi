@@ -228,6 +228,10 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] when the terminal is not owned by
     /// this registry.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal retained-byte accounting invariant is broken.
     pub fn append_output(
         &mut self,
         reference: &TerminalRef,
@@ -247,11 +251,11 @@ impl TerminalRegistry {
         entry.retained_bytes += output.data.len();
         entry.journal.push_back(output.clone());
         while entry.retained_bytes > limit {
-            if let Some(removed) = entry.journal.pop_front() {
-                entry.retained_bytes -= removed.data.len();
-            } else {
-                break;
-            }
+            let removed = entry
+                .journal
+                .pop_front()
+                .expect("retained output has a journal segment");
+            entry.retained_bytes -= removed.data.len();
         }
         Ok(output)
     }
@@ -461,6 +465,18 @@ mod tests {
         );
     }
     #[test]
+    fn duplicate_registration_and_exact_detach_are_fenced() {
+        let r = reference();
+        let mut registry = registry(r.clone());
+        assert_eq!(
+            registry.register(r.clone(), Geometry { cols: 80, rows: 24 }),
+            Err(RegistryError::StaleTarget)
+        );
+        let connection = ConnectionId::new();
+        let subscription = registry.attach(&r, connection).unwrap().subscription;
+        assert_eq!(registry.detach(&r, subscription, connection), Ok(()));
+    }
+    #[test]
     fn output_offsets_are_contiguous_and_old_output_requires_resync() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -528,6 +544,39 @@ mod tests {
                 .unwrap(),
             InputAck::Ambiguous { applied_prefix: 1 }
         );
+        assert_eq!(
+            registry.write_input(
+                &r,
+                input(subscription, connection, client, RequestId::new(), 3),
+                b"gap",
+                &mut writer
+            ),
+            Err(RegistryError::SequenceGap)
+        );
+        let mut failed = Writer {
+            written: Vec::new(),
+            failure: Some(0),
+        };
+        assert_eq!(
+            registry
+                .write_input(
+                    &r,
+                    input(subscription, connection, client, RequestId::new(), 2),
+                    b"fail",
+                    &mut failed
+                )
+                .unwrap(),
+            InputAck::Failed
+        );
+        assert_eq!(
+            registry.write_input(
+                &r,
+                input(subscription, connection, client, request, 0),
+                b"old",
+                &mut writer
+            ),
+            Err(RegistryError::IdempotencyExpired)
+        );
     }
     #[test]
     fn stale_refs_and_wrong_attachment_are_rejected() {
@@ -561,21 +610,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(snapshot.geometry.cols, 100);
-        match registry.exited(&r, 0).unwrap() {
+        assert_eq!(
+            registry.exited(&r, 0).unwrap(),
             Event::Exited {
-                final_output_offset,
-                ..
-            } => assert_eq!(final_output_offset, 4),
-            _ => unreachable!(),
-        }
+                terminal: r.clone(),
+                revision: 2,
+                final_output_offset: 4,
+                status: 0,
+            }
+        );
+        let connection = ConnectionId::new();
+        let subscription = registry.attach(&r, connection).unwrap().subscription;
         assert_eq!(
             registry.write_input(
                 &r,
-                input(1, ConnectionId::new(), ClientId::new(), RequestId::new(), 0),
+                input(
+                    subscription,
+                    connection,
+                    ClientId::new(),
+                    RequestId::new(),
+                    0
+                ),
                 b"x",
                 &mut Writer::default()
             ),
-            Err(RegistryError::NotAttached)
+            Err(RegistryError::Exited)
         );
     }
 }
