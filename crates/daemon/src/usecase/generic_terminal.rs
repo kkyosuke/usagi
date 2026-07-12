@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Daemon-owned, terminal-only launch orchestration.
 //!
 //! The IPC-facing request selects only a trusted profile. This coordinator

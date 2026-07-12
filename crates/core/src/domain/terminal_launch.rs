@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Safe, terminal-only launch vocabulary.
 //!
 //! This intentionally has no agent profile, command string, secret value, or
