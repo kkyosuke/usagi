@@ -10,3 +10,6 @@
 pub mod domain;
 pub mod infrastructure;
 pub mod usecase;
+
+#[cfg(test)]
+pub(crate) mod test_support;

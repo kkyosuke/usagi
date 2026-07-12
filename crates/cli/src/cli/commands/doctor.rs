@@ -2,25 +2,26 @@
 
 use std::io::{self, Write};
 
-use super::unimplemented;
-use crate::cli::Run;
+use crate::cli::{Run, RunOutcome, TuiRequest};
 
 /// `usagi doctor` のハンドラ。
 pub struct Doctor;
 
 impl Run for Doctor {
-    fn run(&self, out: &mut dyn Write) -> io::Result<()> {
-        unimplemented(out, "doctor", "")
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        Ok(RunOutcome::LaunchTui(TuiRequest::Doctor))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::Command;
-    use crate::cli::commands::render;
+    use crate::cli::commands::execute;
+    use crate::cli::{Command, RunOutcome, TuiRequest};
 
     #[test]
-    fn reports_name() {
-        assert!(render(Command::Doctor).contains("doctor"));
+    fn requests_doctor_without_output() {
+        let (outcome, output) = execute(Command::Doctor);
+        assert_eq!(outcome, RunOutcome::LaunchTui(TuiRequest::Doctor));
+        assert!(output.is_empty());
     }
 }

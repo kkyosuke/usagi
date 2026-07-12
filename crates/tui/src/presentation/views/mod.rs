@@ -4,4 +4,5 @@
 //! [`super::widgets`] に委ね、view は「どの状態をどこに出すか」だけを担う。
 //! 色は [`super::theme`] の意味的な役割で載せる。
 
+pub mod config;
 pub mod welcome;

@@ -48,11 +48,19 @@ usagi-core = { path = "crates/core" }
 usagi-daemon = { path = "crates/daemon" }
 usagi-tui = { path = "crates/tui" }
 # domain エンティティ（Workspace / Issue / Memory）が使う基盤語彙。時刻は chrono、
-# JSON インデックス表現の (de)serialize は serde の derive で表す。serde_json は
-# その JSON 表現を検証するテストでのみ使う（dev-dependency）。
+# JSON インデックス表現の (de)serialize は serde の derive で表す。
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+# infrastructure（永続化）で使う。serde_json は index.json / workspaces.json の
+# (de)serialize、anyhow はストアのエラー伝播、fs2 はストアの cross-process ロック、
+# dirs は既定データディレクトリ（~/.usagi）の解決、rayon は markdown の並列スキャン。
 serde_json = "1.0"
+anyhow = "1.0"
+fs2 = "0.4"
+dirs = "6.0"
+rayon = "1.12.0"
+# テスト専用（一時ディレクトリ）。
+tempfile = "3"
 
 # 端末描画で表示桁数（CJK など全角を 2 桁と数える）を正しく測るため。
 unicode-width = "0.2"

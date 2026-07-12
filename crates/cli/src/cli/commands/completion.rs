@@ -3,7 +3,7 @@
 use std::io::{self, Write};
 
 use super::unimplemented;
-use crate::cli::{Run, Shell};
+use crate::cli::{Run, RunOutcome, Shell};
 
 /// `usagi completion <shell>` のハンドラ。
 pub struct Completion {
@@ -11,7 +11,7 @@ pub struct Completion {
 }
 
 impl Run for Completion {
-    fn run(&self, out: &mut dyn Write) -> io::Result<()> {
+    fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
         let shell = match self.shell {
             Shell::Bash => "bash",
             Shell::Zsh => "zsh",
@@ -25,8 +25,8 @@ impl Run for Completion {
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::commands::render;
-    use crate::cli::{Command, Shell};
+    use crate::cli::commands::execute;
+    use crate::cli::{Command, RunOutcome, Shell};
 
     #[test]
     fn maps_every_shell() {
@@ -37,7 +37,8 @@ mod tests {
             (Shell::Powershell, "powershell"),
             (Shell::Elvish, "elvish"),
         ] {
-            let out = render(Command::Completion { shell });
+            let (outcome, out) = execute(Command::Completion { shell });
+            assert_eq!(outcome, RunOutcome::Exit(0));
             assert!(out.contains(label), "expected {label} in {out}");
         }
     }

@@ -6,8 +6,8 @@
 //! ここに置くのは **ターミナルから `usagi <cmd>` で叩く人間向けコマンド** だけである。
 //! エージェント向けの issue / memory 操作は MCP 面（`crate::mcp`）が受け持ち、CLI には置かない。
 //!
-//! 現状ハンドラはほぼ「未実装」を報告するスタブで、コマンド面の骨格だけが動く
-//! （`version` だけは注入 version を表示する）。v2 では必要になった時点で各ハンドラを実装する。
+//! TUI を開くコマンドは [`RunOutcome::LaunchTui`] を返し、合成ルートが TUI 面へ接続する。
+//! それ以外のコマンドは出力後に [`RunOutcome::Exit`] を返す。
 
 pub mod commands;
 
@@ -17,18 +17,46 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
+/// CLI が合成ルートへ依頼する TUI の起動画面。
+///
+/// `usagi-cli` は `usagi-tui` に依存せず、この入口面の要求だけを返す。合成ルートが
+/// TUI 面の画面型へ変換することで、面クレート間の依存を作らずに接続する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TuiRequest {
+    /// Welcome 画面を開く。
+    Welcome,
+    /// workspace 画面を開く。`path` 省略時はカレントディレクトリを使う。
+    Workspace {
+        /// 開くディレクトリ。
+        path: Option<PathBuf>,
+    },
+    /// Config 画面を開く。
+    Config,
+    /// Doctor 画面を開く。
+    Doctor,
+}
+
+/// CLI の解析・ハンドラ実行結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// CLI で処理が完了したときのプロセス終了コード。
+    Exit(i32),
+    /// 合成ルートに TUI の起動を依頼する。
+    LaunchTui(TuiRequest),
+}
+
 /// 実行可能な CLI サブコマンドの共通インターフェース。
 ///
 /// clap が解釈した各コマンドは、自分の実行方法を知る型（`commands` のハンドラ）に
 /// 変換され、dispatch は「型ごとに分岐する巨大な match」ではなく一様な `run` 呼び出しに
 /// なる。出力先（`out`）は注入されるため、ハンドラは実 IO なしでユニットテストできる。
 pub trait Run {
-    /// サブコマンドを実行し、人間向けの出力を `out` に書き出す。
+    /// サブコマンドを実行し、CLI 完了または TUI 起動要求を返す。
     ///
     /// # Errors
     ///
     /// `out` への書き込みに失敗した場合、そのエラーを返す。
-    fn run(&self, out: &mut dyn Write) -> io::Result<()>;
+    fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome>;
 }
 
 /// `usagi` の CLI コマンドツリー（`clap` による引数解析の入口）。
@@ -56,6 +84,9 @@ pub struct Cli {
 /// オプションを型として表す。`help` は clap が自動で用意する。
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Welcome TUI を開く（引数なし起動の互換 alias）
+    #[command(hide = true)]
+    Hop,
     /// ディレクトリをプロジェクトとして登録して TUI で開く
     Open {
         /// 開くディレクトリ（省略時はカレントディレクトリ）
@@ -98,6 +129,7 @@ impl Command {
     pub fn into_handler(self, version: &str) -> Box<dyn Run> {
         use commands as h;
         match self {
+            Command::Hop => Box::new(h::Hop),
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
             Command::Doctor => Box::new(h::Doctor),
@@ -111,7 +143,7 @@ impl Command {
 }
 
 /// CLI 面のエントリポイント。`args`（プログラム名を含む argv）を解析し、
-/// 対応するハンドラを実行して、プロセスの終了コードを返す。
+/// 対応するハンドラを実行して、CLI 完了または TUI 起動要求を返す。
 ///
 /// 出力は注入された `out` / `err` に書く（合成ルートが実 stdout / stderr を束ねる）。
 /// clap の `--help` / `--version` は `out` に、使い方エラーは `err` に出す慣習に従う。
@@ -134,7 +166,7 @@ pub fn run(
     version: &str,
     out: &mut dyn Write,
     err: &mut dyn Write,
-) -> io::Result<i32> {
+) -> io::Result<RunOutcome> {
     let mut command = Cli::command().version(version.to_owned());
     let matches = match command.clone().try_get_matches_from(args) {
         Ok(matches) => matches,
@@ -146,26 +178,25 @@ pub fn run(
             } else {
                 write!(out, "{rendered}")?;
             }
-            return Ok(e.exit_code());
+            return Ok(RunOutcome::Exit(e.exit_code()));
         }
     };
     // matches は Cli::command() から得たものなので、Cli への変換は常に成功する。
     let cli =
         Cli::from_arg_matches(&matches).expect("matches from Cli::command() は Cli に変換できる");
     if let Some(command) = cli.command {
-        command.into_handler(version).run(out)?;
-        Ok(0)
+        command.into_handler(version).run(out)
     } else {
         // 引数なしの `usagi` は合成ルートが TUI に振り分けるため、ここに到達するのは
         // グローバルフラグだけが与えられた場合。トップレベルのヘルプを表示する。
         write!(out, "{}", command.render_long_help())?;
-        Ok(0)
+        Ok(RunOutcome::Exit(0))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, Shell, run};
+    use super::{Cli, Command, RunOutcome, Shell, TuiRequest, run};
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
@@ -176,6 +207,10 @@ mod tests {
     /// オプションなしのサブコマンドを解析できる。
     #[test]
     fn parses_simple_subcommands() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "hop"]).unwrap().command,
+            Some(Command::Hop)
+        ));
         assert!(matches!(
             Cli::try_parse_from(["usagi", "config"]).unwrap().command,
             Some(Command::Config)
@@ -215,15 +250,28 @@ mod tests {
         ));
     }
 
-    /// 有効なサブコマンドは終了コード 0 でハンドラ出力を `out` に書く。
+    /// TUI を開くコマンドは、解析済み引数を保った起動要求を返す。
     #[test]
-    fn run_dispatches_to_a_handler() {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = run(argv(&["usagi", "config"]), "9.9.9", &mut out, &mut err).unwrap();
-        assert_eq!(code, 0);
-        assert!(err.is_empty());
-        assert!(String::from_utf8(out).unwrap().contains("config"));
+    fn run_returns_tui_requests_without_output() {
+        for (tokens, expected) in [
+            (&["usagi", "hop"][..], TuiRequest::Welcome),
+            (&["usagi", "open"][..], TuiRequest::Workspace { path: None }),
+            (
+                &["usagi", "open", "/tmp/x"][..],
+                TuiRequest::Workspace {
+                    path: Some("/tmp/x".into()),
+                },
+            ),
+            (&["usagi", "config"][..], TuiRequest::Config),
+            (&["usagi", "doctor"][..], TuiRequest::Doctor),
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            assert_eq!(outcome, RunOutcome::LaunchTui(expected));
+            assert!(out.is_empty());
+            assert!(err.is_empty());
+        }
     }
 
     /// サブコマンドなしはトップレベルのヘルプを `out` に出す。
@@ -231,8 +279,9 @@ mod tests {
     fn run_without_subcommand_prints_help() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
-        assert_eq!(code, 0);
+        let outcome = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
+        assert_eq!(outcome, RunOutcome::Exit(0));
+        assert!(err.is_empty());
         assert!(String::from_utf8(out).unwrap().contains("Usage"));
     }
 
@@ -241,8 +290,8 @@ mod tests {
     fn run_help_goes_to_stdout() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = run(argv(&["usagi", "--help"]), "9.9.9", &mut out, &mut err).unwrap();
-        assert_eq!(code, 0);
+        let outcome = run(argv(&["usagi", "--help"]), "9.9.9", &mut out, &mut err).unwrap();
+        assert_eq!(outcome, RunOutcome::Exit(0));
         assert!(err.is_empty());
         assert!(!out.is_empty());
     }
@@ -253,8 +302,8 @@ mod tests {
         for tokens in [&["usagi", "--version"][..], &["usagi", "version"][..]] {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            let code = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
-            assert_eq!(code, 0);
+            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            assert_eq!(outcome, RunOutcome::Exit(0));
             assert!(err.is_empty());
             assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
         }
@@ -265,16 +314,34 @@ mod tests {
     fn run_reports_unknown_command_on_stderr() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = run(
+        let outcome = run(
             argv(&["usagi", "nope-not-a-command"]),
             "9.9.9",
             &mut out,
             &mut err,
         )
         .unwrap();
-        assert_ne!(code, 0);
+        assert_eq!(outcome, RunOutcome::Exit(2));
         assert!(out.is_empty());
         assert!(!err.is_empty());
+    }
+
+    /// 余分な引数は clap の使い方エラーになり、TUI 起動要求へ到達しない。
+    #[test]
+    fn run_rejects_extra_tui_command_arguments_without_launching() {
+        for tokens in [
+            &["usagi", "hop", "extra"][..],
+            &["usagi", "open", "one", "two"][..],
+            &["usagi", "config", "extra"][..],
+            &["usagi", "doctor", "extra"][..],
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            assert_eq!(outcome, RunOutcome::Exit(2));
+            assert!(out.is_empty());
+            assert!(!err.is_empty());
+        }
     }
 
     /// clap が派生する update / 補助メタデータ関数も実行して被覆する
@@ -286,6 +353,7 @@ mod tests {
         assert!(
             Command::augment_subcommands_for_update(clap::Command::new("usagi")).has_subcommands()
         );
+        assert!(Command::has_subcommand("hop"));
         assert!(Command::has_subcommand("open"));
         assert!(!Command::has_subcommand("nope"));
 
@@ -300,5 +368,15 @@ mod tests {
         // ValueEnum の派生メタデータ。
         assert_eq!(Shell::value_variants().len(), 5);
         assert!(Shell::Bash.to_possible_value().is_some());
+
+        // CLI/TUI 境界型の derive された Clone / Debug / PartialEq を実行する。
+        let request = TuiRequest::Workspace {
+            path: Some("/tmp/x".into()),
+        };
+        assert_eq!(request.clone(), request);
+        assert!(format!("{request:?}").contains("Workspace"));
+        let outcome = RunOutcome::LaunchTui(TuiRequest::Doctor);
+        assert_eq!(outcome.clone(), outcome);
+        assert!(format!("{outcome:?}").contains("Doctor"));
     }
 }
