@@ -14,9 +14,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crossterm::cursor;
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -48,12 +46,18 @@ use usagi_tui::presentation::{
     self, BannerScreenRunner, Exit, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::terminal_input::{KeyCode, LiveInput, RuntimeEvent};
+
+mod tui_input;
+use tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// crossterm を backing にした実端末。TUI 面の [`Terminal`] ポートを合成ルートで実装し、
 /// raw mode の描画（毎フレーム全消去して描き直す）とキー/リサイズイベントの読み取りを
 /// [`Key`] 語彙へ翻訳する。ここが唯一の実端末 IO 層である。
 struct CrosstermTerminal {
     out: std::io::Stdout,
+    input: EventPump<CrosstermSource, NoBackend<()>>,
+    input_started: Instant,
 }
 
 impl Terminal for CrosstermTerminal {
@@ -83,12 +87,16 @@ impl Terminal for CrosstermTerminal {
 
     fn read_key(&mut self) -> std::io::Result<Key> {
         loop {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c')
-                    {
+            match self.input.next(self.input_started.elapsed())? {
+                RuntimeEvent::Input(LiveInput::Key(key)) => {
+                    if key.modifiers.control && key.code == KeyCode::Char('c') {
                         return Ok(Key::Quit);
+                    }
+                    if !matches!(
+                        key.kind,
+                        usagi_tui::usecase::terminal_input::KeyEventKind::Press
+                    ) {
+                        return Ok(Key::Other);
                     }
                     return Ok(match key.code {
                         KeyCode::Up => Key::Up,
@@ -97,16 +105,20 @@ impl Terminal for CrosstermTerminal {
                         KeyCode::Right => Key::Right,
                         KeyCode::Enter => Key::Enter,
                         KeyCode::Backspace => Key::Backspace,
-                        KeyCode::Esc => Key::Escape,
+                        KeyCode::Escape => Key::Escape,
                         KeyCode::Char(ch) => Key::Char(ch),
                         _ => Key::Other,
                     });
                 }
-                // リサイズは次フレームで描き直せばよいので Other として抜ける。
-                Event::Resize(_, _) => return Ok(Key::Other),
-                // その他のイベント（マウス／ホイール・フォーカス・貼り付け・キーの離上など）は
-                // 読み飛ばす。ホイールを取り込んで捨てることで端末がスクロールしない。
-                _ => {}
+                // 現行の管理画面 loop は Key port のため、次フレームを要求する Other として
+                // 表す。lossless な RuntimeEvent は Home controller 接続時にそのまま渡せる。
+                RuntimeEvent::Resize { .. }
+                | RuntimeEvent::Input(
+                    LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_),
+                )
+                | RuntimeEvent::Backend(()) => return Ok(Key::Other),
+                // legacy Key port は tick を公開しないため、次の stream event を待つ。
+                RuntimeEvent::Tick => {}
             }
         }
     }
@@ -221,6 +233,13 @@ fn run_in_terminal(
 
     let mut terminal = CrosstermTerminal {
         out: std::io::stdout(),
+        input: EventPump::new(
+            CrosstermSource,
+            NoBackend::default(),
+            Duration::from_millis(16),
+            Duration::ZERO,
+        ),
+        input_started: Instant::now(),
     };
     let result = run(&mut terminal);
 

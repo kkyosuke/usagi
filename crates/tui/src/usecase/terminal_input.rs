@@ -63,6 +63,10 @@ pub struct Modifiers {
     pub alt: bool,
     /// Super / Command modifier.
     pub super_: bool,
+    /// Hyper modifier.
+    pub hyper: bool,
+    /// Meta modifier.
+    pub meta: bool,
 }
 
 /// The phase of a physical key event.
@@ -114,6 +118,21 @@ pub enum LiveInput {
     Paste(Vec<u8>),
     /// Bytes supplied by a terminal backend without a semantic key event.
     Raw(Vec<u8>),
+}
+
+/// terminal、backend、timer を controller へ渡す統一 runtime stream。
+///
+/// `B` は daemon wire 型ではなく、adapter が投影した TUI-local backend event にする。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEvent<B> {
+    /// semantic key、text、または paste payload。
+    Input(LiveInput),
+    /// terminal geometry。width（columns）を先に持つ。
+    Resize { width: u16, height: u16 },
+    /// 定期的な runtime tick。
+    Tick,
+    /// backend receiver から届いた TUI-local event。
+    Backend(B),
 }
 
 /// A TUI-local action reserved from the live terminal stream.
@@ -212,7 +231,12 @@ impl LiveInputClassifier {
 }
 
 fn is_only_control(modifiers: Modifiers) -> bool {
-    modifiers.control && !modifiers.shift && !modifiers.alt && !modifiers.super_
+    modifiers.control
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.super_
+        && !modifiers.hyper
+        && !modifiers.meta
 }
 
 fn is_ctrl_o(key: &KeyEvent) -> bool {
