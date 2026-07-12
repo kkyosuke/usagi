@@ -200,9 +200,19 @@ mod tests {
     #[test]
     fn rejects_untrusted_or_invalid_values() {
         assert!(TerminalProfileId::new("bad value").is_err());
+        assert!(TerminalProfileId::new("a".repeat(65)).is_err());
+        assert_eq!(
+            TerminalProfileId::new("shell").unwrap().to_string(),
+            "shell"
+        );
         let snapshot = DurableTerminalLaunchSnapshot::new(request(), 1, "", PathBuf::from("."), [])
             .unwrap_err();
         assert_eq!(snapshot, TerminalLaunchValidationError::InvalidProgram);
+        assert_eq!(
+            DurableTerminalLaunchSnapshot::new(request(), 1, "sh\0", PathBuf::from("."), [])
+                .unwrap_err(),
+            TerminalLaunchValidationError::InvalidProgram
+        );
         assert_eq!(
             DurableTerminalLaunchSnapshot::new(request(), 0, "sh", PathBuf::from("."), [])
                 .unwrap_err(),
@@ -218,6 +228,25 @@ mod tests {
             ResolvedTerminalLaunch::new(
                 snapshot,
                 BTreeMap::from([(EnvironmentVariableName::new("TERM").unwrap(), "x".into())])
+            )
+            .unwrap_err(),
+            TerminalLaunchValidationError::InvalidEnvironment
+        );
+        let snapshot = DurableTerminalLaunchSnapshot::new(
+            request(),
+            1,
+            "sh",
+            PathBuf::from("."),
+            [EnvironmentVariableName::new("TERM").unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            ResolvedTerminalLaunch::new(
+                snapshot,
+                BTreeMap::from([(
+                    EnvironmentVariableName::new("TERM").unwrap(),
+                    "bad\0".into()
+                )])
             )
             .unwrap_err(),
             TerminalLaunchValidationError::InvalidEnvironment

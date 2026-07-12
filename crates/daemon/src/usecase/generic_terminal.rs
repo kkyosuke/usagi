@@ -302,6 +302,14 @@ mod tests {
             Err(())
         }
     }
+    struct FailAfter(usize);
+    impl TerminalStore for FailAfter {
+        type Error = ();
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), ()> {
+            self.0 = self.0.saturating_sub(1);
+            (self.0 != 0).then_some(()).ok_or(())
+        }
+    }
     struct Resolver;
     impl TerminalProfileResolver for Resolver {
         fn resolve(
@@ -547,6 +555,79 @@ mod tests {
                 &mut Spawner(Ok(process()))
             ),
             Err(GenericTerminalError::Store)
+        );
+    }
+    #[test]
+    fn resolver_store_and_terminal_identity_failures_are_typed() {
+        struct RejectingResolver;
+        impl TerminalProfileResolver for RejectingResolver {
+            fn resolve(
+                &mut self,
+                request: &TerminalLaunchRequest,
+            ) -> Result<ResolvedTerminalLaunch, TerminalLaunchValidationError> {
+                Err(TerminalLaunchValidationError::UnknownProfile {
+                    profile_id: request.profile_id.clone(),
+                })
+            }
+        }
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(2, 64, 1);
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                terminal.clone(),
+                fence.clone(),
+                Geometry { cols: 80, rows: 24 },
+                &mut RejectingResolver,
+                &mut Store::default(),
+                &mut Spawner(Ok(process()))
+            ),
+            Err(GenericTerminalError::Launch(
+                TerminalLaunchValidationError::UnknownProfile {
+                    profile_id: request.profile_id.clone()
+                }
+            ))
+        );
+        let (persist_after_spawn, spawn_fence) = refs(&request);
+        assert_eq!(
+            coordinator.launch(
+                &request,
+                persist_after_spawn,
+                spawn_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut FailAfter(2),
+                &mut Spawner(Ok(process()))
+            ),
+            Err(GenericTerminalError::ReconcileRequired(
+                TerminalReconcileState::PersistAfterSpawn
+            ))
+        );
+        let (live, live_fence) = refs(&request);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                live.clone(),
+                live_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        let key = live.terminal_id.as_str();
+        coordinator
+            .records
+            .get_mut(&key)
+            .unwrap()
+            .terminal
+            .daemon_generation = DaemonGeneration::new();
+        let stale = coordinator.records[&key].terminal.clone();
+        assert_eq!(
+            coordinator.terminal_snapshot(&stale),
+            Err(GenericTerminalError::TerminalGenerationMismatch)
         );
     }
 }
