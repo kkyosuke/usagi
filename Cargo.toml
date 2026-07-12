@@ -48,6 +48,10 @@ usagi-core = { path = "crates/core" }
 usagi-daemon = { path = "crates/daemon" }
 usagi-tui = { path = "crates/tui" }
 
+# CLI の引数解析。入口面クレート（usagi-cli）がコマンドツリーの定義に使う。
+# `string`: 配布 version など実行時に決まる文字列を clap コマンドに載せるため。
+clap = { version = "4.5", features = ["derive", "string"] }
+
 # clippy は CI / pre-push で `-D warnings` になるため、
 # 日常のビルドから pedantic まで warning として表面化させておく。
 # 各クレートは `[lints] workspace = true` でこれを継承する。
