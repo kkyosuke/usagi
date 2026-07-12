@@ -272,10 +272,11 @@ request capability 不足、plan provenance 不一致は typed error で fail-cl
 黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は
 adapter / daemon infrastructure の責務である。
 
-Codex adapter は daemon の `usecase::codex` に閉じる。Codex の CLI flag、model の解釈、config / MCP /
-hook の payload は provisioner 内部だけが扱う。adapter は `AgentAdapter` として reservation 前に durable
-snapshot と `SpawnProvision` を組み立て、runtime は snapshot を保存してから provision を PTY spawner へ
-一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal stream、error detail に残らない。
+Codex / Claude adapter は daemon の `usecase::codex` / `usecase::claude` に閉じる。各 product の CLI flag、
+model の解釈、config / MCP / hook の payload はそれぞれの provisioner 内部だけが扱う。adapter は共通の
+`AgentAdapter` として reservation 前に durable snapshot と `SpawnProvision` を組み立て、runtime は snapshot を
+保存してから provision を PTY spawner へ一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal
+stream、error detail に残らない。
 
 durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
 credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
