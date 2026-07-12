@@ -39,10 +39,7 @@ pub enum Command {
     Config { arguments: String },
     Env { arguments: String },
     Issue { arguments: String },
-    Preview { arguments: String },
     Session { arguments: String },
-    Unite { arguments: String },
-    Wake { arguments: String },
 }
 
 type CommandFactory = fn(String) -> Command;
@@ -82,35 +79,11 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
     CommandDefinition {
         info: CommandInfo {
-            name: "preview",
-            description: "Preview a Markdown file",
-            usage: "preview <path|name>",
-        },
-        factory: |arguments| Command::Preview { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
             name: "session",
             description: "Create, list, select, or remove sessions",
             usage: "session [create|list|overview|remove] <name>",
         },
         factory: |arguments| Command::Session { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "unite",
-            description: "Add or remove a workspace in the unite view",
-            usage: "unite [add|remove] <workspace>",
-        },
-        factory: |arguments| Command::Unite { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "wake",
-            description: "Schedule a continue message for running agents",
-            usage: "wake [-t <hhmm>|-i <duration>|status|cancel]",
-        },
-        factory: |arguments| Command::Wake { arguments },
     },
 ];
 
@@ -130,10 +103,7 @@ impl Command {
             Self::Config { arguments } => Box::new(h::Config { arguments }),
             Self::Env { arguments } => Box::new(h::Env { arguments }),
             Self::Issue { arguments } => Box::new(h::Issue { arguments }),
-            Self::Preview { arguments } => Box::new(h::Preview { arguments }),
             Self::Session { arguments } => Box::new(h::Session { arguments }),
-            Self::Unite { arguments } => Box::new(h::Unite { arguments }),
-            Self::Wake { arguments } => Box::new(h::Wake { arguments }),
         }
     }
 }
@@ -219,12 +189,7 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(
-            names,
-            [
-                "config", "env", "issue", "preview", "session", "unite", "wake"
-            ]
-        );
+        assert_eq!(names, ["config", "env", "issue", "session"]);
         assert!(
             definitions
                 .iter()
@@ -254,27 +219,9 @@ mod tests {
                 },
             ),
             (
-                "preview docs/a file.md",
-                Command::Preview {
-                    arguments: "docs/a file.md".to_owned(),
-                },
-            ),
-            (
                 "session create feature-x",
                 Command::Session {
                     arguments: "create feature-x".to_owned(),
-                },
-            ),
-            (
-                "unite add backend",
-                Command::Unite {
-                    arguments: "add backend".to_owned(),
-                },
-            ),
-            (
-                "wake -i 30m",
-                Command::Wake {
-                    arguments: "-i 30m".to_owned(),
                 },
             ),
         ];

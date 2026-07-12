@@ -6,18 +6,12 @@
 mod config;
 mod env;
 mod issue;
-mod preview;
 mod session;
-mod unite;
-mod wake;
 
 pub(super) use config::Config;
 pub(super) use env::Env;
 pub(super) use issue::Issue;
-pub(super) use preview::Preview;
 pub(super) use session::Session;
-pub(super) use unite::Unite;
-pub(super) use wake::Wake;
 
 #[cfg(test)]
 pub(crate) fn render(command: super::Command) -> super::CommandResult {

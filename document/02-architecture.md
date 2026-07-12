@@ -213,7 +213,7 @@ v1 から機能を再実装するときの置き場所の指針。
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙
-（`config` / `env` / `issue` / `preview` / `session` / `unite` / `wake`）を持つ。
+（`config` / `env` / `issue` / `session`）を持つ。
 `interpret` は入力をトップレベル名と trim 済みの未解釈引数に分け、`Command::into_handler` が
 コマンドごとのハンドラへ変換する。ハンドラは `Run` トレイトを実装し、実 IO や画面状態を
 直接操作せず純粋な `CommandResult` を返す。コマンド固有処理を持たない現在のハンドラは、
