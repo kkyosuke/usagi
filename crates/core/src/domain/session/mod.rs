@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::note::Scratchpad;
+use crate::domain::pullrequest::PrLink;
+
 /// Who launched a session — a person operating the TUI, or an agent driving the
 /// MCP server — recorded once when the session is created so a later reader can
 /// tell an automated session apart from a hand-made one.
@@ -99,6 +102,18 @@ pub struct SessionRecord {
     /// [`last_active_or_created`](Self::last_active_or_created).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_active: Option<DateTime<Utc>>,
+    /// The session's note scratchpad — free-form note, todo checklist, and
+    /// decision log (see [`Scratchpad`]). Display / UX only; empty (the default)
+    /// is omitted from `state.json`.
+    #[serde(default, skip_serializing_if = "Scratchpad::is_empty")]
+    pub notes: Scratchpad,
+    /// Pull requests discovered for this session — harvested from its panes'
+    /// output and persisted so the sidebar keeps showing the `#<number>` badges
+    /// across restarts. Empty (the default) is omitted from `state.json`. Rolled
+    /// up to the session level via [`PrLink::aggregate`] (per-worktree attribution
+    /// arrives with the git layer).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prs: Vec<PrLink>,
 }
 
 impl SessionRecord {

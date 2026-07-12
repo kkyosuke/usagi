@@ -1,4 +1,6 @@
 use super::{SessionOrigin, SessionRecord};
+use crate::domain::note::{Scratchpad, SessionTodo};
+use crate::domain::pullrequest::PrLink;
 use chrono::{TimeZone, Utc};
 
 fn sample() -> SessionRecord {
@@ -11,6 +13,8 @@ fn sample() -> SessionRecord {
         root: "/repo/.usagi/sessions/feature-x".into(),
         created_at: ts,
         last_active: None,
+        notes: Scratchpad::default(),
+        prs: Vec::new(),
     }
 }
 
@@ -78,6 +82,29 @@ fn record_round_trips_through_json_and_omits_defaults() {
     // Exercise the derived Clone / Debug.
     assert_eq!(s.clone(), s);
     assert!(format!("{s:?}").contains("feature-x"));
+}
+
+#[test]
+fn empty_notes_and_prs_are_omitted_but_populated_ones_round_trip() {
+    // Empty scratchpad and PR list are omitted from the file.
+    let empty = sample();
+    let json = serde_json::to_string(&empty).unwrap();
+    assert!(!json.contains("notes"), "{json}");
+    assert!(!json.contains("prs"), "{json}");
+
+    // Populated notes and PRs persist and round-trip.
+    let mut s = sample();
+    s.notes = Scratchpad {
+        note: Some("wip".to_string()),
+        todos: vec![SessionTodo::new("do it")],
+        decisions: Vec::new(),
+    };
+    s.prs = vec![PrLink::new(7, "https://x/pull/7")];
+    let json = serde_json::to_string(&s).unwrap();
+    assert!(json.contains("notes"));
+    assert!(json.contains("\"prs\""));
+    let back: SessionRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, s);
 }
 
 #[test]
