@@ -297,6 +297,23 @@ final output を drain 済みの verified exit、または identity を伴う re
 
 product 固有 adapter、secret、IPC schema はこの coordinator の境界外である。
 
+### Generic terminal launch boundary
+
+通常の interactive terminal は Agent runtime ではない。client は `TerminalProfileId` と登録済み
+workspace / session / worktree scope、geometry だけを `TerminalLaunchRequest` として送る。raw shell
+command、argv、cwd、env は request / IPC に置かない。daemon の `TerminalProfileResolver` が
+code-defined profile または trusted local settings から一度だけ program、cwd、非 secret env を解決する。
+
+`GenericTerminalCoordinator` は `TerminalRef` と `CompletionFence`、profile revision、program、cwd、env
+**名**の allowlist だけを `TerminalStore` へ保存してから PTY を spawn する。env の値、secret、rendered
+shell command は durable record、IPC event、通常 log に保存しない。generic terminal は
+`AgentRuntimeId`、AgentProfile、phase token を作らず、agent hook / MCP injection / adapter provisioning を
+呼ばない。
+
+attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` と #251 の reservation contract を
+使う。disconnect は attachment だけを外して PTY を生存させる。spawn 応答の欠落、identity unknown、orphan
+は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが slot を解放する。
+
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙

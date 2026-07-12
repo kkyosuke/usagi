@@ -15,6 +15,7 @@ pub mod claude;
 pub mod codex;
 pub mod control;
 pub mod generation;
+pub mod generic_terminal;
 pub mod restart;
 pub mod runtime;
 pub mod serve;
