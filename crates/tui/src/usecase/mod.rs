@@ -5,4 +5,5 @@
 //! 依存方向は presentation → usecase → domain（domain は usagi-core が持つ）。
 
 pub mod application;
+pub mod closeup;
 pub mod overview;
