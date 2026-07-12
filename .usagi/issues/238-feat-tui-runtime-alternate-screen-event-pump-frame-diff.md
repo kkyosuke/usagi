@@ -1,14 +1,14 @@
 ---
 number: 238
 title: feat(tui): runtime を alternate screen・event pump・frame diff で合成する
-status: todo
+status: done
 priority: high
 labels: [tui, runtime]
 dependson: [228, 229, 230, 220]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:47.788110+00:00
-updated_at: 2026-07-12T21:11:47.788110+00:00
+updated_at: 2026-07-12T22:52:10.952498+00:00
 ---
 
 ## 目的
