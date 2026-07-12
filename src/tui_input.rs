@@ -24,7 +24,6 @@ pub trait CrosstermEventSource {
 }
 
 /// 実端末の crossterm source。
-#[derive(Debug, Default)]
 pub struct CrosstermSource;
 
 impl CrosstermEventSource for CrosstermSource {
@@ -206,6 +205,18 @@ mod tests {
         }
     }
 
+    struct DelayedSource(Option<Event>);
+
+    impl CrosstermEventSource for DelayedSource {
+        fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+            Ok(!timeout.is_zero() && self.0.is_some())
+        }
+
+        fn read(&mut self) -> io::Result<Event> {
+            Ok(self.0.take().expect("read after ready poll"))
+        }
+    }
+
     #[derive(Default)]
     struct FakeBackend(VecDeque<&'static str>);
 
@@ -306,5 +317,100 @@ mod tests {
 
         assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
         assert_eq!(pump.source.timeouts, vec![Duration::ZERO, TICK]);
+    }
+
+    #[test]
+    fn ignores_non_input_events_received_while_waiting_for_a_tick() {
+        let source = DelayedSource(Some(Event::FocusLost));
+        let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
+
+        assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
+    }
+
+    #[test]
+    fn adapter_maps_every_portable_crossterm_key_code_and_kind() {
+        let cases = [
+            (
+                KeyCode::Backspace,
+                usagi_tui::usecase::terminal_input::KeyCode::Backspace,
+            ),
+            (
+                KeyCode::Enter,
+                usagi_tui::usecase::terminal_input::KeyCode::Enter,
+            ),
+            (
+                KeyCode::Tab,
+                usagi_tui::usecase::terminal_input::KeyCode::Tab,
+            ),
+            (
+                KeyCode::BackTab,
+                usagi_tui::usecase::terminal_input::KeyCode::BackTab,
+            ),
+            (
+                KeyCode::Esc,
+                usagi_tui::usecase::terminal_input::KeyCode::Escape,
+            ),
+            (KeyCode::Up, usagi_tui::usecase::terminal_input::KeyCode::Up),
+            (
+                KeyCode::Down,
+                usagi_tui::usecase::terminal_input::KeyCode::Down,
+            ),
+            (
+                KeyCode::Left,
+                usagi_tui::usecase::terminal_input::KeyCode::Left,
+            ),
+            (
+                KeyCode::Right,
+                usagi_tui::usecase::terminal_input::KeyCode::Right,
+            ),
+            (
+                KeyCode::Home,
+                usagi_tui::usecase::terminal_input::KeyCode::Home,
+            ),
+            (
+                KeyCode::End,
+                usagi_tui::usecase::terminal_input::KeyCode::End,
+            ),
+            (
+                KeyCode::PageUp,
+                usagi_tui::usecase::terminal_input::KeyCode::PageUp,
+            ),
+            (
+                KeyCode::PageDown,
+                usagi_tui::usecase::terminal_input::KeyCode::PageDown,
+            ),
+            (
+                KeyCode::Insert,
+                usagi_tui::usecase::terminal_input::KeyCode::Insert,
+            ),
+            (
+                KeyCode::Delete,
+                usagi_tui::usecase::terminal_input::KeyCode::Delete,
+            ),
+            (
+                KeyCode::F(8),
+                usagi_tui::usecase::terminal_input::KeyCode::Function(8),
+            ),
+            (
+                KeyCode::Null,
+                usagi_tui::usecase::terminal_input::KeyCode::Unknown,
+            ),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(
+                adapt_key(KeyEvent::new(code, KeyModifiers::NONE)).code,
+                expected
+            );
+        }
+        assert_eq!(
+            adapt_key(KeyEvent::new_with_kind(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ))
+            .kind,
+            InputKeyEventKind::Release
+        );
     }
 }
