@@ -25,7 +25,8 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 各クレート内はクリーンアーキテクチャの依存方向（`presentation → usecase → domain ← infrastructure`）を守る。
 **構成・責務・依存ルールは [2. アーキテクチャ](02-architecture.md) が正本**。開発時は次の 3 点だけ守ること。
 
-- `usagi-tui` / `usagi-daemon` / `usagi-cli` を相互に依存させない（連携は `usagi-core` の IPC プロトコル型を介した実行時通信のみ）。
+- `usagi-tui` / `usagi-daemon` / `usagi-cli` を相互に依存させない。プロセス内の面選択は
+  合成ルートが要求型を変換し、daemon との実行時通信は `usagi-core` の IPC プロトコル型を介する。
 - `usagi-core` の `domain/` は他層・他 usagi クレートに依存させない。外部クレートは時刻（`chrono`）と (de)serialize 語彙（`serde`）の基盤語彙に限り、git・PTY・IO 等の重い外部クレートは持ち込まない（正本は [2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
 - 依存方向を逆流させない（例: `usagi-core` から実行面クレートを参照しない）。
 

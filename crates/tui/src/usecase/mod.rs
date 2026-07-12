@@ -4,4 +4,5 @@
 //! usagi-core の usecase に置き、ここからは呼び出すだけにする。
 //! 依存方向は presentation → usecase → domain（domain は usagi-core が持つ）。
 
+pub mod application;
 pub mod overview;
