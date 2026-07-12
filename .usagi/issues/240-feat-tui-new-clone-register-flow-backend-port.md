@@ -1,14 +1,14 @@
 ---
 number: 240
 title: feat(tui): New の clone/register flow を backend port に結合する
-status: todo
+status: done
 priority: medium
 labels: [tui, parity-b]
 dependson: [230]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.522307+00:00
-updated_at: 2026-07-12T21:12:33.522307+00:00
+updated_at: 2026-07-12T22:53:23.934664+00:00
 ---
 
 ## 目的

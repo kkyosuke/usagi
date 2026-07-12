@@ -242,7 +242,7 @@ v1 から機能を再実装するときの置き場所の指針。
 | 画面をまたぐ再利用 UI 部品（widget） | `crates/tui/` の `presentation/widgets/` |
 | 色（意味的な役割→具体色）・色定数 | `crates/tui/` の `presentation/theme` |
 | 領域配置・ペイン分割・chrome（layout）。マスコットを頂く全画面の共通 chrome は `layouts/mascot_screen`（welcome / config が共有） | `crates/tui/` の `presentation/layouts/` |
-| 画面グラフの遷移・イベント状態機械 | `crates/tui/` の `usecase/`。Entry / Home controller は `usecase/application/controller.rs` で state / event / effect を純粋に還元する。Welcome / Open / Recent が選んだ `WorkspaceId` は attach completion と照合し、同じ ID の Home snapshot だけで Home を初期化する。失敗は元の entry surface に保持して同じ ID を retry でき、遅延・不一致の completion は無視する。daemon wire は TUI-local backend port の外へ閉じる |
+| 画面グラフの遷移・イベント状態機械 | `crates/tui/` の `usecase/`。Entry / New / Home controller は `usecase/application/controller.rs` で state / event / effect を純粋に還元する。Welcome / Open / Recent が選んだ `WorkspaceId` は attach completion と照合し、同じ ID の Home snapshot だけで Home を初期化する。New は Clone の git→project/registry と Existing の project/registry 登録を TUI-local backend port へ effect として渡し、operation token で completion を照合する。validation / backend failure は form を保持したまま同じ request を retry でき、成功時だけ Home を初期化する。遅延・不一致の completion は無視し、daemon wire は backend port の外へ閉じる |
 | Closeup terminal / Agent tab の placeholder・選択維持・attach policy | `crates/tui/` の `usecase/application/pane.rs`。daemon inventory / stream は event adapter が扱い、reducer は stable `TerminalRef` と `OperationId` だけを受け取る |
 | Overview コマンドの解釈・dispatch | `crates/tui/` の `usecase/overview/`（ハンドラは `overview/commands/`） |
 | Closeup コマンドの解釈・dispatch | `crates/tui/` の `usecase/closeup/`（ハンドラは `closeup/commands/`） |
