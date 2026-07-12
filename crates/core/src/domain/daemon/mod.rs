@@ -36,5 +36,36 @@ impl DaemonRecord {
     }
 }
 
+/// The lifecycle state derived from a daemon record and the liveness of its
+/// process. It is what clients act on: connect to an [`Alive`](DaemonState::Alive)
+/// daemon, reclaim a [`Stale`](DaemonState::Stale) record before spawning a fresh
+/// one, and spawn directly when [`Absent`](DaemonState::Absent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonState {
+    /// A record exists and its process is alive — a running daemon to connect to.
+    Alive,
+    /// A record exists but its process is gone — a leftover to reclaim.
+    Stale,
+    /// No record exists — no daemon has registered.
+    Absent,
+}
+
+/// Classify the daemon lifecycle state from an optional record and whether its
+/// process is alive.
+///
+/// The record's presence and the liveness probe are supplied by the caller:
+/// reading `daemon.json` and probing the pid are infrastructure concerns (real
+/// IO), so this stays a pure decision. When `record` is `None` the result is
+/// [`Absent`](DaemonState::Absent) and `alive` is irrelevant; otherwise `alive`
+/// selects [`Alive`](DaemonState::Alive) or [`Stale`](DaemonState::Stale).
+#[must_use]
+pub fn classify(record: Option<&DaemonRecord>, alive: bool) -> DaemonState {
+    match record {
+        None => DaemonState::Absent,
+        Some(_) if alive => DaemonState::Alive,
+        Some(_) => DaemonState::Stale,
+    }
+}
+
 #[cfg(test)]
 mod tests;
