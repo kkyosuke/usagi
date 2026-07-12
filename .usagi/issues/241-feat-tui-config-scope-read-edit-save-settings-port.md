@@ -1,14 +1,14 @@
 ---
 number: 241
 title: feat(tui): Config の scope read/edit/save を settings port に結合する
-status: in-progress
+status: done
 priority: medium
 labels: [tui, parity-b]
 dependson: [230]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.756332+00:00
-updated_at: 2026-07-12T22:48:45.483666+00:00
+updated_at: 2026-07-12T22:56:48.577622+00:00
 ---
 
 ## 目的
