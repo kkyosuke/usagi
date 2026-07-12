@@ -14,6 +14,8 @@ use usagi_core::infrastructure::daemon::{
 
 use crate::usecase;
 
+pub mod ipc;
+
 /// daemon 面が実 IO を行うために注入される依存一式。合成ルートが本物（ファイル・
 /// signal 0・SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
