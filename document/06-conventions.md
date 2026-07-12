@@ -35,9 +35,9 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 ルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、各クレートは
 `<crate>.workspace = true` で参照する。
 
-現在追加済みの外部依存は、domain エンティティ（`Workspace` / `Issue` / `Memory`）が使う
-`chrono`（時刻）・`serde`（JSON インデックス表現の derive）と、その JSON 表現を検証する
-テスト専用の `serde_json`（dev-dependency）だけである。
+現在追加済みの外部依存は、domain エンティティ（`Workspace` / `Issue` / `Memory` /
+`DaemonRecord`）が使う `chrono`（時刻）・`serde`（JSON インデックス表現の derive）と、
+その JSON 表現を検証するテスト専用の `serde_json`（dev-dependency）だけである。
 
 ## ブランチ名
 
