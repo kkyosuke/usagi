@@ -1,14 +1,14 @@
 ---
 number: 209
 title: feat(daemon): live terminal を保つ generation rollover と orphan safety を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, lifecycle, safety, ipc]
 dependson: [216, 218, 219]
 related: [159, 205, 206, 207, 208]
 parent: 213
 created_at: 2026-07-11T12:13:49.117451+00:00
-updated_at: 2026-07-12T12:09:54.278892+00:00
+updated_at: 2026-07-12T21:11:18.362685+00:00
 ---
 
 ## 目的
