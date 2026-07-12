@@ -10,49 +10,10 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
+use crate::usecase::closeup;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
-
-/// メニューの 1 アクション（ダミー）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Action {
-    /// 直接選ぶショートカット文字。
-    pub key: char,
-    /// 表示ラベル。
-    pub label: &'static str,
-    /// 1 行の説明。
-    pub description: &'static str,
-}
-
-/// フォーカス中セッションに対して選べるアクション（ダミー）。
-const ACTIONS: &[Action] = &[
-    Action {
-        key: 'o',
-        label: "Open terminal",
-        description: "attach the live shell",
-    },
-    Action {
-        key: 'a',
-        label: "Focus agent",
-        description: "jump to the agent pane",
-    },
-    Action {
-        key: 'n',
-        label: "New tab",
-        description: "open another pane",
-    },
-    Action {
-        key: 'e',
-        label: "Note",
-        description: "edit the session note",
-    },
-    Action {
-        key: 'x',
-        label: "Close tab",
-        description: "close the current pane",
-    },
-];
 
 /// アクションメニューの状態。対象セッション名と、アクション一覧上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -85,45 +46,47 @@ impl CloseupModal {
 
     /// アクション一覧。
     #[must_use]
-    pub fn actions(&self) -> &'static [Action] {
-        ACTIONS
+    pub fn actions(&self) -> Vec<closeup::CommandInfo> {
+        closeup::commands().collect()
     }
 
     /// 選択中のアクション。
     #[must_use]
-    pub fn selected_action(&self) -> Action {
-        ACTIONS[self.selected]
+    pub fn selected_action(&self) -> closeup::CommandInfo {
+        self.actions()[self.selected]
+    }
+
+    /// Enter で controller へ渡す registry command。Closeup は入力欄を持たないため、
+    /// 選択行の command 名そのものが completion になる。
+    #[must_use]
+    pub fn submission(&self) -> String {
+        self.selected_action().name.to_owned()
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
     pub fn select_next(&mut self) {
-        self.selected = (self.selected + 1) % ACTIONS.len();
+        self.selected = (self.selected + 1) % self.actions().len();
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
     pub fn select_prev(&mut self) {
-        self.selected = (self.selected + ACTIONS.len() - 1) % ACTIONS.len();
-    }
-
-    /// ショートカット文字 `key` に対応するアクション。無ければ `None`。
-    #[must_use]
-    pub fn action_for(&self, key: char) -> Option<Action> {
-        ACTIONS.iter().find(|a| a.key == key).copied()
+        let len = self.actions().len();
+        self.selected = (self.selected + len - 1) % len;
     }
 }
 
 /// 1 アクション行: 選択中は `›` マーカー、`key` バッジ（warning）、ラベル（accent）、説明（dim）。
-fn action_row(action: Action, selected: bool, inner: usize) -> String {
+fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
     } else {
         " ".to_string()
     };
-    let key = Role::Warning.style().bold().paint(&action.key.to_string());
+    let key = Role::Warning.style().bold().paint(action.name);
     let label = Role::Accent
         .style()
         .bold()
-        .paint(&format!("{:<14}", action.label));
+        .paint(&format!("{:<14}", action.name));
     let desc = Style::new().dim().paint(action.description);
     widgets::clip_to_width(&format!("  {marker} {key}  {label}{desc}"), inner)
 }
@@ -136,7 +99,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
             .paint(&format!("session: {}", state.session())),
         String::new(),
     ];
-    for (i, action) in ACTIONS.iter().enumerate() {
+    for (i, action) in state.actions().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
     }
     lines.push(String::new());
@@ -206,35 +169,32 @@ mod tests {
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
         assert_eq!(modal.actions().len(), 5);
-        assert_eq!(modal.selected_action().key, 'o');
+        assert_eq!(modal.selected_action().name, "agent");
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("tui"));
         let action = modal.actions()[0];
         assert_eq!(action, action);
-        assert!(format!("{action:?}").contains("Open terminal"));
+        assert!(format!("{action:?}").contains("agent"));
     }
 
     #[test]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
-        modal.select_prev(); // wrap to last (4)
+        modal.select_prev(); // wrap to last (terminal)
         assert_eq!(modal.selected(), 4);
-        assert_eq!(modal.selected_action().key, 'x');
+        assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
-        assert_eq!(modal.selected_action().key, 'a');
+        assert_eq!(modal.selected_action().name, "chat");
     }
 
     #[test]
-    fn action_for_maps_shortcut_keys() {
-        let modal = CloseupModal::new("s");
-        assert_eq!(
-            modal.action_for('o').map(|a| a.label),
-            Some("Open terminal")
-        );
-        assert_eq!(modal.action_for('x').map(|a| a.label), Some("Close tab"));
-        assert_eq!(modal.action_for('z'), None);
+    fn selected_action_submission_comes_from_the_registry() {
+        let mut modal = CloseupModal::new("s");
+        assert_eq!(modal.submission(), "agent");
+        modal.select_next();
+        assert_eq!(modal.submission(), "chat");
     }
 
     #[test]
@@ -242,9 +202,9 @@ mod tests {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Session")); // タイトル
         assert!(text.contains("session: daemon"));
-        assert!(text.contains("Open terminal"));
-        assert!(text.contains("attach the live shell"));
-        assert!(text.contains("Close tab"));
+        assert!(text.contains("terminal"));
+        assert!(text.contains("Open an agent"));
+        assert!(text.contains("close"));
         assert!(text.contains("Esc: switch"));
         // 選択マーカーは 1 つ。
         assert!(text.contains('›'));

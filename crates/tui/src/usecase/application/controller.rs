@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
+use crate::usecase::{closeup, overview};
+
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeMode {
@@ -220,7 +222,7 @@ impl AppState {
 }
 
 /// terminal adapter が将来投影する入力語彙。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppKey {
     /// cursor を前の row へ動かす。
     Up,
@@ -236,6 +238,10 @@ pub enum AppKey {
     OpenCloseupOverlay,
     /// 将来の terminal input / command vocabulary 用の文字入力。
     Char(char),
+    /// Overview modal の現在の入力を registry 経由で実行する。
+    SubmitOverview(String),
+    /// Closeup modal の現在の入力を registry 経由で実行する。
+    SubmitCloseup(String),
 }
 
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
@@ -283,6 +289,21 @@ pub enum Effect {
     },
     /// 次の snapshot を要求する。
     RefreshSessions { workspace: WorkspaceId },
+    /// workspace scope command を backend adapter に依頼する。
+    WorkspaceCommand {
+        workspace: WorkspaceId,
+        command: overview::Command,
+    },
+    /// target の terminal を開くか再利用する。
+    OpenTerminal { target: Target, arguments: String },
+    /// target の agent を開くか再利用する。
+    OpenAgent { target: Target, arguments: String },
+    /// selected session を削除する。root はこの effect に変換しない。
+    RemoveSession {
+        workspace: WorkspaceId,
+        session: SessionId,
+        force: bool,
+    },
 }
 
 /// effect を実行し、backend event を取り出す TUI-local port。
@@ -389,8 +410,89 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.overlay = Some(Overlay::Closeup);
             Vec::new()
         }
+        AppKey::SubmitOverview(input) => submit_overview(state, &input),
+        AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
         AppKey::Char(_) => Vec::new(),
+    }
+}
+
+fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
+    if state.overlay != Some(Overlay::Overview) {
+        return Vec::new();
+    }
+    match overview::interpret(input) {
+        Ok(command) => {
+            state.overlay = None;
+            state.notice = Some(Notice::new(format!("Requested {}", command.name())));
+            vec![Effect::WorkspaceCommand {
+                workspace: state.workspace,
+                command,
+            }]
+        }
+        Err(error) => {
+            state.notice = Some(Notice::new(error.to_string()));
+            Vec::new()
+        }
+    }
+}
+
+fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
+    if state.overlay != Some(Overlay::Closeup) {
+        return Vec::new();
+    }
+    let command = match closeup::interpret(input) {
+        Ok(command) => command,
+        Err(error) => {
+            state.notice = Some(Notice::new(error.to_string()));
+            return Vec::new();
+        }
+    };
+    let command_name = command.name();
+    let effect = match command {
+        closeup::Command::Terminal { arguments } => Some(Effect::OpenTerminal {
+            target: state.active,
+            arguments,
+        }),
+        closeup::Command::Agent { arguments } => Some(Effect::OpenAgent {
+            target: state.active,
+            arguments,
+        }),
+        closeup::Command::Close { arguments } => match state.active {
+            Target::Session(session) => {
+                if let Some(force) = parse_close_force(&arguments) {
+                    Some(Effect::RemoveSession {
+                        workspace: state.workspace,
+                        session,
+                        force,
+                    })
+                } else {
+                    state.notice = Some(Notice::new("invalid close arguments"));
+                    None
+                }
+            }
+            Target::Root(_) => {
+                state.notice = Some(Notice::new("workspace root cannot be closed"));
+                None
+            }
+        },
+        closeup::Command::Chat { .. } | closeup::Command::Diff { .. } => {
+            state.notice = Some(Notice::new(format!("{command_name} is not available")));
+            None
+        }
+    };
+    if effect.is_some() {
+        state.overlay = None;
+        state.notice = Some(Notice::new(format!("Requested {command_name}")));
+    }
+    effect.into_iter().collect()
+}
+
+fn parse_close_force(arguments: &str) -> Option<bool> {
+    match arguments {
+        "" => Some(false),
+        "--force" => Some(true),
+        _ => None,
     }
 }
 
@@ -626,5 +728,114 @@ mod tests {
         assert_eq!(state.selected(), Selection::NewSession);
         let _ = update(&mut state, AppEvent::Key(AppKey::Char('x')));
         assert_eq!(state.selected(), Selection::NewSession);
+    }
+
+    #[test]
+    fn modal_registry_dispatches_once_and_rejects_invalid_root_and_repeated_requests() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("issue list".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::WorkspaceCommand {
+                workspace,
+                command: overview::Command::Issue {
+                    arguments: "list".to_owned(),
+                },
+            }]
+        );
+        assert_eq!(state.overlay(), None);
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("issue list".to_owned())),
+            )
+            .is_empty()
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("unknown".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Overview));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("close".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("workspace root cannot be closed")
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        let effects = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::OpenTerminal {
+                target: Target::Session(session),
+                arguments: "open".to_owned(),
+            }]
+        );
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("terminal open".to_owned())),
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn closeup_registry_dispatches_agent_and_validated_session_remove() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("agent codex".to_owned())),
+            ),
+            vec![Effect::OpenAgent {
+                target: Target::Session(session),
+                arguments: "codex".to_owned(),
+            }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("close --force".to_owned())),
+            ),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+            }]
+        );
     }
 }
