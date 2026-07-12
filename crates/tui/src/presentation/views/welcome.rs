@@ -1,10 +1,11 @@
 //! Welcome 画面（最初のトップメニュー）。
 //!
 //! 起動直後に出るメニュー画面。左に Open / New / Config / Quit のメニュー、右に最近使った
-//! workspace（recent）のカードを 2 カラムで並べ、マスコットとタイトルを上に置く。状態
-//! （[`Welcome`]）は端末 IO を持たず、[`render`] が状態を 1 フレーム分の行（ANSI 付き
-//! `Vec<String>`）に変換する純粋関数である。色は [`crate::presentation::theme`] の意味的な
-//! 役割で載せる。
+//! 項目（recent）のカードを 2 カラムで並べ、マスコットとタイトルを上に置く。recent の各項目は
+//! 単体 workspace か、一緒に開いた workspace の合併（unite）のどちらかで、カードの見た目を
+//! 変えて描き分ける。状態（[`Welcome`]）は端末 IO を持たず、[`render`] が状態を 1 フレーム分の
+//! 行（ANSI 付き `Vec<String>`）に変換する純粋関数である。色は
+//! [`crate::presentation::theme`] の意味的な役割で載せる。
 //!
 //! キー入力の解釈（どのキーをどの操作に写すか）は入力層が整うときに載せる。ここでは状態を
 //! 動かすのに必要な純粋な操作 — 選択の上下移動（[`Welcome::select_next`] /
@@ -13,7 +14,7 @@
 
 use chrono::{DateTime, Utc};
 
-use usagi_core::domain::workspace::WorkspaceOverview;
+use usagi_core::domain::recent::Recent;
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, icon, modal};
@@ -24,6 +25,8 @@ const TITLE: &str = "USAGI";
 const MENU_WIDTH: usize = 18;
 /// 右の recent 列の固定表示幅。
 const RECENT_WIDTH: usize = 32;
+/// recent 列に出すカードの枚数（キー `1`〜`3`）。
+const RECENT_SLOTS: usize = 3;
 /// メニュー列と recent 列の間、区切り線の左右に置く余白。
 const COLUMN_GAP: usize = 4;
 /// recent カードの内側（内容）幅。枠線 2 桁＋左右余白 2 桁を引く。
@@ -44,7 +47,7 @@ pub enum MenuAction {
     Config,
     /// welcome 画面を離れて終了する。
     Quit,
-    /// recent 一覧の `usize` 番目の workspace を開く。
+    /// recent 一覧の `usize` 番目の項目を開く。
     OpenRecent(usize),
 }
 
@@ -57,29 +60,12 @@ pub struct MenuItem {
     pub key: char,
 }
 
-/// 右カラムに出す recent workspace の 1 枚のカード。数値は
-/// [`WorkspaceOverview`] から取り込む。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecentItem {
-    /// workspace 名。
-    pub label: String,
-    /// この workspace を開く番号キー（`1`〜`3`）。
-    pub key: char,
-    /// 最終利用時刻。相対表記に使う。
-    pub updated_at: DateTime<Utc>,
-    /// 記録済みセッション数。
-    pub session_count: usize,
-    /// 未 done の issue 数。
-    pub open_issue_count: usize,
-    /// 検出済み PR 数。
-    pub pr_count: usize,
-}
-
-/// welcome メニューの状態。端末 IO を持たず、[`render`] に渡して描画する。
+/// welcome メニューの状態。端末 IO を持たず、[`render`] に渡して描画する。recent は
+/// [`Recent`] の配列で持ち、単体 workspace と unite を同じリストに混ぜて表示する。
 #[derive(Debug, Clone)]
 pub struct Welcome {
     items: Vec<MenuItem>,
-    recent_items: Vec<RecentItem>,
+    recent: Vec<Recent>,
     selected_index: usize,
     notice: Option<String>,
 }
@@ -127,32 +113,19 @@ fn activate(key: char) -> MenuAction {
 }
 
 impl Welcome {
-    /// recent workspace（最近使った順）を添えてメニューを組む。recent は先頭 3 件だけ取り、
-    /// `1`〜`3` の番号キーを振る。
+    /// recent 項目（最近使った順）を添えてメニューを組む。recent は先頭 [`RECENT_SLOTS`] 件
+    /// だけ取り、`1`〜`3` の番号キーで開ける。
     #[must_use]
-    pub fn new(recent: Vec<WorkspaceOverview>) -> Self {
-        let recent_items = recent
-            .into_iter()
-            .take(3)
-            .enumerate()
-            .map(|(index, overview)| RecentItem {
-                label: overview.workspace.name,
-                key: recent_key(index),
-                updated_at: overview.workspace.updated_at,
-                session_count: overview.session_count,
-                open_issue_count: overview.open_issue_count,
-                pr_count: overview.pr_count,
-            })
-            .collect();
+    pub fn new(recent: Vec<Recent>) -> Self {
         Self {
             items: default_items(),
-            recent_items,
+            recent: recent.into_iter().take(RECENT_SLOTS).collect(),
             selected_index: 0,
             notice: None,
         }
     }
 
-    /// recent workspace を持たないメニュー。
+    /// recent 項目を持たないメニュー。
     #[must_use]
     pub fn empty() -> Self {
         Self::new(Vec::new())
@@ -164,10 +137,10 @@ impl Welcome {
         &self.items
     }
 
-    /// recent カード。
+    /// recent 項目（単体 workspace / unite が混在する）。
     #[must_use]
-    pub fn recent_items(&self) -> &[RecentItem] {
-        &self.recent_items
+    pub fn recent(&self) -> &[Recent] {
+        &self.recent
     }
 
     /// 選択中の項目の添字。
@@ -218,10 +191,10 @@ impl Welcome {
         self.recent_action(key)
     }
 
-    /// 番号キー `key` に対応する recent workspace を開く操作。空スロットや範囲外は `None`。
+    /// 番号キー `key` に対応する recent 項目を開く操作。空スロットや範囲外は `None`。
     fn recent_action(&self, key: char) -> Option<MenuAction> {
         let digit = usize::try_from(key.to_digit(10)?).ok()?;
-        if (1..=self.recent_items.len()).contains(&digit) {
+        if (1..=self.recent.len()).contains(&digit) {
             Some(MenuAction::OpenRecent(digit - 1))
         } else {
             None
@@ -280,37 +253,81 @@ fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     lines
 }
 
-/// recent カード 1 枚。実データがなければ番号付きのプレースホルダを描く。
-fn recent_card(item: Option<&RecentItem>, index: usize, now: DateTime<Utc>) -> Vec<String> {
+/// recent カードのタイトルに置く番号キー（Warning 太字）。
+fn card_key(key: char) -> String {
+    Role::Warning.style().bold().paint(&key.to_string())
+}
+
+/// recent カードの本文行（dim）。
+fn card_body_line(text: &str) -> String {
+    Style::new().dim().paint(text)
+}
+
+/// カウント行 `◷ 相対時刻  ⎇ セッション  #PR  ● 未 done issue`。単体・unite 共通の書式。
+fn counts_line(relative: &str, sessions: usize, prs: usize, open_issues: usize) -> String {
+    card_body_line(&format!(
+        "◷ {relative}  ⎇ {sessions}  #{prs}  ● {open_issues}"
+    ))
+}
+
+/// recent カード 1 枚。[`Recent`] のバリアントで描き分ける。実データが無いスロットは番号付きの
+/// プレースホルダを描く。
+///
+/// - 単体 workspace: タイトル `key name`、本文はカウント 1 行。
+/// - unite（合併）: タイトル `key primary +追加数`、本文はメンバー名（`∪`）＋合計カウントの 2 行。
+fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<String> {
+    let key = recent_key(index);
     match item {
-        Some(item) => {
+        Some(Recent::Workspace(overview)) => {
+            let title = format!("{} {}", card_key(key), overview.workspace.name);
+            let body = vec![counts_line(
+                &widgets::relative_time(overview.workspace.updated_at, now),
+                overview.session_count,
+                overview.pr_count,
+                overview.open_issue_count,
+            )];
+            modal::boxed(&title, RECENT_INNER_WIDTH, &body)
+        }
+        Some(Recent::Unite(unite)) => {
             let title = format!(
-                "{} {}",
-                Role::Warning.style().bold().paint(&item.key.to_string()),
-                item.label
+                "{} {} +{}",
+                card_key(key),
+                unite.primary_name(),
+                unite.extra_count()
             );
-            let body = vec![Style::new().dim().paint(&format!(
-                "◷ {}  ⎇ {}  #{}  ● {}",
-                widgets::relative_time(item.updated_at, now),
-                item.session_count,
-                item.pr_count,
-                item.open_issue_count
-            ))];
+            let names = unite
+                .members()
+                .iter()
+                .map(|member| member.workspace.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let relative = unite
+                .updated_at()
+                .map_or_else(|| "—".to_string(), |at| widgets::relative_time(at, now));
+            let body = vec![
+                card_body_line(&format!("∪ {names}")),
+                counts_line(
+                    &relative,
+                    unite.session_count(),
+                    unite.pr_count(),
+                    unite.open_issue_count(),
+                ),
+            ];
             modal::boxed(&title, RECENT_INNER_WIDTH, &body)
         }
         None => modal::boxed(
-            &format!("{} —", recent_key(index)),
+            &format!("{key} —"),
             RECENT_INNER_WIDTH,
-            &[Style::new().dim().paint("No recent workspace")],
+            &[card_body_line("No recent workspace")],
         ),
     }
 }
 
-/// 右カラムの recent 群。見出し＋常に 3 枚のカードで高さを固定し、読み込みや空でも
-/// マスコット行がずれないようにする。
-fn recent_lines(items: &[RecentItem], now: DateTime<Utc>) -> Vec<String> {
+/// 右カラムの recent 群。見出し＋常に [`RECENT_SLOTS`] 枚のカードを出し、読み込みや空でも
+/// 列の見出し位置がずれないようにする。
+fn recent_lines(items: &[Recent], now: DateTime<Utc>) -> Vec<String> {
     let mut lines = vec![Role::Success.style().bold().paint("Recent")];
-    for i in 0..3 {
+    for i in 0..RECENT_SLOTS {
         lines.extend(recent_card(items.get(i), i, now));
     }
     lines
@@ -325,16 +342,16 @@ fn pad_segment(segment: &str, width: usize) -> String {
 }
 
 /// メニュー列（左）と recent 群（右）を区切り線で結んだ 2 カラムブロック。ブロック全体を
-/// 端末に中央寄せする。
+/// 端末に中央寄せする。unite カードは行数が多いので、片方の列が尽きた行は空白で埋める。
 fn menu_lines(
     width: usize,
     items: &[MenuItem],
     selected_index: usize,
-    recent_items: &[RecentItem],
+    recent: &[Recent],
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let left = menu_column_lines(items, selected_index);
-    let right = recent_lines(recent_items, now);
+    let right = recent_lines(recent, now);
     let row_count = left.len().max(right.len());
     let left_pad = " ".repeat(widgets::centered_padding(width, MENU_BLOCK_WIDTH));
     let gap = " ".repeat(COLUMN_GAP);
@@ -391,7 +408,7 @@ pub fn render(
         width,
         welcome.items(),
         welcome.selected_index(),
-        welcome.recent_items(),
+        welcome.recent(),
         now,
     ));
     body.extend(notice_lines(width, welcome.notice()));
@@ -418,6 +435,7 @@ mod tests {
     use super::{MenuAction, Welcome, render};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
+    use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
     fn now() -> DateTime<Utc> {
@@ -430,6 +448,21 @@ mod tests {
         let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
         workspace.updated_at = now() - Duration::minutes(minutes_ago);
         WorkspaceOverview::new(workspace, 2, 4, 1)
+    }
+
+    /// 単体 workspace の recent 項目。
+    fn workspace(name: &str, minutes_ago: i64) -> Recent {
+        Recent::Workspace(overview(name, minutes_ago))
+    }
+
+    /// 与えた (名前, 何分前) のメンバーからなる unite の recent 項目。
+    fn unite(members: &[(&str, i64)]) -> Recent {
+        Recent::Unite(UniteOverview::new(
+            members
+                .iter()
+                .map(|(name, minutes)| overview(name, *minutes))
+                .collect(),
+        ))
     }
 
     fn strip(line: &str) -> String {
@@ -450,13 +483,21 @@ mod tests {
         out
     }
 
+    fn rendered(welcome: &Welcome) -> String {
+        render(24, 80, welcome, now())
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn new_welcome_starts_at_the_first_item_without_a_notice() {
         let welcome = Welcome::empty();
         assert_eq!(welcome.selected_index(), 0);
         assert_eq!(welcome.notice(), None);
         assert_eq!(welcome.items().len(), 4);
-        assert!(welcome.recent_items().is_empty());
+        assert!(welcome.recent().is_empty());
         // derive された Clone / Debug も計測対象なのでここで触れる。
         assert!(format!("{:?}", welcome.clone()).contains("Welcome"));
     }
@@ -464,7 +505,7 @@ mod tests {
     #[test]
     fn default_matches_empty() {
         assert_eq!(Welcome::default().selected_index(), 0);
-        assert!(Welcome::default().recent_items().is_empty());
+        assert!(Welcome::default().recent().is_empty());
     }
 
     #[test]
@@ -533,7 +574,10 @@ mod tests {
 
     #[test]
     fn action_for_maps_recent_number_keys() {
-        let welcome = Welcome::new(vec![overview("alpha", 11), overview("beta", 180)]);
+        let welcome = Welcome::new(vec![
+            workspace("alpha", 11),
+            unite(&[("beta", 180), ("gamma", 5)]),
+        ]);
         assert_eq!(welcome.action_for('1'), Some(MenuAction::OpenRecent(0)));
         assert_eq!(welcome.action_for('2'), Some(MenuAction::OpenRecent(1)));
         // 空スロット（3 件未満）や範囲外は None。
@@ -542,51 +586,64 @@ mod tests {
     }
 
     #[test]
-    fn recent_items_are_limited_to_three_and_numbered() {
+    fn recent_is_limited_to_three() {
         let welcome = Welcome::new(vec![
-            overview("alpha", 1),
-            overview("beta", 2),
-            overview("gamma", 3),
-            overview("delta", 4),
+            workspace("alpha", 1),
+            workspace("beta", 2),
+            workspace("gamma", 3),
+            workspace("delta", 4),
         ]);
-        assert_eq!(welcome.recent_items().len(), 3);
-        assert_eq!(welcome.recent_items()[0].label, "alpha");
-        assert_eq!(welcome.recent_items()[0].key, '1');
-        assert_eq!(welcome.recent_items()[2].label, "gamma");
-        assert_eq!(welcome.recent_items()[2].key, '3');
-        // derive された Clone / PartialEq / Debug（RecentItem）を触れる。
-        assert_eq!(welcome.recent_items()[0].clone(), welcome.recent_items()[0]);
-        assert!(format!("{:?}", welcome.recent_items()[0]).contains("alpha"));
-        // MenuItem の derive も。
+        assert_eq!(welcome.recent().len(), 3);
+        // MenuItem / MenuAction の derive も計測対象なのでここで触れる。
         assert_eq!(welcome.items()[0], welcome.items()[0]);
         assert!(format!("{:?}", welcome.items()[0]).contains("Open"));
-        // MenuAction の derive も。
         assert_eq!(MenuAction::OpenRecent(0), MenuAction::OpenRecent(0));
         assert!(format!("{:?}", MenuAction::Open).contains("Open"));
     }
 
     #[test]
     fn render_combines_every_section() {
-        let welcome = Welcome::new(vec![overview("alpha", 11)]);
-        let frame = render(0, 0, &welcome, now());
-        let joined: String = frame
-            .iter()
-            .map(|l| strip(l))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let welcome = Welcome::new(vec![workspace("alpha", 11)]);
+        let joined = rendered(&welcome);
         assert!(joined.contains("USAGI"));
         assert!(joined.contains("Menu"));
         assert!(joined.contains("Recent"));
         assert!(joined.contains("Open"));
         assert!(joined.contains("Quit"));
         assert!(joined.contains("alpha"));
-        // recent カードの数値と相対時刻。
+        // 単体 workspace カードのカウントと相対時刻。
         assert!(joined.contains("11min ago"));
         assert!(joined.contains("#1"));
         assert!(joined.contains("● 4"));
         assert!(joined.contains('│'));
         // フッタのヒント。
         assert!(joined.contains("q: quit"));
+    }
+
+    #[test]
+    fn render_distinguishes_unite_cards_from_workspace_cards() {
+        let welcome = Welcome::new(vec![
+            workspace("solo", 30),
+            unite(&[("alpha", 45), ("beta", 8)]),
+        ]);
+        let joined = rendered(&welcome);
+        // 単体カード。
+        assert!(joined.contains("solo"));
+        // unite カード: primary +追加数、メンバー名（∪）、合計カウント（セッション 2+2=4）、
+        // 最新メンバーの相対時刻（beta が 8min ago）。
+        assert!(joined.contains("alpha +1"));
+        assert!(joined.contains("∪ alpha · beta"));
+        assert!(joined.contains("⎇ 4"));
+        assert!(joined.contains("8min ago"));
+    }
+
+    #[test]
+    fn render_handles_an_empty_unite() {
+        // 退化した空 unite でも落ちず、相対時刻を "—" で表す。
+        let welcome = Welcome::new(vec![unite(&[])]);
+        let joined = rendered(&welcome);
+        assert!(joined.contains('∪'));
+        assert!(joined.contains("+0"));
     }
 
     #[test]
@@ -600,13 +657,7 @@ mod tests {
 
     #[test]
     fn render_shows_a_placeholder_when_there_are_no_recents() {
-        let welcome = Welcome::empty();
-        let frame = render(24, 80, &welcome, now());
-        let joined: String = frame
-            .iter()
-            .map(|l| strip(l))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let joined = rendered(&Welcome::empty());
         assert!(joined.contains("No recent workspace"));
         assert!(joined.contains("1 —"));
     }
@@ -615,12 +666,7 @@ mod tests {
     fn render_renders_the_notice_line() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("welcome back".to_string()));
-        let frame = render(24, 80, &welcome, now());
-        let joined: String = frame
-            .iter()
-            .map(|l| strip(l))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let joined = rendered(&welcome);
         assert!(joined.contains("welcome back"));
     }
 
@@ -665,7 +711,10 @@ mod tests {
 
     #[test]
     fn render_rows_fit_the_terminal_width() {
-        let welcome = Welcome::new(vec![overview("alpha", 11)]);
+        let welcome = Welcome::new(vec![
+            workspace("alpha", 11),
+            unite(&[("beta", 20), ("gamma", 5)]),
+        ]);
         let frame = render(24, 80, &welcome, now());
         // どの行も端末幅を超えない（2 カラムブロックが幅内に収まる）。
         assert!(frame.iter().all(|l| display_width(l) <= 80));
