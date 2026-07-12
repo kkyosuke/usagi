@@ -1,0 +1,18 @@
+# usagi v2 の入口面クレート（常駐しない headless presentation）。人間向け CLI
+# サブコマンド（cli/）とエージェント向け MCP サーバ（mcp/）を置く
+# （document/proposals/01-entry-surfaces.md）。usagi-core にのみ依存し、
+# usagi-tui / usagi-daemon には依存しない。
+[package]
+name = "usagi-cli"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+usagi-core.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

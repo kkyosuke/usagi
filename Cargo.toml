@@ -2,8 +2,8 @@
 # 独立した Cargo プロジェクトとして残っている（この workspace のビルド対象外）。
 #
 # ルートパッケージは配布バイナリ `usagi` の合成ルート（bin）で、実装は crates/ 配下の
-# 3 クレートに置く（共通: usagi-core / daemon 面: usagi-daemon / TUI 面: usagi-tui）。
-# 構成の設計判断は document/proposals/06-v2-workspace-layout.md を参照。
+# 4 クレートに置く（共通: usagi-core / daemon 面: usagi-daemon / TUI 面: usagi-tui /
+# 入口面: usagi-cli）。構成の正本は document/02-architecture.md を参照。
 #
 # リリース起点は v1/Cargo.toml の version（auto-release が監視。リリースはまだ
 # v1 のバイナリを出荷する）。このルートの version はリリースに影響しないが、
@@ -19,6 +19,7 @@ license.workspace = true
 description = "usagi v2 — セッション・worktree オーケストレータのフルリライト"
 
 [dependencies]
+usagi-cli.workspace = true
 usagi-core.workspace = true
 usagi-daemon.workspace = true
 usagi-tui.workspace = true
@@ -29,7 +30,7 @@ usagi-tui.workspace = true
 workspace = true
 
 [workspace]
-members = ["crates/core", "crates/daemon", "crates/tui"]
+members = ["crates/cli", "crates/core", "crates/daemon", "crates/tui"]
 # v1/ は退避された旧実装（独立した Cargo プロジェクト）。workspace に含めない。
 exclude = ["v1"]
 
@@ -42,6 +43,7 @@ license = "MIT"
 # v2 はゼロからのリライトのため、外部依存は必要になった時点で追加する
 # （v1 の依存を先回りで持ち込まない）。
 [workspace.dependencies]
+usagi-cli = { path = "crates/cli" }
 usagi-core = { path = "crates/core" }
 usagi-daemon = { path = "crates/daemon" }
 usagi-tui = { path = "crates/tui" }
