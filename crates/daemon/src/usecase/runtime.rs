@@ -61,16 +61,62 @@ pub trait RuntimeStore {
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error>;
 }
 /// Called exactly once by [`RuntimeCoordinator::launch`], before PTY spawn.
-pub trait LaunchResolver {
-    fn resolve(
-        &mut self,
-        request: &LaunchRequest,
-    ) -> Result<DurableLaunchSnapshot, LaunchValidationError>;
+/// Ephemeral, adapter-owned spawn inputs. This value is never copied into a
+/// [`DurableLaunchSnapshot`] or a runtime record.
+pub struct SpawnProvision {
+    environment: BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String>,
+    arguments: Vec<String>,
+}
+
+impl SpawnProvision {
+    #[must_use]
+    pub fn new(
+        environment: impl IntoIterator<
+            Item = (usagi_core::domain::agent::EnvironmentVariableName, String),
+        >,
+        arguments: Vec<String>,
+    ) -> Self {
+        Self {
+            environment: environment.into_iter().collect(),
+            arguments,
+        }
+    }
+
+    #[must_use]
+    pub fn environment(
+        &self,
+    ) -> &BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String> {
+        &self.environment
+    }
+
+    #[must_use]
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterError {
+    Validation(LaunchValidationError),
+    ExecutableUnavailable,
+    ProvisionFailed,
+}
+
+/// Product adapter boundary. It validates/renders a durable snapshot and
+/// materializes the non-durable spawn inputs exactly once before reservation.
+pub trait AgentAdapter {
+    fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError>;
+}
+
+pub struct ResolvedLaunch {
+    pub snapshot: DurableLaunchSnapshot,
+    pub provision: SpawnProvision,
 }
 pub trait PtySpawner {
     fn spawn(
         &mut self,
         launch: &DurableLaunchSnapshot,
+        provision: &SpawnProvision,
         terminal: &TerminalRef,
     ) -> Result<ProcessIdentity, SpawnFailure>;
 }
@@ -86,7 +132,7 @@ pub trait OutputJournal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeError {
-    Launch(LaunchValidationError),
+    Adapter(AdapterError),
     RuntimeAlreadyExists,
     ScopeMismatch,
     ConcurrencyExhausted,
@@ -118,13 +164,13 @@ impl RuntimeCoordinator {
         }
     }
 
-    pub fn launch<R: LaunchResolver, S: RuntimeStore, P: PtySpawner>(
+    pub fn launch<A: AgentAdapter, S: RuntimeStore, P: PtySpawner>(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
         operation: CompletionFence,
         geometry: Geometry,
-        resolver: &mut R,
+        adapter: &mut A,
         store: &mut S,
         spawner: &mut P,
     ) -> Result<(), RuntimeError> {
@@ -136,7 +182,8 @@ impl RuntimeCoordinator {
         if self.occupied_slots() >= self.limit {
             return Err(RuntimeError::ConcurrencyExhausted);
         }
-        let launch = resolver.resolve(request).map_err(RuntimeError::Launch)?;
+        let resolved = adapter.resolve(request).map_err(RuntimeError::Adapter)?;
+        let launch = resolved.snapshot;
         if launch.request != *request
             || launch.plan.profile_id != request.profile_id
             || launch.plan.profile_revision == 0
@@ -159,7 +206,11 @@ impl RuntimeCoordinator {
             // removing it would make a later actor believe a replacement is safe.
             return Err(RuntimeError::Terminal(error));
         }
-        match spawner.spawn(&self.records[&key].launch, &runtime.terminal) {
+        match spawner.spawn(
+            &self.records[&key].launch,
+            &resolved.provision,
+            &runtime.terminal,
+        ) {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("inserted");
                 record.process = Some(process);
@@ -354,24 +405,24 @@ mod tests {
     struct Resolver {
         calls: usize,
     }
-    impl LaunchResolver for Resolver {
-        fn resolve(
-            &mut self,
-            request: &LaunchRequest,
-        ) -> Result<DurableLaunchSnapshot, LaunchValidationError> {
+    impl AgentAdapter for Resolver {
+        fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
             self.calls += 1;
-            Ok(DurableLaunchSnapshot::new(
-                request.clone(),
-                LaunchPlan::new(
-                    request.profile_id.clone(),
-                    7,
-                    "agent",
-                    vec!["--safe".into()],
-                    [],
-                    PathBuf::from("."),
-                )
-                .unwrap(),
-            ))
+            Ok(ResolvedLaunch {
+                snapshot: DurableLaunchSnapshot::new(
+                    request.clone(),
+                    LaunchPlan::new(
+                        request.profile_id.clone(),
+                        7,
+                        "agent",
+                        vec!["--safe".into()],
+                        [],
+                        PathBuf::from("."),
+                    )
+                    .unwrap(),
+                ),
+                provision: SpawnProvision::new([], Vec::new()),
+            })
         }
     }
     struct Spawner(Result<ProcessIdentity, SpawnFailure>);
@@ -379,6 +430,7 @@ mod tests {
         fn spawn(
             &mut self,
             _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
             _: &TerminalRef,
         ) -> Result<ProcessIdentity, SpawnFailure> {
             self.0.clone()
@@ -673,14 +725,11 @@ mod tests {
     #[test]
     fn invalid_resolver_provenance_and_duplicate_terminal_reservation_are_rejected() {
         struct BadResolver;
-        impl LaunchResolver for BadResolver {
-            fn resolve(
-                &mut self,
-                request: &LaunchRequest,
-            ) -> Result<DurableLaunchSnapshot, LaunchValidationError> {
-                let mut snapshot = Resolver::default().resolve(request)?;
-                snapshot.request.resume = true;
-                Ok(snapshot)
+        impl AgentAdapter for BadResolver {
+            fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
+                let mut resolved = Resolver::default().resolve(request)?;
+                resolved.snapshot.request.resume = true;
+                Ok(resolved)
             }
         }
         let request = request();
@@ -724,12 +773,11 @@ mod tests {
     #[test]
     fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
         struct RejectingResolver;
-        impl LaunchResolver for RejectingResolver {
-            fn resolve(
-                &mut self,
-                _: &LaunchRequest,
-            ) -> Result<DurableLaunchSnapshot, LaunchValidationError> {
-                Err(LaunchValidationError::InvalidProgram)
+        impl AgentAdapter for RejectingResolver {
+            fn resolve(&mut self, _: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
+                Err(AdapterError::Validation(
+                    LaunchValidationError::InvalidProgram,
+                ))
             }
         }
         struct RejectingStore;
@@ -776,7 +824,9 @@ mod tests {
                 &mut store,
                 &mut spawner
             ),
-            Err(RuntimeError::Launch(LaunchValidationError::InvalidProgram))
+            Err(RuntimeError::Adapter(AdapterError::Validation(
+                LaunchValidationError::InvalidProgram
+            )))
         );
         let (runtime, fence) = refs(&first_request);
         assert_eq!(
