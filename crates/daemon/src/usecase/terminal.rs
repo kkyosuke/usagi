@@ -11,6 +11,38 @@ use std::collections::{BTreeMap, VecDeque};
 
 use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
 
+/// The durable process state shared by every daemon-owned terminal.
+///
+/// Agent adapters (Claude/Codex) and the generic shell path differ only in
+/// how they resolve a launch; once a `TerminalRef` is reserved, they use this
+/// same lifecycle vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalRuntimeState {
+    Reserved,
+    Running,
+    Exited,
+    Reclaimed,
+    ReconcileRequired(TerminalReconcileState),
+    SpawnFailed,
+}
+
+/// A fail-closed condition that must be reconciled, never replaced by spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReconcileState {
+    SpawnAmbiguous,
+    PersistAfterSpawn,
+    IdentityUnknown,
+    OrphanRunning,
+    PersistAfterExit,
+}
+
+/// Result of spawning a terminal PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFailure {
+    Definite,
+    Ambiguous,
+}
+
 /// The effective terminal dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {

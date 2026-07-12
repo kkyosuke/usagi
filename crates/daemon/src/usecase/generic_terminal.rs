@@ -26,8 +26,10 @@ use usagi_core::domain::{
 
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
-    runtime::{ReconcileState, RuntimeState, SpawnFailure},
-    terminal::{Geometry, RegistryError, Snapshot, TerminalRegistry},
+    terminal::{
+        Geometry, RegistryError, Snapshot, SpawnFailure, TerminalReconcileState, TerminalRegistry,
+        TerminalRuntimeState,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +37,7 @@ pub struct DurableTerminalRecord {
     pub terminal: TerminalRef,
     pub operation: CompletionFence,
     pub launch: DurableTerminalLaunchSnapshot,
-    pub state: RuntimeState,
+    pub state: TerminalRuntimeState,
     pub process: Option<ProcessIdentity>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -70,7 +72,7 @@ pub enum GenericTerminalError {
     Terminal(RegistryError),
     Store,
     SpawnFailed,
-    ReconcileRequired(ReconcileState),
+    ReconcileRequired(TerminalReconcileState),
     UnknownTerminal,
     TerminalGenerationMismatch,
 }
@@ -123,7 +125,7 @@ impl GenericTerminalCoordinator {
                 terminal: terminal.clone(),
                 operation,
                 launch: resolved.snapshot.clone(),
-                state: RuntimeState::Reserved,
+                state: TerminalRuntimeState::Reserved,
                 process: None,
             },
         );
@@ -135,28 +137,30 @@ impl GenericTerminalCoordinator {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("reserved record");
                 record.process = Some(process);
-                record.state = RuntimeState::Running;
+                record.state = TerminalRuntimeState::Running;
                 if self.persist(store).is_err() {
                     self.records.get_mut(&key).expect("reserved record").state =
-                        RuntimeState::ReconcileRequired(ReconcileState::PersistAfterSpawn);
+                        TerminalRuntimeState::ReconcileRequired(
+                            TerminalReconcileState::PersistAfterSpawn,
+                        );
                     return Err(GenericTerminalError::ReconcileRequired(
-                        ReconcileState::PersistAfterSpawn,
+                        TerminalReconcileState::PersistAfterSpawn,
                     ));
                 }
                 Ok(())
             }
             Err(SpawnFailure::Definite) => {
                 self.records.get_mut(&key).expect("reserved record").state =
-                    RuntimeState::SpawnFailed;
+                    TerminalRuntimeState::SpawnFailed;
                 self.persist(store)?;
                 Err(GenericTerminalError::SpawnFailed)
             }
             Err(SpawnFailure::Ambiguous) => {
                 self.records.get_mut(&key).expect("reserved record").state =
-                    RuntimeState::ReconcileRequired(ReconcileState::SpawnAmbiguous);
+                    TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::SpawnAmbiguous);
                 self.persist(store)?;
                 Err(GenericTerminalError::ReconcileRequired(
-                    ReconcileState::SpawnAmbiguous,
+                    TerminalReconcileState::SpawnAmbiguous,
                 ))
             }
         }
@@ -184,7 +188,7 @@ impl GenericTerminalCoordinator {
         self.terminals
             .exited(terminal, status)
             .map_err(GenericTerminalError::Terminal)?;
-        self.record_mut(terminal)?.state = RuntimeState::Exited;
+        self.record_mut(terminal)?.state = TerminalRuntimeState::Exited;
         self.persist(store)
     }
     /// Never starts a replacement after an ambiguous outcome.
@@ -196,13 +200,13 @@ impl GenericTerminalCoordinator {
     ) -> Result<(), GenericTerminalError> {
         let record = self.record_mut(terminal)?;
         record.state = match observation {
-            ProcessObservation::Gone => RuntimeState::Reclaimed,
+            ProcessObservation::Gone => TerminalRuntimeState::Reclaimed,
             ProcessObservation::VerifiedAlive(actual)
                 if record.process.as_ref() == Some(&actual) =>
             {
-                RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
+                TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning)
             }
-            _ => RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown),
+            _ => TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown),
         };
         self.persist(store)
     }
@@ -219,9 +223,9 @@ impl GenericTerminalCoordinator {
             .filter(|record| {
                 matches!(
                     record.state,
-                    RuntimeState::Reserved
-                        | RuntimeState::Running
-                        | RuntimeState::ReconcileRequired(_)
+                    TerminalRuntimeState::Reserved
+                        | TerminalRuntimeState::Running
+                        | TerminalRuntimeState::ReconcileRequired(_)
                 )
             })
             .count()
@@ -265,10 +269,10 @@ impl GenericTerminalCoordinator {
             .ok_or(GenericTerminalError::UnknownTerminal)
     }
     fn running(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
-        (self.record(terminal)?.state == RuntimeState::Running)
+        (self.record(terminal)?.state == TerminalRuntimeState::Running)
             .then_some(())
             .ok_or(GenericTerminalError::ReconcileRequired(
-                ReconcileState::IdentityUnknown,
+                TerminalReconcileState::IdentityUnknown,
             ))
     }
 }
@@ -409,7 +413,7 @@ mod tests {
                 &mut Spawner(Err(SpawnFailure::Ambiguous))
             ),
             Err(GenericTerminalError::ReconcileRequired(
-                ReconcileState::SpawnAmbiguous
+                TerminalReconcileState::SpawnAmbiguous
             ))
         );
         assert_eq!(c.occupied_slots(), 1);
@@ -505,7 +509,7 @@ mod tests {
                 .find(|record| record.terminal == live)
                 .unwrap()
                 .state,
-            RuntimeState::ReconcileRequired(ReconcileState::OrphanRunning)
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::OrphanRunning)
         );
         c.reconcile(&live, ProcessObservation::Unknown, &mut store)
             .unwrap();
@@ -516,7 +520,7 @@ mod tests {
                 .find(|record| record.terminal == live)
                 .unwrap()
                 .state,
-            RuntimeState::ReconcileRequired(ReconcileState::IdentityUnknown)
+            TerminalRuntimeState::ReconcileRequired(TerminalReconcileState::IdentityUnknown)
         );
         let (exiting, exiting_fence) = refs(&request);
         c.launch(
