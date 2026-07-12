@@ -1,14 +1,14 @@
 ---
 number: 216
 title: feat(ipc): secure Unix transport と bounded backpressure を実装する
-status: todo
+status: done
 priority: high
 labels: [ipc, security, daemon]
 dependson: [215]
 related: []
 parent: 213
 created_at: 2026-07-12T11:38:43.903832+00:00
-updated_at: 2026-07-12T12:09:54.278892+00:00
+updated_at: 2026-07-12T12:56:49.675760+00:00
 ---
 
 ## 目的

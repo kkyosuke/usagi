@@ -20,7 +20,9 @@
 # IPC の型付き generic codec は crate ごとの単相化が重複して coverage 集計されるため、
 # protocol core と daemon adapter は function/line 集計から除外する。pure/fake-IO tests は
 # 通常の test gate で必ず実行する。
-export COVERAGE_IGNORE='(src/main\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs)'
+# Unix transport は bind/connect、peer credential、lstat、rename を実際の kernel socket
+# に対して行う adapter であり、fake へ差し替え可能な protocol/queue logic は core に置く。
+export COVERAGE_IGNORE='(src/main\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs|daemon/src/infrastructure/unix_transport\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
