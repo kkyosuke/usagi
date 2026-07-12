@@ -1,13 +1,13 @@
 ---
 number: 252
 title: feat(daemon): Codex adapter を daemon launch に接続する
-status: todo
+status: in-progress
 priority: high
 labels: [daemon, agent, codex]
 dependson: [250, 251]
 related: [142, 145, 146]
 created_at: 2026-07-12T22:33:12.392377+00:00
-updated_at: 2026-07-12T22:33:38.201166+00:00
+updated_at: 2026-07-12T22:59:59.823156+00:00
 ---
 
 ## 目的
