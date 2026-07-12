@@ -16,11 +16,14 @@ use chrono::{DateTime, Utc};
 
 use usagi_core::domain::recent::Recent;
 
+use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, icon, modal};
+use crate::presentation::widgets::{self, modal};
 
 /// 画面上部に置くタイトル。
 const TITLE: &str = "USAGI";
+/// 最下行に固定するキー操作ヒント。
+const FOOTER: &str = "↑↓: move / Enter or letter: select / 1-3: recent / q: quit";
 /// 左のメニュー列の固定表示幅。
 const MENU_WIDTH: usize = 18;
 /// 右の recent 列の固定表示幅。
@@ -208,22 +211,6 @@ impl Default for Welcome {
     }
 }
 
-/// `text` を幅 `width` に中央寄せし、`style` で塗った 1 行。端末より広いテキストは
-/// [`widgets::clip_to_width`] で省略記号付きに切ってから寄せる。
-fn centered_line(width: usize, text: &str, style: Style) -> String {
-    let clipped = widgets::clip_to_width(text, width);
-    let pad = widgets::centered_padding(width, widgets::display_width(&clipped));
-    format!("{}{}", " ".repeat(pad), style.paint(&clipped))
-}
-
-/// マスコット＋タイトルのヘッダ行。垂直位置は [`render`] が決めるので先頭余白は付けない。
-fn header_lines(width: usize) -> Vec<String> {
-    let mut lines = icon::centered(width);
-    lines.push(String::new());
-    lines.push(centered_line(width, TITLE, Role::Success.style().bold()));
-    lines
-}
-
 /// 左のメニュー列。選択中の項目を強調する。
 fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label...... key" — カーソル + 10 桁ラベル + 右寄せキー。
@@ -372,26 +359,18 @@ fn menu_lines(
 fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     match notice {
         None => vec![String::new()],
-        Some(text) => vec![centered_line(width, text, Role::Warning.style())],
+        Some(text) => vec![mascot_screen::centered_line(
+            width,
+            text,
+            Role::Warning.style(),
+        )],
     }
 }
 
-/// 画面下部に固定するキー操作ヒント。[`render`] が最下行に貼り付ける。
-fn footer_lines(width: usize) -> Vec<String> {
-    let footer = "↑↓: move / Enter or letter: select / 1-3: recent / q: quit";
-    vec![centered_line(width, footer, Style::new().dim())]
-}
-
-/// `body_lines` 行のボディを、`footer_lines` 行のフッタの上で `height` 行に垂直中央寄せ
-/// するときの上の空行数。
-fn centered_top_padding(height: usize, body_lines: usize, footer_lines: usize) -> usize {
-    height.saturating_sub(body_lines + footer_lines) / 2
-}
-
 /// 生の端末サイズ `raw_height`×`raw_width` に対する welcome 画面 1 フレーム分の行。
-/// ボディ（マスコット・タイトル・2 カラムメニュー・通知）は垂直中央寄せ、フッタは最下行に
-/// 固定する。サイズ 0 は 80×24 にフォールバックする。`now` は recent の相対時刻に使うので
-/// 呼び出し側が渡す（この層は実時計を読まない）。
+/// マスコット・タイトル・フッタの配置は共通の [`mascot_screen`] レイアウトに任せ、この関数は
+/// ボディ（2 カラムメニュー＋通知）だけを組む。`now` は recent の相対時刻に使うので呼び出し側が
+/// 渡す（この層は実時計を読まない）。
 #[must_use]
 pub fn render(
     raw_height: usize,
@@ -399,35 +378,17 @@ pub fn render(
     welcome: &Welcome,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let (height, width) = widgets::normalize_size(raw_height, raw_width);
-
-    let mut body = header_lines(width);
-    // 中央寄せしたタイトルと 2 カラムの区切り線の間に 1 行の余白を置く。
-    body.push(String::new());
-    body.extend(menu_lines(
-        width,
-        welcome.items(),
-        welcome.selected_index(),
-        welcome.recent(),
-        now,
-    ));
-    body.extend(notice_lines(width, welcome.notice()));
-    let footer = footer_lines(width);
-
-    let mut lines = Vec::with_capacity(height);
-    let top_padding = centered_top_padding(height, body.len(), footer.len());
-    for _ in 0..top_padding {
-        lines.push(String::new());
-    }
-    lines.extend(body);
-
-    // フッタを最下行まで押し下げる。
-    let bottom_padding = height.saturating_sub(lines.len() + footer.len());
-    for _ in 0..bottom_padding {
-        lines.push(String::new());
-    }
-    lines.extend(footer);
-    lines
+    mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
+        let mut body = menu_lines(
+            width,
+            welcome.items(),
+            welcome.selected_index(),
+            welcome.recent(),
+            now,
+        );
+        body.extend(notice_lines(width, welcome.notice()));
+        body
+    })
 }
 
 #[cfg(test)]
