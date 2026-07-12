@@ -13,8 +13,11 @@ fn main() -> std::io::Result<()> {
         version: env!("CARGO_PKG_VERSION"),
     };
     let mut stdout = std::io::stdout();
-    match std::env::args().nth(1).as_deref() {
-        Some("daemon") => usagi_daemon::presentation::run(&mut stdout, &info),
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("daemon") => {
+            usagi_daemon::presentation::run(&mut stdout, args.get(2).map(String::as_str), &info)
+        }
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
         Some(command) => usagi_cli::cli::write_unknown_command(&mut stdout, &info, command),
         None => usagi_tui::presentation::write_banner(&mut stdout, &info),
