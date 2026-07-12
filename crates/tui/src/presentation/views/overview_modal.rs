@@ -1,7 +1,7 @@
 //! Overview modal（コマンドパレット `:`）。
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に
-//! 打つと候補が前方一致で絞り込まれ、↑↓ で選んで実行する。中央に浮かぶ枠付きダイアログとして
+//! 打つと候補が前方一致で絞り込まれ、↑↓ で選べる。中央に浮かぶ枠付きダイアログとして
 //! 描く（配置は共通の [`modal`] widget に委譲）。
 //!
 //! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
@@ -194,7 +194,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
         }
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  Enter: run   Esc: close"));
+    lines.push(Style::new().dim().paint("  ↑↓: select   Esc: close"));
     lines
 }
 
@@ -205,9 +205,28 @@ pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec
     modal::render_modal(raw_height, raw_width, "Command", INNER_WIDTH, &body(state))
 }
 
+/// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
+/// サイズ 0 は 80×24 にフォールバックする。
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: &OverviewModal,
+) -> Vec<String> {
+    modal::render_over(
+        raw_height,
+        raw_width,
+        base,
+        "Command",
+        INNER_WIDTH,
+        &body(state),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OverviewModal, render};
+    use super::{OverviewModal, render, render_over};
     use crate::presentation::widgets::display_width;
 
     fn strip(line: &str) -> String {
@@ -368,5 +387,35 @@ mod tests {
         assert!(frame.iter().all(|l| display_width(l) <= 80));
         // サイズ 0 は 80×24 にフォールバック。
         assert_eq!(render(0, 0, &OverviewModal::new()).len(), 24);
+    }
+
+    #[test]
+    fn render_over_keeps_the_workspace_background_visible() {
+        let base: Vec<String> = (0..24)
+            .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
+            .collect();
+        let frame = render_over(24, 80, &base, &OverviewModal::new());
+        let text = frame.join("\n");
+
+        assert_eq!(frame.len(), 24);
+        assert!(frame.iter().all(|line| display_width(line) == 80));
+        assert!(frame[0].starts_with("workspace-row-0-"));
+        assert!(text.contains("Command"));
+        assert!(text.contains("workspace commands"));
+        // modal の左右にも元フレームが残る。
+        let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
+        assert!(modal_row.starts_with("workspace"));
+        assert!(modal_row.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
+        let base = vec![format!("\u{1b}[32m{}\u{1b}[0m", "背景".repeat(8)); 16];
+        let frame = render_over(16, 9, &base, &OverviewModal::new());
+
+        assert_eq!(frame.len(), 16);
+        assert!(frame.iter().all(|line| display_width(line) == 9));
+        assert!(frame.iter().any(|line| line.contains('┌')));
+        assert!(frame.iter().any(|line| line.contains("\u{1b}[32m")));
     }
 }

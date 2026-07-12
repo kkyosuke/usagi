@@ -15,6 +15,8 @@ use crate::presentation::widgets::{self, modal};
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 58;
+/// 一度に表示する Pull Request の最大数。
+const MAX_VISIBLE: usize = 6;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -138,12 +140,35 @@ fn detail_lines(pr: &PrLink) -> Vec<String> {
     ]
 }
 
+/// 選択行が必ず収まる PR 一覧 viewport の半開区間 `(start, end)`。
+fn visible_bounds(state: &PrModal) -> (usize, usize) {
+    let len = state.prs.len();
+    let visible = len.min(MAX_VISIBLE);
+    let start = state
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(len.saturating_sub(visible));
+    (start, start + visible)
+}
+
 /// PR ポップアップのボディ（枠の内側の行）: 一覧・選択中の詳細・フッタ。
 fn body(state: &PrModal) -> Vec<String> {
     let mut lines = vec![Style::new().dim().paint("  Pull requests")];
     if let Some(selected) = state.selected_pr() {
-        for (i, pr) in state.prs.iter().enumerate() {
-            lines.push(pr_row(pr, i == state.selected, INNER_WIDTH));
+        let (start, end) = visible_bounds(state);
+        if start > 0 {
+            lines.push(Style::new().dim().paint(&format!("  ↑ {start} more")));
+        }
+        for (i, pr) in state.prs[start..end].iter().enumerate() {
+            let index = start + i;
+            lines.push(pr_row(pr, index == state.selected, INNER_WIDTH));
+        }
+        if end < state.prs.len() {
+            lines.push(
+                Style::new()
+                    .dim()
+                    .paint(&format!("  ↓ {} more", state.prs.len() - end)),
+            );
         }
         lines.push(String::new());
         lines.extend(detail_lines(selected));
@@ -152,11 +177,7 @@ fn body(state: &PrModal) -> Vec<String> {
         lines.push(Style::new().dim().paint("  no pull requests"));
     }
     lines.push(String::new());
-    lines.push(
-        Style::new()
-            .dim()
-            .paint("  ↑↓ select   Enter: open   Esc: close"),
-    );
+    lines.push(Style::new().dim().paint("  ↑↓ select   Esc: close"));
     lines
 }
 
@@ -173,9 +194,28 @@ pub fn render(raw_height: usize, raw_width: usize, state: &PrModal) -> Vec<Strin
     )
 }
 
+/// `base` の workspace フレームを背景に残し、pull request modal を中央に合成する。
+/// サイズ 0 は 80×24 にフォールバックする。
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: &PrModal,
+) -> Vec<String> {
+    modal::render_over(
+        raw_height,
+        raw_width,
+        base,
+        "Pull Request",
+        INNER_WIDTH,
+        &body(state),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PrModal, render};
+    use super::{PrModal, render, render_over};
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::pullrequest::PrLink;
 
@@ -234,6 +274,30 @@ mod tests {
     }
 
     #[test]
+    fn long_lists_scroll_to_keep_the_selection_and_footer_visible() {
+        let prs = (1..=10)
+            .map(|number| PrLink::new(number, format!("https://example.com/pull/{number}")))
+            .collect();
+        let mut modal = PrModal::new(prs);
+        for _ in 0..8 {
+            modal.select_next();
+        }
+
+        let text = joined(&modal);
+        assert!(text.contains("#9"));
+        assert!(text.contains("↑ 3 more"));
+        assert!(text.contains("↓ 1 more"));
+        assert!(!text.contains("#1 "));
+        assert!(text.contains("Esc: close"));
+
+        modal.select_next();
+        let last = joined(&modal);
+        assert!(last.contains("#10"));
+        assert!(last.contains("↑ 4 more"));
+        assert!(!last.contains("↓ 1 more"));
+    }
+
+    #[test]
     fn render_lists_prs_with_state_and_shows_the_selected_detail() {
         let text = joined(&PrModal::dummy());
         assert!(text.contains("Pull Request")); // タイトル
@@ -287,5 +351,34 @@ mod tests {
         assert!(frame.iter().all(|l| display_width(l) <= 80));
         // サイズ 0 は 80×24 にフォールバック。
         assert_eq!(render(0, 0, &PrModal::dummy()).len(), 24);
+    }
+
+    #[test]
+    fn render_over_keeps_the_workspace_background_visible() {
+        let base: Vec<String> = (0..24)
+            .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
+            .collect();
+        let frame = render_over(24, 80, &base, &PrModal::dummy());
+        let text = frame.join("\n");
+
+        assert_eq!(frame.len(), 24);
+        assert!(frame.iter().all(|line| display_width(line) == 80));
+        assert!(frame[0].starts_with("workspace-row-0-"));
+        assert!(text.contains("Pull Request"));
+        assert!(text.contains("#812"));
+        let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
+        assert!(modal_row.starts_with("workspace"));
+        assert!(modal_row.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
+        let base = vec![format!("\u{1b}[36m{}\u{1b}[0m", "背景".repeat(8)); 16];
+        let frame = render_over(16, 9, &base, &PrModal::new(Vec::new()));
+
+        assert_eq!(frame.len(), 16);
+        assert!(frame.iter().all(|line| display_width(line) == 9));
+        assert!(frame.iter().any(|line| line.contains('┌')));
+        assert!(frame.iter().any(|line| line.contains("\u{1b}[36m")));
     }
 }
