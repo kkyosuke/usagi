@@ -47,6 +47,15 @@ usagi-cli = { path = "crates/cli" }
 usagi-core = { path = "crates/core" }
 usagi-daemon = { path = "crates/daemon" }
 usagi-tui = { path = "crates/tui" }
+# domain エンティティ（Workspace / Issue / Memory）が使う基盤語彙。時刻は chrono、
+# JSON インデックス表現の (de)serialize は serde の derive で表す。serde_json は
+# その JSON 表現を検証するテストでのみ使う（dev-dependency）。
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 端末描画で表示桁数（CJK など全角を 2 桁と数える）を正しく測るため。
+unicode-width = "0.2"
 
 # CLI の引数解析。入口面クレート（usagi-cli）がコマンドツリーの定義に使う。
 # `string`: 配布 version など実行時に決まる文字列を clap コマンドに載せるため。

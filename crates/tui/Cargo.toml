@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 usagi-core.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 
