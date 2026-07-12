@@ -1,14 +1,14 @@
 ---
 number: 235
 title: feat(tui): daemon terminal inventory/stream と pane reattach を結合する
-status: todo
+status: done
 priority: high
 labels: [tui, ipc, pane]
 dependson: [218, 220, 232]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:47.528328+00:00
-updated_at: 2026-07-12T21:11:47.528328+00:00
+updated_at: 2026-07-12T22:58:10.052712+00:00
 ---
 
 ## 目的
