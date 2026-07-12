@@ -1,14 +1,14 @@
 ---
 number: 249
 title: feat(daemon): terminal observation から PR projection と更新 hook を発火する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, terminal, pr]
 dependson: [248]
 related: []
 parent: 213
 created_at: 2026-07-12T21:53:55.361643+00:00
-updated_at: 2026-07-12T21:54:26.678746+00:00
+updated_at: 2026-07-12T21:54:27.305557+00:00
 ---
 
 ## 目的
