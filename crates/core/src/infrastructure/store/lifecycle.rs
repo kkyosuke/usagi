@@ -22,9 +22,9 @@ pub struct DaemonLifecycleStore {
 
 impl DaemonLifecycleStore {
     #[must_use]
-    pub fn new(repo_root: impl AsRef<Path>) -> Self {
+    pub fn new(repo_root: &Path) -> Self {
         Self {
-            dir: repo_root.as_ref().join(STATE_DIR),
+            dir: repo_root.join(STATE_DIR),
         }
     }
     #[must_use]
@@ -129,6 +129,32 @@ mod tests {
                         operation
                     },
                     now()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn apply_rejects_an_uninitialized_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DaemonLifecycleStore::new(tmp.path());
+        let daemon = DaemonGeneration::new();
+        let operation = OperationJournal {
+            operation_id: OperationId::new(),
+            owner_daemon_generation: daemon,
+            status: OperationStatus::Accepted,
+            execution_attempt: 1,
+            progress_revision: 0,
+        };
+        assert!(
+            store
+                .apply(
+                    daemon,
+                    LifecycleEvent::ReserveCreate {
+                        name: "one".into(),
+                        operation,
+                    },
+                    now(),
                 )
                 .is_err()
         );
