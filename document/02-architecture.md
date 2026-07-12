@@ -227,8 +227,10 @@ v1 から機能を再実装するときの置き場所の指針。
 | 実装 | 置き場所 |
 |---|---|
 | `Workspace` / `Settings` / `Issue` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
+| agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
+| profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/` |
@@ -244,6 +246,23 @@ v1 から機能を再実装するときの置き場所の指針。
 | CLI サブコマンドの引数解析・dispatch・結果整形 | `crates/cli/` の `cli/`（ハンドラは `cli/commands/`） |
 | MCP サーバ（JSON-RPC の解釈・dispatch・tool アダプタ） | `crates/cli/` の `mcp/`（アダプタは `mcp/tools/`） |
 | 各面への dispatch と実 IO の注入 | ルート `src/`（実 IO の注入のみ。テスト可能なロジックは crates へ） |
+
+### Agent launch boundary
+
+agent 起動の core 契約は `AgentProfile`、`AgentCapability`、`LaunchRequest`、`LaunchPlan` と
+`DurableLaunchSnapshot` である。`AgentProfileId` は static profile の stable ID、`AgentRuntimeId`
+は 1 回の process runtime の incarnation であり、同一視しない。agent capability も IPC の
+negotiation capability、terminal authorization、lifecycle capability とは別の closed vocabulary である。
+
+`LaunchRequest` は profile 選択・mode・model selector・resume・prompt・scope・必要 capability
+だけを表す。adapter が一度だけ renderer で得る `LaunchPlan` は shell command string ではなく
+`program` と `argv` を持つ。environment は名前の allowlist だけを durable に扱い、値・secret・
+adapter private config は含めない。
+
+daemon が snapshot を再生するときは schema と profile revision を検証する。不一致、unknown profile、
+request capability 不足、plan provenance 不一致は typed error で fail-closed とし、最新 catalog から
+黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は
+adapter / daemon infrastructure の責務である。
 
 ## TUI Overview のコマンド dispatch
 

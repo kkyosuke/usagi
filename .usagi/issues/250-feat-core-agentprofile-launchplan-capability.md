@@ -7,7 +7,7 @@ labels: [core, agent, design]
 dependson: []
 related: [142, 145, 146, 219, 248]
 created_at: 2026-07-12T22:26:31.638453+00:00
-updated_at: 2026-07-12T22:26:52.369058+00:00
+updated_at: 2026-07-12T22:37:21.461639+00:00
 ---
 
 ## 目的
