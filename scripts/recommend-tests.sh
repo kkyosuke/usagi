@@ -108,7 +108,7 @@ for layer in "${layers[@]}"; do
   first_layer=$layer
 done
 
-if [ "$fallback" = true ]; then add_unique "cargo test --quiet"; fi
+if [ "$fallback" = true ]; then add_unique "cargo test --workspace --quiet"; fi
 
 echo "Reasons:"
 for reason in "${reasons[@]}"; do printf '  %s\n' "$reason"; done

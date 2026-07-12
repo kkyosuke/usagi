@@ -1,9 +1,12 @@
-//! presentation 層。CLI / TUI の入出力表現を組み立てる。
+//! usagi-tui — TUI 面クレート。daemon が所有する端末に attach するクライアント側
+//! （画面描画・キー入力・attach プロトコルのクライアント）をここに実装する。
+//! usagi-core にのみ依存し、usagi-daemon には依存しない（daemon との通信は
+//! usagi-core の IPC プロトコル型を介して行う）。
 //! 実 IO は行わず、出力先は呼び出し側（合成ルート）から注入する。
 
 use std::io::Write;
 
-use crate::domain::AppInfo;
+use usagi_core::domain::AppInfo;
 
 /// 起動バナーを `out` に書き出す。
 ///
@@ -17,7 +20,7 @@ pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::write_banner;
-    use crate::domain::AppInfo;
+    use usagi_core::domain::AppInfo;
 
     #[test]
     fn write_banner_writes_description_line() {

@@ -1,0 +1,17 @@
+# usagi v2 の TUI 面クレート。daemon が所有する端末に attach するクライアント側
+# （画面描画・キー入力・attach プロトコルのクライアント）を置く。
+# usagi-core にのみ依存し、usagi-daemon には依存しない。
+[package]
+name = "usagi-tui"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+usagi-core.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

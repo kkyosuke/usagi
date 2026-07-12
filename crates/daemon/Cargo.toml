@@ -1,0 +1,18 @@
+# usagi v2 の daemon 面クレート。常駐プロセス（`usagi daemon`）のサーバ側
+# （agent / シェルの PTY 所有・セッション監視・委譲 queue の消化。
+# document/proposals/02-daemon.md）を置く。usagi-core にのみ依存し、
+# usagi-tui には依存しない。
+[package]
+name = "usagi-daemon"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+usagi-core.workspace = true
+
+[dev-dependencies]
+
+[lints]
+workspace = true

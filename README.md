@@ -11,18 +11,19 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
 
 ## 構成（v2）
 
-クリーンアーキテクチャの 4 層構成（`presentation → usecase → domain ← infrastructure`）。
+「TUI 面 / daemon 面 / 共通（common）」の 3 クレート＋合成ルートの Cargo workspace。
+各クレート内はクリーンアーキテクチャの依存方向を守る（正本は
+[document/02-architecture.md](document/02-architecture.md)）。
 
 ```
 .
-├── Cargo.toml          # edition 2024 / clippy (all + pedantic) を warn で有効化
-└── src/
-    ├── main.rs         # 合成ルート。実 IO をここで束ねる
-    ├── lib.rs          # ライブラリクレートのモジュール定義
-    ├── domain/         # ビジネスルール。他層・外部クレートに依存しない
-    ├── usecase/        # domain を組み合わせた操作
-    ├── infrastructure/ # 外部世界（git / FS / プロセス）との接続
-    └── presentation/   # CLI / TUI の入出力表現。実 IO は注入で受け取る
+├── Cargo.toml          # workspace ルート ＋ 配布バイナリ usagi（bin）のパッケージ
+├── src/
+│   └── main.rs         # 合成ルート。実 IO をここで束ね、実行面へ dispatch する
+└── crates/
+    ├── core/           # usagi-core: 共通の domain / usecase / 共有 infrastructure
+    ├── daemon/         # usagi-daemon: daemon 面（usagi-core にのみ依存）
+    └── tui/            # usagi-tui: TUI 面（usagi-core にのみ依存）
 ```
 
 ## 開発
@@ -31,10 +32,10 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
 
 | 目的 | コマンド |
 |---|---|
-| ビルド確認 | `cargo check --all-targets` |
+| ビルド確認 | `cargo check --workspace --all-targets` |
 | フォーマット確認 | `cargo fmt --all -- --check` |
-| Lint | `cargo clippy --all-targets -- -D warnings` |
-| テスト | `cargo test --quiet` |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
+| テスト | `cargo test --workspace --quiet` |
 | 実行 | `cargo run` |
 
 ## 方針
@@ -43,8 +44,7 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
   本物の IO は `src/main.rs` で束ねる。ロジックはすべてユニットテスト可能に保つ
   （テストカバレッジ 100% を維持する）。
 - 依存クレートは必要になった時点で追加する（v1 の依存を先回りで持ち込まない）。
-- コミット・PR・品質チェックの規約はリポジトリ共通の
-  [v1/document/06-conventions.md](v1/document/06-conventions.md) に従う（v1/v2 共通で有効）。
+- コミット・PR・品質チェックの規約は [document/06-conventions.md](document/06-conventions.md) に従う。
 
 ## v1 を使う・参照する
 
