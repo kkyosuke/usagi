@@ -6,5 +6,6 @@
 
 pub mod config;
 pub mod new;
+pub mod pr_modal;
 pub mod welcome;
 pub mod workspace;
