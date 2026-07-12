@@ -3,7 +3,6 @@
 //! 語彙（`serde`）だけは基盤語彙として使う（詳細は
 //! [`document/02-architecture.md`](../../../../document/02-architecture.md) の依存ルール）。
 
-pub mod agent_log;
 pub mod daemon;
 pub mod frontmatter;
 pub mod issue;
@@ -12,6 +11,7 @@ pub mod note;
 pub mod pullrequest;
 pub mod recent;
 pub mod session;
+pub mod trace;
 pub mod workspace;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。
