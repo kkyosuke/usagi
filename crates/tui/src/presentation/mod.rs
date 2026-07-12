@@ -19,6 +19,7 @@ use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::workspace::Workspace;
 
+use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
@@ -45,6 +46,7 @@ pub enum Exit {
 enum Screen {
     Welcome,
     Open,
+    New,
 }
 
 /// welcome 画面でキー `key` を処理した結果の遷移。
@@ -55,6 +57,18 @@ enum WelcomeStep {
     Quit,
     /// Open（workspace 一覧）へ進む。
     OpenList,
+    /// New（新規 workspace 作成フォーム）へ進む。
+    NewForm,
+}
+
+/// New 画面でキー `key` を処理した結果の遷移。
+enum NewStep {
+    /// 同じ画面に留まる（フォーム編集を続ける）。
+    Stay,
+    /// 終了する。
+    Quit,
+    /// welcome へ戻る。
+    Back,
 }
 
 /// Open 画面でキー `key` を処理した結果の遷移。
@@ -69,13 +83,14 @@ enum OpenStep {
     Choose(PathBuf),
 }
 
-/// welcome のメニュー操作 `action` を画面遷移へ写す。遷移先が未実装の項目（New / Config /
+/// welcome のメニュー操作 `action` を画面遷移へ写す。遷移先が未実装の項目（Config /
 /// recent）は同じ画面に留まる。
 fn welcome_action(action: MenuAction) -> WelcomeStep {
     match action {
         MenuAction::Quit => WelcomeStep::Quit,
         MenuAction::Open => WelcomeStep::OpenList,
-        MenuAction::New | MenuAction::Config | MenuAction::OpenRecent(_) => WelcomeStep::Stay,
+        MenuAction::New => WelcomeStep::NewForm,
+        MenuAction::Config | MenuAction::OpenRecent(_) => WelcomeStep::Stay,
     }
 }
 
@@ -96,7 +111,54 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         Key::Char(ch) => welcome
             .action_for(ch)
             .map_or(WelcomeStep::Stay, welcome_action),
-        Key::Other => WelcomeStep::Stay,
+        Key::Left | Key::Right | Key::Backspace | Key::Other => WelcomeStep::Stay,
+    }
+}
+
+/// New 画面のキー処理（純粋）。上下でフィールドを移り、←→ でモード切替（モード選択時）または
+/// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
+/// フォームの確定（作成）は作成処理が入るまで留まる。
+fn step_new(form: &mut New, key: Key) -> NewStep {
+    match key {
+        Key::Up => {
+            form.focus_prev();
+            NewStep::Stay
+        }
+        Key::Down => {
+            form.focus_next();
+            NewStep::Stay
+        }
+        Key::Left => {
+            step_new_horizontal(form, false);
+            NewStep::Stay
+        }
+        Key::Right => {
+            step_new_horizontal(form, true);
+            NewStep::Stay
+        }
+        Key::Backspace => {
+            form.backspace();
+            NewStep::Stay
+        }
+        Key::Char(ch) => {
+            form.insert_char(ch);
+            NewStep::Stay
+        }
+        Key::Escape => NewStep::Back,
+        Key::Quit => NewStep::Quit,
+        Key::Enter | Key::Other => NewStep::Stay,
+    }
+}
+
+/// New 画面の ←→ 操作。モード選択にフォーカスがあるときはモードを切り替え、テキスト欄では
+/// キャレットを左右へ動かす（`right` が右方向）。
+fn step_new_horizontal(form: &mut New, right: bool) {
+    if form.focus() == Field::Mode {
+        form.toggle_mode();
+    } else if right {
+        form.cursor_right();
+    } else {
+        form.cursor_left();
     }
 }
 
@@ -117,7 +179,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         Key::Enter => open.selected().map_or(OpenStep::Stay, |workspace| {
             OpenStep::Choose(workspace.path.clone())
         }),
-        Key::Char(_) | Key::Other => OpenStep::Stay,
+        Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -139,12 +201,14 @@ pub fn run(
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::empty();
     let mut open = Open::new(workspaces);
+    let mut new_form = New::default();
     let mut screen = Screen::Welcome;
     loop {
         let (height, width) = term.size()?;
         let frame = match screen {
             Screen::Welcome => welcome::render(height, width, &welcome, now),
             Screen::Open => open::render(height, width, &open, now),
+            Screen::New => new::render(height, width, &new_form),
         };
         term.draw(&frame)?;
         let key = term.read_key()?;
@@ -153,12 +217,18 @@ pub fn run(
                 WelcomeStep::Stay => {}
                 WelcomeStep::Quit => return Ok(Exit::Quit),
                 WelcomeStep::OpenList => screen = Screen::Open,
+                WelcomeStep::NewForm => screen = Screen::New,
             },
             Screen::Open => match step_open(&mut open, key) {
                 OpenStep::Stay => {}
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
                 OpenStep::Choose(path) => return Ok(Exit::OpenWorkspace(path)),
+            },
+            Screen::New => match step_new(&mut new_form, key) {
+                NewStep::Stay => {}
+                NewStep::Quit => return Ok(Exit::Quit),
+                NewStep::Back => screen = Screen::Welcome,
             },
         }
     }
@@ -205,7 +275,8 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BannerScreenRunner, Exit, run, write_banner};
+    use super::{BannerScreenRunner, Exit, NewStep, run, step_new, write_banner};
+    use crate::presentation::views::new::{Field, Mode, New};
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use chrono::{DateTime, Utc};
@@ -299,13 +370,65 @@ mod tests {
 
     #[test]
     fn run_stays_on_welcome_for_unwired_items_and_unknown_keys() {
-        // 'e'(New) と未知の 'z'、Other は welcome に留まり、q で抜ける。
+        // 'c'(Config) と未知の 'z'、Other は welcome に留まり、q で抜ける。
         let mut term =
-            FakeTerminal::with_keys(&[Key::Char('e'), Key::Char('z'), Key::Other, Key::Char('q')]);
+            FakeTerminal::with_keys(&[Key::Char('c'), Key::Char('z'), Key::Other, Key::Char('q')]);
         assert_eq!(run(&mut term, Vec::new(), now()).unwrap(), Exit::Quit);
         assert_eq!(term.frames.len(), 4);
-        // どのフレームも welcome のまま（Open へは行かない）。
+        // どのフレームも welcome のまま（Open / New へは行かない）。
         assert!(term.frames.iter().all(|f| f.join("\n").contains("Menu")));
+    }
+
+    #[test]
+    fn run_enters_the_new_form_from_welcome_and_returns() {
+        // 'e'(New) で New フォームへ、Esc で welcome へ戻り、q で終了する。
+        let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Escape, Key::Char('q')]);
+        assert_eq!(run(&mut term, Vec::new(), now()).unwrap(), Exit::Quit);
+        assert_eq!(term.frames.len(), 3);
+        assert!(term.frames[0].join("\n").contains("Menu")); // welcome
+        assert!(term.frames[1].join("\n").contains("New Project")); // New フォーム
+        assert!(term.frames[2].join("\n").contains("Menu")); // welcome へ戻る
+    }
+
+    #[test]
+    fn run_stays_on_the_new_form_while_editing_then_quits() {
+        // New へ入り、フォーム内でフィールド移動（留まる）してから終了（Ctrl-C 相当）する。
+        let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Down, Key::Quit]);
+        assert_eq!(run(&mut term, Vec::new(), now()).unwrap(), Exit::Quit);
+        assert_eq!(term.frames.len(), 3);
+        // New に入ったあと、編集操作の間も New に留まる。
+        assert!(term.frames[1].join("\n").contains("New Project"));
+        assert!(term.frames[2].join("\n").contains("New Project"));
+    }
+
+    #[test]
+    fn step_new_edits_navigates_and_returns_back_or_quits() {
+        let mut form = New::default();
+        // 上下でフィールド移動。
+        assert!(matches!(step_new(&mut form, Key::Down), NewStep::Stay));
+        assert_eq!(form.focus(), Field::Url);
+        assert!(matches!(step_new(&mut form, Key::Up), NewStep::Stay));
+        assert_eq!(form.focus(), Field::Mode);
+        // モード選択では ←→ でモードを切り替える。
+        step_new(&mut form, Key::Right);
+        assert_eq!(form.mode(), Mode::Existing);
+        step_new(&mut form, Key::Left);
+        assert_eq!(form.mode(), Mode::Clone);
+        // テキスト欄では入力・Backspace・←→ キャレット移動。
+        step_new(&mut form, Key::Down); // Url
+        step_new(&mut form, Key::Char('a'));
+        step_new(&mut form, Key::Char('b'));
+        assert_eq!(form.url(), "ab");
+        step_new(&mut form, Key::Left); // キャレットを a|b の間へ
+        step_new(&mut form, Key::Right); // 末尾へ戻す
+        assert!(matches!(step_new(&mut form, Key::Backspace), NewStep::Stay));
+        assert_eq!(form.url(), "a");
+        // Enter / Other は留まる。
+        assert!(matches!(step_new(&mut form, Key::Enter), NewStep::Stay));
+        assert!(matches!(step_new(&mut form, Key::Other), NewStep::Stay));
+        // Esc は welcome へ戻り、Quit は終了。
+        assert!(matches!(step_new(&mut form, Key::Escape), NewStep::Back));
+        assert!(matches!(step_new(&mut form, Key::Quit), NewStep::Quit));
     }
 
     #[test]

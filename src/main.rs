@@ -77,7 +77,10 @@ impl Terminal for CrosstermTerminal {
                     return Ok(match key.code {
                         KeyCode::Up => Key::Up,
                         KeyCode::Down => Key::Down,
+                        KeyCode::Left => Key::Left,
+                        KeyCode::Right => Key::Right,
                         KeyCode::Enter => Key::Enter,
+                        KeyCode::Backspace => Key::Backspace,
                         KeyCode::Esc => Key::Escape,
                         KeyCode::Char(ch) => Key::Char(ch),
                         _ => Key::Other,
