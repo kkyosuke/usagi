@@ -20,7 +20,9 @@ use crossterm::{execute, queue};
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
-use usagi_core::infrastructure::daemon::{DaemonRecordStore, LivenessProbe, RecordFile};
+use usagi_core::infrastructure::daemon::{
+    DaemonRecordStore, LivenessProbe, RecordFile, Terminator,
+};
 use usagi_core::infrastructure::paths;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::{self, BannerScreenRunner};
@@ -160,6 +162,29 @@ impl LivenessProbe for KillProbe {
     }
 }
 
+/// Terminates a process by sending it SIGTERM, asking it to shut down.
+struct SigtermTerminator;
+
+impl Terminator for SigtermTerminator {
+    #[cfg(unix)]
+    fn terminate(&self, pid: u32) -> std::io::Result<()> {
+        let pid =
+            libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
+        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn terminate(&self, _pid: u32) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "terminating a daemon is only supported on Unix",
+        ))
+    }
+}
+
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -221,6 +246,7 @@ fn main() -> std::io::Result<()> {
                 &info,
                 &store,
                 &KillProbe,
+                &SigtermTerminator,
             )
         }
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
