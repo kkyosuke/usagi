@@ -1,0 +1,72 @@
+[package]
+name = "usagi"
+version = "2.6.0"
+edition = "2021"
+repository = "https://github.com/KKyosuke/usagi"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0"
+console = "0.15"
+notify-rust = "4.11"
+portable-pty = "0.9.0"
+vt100 = "0.16.2"
+crossterm = "0.29.0"
+shell-words = "1.1.1"
+rayon = "1.12.0"
+unicode-width = "0.2"
+similar = "2.6"
+fs2 = "0.4"
+syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# `usagi op login` stores the 1Password service account token in the OS-native
+# secret store via the cross-platform `keyring` crate: Apple Keychain on macOS,
+# the Windows Credential Manager on Windows, and the Linux kernel keyutils store
+# on Linux (no libdbus/libsecret system dependency).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["linux-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[dev-dependencies]
+tempfile = "3"
+portable-pty = "0.9.0"
+vt100 = "0.16.2"
+
+# Release profile tuned for the binaries published to the four release targets
+# (Linux / macOS amd64・arm64 / Windows). `lto` + a single codegen unit let the
+# optimizer inline across crate boundaries, and `strip` drops debug symbols, so
+# the distributed binary is smaller and a touch faster. `panic` is left at the
+# default `unwind`: background TUI tasks rely on `catch_unwind` (see
+# `presentation/tui/home/tasks.rs`), which `abort` would break.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# Vendored, minimally-patched `vt100`: upstream only feeds the scrollback when no
+# DECSTBM scroll region is active, so an inline full-screen TUI that reserves its
+# composer with a top-anchored region (`ESC[1;Nr`) and scrolls its transcript
+# inside it — the Codex CLI does exactly this — leaves the embedded pane with an
+# empty scrollback and nothing to wheel back through. The patch feeds the
+# scrollback whenever the top margin is the first row, matching xterm. It also
+# trims trailing default cells from immutable scrollback rows to avoid retaining
+# a full-width allocation for mostly-short terminal output. See
+# `third_party/vt100/src/grid.rs` (`scroll_up`) and
+# `third_party/vt100/src/row.rs` (`Row::compact`).
+[patch.crates-io]
+vt100 = { path = "third_party/vt100" }

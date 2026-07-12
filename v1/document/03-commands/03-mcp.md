@@ -185,7 +185,7 @@ presentation に閉じています（[2. アーキテクチャ](../02-architectu
   `issue_to_prompt(number)` → `session_create(name)` → `session_prompt(name, prompt)` の 3 手を
   1 回で行うのが **`session_delegate_issue`** です（[挙動](#session_delegate_issue-の挙動)）。プロンプトを
   自分で調整したい／既存セッションに載せたい場合はこの primitive 3 つを直接使います。
-- **プロンプトに埋め込む status 指示は「単一書き手」ライフサイクルに沿います**（[.agents/workflow.md](../../.agents/workflow.md)）。
+- **プロンプトに埋め込む status 指示は「単一書き手」ライフサイクルに沿います**（[.agents/workflow.md](../../../.agents/workflow.md)）。
   委譲された session に対し、**着手時に自 worktree で `status = in-progress`**、**PR を開く前に自 worktree で
   `status = done` をコミットして実装差分と同じ PR に載せる**（別コミットでよい）ことを指示します。`done` を
   反映できるのはその session の枝だけで、マージで初めて基点ブランチの issue が `done` になります。root は

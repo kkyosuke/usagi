@@ -60,7 +60,16 @@ pre-commit:
         fi
     fmt:
       glob: "*.rs"
-      run: cargo fmt -- {staged_files}
+      # v1/ は退避された旧実装（edition 2021 の独立プロジェクト）のため、
+      # ルート（edition 2024）の rustfmt にかけない（edition 2024 では `gen` が
+      # 予約語になるなど、パース自体が成立しない）。
+      exclude: '^v1/'
+      run: |
+        files=$(printf '%s\n' {staged_files} | grep -v '^v1/' || true)
+        if [ -n "$files" ]; then
+          # shellcheck disable=SC2086
+          cargo fmt -- $files
+        fi
       stage_fixed: true
 
 commit-msg:
