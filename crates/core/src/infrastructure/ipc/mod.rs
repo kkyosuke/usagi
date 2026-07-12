@@ -482,21 +482,25 @@ pub fn read_frame_with_limit(
     Ok(Some(payload))
 }
 /// Decode exactly one JSON value from a bounded frame.
-pub fn read_json_frame(reader: &mut dyn Read, max_frame_bytes: usize) -> io::Result<Option<Value>> {
+pub fn read_json_frame<T: for<'de> Deserialize<'de>>(
+    reader: &mut dyn Read,
+    max_frame_bytes: usize,
+) -> io::Result<Option<T>> {
     read_frame_with_limit(reader, max_frame_bytes)?
         .map(|bytes| {
             serde_json::from_slice(&bytes)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
         .transpose()
 }
 /// Serialize one JSON value and frame it within a negotiated limit.
-pub fn write_json_frame(
+pub fn write_json_frame<T: Serialize>(
     writer: &mut dyn Write,
-    value: &Value,
+    value: &T,
     max_frame_bytes: usize,
 ) -> io::Result<()> {
-    let bytes = value.to_string().into_bytes();
+    let bytes =
+        serde_json::to_vec(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_frame_with_limit(writer, &bytes, max_frame_bytes)
 }
 

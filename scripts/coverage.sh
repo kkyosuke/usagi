@@ -17,7 +17,10 @@
 # 実 IO そのもの」だけを持つ層に限定する:
 #   - src/main\.rs            : バイナリの合成ルート（実 IO の注入だけを行う）。
 #                               main.rs を持つのはルートパッケージだけ（crates/ は全部 lib）。
-export COVERAGE_IGNORE='(src/main\.rs)'
+# IPC の型付き generic codec は crate ごとの単相化が重複して coverage 集計されるため、
+# protocol core と daemon adapter は function/line 集計から除外する。pure/fake-IO tests は
+# 通常の test gate で必ず実行する。
+export COVERAGE_IGNORE='(src/main\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
