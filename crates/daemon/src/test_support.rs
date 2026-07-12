@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::io;
 
-use usagi_core::infrastructure::daemon::{LivenessProbe, RecordFile, Terminator};
+use usagi_core::infrastructure::daemon::{LivenessProbe, RecordFile, ShutdownSignal, Terminator};
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
 #[derive(Default)]
@@ -78,5 +78,24 @@ impl Terminator for RecordingTerminator {
         } else {
             Ok(())
         }
+    }
+}
+
+/// A [`ShutdownSignal`] that returns immediately, so `serve` runs its
+/// register → wait → clear path to completion without blocking.
+pub struct ImmediateShutdown;
+
+impl ShutdownSignal for ImmediateShutdown {
+    fn wait(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A [`ShutdownSignal`] whose wait fails, to cover the error path.
+pub struct FailingShutdown;
+
+impl ShutdownSignal for FailingShutdown {
+    fn wait(&self) -> io::Result<()> {
+        Err(io::Error::other("wait failed"))
     }
 }
