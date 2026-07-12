@@ -49,13 +49,16 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
 | `unicode-width` | 端末描画の表示桁数測定（CJK など全角の 2 桁計上） | 本依存 |
 | `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
+| `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
 | `libc` | 合成ルートでの daemon の pid 生存判定（Unix の signal 0） | 本依存 |
 | `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
 
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` …）は
 `chrono` / `serde` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
-`infrastructure/`（永続化）が、`unicode-width` は `usagi-tui`、`clap` は `usagi-cli`、`libc` は
-合成ルート（daemon 生存判定の実 IO）が使う（[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
+`infrastructure/`（永続化）が、`unicode-width` は `usagi-tui`、`clap` は `usagi-cli` が使う。
+`crossterm`（実端末 IO）と `libc`（daemon の pid 生存判定）は合成ルート（`src/main.rs`）だけが
+使い、`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
+（[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
 
 ## ブランチ名
 

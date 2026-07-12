@@ -15,10 +15,23 @@ fn stdout(output: &Output) -> String {
 }
 
 #[test]
-fn routes_commands_to_their_tui_entry_screens() {
+fn welcome_entry_renders_the_welcome_screen() {
+    // 引数なしと `hop` はどちらも welcome 画面を選ぶ。テストでは stdout が tty でないため、
+    // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
+    for args in [&[][..], &[OsStr::new("hop")][..]] {
+        let output = run(args);
+        assert!(output.status.success(), "args={args:?}");
+        let out = stdout(&output);
+        assert!(out.contains("USAGI"), "args={args:?}");
+        assert!(out.contains("Menu"), "args={args:?}");
+        assert!(out.contains("q: quit"), "args={args:?}");
+        assert!(output.stderr.is_empty(), "args={args:?}");
+    }
+}
+
+#[test]
+fn other_entries_route_to_their_banner_screens() {
     let cases: &[(&[&OsStr], &str)] = &[
-        (&[], "welcome TUI"),
-        (&[OsStr::new("hop")], "welcome TUI"),
         (&[OsStr::new("config")], "config TUI"),
         (&[OsStr::new("doctor")], "doctor TUI"),
     ];
