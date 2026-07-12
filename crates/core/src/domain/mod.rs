@@ -14,6 +14,7 @@ pub mod session;
 pub mod settings;
 pub mod trace;
 pub mod workspace;
+pub mod workspace_state;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。
 ///

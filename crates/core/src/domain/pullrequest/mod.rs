@@ -28,7 +28,7 @@ fn is_zero(value: &u32) -> bool {
 }
 
 /// A pull request discovered for a session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrLink {
     /// The pull request number — the `<N>` of the `/pull/<N>` path. Shown as
     /// `#<number>`.
