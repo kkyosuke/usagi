@@ -1,14 +1,14 @@
 ---
 number: 232
 title: feat(tui): terminal と agent tab の pending pane reducer を実装する
-status: todo
+status: done
 priority: high
 labels: [tui, pane]
 dependson: [223, 224, 226]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.347588+00:00
-updated_at: 2026-07-12T21:11:18.347588+00:00
+updated_at: 2026-07-12T22:32:13.681802+00:00
 ---
 
 ## 目的

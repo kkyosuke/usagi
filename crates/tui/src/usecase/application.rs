@@ -13,6 +13,8 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
+/// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
+pub mod pane;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
