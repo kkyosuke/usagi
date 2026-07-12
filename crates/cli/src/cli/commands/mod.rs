@@ -31,18 +31,8 @@ use std::io::{self, Write};
 use crate::cli::RunOutcome;
 
 /// 未実装のサブコマンドを表す共通のスタブ出力を `out` に書く。
-///
-/// `detail` が空でなければ括弧付きで解析済みオプションを併記し、コマンド面の枠が
-/// オプションまで通っていることを示す。各コマンドのハンドラ（子モジュール）から使う。
-pub(super) fn unimplemented(
-    out: &mut dyn Write,
-    command: &str,
-    detail: &str,
-) -> io::Result<RunOutcome> {
-    if detail.is_empty() {
-        writeln!(out, "usagi {command}: not yet implemented")?;
-    } else {
-        writeln!(out, "usagi {command}: not yet implemented ({detail})")?;
-    }
+/// 各コマンドのハンドラ（子モジュール）から使う。
+pub(super) fn unimplemented(out: &mut dyn Write, command: &str) -> io::Result<RunOutcome> {
+    writeln!(out, "usagi {command}: not yet implemented")?;
     Ok(RunOutcome::Exit(0))
 }

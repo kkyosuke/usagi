@@ -312,6 +312,10 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
   `--version` の値は合成ルートから注入し、clap コマンドに載せる。
 - TUI 起動要求を返すコマンドの対応は
   [1. プロジェクト概要#現在の実装状態](01-overview.md#現在の実装状態)が正本である。
+- **`completion`** は実装済み: `clap_complete` で `Cli` のコマンドツリーから対象シェル
+  （`clap_complete::Shell`）の補完スクリプトを生成して標準出力へ出す。定義が唯一の真実なので
+  補完候補は CLI の実態と一致する。ただし静的ジェネレータの仕様上、`hide = true` の内部コマンド
+  （`hop` / `agent-phase` / `guard-workspace`）も補完候補には含まれる（`--help` には出ない）。
 - **内部フックコマンド**: usagi はエージェント起動時に、Claude の `PreToolUse` フックへ
   `usagi guard-workspace`（worktree 外へのツール呼び出しを拒否）を、Stop フックへ
   `usagi agent-phase <phase>`（ライフサイクル phase 報告）を配線する。この 2 つは人間向けでは
