@@ -354,4 +354,69 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn protocol_errors_are_rendered_and_keep_their_retry_contract() {
+        let mut error = ProtocolError::new(ErrorCode::OwnershipUnknown, "owner vanished");
+        error.retry_mode = RetryMode::Manual;
+        error.side_effect = SideEffect::Applied;
+        let error = ClientError::Protocol(error);
+        assert_eq!(error.code(), ErrorCode::OwnershipUnknown);
+        assert_eq!(error.retry_mode(), RetryMode::Manual);
+        assert_eq!(error.side_effect(), SideEffect::Applied);
+        assert!(error.to_string().contains("owner vanished"));
+    }
+
+    #[test]
+    fn client_returns_ok_and_protocol_error_replies() {
+        for reply in [
+            ResponseOutcome::Ok,
+            ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, "busy")),
+        ] {
+            let stream = scripted(reply);
+            let mut client =
+                IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
+                    .unwrap();
+            let result = client.request(DaemonRequest::Terminal {
+                action: TerminalAction::Resync,
+                payload: serde_json::json!({}),
+            });
+            match result {
+                Ok(DaemonReply::Ok(value)) => assert_eq!(value["ok"], true),
+                Err(ClientError::Protocol(error)) => assert_eq!(error.code, ErrorCode::Busy),
+                other => panic!("unexpected response: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn client_rejects_error_and_missing_handshakes() {
+        let protocol_error = ProtocolError::new(ErrorCode::ProtocolMismatch, "nope");
+        let mut bytes = Vec::new();
+        write_json_frame(&mut bytes, &Bootstrap::Error(protocol_error), 1_048_576).unwrap();
+        assert!(matches!(
+            IpcClient::connect(
+                Scripted {
+                    input: Cursor::new(bytes),
+                    output: vec![]
+                },
+                "c".into(),
+                "n".into(),
+                ClientPolicy::tui()
+            ),
+            Err(ClientError::Protocol(_))
+        ));
+        assert!(matches!(
+            IpcClient::connect(
+                Scripted {
+                    input: Cursor::new(vec![]),
+                    output: vec![]
+                },
+                "c".into(),
+                "n".into(),
+                ClientPolicy::tui()
+            ),
+            Err(ClientError::Unavailable(_))
+        ));
+    }
 }

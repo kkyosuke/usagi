@@ -223,8 +223,20 @@ fn session_action(name: &str) -> Option<SessionAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_PROTOCOL_VERSION, handle_line, serve};
+    use super::{DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client};
     use serde_json::Value;
+    use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
+
+    struct RecordingClient {
+        reply: Result<DaemonReply, ClientError>,
+        requests: Vec<DaemonRequest>,
+    }
+    impl DaemonClient for RecordingClient {
+        fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+            self.requests.push(request);
+            self.reply.clone()
+        }
+    }
 
     /// 1 行を処理して応答 `Value` を得る（通知は `None`）。
     fn call(line: &str) -> Option<Value> {
@@ -349,5 +361,53 @@ mod tests {
         assert_eq!(parse_error["error"]["code"], -32700);
         let ping: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(ping["id"], 9);
+    }
+
+    #[test]
+    fn managed_session_tools_use_the_injected_daemon_client() {
+        for (name, reply) in [
+            (
+                "session_create",
+                Ok(DaemonReply::Accepted {
+                    operation_id: "op".into(),
+                    revision: 3,
+                }),
+            ),
+            (
+                "session_remove",
+                Ok(DaemonReply::Ok(serde_json::json!({"removed":true}))),
+            ),
+            (
+                "session_setup",
+                Err(ClientError::Unavailable("offline".into())),
+            ),
+            (
+                "session_prompt",
+                Ok(DaemonReply::Accepted {
+                    operation_id: "op".into(),
+                    revision: 3,
+                }),
+            ),
+        ] {
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"name":"a"}}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply,
+                requests: vec![],
+            };
+            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            assert_eq!(client.requests.len(), 1);
+            assert!(
+                String::from_utf8(out)
+                    .unwrap()
+                    .contains(if name == "session_setup" {
+                        "Unavailable"
+                    } else {
+                        "content"
+                    })
+            );
+        }
     }
 }

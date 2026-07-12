@@ -290,7 +290,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RunOutcome, Shell, StubGit, TuiRequest, run};
+    use super::{Cli, Command, RunOutcome, SessionCommand, Shell, StubGit, TuiRequest, run};
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
@@ -357,6 +357,38 @@ mod tests {
                 .unwrap()
                 .command,
             Some(Command::Completion { shell: Shell::Zsh })
+        ));
+    }
+
+    #[test]
+    fn session_commands_become_daemon_requests() {
+        for (argv, action) in [
+            (
+                ["usagi", "session", "create", "a"].as_slice(),
+                usagi_core::usecase::client::SessionAction::Create,
+            ),
+            (
+                ["usagi", "session", "remove", "a"].as_slice(),
+                usagi_core::usecase::client::SessionAction::Remove,
+            ),
+            (
+                ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
+                usagi_core::usecase::client::SessionAction::Setup,
+            ),
+            (
+                ["usagi", "session", "prompt", "a", "hi"].as_slice(),
+                usagi_core::usecase::client::SessionAction::Prompt,
+            ),
+        ] {
+            let parsed = Cli::try_parse_from(argv).unwrap().command.unwrap();
+            let (request, _) = super::execute(parsed);
+            assert!(
+                matches!(request, RunOutcome::DaemonRequest(usagi_core::usecase::client::DaemonRequest::Session { action: actual, .. }) if actual == action)
+            );
+        }
+        assert!(matches!(
+            SessionCommand::Create { name: "a".into() },
+            SessionCommand::Create { .. }
         ));
     }
 
