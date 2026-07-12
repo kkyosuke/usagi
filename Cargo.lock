@@ -864,6 +864,7 @@ name = "usagi-tui"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "serde_json",
  "unicode-width",
  "usagi-core",
 ]
