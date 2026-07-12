@@ -11,6 +11,7 @@ pub mod note;
 pub mod pullrequest;
 pub mod recent;
 pub mod session;
+pub mod settings;
 pub mod trace;
 pub mod workspace;
 
