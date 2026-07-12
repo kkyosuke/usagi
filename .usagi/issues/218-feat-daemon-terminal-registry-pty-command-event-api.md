@@ -1,14 +1,14 @@
 ---
 number: 218
 title: feat(daemon): terminal registry と PTY command／event API を実装する
-status: todo
+status: in-progress
 priority: high
 labels: [daemon, terminal, ipc]
 dependson: [216, 217]
 related: []
 parent: 213
 created_at: 2026-07-12T11:39:09.473448+00:00
-updated_at: 2026-07-12T12:08:49.188460+00:00
+updated_at: 2026-07-12T13:20:08.267341+00:00
 ---
 
 ## 目的

@@ -16,6 +16,7 @@ pub mod serve;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod terminal;
 
 /// 認識できない `usagi daemon <subcommand>` に対する案内 1 行を返す。
 ///
