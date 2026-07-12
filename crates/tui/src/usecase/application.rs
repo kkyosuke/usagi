@@ -46,6 +46,15 @@ pub trait WorkspaceLoader {
     ///
     /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
     fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+
+    /// Remove entries that no longer point at directories and return the paths
+    /// removed from the core-owned workspace registry. The caller has already
+    /// obtained explicit user confirmation before invoking this operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when checking or mutating the registry fails.
+    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>>;
 }
 
 /// TUI をどの画面から開始するかを表す。

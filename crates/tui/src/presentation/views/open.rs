@@ -10,6 +10,8 @@
 //! 持つが、その読み出しは実 IO なので合成ルートが行い、この層は受け取った一覧を描くだけである。
 //! `now` は相対時刻に使うので呼び出し側が渡す（この層は実時計を読まない）。
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 
 use usagi_core::domain::workspace::Workspace;
@@ -21,7 +23,7 @@ use crate::presentation::widgets;
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
-const FOOTER: &str = "↑↓: move / Enter: open / Esc: back / q: quit";
+const FOOTER: &str = "↑↓ move / / filter / u Unite / c cleanup / Enter open / Esc back";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 52;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -32,6 +34,11 @@ const NAME_WIDTH: usize = 24;
 pub struct Open {
     workspaces: Vec<Workspace>,
     selected_index: usize,
+    filter: String,
+    filtering: bool,
+    unite: bool,
+    unite_paths: HashSet<std::path::PathBuf>,
+    cleanup_confirming: bool,
 }
 
 impl Open {
@@ -41,6 +48,11 @@ impl Open {
         Self {
             workspaces,
             selected_index: 0,
+            filter: String::new(),
+            filtering: false,
+            unite: false,
+            unite_paths: HashSet::new(),
+            cleanup_confirming: false,
         }
     }
 
@@ -65,7 +77,106 @@ impl Open {
     /// 選択中の workspace。空のときは `None`。
     #[must_use]
     pub fn selected(&self) -> Option<&Workspace> {
-        self.workspaces.get(self.selected_index)
+        self.filtered().get(self.selected_index).copied()
+    }
+
+    /// Whether filter text input owns printable keys.
+    #[must_use]
+    pub const fn filtering(&self) -> bool {
+        self.filtering
+    }
+
+    /// The current case-insensitive workspace-name filter.
+    #[must_use]
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// Whether selection builds a Unite set rather than choosing one workspace.
+    #[must_use]
+    pub const fn is_unite(&self) -> bool {
+        self.unite
+    }
+
+    /// Whether cleanup has been explicitly requested and awaits y/n confirmation.
+    #[must_use]
+    pub const fn cleanup_confirming(&self) -> bool {
+        self.cleanup_confirming
+    }
+
+    /// Start accepting filter text.
+    pub fn begin_filter(&mut self) {
+        self.filtering = true;
+    }
+
+    /// Stop accepting filter text without discarding the filter.
+    pub fn end_filter(&mut self) {
+        self.filtering = false;
+    }
+
+    /// Append one character to the filter and return selection to its first hit.
+    pub fn push_filter(&mut self, ch: char) {
+        self.filter.push(ch);
+        self.selected_index = 0;
+    }
+
+    /// Delete one filter character and return selection to its first hit.
+    pub fn pop_filter(&mut self) {
+        self.filter.pop();
+        self.selected_index = 0;
+    }
+
+    /// Switch between Single and Unite selection. A new Unite set starts empty.
+    pub fn toggle_unite(&mut self) {
+        self.unite = !self.unite;
+        self.unite_paths.clear();
+    }
+
+    /// Add or remove the selected workspace from the Unite set.
+    pub fn toggle_unite_member(&mut self) {
+        let Some(path) = self.selected().map(|workspace| workspace.path.clone()) else {
+            return;
+        };
+        if !self.unite_paths.remove(&path) {
+            self.unite_paths.insert(path);
+        }
+    }
+
+    /// Return selected Unite paths in registry order.
+    #[must_use]
+    pub fn unite_paths(&self) -> Vec<std::path::PathBuf> {
+        self.workspaces
+            .iter()
+            .filter(|workspace| self.unite_paths.contains(&workspace.path))
+            .map(|workspace| workspace.path.clone())
+            .collect()
+    }
+
+    /// Ask for an explicit cleanup confirmation.
+    pub fn request_cleanup(&mut self) {
+        self.cleanup_confirming = true;
+    }
+
+    /// Dismiss a cleanup confirmation without mutating the registry.
+    pub fn cancel_cleanup(&mut self) {
+        self.cleanup_confirming = false;
+    }
+
+    /// Finish a confirmed cleanup, removing the returned registry paths locally.
+    pub fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
+        self.workspaces
+            .retain(|workspace| !paths.iter().any(|path| path == &workspace.path));
+        self.unite_paths.retain(|path| !paths.contains(path));
+        self.cleanup_confirming = false;
+        self.selected_index = 0;
+    }
+
+    fn filtered(&self) -> Vec<&Workspace> {
+        let filter = self.filter.to_lowercase();
+        self.workspaces
+            .iter()
+            .filter(|workspace| workspace.name.to_lowercase().contains(&filter))
+            .collect()
     }
 
     /// `workspace` と同じ path の項目に touch 後の値を反映し、最終利用時刻の降順へ
@@ -84,7 +195,7 @@ impl Open {
             .sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
         self.selected_index = selected_path
             .and_then(|selected_path| {
-                self.workspaces
+                self.filtered()
                     .iter()
                     .position(|current| current.path == selected_path)
             })
@@ -93,21 +204,26 @@ impl Open {
 
     /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。
     pub fn select_next(&mut self) {
-        if self.workspaces.is_empty() {
+        if self.filtered().is_empty() {
             return;
         }
-        self.selected_index = (self.selected_index + 1) % self.workspaces.len();
+        let len = self.filtered().len();
+        if len == 0 {
+            return;
+        }
+        self.selected_index = (self.selected_index + 1) % len;
     }
 
     /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。
     pub fn select_prev(&mut self) {
-        if self.workspaces.is_empty() {
+        if self.filtered().is_empty() {
             return;
         }
-        self.selected_index = self
-            .selected_index
-            .checked_sub(1)
-            .unwrap_or(self.workspaces.len() - 1);
+        let len = self.filtered().len();
+        if len == 0 {
+            return;
+        }
+        self.selected_index = self.selected_index.checked_sub(1).unwrap_or(len - 1);
     }
 }
 
@@ -147,7 +263,7 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         String::new(),
     ];
 
-    if open.is_empty() {
+    if open.filtered().is_empty() {
         lines.push(indent(
             &Style::new()
                 .dim()
@@ -156,11 +272,30 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         return lines;
     }
 
-    for (i, workspace) in open.workspaces().iter().enumerate() {
-        lines.push(indent(&workspace_row(
-            workspace,
-            i == open.selected_index(),
-            now,
+    let mode = if open.is_unite() { "Unite" } else { "Single" };
+    lines[0] = indent(
+        &Role::Success
+            .style()
+            .bold()
+            .paint(&format!("Workspaces · {mode}")),
+    );
+    if open.filtering() || !open.filter().is_empty() {
+        lines.push(indent(&format!(
+            "Filter: {}{}",
+            open.filter(),
+            if open.filtering() { "▌" } else { "" }
+        )));
+        lines.push(String::new());
+    }
+    for (i, workspace) in open.filtered().into_iter().enumerate() {
+        let marker = if open.is_unite() && open.unite_paths.contains(&workspace.path) {
+            "✓ "
+        } else {
+            ""
+        };
+        lines.push(indent(&format!(
+            "{marker}{}",
+            workspace_row(workspace, i == open.selected_index(), now,)
         )));
     }
 
@@ -169,6 +304,15 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         lines.push(String::new());
         let path = format!("↳ {}", workspace.path.display());
         lines.push(indent(&Style::new().dim().paint(&path)));
+    }
+    if open.cleanup_confirming() {
+        lines.push(String::new());
+        lines.push(indent(
+            &Role::Danger
+                .style()
+                .bold()
+                .paint("Remove missing registry entries? y/n"),
+        ));
     }
     lines
 }
@@ -296,7 +440,7 @@ mod tests {
         // 選択中（先頭 alpha）の絶対パスが下に出る。
         assert!(joined.contains("↳ /tmp/alpha"));
         // フッタのヒント。
-        assert!(joined.contains("Esc: back"));
+        assert!(joined.contains("Esc back"));
     }
 
     #[test]
@@ -327,5 +471,43 @@ mod tests {
         let frame = render(24, 80, &open, now());
         // どの行も端末幅を超えない（長い名前は省略記号で切られる）。
         assert!(frame.iter().all(|l| display_width(l) <= 80));
+    }
+
+    #[test]
+    fn filter_matches_names_case_insensitively_and_keeps_selection_in_hits() {
+        let mut open = Open::new(vec![workspace("alpha", 1), workspace("Beta", 2)]);
+        open.begin_filter();
+        open.push_filter('b');
+        open.push_filter('E');
+
+        assert_eq!(open.filter(), "bE");
+        assert_eq!(open.selected().unwrap().name, "Beta");
+        assert!(rendered(&open).contains("Filter: bE▌"));
+        assert!(!rendered(&open).contains("↳ /tmp/alpha"));
+    }
+
+    #[test]
+    fn unite_members_follow_registry_order_and_cleanup_removes_them() {
+        let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
+        open.toggle_unite();
+        open.toggle_unite_member();
+        open.select_next();
+        open.toggle_unite_member();
+        assert_eq!(
+            open.unite_paths(),
+            vec![
+                Path::new("/tmp/alpha").to_path_buf(),
+                Path::new("/tmp/beta").to_path_buf()
+            ]
+        );
+
+        open.request_cleanup();
+        open.remove_paths(&[Path::new("/tmp/alpha").to_path_buf()]);
+        assert!(!open.cleanup_confirming());
+        assert_eq!(open.workspaces().len(), 1);
+        assert_eq!(
+            open.unite_paths(),
+            vec![Path::new("/tmp/beta").to_path_buf()]
+        );
     }
 }

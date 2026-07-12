@@ -105,7 +105,8 @@ enum OpenStep {
     Stay,
     Quit,
     Back,
-    Choose(PathBuf),
+    Choose(Vec<PathBuf>),
+    ConfirmCleanup,
 }
 
 /// Workspace 画面のキー処理結果。
@@ -255,6 +256,35 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
+    if open.cleanup_confirming() {
+        return match key {
+            Key::Char('y') | Key::Enter => OpenStep::ConfirmCleanup,
+            Key::Char('n') | Key::Escape => {
+                open.cancel_cleanup();
+                OpenStep::Stay
+            }
+            Key::Quit => OpenStep::Quit,
+            _ => OpenStep::Stay,
+        };
+    }
+    if open.filtering() {
+        return match key {
+            Key::Char(ch) => {
+                open.push_filter(ch);
+                OpenStep::Stay
+            }
+            Key::Backspace => {
+                open.pop_filter();
+                OpenStep::Stay
+            }
+            Key::Enter | Key::Escape => {
+                open.end_filter();
+                OpenStep::Stay
+            }
+            Key::Quit => OpenStep::Quit,
+            Key::Up | Key::Down | Key::Left | Key::Right | Key::Other => OpenStep::Stay,
+        };
+    }
     match key {
         Key::Up => {
             open.select_prev();
@@ -266,9 +296,36 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         }
         Key::Escape => OpenStep::Back,
         Key::Quit | Key::Char('q') => OpenStep::Quit,
-        Key::Enter => open.selected().map_or(OpenStep::Stay, |workspace| {
-            OpenStep::Choose(workspace.path.clone())
-        }),
+        Key::Enter => {
+            let paths = if open.is_unite() {
+                open.unite_paths()
+            } else {
+                open.selected()
+                    .map(|workspace| vec![workspace.path.clone()])
+                    .unwrap_or_default()
+            };
+            if paths.is_empty() {
+                OpenStep::Stay
+            } else {
+                OpenStep::Choose(paths)
+            }
+        }
+        Key::Char('/') => {
+            open.begin_filter();
+            OpenStep::Stay
+        }
+        Key::Char('u') => {
+            open.toggle_unite();
+            OpenStep::Stay
+        }
+        Key::Char(' ') if open.is_unite() => {
+            open.toggle_unite_member();
+            OpenStep::Stay
+        }
+        Key::Char('c') => {
+            open.request_cleanup();
+            OpenStep::Stay
+        }
         Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Other => OpenStep::Stay,
     }
 }
@@ -481,13 +538,19 @@ pub fn run(
                 OpenStep::Stay => {}
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
-                OpenStep::Choose(path) => {
-                    let snapshot = loader.open(&path)?;
-                    welcome.record_opened(&snapshot.workspace);
-                    open.record_opened(&snapshot.workspace);
-                    if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
-                        return Ok(Exit::Quit);
+                OpenStep::Choose(paths) => {
+                    for path in paths {
+                        let snapshot = loader.open(&path)?;
+                        welcome.record_opened(&snapshot.workspace);
+                        open.record_opened(&snapshot.workspace);
+                        if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
+                            return Ok(Exit::Quit);
+                        }
                     }
+                }
+                OpenStep::ConfirmCleanup => {
+                    let removed = loader.cleanup_missing(open.workspaces())?;
+                    open.remove_paths(&removed);
                 }
             },
             Screen::New => match step_new(&mut new_form, key) {
@@ -674,6 +737,8 @@ mod tests {
     #[derive(Default)]
     struct FakeLoader {
         opened: Vec<PathBuf>,
+        cleanup_removed: Vec<PathBuf>,
+        cleanup_calls: usize,
         fail: bool,
         opened_at: Option<DateTime<Utc>>,
     }
@@ -693,6 +758,11 @@ mod tests {
                 snapshot.workspace.updated_at = opened_at;
             }
             Ok(snapshot)
+        }
+
+        fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
+            self.cleanup_calls += 1;
+            Ok(self.cleanup_removed.clone())
         }
     }
 
@@ -951,6 +1021,92 @@ mod tests {
         assert!(term.frames[0].join("\n").contains("Menu"));
         assert!(term.frames[1].join("\n").contains("Open Workspace"));
         assert!(term.frames[2].join("\n").contains("alpha-session"));
+    }
+
+    #[test]
+    fn open_filter_cleanup_confirmation_and_unite_selection_use_the_injected_loader() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+
+        let mut filter = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char('/'),
+            Key::Char('b'),
+            Key::Enter,
+            Key::Char('q'),
+        ]);
+        run(
+            &mut filter,
+            vec![alpha.clone(), beta.clone()],
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(filter.frames[3].join("\n").contains("↳ /tmp/beta"));
+
+        let mut cancel = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char('c'),
+            Key::Char('n'),
+            Key::Char('q'),
+        ]);
+        let mut cancel_loader = FakeLoader::default();
+        run(
+            &mut cancel,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut cancel_loader,
+        )
+        .unwrap();
+        assert_eq!(cancel_loader.cleanup_calls, 0);
+
+        let mut confirm = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char('c'),
+            Key::Char('y'),
+            Key::Char('q'),
+        ]);
+        let mut confirm_loader = FakeLoader {
+            cleanup_removed: vec![alpha.path.clone()],
+            ..FakeLoader::default()
+        };
+        run(
+            &mut confirm,
+            vec![alpha.clone()],
+            Vec::new(),
+            now(),
+            &mut confirm_loader,
+        )
+        .unwrap();
+        assert_eq!(confirm_loader.cleanup_calls, 1);
+        assert!(confirm.frames[3].join("\n").contains("No workspaces yet"));
+
+        let mut unite = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char('u'),
+            Key::Char(' '),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::Char('q'),
+        ]);
+        let mut unite_loader = FakeLoader::default();
+        run(
+            &mut unite,
+            vec![alpha, beta],
+            Vec::new(),
+            now(),
+            &mut unite_loader,
+        )
+        .unwrap();
+        assert_eq!(
+            unite_loader.opened,
+            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
+        );
     }
 
     #[test]

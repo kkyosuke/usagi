@@ -1,14 +1,14 @@
 ---
 number: 239
 title: feat(tui): Open filter・registry cleanup・Unite を追加する
-status: todo
+status: done
 priority: medium
 labels: [tui, parity-b]
 dependson: [230]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.292868+00:00
-updated_at: 2026-07-12T21:12:33.292868+00:00
+updated_at: 2026-07-12T22:54:30.606703+00:00
 ---
 
 ## 目的
