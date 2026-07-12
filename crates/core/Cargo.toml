@@ -16,9 +16,7 @@ publish = false
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
-
-# serde_json は Summary の JSON 表現を検証するユニットテストでのみ使う。
-[dev-dependencies]
+# daemon record store が DaemonRecord を daemon.json へ (de)serialize するのに使う。
 serde_json.workspace = true
 
 [lints]

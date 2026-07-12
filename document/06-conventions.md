@@ -38,7 +38,8 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 
 現在追加済みの外部依存は、domain エンティティ（`Workspace` / `Issue` / `Memory` /
 `DaemonRecord`）が使う `chrono`（時刻）・`serde`（JSON インデックス表現の derive）と、
-その JSON 表現を検証するテスト専用の `serde_json`（dev-dependency）だけである。
+その永続化（daemon record store が `DaemonRecord` を `daemon.json` へ (de)serialize
+する）に使う `serde_json` だけである。
 
 ## ブランチ名
 
