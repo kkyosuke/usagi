@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use usagi_core::infrastructure::git::GitRunner;
+use usagi_core::usecase::client::{DaemonRequest, SessionAction};
 
 /// CLI が合成ルートへ依頼する TUI の起動画面。
 ///
@@ -40,12 +41,15 @@ pub enum TuiRequest {
 }
 
 /// CLI の解析・ハンドラ実行結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RunOutcome {
     /// CLI で処理が完了したときのプロセス終了コード。
     Exit(i32),
     /// 合成ルートに TUI の起動を依頼する。
     LaunchTui(TuiRequest),
+    /// A managed session mutation to be sent by the composition root through
+    /// the daemon client. It deliberately is not executed against local state.
+    DaemonRequest(DaemonRequest),
 }
 
 /// 実行可能な CLI サブコマンドの共通インターフェース。
@@ -112,6 +116,11 @@ pub enum Command {
     },
     /// バージョンを表示する
     Version,
+    /// Managed session lifecycle operation (always daemon-owned).
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// （ヘルプ非表示・内部）エージェントのライフサイクル phase を記録する（Stop フックが呼ぶ）
     #[command(hide = true)]
     AgentPhase {
@@ -121,6 +130,15 @@ pub enum Command {
     /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
     #[command(hide = true)]
     GuardWorkspace,
+}
+
+/// The session mutations exposed by the human CLI.
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    Create { name: String },
+    Remove { name: String },
+    Setup { name: String, command: String },
+    Prompt { name: String, prompt: String },
 }
 
 impl Command {
@@ -146,10 +164,41 @@ impl Command {
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
             }),
+            Command::Session { command } => Box::new(Session { command }),
             // エージェント統合フックは commands/ ではなく hooks/ に置く。
             Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
             Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
         }
+    }
+}
+
+struct Session {
+    command: SessionCommand,
+}
+
+impl Run for Session {
+    fn run(&self, _out: &mut dyn Write) -> io::Result<RunOutcome> {
+        let (action, payload) = match &self.command {
+            SessionCommand::Create { name } => {
+                (SessionAction::Create, serde_json::json!({"name": name}))
+            }
+            SessionCommand::Remove { name } => {
+                (SessionAction::Remove, serde_json::json!({"name": name}))
+            }
+            SessionCommand::Setup { name, command } => (
+                SessionAction::Setup,
+                serde_json::json!({"name": name, "command": command}),
+            ),
+            SessionCommand::Prompt { name, prompt } => (
+                SessionAction::Prompt,
+                serde_json::json!({"name": name, "prompt": prompt}),
+            ),
+        };
+        Ok(RunOutcome::DaemonRequest(DaemonRequest::Session {
+            action,
+            operation_id: usagi_core::domain::id::OperationId::new().as_str(),
+            payload,
+        }))
     }
 }
 

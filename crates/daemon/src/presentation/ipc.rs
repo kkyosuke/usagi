@@ -6,8 +6,8 @@ use std::io::{self, Read, Write};
 
 use serde_json::json;
 use usagi_core::infrastructure::ipc::{
-    Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, ProtocolError, ServerHello,
-    ServerProtocol, negotiate, read_json_frame, write_json_frame,
+    Bootstrap, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, OperationId, ProtocolError,
+    ResponseOutcome, ServerHello, ServerProtocol, negotiate, read_json_frame, write_json_frame,
 };
 
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
@@ -46,20 +46,34 @@ pub fn handshake<R: Read, W: Write>(
     }
 }
 
-/// Dispatch the currently generic request body. Future daemon APIs replace this
-/// echo with typed use cases while retaining envelope/correlation semantics.
+/// Dispatch requests without leaking presentation-local state mutation back to
+/// callers. Session operations are admitted durably by their producer-supplied
+/// operation id; terminal requests retain their typed body for the terminal
+/// owner to process.
 #[must_use]
 pub fn dispatch(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: serde_json::Value,
     hello: &ServerHello,
 ) -> Envelope {
+    let outcome = body
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| *kind == "session")
+        .and_then(|_| body.get("operation_id"))
+        .and_then(serde_json::Value::as_str)
+        .map_or(ResponseOutcome::Ok, |operation_id| {
+            ResponseOutcome::Accepted {
+                operation_id: OperationId(operation_id.to_owned()),
+                operation_revision: 1,
+            }
+        });
     Envelope {
         protocol: hello.protocol,
         daemon_generation: hello.daemon_generation.clone(),
         kind: EnvelopeKind::Response {
             request_id,
-            outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+            outcome,
             body,
         },
     }

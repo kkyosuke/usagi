@@ -9,6 +9,9 @@
 use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
+use usagi_core::usecase::client::{
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+};
 
 use super::protocol::{self, error_code};
 use super::tool::ToolError;
@@ -31,7 +34,25 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 /// # Errors
 ///
 /// stdin の読み取り、または `out` への書き込みが IO エラーになった場合、そのエラーを返す。
-pub fn serve(mut input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
+pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
+    let mut unavailable = UnavailableClient;
+    serve_with_client(input, out, version, &mut unavailable)
+}
+
+/// As [`serve`], but routes managed-session tools through the supplied daemon
+/// client. The stdio server owns no session state and never falls back to a
+/// local PTY when the client reports an error.
+///
+/// # Errors
+///
+/// Returns only stdin/stdout IO errors; daemon failures are encoded as
+/// JSON-RPC responses so one failed tool call does not stop the server.
+pub fn serve_with_client(
+    mut input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+) -> io::Result<()> {
     let mut buf = Vec::new();
     loop {
         buf.clear();
@@ -45,14 +66,33 @@ pub fn serve(mut input: impl BufRead, out: &mut dyn Write, version: &str) -> io:
         if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(line, version) {
+        if let Some(response) = handle_line_with_client(line, version, client) {
             writeln!(out, "{response}")?;
         }
     }
 }
 
+struct UnavailableClient;
+impl DaemonClient for UnavailableClient {
+    fn request(&mut self, _request: DaemonRequest) -> Result<DaemonReply, ClientError> {
+        Err(ClientError::Unavailable(
+            "managed daemon client is not configured".into(),
+        ))
+    }
+}
+
 /// 1 リクエスト行を処理して応答文字列を返す。通知（`id` 無し）は `None`。
+#[cfg(test)]
 fn handle_line(line: &str, version: &str) -> Option<String> {
+    let mut unavailable = UnavailableClient;
+    handle_line_with_client(line, version, &mut unavailable)
+}
+
+fn handle_line_with_client(
+    line: &str,
+    version: &str,
+    client: &mut dyn DaemonClient,
+) -> Option<String> {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
         return Some(
             protocol::error(Value::Null, error_code::PARSE_ERROR, "parse error").to_string(),
@@ -63,7 +103,7 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
     match (method, id) {
         // 通常のリクエスト（method ＋ id）。
         (Some(method), Some(id)) => {
-            Some(respond(method, id, request.get("params"), version).to_string())
+            Some(respond(method, id, request.get("params"), version, client).to_string())
         }
         // method が無いのに id がある＝不正リクエスト。
         (None, Some(id)) => {
@@ -75,12 +115,18 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
 }
 
 /// method 別に応答 `Value` を組み立てる。
-fn respond(method: &str, id: Value, params: Option<&Value>, version: &str) -> Value {
+fn respond(
+    method: &str,
+    id: Value,
+    params: Option<&Value>,
+    version: &str,
+    client: &mut dyn DaemonClient,
+) -> Value {
     match method {
         "initialize" => protocol::success(id, initialize_result(params, version)),
         "ping" => protocol::success(id, json!({})),
         "tools/list" => protocol::success(id, tools_list_result()),
-        "tools/call" => tools_call(id, params),
+        "tools/call" => tools_call(id, params, client),
         other => protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
@@ -121,7 +167,7 @@ fn tools_list_result() -> Value {
 
 /// `tools/call` を処理する。現状は全 tool が未実装スタブのため、存在すれば「未実装」、
 /// 無ければ「method not found」を返す。
-fn tools_call(id: Value, params: Option<&Value>) -> Value {
+fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
     };
@@ -129,6 +175,27 @@ fn tools_call(id: Value, params: Option<&Value>) -> Value {
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if let Some(action) = session_action(name) {
+        let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+        return match client.request(DaemonRequest::Session {
+            action,
+            operation_id,
+            payload: arguments,
+        }) {
+            Ok(DaemonReply::Accepted {
+                operation_id,
+                revision,
+            }) => protocol::success(
+                id,
+                json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
+            ),
+            Ok(DaemonReply::Ok(value)) => protocol::success(
+                id,
+                json!({"content":[{"type":"text","text":value.to_string()}]}),
+            ),
+            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+        };
+    }
     match dispatch(name, &arguments.to_string()) {
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
@@ -141,6 +208,16 @@ fn tools_call(id: Value, params: Option<&Value>) -> Value {
             error_code::INTERNAL_ERROR,
             &format!("tool not yet implemented: {name}"),
         ),
+    }
+}
+
+fn session_action(name: &str) -> Option<SessionAction> {
+    match name {
+        "session_create" => Some(SessionAction::Create),
+        "session_remove" => Some(SessionAction::Remove),
+        "session_setup" => Some(SessionAction::Setup),
+        "session_prompt" => Some(SessionAction::Prompt),
+        _ => None,
     }
 }
 
