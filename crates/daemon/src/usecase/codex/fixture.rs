@@ -11,44 +11,46 @@ use usagi_core::domain::{
     },
 };
 
-use super::{
-    CodexAdapter, CodexMaterial, CodexProvision, CodexProvisionFailure, CodexProvisioner,
-    LaunchResolver,
-};
+use super::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner};
 use crate::usecase::{
     generation::ProcessIdentity,
-    runtime::{PtySpawner, RuntimeCoordinator, RuntimeStore, RuntimeStoreSnapshot},
+    runtime::{
+        AdapterError, AgentAdapter, PtySpawner, RuntimeCoordinator, RuntimeStore,
+        RuntimeStoreSnapshot, SpawnProvision,
+    },
     terminal::Geometry,
 };
 
-#[derive(Debug)]
 struct FakeProvisioner {
-    result: Result<CodexProvision, CodexProvisionFailure>,
-    calls: Vec<(LaunchScope, Vec<CodexMaterial>)>,
+    result: Option<Result<CodexProvision, CodexProvisionFailure>>,
+    calls: Vec<LaunchScope>,
 }
 
 impl FakeProvisioner {
     fn ready() -> Self {
         Self {
-            result: Ok(CodexProvision {
+            result: Some(Ok(CodexProvision {
                 working_directory: PathBuf::from("/worktree"),
                 environment_allowlist: [EnvironmentVariableName::new("USAGI_RUNTIME").unwrap()]
                     .into_iter()
                     .collect(),
-            }),
+                spawn: SpawnProvision::new(
+                    [(
+                        EnvironmentVariableName::new("CODEX_TOKEN").unwrap(),
+                        "secret-value".into(),
+                    )],
+                    vec!["--config".into(), "/scoped/codex.toml".into()],
+                ),
+            })),
             calls: Vec::new(),
         }
     }
 }
 
 impl CodexProvisioner for FakeProvisioner {
-    fn provision(
-        &mut self,
-        scope: &LaunchScope,
-        material: &[CodexMaterial],
-    ) -> Result<CodexProvision, CodexProvisionFailure> {
-        self.calls.push((scope.clone(), material.to_vec()));
-        self.result.clone()
+    fn provision(&mut self, scope: &LaunchScope) -> Result<CodexProvision, CodexProvisionFailure> {
+        self.calls.push(scope.clone());
+        self.result.take().expect("fake provisioner called once")
     }
 }
 
@@ -74,7 +76,8 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
     let mut adapter = CodexAdapter::new(provisioner);
     let request = request(LaunchMode::Interactive);
 
-    let snapshot = adapter.resolve(&request).unwrap();
+    let resolved = adapter.resolve(&request).unwrap();
+    let snapshot = resolved.snapshot;
 
     assert_eq!(snapshot.plan.program, "codex");
     assert_eq!(
@@ -92,16 +95,17 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
         ]
     );
     assert_eq!(snapshot.plan.working_directory, PathBuf::from("/worktree"));
+    assert_eq!(adapter.provisioner.calls, vec![request.scope]);
     assert_eq!(
-        adapter.provisioner.calls,
-        vec![(
-            request.scope,
-            vec![
-                CodexMaterial::Config,
-                CodexMaterial::Mcp,
-                CodexMaterial::Hooks
-            ]
-        )]
+        resolved.provision.arguments(),
+        ["--config", "/scoped/codex.toml"]
+    );
+    assert_eq!(
+        resolved
+            .provision
+            .environment()
+            .get(&EnvironmentVariableName::new("CODEX_TOKEN").unwrap()),
+        Some(&"secret-value".into())
     );
 }
 
@@ -112,7 +116,7 @@ fn renders_resume_only_without_an_initial_prompt() {
     request.initial_prompt = None;
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
 
-    let snapshot = adapter.resolve(&request).unwrap();
+    let snapshot = adapter.resolve(&request).unwrap().snapshot;
 
     assert_eq!(
         snapshot.plan.argv,
@@ -135,25 +139,30 @@ fn headless_requires_a_prompt_and_does_not_accept_resume() {
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
     let mut missing_prompt = request(LaunchMode::Headless);
     missing_prompt.initial_prompt = None;
-    assert_eq!(
+    assert!(matches!(
         adapter.resolve(&missing_prompt),
-        Err(LaunchValidationError::EmptyPrompt)
-    );
+        Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt))
+    ));
 
     let mut resume = request(LaunchMode::Headless);
     resume.resume = true;
-    assert_eq!(
+    assert!(matches!(
         adapter.resolve(&resume),
-        Err(LaunchValidationError::UnsupportedCapability {
-            capability: AgentCapability::Resume
-        })
-    );
+        Err(AdapterError::Validation(
+            LaunchValidationError::UnsupportedCapability {
+                capability: AgentCapability::Resume
+            }
+        ))
+    ));
 }
 
 #[test]
 fn renders_headless_exec_and_exposes_the_static_profile() {
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
-    let snapshot = adapter.resolve(&request(LaunchMode::Headless)).unwrap();
+    let snapshot = adapter
+        .resolve(&request(LaunchMode::Headless))
+        .unwrap()
+        .snapshot;
 
     assert_eq!(adapter.profile().id.as_str(), "codex");
     assert_eq!(
@@ -174,24 +183,26 @@ fn rejects_unknown_profiles_and_unsupported_product_capabilities_before_provisio
     let mut unknown = request(LaunchMode::Interactive);
     unknown.profile_id = AgentProfileId::new("other").unwrap();
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
-    assert_eq!(
+    assert!(matches!(
         adapter.resolve(&unknown),
-        Err(LaunchValidationError::UnknownProfile {
-            profile_id: AgentProfileId::new("other").unwrap()
-        })
-    );
+        Err(AdapterError::Validation(
+            LaunchValidationError::UnknownProfile { profile_id: _ }
+        ))
+    ));
     assert!(adapter.provisioner.calls.is_empty());
 
     let mut unsupported = request(LaunchMode::Interactive);
     unsupported
         .required_capabilities
         .insert(AgentCapability::PhaseReporting);
-    assert_eq!(
+    assert!(matches!(
         adapter.resolve(&unsupported),
-        Err(LaunchValidationError::UnsupportedCapability {
-            capability: AgentCapability::PhaseReporting
-        })
-    );
+        Err(AdapterError::Validation(
+            LaunchValidationError::UnsupportedCapability {
+                capability: AgentCapability::PhaseReporting
+            }
+        ))
+    ));
     assert!(adapter.provisioner.calls.is_empty());
 }
 
@@ -200,19 +211,19 @@ fn typed_pre_spawn_provision_failures_do_not_create_a_snapshot() {
     for (failure, expected) in [
         (
             CodexProvisionFailure::ExecutableUnavailable,
-            LaunchValidationError::InvalidProgram,
+            AdapterError::ExecutableUnavailable,
         ),
         (
             CodexProvisionFailure::MaterializationFailed,
-            LaunchValidationError::InvalidWorkingDirectory,
+            AdapterError::ProvisionFailed,
         ),
     ] {
         let mut provisioner = FakeProvisioner::ready();
-        provisioner.result = Err(failure);
+        provisioner.result = Some(Err(failure));
         let mut adapter = CodexAdapter::new(provisioner);
         assert_eq!(
-            adapter.resolve(&request(LaunchMode::Interactive)),
-            Err(expected)
+            adapter.resolve(&request(LaunchMode::Interactive)).err(),
+            Some(expected)
         );
     }
 }
@@ -220,15 +231,16 @@ fn typed_pre_spawn_provision_failures_do_not_create_a_snapshot() {
 #[test]
 fn durable_snapshot_contains_no_provisioned_values_and_fails_closed_on_revision_drift() {
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
-    let snapshot = adapter.resolve(&request(LaunchMode::Interactive)).unwrap();
-    let serialized = serde_json::to_string(&snapshot).unwrap();
+    let resolved = adapter.resolve(&request(LaunchMode::Interactive)).unwrap();
+    let serialized = serde_json::to_string(&resolved.snapshot).unwrap();
     assert!(!serialized.contains("secret"));
     assert!(!serialized.contains("credential"));
-    assert!(adapter.validate_snapshot(&snapshot).is_ok());
+    assert!(!serialized.contains("scoped/codex.toml"));
+    assert!(adapter.validate_snapshot(&resolved.snapshot).is_ok());
 
     let newer = CodexAdapter::with_revision(FakeProvisioner::ready(), 2);
     assert_eq!(
-        newer.validate_snapshot(&snapshot),
+        newer.validate_snapshot(&resolved.snapshot),
         Err(LaunchValidationError::ProfileRevisionMismatch {
             expected: 1,
             actual: 2
@@ -241,6 +253,7 @@ fn provisioned_environment_is_an_allowlist_not_an_environment_value_map() {
     let provision = CodexProvision {
         working_directory: PathBuf::from("/worktree"),
         environment_allowlist: BTreeSet::new(),
+        spawn: SpawnProvision::new([], Vec::new()),
     };
     assert!(provision.environment_allowlist.is_empty());
 }
@@ -265,8 +278,16 @@ impl PtySpawner for FakeSpawner {
     fn spawn(
         &mut self,
         _: &usagi_core::domain::agent::DurableLaunchSnapshot,
+        provision: &SpawnProvision,
         _: &TerminalRef,
     ) -> Result<ProcessIdentity, crate::usecase::runtime::SpawnFailure> {
+        assert_eq!(provision.arguments(), ["--config", "/scoped/codex.toml"]);
+        assert_eq!(
+            provision
+                .environment()
+                .get(&EnvironmentVariableName::new("CODEX_TOKEN").unwrap()),
+            Some(&"secret-value".into())
+        );
         self.calls += 1;
         Ok(ProcessIdentity {
             pid: 42,

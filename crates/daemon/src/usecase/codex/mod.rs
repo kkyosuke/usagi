@@ -16,7 +16,7 @@ use usagi_core::{
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
-use super::runtime::LaunchResolver;
+use super::runtime::{AdapterError, AgentAdapter, ResolvedLaunch, SpawnProvision};
 
 #[cfg(test)]
 mod fixture;
@@ -24,20 +24,11 @@ mod fixture;
 const PROFILE_NAME: &str = "codex";
 const PROFILE_REVISION: u32 = 1;
 
-/// The three Codex-owned materialization sites. Their concrete syntax and
-/// contents stay inside a [`CodexProvisioner`] implementation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexMaterial {
-    Config,
-    Mcp,
-    Hooks,
-}
-
 /// The non-secret outcome that the renderer may use to build a durable plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexProvision {
     pub working_directory: PathBuf,
     pub environment_allowlist: BTreeSet<EnvironmentVariableName>,
+    pub spawn: SpawnProvision,
 }
 
 /// Typed pre-spawn failures from the injected Codex provisioning boundary.
@@ -62,14 +53,10 @@ pub trait CodexProvisioner {
     ///
     /// Returns [`CodexProvisionFailure`] when the Codex executable cannot be
     /// used or its scoped artifacts cannot be materialized.
-    fn provision(
-        &mut self,
-        scope: &LaunchScope,
-        material: &[CodexMaterial],
-    ) -> Result<CodexProvision, CodexProvisionFailure>;
+    fn provision(&mut self, scope: &LaunchScope) -> Result<CodexProvision, CodexProvisionFailure>;
 }
 
-/// A `LaunchResolver` for the code-defined `codex` profile.
+/// An [`AgentAdapter`] for the code-defined `codex` profile.
 #[derive(Debug)]
 pub struct CodexAdapter<P> {
     provisioner: P,
@@ -131,47 +118,40 @@ impl<P> AgentProfileCatalog for CodexAdapter<P> {
     }
 }
 
-impl<P: CodexProvisioner> LaunchResolver for CodexAdapter<P> {
-    fn resolve(
-        &mut self,
-        request: &LaunchRequest,
-    ) -> Result<DurableLaunchSnapshot, LaunchValidationError> {
-        let profile = validate_request(self, request)?;
+impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
+    fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
+        let profile = validate_request(self, request).map_err(AdapterError::Validation)?;
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
-            return Err(LaunchValidationError::EmptyPrompt);
+            return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
         }
         if request.mode == LaunchMode::Headless && request.resume {
-            return Err(LaunchValidationError::UnsupportedCapability {
-                capability: AgentCapability::Resume,
-            });
+            return Err(AdapterError::Validation(
+                LaunchValidationError::UnsupportedCapability {
+                    capability: AgentCapability::Resume,
+                },
+            ));
         }
-        let provision = self
-            .provisioner
-            .provision(
-                &request.scope,
-                &[
-                    CodexMaterial::Config,
-                    CodexMaterial::Mcp,
-                    CodexMaterial::Hooks,
-                ],
-            )
-            .map_err(|failure| match failure {
-                CodexProvisionFailure::ExecutableUnavailable => {
-                    LaunchValidationError::InvalidProgram
-                }
-                CodexProvisionFailure::MaterializationFailed => {
-                    LaunchValidationError::InvalidWorkingDirectory
-                }
-            })?;
-        let plan = render_plan(request, &profile, provision)?;
-        Ok(DurableLaunchSnapshot::new(request.clone(), plan))
+        let provision =
+            self.provisioner
+                .provision(&request.scope)
+                .map_err(|failure| match failure {
+                    CodexProvisionFailure::ExecutableUnavailable => {
+                        AdapterError::ExecutableUnavailable
+                    }
+                    CodexProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
+                })?;
+        let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
+        Ok(ResolvedLaunch {
+            snapshot: DurableLaunchSnapshot::new(request.clone(), plan),
+            provision: provision.spawn,
+        })
     }
 }
 
 fn render_plan(
     request: &LaunchRequest,
     profile: &AgentProfile,
-    provision: CodexProvision,
+    provision: &CodexProvision,
 ) -> Result<LaunchPlan, LaunchValidationError> {
     let mut argv = match request.mode {
         LaunchMode::Interactive if request.resume && request.initial_prompt.is_none() => vec![
@@ -206,7 +186,7 @@ fn render_plan(
         profile.revision,
         "codex",
         argv,
-        provision.environment_allowlist,
-        provision.working_directory,
+        provision.environment_allowlist.clone(),
+        provision.working_directory.clone(),
     )
 }

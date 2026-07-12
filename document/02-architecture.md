@@ -236,7 +236,8 @@ v1 から機能を再実装するときの置き場所の指針。
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
 | workspace の登録・touch・recent overview 構築、セッション作成・設定解決など両面が使うロジック | `crates/core/src/usecase/` |
 | profile catalog seam と profile/request・durable snapshot の pure validation | `crates/core/src/usecase/agent.rs`。catalog は adapter が code-defined descriptor を登録する境界であり、durable state の正本ではない |
-| Codex profile の argv renderer と config / MCP / hook の scoped materialization | `crates/daemon/src/usecase/codex/`。adapter は `LaunchResolver` として reservation 前に一度だけ provision し、durable snapshot へは non-secret plan と環境変数名の allowlist だけを返す |
+| product 固有 agent adapter と scoped materialization | `crates/daemon/src/usecase/runtime.rs` の `AgentAdapter` / `SpawnProvision`。adapter は reservation 前に durable snapshot と非永続 spawn provision を一度だけ組み立てる |
+| Codex profile の argv renderer と config / MCP / hook の materialization | `crates/daemon/src/usecase/codex/`。Codex adapter は共通 `AgentAdapter` を実装し、secret の値・一時 config 引数を `SpawnProvision` だけへ渡す |
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/` |
@@ -272,10 +273,13 @@ request capability 不足、plan provenance 不一致は typed error で fail-cl
 adapter / daemon infrastructure の責務である。
 
 Codex adapter は daemon の `usecase::codex` に閉じる。Codex の CLI flag、model の解釈、config / MCP /
-hook の payload は provisioner 内部だけが扱い、`RuntimeCoordinator`、IPC、terminal stream には渡さない。
-provisioner は scope ごとの作成を reservation 前に完了させるが、durable snapshot が持てるのは
-`program`、`argv`、working directory、環境変数**名**の allowlist だけである。credential、secret、raw
-hook payload、provisioned file path は保存・event・error detail に載せない。
+hook の payload は provisioner 内部だけが扱う。adapter は `AgentAdapter` として reservation 前に durable
+snapshot と `SpawnProvision` を組み立て、runtime は snapshot を保存してから provision を PTY spawner へ
+一度だけ渡す。`SpawnProvision` は durable record、IPC、terminal stream、error detail に残らない。
+
+durable snapshot が持てるのは `program`、`argv`、working directory、環境変数**名**の allowlist だけである。
+credential、secret、raw hook payload、provisioned file path は `SpawnProvision` にだけ存在し、保存・event・
+error detail に載せない。
 
 ### Daemon runtime ownership
 
