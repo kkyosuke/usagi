@@ -11,15 +11,21 @@ repository.workspace = true
 license.workspace = true
 publish = false
 
-# domain の Workspace / Issue / Memory は時刻に chrono、JSON インデックス表現の
-# (de)serialize に serde を使う。version はルート Cargo.toml で一元管理する。
+# domain の Workspace / Issue / Memory は時刻に chrono、JSON 表現の (de)serialize に
+# serde を使う。infrastructure（永続化）は serde_json / anyhow / fs2 / dirs / rayon を
+# 使う。version はルート Cargo.toml で一元管理する。
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
-
-# serde_json は Summary の JSON 表現を検証するユニットテストでのみ使う。
-[dev-dependencies]
 serde_json.workspace = true
+anyhow.workspace = true
+fs2.workspace = true
+dirs.workspace = true
+rayon.workspace = true
+
+# tempfile はストアのユニットテストで一時ディレクトリを作るためだけに使う。
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

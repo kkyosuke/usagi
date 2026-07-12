@@ -38,14 +38,25 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 
 現在追加済みの外部依存は次のとおり。
 
-| クレート | 用途 | 使う場所 |
+| クレート | 使途 | 種別 |
 |---|---|---|
-| `chrono` | 時刻 | domain エンティティ（`Workspace` / `Issue` / `Memory` / `DaemonRecord`）と、相対時刻に現在時刻を渡す合成ルート |
-| `serde` | JSON インデックス表現の derive | domain エンティティ |
-| `serde_json` | 上の JSON 表現を検証するテスト（dev-dependency） | domain のテスト |
-| `unicode-width` | 表示桁数の測定（CJK 全角を 2 桁と数える） | TUI 面の描画 widget |
-| `clap` | CLI の引数解析 | 入口面（`usagi-cli`） |
-| `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 合成ルート（`src/main.rs`）のみ。TUI 面は `Terminal` ポートに対して純粋に振る舞い crossterm に依存しない |
+| `chrono` | domain エンティティの時刻 | 本依存 |
+| `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
+| `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize | 本依存 |
+| `anyhow` | infrastructure（永続化ストア）のエラー伝播 | 本依存 |
+| `fs2` | ストアの cross-process ロック（`flock` 相当） | 本依存 |
+| `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
+| `rayon` | markdown ファイルの並列スキャン | 本依存 |
+| `unicode-width` | 端末描画の表示桁数測定（CJK など全角の 2 桁計上） | 本依存 |
+| `clap` | 入口面 CLI の引数解析（コマンドツリー定義） | 本依存 |
+| `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 本依存 |
+| `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
+
+`usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` …）は
+`chrono` / `serde` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
+`infrastructure/`（永続化）が、`unicode-width` は `usagi-tui`、`clap` は `usagi-cli` が使う。
+`crossterm` は合成ルート（`src/main.rs`）だけが使い、`usagi-tui` は `Terminal` ポートに対して
+純粋に振る舞う（[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
 
 ## ブランチ名
 
