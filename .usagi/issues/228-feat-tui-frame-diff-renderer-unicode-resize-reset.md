@@ -1,14 +1,14 @@
 ---
 number: 228
 title: feat(tui): frame-diff renderer と Unicode 幅・resize reset を実装する
-status: todo
+status: done
 priority: high
 labels: [tui, renderer]
 dependson: [225]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.068513+00:00
-updated_at: 2026-07-12T21:11:18.068513+00:00
+updated_at: 2026-07-12T22:33:34.851266+00:00
 ---
 
 ## 目的
