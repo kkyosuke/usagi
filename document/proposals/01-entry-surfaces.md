@@ -1,6 +1,6 @@
 # 提案: 入口面（CLI / MCP）の配置と daemon を権威とする反映フロー
 
-> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md)
+> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ 次へ → [IPC／ID overview](02-ipc-id.md)
 
 ## 目次
 

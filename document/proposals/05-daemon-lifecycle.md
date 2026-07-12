@@ -1,6 +1,6 @@
 # 提案: v2 daemon lifecycle／配置／実装計画
 
-> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [daemon API](04-daemon-api.md)
+> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [daemon API](04-daemon-api.md) ｜ 次へ → [TUI v1 parity](06-tui-v1-parity.md)
 
 本書は **v2 の未実装設計**であり、現在仕様の正本ではない。本書がactive/draining generation、planned restart、
 crash orphan、clean architecture配置、段階的issue分割、test strategyについての実装前SSoTである。
