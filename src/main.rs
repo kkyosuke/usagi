@@ -12,7 +12,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use crossterm::cursor;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -50,9 +52,15 @@ impl Terminal for CrosstermTerminal {
             cursor::MoveTo(0, 0),
             terminal::Clear(terminal::ClearType::All)
         )?;
-        for line in frame {
-            // raw mode では改行だけでは行頭へ戻らないため `\r\n` で送る。
-            write!(self.out, "{line}\r\n")?;
+        // 行の「間」だけを `\r\n` で区切り、最終行の後には改行を出さない。フレームは端末の
+        // 高さちょうどなので、最下行で改行するとその 1 行分だけ画面がスクロールしてしまう
+        // （代替スクリーン内でも起きる）。raw mode では改行だけでは行頭へ戻らないため区切りは
+        // `\r\n` を使う。
+        for (i, line) in frame.iter().enumerate() {
+            if i > 0 {
+                write!(self.out, "\r\n")?;
+            }
+            write!(self.out, "{line}")?;
         }
         self.out.flush()
     }
@@ -77,7 +85,8 @@ impl Terminal for CrosstermTerminal {
                 }
                 // リサイズは次フレームで描き直せばよいので Other として抜ける。
                 Event::Resize(_, _) => return Ok(Key::Other),
-                // その他のイベント（フォーカス・貼り付け・キーの離上など）は読み飛ばす。
+                // その他のイベント（マウス／ホイール・フォーカス・貼り付け・キーの離上など）は
+                // 読み飛ばす。ホイールを取り込んで捨てることで端末がスクロールしない。
                 _ => {}
             }
         }
@@ -114,16 +123,31 @@ fn run_interactive(out: &mut dyn Write, info: &AppInfo, now: DateTime<Utc>) -> s
 
     enable_raw_mode()?;
     let mut setup = std::io::stdout();
-    execute!(setup, EnterAlternateScreen, cursor::Hide)?;
+    // 代替スクリーンに入り、さらにマウスレポートを有効化する。代替スクリーンは起動前の
+    // スクロールバックを隠すが、それだけでは端末によってはホイールで元のバッファをスクロール
+    // でき、背後の起動前コマンドが見えてしまう。マウスレポートを有効にするとホイールは端末では
+    // なくアプリへ報告され（[`CrosstermTerminal::read_key`] が読み飛ばす）、TUI をスクロール
+    // 不能にできる（v1 と同じ手法）。
+    execute!(
+        setup,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        cursor::Hide
+    )?;
 
     let mut terminal = CrosstermTerminal {
         out: std::io::stdout(),
     };
     let result = presentation::run(&mut terminal, workspaces, now);
 
-    // 描画の成否によらず端末を復元する。
+    // 描画の成否によらず端末を復元する（マウスレポートも忘れず戻す）。
     let mut teardown = std::io::stdout();
-    let _ = execute!(teardown, cursor::Show, LeaveAlternateScreen);
+    let _ = execute!(
+        teardown,
+        cursor::Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
     let _ = disable_raw_mode();
 
     match result? {
