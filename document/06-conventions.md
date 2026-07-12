@@ -36,9 +36,16 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 ルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、各クレートは
 `<crate>.workspace = true` で参照する。
 
-現在追加済みの外部依存は、domain エンティティ（`Workspace` / `Issue` / `Memory` /
-`DaemonRecord`）が使う `chrono`（時刻）・`serde`（JSON インデックス表現の derive）と、
-その JSON 表現を検証するテスト専用の `serde_json`（dev-dependency）だけである。
+現在追加済みの外部依存は次のとおり。
+
+| クレート | 用途 | 使う場所 |
+|---|---|---|
+| `chrono` | 時刻 | domain エンティティ（`Workspace` / `Issue` / `Memory` / `DaemonRecord`）と、相対時刻に現在時刻を渡す合成ルート |
+| `serde` | JSON インデックス表現の derive | domain エンティティ |
+| `serde_json` | 上の JSON 表現を検証するテスト（dev-dependency） | domain のテスト |
+| `unicode-width` | 表示桁数の測定（CJK 全角を 2 桁と数える） | TUI 面の描画 widget |
+| `clap` | CLI の引数解析 | 入口面（`usagi-cli`） |
+| `crossterm` | 対話 TUI の実端末バックエンド（raw mode・代替スクリーン・キー/リサイズイベント） | 合成ルート（`src/main.rs`）のみ。TUI 面は `Terminal` ポートに対して純粋に振る舞い crossterm に依存しない |
 
 ## ブランチ名
 
