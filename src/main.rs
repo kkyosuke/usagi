@@ -17,6 +17,6 @@ fn main() -> std::io::Result<()> {
         Some("daemon") => usagi_daemon::presentation::run(&mut stdout, &info),
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
         Some(command) => usagi_cli::cli::write_unknown_command(&mut stdout, &info, command),
-        None => usagi_tui::write_banner(&mut stdout, &info),
+        None => usagi_tui::presentation::write_banner(&mut stdout, &info),
     }
 }
