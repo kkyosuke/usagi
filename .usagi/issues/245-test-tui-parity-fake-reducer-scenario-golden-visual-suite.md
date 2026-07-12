@@ -1,14 +1,14 @@
 ---
 number: 245
 title: test(tui): parity fake reducer scenario と golden visual suite を整備する
-status: todo
+status: done
 priority: high
 labels: [tui, test, parity]
 dependson: [228, 231, 232, 233, 237]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:34.116229+00:00
-updated_at: 2026-07-12T21:12:34.116229+00:00
+updated_at: 2026-07-12T23:07:04.697474+00:00
 ---
 
 ## 目的
