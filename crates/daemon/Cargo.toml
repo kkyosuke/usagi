@@ -13,8 +13,13 @@ publish = false
 usagi-core.workspace = true
 # IPC リクエスト/レスポンス（usagi-core のプロトコル型）を wire の JSON へ (de)serialize する。
 serde_json.workspace = true
+serde.workspace = true
+# Unix peer credentials and socket ownership checks are transport concerns of
+# the daemon boundary, never part of the protocol core.
+libc.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

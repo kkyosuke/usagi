@@ -155,6 +155,10 @@ presentation 主体の実クレートになる。
   全面に依存できる合成ルートが要求型を変換する。daemon との実行時通信は IPC で行い、
   そのプロトコル型は `usagi-core` が持つ。
 - `usagi-core` は他の usagi クレートに依存しない。
+- IPC の frame codec、surface-neutral な byte-stream `Connection` port、queue 上限は
+  `usagi-core` に置く。Unix domain socket の bind/connect、owner・symlink・peer UID
+  検証、generation locator は `usagi-daemon` の infrastructure adapter に置く。これにより
+  TUI の attach 状態機械は socket 実装を参照せず、実 socket を束ねるのは合成ルートだけである。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない
