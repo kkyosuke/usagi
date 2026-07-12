@@ -27,6 +27,7 @@ use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
@@ -123,6 +124,62 @@ enum WorkspaceStep {
 enum WorkspaceModal {
     Overview(OverviewModal),
     Pr(PrModal),
+    Text(TextOverlay),
+}
+
+/// Home overlay が必要とするデータを取得する境界。
+///
+/// backend の diff / PR fetch はこの port の実装側へ閉じる。返す文字列はすべて
+/// 画面に表示して安全な要約でなければならず、生の command error や credential を
+/// 渡してはならない。現在の runtime は snapshot だけから読める値を提供し、未接続の
+/// diff は安全な fallback を返す。
+pub trait OverlayDataPort {
+    /// Preview の安全な表示内容を返す。
+    fn preview(&self, workspace: &WorkspaceView) -> OverlayDocument;
+    /// Diff の安全な表示内容を返す。
+    fn diff(&self, workspace: &WorkspaceView) -> OverlayDocument;
+    /// 長文 text の安全な表示内容を返す。
+    fn text(&self, workspace: &WorkspaceView) -> OverlayDocument;
+    /// Pull Request 一覧または安全な fallback message を返す。
+    ///
+    /// # Errors
+    ///
+    /// データを取得できず、画面へ表示して安全な fallback message を返す場合に失敗する。
+    fn pull_requests(
+        &self,
+        workspace: &WorkspaceView,
+    ) -> Result<Vec<usagi_core::domain::pullrequest::PrLink>, String>;
+}
+
+/// 永続化済み snapshot を読む既定の overlay data port。
+struct SnapshotOverlayData;
+
+impl OverlayDataPort for SnapshotOverlayData {
+    fn preview(&self, workspace: &WorkspaceView) -> OverlayDocument {
+        OverlayDocument::Ready(workspace.focused_preview_lines())
+    }
+
+    fn diff(&self, _workspace: &WorkspaceView) -> OverlayDocument {
+        OverlayDocument::Unavailable(
+            "Diff data is unavailable until a backend supplies it.".to_string(),
+        )
+    }
+
+    fn text(&self, workspace: &WorkspaceView) -> OverlayDocument {
+        let lines = workspace.focused_note_lines();
+        if lines.is_empty() {
+            OverlayDocument::Unavailable("No notes are available for this target.".to_string())
+        } else {
+            OverlayDocument::Ready(lines)
+        }
+    }
+
+    fn pull_requests(
+        &self,
+        workspace: &WorkspaceView,
+    ) -> Result<Vec<usagi_core::domain::pullrequest::PrLink>, String> {
+        Ok(workspace.focused_prs().to_vec())
+    }
 }
 
 /// Workspace runtime が 1 フレームを進めるために持つ presentation state。
@@ -133,15 +190,17 @@ struct WorkspaceUi {
     workspace: WorkspaceView,
     closeup: CloseupModal,
     modal: Option<WorkspaceModal>,
+    overlay_data: Box<dyn OverlayDataPort>,
 }
 
 impl WorkspaceUi {
-    fn new(workspace: WorkspaceView) -> Self {
+    fn with_overlay_data(workspace: WorkspaceView, overlay_data: Box<dyn OverlayDataPort>) -> Self {
         let closeup = CloseupModal::new(workspace.focused_label());
         Self {
             workspace,
             closeup,
             modal: None,
+            overlay_data,
         }
     }
 
@@ -159,9 +218,28 @@ impl WorkspaceUi {
 
     /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
     fn open_prs(&mut self) {
-        self.modal = Some(WorkspaceModal::Pr(PrModal::new(
-            self.workspace.focused_prs().to_vec(),
-        )));
+        self.modal = Some(match self.overlay_data.pull_requests(&self.workspace) {
+            Ok(prs) => WorkspaceModal::Pr(PrModal::new(prs)),
+            Err(message) => WorkspaceModal::Text(TextOverlay::new(
+                "Pull Request",
+                OverlayDocument::Unavailable(message),
+            )),
+        });
+    }
+
+    fn open_preview(&mut self) {
+        let document = self.overlay_data.preview(&self.workspace);
+        self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Preview", document)));
+    }
+
+    fn open_diff(&mut self) {
+        let document = self.overlay_data.diff(&self.workspace);
+        self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Diff", document)));
+    }
+
+    fn open_text(&mut self) {
+        let document = self.overlay_data.text(&self.workspace);
+        self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Notes", document)));
     }
 }
 
@@ -306,6 +384,23 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
     false
 }
 
+/// 長文 overlay の入力処理。背景の cursor / tab は動かさない。
+fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
+    match key {
+        Key::Up | Key::Char('k') => modal.scroll_up(),
+        Key::Down | Key::Char('j') => modal.scroll_down(),
+        Key::Escape => return true,
+        Key::Left
+        | Key::Right
+        | Key::Enter
+        | Key::Backspace
+        | Key::Quit
+        | Key::Char(_)
+        | Key::Other => {}
+    }
+    false
+}
+
 /// Switch のキー処理。session 選択と preview tab の移動を行い、Enter / `t` で
 /// 選択行の Closeup action menu へ入る。
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
@@ -317,6 +412,9 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Enter | Key::Char('t') => ui.enter_closeup(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
+        Key::Char('v') => ui.open_preview(),
+        Key::Char('d') => ui.open_diff(),
+        Key::Char('n') => ui.open_text(),
         Key::Escape => return WorkspaceStep::Back,
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         Key::Backspace | Key::Char(_) | Key::Other => {}
@@ -334,6 +432,9 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Right | Key::Char('l') => ui.workspace.tab_next(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
+        Key::Char('v') => ui.open_preview(),
+        Key::Char('d') => ui.open_diff(),
+        Key::Char('n') => ui.open_text(),
         Key::Escape => ui.workspace.enter_switch(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         // action 実行は Closeup command handler が接続されるまで no-op。
@@ -353,6 +454,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         let close = match modal {
             WorkspaceModal::Overview(modal) => step_overview(modal, key),
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
+            WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
         };
         if close {
             ui.modal = None;
@@ -374,6 +476,7 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
             overview_modal::render_over(height, width, &base, modal)
         }
         Some(WorkspaceModal::Pr(modal)) => pr_modal::render_over(height, width, &base, modal),
+        Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
         None if ui.workspace.mode() == Mode::Closeup => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
         }
@@ -394,8 +497,32 @@ fn drive_workspace(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
 ) -> io::Result<WorkspaceStep> {
+    drive_workspace_with_overlay_data(term, snapshot, Box::new(SnapshotOverlayData))
+}
+
+/// `overlay_data` を注入して 1 つの Workspace snapshot を駆動する。
+///
+/// diff / PR の backend fetch は実装しない。この seam に安全な projection を実装して
+/// 注入することで、表示層を外部 IO や生エラーから分離する。
+///
+/// # Errors
+///
+/// 端末への描画またはキー読み取りに失敗した場合、そのエラーを返す。
+pub fn run_workspace_with_overlay_data(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    overlay_data: Box<dyn OverlayDataPort>,
+) -> io::Result<Exit> {
+    drive_workspace_with_overlay_data(term, snapshot, overlay_data).map(|_| Exit::Quit)
+}
+
+fn drive_workspace_with_overlay_data(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    overlay_data: Box<dyn OverlayDataPort>,
+) -> io::Result<WorkspaceStep> {
     let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
-    let mut ui = WorkspaceUi::new(workspace);
+    let mut ui = WorkspaceUi::with_overlay_data(workspace, overlay_data);
     loop {
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
@@ -546,10 +673,11 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, ConfigStep, Exit, NewStep, OverviewModal, PrModal, Start, WelcomeStep,
-        WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi,
-        run as run_from_start, run_workspace, step_config, step_new, step_overview, step_pr,
-        step_workspace, welcome_action, write_banner,
+        BannerScreenRunner, ConfigStep, Exit, NewStep, OverlayDataPort, OverlayDocument,
+        OverviewModal, PrModal, SnapshotOverlayData, Start, WelcomeStep, WorkspaceLoader,
+        WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start,
+        run_workspace, run_workspace_with_overlay_data, step_config, step_new, step_overview,
+        step_pr, step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -676,6 +804,26 @@ mod tests {
         opened: Vec<PathBuf>,
         fail: bool,
         opened_at: Option<DateTime<Utc>>,
+    }
+
+    struct FixedOverlayData;
+
+    impl OverlayDataPort for FixedOverlayData {
+        fn preview(&self, _workspace: &WorkspaceView) -> OverlayDocument {
+            OverlayDocument::Ready(vec!["injected preview".to_string()])
+        }
+
+        fn diff(&self, _workspace: &WorkspaceView) -> OverlayDocument {
+            OverlayDocument::Unavailable("injected diff fallback".to_string())
+        }
+
+        fn text(&self, _workspace: &WorkspaceView) -> OverlayDocument {
+            OverlayDocument::Ready(vec!["injected text".to_string()])
+        }
+
+        fn pull_requests(&self, _workspace: &WorkspaceView) -> Result<Vec<PrLink>, String> {
+            Err("injected PR fallback".to_string())
+        }
     }
 
     impl WorkspaceLoader for FakeLoader {
@@ -850,7 +998,7 @@ mod tests {
     fn switch_pr_modal_captures_keys_without_moving_the_background() {
         let snapshot = snapshot_with_pr("switch");
         let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
-        let mut ui = WorkspaceUi::new(workspace);
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
         let selected = ui.workspace.selected();
         let tab = ui.workspace.active_tab();
 
@@ -1228,6 +1376,56 @@ mod tests {
         // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
         assert!(frame(12).contains("Switch"));
         assert!(!frame(12).contains("Open terminal"));
+    }
+
+    #[test]
+    fn workspace_text_overlays_keep_home_visible_and_capture_scroll_keys() {
+        let keys = [
+            Key::Char('v'),
+            Key::Down,
+            Key::Escape,
+            Key::Char('d'),
+            Key::Down,
+            Key::Escape,
+            Key::Char('n'),
+            Key::Down,
+            Key::Escape,
+            Key::Char('p'),
+            Key::Escape,
+            Key::Quit,
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+
+        assert_eq!(
+            run_workspace(&mut term, snapshot_with_pr("overlays")).unwrap(),
+            Exit::Quit
+        );
+        let frame = |index: usize| term.frames[index].join("\n");
+
+        assert!(frame(1).contains("Preview"));
+        assert!(frame(1).contains("session: overlays-session"));
+        assert!(frame(1).contains("overlays-session")); // Home background remains visible.
+        assert!(frame(4).contains("Diff"));
+        assert!(frame(4).contains("unavailable until a backend"));
+        assert!(frame(7).contains("Notes"));
+        assert!(frame(7).contains("No notes are available"));
+        assert!(frame(10).contains("Pull Request"));
+        assert!(frame(10).contains("#42"));
+    }
+
+    #[test]
+    fn workspace_accepts_an_injected_overlay_data_port() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('v'), Key::Escape, Key::Quit]);
+        assert_eq!(
+            run_workspace_with_overlay_data(
+                &mut term,
+                snapshot("injected"),
+                Box::new(FixedOverlayData),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert!(term.frames[1].join("\n").contains("injected preview"));
     }
 
     #[test]

@@ -279,6 +279,47 @@ impl Workspace {
             .map_or(&[], |session| session.prs.as_slice())
     }
 
+    /// フォーカス中 target の preview に出す安全な概要行。
+    #[must_use]
+    pub fn focused_preview_lines(&self) -> Vec<String> {
+        let (kind, path) = self.focused_session().map_or_else(
+            || ("workspace", self.path()),
+            |session| ("session", session.root.as_path()),
+        );
+        vec![
+            format!("{}: {}", kind, self.focused_label()),
+            format!("path: {}", path.display()),
+            format!("{} pull request(s)", self.focused_prs().len()),
+        ]
+    }
+
+    /// フォーカス中 target の scratchpad を text overlay 用の安全な行へ投影する。
+    #[must_use]
+    pub fn focused_note_lines(&self) -> Vec<String> {
+        let notes = self
+            .focused_session()
+            .map_or(&self.state.root_notes, |session| &session.notes);
+        let mut lines = Vec::new();
+        if let Some(note) = notes.note() {
+            lines.extend(note.lines().map(str::to_owned));
+        }
+        for todo in notes.todos() {
+            lines.push(format!(
+                "[{}] {}",
+                if todo.done { 'x' } else { ' ' },
+                todo.text
+            ));
+        }
+        for decision in notes.decisions() {
+            lines.push(format!(
+                "{}  {}",
+                decision.at.format("%Y-%m-%d"),
+                decision.text
+            ));
+        }
+        lines
+    }
+
     /// 左ペインの選択を 1 つ下へ（末尾の root の次は先頭へ回り込む）。
     pub fn select_next(&mut self) {
         self.selected = (self.selected + 1) % self.row_count();

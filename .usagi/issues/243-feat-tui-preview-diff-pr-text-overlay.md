@@ -1,14 +1,14 @@
 ---
 number: 243
 title: feat(tui): preview・diff・PR・text overlay を実装する
-status: todo
+status: done
 priority: medium
 labels: [tui, parity-b, overlay]
 dependson: [226, 228]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.941269+00:00
-updated_at: 2026-07-12T21:12:33.941269+00:00
+updated_at: 2026-07-12T22:54:49.744493+00:00
 ---
 
 ## 目的

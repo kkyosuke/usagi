@@ -10,5 +10,6 @@ pub mod new;
 pub mod open;
 pub mod overview_modal;
 pub mod pr_modal;
+pub mod text_overlay;
 pub mod welcome;
 pub mod workspace;
