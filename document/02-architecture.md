@@ -1,6 +1,6 @@
 # 2. アーキテクチャ
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [6. 開発規約](06-conventions.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [1. プロジェクト概要](01-overview.md) ｜ 次へ → [3. TUI](03-tui.md)
 
 v2 の実装は **Cargo workspace 上の 4 クレート＋合成ルート（ルート bin パッケージ）** で構成する。
 面（TUI / daemon / 入口）の境界をクレート境界に一致させ、依存方向を rustc で強制する。

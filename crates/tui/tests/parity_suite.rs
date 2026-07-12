@@ -23,7 +23,10 @@ use usagi_tui::usecase::application::lifecycle::{
     SessionRow, Target as LifecycleTarget, update as update_lifecycle,
 };
 use usagi_tui::usecase::application::pane::{
-    PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, reduce,
+    LivePane, PaneEffect, PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
+};
+use usagi_tui::usecase::application::pane_runtime::{
+    Geometry, PaneRuntime, TerminalError, TerminalInventory, TerminalPort, TerminalSnapshot,
 };
 
 /// Fake lifecycle adapter: records requests and replays daemon events in the
@@ -349,4 +352,136 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
             text: "語".into()
         }]
     );
+}
+
+#[derive(Default)]
+struct ResumeFixturePort {
+    inventory: Vec<TerminalInventory>,
+    attachments: Vec<TerminalRef>,
+}
+
+impl TerminalPort for ResumeFixturePort {
+    fn inventory(&mut self) -> Result<Vec<TerminalInventory>, TerminalError> {
+        Ok(self.inventory.clone())
+    }
+
+    fn attach(
+        &mut self,
+        terminal: &TerminalRef,
+        _: Option<u64>,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        self.attachments.push(terminal.clone());
+        Ok(TerminalSnapshot {
+            terminal: terminal.clone(),
+            output_offset: 0,
+            geometry: Geometry { cols: 80, rows: 24 },
+            replay: Vec::new(),
+            exited: false,
+        })
+    }
+
+    fn resync(&mut self, _: &TerminalRef) -> Result<TerminalSnapshot, TerminalError> {
+        Err(TerminalError::Unavailable)
+    }
+
+    fn input(&mut self, _: &TerminalRef, _: &[u8]) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
+    fn resize(&mut self, _: &TerminalRef, _: Geometry) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
+    fn detach(&mut self, _: &TerminalRef) {}
+}
+
+#[test]
+fn resume_compatibility_fixture_falls_back_for_missing_stale_and_old_state() {
+    let workspace = WorkspaceId::new();
+    let removed_session = SessionId::new();
+    let surviving_session = SessionId::new();
+
+    // A saved target is an identity, not a row index. A refreshed snapshot that
+    // no longer contains it migrates both selection and action target to root.
+    let mut lifecycle = LifecycleState::new(
+        workspace,
+        vec![SessionRow {
+            id: removed_session,
+            label: "old".into(),
+        }],
+    );
+    let create = OperationId::new();
+    let _ = update_lifecycle(
+        &mut lifecycle,
+        Event::RequestCreate {
+            operation_id: create,
+            label: "select old target".into(),
+        },
+    );
+    let _ = update_lifecycle(
+        &mut lifecycle,
+        Event::Daemon(DaemonEvent::Accepted {
+            operation_id: create,
+            row: PendingRow::Creating {
+                label: "select old target".into(),
+            },
+        }),
+    );
+    let _ = update_lifecycle(
+        &mut lifecycle,
+        Event::Daemon(DaemonEvent::Succeeded {
+            operation_id: create,
+            revision: 1,
+            created: Some(SessionRow {
+                id: removed_session,
+                label: "old".into(),
+            }),
+        }),
+    );
+    let _ = update_lifecycle(
+        &mut lifecycle,
+        Event::Snapshot {
+            sessions: vec![SessionRow {
+                id: surviving_session,
+                label: "current".into(),
+            }],
+        },
+    );
+    assert_eq!(
+        lifecycle.selected(),
+        usagi_tui::usecase::application::lifecycle::Selection::Target(LifecycleTarget::Root)
+    );
+    assert_eq!(lifecycle.active(), LifecycleTarget::Root);
+
+    let saved = terminal(workspace, surviving_session);
+    let pane = PaneState::with_live(
+        PaneSelection::Tab(TabSelection::Live(saved.clone())),
+        vec![LivePane {
+            terminal: saved.clone(),
+            kind: PaneKind::Terminal,
+        }],
+    );
+
+    // Missing inventory data is a safe no-attach fallback.
+    let mut missing = PaneRuntime::new(pane.clone());
+    let mut port = ResumeFixturePort::default();
+    missing.reconnect(&mut port);
+    assert!(missing.pane().tabs().is_empty());
+    assert!(port.attachments.is_empty());
+
+    // An old TerminalRef (same terminal ID but another daemon incarnation) is
+    // stale rather than a candidate for heuristic migration.
+    let mut old = saved.clone();
+    old.daemon_generation = DaemonGeneration::new();
+    let mut stale = PaneRuntime::new(pane);
+    let mut port = ResumeFixturePort {
+        inventory: vec![TerminalInventory {
+            terminal: old,
+            live: true,
+        }],
+        ..ResumeFixturePort::default()
+    };
+    stale.reconnect(&mut port);
+    assert!(stale.pane().tabs().is_empty());
+    assert!(port.attachments.is_empty());
 }
