@@ -98,8 +98,23 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<ExitSta
     }
 }
 
+fn spawn_hop(home: &std::path::Path, slave: &File) -> io::Result<Child> {
+    Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .arg("hop")
+        .env("USAGI_HOME", home)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave.try_clone()?))
+        .spawn()
+}
+
+fn send(master: &mut File, input: &[u8]) {
+    master.write_all(input).unwrap();
+    master.flush().unwrap();
+}
+
 #[test]
-fn hop_recent_opens_workspace_and_restores_the_terminal() {
+fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     let home = tempfile::tempdir().unwrap();
     let roots = tempfile::tempdir().unwrap();
     let workspace = roots.path().join("pty-workspace");
@@ -118,20 +133,13 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     let reader_master = master.try_clone().unwrap();
     let reader = thread::spawn(move || read_pty(reader_master));
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
-        .arg("hop")
-        .env("USAGI_HOME", home.path())
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::from(slave.try_clone().unwrap()))
-        .stderr(Stdio::from(slave.try_clone().unwrap()))
-        .spawn()
-        .expect("PTY上でusagi hopを起動できる");
+    let mut child = spawn_hop(home.path(), &slave).expect("PTY上でusagi hopを起動できる");
 
-    // Welcome の最初の Recent を開き、Workspace が描画された後に終了する。入力は PTY の
-    // line discipline が raw mode へ切り替わる時間を確保してから送る。
+    // `1` は Welcome の予約 input で最初の Recent を開く。`x` は Workspace 上の
+    // non-reserved input で、画面遷移や quit を起こさず次フレームだけを要求する。入力は
+    // PTY の line discipline が raw mode へ切り替わる時間を確保してから送る。
     thread::sleep(Duration::from_millis(150));
-    master.write_all(b"1").unwrap();
-    master.flush().unwrap();
+    send(&mut master, b"1");
     thread::sleep(Duration::from_millis(150));
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
@@ -139,11 +147,9 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     thread::sleep(Duration::from_millis(100));
     // The legacy workspace loop observes resize on the next frame boundary. `x` is a no-op key
     // which requests that boundary without changing the visible Home state.
-    master.write_all(b"x").unwrap();
-    master.flush().unwrap();
+    send(&mut master, b"x");
     thread::sleep(Duration::from_millis(100));
-    master.write_all(b"q").unwrap();
-    master.flush().unwrap();
+    send(&mut master, b"q");
 
     let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
         Ok(status) => status,
@@ -159,6 +165,22 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     };
     let attributes_after = terminal_attributes(&slave).unwrap();
 
+    // One client can leave and immediately attach again to the same OS terminal.  A leaked raw
+    // flag, alternate screen, mouse capture, or hidden cursor would make this second entry flaky.
+    assert!(status.success());
+    assert_eq!(attributes_after.c_iflag, attributes_before.c_iflag);
+    assert_eq!(attributes_after.c_oflag, attributes_before.c_oflag);
+    assert_eq!(attributes_after.c_cflag, attributes_before.c_cflag);
+    assert_eq!(attributes_after.c_lflag, attributes_before.c_lflag);
+    assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
+
+    let mut reattached =
+        spawn_hop(home.path(), &slave).expect("同じPTYへ再接続してhopを起動できる");
+    thread::sleep(Duration::from_millis(150));
+    send(&mut master, b"q");
+    let reattached_status = wait_with_timeout(&mut reattached, Duration::from_secs(5)).unwrap();
+    let attributes_reattached = terminal_attributes(&slave).unwrap();
+
     // slave をすべて閉じると reader が EOF/EIO を受け取れる。
     drop(slave);
     drop(master);
@@ -166,6 +188,7 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     let output = String::from_utf8_lossy(&captured);
 
     assert!(status.success(), "PTY output: {output}");
+    assert!(reattached_status.success(), "PTY output: {output}");
     assert!(output.contains("Recent"), "PTY output: {output}");
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
     assert!(output.contains("Sessions"), "PTY output: {output}");
@@ -173,14 +196,24 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1000l"), "PTY output: {output}");
+    assert!(
+        output.matches("\u{1b}[?1049h").count() >= 2,
+        "both entries must use the alternate screen: {output}"
+    );
+    assert!(
+        output.matches("\u{1b}[?1049l").count() >= 2,
+        "both exits must restore the primary screen: {output}"
+    );
     assert!(
         output.matches("\u{1b}[2J").count() >= 2,
         "the initial and resized surfaces must both be cleared: {output}"
     );
 
-    assert_eq!(attributes_after.c_iflag, attributes_before.c_iflag);
-    assert_eq!(attributes_after.c_oflag, attributes_before.c_oflag);
-    assert_eq!(attributes_after.c_cflag, attributes_before.c_cflag);
-    assert_eq!(attributes_after.c_lflag, attributes_before.c_lflag);
-    assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
+    assert_eq!(attributes_reattached.c_iflag, attributes_before.c_iflag);
+    assert_eq!(attributes_reattached.c_oflag, attributes_before.c_oflag);
+    assert_eq!(attributes_reattached.c_cflag, attributes_before.c_cflag);
+    assert_eq!(attributes_reattached.c_lflag, attributes_before.c_lflag);
+    assert_eq!(attributes_reattached.c_cc, attributes_before.c_cc);
 }
