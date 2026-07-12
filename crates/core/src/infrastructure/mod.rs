@@ -11,7 +11,9 @@
 //! - [`persistence`] — entity 非依存の永続化基盤（アトミック書き込み・ロック・
 //!   markdown ＋ 派生 `index.json` の汎用ストア）。
 //! - [`store`] — entity 別ストア（issue / memory / workspace レジストリ）。
+//! - [`daemon`] — daemon lifecycle レコード（`daemon.json`）の store。
 
+pub mod daemon;
 pub mod error_log;
 pub mod paths;
 pub mod persistence;

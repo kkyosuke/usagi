@@ -42,7 +42,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 |---|---|---|
 | `chrono` | domain エンティティの時刻 | 本依存 |
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
-| `serde_json` | `index.json` / `workspaces.json` の (de)serialize | 本依存 |
+| `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize | 本依存 |
 | `anyhow` | infrastructure（永続化ストア）のエラー伝播 | 本依存 |
 | `fs2` | ストアの cross-process ロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
