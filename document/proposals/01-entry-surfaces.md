@@ -62,6 +62,9 @@ v1 で JSON 出力の SSoT を usecase 側（`view`）に置いて CLI・MCP が
 
 ## ディレクトリ構成と依存
 
+> この節のクレート構成・依存・dispatch は実装済みで、正本は
+> [02-architecture.md](../02-architecture.md)。本節は設計判断の経緯として残す。
+
 ```text
 crates/
 ├── core/             # usagi-core: domain / 共有 usecase / infrastructure（IPC プロトコル型・store・git）

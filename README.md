@@ -11,17 +11,18 @@ Cargo パッケージであり、旧実装（v1）は [v1/](v1/README.md) に独
 
 ## 構成（v2）
 
-「TUI 面 / daemon 面 / 共通（common）」の 3 クレート＋合成ルートの Cargo workspace。
-各クレート内はクリーンアーキテクチャの依存方向を守る（正本は
+「TUI 面 / daemon 面 / 入口面（CLI・MCP）/ 共通（common）」の 4 クレート＋合成ルートの
+Cargo workspace。各クレート内はクリーンアーキテクチャの依存方向を守る（正本は
 [document/02-architecture.md](document/02-architecture.md)）。
 
 ```
 .
 ├── Cargo.toml          # workspace ルート ＋ 配布バイナリ usagi（bin）のパッケージ
 ├── src/
-│   └── main.rs         # 合成ルート。実 IO をここで束ね、実行面へ dispatch する
+│   └── main.rs         # 合成ルート。実 IO をここで束ね、各面へ dispatch する
 └── crates/
     ├── core/           # usagi-core: 共通の domain / usecase / 共有 infrastructure
+    ├── cli/            # usagi-cli: 入口面。CLI サブコマンドと MCP サーバ（usagi-core にのみ依存）
     ├── daemon/         # usagi-daemon: daemon 面（usagi-core にのみ依存）
     └── tui/            # usagi-tui: TUI 面（usagi-core にのみ依存）
 ```
