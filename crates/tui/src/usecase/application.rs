@@ -56,6 +56,50 @@ pub trait ScreenRunner {
     fn doctor(&mut self) -> io::Result<()>;
 }
 
+/// 対話画面が端末から受け取る 1 つのキー入力。実端末のイベント（crossterm など）は
+/// 合成ルートがこの語彙へ翻訳して渡すため、TUI 面は特定の端末ライブラリに依存しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// 選択を 1 つ上へ移す。
+    Up,
+    /// 選択を 1 つ下へ移す。
+    Down,
+    /// 選択中の項目を確定する。
+    Enter,
+    /// 画面を終了する（Esc / Ctrl-C など）。
+    Quit,
+    /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
+    Char(char),
+    /// 上記のいずれでもないキー（無視して再描画だけする。リサイズ通知など）。
+    Other,
+}
+
+/// 対話画面が使う端末の最小インターフェース。実端末の制御（raw mode・画面描画・
+/// キー読み取り）は合成ルートが実装して注入し、この層は注入された `Terminal` に対して
+/// 純粋に振る舞う（描くフレームの構築とキーの解釈だけを担う）。
+pub trait Terminal {
+    /// 現在の端末サイズ `(height, width)`（行数・桁数）を返す。
+    ///
+    /// # Errors
+    ///
+    /// 端末サイズの取得に失敗した場合、そのエラーを返す。
+    fn size(&mut self) -> io::Result<(usize, usize)>;
+
+    /// 1 フレーム分の行を端末へ描く。
+    ///
+    /// # Errors
+    ///
+    /// 端末への書き込みに失敗した場合、そのエラーを返す。
+    fn draw(&mut self, frame: &[String]) -> io::Result<()>;
+
+    /// 次のキー入力を 1 つ読む（入力があるまでブロックする）。
+    ///
+    /// # Errors
+    ///
+    /// キー入力の読み取りに失敗した場合、そのエラーを返す。
+    fn read_key(&mut self) -> io::Result<Key>;
+}
+
 /// `entry` に対応する画面を `runner` で実行する。
 ///
 /// # Errors
@@ -158,6 +202,25 @@ mod tests {
             assert_eq!(entry.clone(), entry);
             assert!(!format!("{entry:?}").is_empty());
         }
+    }
+
+    #[test]
+    fn key_derives_are_exercised() {
+        use super::Key;
+        // derive された Debug / Clone / Copy / PartialEq を全バリアントで実行する。
+        let keys = [
+            Key::Up,
+            Key::Down,
+            Key::Enter,
+            Key::Quit,
+            Key::Char('o'),
+            Key::Other,
+        ];
+        for key in keys {
+            assert_eq!(key, key);
+            assert!(!format!("{key:?}").is_empty());
+        }
+        assert_ne!(Key::Char('a'), Key::Char('b'));
     }
 
     #[test]
