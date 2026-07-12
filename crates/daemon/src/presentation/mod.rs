@@ -42,10 +42,8 @@ pub struct DaemonEnv<'a, F, P, T, S, L, K> {
 /// 実 IO を伴う verb は、注入された [`DaemonEnv`] を使う usecase へ振り分ける:
 /// 無指定と `serve` は前景の常駐 [`usecase::serve::serve`]、`start` は背景起動の
 /// [`usecase::start::start`]、`status` は [`usecase::status::report`]、`stop` は
-/// [`usecase::stop::stop`]。それ以外は純粋な [`usecase::Command`]（[`usecase::interpret`] が
-/// 解決）の結果を書き出す。
-///
-/// `restart` の実処理は今後足していく。
+/// [`usecase::stop::stop`]、`restart` は [`usecase::restart::restart`]。認識できない
+/// サブコマンドは [`usecase::unknown_subcommand`] の案内を書き出す。
 ///
 /// # Errors
 ///
@@ -82,7 +80,18 @@ pub fn run<
             let line = usecase::stop::stop(env.store, env.probe, env.terminator, info)?;
             writeln!(out, "{line}")
         }
-        Some(other) => writeln!(out, "{}", usecase::interpret(other).execute(info)),
+        Some("restart") => {
+            let line = usecase::restart::restart(
+                env.store,
+                env.probe,
+                env.terminator,
+                env.launcher,
+                env.sleeper,
+                info,
+            )?;
+            writeln!(out, "{line}")
+        }
+        Some(other) => writeln!(out, "{}", usecase::unknown_subcommand(info, other)),
     }
 }
 
@@ -151,40 +160,33 @@ mod tests {
     }
 
     #[test]
-    fn run_reports_restart_stub() {
-        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
-        assert_eq!(
-            run_line(Some("restart"), &store),
-            "usagi v0.1.0: daemon restart is not yet implemented\n"
-        );
-    }
-
-    #[test]
-    fn run_routes_start_to_the_launcher() {
-        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
-        let (probe, terminator, shutdown, sleeper) = (
-            FixedProbe(true),
-            RecordingTerminator::default(),
-            ImmediateShutdown,
-            NoopSleeper,
-        );
-        // The launcher mimics the spawned serve registering pid 5555.
-        let launcher = TestLauncher::registering(&store, 5555);
-        let env = DaemonEnv {
-            store: &store,
-            probe: &probe,
-            terminator: &terminator,
-            shutdown: &shutdown,
-            launcher: &launcher,
-            sleeper: &sleeper,
-            pid: 4321,
-        };
-        let mut buf = Vec::new();
-        run(&mut buf, Some("start"), &info(), &env).unwrap();
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "usagi v0.1.0: daemon started (pid 5555)\n"
-        );
+    fn run_routes_start_and_restart_to_the_launcher() {
+        // Both start and restart launch a daemon; the launcher registers pid 5555.
+        for (subcommand, expected) in [
+            ("start", "usagi v0.1.0: daemon started (pid 5555)\n"),
+            ("restart", "usagi v0.1.0: daemon restarted (pid 5555)\n"),
+        ] {
+            let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+            let (probe, terminator, shutdown, sleeper) = (
+                FixedProbe(true),
+                RecordingTerminator::default(),
+                ImmediateShutdown,
+                NoopSleeper,
+            );
+            let launcher = TestLauncher::registering(&store, 5555);
+            let env = DaemonEnv {
+                store: &store,
+                probe: &probe,
+                terminator: &terminator,
+                shutdown: &shutdown,
+                launcher: &launcher,
+                sleeper: &sleeper,
+                pid: 4321,
+            };
+            let mut buf = Vec::new();
+            run(&mut buf, Some(subcommand), &info(), &env).unwrap();
+            assert_eq!(String::from_utf8(buf).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -228,7 +230,13 @@ mod tests {
             ImmediateShutdown,
             NoopSleeper,
         );
-        for subcommand in [Some("status"), Some("stop"), Some("serve"), Some("start")] {
+        for subcommand in [
+            Some("status"),
+            Some("stop"),
+            Some("serve"),
+            Some("start"),
+            Some("restart"),
+        ] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
             let launcher = TestLauncher::idle(&store);
             let env = DaemonEnv {
