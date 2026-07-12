@@ -35,9 +35,21 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 ルート `Cargo.toml` の `[workspace.dependencies]` で一元管理し、各クレートは
 `<crate>.workspace = true` で参照する。
 
-現在追加済みの外部依存は、domain エンティティ（`Workspace` / `Issue` / `Memory`）が使う
-`chrono`（時刻）・`serde`（JSON インデックス表現の derive）と、その JSON 表現を検証する
-テスト専用の `serde_json`（dev-dependency）だけである。
+現在追加済みの外部依存は次のとおり。
+
+| クレート | 使途 | 種別 |
+|---|---|---|
+| `chrono` | domain エンティティの時刻 | 本依存 |
+| `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
+| `serde_json` | `index.json` / `workspaces.json` の (de)serialize | 本依存 |
+| `anyhow` | infrastructure（永続化ストア）のエラー伝播 | 本依存 |
+| `fs2` | ストアの cross-process ロック（`flock` 相当） | 本依存 |
+| `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
+| `rayon` | markdown ファイルの並列スキャン | 本依存 |
+| `tempfile` | ストアのユニットテスト用の一時ディレクトリ | dev |
+
+いずれも `usagi-core` の依存で、`domain/` は `chrono` / `serde` だけを使い、残りは
+`infrastructure/`（永続化）が使う（[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
 
 ## ブランチ名
 
