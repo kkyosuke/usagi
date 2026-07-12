@@ -12,10 +12,10 @@ publish = false
 [dependencies]
 usagi-core.workspace = true
 clap.workspace = true
+# MCP サーバの stdio JSON-RPC 2.0 のパース・整形と、tool の入力スキーマ埋め込みに使う。
+serde_json.workspace = true
 
 [dev-dependencies]
-# MCP tool の入力スキーマ（JSON 文字列）が妥当な JSON であることをテストで検証する。
-serde_json.workspace = true
 
 [lints]
 workspace = true

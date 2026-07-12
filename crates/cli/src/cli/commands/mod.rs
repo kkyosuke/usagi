@@ -7,22 +7,20 @@
 //! 委譲や core usecase 呼び出し・結果整形を行う（独自のビジネスロジックは持たない）。
 //!
 //! TUI を開くハンドラは起動要求を返し、それ以外の未実装ハンドラは案内を出して終了する。
+//! エージェント統合フック（Claude が呼ぶ `guard-workspace` / `agent-phase`）は人間向けでは
+//! ないため、ここではなく [`crate::cli::hooks`] に置く。
 
-pub mod agent_phase;
 pub mod completion;
 pub mod config;
 pub mod doctor;
-pub mod guard_workspace;
 pub mod hop;
 pub mod open;
 pub mod update;
 pub mod version;
 
-pub use agent_phase::AgentPhase;
 pub use completion::Completion;
 pub use config::Config;
 pub use doctor::Doctor;
-pub use guard_workspace::GuardWorkspace;
 pub use hop::Hop;
 pub use open::Open;
 pub use update::Update;
@@ -36,20 +34,15 @@ use crate::cli::RunOutcome;
 ///
 /// `detail` が空でなければ括弧付きで解析済みオプションを併記し、コマンド面の枠が
 /// オプションまで通っていることを示す。各コマンドのハンドラ（子モジュール）から使う。
-fn unimplemented(out: &mut dyn Write, command: &str, detail: &str) -> io::Result<RunOutcome> {
+pub(super) fn unimplemented(
+    out: &mut dyn Write,
+    command: &str,
+    detail: &str,
+) -> io::Result<RunOutcome> {
     if detail.is_empty() {
         writeln!(out, "usagi {command}: not yet implemented")?;
     } else {
         writeln!(out, "usagi {command}: not yet implemented ({detail})")?;
     }
     Ok(RunOutcome::Exit(0))
-}
-
-/// コマンドを dispatch してハンドラを実行し、結果と出力文字列を得るテストヘルパ。
-/// 各コマンドファイルのテストから使い、`Command::into_handler` の各アームも被覆する。
-#[cfg(test)]
-pub(crate) fn execute(command: crate::cli::Command) -> (RunOutcome, String) {
-    let mut out = Vec::new();
-    let outcome = command.into_handler("9.9.9").run(&mut out).unwrap();
-    (outcome, String::from_utf8(out).unwrap())
 }

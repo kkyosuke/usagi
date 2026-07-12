@@ -20,13 +20,15 @@ use crossterm::{execute, queue};
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::daemon::{
     DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Terminator,
 };
 use usagi_core::infrastructure::paths;
+use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::{self, BannerScreenRunner};
+use usagi_tui::presentation::{self, BannerScreenRunner, Exit};
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 
 /// crossterm を backing にした実端末。TUI 面の [`Terminal`] ポートを合成ルートで実装し、
@@ -68,7 +70,7 @@ impl Terminal for CrosstermTerminal {
                         KeyCode::Up => Key::Up,
                         KeyCode::Down => Key::Down,
                         KeyCode::Enter => Key::Enter,
-                        KeyCode::Esc => Key::Quit,
+                        KeyCode::Esc => Key::Escape,
                         KeyCode::Char(ch) => Key::Char(ch),
                         _ => Key::Other,
                     });
@@ -82,25 +84,34 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
+/// 登録済み workspace の一覧を読む（実 IO）。ストアが開けない・壊れている等の失敗時は
+/// 空一覧にフォールバックする（一覧が空でも welcome / Open 画面は成立するため）。
+fn load_workspaces() -> Vec<Workspace> {
+    Storage::open_default()
+        .and_then(|storage| storage.load_workspaces())
+        .unwrap_or_default()
+}
+
 /// welcome 画面を起動する。対話端末（tty）なら raw mode + 代替スクリーンで対話ループを回し、
-/// 非対話環境（パイプ・CI など）では 1 フレームを `out` へ出して返す。
-fn launch_welcome(out: &mut dyn Write) -> std::io::Result<()> {
+/// 非対話環境（パイプ・CI など）では welcome の 1 フレームを `out` へ出して返す。
+fn launch_welcome(out: &mut dyn Write, info: &AppInfo) -> std::io::Result<()> {
     let now = Utc::now();
-    let mut welcome = Welcome::empty();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        run_welcome_interactive(&mut welcome, now)
+        run_interactive(out, info, now)
     } else {
         // サイズ 0 は welcome::render 側で 80x24 にフォールバックされる。
-        for line in welcome::render(0, 0, &welcome, now) {
+        for line in welcome::render(0, 0, &Welcome::empty(), now) {
             writeln!(out, "{line}")?;
         }
         Ok(())
     }
 }
 
-/// raw mode + 代替スクリーンへ入って welcome の対話ループを回し、終了時（エラー時も）に
-/// 端末状態を必ず元へ戻す。
-fn run_welcome_interactive(welcome: &mut Welcome, now: DateTime<Utc>) -> std::io::Result<()> {
+/// raw mode + 代替スクリーンへ入って対話ループを回し、終了時（エラー時も）に端末状態を必ず
+/// 元へ戻す。ユーザーが Open 画面で workspace を選んだら、後続で workspace 画面へ接続する。
+fn run_interactive(out: &mut dyn Write, info: &AppInfo, now: DateTime<Utc>) -> std::io::Result<()> {
+    let workspaces = load_workspaces();
+
     enable_raw_mode()?;
     let mut setup = std::io::stdout();
     execute!(setup, EnterAlternateScreen, cursor::Hide)?;
@@ -108,13 +119,22 @@ fn run_welcome_interactive(welcome: &mut Welcome, now: DateTime<Utc>) -> std::io
     let mut terminal = CrosstermTerminal {
         out: std::io::stdout(),
     };
-    let result = presentation::run_welcome(&mut terminal, welcome, now);
+    let result = presentation::run(&mut terminal, workspaces, now);
 
     // 描画の成否によらず端末を復元する。
     let mut teardown = std::io::stdout();
     let _ = execute!(teardown, cursor::Show, LeaveAlternateScreen);
     let _ = disable_raw_mode();
-    result
+
+    match result? {
+        Exit::Quit => Ok(()),
+        // 選んだ workspace を開く。workspace 画面は現状バナーなので、代替スクリーンを出た
+        // あとの通常端末へ接続する（対話的な workspace 画面は今後実装する）。
+        Exit::OpenWorkspace(path) => {
+            let mut runner = BannerScreenRunner::new(out, info);
+            application::run(&EntryScreen::Workspace { path }, &mut runner)
+        }
+    }
 }
 
 /// The real `daemon.json` file: reads and writes `<data-dir>/daemon/daemon.json`.
@@ -224,7 +244,7 @@ fn launch_tui(
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
     if entry == &EntryScreen::Welcome {
-        launch_welcome(out)
+        launch_welcome(out, info)
     } else {
         let mut runner = BannerScreenRunner::new(out, info);
         application::run(entry, &mut runner)
@@ -282,7 +302,10 @@ fn main() -> std::io::Result<()> {
             };
             usagi_daemon::presentation::run(&mut stdout, command.as_deref(), &info, &env)
         }
-        Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
+        Some("mcp") => {
+            let stdin = std::io::stdin();
+            usagi_cli::mcp::serve(stdin.lock(), &mut stdout, info.version)
+        }
         None if args.get(1).is_none() => launch_tui(&mut stdout, &info, &EntryScreen::Welcome),
         // その他のサブコマンド（UTF-8 でない名前も含む）は入口面の CLI へ。
         // clap がコマンドツリーを解析し、非 UTF-8 のコマンド名は不正値として報告する。

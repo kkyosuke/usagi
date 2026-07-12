@@ -2,20 +2,21 @@
 //! どんな tool・入力があるかを `Tool` トレイト実装のレジストリ（`tools`）で定義し、
 //! dispatch は名前でレジストリを引いて `Tool::call` を呼ぶ一様な経路にする。
 //!
-//! stdio 上の JSON-RPC 2.0 フレーミング（serve ループ・`tools/list` / `tools/call` の配線）は
-//! 後続で追加する。現状は tool 面の枠（レジストリ + 名前 dispatch）までで、各 tool の
-//! `call` は未実装スタブ。ロジックは usagi-core の usecase（issue / memory）と daemon への
-//! IPC（session）へ委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
+//! stdio 上の JSON-RPC 2.0 の serve ループ（`initialize` / `tools/list` / `tools/call`）は
+//! [`serve`] が担う。`tools/list` と `initialize` は実際に応答し、`tools/call` は tool を
+//! 名前で引いて呼ぶ（各 tool の `call` は未実装スタブなので今は「未実装」エラーを返す）。
+//! ロジックは usagi-core の usecase（issue / memory）と daemon への IPC（session）へ
+//! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
 
+pub mod protocol;
+pub mod serve;
 pub mod tool;
 pub mod tools;
 
-use std::io::Write;
-
+pub use serve::serve;
 use tool::ToolError;
-use usagi_core::domain::AppInfo;
 
-/// tool 名でレジストリを引いて実行する（将来の `tools/call` の実体）。
+/// tool 名でレジストリを引いて実行する（`tools/call` の実体）。
 ///
 /// # Errors
 ///
@@ -29,30 +30,9 @@ pub fn dispatch(name: &str, params: &str) -> Result<String, ToolError> {
     tool.call(params)
 }
 
-/// MCP 面の起動を示す ready 行を `out` に書き出す。
-///
-/// # Errors
-///
-/// `out` への書き込みに失敗した場合、そのエラーを返す。
-pub fn write_ready_line(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()> {
-    writeln!(out, "{} mcp ready", info.describe())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ToolError, dispatch, write_ready_line};
-    use usagi_core::domain::AppInfo;
-
-    #[test]
-    fn write_ready_line_marks_mcp_surface() {
-        let info = AppInfo {
-            name: "usagi",
-            version: "0.1.0",
-        };
-        let mut buf = Vec::new();
-        write_ready_line(&mut buf, &info).unwrap();
-        assert_eq!(String::from_utf8(buf).unwrap(), "usagi v0.1.0 mcp ready\n");
-    }
+    use super::{ToolError, dispatch};
 
     #[test]
     fn dispatch_routes_to_a_known_tool() {
