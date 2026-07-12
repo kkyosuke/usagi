@@ -13,10 +13,13 @@
 //! - [`store`] — entity 別ストア（issue / memory / workspace レジストリ / state.json）。
 //! - [`daemon`] — daemon lifecycle レコード（`daemon.json`）の store。
 //! - [`git`] — worktree ライフサイクル等の git 操作（subprocess は `GitRunner` で注入）。
+//! - [`ipc`] — daemon とクライアントが Unix domain socket で交わす IPC プロトコル型と
+//!   フレーミング（transport は注入）。
 
 pub mod daemon;
 pub mod error_log;
 pub mod git;
+pub mod ipc;
 pub mod paths;
 pub mod persistence;
 pub mod store;

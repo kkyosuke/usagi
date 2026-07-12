@@ -11,6 +11,8 @@ publish = false
 
 [dependencies]
 usagi-core.workspace = true
+# IPC リクエスト/レスポンス（usagi-core のプロトコル型）を wire の JSON へ (de)serialize する。
+serde_json.workspace = true
 
 [dev-dependencies]
 
