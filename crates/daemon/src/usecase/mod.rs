@@ -7,6 +7,7 @@
 use usagi_core::domain::AppInfo;
 
 pub mod serve;
+pub mod start;
 pub mod status;
 pub mod stop;
 
@@ -14,13 +15,13 @@ pub mod stop;
 ///
 /// 各コマンドは実 IO を持たない純粋なアプリケーション操作で、実行結果として
 /// 標準出力へ出す 1 行を組み立てて返す。実際の書き出し・常駐ループ・プロセス
-/// 起動などの実 IO は presentation / 合成ルートが担う。まだ実処理（プロセス起動）が
-/// 入っていない制御プレーンの verb（`start` / `restart`）は IF（コマンド型と routing）だけを
-/// 用意したスタブで、実装が入った段階で各コマンドの `execute` に実処理を入れる。
+/// 起動などの実 IO は presentation / 合成ルートが担う。まだ実処理が入っていない
+/// 制御プレーンの verb `restart` は IF（コマンド型と routing）だけを用意したスタブで、
+/// 実装が入った段階で `execute` に実処理を入れる。
 ///
-/// 実 IO（store 読取・生存判定・signal・常駐待受）を要する `serve` / `status` / `stop` は、
-/// この純粋な trait ではなく [`serve::serve`] / [`status::report`] / [`stop::stop`] が担う
-/// （[`crate::presentation::run`] が振り分ける）。
+/// 実 IO（store 読取・生存判定・signal・常駐待受・プロセス起動）を要する `serve` / `start` /
+/// `status` / `stop` は、この純粋な trait ではなく [`serve::serve`] / [`start::start`] /
+/// [`status::report`] / [`stop::stop`] が担う（[`crate::presentation::run`] が振り分ける）。
 ///
 /// [`interpret`] がサブコマンド文字列を対応するコマンドへ解決するファクトリである。
 pub trait Command {
@@ -53,15 +54,6 @@ impl Command for Unknown {
     }
 }
 
-/// daemon を detached 起動して register する `start`。
-pub struct Start;
-
-impl Command for Start {
-    fn execute(&self, info: &AppInfo) -> String {
-        not_yet_implemented(info, "start")
-    }
-}
-
 /// 稼働中の daemon を止めてから起動し直す `restart`（`stop` → `start` の複合）。
 pub struct Restart;
 
@@ -80,15 +72,14 @@ fn not_yet_implemented(info: &AppInfo, verb: &str) -> String {
 
 /// 純粋な [`Command`]（実 IO を伴わないスタブ verb）へサブコマンド文字列を解決する。
 ///
-/// 制御プレーンのスタブ verb（`start` / `restart`）はそれぞれの実装型へ、それ以外は
-/// [`Unknown`] にする。実 IO を要する `serve`（無指定含む）/ `status` / `stop` は
-/// [`crate::presentation::run`] が [`serve::serve`] / [`status::report`] / [`stop::stop`] へ
-/// 先に振り分けるため、ここには渡らない。返り値を動的ディスパッチにして、verb ごとに実装型を
-/// 増やしても呼び出し側を変えずに済むようにする。
+/// 唯一残るスタブ verb `restart` を実装型へ、それ以外は [`Unknown`] にする。実 IO を要する
+/// `serve`（無指定含む）/ `start` / `status` / `stop` は [`crate::presentation::run`] が
+/// [`serve::serve`] / [`start::start`] / [`status::report`] / [`stop::stop`] へ先に振り分ける
+/// ため、ここには渡らない。返り値を動的ディスパッチにして、verb ごとに実装型を増やしても
+/// 呼び出し側を変えずに済むようにする。
 #[must_use]
 pub fn interpret(subcommand: &str) -> Box<dyn Command> {
     match subcommand {
-        "start" => Box::new(Start),
         "restart" => Box::new(Restart),
         other => Box::new(Unknown::new(other)),
     }
@@ -119,13 +110,11 @@ mod tests {
     }
 
     #[test]
-    fn interpret_resolves_control_plane_verbs_to_not_yet_implemented_stubs() {
-        for verb in ["start", "restart"] {
-            assert_eq!(
-                interpret(verb).execute(&info()),
-                format!("usagi v0.1.0: daemon {verb} is not yet implemented")
-            );
-        }
+    fn interpret_resolves_restart_to_a_not_yet_implemented_stub() {
+        assert_eq!(
+            interpret("restart").execute(&info()),
+            "usagi v0.1.0: daemon restart is not yet implemented"
+        );
     }
 
     #[test]

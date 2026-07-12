@@ -24,7 +24,8 @@ use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::daemon::{
-    DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Terminator,
+    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Sleeper,
+    Terminator,
 };
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -276,6 +277,37 @@ impl ShutdownSignal for SignalShutdown {
     }
 }
 
+/// Launches `usagi daemon serve` as a detached background process. It joins its
+/// own process group and discards its stdio, so it outlives this parent and the
+/// controlling terminal.
+struct ServeLauncher {
+    exe: PathBuf,
+}
+
+impl DaemonLauncher for ServeLauncher {
+    fn launch(&self) -> std::io::Result<()> {
+        let mut command = std::process::Command::new(&self.exe);
+        command
+            .args(["daemon", "serve"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        command.spawn()?;
+        Ok(())
+    }
+}
+
+/// Sleeps a short interval between `start`'s registration polls.
+struct RealSleeper;
+
+impl Sleeper for RealSleeper {
+    fn sleep(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -335,11 +367,16 @@ fn main() -> std::io::Result<()> {
                 .join("daemon")
                 .join("daemon.json");
             let store = DaemonRecordStore::new(FsRecordFile { path });
+            let launcher = ServeLauncher {
+                exe: std::env::current_exe()?,
+            };
             let env = DaemonEnv {
                 store: &store,
                 probe: &KillProbe,
                 terminator: &SigtermTerminator,
                 shutdown: &SignalShutdown,
+                launcher: &launcher,
+                sleeper: &RealSleeper,
                 pid: std::process::id(),
             };
             usagi_daemon::presentation::run(&mut stdout, command.as_deref(), &info, &env)

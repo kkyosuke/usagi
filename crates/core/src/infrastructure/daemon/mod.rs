@@ -82,6 +82,30 @@ pub trait ShutdownSignal {
     fn wait(&self) -> io::Result<()>;
 }
 
+/// Spawns a detached daemon process — the effecting half of `start`.
+///
+/// The real implementation launches `usagi daemon serve` as a detached child
+/// that survives the parent; it is real IO bound at the synthesis root. The
+/// launched `serve` registers its own pid, so `start` learns the pid by reading
+/// the record afterwards rather than from `launch`.
+pub trait DaemonLauncher {
+    /// Spawn a detached `usagi daemon serve` process.
+    ///
+    /// # Errors
+    /// Returns an error when the process cannot be spawned.
+    fn launch(&self) -> io::Result<()>;
+}
+
+/// Pauses between registration polls while `start` waits for the freshly
+/// launched daemon to record itself.
+///
+/// The real implementation sleeps a short interval; tests inject a no-op so the
+/// poll loop runs instantly.
+pub trait Sleeper {
+    /// Sleep for one poll interval.
+    fn sleep(&self);
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,
