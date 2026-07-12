@@ -482,6 +482,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Enter
         | Key::Tab
         | Key::Backspace
+        | Key::Tab
         | Key::Quit
         | Key::Char(_)
         | Key::Other => {}

@@ -1,14 +1,14 @@
 ---
 number: 244
 title: feat(tui): note・todos・decisions と env editor overlay を実装する
-status: todo
+status: done
 priority: medium
 labels: [tui, parity-b, overlay]
 dependson: [226, 228]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:34.018319+00:00
-updated_at: 2026-07-12T21:12:34.018319+00:00
+updated_at: 2026-07-12T22:58:16.219014+00:00
 ---
 
 ## 目的
