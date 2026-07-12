@@ -410,4 +410,13 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn default_serve_returns_a_structured_unavailable_error_for_session_tools() {
+        let input = b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\"}}\n";
+        let mut out = Vec::new();
+        serve(&input[..], &mut out, "9.9.9").unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("managed daemon client is not configured"));
+    }
 }

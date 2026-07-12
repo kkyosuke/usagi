@@ -279,6 +279,21 @@ mod tests {
         }
     }
 
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failed"))
+        }
+    }
+    impl Write for Broken {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("write failed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn scripted(reply: ResponseOutcome) -> Scripted {
         let protocol = ProtocolVersion {
             generation: 1,
@@ -418,5 +433,54 @@ mod tests {
             ),
             Err(ClientError::Unavailable(_))
         ));
+        assert!(matches!(
+            IpcClient::connect(Broken, "c".into(), "n".into(), ClientPolicy::tui()),
+            Err(ClientError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn request_maps_transport_failures_to_unavailable() {
+        let protocol = ProtocolVersion {
+            generation: 1,
+            revision: 1,
+        };
+        let request = DaemonRequest::Terminal {
+            action: TerminalAction::Attach,
+            payload: serde_json::json!({}),
+        };
+        let mut broken = IpcClient {
+            stream: Broken,
+            protocol,
+            daemon_generation: DaemonGeneration("d".into()),
+            next_request: 0,
+            policy: ClientPolicy::tui(),
+        };
+        assert!(matches!(
+            broken.request(request.clone()),
+            Err(ClientError::Unavailable(_))
+        ));
+        let mut closed = IpcClient {
+            stream: Scripted {
+                input: Cursor::new(vec![]),
+                output: vec![],
+            },
+            protocol,
+            daemon_generation: DaemonGeneration("d".into()),
+            next_request: 0,
+            policy: ClientPolicy::tui(),
+        };
+        assert!(matches!(
+            closed.request(request),
+            Err(ClientError::Unavailable(_))
+        ));
+        assert!(
+            Scripted {
+                input: Cursor::new(vec![]),
+                output: vec![]
+            }
+            .flush()
+            .is_ok()
+        );
     }
 }
