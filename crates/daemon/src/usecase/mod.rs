@@ -11,7 +11,12 @@
 
 use usagi_core::domain::AppInfo;
 
+<<<<<<< HEAD
+pub mod claude;
 pub mod codex;
+=======
+pub mod claude;
+>>>>>>> 27153acd (feat(daemon): Claude adapter を launch に接続する)
 pub mod control;
 pub mod generation;
 pub mod restart;

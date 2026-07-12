@@ -296,6 +296,12 @@ final output を drain 済みの verified exit、または identity を伴う re
 
 product 固有 adapter、secret、IPC schema はこの coordinator の境界外である。
 
+Claude の adapter は `crates/daemon/src/usecase/claude.rs` に置く。ここだけが Claude profile
+の capability、CLI の `program` / `argv` renderer、config/MCP/hook の provisioner を所有する。
+provisioner は scope ごとに preflight され、daemon runtime へ渡すのは working directory と環境変数名
+allowlist から得た非 secret の durable launch snapshot だけである。Claude 固有の config 内容、hook payload、
+credential と secret の値・path は durable record、terminal snapshot、IPC、ログへ渡さない。
+
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙
