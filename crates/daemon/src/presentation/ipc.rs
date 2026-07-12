@@ -10,17 +10,39 @@ use usagi_core::infrastructure::ipc::{
     ServerProtocol, negotiate, read_json_frame, write_json_frame,
 };
 
+fn decode_bootstrap(value: serde_json::Value) -> io::Result<Bootstrap> {
+    serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+fn decode_envelope(value: serde_json::Value) -> io::Result<Envelope> {
+    serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+fn write_bootstrap(writer: &mut dyn Write, value: &Bootstrap, limit: usize) -> io::Result<()> {
+    write_json_frame(
+        writer,
+        &serde_json::to_value(value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        limit,
+    )
+}
+fn write_envelope(writer: &mut dyn Write, value: &Envelope, limit: usize) -> io::Result<()> {
+    write_json_frame(
+        writer,
+        &serde_json::to_value(value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        limit,
+    )
+}
+
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
 pub fn handshake<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     server: &ServerProtocol,
 ) -> io::Result<Option<ServerHello>> {
-    let Some(first) = read_json_frame::<Bootstrap>(reader, server.limits.max_frame_bytes as usize)?
-    else {
+    let Some(first) = read_json_frame(reader, server.limits.max_frame_bytes as usize)? else {
         return Ok(None);
     };
-    let Bootstrap::ClientHello(hello) = first else {
+    let Bootstrap::ClientHello(hello) = decode_bootstrap(first)? else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "client hello must be the first frame",
@@ -28,7 +50,7 @@ pub fn handshake<R: Read, W: Write>(
     };
     match negotiate(&hello, server) {
         Ok(reply) => {
-            write_json_frame(
+            write_bootstrap(
                 writer,
                 &Bootstrap::ServerHello(reply.clone()),
                 server.limits.max_frame_bytes as usize,
@@ -36,7 +58,7 @@ pub fn handshake<R: Read, W: Write>(
             Ok(Some(reply))
         }
         Err(error) => {
-            write_json_frame(
+            write_bootstrap(
                 writer,
                 &Bootstrap::Error(error),
                 server.limits.max_frame_bytes as usize,
@@ -75,9 +97,8 @@ pub fn handle_connection<R: Read, W: Write>(
     let Some(hello) = handshake(reader, writer, server)? else {
         return Ok(());
     };
-    while let Some(envelope) =
-        read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
-    {
+    while let Some(envelope) = read_json_frame(reader, hello.limits.max_frame_bytes as usize)? {
+        let envelope = decode_envelope(envelope)?;
         let EnvelopeKind::Request {
             request_id, body, ..
         } = envelope.kind
@@ -103,11 +124,11 @@ pub fn handle_connection<R: Read, W: Write>(
                     body: json!(null),
                 },
             };
-            write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
+            write_envelope(writer, &reply, hello.limits.max_frame_bytes as usize)?;
             continue;
         }
         let reply = dispatch(request_id, body, &hello);
-        write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
+        write_envelope(writer, &reply, hello.limits.max_frame_bytes as usize)?;
     }
     Ok(())
 }
@@ -137,11 +158,35 @@ pub fn server_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
     use std::io::Cursor;
     use usagi_core::infrastructure::ipc::{
-        BuildIdentity, ClientHello, ClientId, ProtocolRange, ProtocolVersion, read_json_frame,
-        write_json_frame,
+        BuildIdentity, ClientHello, ClientId, ProtocolRange, ProtocolVersion,
+        read_json_frame as read_value_frame, write_json_frame as write_value_frame,
     };
+
+    fn write_json_frame<T: Serialize>(
+        writer: &mut dyn Write,
+        value: &T,
+        limit: usize,
+    ) -> io::Result<()> {
+        write_value_frame(
+            writer,
+            &serde_json::to_value(value).expect("test values serialize"),
+            limit,
+        )
+    }
+    fn read_json_frame<T: for<'de> Deserialize<'de>>(
+        reader: &mut dyn Read,
+        limit: usize,
+    ) -> io::Result<Option<T>> {
+        read_value_frame(reader, limit)?
+            .map(|value| {
+                serde_json::from_value(value)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+            })
+            .transpose()
+    }
 
     struct BrokenWriter;
     impl Write for BrokenWriter {
@@ -374,5 +419,47 @@ mod tests {
         assert!(
             matches!(reply.kind, EnvelopeKind::Response { request_id: usagi_core::infrastructure::ipc::RequestId(ref value), .. } if value == "r")
         );
+    }
+
+    #[test]
+    fn value_conversion_helpers_cover_success_invalid_value_and_write_failure() {
+        let bootstrap = hello();
+        assert_eq!(
+            decode_bootstrap(serde_json::to_value(&bootstrap).unwrap()).unwrap(),
+            bootstrap
+        );
+        assert_eq!(
+            decode_bootstrap(json!({})).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let request = request();
+        assert_eq!(
+            decode_envelope(serde_json::to_value(&request).unwrap()).unwrap(),
+            request
+        );
+        assert_eq!(
+            decode_envelope(json!({})).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut bootstrap_bytes = Vec::new();
+        write_bootstrap(&mut bootstrap_bytes, &bootstrap, 1024).unwrap();
+        assert!(
+            read_value_frame(&mut Cursor::new(bootstrap_bytes), 1024)
+                .unwrap()
+                .is_some()
+        );
+        assert!(write_bootstrap(&mut BrokenWriter, &bootstrap, 1024).is_err());
+        let mut envelope_bytes = Vec::new();
+        write_envelope(&mut envelope_bytes, &request, 1024).unwrap();
+        assert!(
+            read_value_frame(&mut Cursor::new(envelope_bytes), 1024)
+                .unwrap()
+                .is_some()
+        );
+        assert!(write_envelope(&mut BrokenWriter, &request, 1024).is_err());
+
+        let mut invalid = Vec::new();
+        write_value_frame(&mut invalid, &json!({}), 1024).unwrap();
+        assert!(read_json_frame::<Bootstrap>(&mut Cursor::new(invalid), 1024).is_err());
     }
 }

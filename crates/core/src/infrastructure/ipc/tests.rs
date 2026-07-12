@@ -1,4 +1,5 @@
 use super::*;
+use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Cursor, Read};
 
@@ -16,6 +17,13 @@ impl io::Write for BadWriter {
     }
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+struct FailingSerialize;
+impl Serialize for FailingSerialize {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("bad"))
     }
 }
 
@@ -90,7 +98,7 @@ fn invalid_json_is_protocol_error() {
     let mut bytes = Vec::new();
     write_frame(&mut bytes, b"{").unwrap();
     assert_eq!(
-        read_json_frame::<Bootstrap>(&mut Cursor::new(bytes), DEFAULT_MAX_FRAME_BYTES)
+        read_json_frame(&mut Cursor::new(bytes), DEFAULT_MAX_FRAME_BYTES)
             .unwrap_err()
             .kind(),
         io::ErrorKind::InvalidData
@@ -287,4 +295,55 @@ fn covers_protocol_error_and_cache_edge_cases() {
     );
     assert!(read_frame(&mut Bad).is_err());
     assert!(write_frame(&mut BadWriter, b"x").is_err());
+    let value = serde_json::to_value(FailingSerialize).unwrap_err();
+    assert!(value.is_data());
+}
+
+#[test]
+fn json_codec_covers_success_and_clean_close() {
+    let value = json!({"kind": "value"});
+    let mut bytes = Vec::new();
+    write_json_frame(&mut bytes, &value, DEFAULT_MAX_FRAME_BYTES).unwrap();
+    assert_eq!(
+        read_json_frame(&mut Cursor::new(bytes), DEFAULT_MAX_FRAME_BYTES).unwrap(),
+        Some(value)
+    );
+    assert_eq!(
+        read_json_frame(&mut Cursor::new(Vec::new()), DEFAULT_MAX_FRAME_BYTES).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn response_cache_overwrites_the_same_key_without_evicting_it() {
+    let response = Envelope {
+        protocol: ProtocolVersion {
+            generation: 1,
+            revision: 1,
+        },
+        daemon_generation: DaemonGeneration("d".into()),
+        kind: EnvelopeKind::Response {
+            request_id: RequestId("r".into()),
+            outcome: ResponseOutcome::Ok,
+            body: json!({}),
+        },
+    };
+    let mut cache = ResponseCache::new(1);
+    for digest in ["one", "two"] {
+        cache.insert(
+            ClientId("c".into()),
+            RequestId("r".into()),
+            CachedResponse {
+                body_digest: digest.into(),
+                response: response.clone(),
+                received_at_ms: 0,
+            },
+        );
+    }
+    assert!(
+        cache
+            .get(&ClientId("c".into()), &RequestId("r".into()), "two")
+            .unwrap()
+            .is_some()
+    );
 }
