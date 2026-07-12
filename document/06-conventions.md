@@ -172,7 +172,7 @@ full test / coverage gate を必須とする条件は次のとおり。
 
 - テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（ルートの `src/main.rs`）で束ねる。
-  - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層だけ（現状は合成ルート `src/main.rs` のみ）。理由は `scripts/coverage.sh` のコメントに列挙する。
+  - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層、または正本 `scripts/coverage.sh` が明示した計測器の単相化重複を回避する例外だけである。理由は `scripts/coverage.sh` のコメントに列挙する。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
 
 ## 変更箇所からの推奨テスト
