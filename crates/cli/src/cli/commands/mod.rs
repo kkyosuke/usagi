@@ -6,7 +6,7 @@
 //! 各ハンドラは presentation に徹する — 解析済みのオプションを保持し、TUI/daemon 面への
 //! 委譲や core usecase 呼び出し・結果整形を行う（独自のビジネスロジックは持たない）。
 //!
-//! TUI を開くハンドラは起動要求を返し、それ以外の未実装ハンドラは案内を出して終了する。
+//! TUI を開くハンドラは起動要求を返し、`update` / `version` / `completion` は結果を出力する。
 //! エージェント統合フック（Claude が呼ぶ `guard-workspace` / `agent-phase`）は人間向けでは
 //! ないため、ここではなく [`crate::cli::hooks`] に置く。
 
@@ -25,14 +25,3 @@ pub use hop::Hop;
 pub use open::Open;
 pub use update::Update;
 pub use version::Version;
-
-use std::io::{self, Write};
-
-use crate::cli::RunOutcome;
-
-/// 未実装のサブコマンドを表す共通のスタブ出力を `out` に書く。
-/// 各コマンドのハンドラ（子モジュール）から使う。
-pub(super) fn unimplemented(out: &mut dyn Write, command: &str) -> io::Result<RunOutcome> {
-    writeln!(out, "usagi {command}: not yet implemented")?;
-    Ok(RunOutcome::Exit(0))
-}

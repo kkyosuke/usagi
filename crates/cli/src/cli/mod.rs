@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
+use usagi_core::infrastructure::git::GitRunner;
 
 /// CLI が合成ルートへ依頼する TUI の起動画面。
 ///
@@ -126,16 +127,21 @@ impl Command {
     /// 解釈済みのコマンドを、その実行方法を知るハンドラ（`Run`）に変換する。
     ///
     /// dispatch はこの 1 か所の対応付けに集約し、実行自体は `Run::run` の一様な
-    /// 呼び出しになる。`version` は入口だけが持つ配布 version を渡す（他コマンドは使わない）。
+    /// 呼び出しになる。`version`（配布 version）は `version` / `update` が、`git`（core の
+    /// [`GitRunner`] seam）は `update` が最新リリースタグの取得に使う（他コマンドは使わない。
+    /// 合成ルートが実物を注入する）。
     #[must_use]
-    pub fn into_handler(self, version: &str) -> Box<dyn Run> {
+    pub fn into_handler(self, version: &str, git: Box<dyn GitRunner>) -> Box<dyn Run> {
         use commands as h;
         match self {
             Command::Hop => Box::new(h::Hop),
             Command::Open { path } => Box::new(h::Open { path }),
             Command::Config => Box::new(h::Config),
             Command::Doctor => Box::new(h::Doctor),
-            Command::Update => Box::new(h::Update),
+            Command::Update => Box::new(h::Update {
+                current: version.to_owned(),
+                git,
+            }),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
@@ -147,12 +153,35 @@ impl Command {
     }
 }
 
+/// テスト用の [`GitRunner`] スタブ。`git ls-remote --tags` を模した固定出力を返す
+/// （現在 9.9.9 より新しい v9.9.10 を含む）。
+#[cfg(test)]
+pub(crate) struct StubGit;
+
+#[cfg(test)]
+impl GitRunner for StubGit {
+    fn run(
+        &self,
+        _repo: &std::path::Path,
+        _args: &[&str],
+    ) -> anyhow::Result<usagi_core::infrastructure::git::GitOutput> {
+        Ok(usagi_core::infrastructure::git::GitOutput {
+            success: true,
+            stdout: "sha\trefs/tags/v9.9.9\nsha\trefs/tags/v9.9.10\n".to_owned(),
+            stderr: String::new(),
+        })
+    }
+}
+
 /// コマンドを dispatch してハンドラを実行し、結果と出力文字列を得るテストヘルパ。
 /// `commands` / `hooks` 双方のハンドラテストから使い、`Command::into_handler` の各アームを被覆する。
 #[cfg(test)]
 pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
     let mut out = Vec::new();
-    let outcome = command.into_handler("9.9.9").run(&mut out).unwrap();
+    let outcome = command
+        .into_handler("9.9.9", Box::new(StubGit))
+        .run(&mut out)
+        .unwrap();
     (outcome, String::from_utf8(out).unwrap())
 }
 
@@ -165,7 +194,8 @@ pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
 /// `args` は `OsString` の具体型で受ける（ジェネリックにすると呼び出し側の
 /// イテレータ型ごとに単相化が増え、テストで到達しない実体がカバレッジを下げるため）。
 /// `version` は `--version` と `version` サブコマンドに載せる配布 version（合成ルートが注入する）。
-/// 合成ルートは `std::env::args_os().collect()` と自身の version を渡す。
+/// `git` は core の [`GitRunner`] seam（合成ルートが実 git を注入。update が ls-remote に使う）。
+/// 合成ルートは `std::env::args_os().collect()` と自身の version・取得口を渡す。
 ///
 /// # Errors
 ///
@@ -178,6 +208,7 @@ pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
 pub fn run(
     args: Vec<OsString>,
     version: &str,
+    git: Box<dyn GitRunner>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> io::Result<RunOutcome> {
@@ -199,7 +230,7 @@ pub fn run(
     let cli =
         Cli::from_arg_matches(&matches).expect("matches from Cli::command() は Cli に変換できる");
     if let Some(command) = cli.command {
-        command.into_handler(version).run(out)
+        command.into_handler(version, git).run(out)
     } else {
         // 引数なしの `usagi` は合成ルートが TUI に振り分けるため、ここに到達するのは
         // グローバルフラグだけが与えられた場合。トップレベルのヘルプを表示する。
@@ -210,7 +241,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RunOutcome, Shell, TuiRequest, run};
+    use super::{Cli, Command, RunOutcome, Shell, StubGit, TuiRequest, run};
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
@@ -297,7 +328,8 @@ mod tests {
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            let outcome =
+                run(argv(tokens), "9.9.9", Box::new(StubGit), &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::LaunchTui(expected));
             assert!(out.is_empty());
             assert!(err.is_empty());
@@ -309,7 +341,14 @@ mod tests {
     fn run_without_subcommand_prints_help() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let outcome = run(argv(&["usagi"]), "9.9.9", &mut out, &mut err).unwrap();
+        let outcome = run(
+            argv(&["usagi"]),
+            "9.9.9",
+            Box::new(StubGit),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
         assert_eq!(outcome, RunOutcome::Exit(0));
         assert!(err.is_empty());
         assert!(String::from_utf8(out).unwrap().contains("Usage"));
@@ -320,7 +359,14 @@ mod tests {
     fn run_help_goes_to_stdout() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let outcome = run(argv(&["usagi", "--help"]), "9.9.9", &mut out, &mut err).unwrap();
+        let outcome = run(
+            argv(&["usagi", "--help"]),
+            "9.9.9",
+            Box::new(StubGit),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
         assert_eq!(outcome, RunOutcome::Exit(0));
         assert!(err.is_empty());
         assert!(!out.is_empty());
@@ -332,7 +378,8 @@ mod tests {
         for tokens in [&["usagi", "--version"][..], &["usagi", "version"][..]] {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            let outcome =
+                run(argv(tokens), "9.9.9", Box::new(StubGit), &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(0));
             assert!(err.is_empty());
             assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
@@ -347,6 +394,7 @@ mod tests {
         let outcome = run(
             argv(&["usagi", "nope-not-a-command"]),
             "9.9.9",
+            Box::new(StubGit),
             &mut out,
             &mut err,
         )
@@ -367,7 +415,8 @@ mod tests {
         ] {
             let mut out = Vec::new();
             let mut err = Vec::new();
-            let outcome = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            let outcome =
+                run(argv(tokens), "9.9.9", Box::new(StubGit), &mut out, &mut err).unwrap();
             assert_eq!(outcome, RunOutcome::Exit(2));
             assert!(out.is_empty());
             assert!(!err.is_empty());

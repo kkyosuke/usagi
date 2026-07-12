@@ -30,6 +30,7 @@ use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
     Sleeper, Terminator,
 };
+use usagi_core::infrastructure::git::{GitOutput, GitRunner};
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::presentation::DaemonEnv;
@@ -368,13 +369,34 @@ fn launch_tui(
     }
 }
 
+/// The real [`GitRunner`] seam: spawns `git -C <repo> <args>` and captures its
+/// output. This is the one piece of real git IO, bound here at the synthesis
+/// root (mirroring the daemon's process seams); `usagi-core`'s git operations and
+/// `usagi update` stay pure over it.
+struct SystemGit;
+
+impl GitRunner for SystemGit {
+    fn run(&self, repo: &std::path::Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()?;
+        Ok(GitOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
 fn dispatch_cli(
     args: Vec<std::ffi::OsString>,
     out: &mut dyn std::io::Write,
     err: &mut dyn std::io::Write,
     info: &AppInfo,
 ) -> std::io::Result<()> {
-    match usagi_cli::cli::run(args, info.version, out, err)? {
+    match usagi_cli::cli::run(args, info.version, Box::new(SystemGit), out, err)? {
         RunOutcome::Exit(code) => std::process::exit(code),
         RunOutcome::LaunchTui(request) => {
             let entry = match request {

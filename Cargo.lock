@@ -810,6 +810,7 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 name = "usagi"
 version = "2.6.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "crossterm",
  "fs2",
@@ -824,6 +825,7 @@ dependencies = [
 name = "usagi-cli"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "clap",
  "clap_complete",
  "serde_json",
