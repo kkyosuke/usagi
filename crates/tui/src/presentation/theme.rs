@@ -14,6 +14,10 @@
 /// ハイパーリンクとして読める柔らかい空色。[`LINK_RGB`] に最も近い 256 キューブ色。
 const INFO_256: u8 = 75;
 
+/// `feature` 役割（マスコット）の ANSI-256 インデックス。うさぎを表すはっきりしたピンク
+/// （`#ff87af` 相当）。16 色の magenta より柔らかく、ピンクとして読める。
+const FEATURE_PINK_256: u8 = 211;
+
 /// 端末色。ANSI 16 色の名前付き色と、256 色キューブのインデックスを表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
@@ -148,7 +152,7 @@ impl Role {
             Role::Success => Color::Green,
             Role::Danger => Color::Red,
             Role::Warning => Color::Yellow,
-            Role::Feature => Color::Magenta,
+            Role::Feature => Color::Ansi256(FEATURE_PINK_256),
             Role::Info => Color::Ansi256(INFO_256),
         }
     }
@@ -172,7 +176,7 @@ pub const LINK_RGB: (u8, u8, u8) = (102, 178, 255);
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, INFO_256, LINK_RGB, Role, Style, TITLE_FADE};
+    use super::{Color, FEATURE_PINK_256, INFO_256, LINK_RGB, Role, Style, TITLE_FADE};
 
     #[test]
     fn empty_style_returns_text_unchanged() {
@@ -183,7 +187,7 @@ mod tests {
     fn paint_wraps_with_sgr_and_resets() {
         // magenta + bold: 属性が先、色が後。末尾は reset。
         assert_eq!(
-            Role::Feature.style().bold().paint("x"),
+            Style::new().fg(Color::Magenta).bold().paint("x"),
             "\u{1b}[1;35mx\u{1b}[0m"
         );
     }
@@ -211,7 +215,7 @@ mod tests {
         assert_eq!(Role::Success.color(), Color::Green);
         assert_eq!(Role::Danger.color(), Color::Red);
         assert_eq!(Role::Warning.color(), Color::Yellow);
-        assert_eq!(Role::Feature.color(), Color::Magenta);
+        assert_eq!(Role::Feature.color(), Color::Ansi256(FEATURE_PINK_256));
         assert_eq!(Role::Info.color(), Color::Ansi256(INFO_256));
     }
 
