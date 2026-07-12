@@ -151,6 +151,12 @@ mod tests {
             OverlayDocument::Unavailable("Diff data is unavailable.".to_string()),
         );
         assert!(render(24, 80, &modal).join("\n").contains("unavailable"));
+        let empty = TextOverlay::new("Preview", OverlayDocument::Ready(Vec::new()));
+        assert!(
+            render(24, 80, &empty)
+                .join("\n")
+                .contains("No content available.")
+        );
         let base = vec!["background".to_string(); 3];
         let frame = render_over(3, 3, &base, &modal);
         assert_eq!(frame.len(), 3);
