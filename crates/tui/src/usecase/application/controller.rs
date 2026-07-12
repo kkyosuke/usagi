@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use usagi_core::domain::id::{AgentRuntimeRef, SessionId, WorkspaceId};
+use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::session_lifecycle::AgentPhase;
 
 use crate::usecase::terminal_input::{LiveInput, RuntimeEvent};
@@ -40,6 +41,108 @@ pub enum Overlay {
     /// Detach confirmation. This is TUI-local: confirming it never stops a
     /// daemon-owned terminal or operation.
     QuitConfirmation,
+    /// active target の note / todo / decision scratchpad。
+    Notes,
+    /// workspace または session の environment editor。
+    Environment,
+}
+
+/// Note editor で現在表示・編集している section。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteSection {
+    Note,
+    Todos,
+    Decisions,
+}
+
+/// Target-local scratchpad の overlay state。
+///
+/// 保存前の値も含め TUI が所有する。port の失敗は [`error`](Self::error) にだけ
+/// 投影するので、利用者が入力した内容は失われない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteEditor {
+    target: Target,
+    scratchpad: Scratchpad,
+    section: NoteSection,
+    draft: String,
+    error: Option<SafeError>,
+}
+
+impl NoteEditor {
+    fn loading(target: Target) -> Self {
+        Self {
+            target,
+            scratchpad: Scratchpad::default(),
+            section: NoteSection::Note,
+            draft: String::new(),
+            error: None,
+        }
+    }
+
+    /// Overlay が対象とする stable identity。
+    #[must_use]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+    /// 現在の表示・編集値。
+    #[must_use]
+    pub fn scratchpad(&self) -> &Scratchpad {
+        &self.scratchpad
+    }
+    /// 選択された section。
+    #[must_use]
+    pub const fn section(&self) -> NoteSection {
+        self.section
+    }
+    /// todo / decision 追加用、または note の編集値。
+    #[must_use]
+    pub fn draft(&self) -> &str {
+        &self.draft
+    }
+    /// port が分類した安全なエラー。
+    #[must_use]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+}
+
+/// One editable environment variable. Values intentionally remain inside the
+/// settings port and TUI-local state; they are never placed in a notice/error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentEntry {
+    pub name: String,
+    pub value: String,
+}
+
+/// workspace / session environment editor state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentEditor {
+    target: Target,
+    entries: Vec<EnvironmentEntry>,
+    error: Option<SafeError>,
+}
+
+impl EnvironmentEditor {
+    fn loading(target: Target) -> Self {
+        Self {
+            target,
+            entries: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+    #[must_use]
+    pub fn entries(&self) -> &[EnvironmentEntry] {
+        &self.entries
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
 }
 
 /// daemon wire と独立した TUI の target projection。
@@ -195,6 +298,8 @@ pub enum Feedback {
 pub struct AppState {
     route: Route,
     overlay: Option<Overlay>,
+    note_editor: Option<NoteEditor>,
+    environment_editor: Option<EnvironmentEditor>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     selected: Selection,
@@ -217,6 +322,8 @@ impl AppState {
         Self {
             route: Route::Home(HomeMode::Switch),
             overlay: None,
+            note_editor: None,
+            environment_editor: None,
             workspace,
             sessions,
             selected: Selection::Target(root),
@@ -241,6 +348,16 @@ impl AppState {
     #[must_use]
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
+    }
+    /// Open note editor, including unsaved values after a save failure.
+    #[must_use]
+    pub fn note_editor(&self) -> Option<&NoteEditor> {
+        self.note_editor.as_ref()
+    }
+    /// Open environment editor, including unsaved values after a save failure.
+    #[must_use]
+    pub fn environment_editor(&self) -> Option<&EnvironmentEditor> {
+        self.environment_editor.as_ref()
     }
     /// navigation cursor。
     #[must_use]
@@ -380,6 +497,24 @@ pub enum AppKey {
     OpenOverview,
     /// target scope overlay を開く。
     OpenCloseupOverlay,
+    /// Open the active target's scratchpad. No keyboard chord is assigned here.
+    OpenNotes,
+    /// Open the active target's environment editor.
+    OpenEnvironment,
+    /// Choose which scratchpad section the overlay displays.
+    SelectNoteSection(NoteSection),
+    /// Replace the note editor draft.
+    SetNoteDraft(String),
+    /// Add the draft as a todo / decision, or apply it as the free-form note.
+    CommitNoteDraft,
+    /// Toggle a todo without removing checklist entries in bulk.
+    ToggleTodo(usize),
+    /// Persist the current scratchpad through its owning port.
+    SaveNotes,
+    /// Insert or replace one environment variable in the local editor.
+    SetEnvironment { name: String, value: String },
+    /// Persist the current environment through its owning port.
+    SaveEnvironment,
     /// 将来の terminal input / command vocabulary 用の文字入力。
     Char(char),
     /// Overview modal の現在の入力を registry 経由で実行する。
@@ -434,6 +569,20 @@ pub enum BackendEvent {
     /// Safe progress, error, or connection feedback. Raw protocol details are
     /// deliberately excluded from the TUI event vocabulary.
     Feedback(Feedback),
+    /// Scratchpad data returned by its persistence owner.
+    NotesLoaded {
+        target: Target,
+        scratchpad: Scratchpad,
+    },
+    /// A safe scratchpad read/save failure.
+    NotesError { target: Target, error: SafeError },
+    /// Environment values returned by the settings owner.
+    EnvironmentLoaded {
+        target: Target,
+        entries: Vec<EnvironmentEntry>,
+    },
+    /// A safe environment read/save failure.
+    EnvironmentError { target: Target, error: SafeError },
 }
 
 /// 非同期 request の成否。
@@ -461,6 +610,20 @@ pub enum Effect {
     WorkspaceCommand {
         workspace: WorkspaceId,
         command: overview::Command,
+    },
+    /// Read an active target's scratchpad through the existing persistence owner.
+    LoadNotes { target: Target },
+    /// Save an edited scratchpad through the existing persistence owner.
+    SaveNotes {
+        target: Target,
+        scratchpad: Scratchpad,
+    },
+    /// Read environment values through the existing settings owner.
+    LoadEnvironment { target: Target },
+    /// Save environment values through the existing settings owner.
+    SaveEnvironment {
+        target: Target,
+        entries: Vec<EnvironmentEntry>,
     },
     /// target の terminal を開くか再利用する。
     OpenTerminal { target: Target, arguments: String },
@@ -1075,6 +1238,7 @@ impl BackendPort for FakeBackend {
 #[must_use]
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
+        AppEvent::Backend(event) if update_editor_backend(state, &event) => Vec::new(),
         AppEvent::Key(key) => update_key(state, key),
         AppEvent::LivePaneAvailability(has_live_pane) => {
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
@@ -1092,7 +1256,13 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.ctrl_c_grace = false;
             Vec::new()
         }
-        AppEvent::Tick => Vec::new(),
+        AppEvent::Tick
+        | AppEvent::Backend(
+            BackendEvent::NotesLoaded { .. }
+            | BackendEvent::NotesError { .. }
+            | BackendEvent::EnvironmentLoaded { .. }
+            | BackendEvent::EnvironmentError { .. },
+        ) => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
             state.sessions = sessions;
             state
@@ -1144,11 +1314,55 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     }
 }
 
+fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
+    match event {
+        BackendEvent::NotesLoaded { target, scratchpad } => {
+            if let Some(editor) = state
+                .note_editor
+                .as_mut()
+                .filter(|editor| editor.target == *target)
+            {
+                editor.scratchpad.clone_from(scratchpad);
+                editor.error = None;
+            }
+        }
+        BackendEvent::NotesError { target, error } => {
+            if let Some(editor) = state
+                .note_editor
+                .as_mut()
+                .filter(|editor| editor.target == *target)
+            {
+                editor.error = Some(error.clone());
+            }
+        }
+        BackendEvent::EnvironmentLoaded { target, entries } => {
+            if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|editor| editor.target == *target)
+            {
+                editor.entries.clone_from(entries);
+                editor.error = None;
+            }
+        }
+        BackendEvent::EnvironmentError { target, error } => {
+            if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|editor| editor.target == *target)
+            {
+                editor.error = Some(error.clone());
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     if let Some(overlay) = state.overlay {
         return update_overlay(state, overlay, key);
     }
-
     if !matches!(key, AppKey::CtrlC) {
         state.ctrl_c_grace = false;
     }
@@ -1168,15 +1382,18 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.overlay = Some(Overlay::QuitConfirmation);
             Vec::new()
         }
+        AppKey::OpenNotes | AppKey::OpenEnvironment => {
+            update_editor_key(state, &key).unwrap_or_default()
+        }
         key => update_management_key(state, key),
     }
 }
 
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
+    if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) {
+        return Vec::new();
+    }
     match overlay {
-        // Ctrl-C and Ctrl-Q are intentionally inert in every modal. In
-        // particular, repeated Ctrl-C must not confirm a detach.
-        _ if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) => Vec::new(),
         Overlay::QuitConfirmation => match key {
             AppKey::Char('y' | 'Y') | AppKey::Enter => {
                 state.overlay = None;
@@ -1188,11 +1405,21 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
             _ => Vec::new(),
         },
-        _ if matches!(key, AppKey::Escape) => {
+        Overlay::Notes | Overlay::Environment => {
+            if matches!(key, AppKey::Escape) {
+                state.overlay = None;
+                state.note_editor = None;
+                state.environment_editor = None;
+                Vec::new()
+            } else {
+                update_editor_key(state, &key).unwrap_or_default()
+            }
+        }
+        Overlay::Overview | Overlay::Closeup if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
         }
-        _ => update_management_key(state, key),
+        Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
     }
 }
 
@@ -1224,10 +1451,146 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
-        AppKey::CtrlC | AppKey::CtrlQ | AppKey::OpenQuitConfirmation | AppKey::Char(_) => {
-            Vec::new()
-        }
+        AppKey::Char(_)
+        | AppKey::CtrlC
+        | AppKey::CtrlQ
+        | AppKey::OpenQuitConfirmation
+        | AppKey::OpenNotes
+        | AppKey::OpenEnvironment
+        | AppKey::SelectNoteSection(_)
+        | AppKey::SetNoteDraft(_)
+        | AppKey::CommitNoteDraft
+        | AppKey::ToggleTodo(_)
+        | AppKey::SaveNotes
+        | AppKey::SetEnvironment { .. }
+        | AppKey::SaveEnvironment => Vec::new(),
     }
+}
+
+fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
+    let notes_open = state.overlay == Some(Overlay::Notes);
+    let environment_open = state.overlay == Some(Overlay::Environment);
+    match key {
+        AppKey::OpenNotes => Some(open_notes(state)),
+        AppKey::OpenEnvironment => Some(open_environment(state)),
+        AppKey::SelectNoteSection(section) => {
+            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
+                editor.section = *section;
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::SetNoteDraft(draft) => {
+            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open) {
+                editor.draft.clone_from(draft);
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::CommitNoteDraft => Some(commit_note_draft(state)),
+        AppKey::ToggleTodo(index) => {
+            if let Some(editor) = state.note_editor.as_mut().filter(|_| notes_open)
+                && let Some(todo) = editor.scratchpad.todos.get_mut(*index)
+            {
+                todo.done = !todo.done;
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::SaveNotes => Some(
+            state
+                .note_editor
+                .as_ref()
+                .filter(|_| notes_open)
+                .map_or_else(Vec::new, |editor| {
+                    vec![Effect::SaveNotes {
+                        target: editor.target,
+                        scratchpad: editor.scratchpad.clone(),
+                    }]
+                }),
+        ),
+        AppKey::SetEnvironment { name, value } => {
+            if let Some(editor) = state
+                .environment_editor
+                .as_mut()
+                .filter(|_| environment_open)
+            {
+                if let Some(entry) = editor.entries.iter_mut().find(|entry| entry.name == *name) {
+                    entry.value.clone_from(value);
+                } else if !name.trim().is_empty() {
+                    editor.entries.push(EnvironmentEntry {
+                        name: name.clone(),
+                        value: value.clone(),
+                    });
+                    editor
+                        .entries
+                        .sort_by(|left, right| left.name.cmp(&right.name));
+                }
+                editor.error = None;
+            }
+            Some(Vec::new())
+        }
+        AppKey::SaveEnvironment => Some(
+            state
+                .environment_editor
+                .as_ref()
+                .filter(|_| environment_open)
+                .map_or_else(Vec::new, |editor| {
+                    vec![Effect::SaveEnvironment {
+                        target: editor.target,
+                        entries: editor.entries.clone(),
+                    }]
+                }),
+        ),
+        _ => None,
+    }
+}
+
+fn open_notes(state: &mut AppState) -> Vec<Effect> {
+    let target = state.active;
+    state.overlay = Some(Overlay::Notes);
+    state.environment_editor = None;
+    state.note_editor = Some(NoteEditor::loading(target));
+    vec![Effect::LoadNotes { target }]
+}
+
+fn open_environment(state: &mut AppState) -> Vec<Effect> {
+    let target = state.active;
+    state.overlay = Some(Overlay::Environment);
+    state.note_editor = None;
+    state.environment_editor = Some(EnvironmentEditor::loading(target));
+    vec![Effect::LoadEnvironment { target }]
+}
+
+fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
+    let Some(editor) = state
+        .note_editor
+        .as_mut()
+        .filter(|_| state.overlay == Some(Overlay::Notes))
+    else {
+        return Vec::new();
+    };
+    let draft = editor.draft.trim();
+    match editor.section {
+        NoteSection::Note => editor.scratchpad.note = (!draft.is_empty()).then(|| draft.to_owned()),
+        NoteSection::Todos if !draft.is_empty() => editor
+            .scratchpad
+            .todos
+            .push(usagi_core::domain::note::SessionTodo::new(draft)),
+        NoteSection::Decisions if !draft.is_empty() => {
+            editor
+                .scratchpad
+                .decisions
+                .push(usagi_core::domain::note::SessionDecision::new(
+                    chrono::Utc::now(),
+                    draft,
+                ));
+        }
+        NoteSection::Todos | NoteSection::Decisions => {}
+    }
+    editor.draft.clear();
+    editor.error = None;
+    Vec::new()
 }
 
 fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
@@ -1235,6 +1598,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
         return Vec::new();
     }
     match overview::interpret(input) {
+        Ok(overview::Command::Env { .. }) => open_environment(state),
         Ok(command) => {
             state.overlay = None;
             state.notice = Some(Notice::new(format!("Requested {}", command.name())));
@@ -2217,6 +2581,99 @@ mod tests {
             vec![Effect::AttachWorkspace {
                 workspace: requested
             }]
+        );
+    }
+
+    #[test]
+    fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
+        let (workspace, session, _) = ids();
+        let target = Target::Session(session);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let mut backend = FakeBackend::default();
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
+        assert_eq!(effects, vec![Effect::LoadNotes { target }]);
+        backend.push_event(BackendEvent::NotesLoaded {
+            target,
+            scratchpad: Scratchpad {
+                note: Some("before".to_owned()),
+                todos: vec![usagi_core::domain::note::SessionTodo::new("test it")],
+                decisions: Vec::new(),
+            },
+        });
+        run_fake_cycle(&mut state, &mut backend, effects);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SelectNoteSection(NoteSection::Todos)),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::ToggleTodo(0)));
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetNoteDraft("document it".to_owned())),
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::CommitNoteDraft));
+        let queued_saves = update(&mut state, AppEvent::Key(AppKey::SaveNotes));
+        assert!(
+            matches!(&queued_saves[..], [Effect::SaveNotes { target: saved_target, scratchpad }] if *saved_target == target && scratchpad.todos.len() == 2 && scratchpad.todos[0].done)
+        );
+        backend.push_event(BackendEvent::NotesError {
+            target,
+            error: SafeError {
+                message: SafeMessage::new("Could not save notes"),
+                error_id: "safe-note-1".to_owned(),
+            },
+        });
+        run_fake_cycle(&mut state, &mut backend, queued_saves);
+        let note = state.note_editor().unwrap();
+        assert_eq!(note.scratchpad().todos[1].text, "document it");
+        assert_eq!(
+            note.error().unwrap().message.as_str(),
+            "Could not save notes"
+        );
+
+        let effects = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
+        assert_eq!(effects, vec![Effect::LoadEnvironment { target }]);
+        backend.push_event(BackendEvent::EnvironmentLoaded {
+            target,
+            entries: vec![EnvironmentEntry {
+                name: "MODE".to_owned(),
+                value: "dev".to_owned(),
+            }],
+        });
+        run_fake_cycle(&mut state, &mut backend, effects);
+        let _ = update(
+            &mut state,
+            AppEvent::Key(AppKey::SetEnvironment {
+                name: "MODE".to_owned(),
+                value: "test".to_owned(),
+            }),
+        );
+        let saves = update(&mut state, AppEvent::Key(AppKey::SaveEnvironment));
+        assert_eq!(
+            saves,
+            vec![Effect::SaveEnvironment {
+                target,
+                entries: vec![EnvironmentEntry {
+                    name: "MODE".to_owned(),
+                    value: "test".to_owned()
+                }],
+            }]
+        );
+        backend.push_event(BackendEvent::EnvironmentError {
+            target,
+            error: SafeError {
+                message: SafeMessage::new("Could not save environment"),
+                error_id: "safe-env-1".to_owned(),
+            },
+        });
+        run_fake_cycle(&mut state, &mut backend, saves);
+        let environment = state.environment_editor().unwrap();
+        assert_eq!(environment.entries()[0].value, "test");
+        assert_eq!(
+            environment.error().unwrap().message.as_str(),
+            "Could not save environment"
         );
     }
 }
