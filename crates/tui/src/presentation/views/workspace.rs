@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
@@ -23,6 +24,26 @@ const LEFT_WIDTH: usize = 28;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
 
+/// Workspace 画面でキーボードが操作する対象。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// セッション一覧から操作対象を選ぶ。
+    Switch,
+    /// 選択中セッションのタブやアクションを操作する。
+    Closeup,
+}
+
+impl Mode {
+    const ALL: [Self; 2] = [Self::Switch, Self::Closeup];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Switch => "Switch",
+            Self::Closeup => "Closeup",
+        }
+    }
+}
+
 /// 右ペインの 1 タブ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tab {
@@ -31,11 +52,12 @@ pub struct Tab {
 }
 
 /// Workspace 画面の状態。左ペインは [`WorkspaceState`] のセッション群＋末尾の root 行を
-/// 選択でき、右ペインはタブを切り替えられる。
+/// 選択でき、右ペインのタブは Switch / Closeup のどちらでも切り替えられる。
 #[derive(Debug, Clone)]
 pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
+    mode: Mode,
     /// 選択行。`0..sessions.len()` はセッション、`sessions.len()` は root 行。
     selected: usize,
     tabs: Vec<Tab>,
@@ -49,6 +71,7 @@ impl Workspace {
         Self {
             record: workspace,
             state,
+            mode: Mode::Switch,
             selected: 0,
             tabs: vec![
                 Tab { label: "Preview" },
@@ -78,6 +101,26 @@ impl Workspace {
         &self.state.sessions
     }
 
+    /// 現在の操作 mode。
+    #[must_use]
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// 選択中の session を操作する Closeup へ移る。
+    ///
+    /// session と tab の選択位置はそのまま維持する。
+    pub fn enter_closeup(&mut self) {
+        self.mode = Mode::Closeup;
+    }
+
+    /// session 一覧を操作する Switch へ戻る。
+    ///
+    /// session と tab の選択位置はそのまま維持する。
+    pub fn enter_switch(&mut self) {
+        self.mode = Mode::Switch;
+    }
+
     /// タブ一覧。
     #[must_use]
     pub fn tabs(&self) -> &[Tab] {
@@ -100,6 +143,20 @@ impl Workspace {
     #[must_use]
     pub fn root_selected(&self) -> bool {
         self.selected == self.state.sessions.len()
+    }
+
+    /// フォーカス中 session の表示ラベル。root 行では `"root"`。
+    #[must_use]
+    pub fn focused_label(&self) -> &str {
+        self.focused_session()
+            .map_or("root", SessionRecord::display_label)
+    }
+
+    /// フォーカス中 session に記録された Pull Request。root 行では空。
+    #[must_use]
+    pub fn focused_prs(&self) -> &[PrLink] {
+        self.focused_session()
+            .map_or(&[], |session| session.prs.as_slice())
     }
 
     /// 左ペインの選択を 1 つ下へ（末尾の root の次は先頭へ回り込む）。
@@ -133,12 +190,6 @@ impl Workspace {
     fn focused_session(&self) -> Option<&SessionRecord> {
         self.state.sessions.get(self.selected)
     }
-
-    /// フォーカス中の行の表示名（root 選択なら "root"）。
-    fn focused_name(&self) -> &str {
-        self.focused_session()
-            .map_or("root", SessionRecord::display_label)
-    }
 }
 
 // ── header ──────────────────────────────────────────────────────────────────
@@ -148,8 +199,19 @@ fn header_line(width: usize, ws: &Workspace) -> String {
     let count = ws.sessions().len();
     let sep = Style::new().dim().paint(" › ");
     let dot = Style::new().dim().paint(" · ");
+    let modes = Mode::ALL
+        .iter()
+        .map(|mode| {
+            if *mode == ws.mode() {
+                Role::Accent.style().bold().paint(mode.label())
+            } else {
+                Style::new().dim().paint(mode.label())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
     let line = format!(
-        " {}{sep}{}{dot}{}",
+        " {}{sep}{}{dot}{}{dot}{modes}",
         Role::Success.style().bold().paint("USAGI"),
         Role::Success.style().bold().paint(ws.name()),
         Style::new().dim().paint(&format!("{count} sessions")),
@@ -210,10 +272,14 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
-fn left_footer(width: usize) -> String {
+fn left_footer(width: usize, ws: &Workspace) -> String {
+    let hint = match ws.mode() {
+        Mode::Switch => "[switch] ↑↓ session",
+        Mode::Closeup => "[closeup] session selected",
+    };
     Style::new()
         .dim()
-        .paint(&widgets::clip_to_width("↑↓ session / q quit", width))
+        .paint(&widgets::clip_to_width(hint, width))
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -248,7 +314,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         rows.push(selectable_row(width, ws, index));
     }
     rows.resize(body_capacity, String::new());
-    rows.push(left_footer(width));
+    rows.push(left_footer(width, ws));
     rows
 }
 
@@ -256,7 +322,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 /// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
 fn closeup_header(width: usize, ws: &Workspace) -> String {
-    let name = Role::Accent.style().bold().paint(ws.focused_name());
+    let name = Role::Accent.style().bold().paint(ws.focused_label());
     let detail = ws.focused_session().map_or_else(
         || ws.path().display().to_string(),
         |session| format!("{} · {}", session.name, session.origin),
@@ -294,17 +360,21 @@ fn content_lines(ws: &Workspace) -> Vec<String> {
         String::new(),
         Style::new()
             .dim()
-            .paint(&format!("  {tab} — {kind} '{}'", ws.focused_name())),
+            .paint(&format!("  {tab} — {kind} '{}'", ws.focused_label())),
         String::new(),
         Style::new().dim().paint(&format!("  {}", path.display())),
     ]
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
-fn right_footer(width: usize) -> String {
+fn right_footer(width: usize, ws: &Workspace) -> String {
+    let hint = match ws.mode() {
+        Mode::Switch => "←→ tab / Enter closeup / : commands / p PR / Esc back / q quit",
+        Mode::Closeup => "←→ tab / ↑↓ action / : commands / p PR / Esc switch / q quit",
+    };
     Style::new()
         .dim()
-        .paint(&widgets::clip_to_width("←→ tab / Esc back / q quit", width))
+        .paint(&widgets::clip_to_width(hint, width))
 }
 
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
@@ -315,7 +385,7 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         String::new(),
     ];
     rows.extend(content_lines(ws));
-    with_footer(rows, height, right_footer(width))
+    with_footer(rows, height, right_footer(width, ws))
 }
 
 // ── composition ─────────────────────────────────────────────────────────────
@@ -354,11 +424,12 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 
 #[cfg(test)]
 mod tests {
-    use super::{Workspace, render};
+    use super::{Mode, Workspace, render};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
@@ -441,6 +512,7 @@ mod tests {
         assert_eq!(ws.sessions().len(), 2);
         assert_eq!(ws.sessions()[0].display_label(), "UI work");
         assert_eq!(ws.tabs().len(), 4);
+        assert_eq!(ws.mode(), Mode::Switch);
         assert_eq!(ws.selected(), 0);
         assert_eq!(ws.active_tab(), 0);
         assert!(!ws.root_selected());
@@ -487,6 +559,91 @@ mod tests {
         ws.tab_next();
         assert_eq!(ws.active_tab(), 1);
         assert!(joined(&ws).contains("Terminal — session 'UI work'"));
+    }
+
+    #[test]
+    fn mode_transitions_preserve_the_session_and_tab_selection() {
+        let mut ws = workspace();
+        ws.select_next();
+        ws.tab_next();
+        let selected = ws.selected();
+        let active_tab = ws.active_tab();
+
+        ws.enter_closeup();
+        assert_eq!(ws.mode(), Mode::Closeup);
+        assert_eq!(ws.selected(), selected);
+        assert_eq!(ws.active_tab(), active_tab);
+
+        ws.enter_switch();
+        assert_eq!(ws.mode(), Mode::Switch);
+        assert_eq!(ws.selected(), selected);
+        assert_eq!(ws.active_tab(), active_tab);
+        assert!(format!("{:?}", ws.mode()).contains("Switch"));
+    }
+
+    #[test]
+    fn focused_label_and_pull_requests_follow_the_selected_session() {
+        let mut ws = workspace();
+        ws.state.sessions[0]
+            .prs
+            .push(PrLink::new(42, "https://example.com/pull/42"));
+
+        assert_eq!(ws.focused_label(), "UI work");
+        assert_eq!(ws.focused_prs()[0].number, 42);
+
+        ws.select_next();
+        assert_eq!(ws.focused_label(), "daemon");
+        assert!(ws.focused_prs().is_empty());
+
+        ws.select_next();
+        assert!(ws.root_selected());
+        assert_eq!(ws.focused_label(), "root");
+        assert!(ws.focused_prs().is_empty());
+    }
+
+    #[test]
+    fn header_shows_both_modes_and_highlights_the_current_one() {
+        let mut ws = workspace();
+        let switch_header = &render(30, 100, &ws)[0];
+        assert!(switch_header.contains("\u{1b}[1;36mSwitch\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[2mCloseup\u{1b}[0m"));
+
+        ws.enter_closeup();
+        let closeup_header = &render(30, 100, &ws)[0];
+        assert!(closeup_header.contains("\u{1b}[2mSwitch\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[1;36mCloseup\u{1b}[0m"));
+    }
+
+    #[test]
+    fn render_uses_mode_specific_footers_and_keeps_tabs_visible() {
+        let mut ws = workspace();
+        let switch = joined(&ws);
+        assert!(switch.contains("[switch] ↑↓ session"));
+        assert!(switch.contains("←→ tab"));
+        assert!(switch.contains("Enter closeup"));
+        assert!(switch.contains("p PR"));
+        for label in ["Preview", "Terminal", "Diff", "Notes"] {
+            assert!(switch.contains(label));
+        }
+
+        ws.tab_next();
+        ws.enter_closeup();
+        let closeup_frame = render(30, 100, &ws);
+        let closeup = closeup_frame
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(closeup.contains("[closeup] session selected"));
+        assert!(closeup.contains("←→ tab"));
+        assert!(closeup.contains("Esc switch"));
+        assert!(closeup.contains("↑↓ action"));
+        assert!(closeup.contains("Terminal — session 'UI work'"));
+        assert!(
+            closeup_frame
+                .iter()
+                .any(|line| line.contains("[\u{1b}[1;36mTerminal\u{1b}[0m]"))
+        );
     }
 
     #[test]

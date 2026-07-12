@@ -1,10 +1,15 @@
 //! 枠付きダイアログ（modal）の部品。
 //!
-//! 角丸の枠に本文を収める [`boxed`] と、それを画面中央に配置する [`render_modal`] を持つ。
+//! 角丸の枠に本文を収める [`boxed`]、それを空の画面中央に配置する
+//! [`render_modal`]、既存フレームの中央に合成する [`render_over`] を持つ。
 //! 幅は表示桁数（全角 2 桁）で測り、本文が枠より広ければ [`super::clip_to_width`] で切り、
 //! 短ければ空白で詰めて右端を揃える。色付け（枠色）はテーマ導入時に載せるため無色で描く。
 
 use super::{centered_padding, clip_to_width, display_width, normalize_size};
+use unicode_width::UnicodeWidthChar;
+
+/// 背景の ANSI スタイルを modal へ滲ませないための SGR reset。
+const RESET: &str = "\u{1b}[0m";
 
 /// `lines` を角丸の枠に収め、`title` を上辺に埋め込んだ行を返す。各行は左右 1 桁の余白を
 /// 付けて `inner_width` に揃える。返す行はまだ配置されていない（[`render_modal`] が中央寄せする）。
@@ -55,6 +60,11 @@ pub fn render_modal(
     body: &[String],
 ) -> Vec<String> {
     let (height, width) = normalize_size(raw_height, raw_width);
+    // 左右の枠線と余白だけで 4 桁必要。枠が収まらない幅では
+    // 端末外へはみ出すより、空のフレームを返す。
+    if width < 4 {
+        return vec![String::new(); height];
+    }
     // 枠は `inner_width + 4` 桁必要。狭い端末で溢れないよう内側幅を詰める（boxed が各行と
     // タイトルを収まるよう切る）。
     let inner_width = modal_inner_width(width, inner_width);
@@ -78,9 +88,138 @@ pub fn render_modal(
     lines
 }
 
+/// ANSI escape の終端かどうか。CSI 導入子 `[` は final byte ではない。
+fn is_escape_final(ch: char) -> bool {
+    ('\u{40}'..='\u{7e}').contains(&ch) && ch != '['
+}
+
+/// `text` から表示列 `start..start + width` を取り出し、ちょうど `width` 桁に
+/// そろえる。ANSI escape は 0 桁として保存する。境界が全角文字の 2 桁の中間に
+/// 入った場合は、片側だけを描けないため重なる列を空白にする。
+fn columns(text: &str, start: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let end = start.saturating_add(width);
+    let mut out = String::new();
+    let mut escapes_before = String::new();
+    let mut column = 0usize;
+    let mut selected = false;
+    let mut carries_style = false;
+    let mut chars = text.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            let mut sequence = String::from(ch);
+            for next in chars.by_ref() {
+                sequence.push(next);
+                if is_escape_final(next) {
+                    break;
+                }
+            }
+            if selected && column < end {
+                out.push_str(&sequence);
+                carries_style = true;
+            } else if !selected && column <= start {
+                // suffix は行の途中から始まる。そこまでの SGR を再生すれば、
+                // modal の手前で reset しても suffix の元の色を復元できる。
+                escapes_before.push_str(&sequence);
+            }
+            continue;
+        }
+
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if char_width == 0 {
+            if selected && column <= end {
+                out.push(ch);
+            }
+            continue;
+        }
+
+        let char_end = column.saturating_add(char_width);
+        if char_end <= start {
+            column = char_end;
+            continue;
+        }
+        if column >= end {
+            break;
+        }
+        if !selected {
+            out.push_str(&escapes_before);
+            carries_style = !escapes_before.is_empty();
+            selected = true;
+        }
+
+        if column < start || char_end > end {
+            // 2 桁文字を半分だけ残すことはできない。その文字のうち
+            // 要求範囲と重なるセル数だけ空白にし、後続の列位置を保つ。
+            let overlap_start = column.max(start);
+            let overlap_end = char_end.min(end);
+            out.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
+        } else {
+            out.push(ch);
+        }
+        column = char_end;
+    }
+
+    let padding = width.saturating_sub(display_width(&out));
+    out.push_str(&" ".repeat(padding));
+    if carries_style {
+        out.push_str(RESET);
+    }
+    out
+}
+
+/// `base` の背景を残したまま、`body` を枠付き modal として中央に合成する。
+///
+/// 返すフレームは常に正規化後の端末高と同じ行数で、各行は端末幅ちょうどに
+/// そろえる。ANSI escape は 0 桁、全角文字は 2 桁として扱う。背景が短い行や
+/// 行数不足の場合は空白で埋める。幅 4 桁未満では枠自体が収まらないため、
+/// modal は描かず正規化した背景だけを返す。
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    title: &str,
+    inner_width: usize,
+    body: &[String],
+) -> Vec<String> {
+    let (height, width) = normalize_size(raw_height, raw_width);
+    let mut frame: Vec<String> = (0..height)
+        .map(|row| columns(base.get(row).map_or("", String::as_str), 0, width))
+        .collect();
+
+    // 左右の枠線と余白だけで 4 桁必要。それ未満では背景を守る。
+    if width < 4 {
+        return frame;
+    }
+
+    let inner_width = modal_inner_width(width, inner_width);
+    let box_lines = boxed(title, inner_width, body);
+    let box_width = inner_width + 4;
+    let left = centered_padding(width, box_width);
+    let top = height.saturating_sub(box_lines.len()) / 2;
+
+    for (offset, box_line) in box_lines.iter().enumerate() {
+        let row = top + offset;
+        if row >= height {
+            break;
+        }
+        let background = &frame[row];
+        let prefix = columns(background, 0, left);
+        let suffix_start = left + box_width;
+        let suffix = columns(background, suffix_start, width.saturating_sub(suffix_start));
+        frame[row] = format!("{prefix}{box_line}{suffix}");
+    }
+
+    frame
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{boxed, modal_inner_width, render_modal};
+    use super::{boxed, columns, modal_inner_width, render_modal, render_over};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -135,5 +274,78 @@ mod tests {
         let body: Vec<String> = (0..20).map(|i| i.to_string()).collect();
         let lines = render_modal(3, 40, "", 10, &body);
         assert_eq!(lines.len(), 3);
+
+        // 枠の最小 4 桁が収まらない端末でも、行を幅外へ出さない。
+        for width in 1..4 {
+            let lines = render_modal(2, width, "T", 10, &["body".to_string()]);
+            assert_eq!(lines.len(), 2);
+            assert!(lines.iter().all(|line| display_width(line) <= width));
+        }
+    }
+
+    #[test]
+    fn render_over_preserves_the_background_outside_the_centered_box() {
+        let base: Vec<String> = (0..9)
+            .map(|row| format!("row-{row}-{}", ".".repeat(33)))
+            .collect();
+        let lines = render_over(9, 40, &base, "T", 8, &["body".to_string()]);
+
+        assert_eq!(lines.len(), 9);
+        assert!(lines.iter().all(|line| display_width(line) == 40));
+        // 3 行の box は row 3..=5 に置かれ、その外は背景のまま。
+        assert!(lines[0].starts_with("row-0-"));
+        assert!(lines[8].starts_with("row-8-"));
+        // box の左右にも背景が残る。
+        assert!(lines[3].starts_with("row-3-"));
+        assert!(lines[3].contains("┌─ T "));
+        assert!(lines[3].trim_end().ends_with("...."));
+        assert!(lines[4].contains("body"));
+    }
+
+    #[test]
+    fn render_over_keeps_ansi_and_full_width_cells_aligned() {
+        // 色付き全角文字の中間に box 境界が入る（left=5）ケース。
+        let background = format!("\u{1b}[31m{}\u{1b}[0m", "界".repeat(10));
+        let base = vec![background; 5];
+        let lines = render_over(5, 20, &base, "題", 6, &["中身".to_string()]);
+
+        assert_eq!(lines.len(), 5);
+        assert!(lines.iter().all(|line| display_width(line) == 20));
+        let top = &lines[1];
+        assert!(top.contains("\u{1b}[31m"));
+        // prefix の色は modal 枠前で閉じ、suffix で再現される。
+        assert!(top.contains("\u{1b}[0m┌"));
+        assert!(top.matches("\u{1b}[31m").count() >= 2);
+        assert!(top.contains("─ 題 "));
+    }
+
+    #[test]
+    fn render_over_handles_tiny_terminals_without_overflow() {
+        for width in 1..=4 {
+            let base = vec!["abcdef".to_string(); 2];
+            let lines = render_over(2, width, &base, "title", 20, &["body".to_string()]);
+            assert_eq!(lines.len(), 2);
+            assert!(lines.iter().all(|line| display_width(line) == width));
+            if width < 4 {
+                assert!(!lines.iter().any(|line| line.contains('┌')));
+            } else {
+                assert!(lines.iter().any(|line| line.contains('┌')));
+            }
+        }
+    }
+
+    #[test]
+    fn render_over_normalizes_missing_rows_and_zero_size() {
+        let lines = render_over(0, 0, &["background".to_string()], "T", 10, &[]);
+        assert_eq!(lines.len(), 24);
+        assert!(lines.iter().all(|line| display_width(line) == 80));
+        assert!(lines[0].starts_with("background"));
+    }
+
+    #[test]
+    fn column_slice_keeps_zero_width_combining_characters() {
+        let sliced = columns("a\u{301}b", 0, 2);
+        assert_eq!(display_width(&sliced), 2);
+        assert!(sliced.contains('\u{301}'));
     }
 }

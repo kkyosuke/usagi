@@ -73,9 +73,23 @@ Welcome の **Config**、または `usagi config` を選ぶと設定画面（Con
 対話ループの開始画面を Welcome か Config かで選び、どちらも同じループを回す。
 
 Workspace 画面は、`state.json` から読んだ session 一覧と root 行を左ペイン、選択中 session の
-タブを右ペインに表示する。`↑↓` で session、`←→` でタブを切り替える。Esc は Open 経由なら Open、
-Recent 経由なら Welcome へ戻り、`q` / Ctrl-C は TUI を終了する。タブ本文はプレースホルダで、
-daemon が所有する端末への attach はまだ行わない。
+タブを右ペインに表示し、ヘッダーに **Switch** / **Closeup** の現在 mode を示す。起動時は Switch
+で、`↑↓`（`j` / `k`）で session と root の選択を循環し、`←→`（`h` / `l`）で Preview / Terminal /
+Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
+モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
+タブを切り替え、Esc で Switch へ戻る。
+
+`:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
+`←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
+`p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。モーダル表示中は
+その入力が背面より優先されるため、Overview に入力した `q` は終了キーにならない。Closeup action、
+Overview command、Pull Request の実行はまだ接続せず、今回は表示と選択だけを行う。
+
+Esc は最前面から `モーダル → Closeup → Switch → 呼び出し元` の順に戻る。Switch からは Open
+経由なら Open、Recent 経由なら Welcome へ戻り、`usagi open` で直接開いた場合は終了する。
+`q` は基底の Switch / Closeup で TUI を終了し、最前面モーダルではそのモーダルが受け取る。
+Ctrl-C は表示状態にかかわらず TUI を終了する。タブ本文はプレースホルダで、daemon が所有する
+端末への attach はまだ行わない。
 
 `usagi open [path]` も同じ Workspace 画面を直接起動する。相対 path と省略時のカレントディレクトリは
 実在する絶対 path へ解決し、未登録ならディレクトリ名を workspace 名として登録する。同名が既に別

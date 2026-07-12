@@ -20,11 +20,14 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 
+use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::config;
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
+use crate::presentation::views::overview_modal::{self, OverviewModal};
+use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
-use crate::presentation::views::workspace::{self, Workspace as WorkspaceView};
+use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
@@ -110,6 +113,55 @@ enum WorkspaceStep {
     Stay,
     Quit,
     Back,
+}
+
+/// Workspace の基底画面より手前に重ねる modal。
+///
+/// Closeup の action menu は [`Mode::Closeup`] の既定 surface なのでここには含めず、
+/// Overview / PR を一時的に最前面へ出すときだけこの値を使う。
+enum WorkspaceModal {
+    Overview(OverviewModal),
+    Pr(PrModal),
+}
+
+/// Workspace runtime が 1 フレームを進めるために持つ presentation state。
+///
+/// 永続化済み workspace state は [`WorkspaceView`] が持ち、ここでは top-level mode、
+/// Closeup の選択、最前面 modal を組み合わせる。端末 IO は持たない。
+struct WorkspaceUi {
+    workspace: WorkspaceView,
+    closeup: CloseupModal,
+    modal: Option<WorkspaceModal>,
+}
+
+impl WorkspaceUi {
+    fn new(workspace: WorkspaceView) -> Self {
+        let closeup = CloseupModal::new(workspace.focused_label());
+        Self {
+            workspace,
+            closeup,
+            modal: None,
+        }
+    }
+
+    /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
+    fn enter_closeup(&mut self) {
+        self.workspace.enter_closeup();
+        self.closeup = CloseupModal::new(self.workspace.focused_label());
+        self.modal = None;
+    }
+
+    /// 現在 mode を保ったまま Workspace scope の command palette を重ねる。
+    fn open_overview(&mut self) {
+        self.modal = Some(WorkspaceModal::Overview(OverviewModal::new()));
+    }
+
+    /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
+    fn open_prs(&mut self) {
+        self.modal = Some(WorkspaceModal::Pr(PrModal::new(
+            self.workspace.focused_prs().to_vec(),
+        )));
+    }
 }
 
 /// welcome のメニュー操作を画面遷移へ写す。
@@ -220,18 +272,112 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
     }
 }
 
-/// Workspace 画面のキー処理。上下は session、左右は tab を循環する。
-fn step_workspace(workspace: &mut WorkspaceView, key: Key) -> WorkspaceStep {
+/// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
+/// Enter の command 実行は command handler が接続されるまで no-op とする。
+fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
-        Key::Up => workspace.select_prev(),
-        Key::Down => workspace.select_next(),
-        Key::Left => workspace.tab_prev(),
-        Key::Right => workspace.tab_next(),
+        Key::Up => modal.select_prev(),
+        Key::Down => modal.select_next(),
+        Key::Left => modal.cursor_left(),
+        Key::Right => modal.cursor_right(),
+        Key::Backspace => modal.backspace(),
+        Key::Char(ch) => modal.insert_char(ch),
+        Key::Escape => return true,
+        Key::Enter | Key::Quit | Key::Other => {}
+    }
+    false
+}
+
+/// PR modal の入力処理。Enter のブラウザ起動は外部 IO port が接続されるまで no-op とする。
+fn step_pr(modal: &mut PrModal, key: Key) -> bool {
+    match key {
+        Key::Up | Key::Char('k') => modal.select_prev(),
+        Key::Down | Key::Char('j') => modal.select_next(),
+        Key::Escape => return true,
+        Key::Left
+        | Key::Right
+        | Key::Enter
+        | Key::Backspace
+        | Key::Quit
+        | Key::Char(_)
+        | Key::Other => {}
+    }
+    false
+}
+
+/// Switch のキー処理。session 選択と preview tab の移動を行い、Enter / `t` で
+/// 選択行の Closeup action menu へ入る。
+fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    match key {
+        Key::Up | Key::Char('k') => ui.workspace.select_prev(),
+        Key::Down | Key::Char('j') => ui.workspace.select_next(),
+        Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
+        Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Enter | Key::Char('t') => ui.enter_closeup(),
+        Key::Char(':') => ui.open_overview(),
+        Key::Char('p') => ui.open_prs(),
         Key::Escape => return WorkspaceStep::Back,
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Backspace | Key::Char(_) | Key::Other => {}
+    }
+    WorkspaceStep::Stay
+}
+
+/// Closeup のキー処理。action menu の上下選択と背面 tab の左右移動を行う。Esc は
+/// Workspace 自体を閉じず Switch へ一段戻す。
+fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    match key {
+        Key::Up | Key::Char('k') => ui.closeup.select_prev(),
+        Key::Down | Key::Char('j') => ui.closeup.select_next(),
+        Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
+        Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Char(':') => ui.open_overview(),
+        Key::Char('p') => ui.open_prs(),
+        Key::Escape => ui.workspace.enter_switch(),
+        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        // action 実行は Closeup command handler が接続されるまで no-op。
         Key::Enter | Key::Backspace | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
+}
+
+/// Workspace 画面のキー処理。Ctrl-C は常に終了し、それ以外は最前面 modal、現在 mode の
+/// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
+fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if key == Key::Quit {
+        return WorkspaceStep::Quit;
+    }
+
+    if let Some(modal) = &mut ui.modal {
+        let close = match modal {
+            WorkspaceModal::Overview(modal) => step_overview(modal, key),
+            WorkspaceModal::Pr(modal) => step_pr(modal, key),
+        };
+        if close {
+            ui.modal = None;
+        }
+        return WorkspaceStep::Stay;
+    }
+
+    match ui.workspace.mode() {
+        Mode::Switch => step_switch(ui, key),
+        Mode::Closeup => step_closeup(ui, key),
+    }
+}
+
+/// Workspace と、その時点で最前面にある modal を 1 フレームへ合成する。
+fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String> {
+    let base = workspace::render(height, width, &ui.workspace);
+    match &ui.modal {
+        Some(WorkspaceModal::Overview(modal)) => {
+            overview_modal::render_over(height, width, &base, modal)
+        }
+        Some(WorkspaceModal::Pr(modal)) => pr_modal::render_over(height, width, &base, modal),
+        None if ui.workspace.mode() == Mode::Closeup => {
+            closeup_modal::render_over(height, width, &base, &ui.closeup)
+        }
+        None => base,
+    }
 }
 
 /// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
@@ -247,11 +393,12 @@ fn drive_workspace(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
 ) -> io::Result<WorkspaceStep> {
-    let mut workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+    let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+    let mut ui = WorkspaceUi::new(workspace);
     loop {
         let (height, width) = term.size()?;
-        term.draw(&workspace::render(height, width, &workspace))?;
-        match step_workspace(&mut workspace, term.read_key()?) {
+        term.draw(&render_workspace(height, width, &ui))?;
+        match step_workspace(&mut ui, term.read_key()?) {
             WorkspaceStep::Stay => {}
             exit => return Ok(exit),
         }
@@ -398,12 +545,16 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, ConfigStep, Exit, NewStep, Start, WelcomeStep, WorkspaceLoader,
-        WorkspaceSnapshot, run as run_from_start, run_workspace, step_config, step_new,
-        welcome_action, write_banner,
+        BannerScreenRunner, ConfigStep, Exit, NewStep, OverviewModal, PrModal, Start, WelcomeStep,
+        WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi,
+        run as run_from_start, run_workspace, step_config, step_new, step_overview, step_pr,
+        step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
+    use crate::presentation::views::workspace::{
+        Mode as WorkspaceMode, Workspace as WorkspaceView,
+    };
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use chrono::{DateTime, Duration, Utc};
@@ -412,6 +563,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
@@ -453,6 +605,14 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    fn snapshot_with_pr(name: &str) -> WorkspaceSnapshot {
+        let mut snapshot = snapshot(name);
+        let mut pr = PrLink::new(42, "https://example.com/pull/42");
+        pr.title = Some("Workspace navigation".to_string());
+        snapshot.state.sessions[0].prs.push(pr);
+        snapshot
     }
 
     fn recent(name: &str) -> Recent {
@@ -654,6 +814,64 @@ mod tests {
     }
 
     #[test]
+    fn modal_reducers_capture_edit_selection_and_close_keys() {
+        let mut overview = OverviewModal::new();
+        for key in [Key::Down, Key::Up, Key::Left, Key::Right] {
+            assert!(!step_overview(&mut overview, key));
+        }
+        assert!(!step_overview(&mut overview, Key::Char('q')));
+        assert_eq!(overview.input(), "q");
+        for key in [Key::Backspace, Key::Enter, Key::Other, Key::Quit] {
+            assert!(!step_overview(&mut overview, key));
+        }
+        assert!(step_overview(&mut overview, Key::Escape));
+
+        let mut pr = PrModal::new(vec![PrLink::new(7, "https://example.com/pull/7")]);
+        for key in [
+            Key::Up,
+            Key::Char('k'),
+            Key::Down,
+            Key::Char('j'),
+            Key::Left,
+            Key::Right,
+            Key::Enter,
+            Key::Backspace,
+            Key::Quit,
+            Key::Char('x'),
+            Key::Other,
+        ] {
+            assert!(!step_pr(&mut pr, key));
+        }
+        assert!(step_pr(&mut pr, Key::Escape));
+    }
+
+    #[test]
+    fn switch_pr_modal_captures_keys_without_moving_the_background() {
+        let snapshot = snapshot_with_pr("switch");
+        let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+        let mut ui = WorkspaceUi::new(workspace);
+        let selected = ui.workspace.selected();
+        let tab = ui.workspace.active_tab();
+
+        assert_eq!(step_workspace(&mut ui, Key::Char('p')), WorkspaceStep::Stay);
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Pr(_))));
+        step_workspace(&mut ui, Key::Down);
+        step_workspace(&mut ui, Key::Right);
+        assert_eq!(ui.workspace.selected(), selected);
+        assert_eq!(ui.workspace.active_tab(), tab);
+
+        step_workspace(&mut ui, Key::Escape);
+        assert!(ui.modal.is_none());
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+
+        step_workspace(&mut ui, Key::Char(':'));
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Overview(_))));
+        step_workspace(&mut ui, Key::Escape);
+        assert!(ui.modal.is_none());
+        assert_eq!(step_workspace(&mut ui, Key::Backspace), WorkspaceStep::Stay);
+    }
+
+    #[test]
     fn new_form_opens_edits_and_returns_to_welcome() {
         let keys = [
             Key::Char('e'),
@@ -749,6 +967,7 @@ mod tests {
             Key::Enter,
             Key::Char('z'),
             Key::Other,
+            Key::Escape,
             Key::Escape,
             Key::Left,
             Key::Right,
@@ -959,18 +1178,80 @@ mod tests {
     }
 
     #[test]
-    fn direct_workspace_handles_navigation_and_both_exit_keys() {
-        for exit in [Key::Escape, Key::Quit, Key::Char('q')] {
-            let keys = [
-                Key::Down,
-                Key::Up,
+    fn workspace_modes_modals_tabs_and_escape_stack_are_interactive() {
+        let keys = [
+            Key::Right,
+            Key::Enter,
+            Key::Down,
+            Key::Char(':'),
+            Key::Char('q'),
+            Key::Left,
+            Key::Backspace,
+            Key::Escape,
+            Key::Char('p'),
+            Key::Down,
+            Key::Escape,
+            Key::Escape,
+            Key::Escape,
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+
+        assert_eq!(
+            run_workspace(&mut term, snapshot_with_pr("direct")).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(term.frames.len(), keys.len());
+
+        let frame = |index: usize| term.frames[index].join("\n");
+        assert!(frame(0).contains("Switch"));
+        assert!(frame(0).contains("Preview"));
+        assert!(frame(1).contains("Terminal — session 'direct-session'"));
+
+        // Closeup modal は workspace と tab strip の上に重なり、左右移動後の tab を保つ。
+        assert!(frame(2).contains("Open terminal"));
+        assert!(frame(2).contains("direct-session"));
+        assert!(frame(2).contains("Terminal"));
+
+        // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
+        assert!(frame(4).contains("workspace commands"));
+        assert!(frame(5).contains("matches"));
+        assert!(frame(5).contains("quit"));
+        assert!(frame(5).contains("Command"));
+        assert!(frame(8).contains("Open terminal"));
+
+        // PR modal も実データを表示し、閉じると同じ Closeup に戻る。
+        assert!(frame(9).contains("Pull Request"));
+        assert!(frame(9).contains("#42"));
+        assert!(frame(9).contains("Terminal"));
+        assert!(frame(11).contains("Open terminal"));
+
+        // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
+        assert!(frame(12).contains("Switch"));
+        assert!(!frame(12).contains("Open terminal"));
+    }
+
+    #[test]
+    fn direct_workspace_handles_navigation_shortcuts_and_exit_keys() {
+        for (navigation, exit) in [
+            (vec![Key::Escape], Key::Escape),
+            (Vec::new(), Key::Quit),
+            (Vec::new(), Key::Char('q')),
+        ] {
+            let mut keys = vec![
+                Key::Char('j'),
+                Key::Char('k'),
+                Key::Char('l'),
+                Key::Char('h'),
+                Key::Char('t'),
                 Key::Right,
                 Key::Left,
-                Key::Enter,
+                Key::Char('k'),
+                Key::Char('j'),
                 Key::Char('z'),
                 Key::Other,
-                exit,
             ];
+            keys.extend(navigation);
+            keys.push(exit);
             let mut term = FakeTerminal::with_keys(&keys);
             assert_eq!(
                 run_workspace(&mut term, snapshot("direct")).unwrap(),

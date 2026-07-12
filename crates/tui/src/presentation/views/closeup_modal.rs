@@ -1,7 +1,7 @@
 //! Closeup modal（セッションのアクションメニュー）。
 //!
-//! workspace 画面でフォーカス中のセッションに対する操作を選ぶ小さな中央メニュー。↑↓ で選び、
-//! Enter で実行する。中央に浮かぶ枠付きダイアログとして描く（枠・配置は共通の [`modal`]
+//! workspace 画面でフォーカス中のセッションに対する操作を選ぶ小さな中央メニュー。↑↓ で選ぶ。
+//! 中央に浮かぶ枠付きダイアログとして描く（枠・配置は共通の [`modal`]
 //! widget に委譲）。
 //!
 //! 状態 [`CloseupModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
@@ -140,7 +140,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  Enter: run   Esc: close"));
+    lines.push(Style::new().dim().paint("  ↑↓: select   Esc: switch"));
     lines
 }
 
@@ -151,9 +151,28 @@ pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<
     modal::render_modal(raw_height, raw_width, "Session", INNER_WIDTH, &body(state))
 }
 
+/// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
+/// サイズ 0 は 80×24 にフォールバックする。
+#[must_use]
+pub fn render_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: &CloseupModal,
+) -> Vec<String> {
+    modal::render_over(
+        raw_height,
+        raw_width,
+        base,
+        "Session",
+        INNER_WIDTH,
+        &body(state),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{CloseupModal, render};
+    use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::display_width;
 
     fn strip(line: &str) -> String {
@@ -226,7 +245,7 @@ mod tests {
         assert!(text.contains("Open terminal"));
         assert!(text.contains("attach the live shell"));
         assert!(text.contains("Close tab"));
-        assert!(text.contains("Esc: close"));
+        assert!(text.contains("Esc: switch"));
         // 選択マーカーは 1 つ。
         assert!(text.contains('›'));
     }
@@ -249,5 +268,34 @@ mod tests {
         assert!(frame.iter().all(|l| display_width(l) <= 80));
         // サイズ 0 は 80×24 にフォールバック。
         assert_eq!(render(0, 0, &CloseupModal::new("s")).len(), 24);
+    }
+
+    #[test]
+    fn render_over_keeps_the_workspace_background_visible() {
+        let base: Vec<String> = (0..24)
+            .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
+            .collect();
+        let frame = render_over(24, 80, &base, &CloseupModal::new("daemon"));
+        let text = frame.join("\n");
+
+        assert_eq!(frame.len(), 24);
+        assert!(frame.iter().all(|line| display_width(line) == 80));
+        assert!(frame[0].starts_with("workspace-row-0-"));
+        assert!(text.contains("Session"));
+        assert!(text.contains("session: daemon"));
+        let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
+        assert!(modal_row.starts_with("workspace"));
+        assert!(modal_row.trim_end().ends_with('.'));
+    }
+
+    #[test]
+    fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
+        let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 14];
+        let frame = render_over(14, 9, &base, &CloseupModal::new("会話"));
+
+        assert_eq!(frame.len(), 14);
+        assert!(frame.iter().all(|line| display_width(line) == 9));
+        assert!(frame.iter().any(|line| line.contains('┌')));
+        assert!(frame.iter().any(|line| line.contains("\u{1b}[35m")));
     }
 }
