@@ -30,6 +30,8 @@ crossterm.workspace = true
 chrono.workspace = true
 # daemon の pid 生存判定（signal 0）を合成ルートで束ねるため。
 libc.workspace = true
+# daemon の単一インスタンスロック（flock）を合成ルートで束ねるため。
+fs2.workspace = true
 
 [dev-dependencies]
 

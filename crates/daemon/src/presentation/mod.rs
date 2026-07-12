@@ -8,17 +8,17 @@ use std::io::Write;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Sleeper,
-    Terminator,
+    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
+    Sleeper, Terminator,
 };
 
 use crate::usecase;
 
 /// daemon 面が実 IO を行うために注入される依存一式。合成ルートが本物（ファイル・
-/// signal 0・SIGTERM・signal 待受・detached spawn・sleep・自プロセス pid）を束ねて構築し、
-/// テストは fake を差し込む。[`run`] にまとめて渡すことで、verb ごとに必要な seam が
-/// 増えても entry point の引数を平らに保つ。
-pub struct DaemonEnv<'a, F, P, T, S, L, K> {
+/// signal 0・SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
+/// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
+/// verb ごとに必要な seam が増えても entry point の引数を平らに保つ。
+pub struct DaemonEnv<'a, F, P, T, S, L, K, M> {
     /// `daemon.json` の read/write/clear。
     pub store: &'a DaemonRecordStore<F>,
     /// pid の生存判定。
@@ -31,6 +31,8 @@ pub struct DaemonEnv<'a, F, P, T, S, L, K> {
     pub launcher: &'a L,
     /// `start` が登録確認ポーリングの間に待つための sleeper。
     pub sleeper: &'a K,
+    /// `serve` の単一インスタンスロック（多重起動を防ぐ権威）。
+    pub lock: &'a M,
     /// `serve` が register する自プロセスの pid。
     pub pid: u32,
 }
@@ -57,15 +59,16 @@ pub fn run<
     S: ShutdownSignal,
     L: DaemonLauncher,
     K: Sleeper,
+    M: InstanceLock,
 >(
     out: &mut W,
     subcommand: Option<&str>,
     info: &AppInfo,
-    env: &DaemonEnv<F, P, T, S, L, K>,
+    env: &DaemonEnv<F, P, T, S, L, K, M>,
 ) -> std::io::Result<()> {
     match subcommand {
         None | Some("serve") => {
-            usecase::serve::serve(out, env.store, env.probe, env.shutdown, env.pid, info)
+            usecase::serve::serve(out, env.store, env.shutdown, env.lock, env.pid, info)
         }
         Some("start") => {
             let line =
@@ -99,8 +102,8 @@ pub fn run<
 mod tests {
     use super::{DaemonEnv, run};
     use crate::test_support::{
-        FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopSleeper, RecordingTerminator,
-        TestLauncher,
+        FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopSleeper,
+        RecordingTerminator, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
@@ -130,6 +133,7 @@ mod tests {
             shutdown: &shutdown,
             launcher: &launcher,
             sleeper: &sleeper,
+            lock: &FakeLock::Acquired,
             pid: 4321,
         };
         let mut buf = Vec::new();
@@ -181,6 +185,7 @@ mod tests {
                 shutdown: &shutdown,
                 launcher: &launcher,
                 sleeper: &sleeper,
+                lock: &FakeLock::Acquired,
                 pid: 4321,
             };
             let mut buf = Vec::new();
@@ -230,13 +235,10 @@ mod tests {
             ImmediateShutdown,
             NoopSleeper,
         );
-        for subcommand in [
-            Some("status"),
-            Some("stop"),
-            Some("serve"),
-            Some("start"),
-            Some("restart"),
-        ] {
+        // `serve` on the acquired path writes without reading, so a malformed
+        // record does not surface there; its error paths are covered in its own
+        // tests. The record-reading verbs must propagate the load error.
+        for subcommand in [Some("status"), Some("stop"), Some("start"), Some("restart")] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
             let launcher = TestLauncher::idle(&store);
             let env = DaemonEnv {
@@ -246,6 +248,7 @@ mod tests {
                 shutdown: &shutdown,
                 launcher: &launcher,
                 sleeper: &sleeper,
+                lock: &FakeLock::Acquired,
                 pid: 4321,
             };
             let mut buf = Vec::new();
