@@ -1,14 +1,14 @@
 ---
 number: 214
 title: feat(core): v2 typed ID と fencing invariant を導入する
-status: todo
+status: done
 priority: high
 labels: [core, ipc, domain]
 dependson: [212]
 related: []
 parent: 213
 created_at: 2026-07-12T11:38:17.560741+00:00
-updated_at: 2026-07-12T12:09:54.278892+00:00
+updated_at: 2026-07-12T12:24:36.103658+00:00
 ---
 
 ## 目的

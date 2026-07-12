@@ -63,6 +63,9 @@ usagi-tui = { path = "crates/tui" }
 # JSON インデックス表現の (de)serialize は serde の derive で表す。
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+# v2 resource identity. UUIDv4 is used for resource incarnations and UUIDv7 for
+# producer-issued durable operations.
+uuid = { version = "1.20", features = ["v4", "v7"] }
 # infrastructure（永続化）で使う。serde_json は index.json / workspaces.json の
 # (de)serialize、anyhow はストアのエラー伝播、fs2 はストアの cross-process ロック、
 # dirs は既定データディレクトリ（~/.usagi）の解決、rayon は markdown の並列スキャン。
