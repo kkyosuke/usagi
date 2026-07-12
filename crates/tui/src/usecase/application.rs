@@ -15,6 +15,9 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 pub mod controller;
 /// Session create/remove の pending 表示と safe landing を扱う純粋 reducer。
 pub mod lifecycle;
+/// daemon SessionLifecycle の effect / replay / snapshot を lifecycle reducer へ
+/// 接続する adapter。
+pub mod lifecycle_adapter;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。

@@ -191,9 +191,10 @@ tab reorder、text selection 中 Ctrl-C の copy は B とし、A の prefix pas
 ## daemon と backend の外部 checkpoint
 
 現在の IPC transport は [core IPC](../../crates/core/src/infrastructure/ipc/mod.rs) と
-[daemon handler](../../crates/daemon/src/presentation/ipc.rs) の Ping / Pong 語彙・一接続の逐次 handler までで、実 socket
-server / TUI client へ未合成である。一方、typed resource ID、aggregate reference、pure fencing は
-[core domain ID](../../crates/core/src/domain/id/mod.rs) に実装済みである。wire / ID / daemon lifecycle の正本は [ID 契約](02-ipc-id.md)、
+[daemon handler](../../crates/daemon/src/presentation/ipc.rs) の handshake / framed request-response を提供する。TUI の
+SessionLifecycle adapter は daemon control surface を注入し、durable operation ID、operation replay cursor、workspace
+snapshot を reducer へ結合する。daemon の control API 自体はその adapter の外側で所有する。一方、typed resource ID、aggregate
+reference、pure fencing は [core domain ID](../../crates/core/src/domain/id/mod.rs) に実装済みである。wire / ID / daemon lifecycle の正本は [ID 契約](02-ipc-id.md)、
 [IPC protocol](03-ipc-protocol.md)、[daemon API](04-daemon-api.md)、[daemon lifecycle](05-daemon-lifecycle.md) とする。
 次の `D1`〜`D6` は TUI acceptance から外部正本への**結合 checkpoint alias**であり、wire の型名、field、順序軸、
 error shape をこの文書では再定義しない。

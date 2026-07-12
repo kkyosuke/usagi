@@ -202,6 +202,9 @@ pub enum Event {
     Interaction(Interaction),
     /// daemon lifecycle update。
     Daemon(DaemonEvent),
+    /// reconnect 時に daemon が返す workspace snapshot。pending operation は
+    /// operation journal の replay で別途収束させるため、ここでは捨てない。
+    Snapshot { sessions: Vec<SessionRow> },
 }
 
 /// reducer が adapter に依頼する外部操作。
@@ -259,7 +262,28 @@ pub fn update(state: &mut LifecycleState, event: Event) -> Vec<Effect> {
             Vec::new()
         }
         Event::Daemon(event) => apply_daemon(state, event),
+        Event::Snapshot { sessions } => snapshot(state, sessions),
     }
+}
+
+/// daemon snapshot を現在の表示へ反映する。snapshot に存在しない local target は
+/// root へ縮退するが、pending operation は replay/final event のため保持する。
+fn snapshot(state: &mut LifecycleState, sessions: Vec<SessionRow>) -> Vec<Effect> {
+    state.sessions = sessions;
+    let exists = |target| match target {
+        Target::Root => true,
+        Target::Session(id) => state.sessions.iter().any(|row| row.id == id),
+    };
+    let selected_exists = matches!(state.selected, Selection::NewSession)
+        || matches!(state.selected, Selection::Target(target) if exists(target));
+    if !selected_exists {
+        state.selected = Selection::Target(Target::Root);
+    }
+    if !exists(state.active) {
+        state.active = Target::Root;
+        state.mode = Mode::Switch;
+    }
+    Vec::new()
 }
 
 fn apply_daemon(state: &mut LifecycleState, event: DaemonEvent) -> Vec<Effect> {

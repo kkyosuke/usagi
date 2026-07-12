@@ -1,14 +1,14 @@
 ---
 number: 234
 title: feat(tui): daemon SessionLifecycle adapter と reconcile を結合する
-status: todo
+status: done
 priority: high
 labels: [tui, ipc, lifecycle]
 dependson: [217, 219, 220, 231]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:47.427108+00:00
-updated_at: 2026-07-12T21:11:47.427108+00:00
+updated_at: 2026-07-12T23:02:21.421032+00:00
 ---
 
 ## 目的
