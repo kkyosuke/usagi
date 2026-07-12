@@ -1,6 +1,6 @@
 # 提案: v2 daemon IPC／ID overview と identity
 
-> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ 次へ → [IPC protocol](03-ipc-protocol.md)
+> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [入口面](01-entry-surfaces.md) ｜ 次へ → [IPC protocol](03-ipc-protocol.md)
 
 本書は **v2 の未実装設計**であり、現在仕様の正本ではない。現在のクレート責務と依存方向は
 [2. アーキテクチャ](../02-architecture.md)、現在実装されている起動面は
