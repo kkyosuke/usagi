@@ -21,9 +21,10 @@ use crossterm::{execute, queue};
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::infrastructure::daemon::{
-    DaemonRecordStore, LivenessProbe, RecordFile, Terminator,
+    DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Terminator,
 };
 use usagi_core::infrastructure::paths;
+use usagi_daemon::presentation::DaemonEnv;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::{self, BannerScreenRunner};
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
@@ -185,6 +186,38 @@ impl Terminator for SigtermTerminator {
     }
 }
 
+/// Blocks the foreground daemon until it receives SIGINT or SIGTERM.
+struct SignalShutdown;
+
+impl ShutdownSignal for SignalShutdown {
+    #[cfg(unix)]
+    fn wait(&self) -> std::io::Result<()> {
+        // Block SIGINT / SIGTERM so they are delivered synchronously to sigwait
+        // instead of taking their default terminate action; then wait for one.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&raw mut set);
+            libc::sigaddset(&raw mut set, libc::SIGINT);
+            libc::sigaddset(&raw mut set, libc::SIGTERM);
+            if libc::sigprocmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut received: libc::c_int = 0;
+            if libc::sigwait(&raw const set, &raw mut received) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn wait(&self) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "running the daemon is only supported on Unix",
+        ))
+    }
+}
+
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -240,14 +273,14 @@ fn main() -> std::io::Result<()> {
                 .join("daemon")
                 .join("daemon.json");
             let store = DaemonRecordStore::new(FsRecordFile { path });
-            usagi_daemon::presentation::run(
-                &mut stdout,
-                command.as_deref(),
-                &info,
-                &store,
-                &KillProbe,
-                &SigtermTerminator,
-            )
+            let env = DaemonEnv {
+                store: &store,
+                probe: &KillProbe,
+                terminator: &SigtermTerminator,
+                shutdown: &SignalShutdown,
+                pid: std::process::id(),
+            };
+            usagi_daemon::presentation::run(&mut stdout, command.as_deref(), &info, &env)
         }
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
         None if args.get(1).is_none() => launch_tui(&mut stdout, &info, &EntryScreen::Welcome),

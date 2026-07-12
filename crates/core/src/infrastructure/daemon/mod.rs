@@ -68,6 +68,20 @@ pub trait Terminator {
     fn terminate(&self, pid: u32) -> io::Result<()>;
 }
 
+/// Blocks a running `serve` until the daemon is asked to shut down.
+///
+/// The real implementation waits for SIGINT / SIGTERM; it is real IO bound at
+/// the synthesis root, so the `serve` loop stays testable through a fake that
+/// returns immediately. Returning `Ok` means "shut down now"; the caller then
+/// clears its record and exits.
+pub trait ShutdownSignal {
+    /// Block until the daemon should stop.
+    ///
+    /// # Errors
+    /// Returns an error when waiting for the shutdown signal fails.
+    fn wait(&self) -> io::Result<()>;
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,
