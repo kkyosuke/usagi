@@ -7,6 +7,7 @@ pub mod daemon;
 pub mod frontmatter;
 pub mod issue;
 pub mod memory;
+pub mod recent;
 pub mod workspace;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。
