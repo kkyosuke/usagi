@@ -14,7 +14,7 @@ fn main() -> std::io::Result<()> {
     };
     let mut stdout = std::io::stdout();
     match std::env::args().nth(1).as_deref() {
-        Some("daemon") => usagi_daemon::presentation::write_ready_line(&mut stdout, &info),
+        Some("daemon") => usagi_daemon::presentation::run(&mut stdout, &info),
         Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
         Some(command) => usagi_cli::cli::write_unknown_command(&mut stdout, &info, command),
         None => usagi_tui::write_banner(&mut stdout, &info),
