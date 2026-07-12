@@ -33,6 +33,7 @@ jobs:
             --config lychee.toml
             --no-progress
             '*.md'
+            'document/**/*.md'
             'v1/README.md'
             'v1/document/**/*.md'
             '.agents/**/*.md'

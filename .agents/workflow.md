@@ -1,8 +1,8 @@
 # 開発ワークフロー
 
 AI エージェントが `usagi` で作業する際の標準手順。**新規作業**と**追加修正**で手順が異なる。
-コーディング・コミット・PR の規約は [v1/document/06-conventions.md](../v1/document/06-conventions.md) を参照。
-ドキュメント全体の目次は [v1/document/README.md](../v1/document/README.md)。
+コーディング・コミット・PR の規約は [document/06-conventions.md](../document/06-conventions.md) を参照。
+ドキュメント全体の目次は [document/README.md](../document/README.md)（v1 時点の仕様は [v1/document/README.md](../v1/document/README.md)）。
 
 ## 新規作業（新しいタスクを始めるとき）
 
@@ -53,30 +53,27 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 
 - クリーンアーキテクチャ（`domain → usecase → infrastructure ← presentation`）の依存方向を守る。
 - 実装と同時にテストを追加・更新する（カバレッジ 100% を維持。CI / pre-push でチェックされる）。
-- 検証は [06-conventions.md#品質チェック（リスク比例の gate）](../v1/document/06-conventions.md#品質チェックリスク比例の-gate)
+- 検証は [06-conventions.md#品質チェック（リスク比例の gate）](../document/06-conventions.md#品質チェックリスク比例の-gate)
   を正本とする。編集中は fmt check / `cargo check --workspace --all-targets` / 変更 module・target と直接 consumer の test、
   commit 前は `cargo clippy --workspace --all-targets -- -D warnings` と risk-based selected tests、push / PR 前は Rust 差分に
   full test + coverage 100% を通す。coverage がテスト実行を兼ねる経路では `cargo test --workspace --quiet` を重複実行しない。
 - docs-only（Rust 差分なし）は Rust gate を省略できるが、Markdown link check は必須である。
 - AI エージェントの完了報告には、実行した command、結果、未実行 gate と理由、[full test / coverage gate
-  必須条件](../v1/document/06-conventions.md#品質チェックリスク比例の-gate)への該当有無を含める。
+  必須条件](../document/06-conventions.md#品質チェックリスク比例の-gate)への該当有無を含める。
 
 - コミットは [Conventional Commits](https://www.conventionalcommits.org/ja/) 形式（例: `feat: doctor コマンドを追加`）。
 
 ### 3. ドキュメントを更新する
 
-実装内容に合わせて `v1/document/` 配下を更新する。仕様・画面・データ構造に変更があれば対応するファイルを更新する。目次は [v1/document/README.md](../v1/document/README.md)。
+実装内容に合わせて `document/` 配下（v2 の正本）を更新する。仕様・構成に変更があれば対応するファイルを更新する。目次は [document/README.md](../document/README.md)。
 
-**書き方のルールは [v1/document/06-conventions.md#ドキュメント規約](../v1/document/06-conventions.md#ドキュメント規約) に従う**（記載＝実装済み・SSoT・1 ファイル 1 トピック・表と図の活用・相対リンクとアンカーの整合）。
+**書き方のルールは [document/06-conventions.md#ドキュメント規約](../document/06-conventions.md#ドキュメント規約) に従う**（記載＝実装済み・SSoT・1 ファイル 1 トピック・表と図の活用・相対リンクとアンカーの整合）。
 
-- `v1/document/01-overview.md` — プロジェクト概要
-- `v1/document/02-architecture.md` — クリーンアーキテクチャ・`src/` のモジュール構成
-- `v1/document/03-commands/` — CLI / TUI 内コマンドのリファレンス（系統ごとに分割）
-- `v1/document/04-orchestration.md` — セッション・worktree オーケストレーション
-- `v1/document/05-settings.md` — 設定項目・保存場所・変更方法
-- `v1/document/06-conventions.md` — 開発規約
-- `v1/document/design/` — TUI 画面構成（画面ごとに分割）
-- `v1/document/data/` — `state.json` / `workspaces.json` / `settings.json` などの永続化仕様
+- `document/01-overview.md` — プロジェクト概要（v2 の位置づけ・v1 との関係）
+- `document/02-architecture.md` — workspace 構成・クレート責務・依存ルール
+- `document/06-conventions.md` — 開発規約
+
+v1 時点の仕様（コマンド・画面・データ構造・orchestration）は `v1/document/`（退避版）にあり、更新しない。
 
 ユーザー向けの変更があれば `README.md` も更新する。
 
@@ -98,11 +95,11 @@ gh pr create --title "<type>: <説明>" --body "<概要>"
 
 ### 1. 開発する
 
-新規作業と同じ。[品質チェック](../v1/document/06-conventions.md#品質チェックリスク比例の-gate)の該当 gate を通してからコミットする。
+新規作業と同じ。[品質チェック](../document/06-conventions.md#品質チェックリスク比例の-gate)の該当 gate を通してからコミットする。
 
 ### 2. ドキュメントを更新する
 
-追加した変更に合わせて `v1/document/` および必要なら `README.md` を更新する。
+追加した変更に合わせて `document/` および必要なら `README.md` を更新する。
 
 ### 3. PR のタイトル・概要を更新する
 
