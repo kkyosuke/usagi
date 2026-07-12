@@ -346,6 +346,14 @@ mod tests {
             Err(LaunchValidationError::InvalidProfileId)
         );
         assert_eq!(
+            AgentProfileId::new(String::from("Claude")),
+            Err(LaunchValidationError::InvalidProfileId)
+        );
+        assert_eq!(
+            AgentProfileId::new(String::from("test")).unwrap().as_str(),
+            "test"
+        );
+        assert_eq!(
             ModelSelector::new(""),
             Err(LaunchValidationError::InvalidModelSelector)
         );
@@ -358,6 +366,14 @@ mod tests {
             Err(LaunchValidationError::InvalidEnvironmentVariableName)
         );
         assert_eq!(
+            EnvironmentVariableName::new(String::from("A-B")),
+            Err(LaunchValidationError::InvalidEnvironmentVariableName)
+        );
+        assert_eq!(
+            EnvironmentVariableName::new(String::from("TEST")),
+            Ok(EnvironmentVariableName::new("TEST").unwrap())
+        );
+        assert_eq!(
             LaunchPlan::new(
                 AgentProfileId::new("test").unwrap(),
                 1,
@@ -367,6 +383,17 @@ mod tests {
                 PathBuf::from("."),
             ),
             Err(LaunchValidationError::InvalidArgumentVector)
+        );
+        assert!(
+            LaunchPlan::new(
+                AgentProfileId::new("test").unwrap(),
+                1,
+                "agent",
+                vec![],
+                [],
+                PathBuf::from("."),
+            )
+            .is_ok()
         );
     }
 
