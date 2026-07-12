@@ -13,7 +13,7 @@ pub mod serve;
 pub mod tool;
 pub mod tools;
 
-pub use serve::serve;
+pub use serve::{serve, serve_with_client};
 use tool::ToolError;
 
 /// tool 名でレジストリを引いて実行する（`tools/call` の実体）。

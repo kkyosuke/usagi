@@ -13,6 +13,7 @@
 //! - [`workspace`] — global registry 上の workspace open（path 解決・登録・touch）と、
 //!   welcome 画面向け recent overview の構築。
 
+pub mod client;
 pub mod issue;
 pub mod memory;
 pub mod note;

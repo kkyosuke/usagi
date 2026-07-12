@@ -35,6 +35,9 @@ use usagi_core::infrastructure::git::{GitOutput, GitRunner};
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
+use usagi_core::usecase::client::{
+    ClientError, ClientPolicy, DaemonClient, DaemonReply, IpcClient,
+};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
@@ -568,7 +571,74 @@ fn dispatch_cli(
             };
             launch_tui(out, info, &entry)
         }
+        RunOutcome::DaemonRequest(request) => match daemon_client(ClientPolicy::cli()) {
+            Ok(mut client) => match client.request(request) {
+                Ok(DaemonReply::Accepted {
+                    operation_id,
+                    revision,
+                }) => {
+                    writeln!(
+                        out,
+                        "accepted operation {operation_id} (revision {revision})"
+                    )
+                }
+                Ok(DaemonReply::Ok(value)) => writeln!(out, "{value}"),
+                Err(error) => {
+                    writeln!(err, "daemon request failed: {error}")?;
+                    Ok(())
+                }
+            },
+            Err(error) => {
+                writeln!(err, "daemon unavailable: {error}")?;
+                Ok(())
+            }
+        },
     }
+}
+
+/// Connect to the managed daemon, starting it once when no endpoint exists.
+/// Any incompatible, unsafe, or unknown-ownership endpoint is returned as a
+/// typed error: this boundary never creates a local managed PTY fallback.
+fn daemon_client(
+    policy: ClientPolicy,
+) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
+    let data_dir =
+        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let connect = || usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir);
+    let stream = match connect() {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::process::Command::new(
+                std::env::current_exe().map_err(|e| ClientError::Unavailable(e.to_string()))?,
+            )
+            .args(["daemon", "start"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| ClientError::Unavailable(e.to_string()))?;
+            let mut connected = None;
+            for _ in 0..20 {
+                match connect() {
+                    Ok(stream) => {
+                        connected = Some(stream);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+            connected.ok_or_else(|| {
+                ClientError::Unavailable("daemon did not publish an endpoint".into())
+            })?
+        }
+        Err(error) => return Err(ClientError::Unavailable(error.to_string())),
+    };
+    IpcClient::connect(
+        stream,
+        format!("cli-{}", std::process::id()),
+        format!("{}", std::process::id()),
+        policy,
+    )
 }
 
 fn main() -> std::io::Result<()> {
@@ -622,7 +692,18 @@ fn main() -> std::io::Result<()> {
         }
         Some("mcp") => {
             let stdin = std::io::stdin();
-            usagi_cli::mcp::serve(stdin.lock(), &mut stdout, info.version)
+            match daemon_client(ClientPolicy::mcp()) {
+                Ok(mut client) => usagi_cli::mcp::serve_with_client(
+                    stdin.lock(),
+                    &mut stdout,
+                    info.version,
+                    &mut client,
+                ),
+                Err(error) => {
+                    writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
+                    Ok(())
+                }
+            }
         }
         None if args.get(1).is_none() => launch_tui(&mut stdout, &info, &EntryScreen::Welcome),
         // その他のサブコマンド（UTF-8 でない名前も含む）は入口面の CLI へ。
