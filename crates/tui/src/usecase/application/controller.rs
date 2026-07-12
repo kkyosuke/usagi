@@ -37,6 +37,9 @@ pub enum Overlay {
     Overview,
     /// active target scope の action surface。
     Closeup,
+    /// Detach confirmation. This is TUI-local: confirming it never stops a
+    /// daemon-owned terminal or operation.
+    QuitConfirmation,
 }
 
 /// daemon wire と独立した TUI の target projection。
@@ -202,6 +205,8 @@ pub struct AppState {
     pending: Vec<PendingOperation>,
     next_pending_token: u64,
     size: Option<(u16, u16)>,
+    has_live_pane: bool,
+    ctrl_c_grace: bool,
 }
 
 impl AppState {
@@ -222,6 +227,8 @@ impl AppState {
             pending: Vec::new(),
             next_pending_token: 1,
             size: None,
+            has_live_pane: false,
+            ctrl_c_grace: false,
         }
     }
 
@@ -293,6 +300,16 @@ impl AppState {
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
     }
+    /// Whether the current Home projection has a live terminal or Agent pane.
+    #[must_use]
+    pub const fn has_live_pane(&self) -> bool {
+        self.has_live_pane
+    }
+    /// Whether the next management `Ctrl-C` is deliberately absorbed.
+    #[must_use]
+    pub const fn ctrl_c_grace(&self) -> bool {
+        self.ctrl_c_grace
+    }
 
     fn root(&self) -> Target {
         Target::Root(self.workspace)
@@ -352,6 +369,13 @@ pub enum AppKey {
     Enter,
     /// overlay を閉じるか Closeup から Switch へ戻る。
     Escape,
+    /// Management-screen Ctrl-C. Live Ctrl-C is classified before it reaches
+    /// this reducer and is passed through to the PTY.
+    CtrlC,
+    /// Management-screen Ctrl-Q. Live Ctrl-Q is likewise PTY passthrough.
+    CtrlQ,
+    /// Open the detach confirmation from a reserved live-pane action.
+    OpenQuitConfirmation,
     /// workspace scope overlay を開く。
     OpenOverview,
     /// target scope overlay を開く。
@@ -369,6 +393,9 @@ pub enum AppKey {
 pub enum AppEvent {
     /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
     Input(LiveInput),
+    /// A runtime pane became available or left the projection. A transition
+    /// from live to non-live arms the one-shot Ctrl-C grace reducer.
+    LivePaneAvailability(bool),
     /// キー入力。
     Key(AppKey),
     /// terminal size の変更。
@@ -465,6 +492,9 @@ pub enum Effect {
         name: String,
         token: PendingToken,
     },
+    /// Detach this TUI client. The adapter owns the connection cleanup; this
+    /// effect intentionally carries no terminal or operation cancellation.
+    Detach,
 }
 
 /// One selectable workspace in the entry surfaces.
@@ -1046,11 +1076,23 @@ impl BackendPort for FakeBackend {
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
         AppEvent::Key(key) => update_key(state, key),
+        AppEvent::LivePaneAvailability(has_live_pane) => {
+            state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
+            state.has_live_pane = has_live_pane;
+            Vec::new()
+        }
         AppEvent::Resize { width, height } => {
             state.size = Some((width, height));
             Vec::new()
         }
-        AppEvent::Input(_) | AppEvent::Tick => Vec::new(),
+        // A live input is classified by `LiveInputClassifier` before reaching
+        // this reducer. It still clears a pending grace, because grace is an
+        // event-based one-shot rather than a timeout.
+        AppEvent::Input(_) => {
+            state.ctrl_c_grace = false;
+            Vec::new()
+        }
+        AppEvent::Tick => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
             state.sessions = sessions;
             state
@@ -1103,9 +1145,58 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
 }
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
-    if matches!(key, AppKey::Escape) && state.overlay.take().is_some() {
-        return Vec::new();
+    if let Some(overlay) = state.overlay {
+        return update_overlay(state, overlay, key);
     }
+
+    if !matches!(key, AppKey::CtrlC) {
+        state.ctrl_c_grace = false;
+    }
+    match key {
+        AppKey::CtrlC => {
+            if std::mem::take(&mut state.ctrl_c_grace) {
+                state.notice = Some(Notice::new("Ctrl-C ignored after leaving live pane"));
+                Vec::new()
+            } else if state.has_live_pane {
+                state.overlay = Some(Overlay::QuitConfirmation);
+                Vec::new()
+            } else {
+                vec![Effect::Detach]
+            }
+        }
+        AppKey::CtrlQ | AppKey::OpenQuitConfirmation => {
+            state.overlay = Some(Overlay::QuitConfirmation);
+            Vec::new()
+        }
+        key => update_management_key(state, key),
+    }
+}
+
+fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
+    match overlay {
+        // Ctrl-C and Ctrl-Q are intentionally inert in every modal. In
+        // particular, repeated Ctrl-C must not confirm a detach.
+        _ if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) => Vec::new(),
+        Overlay::QuitConfirmation => match key {
+            AppKey::Char('y' | 'Y') | AppKey::Enter => {
+                state.overlay = None;
+                vec![Effect::Detach]
+            }
+            AppKey::Char('n' | 'N') | AppKey::Escape => {
+                state.overlay = None;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        },
+        _ if matches!(key, AppKey::Escape) => {
+            state.overlay = None;
+            Vec::new()
+        }
+        _ => update_management_key(state, key),
+    }
+}
+
+fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
         AppKey::Up => {
             state.move_selection(-1);
@@ -1133,7 +1224,9 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
-        AppKey::Char(_) => Vec::new(),
+        AppKey::CtrlC | AppKey::CtrlQ | AppKey::OpenQuitConfirmation | AppKey::Char(_) => {
+            Vec::new()
+        }
     }
 }
 
@@ -1493,6 +1586,89 @@ mod tests {
             }
             assert_eq!(state.route(), case.route, "{}", case.name);
             assert_eq!(state.overlay(), case.overlay, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn management_ctrl_c_detaches_without_live_pane_and_confirms_with_one() {
+        let (workspace, session, _) = ids();
+        let mut idle = AppState::home(workspace, Vec::new());
+        assert_eq!(
+            update(&mut idle, AppEvent::Key(AppKey::CtrlC)),
+            vec![Effect::Detach]
+        );
+
+        let mut live = AppState::home(workspace, vec![session]);
+        let _ = update(&mut live, AppEvent::LivePaneAvailability(true));
+        assert!(live.has_live_pane());
+        assert!(update(&mut live, AppEvent::Key(AppKey::CtrlC)).is_empty());
+        assert_eq!(live.overlay(), Some(Overlay::QuitConfirmation));
+
+        // Confirmation is deliberately immune to repeated quit chords.
+        for key in [AppKey::CtrlC, AppKey::CtrlQ] {
+            assert!(update(&mut live, AppEvent::Key(key)).is_empty());
+            assert_eq!(live.overlay(), Some(Overlay::QuitConfirmation));
+        }
+        assert_eq!(
+            update(&mut live, AppEvent::Key(AppKey::Char('Y'))),
+            vec![Effect::Detach]
+        );
+        assert_eq!(live.overlay(), None);
+    }
+
+    #[test]
+    fn management_ctrl_q_always_confirms_and_confirmation_can_cancel() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Char('n'))).is_empty());
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenQuitConfirmation));
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::Detach]
+        );
+    }
+
+    #[test]
+    fn leaving_live_pane_arms_one_shot_ctrl_c_grace_and_other_input_clears_it() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+        assert!(state.ctrl_c_grace());
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+        assert!(!state.ctrl_c_grace());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+            vec![Effect::Detach]
+        );
+
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
+        assert!(state.ctrl_c_grace());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert!(!state.ctrl_c_grace());
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::CtrlC)),
+            vec![Effect::Detach]
+        );
+    }
+
+    #[test]
+    fn ordinary_modals_keep_ctrl_c_and_ctrl_q_inert() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        for overlay_key in [AppKey::OpenOverview, AppKey::OpenCloseupOverlay] {
+            let _ = update(&mut state, AppEvent::Key(overlay_key));
+            let expected = state.overlay();
+            assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
+            assert_eq!(state.overlay(), expected);
+            assert!(update(&mut state, AppEvent::Key(AppKey::CtrlQ)).is_empty());
+            assert_eq!(state.overlay(), expected);
+            let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
         }
     }
 

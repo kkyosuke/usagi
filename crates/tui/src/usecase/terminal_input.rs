@@ -404,6 +404,11 @@ mod tests {
                 expected: vec![3],
             },
             Case {
+                name: "ctrl q",
+                input: ctrl('q'),
+                expected: vec![17],
+            },
+            Case {
                 name: "alt chord",
                 input: LiveInput::Key(KeyEvent::new(
                     KeyCode::Char('f'),
