@@ -29,8 +29,9 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_daemon::presentation::DaemonEnv;
+use usagi_tui::presentation::views::config;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::{self, BannerScreenRunner, Exit};
+use usagi_tui::presentation::{self, BannerScreenRunner, Exit, Start};
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 
 /// crossterm を backing にした実端末。TUI 面の [`Terminal`] ポートを合成ルートで実装し、
@@ -104,24 +105,34 @@ fn load_workspaces() -> Vec<Workspace> {
         .unwrap_or_default()
 }
 
-/// welcome 画面を起動する。対話端末（tty）なら raw mode + 代替スクリーンで対話ループを回し、
-/// 非対話環境（パイプ・CI など）では welcome の 1 フレームを `out` へ出して返す。
-fn launch_welcome(out: &mut dyn Write, info: &AppInfo) -> std::io::Result<()> {
+/// `start` の画面から対話ループを起動する。対話端末（tty）なら raw mode + 代替スクリーンで
+/// ループを回し、非対話環境（パイプ・CI など）では開始画面の 1 フレームを `out` へ出して返す。
+fn launch_interactive(out: &mut dyn Write, info: &AppInfo, start: Start) -> std::io::Result<()> {
     let now = Utc::now();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        run_interactive(out, info, now)
+        run_interactive(out, info, now, start)
     } else {
-        // サイズ 0 は welcome::render 側で 80x24 にフォールバックされる。
-        for line in welcome::render(0, 0, &Welcome::empty(), now) {
+        // サイズ 0 は各 render 側で 80x24 にフォールバックされる。
+        let frame = match start {
+            Start::Welcome => welcome::render(0, 0, &Welcome::empty(), now),
+            Start::Config => config::render(0, 0),
+        };
+        for line in frame {
             writeln!(out, "{line}")?;
         }
         Ok(())
     }
 }
 
-/// raw mode + 代替スクリーンへ入って対話ループを回し、終了時（エラー時も）に端末状態を必ず
-/// 元へ戻す。ユーザーが Open 画面で workspace を選んだら、後続で workspace 画面へ接続する。
-fn run_interactive(out: &mut dyn Write, info: &AppInfo, now: DateTime<Utc>) -> std::io::Result<()> {
+/// raw mode + 代替スクリーンへ入って `start` 起点の対話ループを回し、終了時（エラー時も）に
+/// 端末状態を必ず元へ戻す。ユーザーが Open 画面で workspace を選んだら、後続で workspace 画面へ
+/// 接続する。
+fn run_interactive(
+    out: &mut dyn Write,
+    info: &AppInfo,
+    now: DateTime<Utc>,
+    start: Start,
+) -> std::io::Result<()> {
     let workspaces = load_workspaces();
 
     enable_raw_mode()?;
@@ -141,7 +152,7 @@ fn run_interactive(out: &mut dyn Write, info: &AppInfo, now: DateTime<Utc>) -> s
     let mut terminal = CrosstermTerminal {
         out: std::io::stdout(),
     };
-    let result = presentation::run(&mut terminal, workspaces, now);
+    let result = presentation::run(&mut terminal, workspaces, now, start);
 
     // 描画の成否によらず端末を復元する（マウスレポートも忘れず戻す）。
     let mut teardown = std::io::stdout();
@@ -270,11 +281,15 @@ fn launch_tui(
     info: &AppInfo,
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
-    if entry == &EntryScreen::Welcome {
-        launch_welcome(out, info)
-    } else {
-        let mut runner = BannerScreenRunner::new(out, info);
-        application::run(entry, &mut runner)
+    match entry {
+        // Welcome / Config は対話ループへ接続する（Config は welcome が home）。
+        EntryScreen::Welcome => launch_interactive(out, info, Start::Welcome),
+        EntryScreen::Config => launch_interactive(out, info, Start::Config),
+        // 対話ループ未接続の画面（Workspace / Doctor）は暫定バナー。
+        EntryScreen::Workspace { .. } | EntryScreen::Doctor => {
+            let mut runner = BannerScreenRunner::new(out, info);
+            application::run(entry, &mut runner)
+        }
     }
 }
 
