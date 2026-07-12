@@ -223,7 +223,10 @@ fn main() -> std::io::Result<()> {
                 &KillProbe,
             )
         }
-        Some("mcp") => usagi_cli::mcp::write_ready_line(&mut stdout, &info),
+        Some("mcp") => {
+            let stdin = std::io::stdin();
+            usagi_cli::mcp::serve(stdin.lock(), &mut stdout, info.version)
+        }
         None if args.get(1).is_none() => launch_tui(&mut stdout, &info, &EntryScreen::Welcome),
         // その他のサブコマンド（UTF-8 でない名前も含む）は入口面の CLI へ。
         // clap がコマンドツリーを解析し、非 UTF-8 のコマンド名は不正値として報告する。

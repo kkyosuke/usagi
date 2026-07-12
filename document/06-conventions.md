@@ -42,7 +42,7 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 |---|---|---|
 | `chrono` | domain エンティティの時刻 | 本依存 |
 | `serde` | エンティティ・インデックスの JSON (de)serialize derive | 本依存 |
-| `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize | 本依存 |
+| `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、および `usagi-cli` の MCP サーバの stdio JSON-RPC | 本依存 |
 | `anyhow` | infrastructure（永続化ストア）のエラー伝播 | 本依存 |
 | `fs2` | ストアの cross-process ロック（`flock` 相当） | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
@@ -55,7 +55,8 @@ v2 の開発で守るべき規約。**開発者・AI エージェントの双方
 
 `usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` …）は
 `chrono` / `serde` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
-`infrastructure/`（永続化）が、`unicode-width` は `usagi-tui`、`clap` は `usagi-cli` が使う。
+`infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
+JSON-RPC）でも使う。`unicode-width` は `usagi-tui`、`clap` は `usagi-cli` が使う。
 `crossterm`（実端末 IO）と `libc`（daemon の pid 生存判定）は合成ルート（`src/main.rs`）だけが
 使い、`usagi-tui` は `Terminal` ポートに対して純粋に振る舞う
 （[2. アーキテクチャ#依存ルール](02-architecture.md#依存ルール)）。
