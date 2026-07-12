@@ -5,9 +5,11 @@
 //! 使い回す部品だけを置く。
 //!
 //! すべて実 IO を持たない純粋関数・値で、フレーム（ANSI 付き行の `Vec<String>`）を
-//! 組み立てるか、その部品（`String`）を返す。色付け（テーマ）は未導入のため、
-//! ここでは無色の構造・幾何・AA・編集ロジックだけを持つ。この直下の関数は、
-//! それらが共通して使うテキスト幅の測定・切り詰め・折り返しのプリミティブである。
+//! 組み立てるか、その部品（`String`）を返す。色は [`super::theme`] が意味的な役割で
+//! 一元管理し、view が widget の返す行に載せる。ここで直接色を選ぶことはしない
+//! （widget は無色の構造・幾何・AA・編集ロジックだけを持つ）。この直下の関数は、
+//! それらが共通して使うテキスト幅の測定・切り詰め・折り返しと、相対時刻の表記の
+//! プリミティブである。
 
 pub mod icon;
 pub mod loading;
@@ -16,6 +18,7 @@ pub mod text_input;
 
 pub use text_input::TextInput;
 
+use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthChar;
 
 /// エスケープシーケンスの先頭（ESC）。表示桁数を測るとき読み飛ばす。
@@ -134,9 +137,47 @@ pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
     (height, width)
 }
 
+/// `from` から `now` までの経過時間を短いラベルにする: `just now` / `5min ago` /
+/// `3h ago` / `2d ago` / `3w ago`、1 か月を超えたら絶対日付 `YYYY-MM-DD` に落とす。
+/// 未来の `from`（時計のずれ）は `just now` とみなす。「最終利用」の言い回しの単一情報源で、
+/// welcome 画面の recent カードが使う。`now` は呼び出し側が渡す（この層は実時計を読まない）。
+#[must_use]
+pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - from).num_seconds();
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}min ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    if days < 30 {
+        return format!("{}w ago", days / 7);
+    }
+    from.format("%Y-%m-%d").to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{centered_padding, clip_to_width, display_width, normalize_size, wrap_to_width};
+    use super::{
+        centered_padding, clip_to_width, display_width, normalize_size, relative_time,
+        wrap_to_width,
+    };
+    use chrono::{DateTime, Duration, Utc};
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
 
     #[test]
     fn display_width_counts_full_width_as_two_and_skips_ansi() {
@@ -203,5 +244,25 @@ mod tests {
     fn normalize_size_substitutes_fallback_for_zeroes() {
         assert_eq!(normalize_size(0, 0), (24, 80));
         assert_eq!(normalize_size(30, 100), (30, 100));
+    }
+
+    #[test]
+    fn relative_time_scales_the_label_by_age() {
+        let now = at("2026-06-25T12:00:00Z");
+        assert_eq!(relative_time(now, now), "just now");
+        // 未来（時計のずれ）も just now。
+        assert_eq!(relative_time(now + Duration::minutes(5), now), "just now");
+        assert_eq!(relative_time(now - Duration::seconds(59), now), "just now");
+        assert_eq!(relative_time(now - Duration::minutes(11), now), "11min ago");
+        assert_eq!(relative_time(now - Duration::hours(3), now), "3h ago");
+        assert_eq!(relative_time(now - Duration::days(2), now), "2d ago");
+        assert_eq!(relative_time(now - Duration::days(20), now), "2w ago");
+    }
+
+    #[test]
+    fn relative_time_falls_back_to_an_absolute_date_after_a_month() {
+        let now = at("2026-06-25T12:00:00Z");
+        // 1 か月を超えると絶対日付になる。
+        assert_eq!(relative_time(at("2026-05-01T00:00:00Z"), now), "2026-05-01");
     }
 }

@@ -429,6 +429,7 @@ dependencies = [
 name = "usagi-tui"
 version = "0.0.0"
 dependencies = [
+ "chrono",
  "unicode-width",
  "usagi-core",
 ]
