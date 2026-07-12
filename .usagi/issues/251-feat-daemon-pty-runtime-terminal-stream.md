@@ -1,13 +1,13 @@
 ---
 number: 251
 title: feat(daemon): PTY runtime と terminal stream を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, terminal, runtime]
 dependson: [250]
 related: [218, 219, 220, 248]
 created_at: 2026-07-12T22:32:36.062498+00:00
-updated_at: 2026-07-12T22:32:36.062498+00:00
+updated_at: 2026-07-12T22:51:00.731841+00:00
 ---
 
 ## 目的

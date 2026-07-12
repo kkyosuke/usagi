@@ -270,6 +270,21 @@ request capability 不足、plan provenance 不一致は typed error で fail-cl
 黙って別の意味へ再解決しない。実 executable 検査、設定 materialization、secret 注入、PTY spawn は
 adapter / daemon infrastructure の責務である。
 
+### Daemon runtime ownership
+
+daemon の `usecase::runtime::RuntimeCoordinator` は、一回の Agent runtime を所有する。
+`LaunchResolver` は request ごとに一度だけ呼ばれ、返した `DurableLaunchSnapshot` と
+`AgentRuntimeRef`、`CompletionFence` を `RuntimeStore` へ保存してから injected `PtySpawner` を
+呼ぶ。restart/reconcile は保存済み snapshot を対象にし、profile を再解決しない。
+
+raw output は `OutputJournal` へ保存してから既存の `TerminalRegistry` の replay に公開する。
+detach/disconnect は attachment だけを外し、PTY と runtime reservation を停止しない。spawn 応答の
+欠落、spawn 後の永続化失敗、process identity unknown、verified-alive orphan は typed
+`ReconcileRequired` となり、replacement spawn と concurrency slot の解放を止める。slot を解放するのは
+final output を drain 済みの verified exit、または identity を伴う reconcile が `Gone` を確認した場合だけである。
+
+product 固有 adapter、secret、IPC schema はこの coordinator の境界外である。
+
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙

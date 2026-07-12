@@ -2,15 +2,35 @@
 
 > [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [IPC protocol](03-ipc-protocol.md) ｜ 次へ → [daemon lifecycle](05-daemon-lifecycle.md)
 
-本書は **v2 の未実装設計**であり、現在仕様の正本ではない。本書がterminal command/event、session/control、
-phase/prompt、socket/peer/workspace/launch securityについての実装前SSoTである。ID scopeは
+本書は terminal command/event、session/control、phase/prompt、socket/peer/workspace/launch security の
+設計提案である。下記の runtime contract 節だけは実装済みの現在仕様を記録し、残る節は実装前の選択肢として扱う。ID scopeは
 [IPC／ID overview](02-ipc-id.md)、共通envelopeとoperation契約は [IPC protocol](03-ipc-protocol.md)を参照する。
 
 ## 目次
 
 - [terminal API](#terminal-api)
+- [実装済み runtime contract](#実装済み-runtime-contract)
 - [session/control API](#sessioncontrol-api)
 - [security boundary](#security-boundary)
+
+## 実装済み runtime contract
+
+`usagi-daemon` の `RuntimeCoordinator` は、`LaunchRequest`、`AgentRuntimeRef`、`CompletionFence` を受け、
+resolver を一度だけ呼ぶ。resolver が返す `DurableLaunchSnapshot` は runtime reservation と一緒に
+`RuntimeStore` へ保存され、その成功後だけ injected `PtySpawner` を呼ぶ。snapshot の request/profile
+provenance が入力と一致しない場合は typed error で拒否する。
+
+| 状態 | spawn / slot | reconcile |
+| --- | --- | --- |
+| `reserved` | durable 保存済み。spawn 前から slot を占有する | spawn 可能 |
+| `running` | process identity 保存済み。terminal output を journal する | verified exit を待つ |
+| `reconcile_required` | replacement と slot 解放を禁止する | ambiguous spawn、永続化失敗、identity unknown、orphan を保持する |
+| `exited` / `reclaimed` | slot を解放する | exit は final output commit 後、reclaimed は `Gone` の確認後だけ到達する |
+| `spawn_failed` | definite no-child のみ | retry policy は上位 operation が決める |
+
+output は `OutputJournal` に先に append し、それから `TerminalRegistry` の raw-output replay に入る。
+terminal attach、detach、replay、cursor fence は既存 registry の `TerminalRef` contract を使い、disconnect は
+PTY を止めない。IPC command/schema、product adapter、secret injection はこの実装の対象外である。
 
 ## terminal API
 
