@@ -387,7 +387,7 @@ fn create_completed(
     setup_plan: Option<SetupPlan>,
     now: DateTime<Utc>,
 ) -> Result<(), LifecycleError> {
-    let pos = fenced_session(state, fence)?;
+    let (pos, operation_pos) = fenced_session(state, fence)?;
     if state.sessions[pos].lifecycle != SessionLifecycle::Creating {
         return Err(LifecycleError::InvalidTransition);
     }
@@ -398,11 +398,7 @@ fn create_completed(
     };
     state.sessions[pos].setup_plan = setup_plan;
     state.sessions[pos].changed_at = now;
-    let op = state
-        .operations
-        .iter_mut()
-        .find(|o| o.operation_id == fence.operation_id)
-        .ok_or(LifecycleError::StaleCompletion)?;
+    let op = &mut state.operations[operation_pos];
     op.progress_revision += 1;
     if state.sessions[pos].lifecycle == SessionLifecycle::Available {
         op.status = OperationStatus::Succeeded;
@@ -415,22 +411,23 @@ fn create_completed(
 fn fenced_session(
     state: &WorkspaceLifecycleState,
     fence: &CompletionFence,
-) -> Result<usize, LifecycleError> {
+) -> Result<(usize, usize), LifecycleError> {
     if fence.workspace_id != state.workspace_id || fence.expected_revision != state.state_revision {
         return Err(LifecycleError::StaleCompletion);
     }
-    let op = state
+    let operation_pos = state
         .operations
         .iter()
-        .find(|o| o.operation_id == fence.operation_id)
+        .position(|o| o.operation_id == fence.operation_id)
         .ok_or(LifecycleError::StaleCompletion)?;
+    let op = &state.operations[operation_pos];
     if op.owner_daemon_generation != fence.owner_daemon_generation
         || op.execution_attempt != fence.execution_attempt
         || op.status.terminal()
     {
         return Err(LifecycleError::StaleCompletion);
     }
-    state
+    let session_pos = state
         .sessions
         .iter()
         .position(|s| {
@@ -438,7 +435,8 @@ fn fenced_session(
                 && s.attempt == fence.lifecycle_attempt
                 && s.operation_id == Some(fence.operation_id)
         })
-        .ok_or(LifecycleError::StaleCompletion)
+        .ok_or(LifecycleError::StaleCompletion)?;
+    Ok((session_pos, operation_pos))
 }
 
 fn complete<F>(
@@ -450,12 +448,8 @@ fn complete<F>(
 where
     F: FnOnce(&mut ManagedSession) -> Result<bool, LifecycleError>,
 {
-    let pos = fenced_session(state, fence)?;
-    let op = state
-        .operations
-        .iter_mut()
-        .find(|o| o.operation_id == fence.operation_id)
-        .ok_or(LifecycleError::StaleCompletion)?;
+    let (pos, operation_pos) = fenced_session(state, fence)?;
+    let op = &mut state.operations[operation_pos];
     let remove = mutate(&mut state.sessions[pos])?;
     op.status = OperationStatus::Succeeded;
     op.progress_revision += 1;
@@ -665,6 +659,16 @@ mod tests {
         );
         state.version.minor = 1;
         assert_eq!(state.validate(), Err(LifecycleError::UnsupportedVersion));
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::RequestCancel {
+                    operation_id: OperationId::new(),
+                },
+                now(),
+            ),
+            Err(LifecycleError::UnsupportedVersion)
+        );
         state.version.minor = 0;
         let operation = op();
         reduce(
@@ -747,6 +751,18 @@ mod tests {
                 now()
             ),
             Err(LifecycleError::MissingSession)
+        );
+        assert_eq!(
+            reduce(
+                &mut state,
+                LifecycleEvent::ReconcileInterrupted {
+                    session_id: SessionId::new(),
+                    operation_id: OperationId::new(),
+                    stage: FailureStage::Create,
+                },
+                now(),
+            ),
+            Err(LifecycleError::StaleCompletion)
         );
 
         let mut available = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
