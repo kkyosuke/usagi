@@ -18,7 +18,9 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets;
-use crate::usecase::application::controller::{AppState, HomeMode, Selection, Target};
+use crate::usecase::application::controller::{
+    AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
+};
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
@@ -55,6 +57,8 @@ pub struct HomeProjection {
     selected: Selection,
     active: Target,
     mode: HomeMode,
+    active_phase: TargetPhase,
+    feedback: Option<Feedback>,
 }
 
 impl HomeProjection {
@@ -85,6 +89,8 @@ impl HomeProjection {
             mode: match state.route() {
                 crate::usecase::application::controller::Route::Home(mode) => mode,
             },
+            active_phase: state.phase_for(state.active()),
+            feedback: state.feedback().cloned(),
         }
     }
 
@@ -672,6 +678,15 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             Style::new()
                 .dim()
                 .paint(&format!("  cwd: {}", home.active_cwd().display())),
+            String::new(),
+            Style::new().dim().paint(&widgets::pad_to_width(
+                &format!("  agent: {}", phase_label(home.active_phase)),
+                width,
+            )),
+            Style::new().dim().paint(&widgets::pad_to_width(
+                &format!("  feedback: {}", feedback_label(home.feedback.as_ref())),
+                width,
+            )),
         ],
         height,
         Style::new().dim().paint(&widgets::clip_to_width(
@@ -681,12 +696,45 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     )
 }
 
+fn phase_label(phase: TargetPhase) -> &'static str {
+    match phase {
+        TargetPhase::Absent => "absent",
+        TargetPhase::Ready => "ready",
+        TargetPhase::Running => "running",
+        TargetPhase::Waiting => "waiting",
+        TargetPhase::Done => "done",
+    }
+}
+
+fn feedback_label(feedback: Option<&Feedback>) -> String {
+    match feedback {
+        None => "none".to_string(),
+        Some(Feedback::Progress(message)) => format!("progress: {}", message.as_str()),
+        Some(Feedback::OperationError(error)) => {
+            format!(
+                "operation error: {} ({})",
+                error.message.as_str(),
+                error.error_id
+            )
+        }
+        Some(Feedback::TerminalError(error)) => {
+            format!(
+                "terminal error: {} ({})",
+                error.message.as_str(),
+                error.error_id
+            )
+        }
+        Some(Feedback::Disconnected) => "disconnected; reconnect to continue".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HomeProjection, Mode, ProjectedSession, Workspace, render, render_home};
     use crate::presentation::widgets::display_width;
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, HomeMode, Selection, Target, update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, SafeError, SafeMessage,
+        Selection, Target, update,
     };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
@@ -882,6 +930,33 @@ mod tests {
         assert_eq!(zero_body.len(), 2);
         assert_eq!(one_row_body.len(), 3);
         assert!(joined_home(&home).contains("cwd: /work"));
+    }
+
+    #[test]
+    fn home_feedback_area_renders_safe_error_and_disconnect_without_raw_detail() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::OperationError(
+                SafeError {
+                    message: SafeMessage::new("Session creation failed"),
+                    error_id: "err-safe-7".to_string(),
+                },
+            ))),
+        );
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = joined_home(&home);
+        assert!(text.contains("agent: absent"));
+        assert!(text.contains("feedback: operation error: Session creation failed (err-safe-7)"));
+        assert!(!text.contains("daemon internal detail: token=secret"));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        assert!(joined_home(&home).contains("feedback: disconnected; reconnect to continue"));
     }
 
     #[test]
