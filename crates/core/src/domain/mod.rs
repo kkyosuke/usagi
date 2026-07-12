@@ -1,5 +1,12 @@
 //! domain 層。ビジネスルールとエンティティを置く。
-//! 他層・他クレート・外部クレートに依存しない。
+//! 他層・他 usagi クレートには依存しない。時刻（`chrono`）と (de)serialize
+//! 語彙（`serde`）だけは基盤語彙として使う（詳細は
+//! [`document/02-architecture.md`](../../../../document/02-architecture.md) の依存ルール）。
+
+pub mod frontmatter;
+pub mod issue;
+pub mod memory;
+pub mod workspace;
 
 /// アプリケーションの自己記述。バージョン表示などで使う。
 ///
