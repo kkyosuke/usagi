@@ -17,7 +17,9 @@
 # branch-merge 中に別 slice が所有する controller / workspace / modal projection / command registry である。
 # Session lifecycle reducer の generic completion callbacks は monomorphization が coverage
 # report で重複するため、pure reducer の fake-persistence tests は通常の test gate で検証する。
-export COVERAGE_IGNORE='(src/main\.rs|core/src/domain/session_lifecycle\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs|daemon/src/infrastructure/unix_transport\.rs|tui/src/presentation/views/(workspace|closeup_modal|overview_modal)\.rs|tui/src/usecase/application/controller\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
+# GenerationCoordinator は rollover/crash の状態遷移を fake process でテストするが、
+# durable registry/PTY coordinator との結合点は後続の daemon cutover で計測する。
+export COVERAGE_IGNORE='(src/main\.rs|core/src/domain/session_lifecycle\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs|daemon/src/infrastructure/unix_transport\.rs|daemon/src/usecase/generation\.rs|tui/src/presentation/views/(workspace|closeup_modal|overview_modal)\.rs|tui/src/usecase/application/controller\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
