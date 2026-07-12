@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 
+use super::json_file;
 use crate::infrastructure::error_log::ErrorLog;
-use crate::infrastructure::json_file;
 
 /// Filename of the derived metadata cache shared by markdown-backed stores.
 /// Kept out of git by usagi's ignore rules.

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate};
 
-use crate::infrastructure::storage::data_dir;
+use crate::infrastructure::paths::data_dir;
 
 /// Whether this process has already pruned old log files. Pruning scans the
 /// whole `logs/` directory, so [`ErrorLog::record`] does it once per process
@@ -287,7 +287,7 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().expect("failed to create temp dir");
         unsafe {
-            std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, home.path());
         }
 
         ErrorLog::record("session create \"c\" failed: boom");
@@ -302,7 +302,7 @@ mod tests {
         assert!(contents.contains("session create \"c\" failed: boom"));
 
         unsafe {
-            std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
 
@@ -311,14 +311,14 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         unsafe {
             std::env::set_var(
-                crate::infrastructure::storage::DATA_DIR_ENV,
+                crate::infrastructure::paths::DATA_DIR_ENV,
                 "/tmp/usagi-log-home",
             );
         }
         let log = ErrorLog::open_default().unwrap();
         assert_eq!(log.dir(), Path::new("/tmp/usagi-log-home/logs"));
         unsafe {
-            std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
 }

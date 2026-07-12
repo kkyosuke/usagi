@@ -1,46 +1,23 @@
-//! Global, per-user persistence: the data directory and the workspace registry.
+//! The workspace registry: the list of workspaces the user has opened.
 //!
-//! `$USAGI_HOME` (or `~/.usagi` by default) is the per-user data directory
-//! shared by every usagi process. The registry of workspaces the user has opened
-//! lives there as `workspaces.json`, a versioned JSON file written through a temp
-//! file + rename so a crash never leaves it half-written.
-//!
-//! This is distinct from [`repo_paths::STATE_DIR`](super::repo_paths::STATE_DIR),
-//! the *repository-local* `.usagi/` directory: they share the `.usagi` basename
-//! by convention but are independent directories.
+//! It lives in the global per-user data directory (see
+//! [`paths::data_dir`](crate::infrastructure::paths::data_dir)) as
+//! `workspaces.json`, a versioned JSON file written through a temp file + rename
+//! so a crash never leaves it half-written. Several usagi processes share this
+//! one store, so mutations take the store lock across the whole read-modify-write.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::workspace::Workspace;
-use crate::infrastructure::json_file;
-use crate::infrastructure::store_lock::StoreLock;
-
-/// Environment variable that overrides the default data directory.
-pub const DATA_DIR_ENV: &str = "USAGI_HOME";
-/// Directory created under the user's home directory by default.
-const DATA_DIR_NAME: &str = ".usagi";
+use crate::infrastructure::paths::data_dir;
+use crate::infrastructure::persistence::json_file;
+use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const WORKSPACES_FILE: &str = "workspaces.json";
-
-/// Resolve the directory where usagi stores its per-user data.
-///
-/// `$USAGI_HOME` takes precedence; otherwise `~/.usagi` is used.
-///
-/// # Errors
-///
-/// Returns an error when `$USAGI_HOME` is unset and the home directory cannot be
-/// determined.
-pub fn data_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(dir));
-    }
-    let home = dirs::home_dir().context("could not determine the home directory")?;
-    Ok(home.join(DATA_DIR_NAME))
-}
 
 /// The `workspaces.json` payload, borrowed for writes so the list need not be
 /// cloned into an owned wrapper just to stamp the version envelope.
@@ -192,6 +169,24 @@ mod tests {
     }
 
     #[test]
+    fn open_default_roots_storage_under_the_data_directory() {
+        let _guard = crate::test_support::process_env_guard();
+        unsafe {
+            std::env::set_var(
+                crate::infrastructure::paths::DATA_DIR_ENV,
+                "/tmp/usagi-ws-home",
+            );
+        }
+        assert_eq!(
+            Storage::open_default().unwrap().dir(),
+            Path::new("/tmp/usagi-ws-home")
+        );
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
+    #[test]
     fn read_json_reports_a_parse_error() {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
@@ -241,30 +236,5 @@ mod tests {
         fs::write(&blocker, "not a directory").unwrap();
         let storage = Storage::new(blocker.join("nested"));
         assert!(storage.lock().is_err());
-    }
-
-    #[test]
-    fn data_dir_prefers_env_override_then_falls_back() {
-        // Serialize $USAGI_HOME mutation against other globals-mutating tests.
-        let _guard = crate::test_support::process_env_guard();
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, "/tmp/usagi-unit-home");
-        }
-        assert_eq!(data_dir().unwrap(), PathBuf::from("/tmp/usagi-unit-home"));
-        assert_eq!(
-            Storage::open_default().unwrap().dir(),
-            Path::new("/tmp/usagi-unit-home")
-        );
-
-        // An empty override is ignored in favour of the home-directory default.
-        unsafe {
-            std::env::set_var(DATA_DIR_ENV, "");
-        }
-        assert!(data_dir().unwrap().ends_with(".usagi"));
-
-        unsafe {
-            std::env::remove_var(DATA_DIR_ENV);
-        }
-        assert!(data_dir().unwrap().ends_with(".usagi"));
     }
 }

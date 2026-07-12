@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
-use crate::infrastructure::markdown_store::{MarkdownEntry, MarkdownStore};
-use crate::infrastructure::repo_paths::STATE_DIR;
-use crate::infrastructure::store_lock::StoreLock;
+use crate::infrastructure::paths::STATE_DIR;
+use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
+use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const ISSUES_DIR_NAME: &str = "issues";
 
@@ -86,7 +86,7 @@ impl MarkdownEntry for IssueEntry {
 
     fn index_file_ref(summaries: &[IssueSummary]) -> IndexFileRef<'_> {
         IndexFileRef {
-            version: crate::infrastructure::json_file::FILE_FORMAT_VERSION,
+            version: crate::infrastructure::persistence::json_file::FILE_FORMAT_VERSION,
             issues: summaries,
         }
     }
@@ -450,7 +450,7 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, home.path());
         }
 
         let tmp = tempfile::tempdir().unwrap();
@@ -475,7 +475,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
 
@@ -503,7 +503,7 @@ mod tests {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
         unsafe {
-            std::env::set_var(crate::infrastructure::storage::DATA_DIR_ENV, home.path());
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, home.path());
         }
 
         let tmp = tempfile::tempdir().unwrap();
@@ -542,7 +542,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var(crate::infrastructure::storage::DATA_DIR_ENV);
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }
     }
 

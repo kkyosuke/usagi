@@ -4,7 +4,7 @@
 //! directory (e.g. to allocate the next issue number or to find stale-named
 //! siblings), writes one markdown file, then rebuilds the derived `index.json`
 //! / `MEMORY.md` by scanning the whole directory. The per-file write is atomic
-//! (temp + rename, see [`crate::infrastructure::json_file`]), but the *sequence*
+//! (temp + rename, see [`super::json_file`]), but the *sequence*
 //! is not: the MCP server and the TUI write the same `.usagi/issues/` and
 //! `.usagi/memory/` directories concurrently, so two processes can interleave
 //! and lose data (e.g. both allocate the same number, or a stale rebuild wins).
