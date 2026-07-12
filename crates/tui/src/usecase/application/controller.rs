@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
+use crate::usecase::terminal_input::{LiveInput, RuntimeEvent};
 use crate::usecase::{closeup, overview};
 
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
@@ -252,6 +253,8 @@ pub enum AppKey {
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// live terminal input。現行 Home reducer は接続 seam を提供し、pane routing は runtime 合成側が担う。
+    Input(LiveInput),
     /// キー入力。
     Key(AppKey),
     /// terminal size の変更。
@@ -262,6 +265,17 @@ pub enum AppEvent {
     Backend(BackendEvent),
     /// request completion。
     OperationResult(OperationResult),
+}
+
+impl From<RuntimeEvent<BackendEvent>> for AppEvent {
+    fn from(event: RuntimeEvent<BackendEvent>) -> Self {
+        match event {
+            RuntimeEvent::Input(input) => Self::Input(input),
+            RuntimeEvent::Resize { width, height } => Self::Resize { width, height },
+            RuntimeEvent::Tick => Self::Tick,
+            RuntimeEvent::Backend(event) => Self::Backend(event),
+        }
+    }
 }
 
 /// backend が TUI-local projection として返す event。
@@ -604,7 +618,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.size = Some((width, height));
             Vec::new()
         }
-        AppEvent::Tick => Vec::new(),
+        AppEvent::Input(_) | AppEvent::Tick => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
             state.sessions = sessions;
             state.reconcile_selection();
@@ -951,6 +965,10 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(
             &mut state,
+            AppEvent::Input(LiveInput::Paste(b"paste".to_vec())),
+        );
+        let _ = update(
+            &mut state,
             AppEvent::Resize {
                 width: 100,
                 height: 40,
@@ -966,6 +984,36 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("connected")
         );
+    }
+
+    #[test]
+    fn runtime_stream_converts_to_controller_events() {
+        let notice = Notice::new("connected");
+        let cases = [
+            (
+                RuntimeEvent::Input(LiveInput::Paste(b"paste".to_vec())),
+                AppEvent::Input(LiveInput::Paste(b"paste".to_vec())),
+            ),
+            (
+                RuntimeEvent::Resize {
+                    width: 100,
+                    height: 40,
+                },
+                AppEvent::Resize {
+                    width: 100,
+                    height: 40,
+                },
+            ),
+            (RuntimeEvent::Tick, AppEvent::Tick),
+            (
+                RuntimeEvent::Backend(BackendEvent::Notice(notice.clone())),
+                AppEvent::Backend(BackendEvent::Notice(notice)),
+            ),
+        ];
+
+        for (runtime, expected) in cases {
+            assert_eq!(AppEvent::from(runtime), expected);
+        }
     }
 
     #[test]
