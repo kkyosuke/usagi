@@ -1,14 +1,14 @@
 ---
 number: 219
 title: feat(daemon): session/control API と durable prompt consumer を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, session, orchestration]
 dependson: [216, 217, 218]
 related: []
 parent: 213
 created_at: 2026-07-12T11:39:24.399363+00:00
-updated_at: 2026-07-12T12:09:54.278892+00:00
+updated_at: 2026-07-12T20:45:56.871474+00:00
 ---
 
 ## 目的
