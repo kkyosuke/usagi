@@ -1,14 +1,14 @@
 ---
 number: 246
 title: test(tui): parity real PTY regression を追加する
-status: todo
+status: done
 priority: high
 labels: [tui, test, pty]
 dependson: [235, 238, 237]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:34.175125+00:00
-updated_at: 2026-07-12T21:12:34.175125+00:00
+updated_at: 2026-07-12T23:05:39.443567+00:00
 ---
 
 ## 目的
