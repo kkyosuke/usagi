@@ -2,6 +2,13 @@
 //! キー入力のマッピングを置く。描画は v1 と同じく自前の差分レンダリングで行い、
 //! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
 //! 実 IO は持たず、出力先は呼び出し側（合成ルート）から注入する。
+//!
+//! 描画は 3 つに分ける: 各画面の view（[`views`]）・再利用 UI 部品（[`widgets`]）・
+//! 領域配置（[`layouts`]）。view が layout で領域を割り、そこへ widget を配置する。
+
+pub mod layouts;
+pub mod views;
+pub mod widgets;
 
 use std::io::Write;
 
