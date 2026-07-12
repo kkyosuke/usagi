@@ -1,7 +1,9 @@
-//! MCP サーバ（`usagi mcp`）の presentation。stdio JSON-RPC の解釈と
-//! tool アダプタを置き、ロジックは usagi-core の usecase（store 系）と
-//! daemon への IPC（session 系）へ委譲する。v2 では必要になった時点で
-//! tool を追加する。
+//! MCP サーバ（`usagi mcp`）の presentation。stdio JSON-RPC の解釈と dispatch を持ち、
+//! ロジックは usagi-core の usecase（store 系）と daemon への IPC（session 系）へ
+//! 委譲する。個々の tool アダプタは `tools` に置き、JSON-RPC フレーミングが肥大したら
+//! 専用モジュールへ分割する。v2 では必要になった時点で tool を追加する。
+
+pub mod tools;
 
 use std::io::Write;
 
