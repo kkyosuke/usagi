@@ -230,7 +230,8 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         uid: 0,
         gid: 0,
     };
-    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let mut size = libc::socklen_t::try_from(std::mem::size_of::<libc::ucred>())
+        .expect("ucred size fits socklen_t");
     // SAFETY: credential is initialized and sized for SO_PEERCRED; fd belongs
     // to the live Unix stream for the duration of this call.
     let result = unsafe {
