@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Typed, pure session/control state transitions owned by the daemon.
 
 #![allow(clippy::missing_errors_doc)]

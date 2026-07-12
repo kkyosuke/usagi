@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Terminal lifetime and attachment registry.
 //!
 //! The registry is deliberately independent of a concrete PTY implementation.

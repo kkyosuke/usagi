@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Home の純粋な application controller。
 //!
 //! [`update`] は TUI-local の [`AppEvent`] を受け、状態を更新して外部へ依頼する

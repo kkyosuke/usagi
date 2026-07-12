@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Test doubles for the injected daemon seams (record file and liveness probe),
 //! shared by the usecase and presentation unit tests.
 

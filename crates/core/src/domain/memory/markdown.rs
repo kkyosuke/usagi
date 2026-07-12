@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! On-disk markdown (frontmatter) serialisation and parsing for [`Memory`].
 //!
 //! The frontmatter *format* (the `---` block, list escaping, timestamps, line

@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The `usagi daemon serve` usecase: run the daemon in the foreground.
 //!
 //! `serve` is the daemon process itself (a hidden subcommand; `usagi daemon`

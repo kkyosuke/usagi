@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Persistence for a repository's agent memories.
 //!
 //! Memories live as `<name>.md` files under `<repo>/.usagi/memory/`, each a

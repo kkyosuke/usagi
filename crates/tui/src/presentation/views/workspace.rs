@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Workspace 画面（ホーム）。
 //!
 //! workspace を開いている間の主画面。全幅の **header** の下を 2 ペインに割る:

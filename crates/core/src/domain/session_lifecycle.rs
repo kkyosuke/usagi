@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Durable, daemon-owned session lifecycle state.
 //!
 //! This module deliberately does not extend the legacy `WorkspaceState` record.

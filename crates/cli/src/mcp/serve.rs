@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! `usagi mcp` の stdio serve ループ。1 行 = 1 JSON-RPC 2.0 メッセージを読み、
 //! `initialize` / `tools/list` / `tools/call` を処理して 1 行の応答を返す。
 //!

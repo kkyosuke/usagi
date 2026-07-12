@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The workspace registry: the list of workspaces the user has opened.
 //!
 //! It lives in the global per-user data directory (see

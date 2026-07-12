@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Repository-level git queries.
 
 use std::path::Path;

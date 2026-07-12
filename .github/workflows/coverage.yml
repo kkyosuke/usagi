@@ -22,15 +22,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # 除外条件・閾値は SSoT (scripts/coverage.sh) を lefthook と共有する。
+    # 閾値は SSoT (scripts/coverage.sh) を lefthook と共有する。
     - name: Load coverage config (SSoT)
       run: |
         . ./scripts/coverage.sh
-        echo "COVERAGE_IGNORE=$COVERAGE_IGNORE" >> "$GITHUB_ENV"
         echo "COVERAGE_MIN=$COVERAGE_MIN" >> "$GITHUB_ENV"
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@nightly
       with:
         components: llvm-tools-preview
 
@@ -43,7 +42,7 @@ jobs:
       uses: taiki-e/install-action@cargo-llvm-cov
 
     - name: Run tests with coverage
-      run: cargo llvm-cov --workspace --lcov --output-path lcov.info --ignore-filename-regex "$COVERAGE_IGNORE"
+      run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
     - name: Generate coverage summary
       if: always()

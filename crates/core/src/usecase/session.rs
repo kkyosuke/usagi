@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Session lifecycle operations.
 //!
 //! Two layers live here. The **state primitives** — [`list`], [`get`], [`touch`],

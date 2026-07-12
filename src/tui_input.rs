@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! crossterm を TUI の統一 runtime input stream へ接続する合成ルート adapter。
 //!
 //! crossterm 依存はこの binary crate に閉じ、TUI crate へ渡す値は terminal 非依存の

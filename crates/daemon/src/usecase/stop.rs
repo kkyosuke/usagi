@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The `usagi daemon stop` usecase: terminate a running daemon and reclaim its
 //! record.
 //!

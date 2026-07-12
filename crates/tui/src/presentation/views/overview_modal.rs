@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Overview modal（コマンドパレット `:`）。
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に

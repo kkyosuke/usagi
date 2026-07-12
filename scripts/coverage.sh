@@ -6,40 +6,26 @@
 # 値を変更するときはこのファイルだけを直せばよい。
 #
 # 使い方:
-#   . scripts/coverage.sh     # COVERAGE_IGNORE / COVERAGE_MIN を読み込む
+#   . scripts/coverage.sh     # COVERAGE_MIN を読み込む
 #   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook pre-push 用)
 #                             # --no-clean で前回のビルド成果物を再利用する
 
 # 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
 # v1/ は退避された旧実装で、workspace から exclude されているため計測に含まれない。
 #
-# 計測から外すのは実 IO、generic codec の単相化重複、および TUI projection の
-# branch-merge 中に別 slice が所有する controller / workspace / modal projection / command registry である。
-# `core/src/usecase/client.rs` は合成ルートの同期 socket adapter を generic stream で
-# 単相化するため、coverage instrumentation が transport seam の error paths を重複計上する。
-# 既存の workspace baseline に残る未被覆 branch は、#220 の PR をマージ可能にする特例として
-# この PR では除外する。個別の実装 slice で fake / integration test を追加した時点で戻す。
-# Session lifecycle reducer の generic completion callbacks は monomorphization が coverage
-# report で重複するため、pure reducer の fake-persistence tests は通常の test gate で検証する。
-# `src/tui_input.rs` は crossterm の実端末 poll/read と合成 root の wiring であり、fake source
-# sequence test で振る舞いを検証する。実端末の読み取り自体は CI では再現できないため除外する。
-# GenerationCoordinator は rollover/crash の状態遷移を fake process でテストするが、
-# durable registry/PTY coordinator との結合点は後続の daemon cutover で計測する。
-# RuntimeCoordinator の injected-port seam と TUI frame/pane の test-only matcher
-# region は llvm-cov が実行値と別に macro/単相化 region を計上するため、当面は
-# workspace gate から除外する。各 module の unit test は通常の test gate で実行する。
-export COVERAGE_IGNORE='(src/(main|tui_input)\.rs|cli/src/cli/(commands/(update|version)|mod)\.rs|cli/src/mcp/serve\.rs|core/src/domain/(session_lifecycle|id/mod|issue/markdown|memory/markdown|pullrequest/mod)\.rs|core/src/infrastructure/(ipc/mod|daemon/mod|error_log|paths|persistence/(json_file|markdown_store)|store/(issue|lifecycle|memory|workspace)|git/(repo|worktree))\.rs|core/src/usecase/(client|issue|memory|note|session|workspace)\.rs|daemon/src/(presentation/ipc|infrastructure/unix_transport|test_support|usecase/(control|generation|runtime|serve|start|stop|terminal))\.rs|tui/src/presentation/(mod|frame|views/(workspace|closeup_modal|overview_modal|open|welcome)|widgets/modal)\.rs|tui/src/usecase/application/(controller|pane)\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
+# 計測から外す item は、ソースコードの `#[coverage(off)]` を正本とする。
+# ファイル名ベースの除外は使わず、理由と使用条件は document/06-conventions.md に従う。
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
 # 直前の `cargo llvm-cov --workspace` の計測結果を workspace 全体で再集計する
 # （CI の summary / enforce 用）。workspace 化後の `cargo llvm-cov report` は
-# カレント（ルート）パッケージにしかスコープせず、ルートは COVERAGE_IGNORE の
+# カレント（ルート）パッケージにしかスコープせず、ルートは `#[coverage(off)]` の
 # main.rs しか持たないため素の report では集計が空になる。パッケージ命名規約
 # （usagi / usagi-*。document/02-architecture.md）に一致する glob で全パッケージを
 # 明示的に選ぶ。
 coverage_report() {
-  cargo llvm-cov report -p 'usagi*' --ignore-filename-regex "$COVERAGE_IGNORE" "$@"
+  cargo llvm-cov report -p 'usagi*' "$@"
 }
 
 # ローカル（lefthook pre-push）で計測から 100% 強制までを一括実行する。
@@ -52,7 +38,6 @@ coverage_enforce() {
   fi
   # runner はインストール済みツールに左右されず、CI と同じ cargo test に固定する。
   cargo llvm-cov --workspace --no-clean \
-    --ignore-filename-regex "$COVERAGE_IGNORE" \
     --fail-under-lines "$COVERAGE_MIN" \
     --fail-under-functions "$COVERAGE_MIN"
 }

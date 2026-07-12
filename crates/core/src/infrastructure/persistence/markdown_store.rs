@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Shared persistence for markdown-source stores with a derived `index.json`.
 //!
 //! [`MarkdownStore`] owns the common mechanics for stores whose source of truth

@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Open 画面（登録済み workspace を開く）。
 //!
 //! welcome の Open から開く画面。usagi に登録済みの workspace を一覧で並べ、選んで開く。

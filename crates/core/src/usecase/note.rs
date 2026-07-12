@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Note scratchpad operations over the repo `state.json` store.
 //!
 //! Every session (and the workspace **root**) carries a [`Scratchpad`]: a

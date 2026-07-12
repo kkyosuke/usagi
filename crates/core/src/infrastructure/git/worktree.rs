@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The worktree lifecycle: add, remove, and list a repository's worktrees.
 //!
 //! A session's parallel working tree is a git worktree on its own branch. These

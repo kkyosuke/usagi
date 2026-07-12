@@ -1,3 +1,5 @@
+#![feature(coverage_attribute)]
+
 //! usagi-daemon — 常駐プロセス（`usagi daemon`）のサーバ面クレート。
 //!
 //! agent / シェルの PTY 所有・セッション監視・委譲 queue の消化

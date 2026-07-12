@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Closeup の terminal / Agent tab を扱う純粋な reducer。
 //!
 //! daemon の inventory や stream はここに持ち込まない。adapter は request と completion、

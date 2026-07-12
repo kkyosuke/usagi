@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Durable persistence boundary for daemon-owned lifecycle state.
 //!
 //! Clients never receive this store: they submit commands to the daemon, which

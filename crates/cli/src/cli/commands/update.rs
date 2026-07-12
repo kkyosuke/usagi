@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! `usagi update` — 最新版があるか確認する。
 //!
 //! リリースは GitHub の `v<major>.<minor>.<patch>` タグ。注入された core の [`GitRunner`]

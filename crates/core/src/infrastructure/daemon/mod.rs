@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The daemon record store: persistence for [`DaemonRecord`] behind an injected
 //! file seam.
 //!

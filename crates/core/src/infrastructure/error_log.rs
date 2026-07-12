@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Persistent error logging with daily rotation and retention.
 //!
 //! Runtime errors that bubble up to `main` would otherwise only reach stderr
