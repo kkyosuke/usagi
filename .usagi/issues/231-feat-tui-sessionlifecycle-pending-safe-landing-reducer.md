@@ -1,14 +1,14 @@
 ---
 number: 231
 title: feat(tui): SessionLifecycle pending と safe landing reducer を実装する
-status: todo
+status: in-progress
 priority: high
 labels: [tui, lifecycle]
 dependson: [223, 225, 226]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.263928+00:00
-updated_at: 2026-07-12T21:11:18.263928+00:00
+updated_at: 2026-07-12T22:26:35.320995+00:00
 ---
 
 ## 目的
