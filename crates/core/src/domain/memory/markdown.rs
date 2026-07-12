@@ -9,18 +9,17 @@ use std::fmt::Write;
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
-    self, format_string_list, inline, parse_string_list, parse_timestamp,
+    self, FrontmatterDoc, format_string_list, inline, parse_string_list, parse_timestamp,
 };
 
 use super::{Memory, MemoryType, ParseMemoryError};
 
-impl Memory {
+impl FrontmatterDoc for Memory {
     /// Render this memory to its on-disk markdown representation.
     ///
     /// The `---` envelope and body normalisation live in
     /// [`frontmatter::to_markdown`]; this closure only lists the memory's fields.
-    #[must_use]
-    pub fn to_markdown(&self) -> String {
+    fn to_markdown(&self) -> String {
         frontmatter::to_markdown(&self.body, |out| {
             let _ = writeln!(out, "name: {}", inline(&self.name));
             let _ = writeln!(out, "title: {}", inline(&self.title));
@@ -44,7 +43,7 @@ impl Memory {
     /// Returns [`ParseMemoryError`] when the frontmatter envelope is malformed, a
     /// field value fails to parse (enum token, timestamp), or a required field
     /// (`name`, `title`, `created_at`, `updated_at`) is absent.
-    pub fn from_markdown(text: &str) -> Result<Memory, ParseMemoryError> {
+    fn from_markdown(text: &str) -> Result<Memory, ParseMemoryError> {
         let mut name: Option<String> = None;
         let mut title: Option<String> = None;
         let mut kind = MemoryType::default();

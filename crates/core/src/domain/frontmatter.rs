@@ -52,6 +52,31 @@ impl From<ParseFrontmatterError> for ParseError {
     }
 }
 
+/// An entity persisted as a frontmatter markdown document (an [`Issue`] or a
+/// [`Memory`]).
+///
+/// Implementors serialise their field set into the shared `---` envelope via
+/// [`FrontmatterDoc::to_markdown`] and reconstruct it via
+/// [`FrontmatterDoc::from_markdown`]. Both share the single [`ParseError`] type,
+/// so a generic caller — e.g. a future markdown-backed store — can load and save
+/// any implementor without naming the concrete entity.
+///
+/// [`Issue`]: crate::domain::issue::Issue
+/// [`Memory`]: crate::domain::memory::Memory
+pub trait FrontmatterDoc: Sized {
+    /// Render this entity to its on-disk markdown representation.
+    #[must_use]
+    fn to_markdown(&self) -> String;
+
+    /// Parse this entity from its on-disk markdown representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] when the frontmatter envelope is malformed, a field
+    /// value fails to parse, or a required field is absent.
+    fn from_markdown(text: &str) -> Result<Self, ParseError>;
+}
+
 /// Generate the `as_str` / [`Display`](std::fmt::Display) /
 /// [`FromStr`](std::str::FromStr) string-token trio for a fieldless enum whose
 /// variants map one-to-one to on-disk / display tokens.

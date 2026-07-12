@@ -9,12 +9,12 @@ use std::fmt::Write;
 use chrono::{DateTime, Utc};
 
 use crate::domain::frontmatter::{
-    self, format_string_list, inline, parse_string_list, parse_timestamp,
+    self, FrontmatterDoc, format_string_list, inline, parse_string_list, parse_timestamp,
 };
 
 use super::{Issue, IssuePriority, IssueStatus, ParseIssueError};
 
-impl Issue {
+impl FrontmatterDoc for Issue {
     /// Render this issue to its on-disk markdown representation.
     ///
     /// Required fields are always emitted; the optional `parent` and `milestone`
@@ -23,8 +23,7 @@ impl Issue {
     /// [`frontmatter::to_markdown`]; this closure only lists the issue's fields,
     /// appending straight into `out` rather than allocating a throwaway `String`
     /// per field as `push_str(&format!(…))` would (cf. `format_number_list`).
-    #[must_use]
-    pub fn to_markdown(&self) -> String {
+    fn to_markdown(&self) -> String {
         frontmatter::to_markdown(&self.body, |out| {
             let _ = writeln!(out, "number: {}", self.number);
             let _ = writeln!(out, "title: {}", inline(&self.title));
@@ -57,7 +56,7 @@ impl Issue {
     /// Returns [`ParseIssueError`] when the frontmatter envelope is malformed, a
     /// field value fails to parse (number, enum token, timestamp, list entry), or
     /// a required field (`number`, `title`, `created_at`, `updated_at`) is absent.
-    pub fn from_markdown(text: &str) -> Result<Issue, ParseIssueError> {
+    fn from_markdown(text: &str) -> Result<Issue, ParseIssueError> {
         let mut number: Option<u32> = None;
         let mut title: Option<String> = None;
         let mut status = IssueStatus::default();
