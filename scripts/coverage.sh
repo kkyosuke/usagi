@@ -21,6 +21,16 @@ export COVERAGE_IGNORE='(src/main\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
+# 直前の `cargo llvm-cov --workspace` の計測結果を workspace 全体で再集計する
+# （CI の summary / enforce 用）。workspace 化後の `cargo llvm-cov report` は
+# カレント（ルート）パッケージにしかスコープせず、ルートは COVERAGE_IGNORE の
+# main.rs しか持たないため素の report では集計が空になる。パッケージ命名規約
+# （usagi / usagi-*。document/02-architecture.md）に一致する glob で全パッケージを
+# 明示的に選ぶ。
+coverage_report() {
+  cargo llvm-cov report -p 'usagi*' --ignore-filename-regex "$COVERAGE_IGNORE" "$@"
+}
+
 # ローカル（lefthook pre-push）で計測から 100% 強制までを一括実行する。
 # CI は計測（lcov 生成）と report を分けて実行するため、こちらは使わない。
 coverage_enforce() {

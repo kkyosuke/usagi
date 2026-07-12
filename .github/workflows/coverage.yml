@@ -48,7 +48,8 @@ jobs:
     - name: Generate coverage summary
       if: always()
       run: |
-        report=$(cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE")
+        . ./scripts/coverage.sh
+        report=$(coverage_report --summary-only)
         total=$(echo "$report" | awk '/^TOTAL/ { print $10 }')
 
         # Lines カバレッジが100%に満たないファイルをMarkdownテーブルの行に整形する。
@@ -97,7 +98,7 @@ jobs:
 
     - name: Enforce 100% coverage
       run: |
-        cargo llvm-cov report \
-          --ignore-filename-regex "$COVERAGE_IGNORE" \
+        . ./scripts/coverage.sh
+        coverage_report \
           --fail-under-lines "$COVERAGE_MIN" \
           --fail-under-functions "$COVERAGE_MIN"
