@@ -23,6 +23,11 @@ usagi-cli.workspace = true
 usagi-core.workspace = true
 usagi-daemon.workspace = true
 usagi-tui.workspace = true
+# 合成ルートだけが実端末 IO を持つ。crossterm で raw mode・代替スクリーン・キー入力を
+# 束ね、welcome 画面の対話ループ（usagi-tui の純粋な制御ループ）へ注入する。chrono は
+# recent カードの相対時刻に渡す現在時刻（実時計）をここで読むために使う。
+crossterm.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 
@@ -64,6 +69,11 @@ tempfile = "3"
 
 # 端末描画で表示桁数（CJK など全角を 2 桁と数える）を正しく測るため。
 unicode-width = "0.2"
+
+# 対話 TUI の実端末バックエンド。raw mode・代替スクリーン・キー/リサイズイベントの
+# 読み取りを担う。TUI 面（usagi-tui）はこれに依存させず、実装は合成ルート（ルートの
+# src/main.rs）だけが持つ（TUI 面は core の Terminal ポートに対して純粋に振る舞う）。
+crossterm = "0.29"
 
 # CLI の引数解析。入口面クレート（usagi-cli）がコマンドツリーの定義に使う。
 # `string`: 配布 version など実行時に決まる文字列を clap コマンドに載せるため。
