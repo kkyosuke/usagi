@@ -3,6 +3,7 @@
 //! 語彙（`serde`）だけは基盤語彙として使う（詳細は
 //! [`document/02-architecture.md`](../../../../document/02-architecture.md) の依存ルール）。
 
+pub mod daemon;
 pub mod frontmatter;
 pub mod issue;
 pub mod memory;
