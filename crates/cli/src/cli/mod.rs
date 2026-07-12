@@ -10,6 +10,7 @@
 //! それ以外のコマンドは出力後に [`RunOutcome::Exit`] を返す。
 
 pub mod commands;
+pub mod hooks;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -151,10 +152,20 @@ impl Command {
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
             }),
-            Command::AgentPhase { phase } => Box::new(h::AgentPhase { phase }),
-            Command::GuardWorkspace => Box::new(h::GuardWorkspace),
+            // エージェント統合フックは commands/ ではなく hooks/ に置く。
+            Command::AgentPhase { phase } => Box::new(hooks::AgentPhase { phase }),
+            Command::GuardWorkspace => Box::new(hooks::GuardWorkspace),
         }
     }
+}
+
+/// コマンドを dispatch してハンドラを実行し、結果と出力文字列を得るテストヘルパ。
+/// `commands` / `hooks` 双方のハンドラテストから使い、`Command::into_handler` の各アームを被覆する。
+#[cfg(test)]
+pub(crate) fn execute(command: Command) -> (RunOutcome, String) {
+    let mut out = Vec::new();
+    let outcome = command.into_handler("9.9.9").run(&mut out).unwrap();
+    (outcome, String::from_utf8(out).unwrap())
 }
 
 /// CLI 面のエントリポイント。`args`（プログラム名を含む argv）を解析し、
