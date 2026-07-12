@@ -12,6 +12,7 @@
 use usagi_core::domain::AppInfo;
 
 pub mod control;
+pub mod generation;
 pub mod restart;
 pub mod serve;
 pub mod start;
