@@ -1,14 +1,14 @@
 ---
 number: 237
 title: feat(tui): detach-safe quit と Ctrl-C grace reducer を実装する
-status: todo
+status: done
 priority: high
 labels: [tui, quit]
 dependson: [223, 224, 232]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:47.719622+00:00
-updated_at: 2026-07-12T21:11:47.719622+00:00
+updated_at: 2026-07-12T22:52:41.580097+00:00
 ---
 
 ## 目的
