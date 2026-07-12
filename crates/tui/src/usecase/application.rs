@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
 
+/// Home の application controller。端末や daemon wire 型に依存しない reducer と
+/// fake backend seam を提供する。
+pub mod controller;
+
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {

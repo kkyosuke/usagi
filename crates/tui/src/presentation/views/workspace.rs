@@ -18,6 +18,7 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets;
+use crate::usecase::application::controller::HomeMode;
 
 /// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
 const LEFT_WIDTH: usize = 28;
@@ -119,6 +120,17 @@ impl Workspace {
     /// session と tab の選択位置はそのまま維持する。
     pub fn enter_switch(&mut self) {
         self.mode = Mode::Switch;
+    }
+
+    /// application controller の Home mode を既存 view の表示 state に反映する。
+    ///
+    /// controller が selected / active の source of truth へ育つまで、既存 Workspace
+    /// view の session・tab state はそのまま保持する最小の adapter である。
+    pub fn apply_home_mode(&mut self, mode: HomeMode) {
+        self.mode = match mode {
+            HomeMode::Switch => Mode::Switch,
+            HomeMode::Closeup => Mode::Closeup,
+        };
     }
 
     /// タブ一覧。
@@ -426,6 +438,7 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 mod tests {
     use super::{Mode, Workspace, render};
     use crate::presentation::widgets::display_width;
+    use crate::usecase::application::controller::HomeMode;
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
     use usagi_core::domain::note::Scratchpad;
@@ -579,6 +592,19 @@ mod tests {
         assert_eq!(ws.selected(), selected);
         assert_eq!(ws.active_tab(), active_tab);
         assert!(format!("{:?}", ws.mode()).contains("Switch"));
+    }
+
+    #[test]
+    fn controller_mode_adapter_preserves_existing_view_selection() {
+        let mut ws = workspace();
+        ws.select_next();
+        ws.tab_next();
+        ws.apply_home_mode(HomeMode::Closeup);
+        assert_eq!(ws.mode(), Mode::Closeup);
+        assert_eq!(ws.selected(), 1);
+        assert_eq!(ws.active_tab(), 1);
+        ws.apply_home_mode(HomeMode::Switch);
+        assert_eq!(ws.mode(), Mode::Switch);
     }
 
     #[test]
