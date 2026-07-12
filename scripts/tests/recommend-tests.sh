@@ -8,12 +8,13 @@ trap 'rm -rf "$tmp"' EXIT
 git -C "$tmp" init -q
 git -C "$tmp" config user.email tests@example.com
 git -C "$tmp" config user.name Tests
-mkdir -p "$tmp/scripts" "$tmp/src/domain" "$tmp/src/usecase" "$tmp/src/presentation/cli" "$tmp/tests" "$tmp/third_party/vt100/src" "$tmp/document" "$tmp/v1/document"
+mkdir -p "$tmp/scripts" "$tmp/src/domain" "$tmp/src/usecase" "$tmp/src/presentation/cli" "$tmp/tests" "$tmp/third_party/vt100/src" "$tmp/document" "$tmp/v1/document" "$tmp/v1/src"
 cp "$script" "$tmp/scripts/recommend-tests.sh"
 cp "${script%.sh}.tsv" "$tmp/scripts/recommend-tests.tsv"
 touch "$tmp/Cargo.toml" "$tmp/src/domain/agent.rs" "$tmp/src/usecase/agent.rs" "$tmp/src/presentation/cli/agent.rs"
 touch "$tmp/tests/old_name.rs" "$tmp/space name.txt" "$tmp/README.md" "$tmp/document/02-architecture.md" "$tmp/v1/document/06-conventions.md"
 touch "$tmp/third_party/vt100/src/lib.rs"
+touch "$tmp/v1/src/main.rs"
 git -C "$tmp" add .
 git -C "$tmp" commit -qm fixture
 
@@ -84,6 +85,13 @@ assert_has "$out" "cargo test --manifest-path third_party/vt100/Cargo.toml"
 assert_has "$out" "cargo test --test tui_e2e"
 assert_has "$out" "cargo test --workspace --quiet"
 git -C "$tmp" checkout -q -- third_party/vt100/src/lib.rs
+
+echo changed >"$tmp/v1/src/main.rs"
+out=$(run)
+assert_has "$out" "cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings"
+assert_has "$out" "cargo test --manifest-path v1/Cargo.toml --quiet"
+assert_not_has "$out" "cargo test --workspace --quiet"
+git -C "$tmp" checkout -q -- v1/src/main.rs
 
 echo changed >"$tmp/src/domain/agent.rs"
 echo changed >"$tmp/src/presentation/cli/agent.rs"

@@ -22,13 +22,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Update version in Cargo.toml
+      - name: Update version in v1/Cargo.toml
         run: |
-          # Cargo.toml の最初の version = "..." を入力されたバージョンで上書き
-          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${{ inputs.version }}\"/}" Cargo.toml
-          
-          # Cargo.lock も更新
-          cargo check
+          # リリース対象はまだ v1（v1/ に退避された旧実装）のため、
+          # v1/Cargo.toml の最初の version = "..." を入力されたバージョンで上書き
+          sed -i -e "0,/^version = \".*\"/{s/^version = \".*\"/version = \"${{ inputs.version }}\"/}" v1/Cargo.toml
+
+          # v1/Cargo.lock も更新
+          cargo check --manifest-path v1/Cargo.toml
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v6

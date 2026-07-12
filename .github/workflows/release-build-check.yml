@@ -1,20 +1,20 @@
 name: Release Build Check
 
-# リリースは Cargo.toml の version 変更を起点に v<version> タグを切って走る
-# （auto-release.yml）。タグ後のリリースビルドは 4 プラットフォーム
-# （Linux / macOS amd64・arm64 / Windows）を対象にするが、通常の Test ワークフロー
-# は ubuntu-latest でしかビルドしないため、Windows 固有のコンパイルエラーがタグを
-# 切るまで検出できない。
+# リリースは v1/Cargo.toml の version 変更を起点に v<version> タグを切って走る
+# （auto-release.yml。リリース対象はまだ v1/ に退避された旧実装）。タグ後の
+# リリースビルドは 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）を
+# 対象にするが、通常の Test ワークフローは ubuntu-latest でしかビルドしないため、
+# Windows 固有のコンパイルエラーがタグを切るまで検出できない。
 #
-# そこで version（とロックファイル）が変わる PR ＝「タグが変わる PR」で、
-# release.yml と同じターゲット行列を release ビルドして、リリースが成功することを
-# マージ前に検証する。
+# そこで v1 の version（とロックファイル）が変わる PR ＝「タグが変わる PR」で、
+# release.yml と同じターゲット行列で v1 を release ビルドして、リリースが成功する
+# ことをマージ前に検証する。
 on:
   pull_request:
     branches: [ "main" ]
     paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
+      - "v1/Cargo.toml"
+      - "v1/Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always
@@ -50,6 +50,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
+          workspaces: v1
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
