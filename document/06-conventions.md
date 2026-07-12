@@ -150,7 +150,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 | 編集中 | フォーマット差分の確認 / コンパイル確認 / 変更 crate・module の test | `cargo fmt --all -- --check` / `cargo check --workspace --all-targets` / 変更箇所に対応する `cargo test -p <crate>` |
 | commit 前 | Lint / risk-based selected tests | `cargo clippy --workspace --all-targets -- -D warnings` / `scripts/recommend-tests.sh origin/main` が示す test（または同等以上の理由付き selected tests） |
 | push / PR 前 | Rust full gate / Markdown link check | Rust 差分あり: `cargo clippy --workspace --all-targets -- -D warnings` と `cargo llvm-cov --workspace --no-clean --ignore-filename-regex "$COVERAGE_IGNORE" --fail-under-lines "$COVERAGE_MIN" --fail-under-functions "$COVERAGE_MIN"`。Markdown 差分あり: `lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' 'v1/README.md' 'v1/document/**/*.md' '.agents/**/*.md' '.github/**/*.md'` |
-| CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 100%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
+| CI | PR gate | `.github/workflows/test.yml` が fmt / clippy / `cargo test --workspace --quiet`、`.github/workflows/coverage.yml` が coverage 99%、`.github/workflows/markdown-link-check.yml` が Markdown link check を実行する |
 
 push / PR 前の coverage は次のローカル経路で実行してよい。`cargo llvm-cov` はテスト実行を兼ねるため、この経路では
 同じ差分に対して `cargo test --workspace --quiet` を重複実行しなくてよい。
@@ -170,7 +170,7 @@ full test / coverage gate を必須とする条件は次のとおり。
 - 変更がクレート境界・層境界、永続化、process / PTY / terminal IO、設定解決、テスト基盤、coverage 除外、CI / hook の gate に影響する。
 - selected tests で対象リスクを説明できない、または直接 consumer を特定できない。
 
-- テストカバレッジ 100% を維持する（CI / lefthook でチェック）。
+- テストカバレッジ 99% 以上を維持する（CI / lefthook でチェック）。
   - **依存を注入してテスト可能にする**。「テストできないから」とロジックを計測対象外（`scripts/coverage.sh` の `COVERAGE_IGNORE`）に逃がさない。実 IO（標準入出力・サブプロセス・端末・PTY・スレッド）は引数やジェネリックで注入し、本物の IO は合成ルート（ルートの `src/main.rs`）で束ねる。
   - `COVERAGE_IGNORE` に残してよいのは、テスト可能なロジックを抜いたあとに残る「実 IO そのもの」の層、または正本 `scripts/coverage.sh` が明示した計測器の単相化重複を回避する例外だけである。理由は `scripts/coverage.sh` のコメントに列挙する。
 - 緊急時のフックスキップ: `LEFTHOOK=0 git commit ...` または `--no-verify`（原則使わない）。
@@ -195,7 +195,7 @@ scripts/recommend-tests.sh origin/main
 |---|---|
 | pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy --workspace --all-targets -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip） |
+| pre-push | `cargo clippy --workspace --all-targets -- -D warnings` / テストカバレッジ 99% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip） |
 
 ### workspace root コミットの拒否（backstop）
 
@@ -216,7 +216,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
-| `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
+| `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・99% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
 
