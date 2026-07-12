@@ -80,8 +80,12 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// 人間向け CLI サブコマンドの一覧。各バリアントがそのコマンドの受け付ける
-/// オプションを型として表す。`help` は clap が自動で用意する。
+/// CLI サブコマンドの一覧。各バリアントがそのコマンドの受け付けるオプションを型として表す。
+/// `help` は clap が自動で用意する。
+///
+/// 大半は人間向けだが、末尾の 2 つ（`AgentPhase` / `GuardWorkspace`）は usagi が
+/// エージェント起動時に Claude のフックへ配線する**内部コマンド**で、`--help` には出さない
+/// （`hide = true`）。人手で叩くものではない。
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Welcome TUI を開く（引数なし起動の互換 alias）
@@ -105,6 +109,15 @@ pub enum Command {
     },
     /// バージョンを表示する
     Version,
+    /// （ヘルプ非表示・内部）エージェントのライフサイクル phase を記録する（Stop フックが呼ぶ）
+    #[command(hide = true)]
+    AgentPhase {
+        /// フックが報告する phase（例: `ended`）
+        phase: String,
+    },
+    /// （ヘルプ非表示・内部）worktree の外へ出るツール呼び出しを拒否する（`PreToolUse` フックが呼ぶ）
+    #[command(hide = true)]
+    GuardWorkspace,
 }
 
 /// 補完スクリプトを生成する対象シェル。
@@ -138,6 +151,8 @@ impl Command {
             Command::Version => Box::new(h::Version {
                 version: version.to_owned(),
             }),
+            Command::AgentPhase { phase } => Box::new(h::AgentPhase { phase }),
+            Command::GuardWorkspace => Box::new(h::GuardWorkspace),
         }
     }
 }
@@ -226,6 +241,22 @@ mod tests {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "version"]).unwrap().command,
             Some(Command::Version)
+        ));
+    }
+
+    /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
+    #[test]
+    fn parses_hidden_internal_commands() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "guard-workspace"])
+                .unwrap()
+                .command,
+            Some(Command::GuardWorkspace)
+        ));
+        let cli = Cli::try_parse_from(["usagi", "agent-phase", "ended"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::AgentPhase { phase }) if phase == "ended"
         ));
     }
 
