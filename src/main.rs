@@ -39,6 +39,7 @@ use usagi_core::usecase::client::{
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
+use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
@@ -52,12 +53,13 @@ mod tui_input;
 use tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// crossterm を backing にした実端末。TUI 面の [`Terminal`] ポートを合成ルートで実装し、
-/// raw mode の描画（毎フレーム全消去して描き直す）とキー/リサイズイベントの読み取りを
-/// [`Key`] 語彙へ翻訳する。ここが唯一の実端末 IO 層である。
+/// raw mode の差分描画とキー/リサイズイベントの読み取りを [`Key`] 語彙へ翻訳する。
+/// ここが唯一の実端末 IO 層である。
 struct CrosstermTerminal {
     out: std::io::Stdout,
     input: EventPump<CrosstermSource, NoBackend<()>>,
     input_started: Instant,
+    renderer: FrameRenderer,
 }
 
 impl Terminal for CrosstermTerminal {
@@ -67,20 +69,26 @@ impl Terminal for CrosstermTerminal {
     }
 
     fn draw(&mut self, frame: &[String]) -> std::io::Result<()> {
-        queue!(
-            self.out,
-            cursor::MoveTo(0, 0),
-            terminal::Clear(terminal::ClearType::All)
-        )?;
-        // 行の「間」だけを `\r\n` で区切り、最終行の後には改行を出さない。フレームは端末の
-        // 高さちょうどなので、最下行で改行するとその 1 行分だけ画面がスクロールしてしまう
-        // （代替スクリーン内でも起きる）。raw mode では改行だけでは行頭へ戻らないため区切りは
-        // `\r\n` を使う。
-        for (i, line) in frame.iter().enumerate() {
-            if i > 0 {
-                write!(self.out, "\r\n")?;
-            }
-            write!(self.out, "{line}")?;
+        let (height, width) = self.size()?;
+        let diff = self
+            .renderer
+            .render(Frame::from_lines(width, height, frame));
+        if diff.clear_surface {
+            queue!(
+                self.out,
+                cursor::MoveTo(0, 0),
+                terminal::Clear(terminal::ClearType::All)
+            )?;
+        }
+        for span in diff.spans {
+            queue!(
+                self.out,
+                cursor::MoveTo(
+                    u16::try_from(span.column).expect("terminal width came from crossterm"),
+                    u16::try_from(span.row).expect("terminal height came from crossterm"),
+                )
+            )?;
+            write!(self.out, "{}", span.text)?;
         }
         self.out.flush()
     }
@@ -112,8 +120,14 @@ impl Terminal for CrosstermTerminal {
                 }
                 // 現行の管理画面 loop は Key port のため、次フレームを要求する Other として
                 // 表す。lossless な RuntimeEvent は Home controller 接続時にそのまま渡せる。
-                RuntimeEvent::Resize { .. }
-                | RuntimeEvent::Input(
+                RuntimeEvent::Resize { .. } => {
+                    // A resize invalidates both the terminal surface and the diff base.  The
+                    // following frame clears then repaints at its new geometry, so stale cells
+                    // from a previously wider/taller frame cannot survive.
+                    self.renderer.reset_surface();
+                    return Ok(Key::Other);
+                }
+                RuntimeEvent::Input(
                     LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_),
                 )
                 | RuntimeEvent::Backend(()) => return Ok(Key::Other),
@@ -240,6 +254,7 @@ fn run_in_terminal(
             Duration::ZERO,
         ),
         input_started: Instant::now(),
+        renderer: FrameRenderer::new(),
     };
     let result = run(&mut terminal);
 
