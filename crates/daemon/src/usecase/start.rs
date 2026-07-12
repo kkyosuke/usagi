@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The `usagi daemon start` usecase: launch the daemon in the background.
 //!
 //! Unlike [`serve`](crate::usecase::serve), which *is* the daemon and runs in

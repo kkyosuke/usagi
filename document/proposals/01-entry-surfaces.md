@@ -173,7 +173,7 @@ TUI から起動した agent（daemon 所有 PTY 内で動作）が MCP tool で
 
 | 代替案 | 不採用の理由 |
 |---|---|
-| CLI / MCP を合成ルート（ルート bin）に置く | ルートは実 IO 注入のみで `COVERAGE_IGNORE` 対象。tool アダプタ・引数解析はテスト対象のロジックであり crates 側に置く |
+| CLI / MCP を合成ルート（ルート bin）に置く | ルートは実 IO 注入のみで `#[coverage(off)]` 対象。tool アダプタ・引数解析はテスト対象のロジックであり crates 側に置く |
 | MCP を `usagi-daemon` に置く（daemon が MCP を serve する） | MCP はエージェントごとに spawn される stdio の**クライアント側**プロセスで、cwd（session worktree）の文脈を運ぶ。常駐サーバに置くと issue / memory の書き込み先解決が cwd から切り離され、v1 のセマンティクスを失う |
 | MCP を `usagi-core` に置く | core は両面が共有するライブラリで presentation を含めない。入口を core に入れると依存の終点が入口を持つ逆転になる |
 | `crates/mcp` を `crates/cli` と別クレートに分ける | どちらも core にしか依存しない薄いアダプタで、互いの逆流リスクがなく、コンパイラで強制すべき境界がない。クレートを増やす利益が boilerplate に見合わない（肥大したら分割を再検討） |

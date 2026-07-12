@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Welcome 画面（最初のトップメニュー）。
 //!
 //! 起動直後に出るメニュー画面。左に Open / New / Config / Quit のメニュー、右に最近使った

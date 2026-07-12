@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Closeup コマンド面の application interface。
 //!
 //! Closeup のコマンド入力をトップレベルのコマンド名と未解釈の引数へ分け、

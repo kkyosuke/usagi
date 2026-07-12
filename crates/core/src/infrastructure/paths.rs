@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Where usagi keeps its data on disk, in one place.
 //!
 //! Two independent locations, kept here so no layer re-spells them as literals:

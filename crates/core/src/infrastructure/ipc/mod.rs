@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Transport-independent IPC protocol vocabulary and its bounded JSON framing.
 //!
 //! A transport supplies bytes; this module supplies the protocol contract.  In

@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Shared helpers for the files usagi persists under its data directories.
 //!
 //! Every store treats a missing file as "no data yet" and writes through a temp

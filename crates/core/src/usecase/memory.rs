@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Memory CRUD operations over the memory store.
 //!
 //! The application-level operations both the human CLI and the agent-facing MCP

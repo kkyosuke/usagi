@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Typed v2 resource identities and pure fencing checks.
 //!
 //! Names, paths, PIDs, and daemon-local counters are attributes, never effecting

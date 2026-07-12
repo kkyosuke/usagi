@@ -1,4 +1,6 @@
-//! usagi-tui — TUI 面クレート。daemon が所有する端末に attach するクライアント側
+#![feature(coverage_attribute)]
+
+//! usagi-tui — daemon が所有する端末に attach するクライアント側
 //! （画面描画・キー入力・attach プロトコルのクライアント）をここに実装する。
 //! usagi-core にのみ依存し、usagi-daemon には依存しない（daemon との通信は
 //! usagi-core の IPC プロトコル型を介して行う）。

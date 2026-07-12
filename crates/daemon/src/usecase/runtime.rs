@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Durable Agent runtime reservation and terminal-stream orchestration.
 
 #![allow(

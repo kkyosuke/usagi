@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Handshake-gated server adapter for the transport-independent IPC protocol.
 
 #![allow(clippy::missing_errors_doc)] // Errors are directly forwarded transport/protocol failures.

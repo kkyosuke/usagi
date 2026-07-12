@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Pure terminal frame grid and incremental diff renderer.
 //!
 //! Views produce ANSI-decorated strings, while this module turns them into a

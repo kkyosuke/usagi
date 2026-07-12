@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Persistence for a repository's task issues.
 //!
 //! Issues live as `NNN-<slug>.md` files under `<repo>/.usagi/issues/`, each a

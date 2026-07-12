@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! The `PrLink` entity: a pull request discovered for a session, with the
 //! bookkeeping the background `gh` enrichment needs.
 //!

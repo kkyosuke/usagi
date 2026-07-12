@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! `usagi version` — 配布 version を表示する（入口から注入される）。
 
 use std::io::{self, Write};

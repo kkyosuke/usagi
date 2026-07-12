@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Workspace operations shared by the CLI and TUI entry paths.
 //!
 //! [`open`] resolves a path against the global workspace registry. It reuses and

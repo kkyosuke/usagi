@@ -1,3 +1,5 @@
+#![feature(coverage_attribute)]
+
 //! usagi-core — TUI 面と daemon 面が共有する共通クレート（common）。
 //!
 //! クリーンアーキテクチャの内側 2 層（domain / usecase）と、両面が共有する

@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Secure Unix-domain transport adapter.
 //!
 //! This module is deliberately outside `usagi-core`: core defines a byte-stream

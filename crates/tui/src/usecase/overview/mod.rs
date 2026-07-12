@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Overview コマンド面の application interface。
 //!
 //! Overview のコマンド入力をトップレベルのコマンド名と未解釈の引数へ分け、

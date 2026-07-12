@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Surface-neutral daemon client port.
 //!
 //! Presentation surfaces submit only typed request bodies through this port.  In

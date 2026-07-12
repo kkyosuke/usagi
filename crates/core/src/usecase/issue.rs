@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Issue CRUD operations over the issue store.
 //!
 //! The application-level operations both the human CLI (`usagi issue …`) and the

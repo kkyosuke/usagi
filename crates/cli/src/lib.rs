@@ -1,3 +1,5 @@
+#![feature(coverage_attribute)]
+
 //! usagi-cli — 入口面クレート。常駐しない 2 つの入口 — 人間向け CLI
 //! サブコマンド（`cli`）とエージェント向け MCP サーバ（`mcp`）—をここに実装する
 //! （document/proposals/01-entry-surfaces.md）。

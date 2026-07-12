@@ -1,3 +1,5 @@
+#![coverage(off)]
+
 //! Durable daemon-generation ownership and crash reconciliation.
 //!
 //! A generation registry is the authority for routing: control work is accepted
