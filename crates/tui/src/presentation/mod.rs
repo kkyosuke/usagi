@@ -5,8 +5,10 @@
 //!
 //! 描画は 3 つに分ける: 各画面の view（[`views`]）・再利用 UI 部品（[`widgets`]）・
 //! 領域配置（[`layouts`]）。view が layout で領域を割り、そこへ widget を配置する。
+//! 色は [`theme`] が意味的な役割で一元管理する（役割→具体色の単一情報源）。
 
 pub mod layouts;
+pub mod theme;
 pub mod views;
 pub mod widgets;
 
