@@ -718,4 +718,101 @@ mod tests {
             Err(RuntimeError::Terminal(RegistryError::StaleTarget))
         );
     }
+
+    #[test]
+    fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
+        struct RejectingResolver;
+        impl LaunchResolver for RejectingResolver {
+            fn resolve(
+                &mut self,
+                _: &LaunchRequest,
+            ) -> Result<DurableLaunchSnapshot, LaunchValidationError> {
+                Err(LaunchValidationError::InvalidProgram)
+            }
+        }
+        struct RejectingStore;
+        impl RuntimeStore for RejectingStore {
+            type Error = ();
+            fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+                Err(())
+            }
+        }
+        struct RejectingJournal;
+        impl OutputJournal for RejectingJournal {
+            type Error = ();
+            fn append(&mut self, _: &Output) -> Result<(), ()> {
+                Err(())
+            }
+        }
+
+        let first_request = request();
+        let (runtime, mut fence) = refs(&first_request);
+        let valid_fence = fence.clone();
+        let mut coordinator = RuntimeCoordinator::new(2, 64, 1);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        fence.owner_daemon_generation = DaemonGeneration::new();
+        assert_eq!(
+            coordinator.launch(
+                &first_request,
+                runtime.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut store,
+                &mut spawner
+            ),
+            Err(RuntimeError::ScopeMismatch)
+        );
+        assert_eq!(
+            coordinator.launch(
+                &first_request,
+                runtime.clone(),
+                valid_fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut RejectingResolver,
+                &mut store,
+                &mut spawner
+            ),
+            Err(RuntimeError::Launch(LaunchValidationError::InvalidProgram))
+        );
+        let (runtime, fence) = refs(&first_request);
+        assert_eq!(
+            coordinator.launch(
+                &first_request,
+                runtime,
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver::default(),
+                &mut RejectingStore,
+                &mut spawner
+            ),
+            Err(RuntimeError::Store)
+        );
+
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        launch(
+            &mut coordinator,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(
+            coordinator.append_output(&runtime, b"x".to_vec(), &mut RejectingJournal),
+            Err(RuntimeError::Journal)
+        );
+        coordinator
+            .reconcile(&runtime, ProcessObservation::Unknown, &mut store)
+            .unwrap();
+        assert_eq!(
+            coordinator.append_output(&runtime, b"x".to_vec(), &mut Journal::default()),
+            Err(RuntimeError::ReconcileRequired(
+                ReconcileState::IdentityUnknown
+            ))
+        );
+    }
 }
