@@ -11,17 +11,19 @@ use usagi_core::domain::AppInfo;
 use crate::usecase;
 
 /// daemon 面の entry point。合成ルートが `usagi daemon` で dispatch する interface で、
-/// アプリケーションロジックは `crate::usecase` へ委譲し、この層は結果を注入された
-/// `out` へ書き出すだけに徹する（独自のビジネスロジックを持たない）。
+/// `usagi daemon` に続くサブコマンド（無しは `None`）を `crate::usecase::interpret` で
+/// [`crate::usecase::Command`] へ解決し、その `execute` の結果を注入された `out` へ書き出す。
+/// この層は解決と書き出しの配線に徹し、独自のビジネスロジックは持たない。
 ///
-/// 引数はまだ最小限（socket パス・設定などは未定で、実装が進んだ時点で追加する）。
-/// 現状は起動アナウンスを出す最小の入口で、常駐ループ・IPC 待ち受けはここに足していく。
+/// サブコマンドの解釈以外の引数（socket パス・設定など）はまだ最小限で、実装が
+/// 進んだ時点で追加する。常駐ループ・IPC 待ち受けは `serve` コマンドの実処理として足していく。
 ///
 /// # Errors
 ///
 /// `out` への書き込みに失敗した場合、そのエラーを返す。
-pub fn run(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()> {
-    writeln!(out, "{}", usecase::startup_announcement(info))
+pub fn run(out: &mut impl Write, subcommand: Option<&str>, info: &AppInfo) -> std::io::Result<()> {
+    let command = usecase::interpret(subcommand);
+    writeln!(out, "{}", command.execute(info))
 }
 
 #[cfg(test)]
@@ -29,17 +31,32 @@ mod tests {
     use super::run;
     use usagi_core::domain::AppInfo;
 
-    #[test]
-    fn run_writes_startup_announcement() {
-        let info = AppInfo {
+    fn info() -> AppInfo {
+        AppInfo {
             name: "usagi",
             version: "0.1.0",
-        };
+        }
+    }
+
+    #[test]
+    fn run_serves_on_none_and_serve() {
+        for subcommand in [None, Some("serve")] {
+            let mut buf = Vec::new();
+            run(&mut buf, subcommand, &info()).unwrap();
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "usagi v0.1.0 daemon ready\n"
+            );
+        }
+    }
+
+    #[test]
+    fn run_reports_unknown_subcommand() {
         let mut buf = Vec::new();
-        run(&mut buf, &info).unwrap();
+        run(&mut buf, Some("bogus"), &info()).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "usagi v0.1.0 daemon ready\n"
+            "usagi v0.1.0: unknown daemon subcommand `bogus`\n"
         );
     }
 }
