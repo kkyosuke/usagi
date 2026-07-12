@@ -504,5 +504,157 @@ pub fn write_json_frame<T: Serialize>(
     write_frame_with_limit(writer, &bytes, max_frame_bytes)
 }
 
+/// A surface-neutral byte-stream connection. TUI and CLI depend on this port;
+/// Unix sockets remain an outer transport adapter.
+pub trait Connection: Read + Write + Send {}
+impl<T: Read + Write + Send> Connection for T {}
+
+/// Per-connection bounds. Control has reserved capacity so terminal output
+/// cannot starve acknowledgements or operation responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueLimits {
+    pub control_frames: usize,
+    pub control_bytes: usize,
+    pub output_frames: usize,
+    pub output_bytes: usize,
+    pub control_reserve_bytes: usize,
+}
+
+impl Default for QueueLimits {
+    fn default() -> Self {
+        Self {
+            control_frames: 256,
+            control_bytes: 2 * 1024 * 1024,
+            output_frames: 256,
+            output_bytes: 2 * 1024 * 1024,
+            control_reserve_bytes: 64 * 1024,
+        }
+    }
+}
+
+/// A framed payload whose unsent suffix survives a nonblocking write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFrame {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl PendingFrame {
+    /// Frames one payload for nonblocking output.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload cannot be represented by the `u32` wire length.
+    #[must_use]
+    pub fn new(payload: Vec<u8>) -> Self {
+        let mut bytes = Vec::with_capacity(payload.len() + 4);
+        let length = u32::try_from(payload.len()).expect("IPC frame fits in u32");
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend(payload);
+        Self { bytes, offset: 0 }
+    }
+
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+
+    pub fn write_to(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
+        match writer.write(&self.bytes[self.offset..]) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::WriteZero, "IPC peer closed")),
+            Ok(written) => {
+                self.offset += written;
+                Ok(self.offset == self.bytes.len())
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The result of attempting to admit a frame before any side effect occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueError {
+    ResourceExhausted,
+    Backpressure,
+}
+
+/// Priority-separated bounded outbound queues.
+#[derive(Debug)]
+pub struct OutboundQueues {
+    limits: QueueLimits,
+    control: VecDeque<PendingFrame>,
+    output: VecDeque<PendingFrame>,
+    control_bytes: usize,
+    output_bytes: usize,
+}
+
+impl OutboundQueues {
+    #[must_use]
+    pub fn new(limits: QueueLimits) -> Self {
+        Self {
+            limits,
+            control: VecDeque::new(),
+            output: VecDeque::new(),
+            control_bytes: 0,
+            output_bytes: 0,
+        }
+    }
+
+    pub fn push_control(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
+        let frame = PendingFrame::new(payload);
+        if self.control.len() >= self.limits.control_frames
+            || self.control_bytes.saturating_add(frame.remaining())
+                > self
+                    .limits
+                    .control_bytes
+                    .saturating_add(self.limits.control_reserve_bytes)
+        {
+            return Err(QueueError::ResourceExhausted);
+        }
+        self.control_bytes += frame.remaining();
+        self.control.push_back(frame);
+        Ok(())
+    }
+
+    /// Output admission fails explicitly; the caller must issue a
+    /// `resync_required` protocol error rather than silently dropping output.
+    pub fn push_output(&mut self, payload: Vec<u8>) -> Result<(), QueueError> {
+        let frame = PendingFrame::new(payload);
+        if self.output.len() >= self.limits.output_frames
+            || self.output_bytes.saturating_add(frame.remaining()) > self.limits.output_bytes
+        {
+            return Err(QueueError::Backpressure);
+        }
+        self.output_bytes += frame.remaining();
+        self.output.push_back(frame);
+        Ok(())
+    }
+
+    /// Writes control first and never interleaves a partially written frame.
+    pub fn flush_one(&mut self, writer: &mut dyn Write) -> io::Result<bool> {
+        let (queue, bytes) = if self.control.is_empty() {
+            (&mut self.output, &mut self.output_bytes)
+        } else {
+            (&mut self.control, &mut self.control_bytes)
+        };
+        let Some(frame) = queue.front_mut() else {
+            return Ok(false);
+        };
+        let before = frame.remaining();
+        let done = frame.write_to(writer)?;
+        *bytes -= before - frame.remaining();
+        if done {
+            queue.pop_front();
+        }
+        Ok(true)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.control.is_empty() && self.output.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests;

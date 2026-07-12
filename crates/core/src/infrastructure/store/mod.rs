@@ -9,6 +9,7 @@
 //! - [`state`] — repo の `WorkspaceState`（`<repo>/.usagi/state.json`）。
 
 pub mod issue;
+pub mod lifecycle;
 pub mod memory;
 pub mod state;
 pub mod workspace;

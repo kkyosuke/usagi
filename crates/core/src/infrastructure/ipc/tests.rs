@@ -288,3 +288,61 @@ fn covers_protocol_error_and_cache_edge_cases() {
     assert!(read_frame(&mut Bad).is_err());
     assert!(write_frame(&mut BadWriter, b"x").is_err());
 }
+
+#[test]
+fn partial_write_and_would_block_preserve_a_complete_frame() {
+    struct PartialWriter {
+        bytes: Vec<u8>,
+        calls: usize,
+    }
+    impl io::Write for PartialWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let count = bytes.len().min(3);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut queue = OutboundQueues::new(QueueLimits::default());
+    queue.push_control(b"ack".to_vec()).unwrap();
+    let mut writer = PartialWriter {
+        bytes: Vec::new(),
+        calls: 0,
+    };
+    while !queue.is_empty() {
+        queue.flush_one(&mut writer).unwrap();
+    }
+    assert_eq!(
+        read_frame(&mut Cursor::new(writer.bytes)).unwrap(),
+        Some(b"ack".to_vec())
+    );
+}
+
+#[test]
+fn saturated_output_preserves_control_capacity() {
+    let mut queue = OutboundQueues::new(QueueLimits {
+        output_frames: 1,
+        output_bytes: 16,
+        control_frames: 1,
+        control_bytes: 4,
+        control_reserve_bytes: 8,
+    });
+    queue.push_output(b"output".to_vec()).unwrap();
+    assert_eq!(
+        queue.push_output(b"more".to_vec()),
+        Err(QueueError::Backpressure)
+    );
+    queue.push_control(b"ack".to_vec()).unwrap();
+    let mut bytes = Vec::new();
+    queue.flush_one(&mut bytes).unwrap();
+    assert_eq!(
+        read_frame(&mut Cursor::new(bytes)).unwrap(),
+        Some(b"ack".to_vec())
+    );
+}
