@@ -285,6 +285,24 @@ mod tests {
             Err(io::Error::other("read failed"))
         }
     }
+
+    struct ReadFails {
+        output: Vec<u8>,
+    }
+    impl Read for ReadFails {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("read failed"))
+        }
+    }
+    impl Write for ReadFails {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
     impl Write for Broken {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write failed"))
@@ -316,7 +334,7 @@ mod tests {
         });
         let response = Envelope {
             protocol,
-            daemon_generation: generation,
+            daemon_generation: generation.clone(),
             kind: EnvelopeKind::Response {
                 request_id: crate::infrastructure::ipc::RequestId("1".into()),
                 outcome: reply,
@@ -325,6 +343,30 @@ mod tests {
         };
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello, 1_048_576).unwrap();
+        let event = Envelope {
+            protocol,
+            daemon_generation: generation.clone(),
+            kind: EnvelopeKind::Event {
+                subscription_id: crate::infrastructure::ipc::SubscriptionId("s".into()),
+                stream_ref: crate::infrastructure::ipc::StreamRef {
+                    stream_id: crate::infrastructure::ipc::StreamId("stream".into()),
+                    epoch: "epoch".into(),
+                },
+                stream_sequence: 1,
+                body: serde_json::json!({}),
+            },
+        };
+        write_json_frame(&mut input, &event, 1_048_576).unwrap();
+        let unrelated = Envelope {
+            protocol,
+            daemon_generation: generation.clone(),
+            kind: EnvelopeKind::Response {
+                request_id: crate::infrastructure::ipc::RequestId("other".into()),
+                outcome: ResponseOutcome::Ok,
+                body: serde_json::json!({}),
+            },
+        };
+        write_json_frame(&mut input, &unrelated, 1_048_576).unwrap();
         write_json_frame(&mut input, &response, 1_048_576).unwrap();
         Scripted {
             input: Cursor::new(input),
@@ -437,6 +479,15 @@ mod tests {
             IpcClient::connect(Broken, "c".into(), "n".into(), ClientPolicy::tui()),
             Err(ClientError::Unavailable(_))
         ));
+        assert!(matches!(
+            IpcClient::connect(
+                ReadFails { output: vec![] },
+                "c".into(),
+                "n".into(),
+                ClientPolicy::tui()
+            ),
+            Err(ClientError::Unavailable(_))
+        ));
     }
 
     #[test]
@@ -472,6 +523,20 @@ mod tests {
         };
         assert!(matches!(
             closed.request(request),
+            Err(ClientError::Unavailable(_))
+        ));
+        let mut read_fails = IpcClient {
+            stream: ReadFails { output: vec![] },
+            protocol,
+            daemon_generation: DaemonGeneration("d".into()),
+            next_request: 0,
+            policy: ClientPolicy::tui(),
+        };
+        assert!(matches!(
+            read_fails.request(DaemonRequest::Terminal {
+                action: TerminalAction::Attach,
+                payload: serde_json::json!({}),
+            }),
             Err(ClientError::Unavailable(_))
         ));
         assert!(
