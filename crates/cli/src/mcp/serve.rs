@@ -20,22 +20,35 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// stdin の JSON-RPC を行ごとに処理し、応答を stdout へ書く。EOF で正常終了する。
 ///
+/// トップレベルの誤り処理: **不正入力 1 行でサーバを止めない**。行は生バイトで読み、
+/// 非 UTF-8 はロッシー変換してパースエラー（`handle_line` が `-32700` を返す）に落とす。
+/// stdin の真の IO エラー（切断など）だけを伝播して終了する。リクエスト単位のエラー
+/// （不正 JSON・未知 method/tool・引数不正・tool 未実装）は `handle_line` が JSON-RPC
+/// エラー応答に整形し、ループは継続する。
+///
 /// `version` は `initialize` の `serverInfo.version` に載せる配布 version（合成ルートが注入）。
 ///
 /// # Errors
 ///
-/// 入力の読み取り、または `out` への書き込みに失敗した場合、そのエラーを返す。
-pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+/// stdin の読み取り、または `out` への書き込みが IO エラーになった場合、そのエラーを返す。
+pub fn serve(mut input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Result<()> {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // 生バイトで 1 行読む。真の IO エラーだけ `?` で伝播する。
+        if input.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(()); // EOF
+        }
+        // 非 UTF-8 はロッシー変換（不正 JSON になり handle_line が parse error を返す）。
+        let line = String::from_utf8_lossy(&buf);
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&line, version) {
+        if let Some(response) = handle_line(line, version) {
             writeln!(out, "{response}")?;
         }
     }
-    Ok(())
 }
 
 /// 1 リクエスト行を処理して応答文字列を返す。通知（`id` 無し）は `None`。
@@ -239,5 +252,25 @@ mod tests {
         // ping には 1 応答、空行と通知には応答なし＝出力は 1 行。
         assert_eq!(text.lines().count(), 1);
         assert!(text.contains("\"id\":1"));
+    }
+
+    #[test]
+    fn serve_survives_non_utf8_line_and_keeps_serving() {
+        // 非 UTF-8 の行 → パースエラーで返し、続く正常な ping にも応答する（サーバは落ちない）。
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&[0xff, 0xfe, b'\n']);
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#);
+        input.push(b'\n');
+
+        let mut out = Vec::new();
+        serve(input.as_slice(), &mut out, "9.9.9").unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let parse_error: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parse_error["error"]["code"], -32700);
+        let ping: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(ping["id"], 9);
     }
 }
