@@ -162,9 +162,12 @@ v1 から機能を再実装するときの置き場所の指針。
 
 ## 入口面 CLI のコマンド dispatch
 
-`crates/cli` の `cli/` は、コマンド面の骨格（枠）を持つ。どんなコマンド・オプションが
-あるかは `clap` のコマンドツリー（`Cli` / `Command` と各サブコマンド enum）で定義し、
-`usagi --help` と型の両方から見える。dispatch は `Run` トレイトで一様化する。
+`crates/cli` の `cli/` は、コマンド面の骨格（枠）を持つ。ここに置くのは
+**ターミナルから `usagi <cmd>` で叩く人間向けコマンド**（`open` / `config` / `doctor` /
+`update` / `completion` / `version` と clap 自動の `help`）だけで、エージェント向けの
+issue / memory 操作は MCP 面（`crates/cli/mcp/`）が受け持つ。どんなコマンド・オプションが
+あるかは `clap` のコマンドツリー（`Cli` / `Command`）で定義し、`usagi --help` と型の
+両方から見える。dispatch は `Run` トレイトで一様化する。
 
 ```text
 argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box<dyn Run> ─► Run::run(out)
@@ -179,8 +182,8 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
   `args` は単相化を増やさないよう `Vec<OsString>` の具体型で受ける。配布 version は
   ルートパッケージだけが持つ（[単一バイナリと合成ルート](#単一バイナリと合成ルート)）ため、
   `--version` の値は合成ルートから注入し、clap コマンドに載せる。
-- 各ハンドラの中身（core usecase 呼び出し・daemon への IPC・結果整形）は今後実装する。
-  現状ハンドラは「未実装」を報告するスタブで、枠だけが動く。
+- 各ハンドラの中身（TUI/daemon 面への委譲・core usecase 呼び出し・結果整形）は今後実装する。
+  現状は `version`（注入 version を表示）以外は未実装を報告するスタブで、枠だけが動く。
 
 ## 検討した代替案
 

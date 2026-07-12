@@ -1,16 +1,19 @@
 //! 人間向け CLI サブコマンドの presentation。ここには **コマンド面の枠** だけを置く:
 //! clap による引数解析ツリー（どんなコマンド・オプションがあるか）と、`Run`
-//! トレイトによる多態 dispatch である。各コマンドの中身（core usecase 呼び出し・
-//! daemon への IPC・結果整形）はハンドラ（`commands`）に実装していく。
+//! トレイトによる多態 dispatch である。各コマンドの中身は今後ハンドラ（`commands`）に
+//! 実装していく。
 //!
-//! 現状ハンドラはすべて「未実装」を報告するスタブで、コマンド面の骨格だけが動く。
-//! ロジックは usagi-core の usecase（store 系）と daemon への IPC（session 系）へ
-//! 委譲する方針で、v2 では必要になった時点で各ハンドラを実装する。
+//! ここに置くのは **ターミナルから `usagi <cmd>` で叩く人間向けコマンド** だけである。
+//! エージェント向けの issue / memory 操作は MCP 面（`crate::mcp`）が受け持ち、CLI には置かない。
+//!
+//! 現状ハンドラはほぼ「未実装」を報告するスタブで、コマンド面の骨格だけが動く
+//! （`version` だけは注入 version を表示する）。v2 では必要になった時点で各ハンドラを実装する。
 
 pub mod commands;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
@@ -50,151 +53,27 @@ pub struct Cli {
 }
 
 /// 人間向け CLI サブコマンドの一覧。各バリアントがそのコマンドの受け付ける
-/// オプションを型として表す。
+/// オプションを型として表す。`help` は clap が自動で用意する。
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// カレントディレクトリをプロジェクトとして登録する（`--git` で clone してから登録）
-    Init {
-        /// このリポジトリ URL を `<リポジトリ名>/` に clone してから登録する
-        #[arg(long, value_name = "URL")]
-        git: Option<String>,
+    /// ディレクトリをプロジェクトとして登録して TUI で開く
+    Open {
+        /// 開くディレクトリ（省略時はカレントディレクトリ）
+        path: Option<PathBuf>,
     },
-    /// AI エージェント用の設定ファイル（CLAUDE.md など）を生成する
-    InitAgent {
-        /// 既存ファイルを確認なしで上書きする
-        #[arg(long, short = 'y')]
-        yes: bool,
-    },
-    /// カレントリポジトリの worktree 状態を state.json に同期して一覧表示する
-    Status,
-    /// デフォルトブランチを origin から最新化し各セッション worktree に配布する
-    Update {
-        /// 変更せず、更新・スキップ内容だけを表示する
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// 放置・マージ済みのセッション worktree を Agent CLI に整理させる
-    Clean {
-        /// 削除せず、削除候補と理由だけを報告させる
-        #[arg(long)]
-        dry_run: bool,
-        /// この実行で使う Agent CLI を指定する（既定設定を上書き）
-        #[arg(long, value_name = "NAME")]
-        agent: Option<String>,
-    },
-    /// 必要ツールの導入状況を診断し、不足があれば導入を提案する
-    Doctor {
-        /// 確認を省いて不足を一括導入する
-        #[arg(long)]
-        fix: bool,
-    },
-    /// 各 Agent CLI が対応する usagi 機能を表で表示する
-    Feature,
-    /// 指定シェルの補完スクリプトを標準出力に印字する
+    /// 設定を編集する（TUI の Config を開く）
+    Config,
+    /// 必要ツールの導入状況を診断する（TUI の Doctor を開く）
+    Doctor,
+    /// 最新版があるか確認する
+    Update,
+    /// 指定シェルの補完スクリプトを標準出力に印字する（Tab 補完を有効化する）
     Completion {
         /// 補完スクリプトを生成する対象シェル
         shell: Shell,
     },
-    /// workspace の `op://` 環境変数を解決するための 1Password 資格情報を保存する
-    Op {
-        #[command(subcommand)]
-        command: OpCommand,
-    },
-    /// （ヘルプ非表示・上級者向け）グローバル設定を表示・編集する
-    #[command(hide = true)]
-    Config {
-        /// 設定ファイルを $EDITOR で開いて編集し、保存時に検証する
-        #[arg(long)]
-        edit: bool,
-    },
-    /// （ヘルプ非表示・エージェント向け）.usagi/issues/ のタスク issue を操作する
-    #[command(hide = true)]
-    Issue {
-        #[command(subcommand)]
-        command: IssueCommand,
-    },
-    /// （ヘルプ非表示・エージェント向け）.usagi/memory/ のエージェントメモリを操作する
-    #[command(hide = true)]
-    Memory {
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
-}
-
-/// `usagi op <subcommand>`。
-#[derive(Debug, Subcommand)]
-pub enum OpCommand {
-    /// 1Password のサービスアカウントトークンを OS のキーチェーンに保存する
-    Login,
-}
-
-/// `usagi issue <subcommand>`（エージェント向け。MCP と同じ store 操作の CLI 版）。
-#[derive(Debug, Subcommand)]
-pub enum IssueCommand {
-    /// issue を新規作成する
-    Create {
-        /// issue のタイトル
-        title: String,
-    },
-    /// issue を一覧表示する
-    List,
-    /// issue の依存グラフを表示する
-    Graph,
-    /// issue の詳細を表示する
-    Show {
-        /// issue 番号
-        number: u32,
-    },
-    /// issue のメタデータ（status など）を更新する
-    Update {
-        /// issue 番号
-        number: u32,
-        /// 新しい status（todo / in-progress / done）
-        #[arg(long)]
-        status: Option<String>,
-    },
-    /// issue を全文検索する
-    Search {
-        /// 検索クエリ
-        query: String,
-    },
-    /// issue を削除する
-    Delete {
-        /// issue 番号
-        number: u32,
-    },
-}
-
-/// `usagi memory <subcommand>`（エージェント向け。MCP と同じ store 操作の CLI 版）。
-#[derive(Debug, Subcommand)]
-pub enum MemoryCommand {
-    /// メモリを保存する
-    Save {
-        /// メモリの名前（スラッグ）
-        name: String,
-    },
-    /// メモリを一覧表示する
-    List,
-    /// メモリの詳細を表示する
-    Show {
-        /// メモリの名前
-        name: String,
-    },
-    /// メモリを更新する
-    Update {
-        /// メモリの名前
-        name: String,
-    },
-    /// メモリを全文検索する
-    Search {
-        /// 検索クエリ
-        query: String,
-    },
-    /// メモリを削除する
-    Delete {
-        /// メモリの名前
-        name: String,
-    },
+    /// バージョンを表示する
+    Version,
 }
 
 /// 補完スクリプトを生成する対象シェル。
@@ -214,23 +93,19 @@ impl Command {
     /// 解釈済みのコマンドを、その実行方法を知るハンドラ（`Run`）に変換する。
     ///
     /// dispatch はこの 1 か所の対応付けに集約し、実行自体は `Run::run` の一様な
-    /// 呼び出しになる。
+    /// 呼び出しになる。`version` は入口だけが持つ配布 version を渡す（他コマンドは使わない）。
     #[must_use]
-    pub fn into_handler(self) -> Box<dyn Run> {
+    pub fn into_handler(self, version: &str) -> Box<dyn Run> {
         use commands as h;
         match self {
-            Command::Init { git } => Box::new(h::Init { git }),
-            Command::InitAgent { yes } => Box::new(h::InitAgent { yes }),
-            Command::Status => Box::new(h::Status),
-            Command::Update { dry_run } => Box::new(h::Update { dry_run }),
-            Command::Clean { dry_run, agent } => Box::new(h::Clean { dry_run, agent }),
-            Command::Doctor { fix } => Box::new(h::Doctor { fix }),
-            Command::Feature => Box::new(h::Feature),
+            Command::Open { path } => Box::new(h::Open { path }),
+            Command::Config => Box::new(h::Config),
+            Command::Doctor => Box::new(h::Doctor),
+            Command::Update => Box::new(h::Update),
             Command::Completion { shell } => Box::new(h::Completion { shell }),
-            Command::Op { command } => Box::new(h::Op { command }),
-            Command::Config { edit } => Box::new(h::Config { edit }),
-            Command::Issue { command } => Box::new(h::Issue { command }),
-            Command::Memory { command } => Box::new(h::Memory { command }),
+            Command::Version => Box::new(h::Version {
+                version: version.to_owned(),
+            }),
         }
     }
 }
@@ -243,7 +118,7 @@ impl Command {
 ///
 /// `args` は `OsString` の具体型で受ける（ジェネリックにすると呼び出し側の
 /// イテレータ型ごとに単相化が増え、テストで到達しない実体がカバレッジを下げるため）。
-/// `version` は `--version` に載せる配布 version（合成ルートが注入する）。
+/// `version` は `--version` と `version` サブコマンドに載せる配布 version（合成ルートが注入する）。
 /// 合成ルートは `std::env::args_os().collect()` と自身の version を渡す。
 ///
 /// # Errors
@@ -278,7 +153,7 @@ pub fn run(
     let cli =
         Cli::from_arg_matches(&matches).expect("matches from Cli::command() は Cli に変換できる");
     if let Some(command) = cli.command {
-        command.into_handler().run(out)?;
+        command.into_handler(version).run(out)?;
         Ok(0)
     } else {
         // 引数なしの `usagi` は合成ルートが TUI に振り分けるため、ここに到達するのは
@@ -290,69 +165,54 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, IssueCommand, MemoryCommand, OpCommand, Shell, run};
+    use super::{Cli, Command, Shell, run};
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
-
-    /// `usagi status` を解析すると Status バリアントになる（parse 経路の疎通）。
-    #[test]
-    fn parses_a_simple_subcommand() {
-        let cli = Cli::try_parse_from(["usagi", "status"]).unwrap();
-        assert!(matches!(cli.command, Some(Command::Status)));
-    }
-
-    /// オプションが解析されてバリアントのフィールドに載る。
-    #[test]
-    fn parses_options_onto_the_variant() {
-        let cli = Cli::try_parse_from(["usagi", "update", "--dry-run"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Update { dry_run: true })
-        ));
-
-        let cli = Cli::try_parse_from(["usagi", "init", "--git", "https://x/y.git"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Init { git: Some(url) }) if url == "https://x/y.git"
-        ));
-    }
-
-    /// ネストしたサブコマンドと `value_enum` も解析できる。
-    #[test]
-    fn parses_nested_subcommands_and_value_enum() {
-        let cli = Cli::try_parse_from(["usagi", "op", "login"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Op {
-                command: OpCommand::Login
-            })
-        ));
-
-        let cli = Cli::try_parse_from(["usagi", "issue", "show", "42"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Issue {
-                command: IssueCommand::Show { number: 42 }
-            })
-        ));
-
-        let cli = Cli::try_parse_from(["usagi", "memory", "search", "worktree"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Memory {
-                command: MemoryCommand::Search { .. }
-            })
-        ));
-
-        let cli = Cli::try_parse_from(["usagi", "completion", "zsh"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Command::Completion { shell: Shell::Zsh })
-        ));
-    }
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
     fn argv(tokens: &[&str]) -> Vec<std::ffi::OsString> {
         tokens.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// オプションなしのサブコマンドを解析できる。
+    #[test]
+    fn parses_simple_subcommands() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "config"]).unwrap().command,
+            Some(Command::Config)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "doctor"]).unwrap().command,
+            Some(Command::Doctor)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "update"]).unwrap().command,
+            Some(Command::Update)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "version"]).unwrap().command,
+            Some(Command::Version)
+        ));
+    }
+
+    /// `open` は任意のパス、`completion` は `value_enum` を受け取る。
+    #[test]
+    fn parses_options() {
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "open"]).unwrap().command,
+            Some(Command::Open { path: None })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "open", "/tmp/x"])
+                .unwrap()
+                .command,
+            Some(Command::Open { path: Some(_) })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["usagi", "completion", "zsh"])
+                .unwrap()
+                .command,
+            Some(Command::Completion { shell: Shell::Zsh })
+        ));
     }
 
     /// 有効なサブコマンドは終了コード 0 でハンドラ出力を `out` に書く。
@@ -360,10 +220,10 @@ mod tests {
     fn run_dispatches_to_a_handler() {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = run(argv(&["usagi", "status"]), "9.9.9", &mut out, &mut err).unwrap();
+        let code = run(argv(&["usagi", "config"]), "9.9.9", &mut out, &mut err).unwrap();
         assert_eq!(code, 0);
         assert!(err.is_empty());
-        assert!(String::from_utf8(out).unwrap().contains("status"));
+        assert!(String::from_utf8(out).unwrap().contains("config"));
     }
 
     /// サブコマンドなしはトップレベルのヘルプを `out` に出す。
@@ -387,15 +247,17 @@ mod tests {
         assert!(!out.is_empty());
     }
 
-    /// `--version` は注入された配布 version を `out` に出す（cli クレートの 0.0.0 ではない）。
+    /// `--version` フラグと `version` サブコマンドはどちらも注入された配布 version を出す。
     #[test]
-    fn run_version_uses_injected_value() {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let code = run(argv(&["usagi", "--version"]), "9.9.9", &mut out, &mut err).unwrap();
-        assert_eq!(code, 0);
-        assert!(err.is_empty());
-        assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
+    fn run_reports_injected_version() {
+        for tokens in [&["usagi", "--version"][..], &["usagi", "version"][..]] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let code = run(argv(tokens), "9.9.9", &mut out, &mut err).unwrap();
+            assert_eq!(code, 0);
+            assert!(err.is_empty());
+            assert!(String::from_utf8(out).unwrap().contains("9.9.9"));
+        }
     }
 
     /// 不正なコマンドは `err` に出て非 0 終了。
@@ -419,37 +281,21 @@ mod tests {
     /// （parse だけでは通らない `*_for_update` / `has_subcommand` 系を明示的に叩く）。
     #[test]
     fn exercises_clap_generated_metadata() {
-        // CommandFactory の update 版。
         let _ = Cli::command_for_update();
 
-        // 各 Subcommand enum の augment（update 版）と has_subcommand。
         assert!(
             Command::augment_subcommands_for_update(clap::Command::new("usagi")).has_subcommands()
         );
-        assert!(Command::has_subcommand("status"));
+        assert!(Command::has_subcommand("open"));
         assert!(!Command::has_subcommand("nope"));
-        assert!(
-            OpCommand::augment_subcommands_for_update(clap::Command::new("op")).has_subcommands()
-        );
-        assert!(OpCommand::has_subcommand("login"));
-        assert!(
-            IssueCommand::augment_subcommands_for_update(clap::Command::new("issue"))
-                .has_subcommands()
-        );
-        assert!(IssueCommand::has_subcommand("create"));
-        assert!(
-            MemoryCommand::augment_subcommands_for_update(clap::Command::new("memory"))
-                .has_subcommands()
-        );
-        assert!(MemoryCommand::has_subcommand("save"));
 
         // FromArgMatches の update 経路。
         let matches = Cli::command()
-            .try_get_matches_from(["usagi", "status"])
+            .try_get_matches_from(["usagi", "config"])
             .unwrap();
         let mut cli = Cli::from_arg_matches(&matches).unwrap();
         cli.update_from_arg_matches(&matches).unwrap();
-        assert!(matches!(cli.command, Some(Command::Status)));
+        assert!(matches!(cli.command, Some(Command::Config)));
 
         // ValueEnum の派生メタデータ。
         assert_eq!(Shell::value_variants().len(), 5);
