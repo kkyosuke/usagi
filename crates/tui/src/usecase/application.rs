@@ -17,6 +17,8 @@ pub mod controller;
 pub mod lifecycle;
 /// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
 pub mod pane;
+/// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
+pub mod pane_runtime;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
