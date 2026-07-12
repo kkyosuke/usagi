@@ -45,18 +45,25 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 }
 
 #[test]
-fn other_entries_route_to_their_banner_screens() {
-    let cases: &[(&[&OsStr], &str)] = &[
-        (&[OsStr::new("config")], "config TUI"),
-        (&[OsStr::new("doctor")], "doctor TUI"),
-    ];
+fn config_entry_renders_the_config_screen() {
+    // `usagi config` は Config 画面を選ぶ。stdout が tty でないため、合成ルートは対話ループの
+    // 代わりに Config の 1 フレームを描いて返す。
+    let output = run(&[OsStr::new("config")]);
+    assert!(output.status.success());
+    let out = stdout(&output);
+    assert!(out.contains("Config"));
+    assert!(out.contains("No settings"));
+    assert!(out.contains("Esc: back"));
+    assert!(output.stderr.is_empty());
+}
 
-    for (args, expected) in cases {
-        let output = run(args);
-        assert!(output.status.success(), "args={args:?}");
-        assert!(stdout(&output).contains(expected), "args={args:?}");
-        assert!(output.stderr.is_empty(), "args={args:?}");
-    }
+#[test]
+fn other_entries_route_to_their_banner_screens() {
+    // 対話ループ未接続の画面（Doctor）は暫定バナー。
+    let output = run(&[OsStr::new("doctor")]);
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("doctor TUI"));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
