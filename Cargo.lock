@@ -815,6 +815,7 @@ dependencies = [
  "crossterm",
  "fs2",
  "libc",
+ "tempfile",
  "usagi-cli",
  "usagi-core",
  "usagi-daemon",

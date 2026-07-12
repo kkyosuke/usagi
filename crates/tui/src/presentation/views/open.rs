@@ -68,6 +68,29 @@ impl Open {
         self.workspaces.get(self.selected_index)
     }
 
+    /// `workspace` と同じ path の項目に touch 後の値を反映し、最終利用時刻の降順へ
+    /// 再整列する。順序が変わっても現在選択中の path を保つ。
+    pub(crate) fn record_opened(&mut self, workspace: &Workspace) {
+        let selected_path = self.selected().map(|selected| selected.path.clone());
+        let Some(current) = self
+            .workspaces
+            .iter_mut()
+            .find(|current| current.path == workspace.path)
+        else {
+            return;
+        };
+        *current = workspace.clone();
+        self.workspaces
+            .sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
+        self.selected_index = selected_path
+            .and_then(|selected_path| {
+                self.workspaces
+                    .iter()
+                    .position(|current| current.path == selected_path)
+            })
+            .unwrap_or_default();
+    }
+
     /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。
     pub fn select_next(&mut self) {
         if self.workspaces.is_empty() {
@@ -165,6 +188,7 @@ mod tests {
     use super::{Open, render};
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
+    use std::path::Path;
     use usagi_core::domain::workspace::Workspace;
 
     fn now() -> DateTime<Utc> {
@@ -246,6 +270,18 @@ mod tests {
         open.select_next();
         open.select_prev();
         assert_eq!(open.selected_index(), 0);
+    }
+
+    #[test]
+    fn record_opened_updates_recency_order_and_keeps_the_selected_path() {
+        let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 10)]);
+        let touched = workspace("beta", 0);
+
+        open.record_opened(&touched);
+
+        assert_eq!(open.workspaces()[0], touched);
+        assert_eq!(open.selected_index(), 1);
+        assert_eq!(open.selected().unwrap().path, Path::new("/tmp/alpha"));
     }
 
     #[test]

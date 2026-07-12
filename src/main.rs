@@ -9,10 +9,10 @@
 
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use crossterm::cursor;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -25,6 +25,7 @@ use fs2::FileExt;
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
@@ -32,11 +33,16 @@ use usagi_core::infrastructure::daemon::{
 };
 use usagi_core::infrastructure::git::{GitOutput, GitRunner};
 use usagi_core::infrastructure::paths;
+use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
+use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_tui::presentation::views::config;
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::{self, BannerScreenRunner, Exit, Start};
+use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
+use usagi_tui::presentation::{
+    self, BannerScreenRunner, Exit, Start, WorkspaceLoader, WorkspaceSnapshot,
+};
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 
 /// crossterm を backing にした実端末。TUI 面の [`Terminal`] ポートを合成ルートで実装し、
@@ -102,44 +108,90 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
-/// 登録済み workspace の一覧を読む（実 IO）。ストアが開けない・壊れている等の失敗時は
-/// 空一覧にフォールバックする（一覧が空でも welcome / Open 画面は成立するため）。
-fn load_workspaces() -> Vec<Workspace> {
-    Storage::open_default()
-        .and_then(|storage| storage.load_workspaces())
-        .unwrap_or_default()
+/// core の `anyhow` error を合成ルートの `io::Result` 境界へ写す。
+fn io_error(error: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(error.to_string())
 }
 
-/// `start` の画面から対話ループを起動する。対話端末（tty）なら raw mode + 代替スクリーンで
-/// ループを回し、非対話環境（パイプ・CI など）では開始画面の 1 フレームを `out` へ出して返す。
-fn launch_interactive(out: &mut dyn Write, info: &AppInfo, start: Start) -> std::io::Result<()> {
-    let now = Utc::now();
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        run_interactive(out, info, now, start)
-    } else {
-        // サイズ 0 は各 render 側で 80x24 にフォールバックされる。
-        let frame = match start {
-            Start::Welcome => welcome::render(0, 0, &Welcome::empty(), now),
-            Start::Config => config::render(0, 0),
-        };
-        for line in frame {
-            writeln!(out, "{line}")?;
-        }
-        Ok(())
+/// `path` が実在するディレクトリか検証する。非 UTF-8 path も filesystem が扱える場合は
+/// bytes のまま lookup し、Darwin の標準 filesystem などが `EILSEQ` 等で拒否した場合は
+/// その失敗を伝播する。
+fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("workspace path is not a directory: {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// CLI から受け取った workspace path を、実在する絶対ディレクトリへ解決する。
+/// 検証できない path を実在扱いするフォールバックは行わない。
+fn resolve_workspace_path(path: &Path) -> std::io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    validate_workspace_directory(&resolved)?;
+    Ok(resolved)
+}
+
+/// 実 workspace registry と repo state を [`WorkspaceLoader`] port に接続する。
+struct FsWorkspaceLoader {
+    storage: Storage,
+}
+
+impl FsWorkspaceLoader {
+    fn open_default() -> std::io::Result<Self> {
+        Ok(Self {
+            storage: Storage::open_default().map_err(io_error)?,
+        })
     }
 }
 
-/// raw mode + 代替スクリーンへ入って `start` 起点の対話ループを回し、終了時（エラー時も）に
-/// 端末状態を必ず元へ戻す。ユーザーが Open 画面で workspace を選んだら、後続で workspace 画面へ
-/// 接続する。
-fn run_interactive(
-    out: &mut dyn Write,
-    info: &AppInfo,
-    now: DateTime<Utc>,
-    start: Start,
-) -> std::io::Result<()> {
-    let workspaces = load_workspaces();
+impl WorkspaceLoader for FsWorkspaceLoader {
+    fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
+        // Open / Recent が渡す registry path は identity を保ったまま検証する。ここで再度
+        // canonicalize すると、登録済みの absolute symlink path が別 workspace として
+        // 二重登録されるためである。CLI の新規入力は dispatch 時点で解決済み。
+        validate_workspace_directory(path)?;
 
+        let workspace =
+            workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
+        // repo-local state の破損は workspace を開く導線そのものを塞がない。空 state で画面を
+        // 成立させ、registry の登録・touch は保持する。
+        let state = WorkspaceStateStore::new(&workspace.path)
+            .load()
+            .unwrap_or_default()
+            .unwrap_or_default();
+        Ok(WorkspaceSnapshot::new(workspace, state))
+    }
+}
+
+/// 開始画面が最初の描画に必要とする workspace data を読む。
+///
+/// Config は単独で成立するため、直接起動時の registry 読み込み失敗は空一覧へ縮退する。正常な
+/// registry は先に読んでおき、Esc で戻った Welcome の Open / Recent 導線を保持する。
+fn load_screen_graph_data(
+    storage: &Storage,
+    start: Start,
+) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
+    match start {
+        Start::Welcome => Ok((
+            storage.load_workspaces().map_err(io_error)?,
+            workspace_usecase::recent(storage).map_err(io_error)?,
+        )),
+        Start::Config => Ok((
+            storage.load_workspaces().unwrap_or_default(),
+            workspace_usecase::recent(storage).unwrap_or_default(),
+        )),
+    }
+}
+
+/// raw mode + 代替スクリーンの lifetime を 1 回だけ所有し、その中で `run` が Welcome / Open /
+/// Workspace を遷移する。結果がエラーでも端末状態は必ず復元する。
+fn run_in_terminal(
+    run: impl FnOnce(&mut CrosstermTerminal) -> std::io::Result<Exit>,
+) -> std::io::Result<Exit> {
     enable_raw_mode()?;
     let mut setup = std::io::stdout();
     // 代替スクリーンに入り、さらにマウスレポートを有効化する。代替スクリーンは起動前の
@@ -147,17 +199,26 @@ fn run_interactive(
     // でき、背後の起動前コマンドが見えてしまう。マウスレポートを有効にするとホイールは端末では
     // なくアプリへ報告され（[`CrosstermTerminal::read_key`] が読み飛ばす）、TUI をスクロール
     // 不能にできる（v1 と同じ手法）。
-    execute!(
+    if let Err(error) = execute!(
         setup,
         EnterAlternateScreen,
         EnableMouseCapture,
         cursor::Hide
-    )?;
+    ) {
+        let _ = execute!(
+            setup,
+            cursor::Show,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+        return Err(error);
+    }
 
     let mut terminal = CrosstermTerminal {
         out: std::io::stdout(),
     };
-    let result = presentation::run(&mut terminal, workspaces, now, start);
+    let result = run(&mut terminal);
 
     // 描画の成否によらず端末を復元する（マウスレポートも忘れず戻す）。
     let mut teardown = std::io::stdout();
@@ -169,15 +230,51 @@ fn run_interactive(
     );
     let _ = disable_raw_mode();
 
-    match result? {
-        Exit::Quit => Ok(()),
-        // 選んだ workspace を開く。workspace 画面は現状バナーなので、代替スクリーンを出た
-        // あとの通常端末へ接続する（対話的な workspace 画面は今後実装する）。
-        Exit::OpenWorkspace(path) => {
-            let mut runner = BannerScreenRunner::new(out, info);
-            application::run(&EntryScreen::Workspace { path }, &mut runner)
+    result
+}
+
+/// `start` から Welcome / New / Config / Open / Workspace の画面グラフを起動する。対話端末では
+/// すべてを同じ raw mode + 代替スクリーン上で回し、非対話環境では開始画面を 1 フレーム描く。
+fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
+    let now = Utc::now();
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let storage = Storage::open_default().map_err(io_error)?;
+        let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
+        let mut loader = FsWorkspaceLoader { storage };
+        run_in_terminal(|terminal| {
+            presentation::run(terminal, workspaces, recent, now, start, &mut loader)
+        })?;
+    } else {
+        // サイズ 0 は各 render 側で 80x24 にフォールバックされる。
+        let frame = match start {
+            Start::Welcome => {
+                let storage = Storage::open_default().map_err(io_error)?;
+                let recent = workspace_usecase::recent(&storage).map_err(io_error)?;
+                welcome::render(0, 0, &Welcome::new(recent), now)
+            }
+            Start::Config => config::render(0, 0),
+        };
+        for line in frame {
+            writeln!(out, "{line}")?;
         }
     }
+    Ok(())
+}
+
+/// `path` の Workspace 画面を直接起動する。登録・touch・state 読み込みは対話 / 非対話の
+/// どちらでも同じ loader を通す。
+fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
+    let mut loader = FsWorkspaceLoader::open_default()?;
+    let snapshot = loader.open(path)?;
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        run_in_terminal(|terminal| presentation::run_workspace(terminal, snapshot))?;
+    } else {
+        let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+        for line in workspace::render(0, 0, &workspace) {
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
 }
 
 /// The real `daemon.json` file: reads and writes `<data-dir>/daemon/daemon.json`.
@@ -358,11 +455,10 @@ fn launch_tui(
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
     match entry {
-        // Welcome / Config は対話ループへ接続する（Config は welcome が home）。
-        EntryScreen::Welcome => launch_interactive(out, info, Start::Welcome),
-        EntryScreen::Config => launch_interactive(out, info, Start::Config),
-        // 対話ループ未接続の画面（Workspace / Doctor）は暫定バナー。
-        EntryScreen::Workspace { .. } | EntryScreen::Doctor => {
+        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome),
+        EntryScreen::Config => launch_screen_graph(out, Start::Config),
+        EntryScreen::Workspace { path } => launch_workspace(out, path),
+        EntryScreen::Doctor => {
             let mut runner = BannerScreenRunner::new(out, info);
             application::run(entry, &mut runner)
         }
@@ -401,12 +497,14 @@ fn dispatch_cli(
         RunOutcome::LaunchTui(request) => {
             let entry = match request {
                 TuiRequest::Welcome => EntryScreen::Welcome,
-                TuiRequest::Workspace { path } => EntryScreen::Workspace {
-                    path: match path {
+                TuiRequest::Workspace { path } => {
+                    let path = match path {
                         Some(path) => path,
                         None => std::env::current_dir()?,
-                    },
-                },
+                    };
+                    let path = resolve_workspace_path(&path)?;
+                    EntryScreen::Workspace { path }
+                }
                 TuiRequest::Config => EntryScreen::Config,
                 TuiRequest::Doctor => EntryScreen::Doctor,
             };
@@ -465,5 +563,24 @@ fn main() -> std::io::Result<()> {
             let mut stderr = std::io::stderr();
             dispatch_cli(args, &mut stdout, &mut stderr, &info)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Start, load_screen_graph_data};
+    use usagi_core::infrastructure::store::workspace::Storage;
+
+    #[test]
+    fn config_start_degrades_a_broken_workspace_registry() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
+        let storage = Storage::new(home.path());
+
+        let (workspaces, recent) = load_screen_graph_data(&storage, Start::Config).unwrap();
+
+        assert!(workspaces.is_empty());
+        assert!(recent.is_empty());
+        assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
     }
 }

@@ -5,11 +5,14 @@
 //! - 左ペイン **session menu** — セッション一覧（session）・root 行（root）・キー操作の footer。
 //! - 右ペイン **closeup** — フォーカス中セッションの header・タブ切替の tabmenu・content・footer。
 //!
-//! 各パーツはそれぞれ独立した関数で組み、2 ペインの結合は共通の [`panes`] レイアウトに任せる。
-//! 表示内容はダミー（[`Workspace::dummy`] が埋める）で、状態 [`Workspace`] は端末 IO を持たない
-//! 純粋な値、[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
-//!
-//! キー入力の解釈は入力層が整うときに載せる。ここでは選択・タブ移動の純粋操作だけを公開する。
+//! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
+//! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
+
+use std::path::Path;
+
+use usagi_core::domain::session::SessionRecord;
+use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
+use usagi_core::domain::workspace_state::WorkspaceState;
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
@@ -20,28 +23,19 @@ const LEFT_WIDTH: usize = 28;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
 
-/// 左ペインに並ぶ 1 セッション（ダミー）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Session {
-    /// セッション名。
-    pub name: String,
-    /// 状態ラベル（ダミー: `● live` など）。
-    pub status: &'static str,
-}
-
-/// 右ペインの 1 タブ（ダミー）。
+/// 右ペインの 1 タブ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tab {
     /// タブのラベル。
     pub label: &'static str,
 }
 
-/// Workspace 画面の状態。表示はダミー。左ペインはセッション群＋末尾の root 行を選択でき、
-/// 右ペインはタブを切り替えられる。
+/// Workspace 画面の状態。左ペインは [`WorkspaceState`] のセッション群＋末尾の root 行を
+/// 選択でき、右ペインはタブを切り替えられる。
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    name: String,
-    sessions: Vec<Session>,
+    record: WorkspaceRecord,
+    state: WorkspaceState,
     /// 選択行。`0..sessions.len()` はセッション、`sessions.len()` は root 行。
     selected: usize,
     tabs: Vec<Tab>,
@@ -49,25 +43,12 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// デモ用のダミー workspace（セッション 3 つ＋タブ 4 つ）。
+    /// core の workspace とその永続化済み状態から画面状態を作る。
     #[must_use]
-    pub fn dummy() -> Self {
+    pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
         Self {
-            name: "usagi".to_string(),
-            sessions: vec![
-                Session {
-                    name: "tui".to_string(),
-                    status: "● live",
-                },
-                Session {
-                    name: "daemon".to_string(),
-                    status: "▶ running",
-                },
-                Session {
-                    name: "docs".to_string(),
-                    status: "◆ waiting",
-                },
-            ],
+            record: workspace,
+            state,
             selected: 0,
             tabs: vec![
                 Tab { label: "Preview" },
@@ -82,13 +63,19 @@ impl Workspace {
     /// workspace 名。
     #[must_use]
     pub fn name(&self) -> &str {
-        &self.name
+        &self.record.name
+    }
+
+    /// workspace の絶対パス。
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.record.path
     }
 
     /// セッション一覧。
     #[must_use]
-    pub fn sessions(&self) -> &[Session] {
-        &self.sessions
+    pub fn sessions(&self) -> &[SessionRecord] {
+        &self.state.sessions
     }
 
     /// タブ一覧。
@@ -112,7 +99,7 @@ impl Workspace {
     /// root 行を選択しているか。
     #[must_use]
     pub fn root_selected(&self) -> bool {
-        self.selected == self.sessions.len()
+        self.selected == self.state.sessions.len()
     }
 
     /// 左ペインの選択を 1 つ下へ（末尾の root の次は先頭へ回り込む）。
@@ -139,28 +126,26 @@ impl Workspace {
 
     /// 選択できる行数（セッション数＋root 行 1）。
     fn row_count(&self) -> usize {
-        self.sessions.len() + 1
+        self.state.sessions.len() + 1
+    }
+
+    /// フォーカス中のセッション（root 選択なら `None`）。
+    fn focused_session(&self) -> Option<&SessionRecord> {
+        self.state.sessions.get(self.selected)
     }
 
     /// フォーカス中の行の表示名（root 選択なら "root"）。
     fn focused_name(&self) -> &str {
-        self.sessions
-            .get(self.selected)
-            .map_or("root", |s| s.name.as_str())
-    }
-}
-
-impl Default for Workspace {
-    fn default() -> Self {
-        Self::dummy()
+        self.focused_session()
+            .map_or("root", SessionRecord::display_label)
     }
 }
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// 全幅の header: workspace 名のパンくずとセッション数（ダミー）。左寄せ・dim の区切り。
+/// 全幅の header: workspace 名のパンくずとセッション数。左寄せ・dim の区切り。
 fn header_line(width: usize, ws: &Workspace) -> String {
-    let count = ws.sessions.len();
+    let count = ws.sessions().len();
     let sep = Style::new().dim().paint(" › ");
     let dot = Style::new().dim().paint(" · ");
     let line = format!(
@@ -177,21 +162,35 @@ fn rule_line(width: usize) -> String {
     Style::new().dim().paint(&"─".repeat(width))
 }
 
-// ── left pane: session menu ───────────────────────────────────────────────────
+// ── left pane: session menu ─────────────────────────────────────────────────
 
-/// セッション行（session）。選択中は `>` カーソル＋accent、状態ラベルは dim。
-fn session_rows(width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = vec![Role::Success.style().bold().paint("Sessions")];
-    for (i, session) in ws.sessions.iter().enumerate() {
-        let selected = i == ws.selected;
-        rows.push(menu_row(width, selected, &session.name, session.status));
-    }
-    rows
-}
-
-/// root 行（root）。フォーカス中は強調する。
+/// root 行。フォーカス中は強調する。
 fn root_row(width: usize, ws: &Workspace) -> String {
     menu_row(width, ws.root_selected(), "root", "workspace root")
+}
+
+/// 選択可能な 1 行。`0..sessions.len()` は session、末尾は root。
+fn selectable_row(width: usize, ws: &Workspace, index: usize) -> String {
+    ws.sessions().get(index).map_or_else(
+        || root_row(width, ws),
+        |session| {
+            menu_row(
+                width,
+                index == ws.selected,
+                session.display_label(),
+                session.origin.as_str(),
+            )
+        },
+    )
+}
+
+/// `capacity` 行の viewport に選択行が必ず入るよう、先頭 index を決める。
+fn viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
+    let visible = capacity.min(row_count);
+    let max_start = row_count.saturating_sub(visible);
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(max_start)
 }
 
 /// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
@@ -214,27 +213,59 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
 fn left_footer(width: usize) -> String {
     Style::new()
         .dim()
-        .paint(&widgets::clip_to_width("↑↓ session  Enter  q quit", width))
+        .paint(&widgets::clip_to_width("↑↓ session / q quit", width))
 }
 
-/// 左ペイン（session menu）を `height` 行に組む: セッション群＋root 行、footer を最下行に固定。
+/// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
+/// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
 fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = session_rows(width, ws);
-    rows.push(String::new());
-    rows.push(root_row(width, ws));
-    with_footer(rows, height, left_footer(width))
+    if height == 0 {
+        return Vec::new();
+    }
+    if height == 1 {
+        return vec![selectable_row(width, ws, ws.selected)];
+    }
+
+    let body_capacity = height - 1;
+    let show_heading = body_capacity > 1;
+    let viewport_capacity = body_capacity - usize::from(show_heading);
+    let start = viewport_start(ws.selected, ws.row_count(), viewport_capacity);
+    let end = (start + viewport_capacity).min(ws.row_count());
+
+    let mut rows = Vec::with_capacity(height);
+    if show_heading {
+        rows.push(Role::Success.style().bold().paint("Sessions"));
+    }
+    for index in start..end {
+        // 全行が収まる場合だけ、session と root の間に余白を残す。
+        if index == ws.sessions().len()
+            && start == 0
+            && end == ws.row_count()
+            && viewport_capacity > ws.row_count()
+        {
+            rows.push(String::new());
+        }
+        rows.push(selectable_row(width, ws, index));
+    }
+    rows.resize(body_capacity, String::new());
+    rows.push(left_footer(width));
+    rows
 }
 
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
-/// closeup の header: フォーカス中セッションの名前と状態（ダミー）。
+/// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
 fn closeup_header(width: usize, ws: &Workspace) -> String {
     let name = Role::Accent.style().bold().paint(ws.focused_name());
-    let detail = Style::new().dim().paint("branch: main · agent: idle");
+    let detail = ws.focused_session().map_or_else(
+        || ws.path().display().to_string(),
+        |session| format!("{} · {}", session.name, session.origin),
+    );
+    let detail = Style::new().dim().paint(&detail);
     widgets::pad_to_width(&format!(" {name}  {detail}"), width)
 }
 
-/// tabmenu: タブ（tab）を並べ、アクティブを `[Label]` accent、他を dim で描く。
+/// tabmenu: タブを並べ、アクティブを `[Label]` accent、他を dim で描く。
 fn tab_menu(width: usize, ws: &Workspace) -> String {
     let tabs = ws
         .tabs
@@ -252,28 +283,28 @@ fn tab_menu(width: usize, ws: &Workspace) -> String {
     widgets::pad_to_width(&format!(" {tabs}"), width)
 }
 
-/// content: アクティブなタブに応じたダミー本文。
+/// content: アクティブなタブと、フォーカス中の実 workspace / session path。
 fn content_lines(ws: &Workspace) -> Vec<String> {
-    let tab = ws.tabs.get(ws.active_tab).map_or("", |t| t.label);
-    let session = ws.focused_name();
+    let tab = ws.tabs[ws.active_tab].label;
+    let (kind, path) = ws.focused_session().map_or_else(
+        || ("workspace", ws.path()),
+        |session| ("session", session.root.as_path()),
+    );
     vec![
         String::new(),
         Style::new()
             .dim()
-            .paint(&format!("  {tab} — session '{session}' (dummy)")),
+            .paint(&format!("  {tab} — {kind} '{}'", ws.focused_name())),
         String::new(),
-        Style::new()
-            .dim()
-            .paint("  ここに選択中タブの内容が表示される。"),
+        Style::new().dim().paint(&format!("  {}", path.display())),
     ]
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
 fn right_footer(width: usize) -> String {
-    Style::new().dim().paint(&widgets::clip_to_width(
-        "←→ tab / Enter open / Esc back",
-        width,
-    ))
+    Style::new()
+        .dim()
+        .paint(&widgets::clip_to_width("←→ tab / Esc back / q quit", width))
 }
 
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
@@ -325,6 +356,57 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 mod tests {
     use super::{Workspace, render};
     use crate::presentation::widgets::display_width;
+    use chrono::{DateTime, Utc};
+    use std::path::PathBuf;
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+    use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
+    use usagi_core::domain::workspace_state::WorkspaceState;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
+        SessionRecord {
+            name: name.to_string(),
+            display_name: display_name.map(str::to_string),
+            origin,
+            started_from: None,
+            root: PathBuf::from(format!("/tmp/actual/.usagi/sessions/{name}")),
+            created_at: now(),
+            last_active: None,
+            notes: Scratchpad::default(),
+            prs: Vec::new(),
+        }
+    }
+
+    fn workspace() -> Workspace {
+        let record = WorkspaceRecord::new("actual", "/tmp/actual");
+        let state = WorkspaceState {
+            sessions: vec![
+                session("tui", Some("UI work"), SessionOrigin::Human),
+                session("daemon", None, SessionOrigin::Mcp),
+            ],
+            root_notes: Scratchpad::default(),
+            updated_at: now(),
+        };
+        Workspace::new(record, state)
+    }
+
+    fn workspace_with_sessions(count: usize) -> Workspace {
+        let record = WorkspaceRecord::new("actual", "/tmp/actual");
+        let state = WorkspaceState {
+            sessions: (0..count)
+                .map(|index| session(&format!("session-{index:02}"), None, SessionOrigin::Human))
+                .collect(),
+            root_notes: Scratchpad::default(),
+            updated_at: now(),
+        };
+        Workspace::new(record, state)
+    }
 
     fn strip(line: &str) -> String {
         let mut out = String::new();
@@ -346,130 +428,162 @@ mod tests {
     fn joined(ws: &Workspace) -> String {
         render(30, 100, ws)
             .iter()
-            .map(|l| strip(l))
+            .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     #[test]
-    fn dummy_workspace_has_sessions_and_tabs() {
-        let ws = Workspace::dummy();
-        assert_eq!(ws.name(), "usagi");
-        assert_eq!(ws.sessions().len(), 3);
+    fn workspace_is_built_from_domain_records() {
+        let ws = workspace();
+        assert_eq!(ws.name(), "actual");
+        assert_eq!(ws.path(), PathBuf::from("/tmp/actual"));
+        assert_eq!(ws.sessions().len(), 2);
+        assert_eq!(ws.sessions()[0].display_label(), "UI work");
         assert_eq!(ws.tabs().len(), 4);
         assert_eq!(ws.selected(), 0);
         assert_eq!(ws.active_tab(), 0);
         assert!(!ws.root_selected());
-        // Default は dummy。derive された Clone / Debug も触れる。
-        assert_eq!(Workspace::default().sessions().len(), 3);
-        assert!(format!("{:?}", ws.clone()).contains("usagi"));
-        // Session / Tab の derive も。
-        assert_eq!(ws.sessions()[0], ws.sessions()[0]);
-        assert_eq!(ws.tabs()[0], ws.tabs()[0]);
-        assert!(format!("{:?}", ws.sessions()[0]).contains("tui"));
+        assert!(format!("{:?}", ws.clone()).contains("actual"));
         assert!(format!("{:?}", ws.tabs()[0]).contains("Preview"));
+        assert_eq!(ws.tabs()[0], ws.tabs()[0]);
     }
 
     #[test]
     fn select_cycles_through_sessions_then_the_root_row() {
-        let mut ws = Workspace::dummy();
-        ws.select_next(); // 1
-        ws.select_next(); // 2
-        assert_eq!(ws.selected(), 2);
-        ws.select_next(); // 3 = root
+        let mut ws = workspace();
+        ws.select_next();
+        assert_eq!(ws.selected(), 1);
+        ws.select_next();
         assert!(ws.root_selected());
-        ws.select_next(); // wrap to 0
+        ws.select_next();
         assert_eq!(ws.selected(), 0);
-        ws.select_prev(); // wrap to root
+        ws.select_prev();
         assert!(ws.root_selected());
+    }
+
+    #[test]
+    fn an_empty_workspace_selects_and_cycles_the_root_row() {
+        let mut ws = Workspace::new(
+            WorkspaceRecord::new("empty", "/tmp/empty"),
+            WorkspaceState::new(),
+        );
+        assert!(ws.root_selected());
+        ws.select_next();
+        ws.select_prev();
+        assert_eq!(ws.selected(), 0);
+        let text = joined(&ws);
+        assert!(text.contains("0 sessions"));
+        assert!(text.contains("/tmp/empty"));
     }
 
     #[test]
     fn tab_navigation_wraps() {
-        let mut ws = Workspace::dummy();
-        ws.tab_prev(); // wrap to last (3)
+        let mut ws = workspace();
+        ws.tab_prev();
         assert_eq!(ws.active_tab(), 3);
-        ws.tab_next(); // wrap to 0
+        ws.tab_next();
         assert_eq!(ws.active_tab(), 0);
         ws.tab_next();
         assert_eq!(ws.active_tab(), 1);
+        assert!(joined(&ws).contains("Terminal — session 'UI work'"));
     }
 
     #[test]
-    fn render_shows_the_header_and_both_panes() {
-        let text = joined(&Workspace::dummy());
-        // header: パンくずとセッション数。
+    fn render_shows_real_workspace_and_session_records() {
+        let text = joined(&workspace());
         assert!(text.contains("USAGI"));
-        assert!(text.contains("usagi"));
-        assert!(text.contains("3 sessions"));
-        // 左ペイン: セッション一覧・root。
+        assert!(text.contains("actual"));
+        assert!(text.contains("2 sessions"));
         assert!(text.contains("Sessions"));
-        assert!(text.contains("tui"));
+        assert!(text.contains("UI work"));
+        assert!(text.contains("human"));
         assert!(text.contains("daemon"));
+        assert!(text.contains("mcp"));
+        assert!(text.contains("tui · human"));
+        assert!(text.contains("/tmp/actual/.usagi/sessions/tui"));
         assert!(text.contains("root"));
-        assert!(text.contains("q quit")); // 左 footer
-        // 右ペイン: closeup header・tabmenu・content・footer。
         assert!(text.contains("Preview"));
         assert!(text.contains("Terminal"));
-        assert!(text.contains("dummy")); // content
-        assert!(text.contains("Esc back")); // 右 footer
-        // 縦区切り。
+        assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
     }
 
     #[test]
-    fn render_reflects_the_selected_session_in_the_closeup_header() {
-        let mut ws = Workspace::dummy();
-        ws.select_next(); // daemon を選択
-        let text = joined(&ws);
-        // closeup header にフォーカス中セッション名。
-        assert!(text.contains("daemon"));
+    fn render_reflects_selected_session_and_root() {
+        let mut ws = workspace();
+        ws.select_next();
+        let session_text = joined(&ws);
+        assert!(session_text.contains("daemon · mcp"));
+        assert!(session_text.contains("/tmp/actual/.usagi/sessions/daemon"));
+
+        ws.select_next();
+        assert!(ws.root_selected());
+        let root_text = joined(&ws);
+        assert!(root_text.contains("Preview — workspace 'root'"));
+        assert!(root_text.contains("/tmp/actual"));
     }
 
     #[test]
     fn render_marks_only_one_selected_row() {
-        let text = joined(&Workspace::dummy());
-        // 左ペインのカーソル `>` は 1 行だけ。
-        let cursor_rows = render(30, 100, &Workspace::dummy())
+        let frame = render(30, 100, &workspace());
+        let cursor_rows = frame
             .iter()
-            .filter(|l| strip(l).trim_start().starts_with('>'))
+            .filter(|line| strip(line).trim_start().starts_with('>'))
             .count();
         assert_eq!(cursor_rows, 1);
-        assert!(text.contains('>'));
     }
 
     #[test]
-    fn render_shows_root_focus_in_the_closeup_header() {
-        let mut ws = Workspace::dummy();
-        // root 行まで移動（セッション 3 つの次）。
-        for _ in 0..3 {
+    fn session_viewport_keeps_every_selection_and_the_root_visible() {
+        let mut ws = workspace_with_sessions(12);
+        let tiny_frame = render(3, 100, &ws);
+        assert!(
+            tiny_frame
+                .iter()
+                .map(|line| strip(line))
+                .any(|line| line.contains("> session-00"))
+        );
+        for expected in (0..12)
+            .map(|index| format!("session-{index:02}"))
+            .chain(std::iter::once("root".to_string()))
+        {
+            let frame = render(8, 100, &ws);
+            let selected = frame
+                .iter()
+                .map(|line| strip(line))
+                .find(|line| line.trim_start().starts_with('>'))
+                .expect("selected row must be inside the viewport");
+            assert!(selected.contains(&expected), "selected row: {selected}");
+            if expected == "root" {
+                let text = frame
+                    .iter()
+                    .map(|line| strip(line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(!text.contains("session-00"));
+            }
             ws.select_next();
         }
-        assert!(ws.root_selected());
-        let text = joined(&ws);
-        assert!(text.contains("root"));
     }
 
     #[test]
     fn render_fills_the_terminal_and_fits_its_width() {
-        let frame = render(30, 100, &Workspace::dummy());
+        let frame = render(30, 100, &workspace());
         assert_eq!(frame.len(), 30);
-        assert!(frame.iter().all(|l| display_width(l) == 100));
+        assert!(frame.iter().all(|line| display_width(line) == 100));
     }
 
     #[test]
     fn render_falls_back_for_a_zero_size() {
-        let frame = render(0, 0, &Workspace::dummy());
+        let frame = render(0, 0, &workspace());
         assert_eq!(frame.len(), 24);
-        assert!(frame.iter().all(|l| display_width(l) == 80));
+        assert!(frame.iter().all(|line| display_width(line) == 80));
     }
 
     #[test]
     fn render_does_not_overflow_a_short_terminal() {
-        // header と罫線だけで埋まる高さでも溢れず、ちょうど height 行。
-        let frame = render(2, 80, &Workspace::dummy());
-        assert_eq!(frame.len(), 2);
-        let tiny = render(1, 80, &Workspace::dummy());
-        assert_eq!(tiny.len(), 1);
+        assert_eq!(render(2, 80, &workspace()).len(), 2);
+        assert_eq!(render(1, 80, &workspace()).len(), 1);
     }
 }
