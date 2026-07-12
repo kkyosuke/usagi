@@ -65,7 +65,8 @@ fn config_entry_renders_the_config_screen() {
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("Config"));
-    assert!(out.contains("No settings"));
+    assert!(out.contains("Scope: [Global]"));
+    assert!(out.contains("Theme: System"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
 }

@@ -19,4 +19,5 @@ pub mod issue;
 pub mod memory;
 pub mod note;
 pub mod session;
+pub mod settings;
 pub mod workspace;

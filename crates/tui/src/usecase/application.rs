@@ -276,6 +276,7 @@ mod tests {
             Key::Left,
             Key::Right,
             Key::Enter,
+            Key::Tab,
             Key::Backspace,
             Key::Escape,
             Key::Quit,
