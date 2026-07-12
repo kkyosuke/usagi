@@ -1,6 +1,9 @@
-//! 人間向け CLI サブコマンドの presentation。引数解析と結果整形だけを持ち、
+//! 人間向け CLI サブコマンドの presentation。引数解析・dispatch・結果整形だけを持ち、
 //! ロジックは usagi-core の usecase（store 系）と daemon への IPC（session 系）へ
-//! 委譲する。v2 では必要になった時点でサブコマンドを追加する。
+//! 委譲する。個々のサブコマンドハンドラは `commands` に置き、引数解析・整形が肥大したら
+//! 専用モジュールへ分割する。v2 では必要になった時点でサブコマンドを追加する。
+
+pub mod commands;
 
 use std::io::Write;
 

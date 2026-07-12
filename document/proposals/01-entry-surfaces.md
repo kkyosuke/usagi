@@ -74,7 +74,9 @@ crates/
     └── src/
         ├── lib.rs
         ├── cli/      # 人間向けサブコマンド（issue / memory / status / clean / ...）
-        └── mcp/      # MCP サーバ（stdio JSON-RPC フレーミング・tool アダプタ）
+        │   └── commands/   # サブコマンドハンドラ（core usecase 直呼び / daemon IPC）
+        └── mcp/      # MCP サーバ（stdio JSON-RPC フレーミング・dispatch）
+            └── tools/      # tool アダプタ（commands と同じ core usecase を呼ぶ兄弟）
 ```
 
 合成ルートの dispatch は第 1 引数で決める。
