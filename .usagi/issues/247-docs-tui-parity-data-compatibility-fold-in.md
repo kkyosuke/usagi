@@ -1,14 +1,14 @@
 ---
 number: 247
 title: docs(tui): parity data compatibility と実装済み仕様の fold-in を行う
-status: todo
+status: done
 priority: medium
 labels: [tui, docs, parity]
 dependson: [234, 235, 236, 238, 245, 246]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:34.288369+00:00
-updated_at: 2026-07-12T21:12:58.076016+00:00
+updated_at: 2026-07-12T23:15:53.928751+00:00
 ---
 
 ## 目的
