@@ -86,9 +86,12 @@ Diff / Notes のタブを循環する。Enter または `t` で選択行の Clos
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
-`p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。モーダル表示中は
-その入力が背面より優先されるため、Overview に入力した `q` は終了キーにならない。Closeup action、
-Overview command、Pull Request の実行はまだ接続せず、今回は表示と選択だけを行う。
+`p` は選択中 session の Pull Request モーダルを開き、root では空一覧を表示する。`v` は対象の
+preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
+長文を scroll し、データを提供できない diff や空の Notes は安全な fallback を表示する。いずれも
+Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
+`q` は終了キーにならない。Closeup action、Overview command、Pull Request の実行はまだ接続せず、
+今回は表示と選択だけを行う。
 
 Esc は最前面から `モーダル → Closeup → Switch → 呼び出し元` の順に戻る。Switch からは Open
 経由なら Open、Recent 経由なら Welcome へ戻り、`usagi open` で直接開いた場合は終了する。
