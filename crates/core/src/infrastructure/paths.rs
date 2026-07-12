@@ -19,6 +19,10 @@ use anyhow::{Context, Result};
 /// (`issues/`, `memory/`, `state.json`, …): `<repo>/.usagi`.
 pub const STATE_DIR: &str = ".usagi";
 
+/// The directory under [`STATE_DIR`] that holds session worktrees, one per
+/// session: `<repo>/.usagi/sessions/<name>`.
+pub const SESSIONS_DIR: &str = "sessions";
+
 /// Environment variable that overrides the default data directory.
 pub const DATA_DIR_ENV: &str = "USAGI_HOME";
 /// Directory created under the user's home directory by default.
