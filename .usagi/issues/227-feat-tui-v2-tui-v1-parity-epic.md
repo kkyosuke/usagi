@@ -1,13 +1,13 @@
 ---
 number: 227
 title: feat(tui): v2 TUI v1-parity の残作業を追跡する Epic
-status: todo
+status: done
 priority: high
 labels: [tui, epic, parity]
 dependson: []
 related: []
 created_at: 2026-07-12T21:10:44.592323+00:00
-updated_at: 2026-07-12T21:12:58.135618+00:00
+updated_at: 2026-07-12T23:19:16.330873+00:00
 ---
 
 ## 目的
