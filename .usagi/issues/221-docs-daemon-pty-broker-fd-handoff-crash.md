@@ -1,13 +1,13 @@
 ---
 number: 221
 title: docs(daemon): PTY broker／FD handoff による crash 継続を将来設計する
-status: todo
+status: done
 priority: low
 labels: [design, daemon, terminal]
 dependson: [209]
 related: [168, 213]
 created_at: 2026-07-12T11:40:16.705437+00:00
-updated_at: 2026-07-12T12:06:04.439149+00:00
+updated_at: 2026-07-12T21:32:12.066907+00:00
 ---
 
 ## 目的
