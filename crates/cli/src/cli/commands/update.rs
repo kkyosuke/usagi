@@ -3,24 +3,26 @@
 use std::io::{self, Write};
 
 use super::unimplemented;
-use crate::cli::Run;
+use crate::cli::{Run, RunOutcome};
 
 /// `usagi update` のハンドラ。
 pub struct Update;
 
 impl Run for Update {
-    fn run(&self, out: &mut dyn Write) -> io::Result<()> {
+    fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
         unimplemented(out, "update", "")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::Command;
-    use crate::cli::commands::render;
+    use crate::cli::commands::execute;
+    use crate::cli::{Command, RunOutcome};
 
     #[test]
     fn reports_name() {
-        assert!(render(Command::Update).contains("update"));
+        let (outcome, output) = execute(Command::Update);
+        assert_eq!(outcome, RunOutcome::Exit(0));
+        assert!(output.contains("update"));
     }
 }
