@@ -94,6 +94,16 @@ pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
 }
 
 impl Command {
+    /// registry に登録された command 名。
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Config { .. } => "config",
+            Self::Env { .. } => "env",
+            Self::Issue { .. } => "issue",
+            Self::Session { .. } => "session",
+        }
+    }
     /// 解釈済みコマンドを、その実行方法を知る個別ハンドラへ変換する。
     #[must_use]
     pub fn into_handler(self) -> Box<dyn Run> {

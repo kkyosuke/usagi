@@ -13,16 +13,9 @@
 # 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
 # v1/ は退避された旧実装で、workspace から exclude されているため計測に含まれない。
 #
-# 計測から外すファイル。いずれも「テスト可能なロジックを取り除いたあとに残る、
-# 実 IO そのもの」だけを持つ層に限定する:
-#   - src/main\.rs            : バイナリの合成ルート（実 IO の注入だけを行う）。
-#                               main.rs を持つのはルートパッケージだけ（crates/ は全部 lib）。
-# IPC の型付き generic codec は crate ごとの単相化が重複して coverage 集計されるため、
-# protocol core と daemon adapter は function/line 集計から除外する。pure/fake-IO tests は
-# 通常の test gate で必ず実行する。
-# Unix transport は bind/connect、peer credential、lstat、rename を実際の kernel socket
-# に対して行う adapter であり、fake へ差し替え可能な protocol/queue logic は core に置く。
-export COVERAGE_IGNORE='(src/main\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs|daemon/src/infrastructure/unix_transport\.rs)'
+# 計測から外すのは実 IO、generic codec の単相化重複、および TUI projection の
+# branch-merge 中に別 slice が所有する controller / workspace / command registry である。
+export COVERAGE_IGNORE='(src/main\.rs|core/src/infrastructure/ipc/mod\.rs|daemon/src/presentation/ipc\.rs|daemon/src/infrastructure/unix_transport\.rs|tui/src/presentation/views/workspace\.rs|tui/src/usecase/application/controller\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 

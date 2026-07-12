@@ -10,48 +10,12 @@
 
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, TextInput, modal};
+use crate::usecase::overview;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 56;
 /// 一度に出す候補の最大数。
 const MAX_MATCHES: usize = 8;
-
-/// コマンド候補 1 件（ダミー）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandHint {
-    /// コマンド名。
-    pub name: &'static str,
-    /// 1 行の説明。
-    pub description: &'static str,
-}
-
-/// workspace 全体に効くコマンド（ダミー）。前方一致で絞り込む対象。
-const COMMANDS: &[CommandHint] = &[
-    CommandHint {
-        name: "new",
-        description: "start a new session",
-    },
-    CommandHint {
-        name: "rename",
-        description: "rename the selected session",
-    },
-    CommandHint {
-        name: "config",
-        description: "edit workspace settings",
-    },
-    CommandHint {
-        name: "issue",
-        description: "browse the issue store",
-    },
-    CommandHint {
-        name: "remove",
-        description: "remove sessions",
-    },
-    CommandHint {
-        name: "quit",
-        description: "leave usagi",
-    },
-];
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
 #[derive(Debug, Clone, Default)]
@@ -87,13 +51,30 @@ impl OverviewModal {
 
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
     #[must_use]
-    pub fn matches(&self) -> Vec<CommandHint> {
+    pub fn matches(&self) -> Vec<overview::CommandInfo> {
         let typed = self.input.value().trim();
-        COMMANDS
-            .iter()
+        overview::commands()
             .filter(|cmd| cmd.name.starts_with(typed))
-            .copied()
             .collect()
+    }
+
+    /// 選択中候補の command 名を入力欄へ補完する。候補が無ければ no-op。
+    pub fn complete_selected(&mut self) {
+        if let Some(command) = self.matches().get(self.selected) {
+            self.input = TextInput::with_value(command.name);
+        }
+    }
+
+    /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
+    #[must_use]
+    pub fn submission(&self) -> String {
+        if self.input.value().trim().is_empty() {
+            self.matches()
+                .get(self.selected)
+                .map_or_else(String::new, |command| command.name.to_owned())
+        } else {
+            self.input.value().to_owned()
+        }
     }
 
     /// キャレット位置に 1 文字挿入し、選択を先頭に戻す（候補集合が変わるため）。
@@ -161,7 +142,7 @@ fn input_line(value: &str, cursor: usize) -> String {
 }
 
 /// 1 候補行: 選択中は `›` マーカー、コマンド名（accent）、説明（dim）。幅に切り詰める。
-fn hint_row(hint: CommandHint, selected: bool, inner: usize) -> String {
+fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
     } else {
@@ -266,30 +247,30 @@ mod tests {
         assert_eq!(modal.input(), "");
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.matches().len(), 6);
+        assert_eq!(modal.matches().len(), 4);
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("OverviewModal"));
-        // CommandHint の derive も。
+        // registry metadata の derive も。
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);
-        assert!(format!("{hint:?}").contains("new"));
+        assert!(format!("{hint:?}").contains("config"));
     }
 
     #[test]
     fn typing_filters_by_prefix_and_resets_the_selection() {
         let mut modal = OverviewModal::new();
         modal.select_next(); // selected = 1
-        type_str(&mut modal, "r");
-        // "r" 前方一致: rename / remove。
+        type_str(&mut modal, "i");
+        // "i" 前方一致: issue。
         let names: Vec<&str> = modal.matches().iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["rename", "remove"]);
+        assert_eq!(names, vec!["issue"]);
         // 入力で選択は先頭へ。
         assert_eq!(modal.selected(), 0);
-        // さらに絞る（"ren" は rename だけ）。
-        type_str(&mut modal, "en");
+        // さらに入力しても候補は変わらない。
+        type_str(&mut modal, "ss");
         assert_eq!(
             modal.matches().iter().map(|c| c.name).collect::<Vec<_>>(),
-            vec!["rename"]
+            vec!["issue"]
         );
     }
 
@@ -308,16 +289,29 @@ mod tests {
             vec!["config"]
         );
         modal.backspace();
-        assert_eq!(modal.matches().len(), 6);
+        assert_eq!(modal.matches().len(), 4);
     }
 
     #[test]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
-        modal.select_prev(); // wrap to last (5)
-        assert_eq!(modal.selected(), 5);
+        modal.select_prev(); // wrap to last (3)
+        assert_eq!(modal.selected(), 3);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
+    }
+
+    #[test]
+    fn completion_and_submission_use_the_registry_metadata() {
+        let mut modal = OverviewModal::new();
+        modal.select_next();
+        let expected = modal.matches()[modal.selected()].name;
+        modal.complete_selected();
+        assert_eq!(modal.input(), expected);
+        assert_eq!(modal.submission(), expected);
+
+        let empty = OverviewModal::new();
+        assert_eq!(empty.submission(), "config");
     }
 
     #[test]
@@ -347,20 +341,19 @@ mod tests {
         assert!(text.contains("Command")); // タイトル
         assert!(text.contains('❯')); // プロンプト
         assert!(text.contains("workspace commands"));
-        assert!(text.contains("new"));
-        assert!(text.contains("start a new session"));
+        assert!(text.contains("config"));
+        assert!(text.contains("Edit this workspace's local settings"));
         assert!(text.contains("Esc: close"));
     }
 
     #[test]
     fn render_says_matches_when_filtering_and_marks_the_selection() {
         let mut modal = OverviewModal::new();
-        type_str(&mut modal, "re"); // rename のみ
+        type_str(&mut modal, "is"); // issue のみ
         let text = joined(&modal);
         assert!(text.contains("matches"));
-        assert!(text.contains("rename"));
+        assert!(text.contains("issue"));
         assert!(text.contains('›')); // 選択マーカー
-        assert!(!text.contains("issue"));
     }
 
     #[test]

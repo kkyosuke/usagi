@@ -1208,22 +1208,21 @@ mod tests {
         assert!(frame(1).contains("Terminal — session 'direct-session'"));
 
         // Closeup modal は workspace と tab strip の上に重なり、左右移動後の tab を保つ。
-        assert!(frame(2).contains("Open terminal"));
+        assert!(frame(2).contains("terminal"));
         assert!(frame(2).contains("direct-session"));
         assert!(frame(2).contains("Terminal"));
 
         // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
         assert!(frame(4).contains("workspace commands"));
-        assert!(frame(5).contains("matches"));
-        assert!(frame(5).contains("quit"));
+        assert!(frame(5).contains("no matching command"));
         assert!(frame(5).contains("Command"));
-        assert!(frame(8).contains("Open terminal"));
+        assert!(frame(8).contains("terminal"));
 
         // PR modal も実データを表示し、閉じると同じ Closeup に戻る。
         assert!(frame(9).contains("Pull Request"));
         assert!(frame(9).contains("#42"));
         assert!(frame(9).contains("Terminal"));
-        assert!(frame(11).contains("Open terminal"));
+        assert!(frame(11).contains("terminal"));
 
         // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
         assert!(frame(12).contains("Switch"));
