@@ -18,6 +18,8 @@ clap_complete.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# update のテストで GitRunner のフェイクを書くため（seam の戻り値が anyhow::Result）。
+anyhow.workspace = true
 
 [lints]
 workspace = true

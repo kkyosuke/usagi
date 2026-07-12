@@ -32,6 +32,8 @@ chrono.workspace = true
 libc.workspace = true
 # daemon の単一インスタンスロック（flock）を合成ルートで束ねるため。
 fs2.workspace = true
+# core の GitRunner seam（`fn run(..) -> anyhow::Result<..>`）を合成ルートで実装するため。
+anyhow.workspace = true
 
 [dev-dependencies]
 
