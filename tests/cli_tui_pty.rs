@@ -1,0 +1,158 @@
+//! 実 PTY 上で合成ルートの raw mode / 代替スクリーン lifetime を通す結合テスト。
+
+#![cfg(unix)]
+
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// 100×24 の PTY master/slave pair を開く。
+fn open_pty() -> io::Result<(File, File)> {
+    let mut master_fd = -1;
+    let mut slave_fd = -1;
+    let mut size = libc::winsize {
+        ws_row: 24,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: output pointers refer to writable local integers, `size` is initialized, and the
+    // optional terminal-name / termios pointers are null. A successful call returns two owned fds.
+    let result = unsafe {
+        libc::openpty(
+            &raw mut master_fd,
+            &raw mut slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut size,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openpty` succeeded and transferred two distinct, valid descriptors to this caller.
+    let pair = unsafe { (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd)) };
+    Ok(pair)
+}
+
+fn terminal_attributes(terminal: &File) -> io::Result<libc::termios> {
+    let mut attributes = std::mem::MaybeUninit::uninit();
+    // SAFETY: `attributes` points to writable storage for one termios value and `terminal` owns a
+    // live PTY slave descriptor for the duration of the call.
+    if unsafe { libc::tcgetattr(terminal.as_raw_fd(), attributes.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful `tcgetattr` initialized every field of `attributes`.
+    Ok(unsafe { attributes.assume_init() })
+}
+
+fn read_pty(mut master: File) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        match master.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            // Linux PTYs report EIO, while Darwin normally reports EOF, after the final slave
+            // descriptor closes. Both mean the captured stream is complete.
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+            Err(error) => panic!("PTY outputの読み取りに失敗: {error}"),
+        }
+    }
+    output
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "PTY上のusagiが終了しなかった",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn hop_recent_opens_workspace_and_restores_the_terminal() {
+    let home = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+    let workspace = roots.path().join("pty-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    // 非対話 open も同じ本番合成ルートを通して Recent 用の registry entry を作る。
+    let registered = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args(["open".as_ref(), workspace.as_os_str()])
+        .env("USAGI_HOME", home.path())
+        .output()
+        .expect("workspaceを事前登録できる");
+    assert!(registered.status.success());
+
+    let (mut master, slave) = open_pty().unwrap();
+    let attributes_before = terminal_attributes(&slave).unwrap();
+    let reader_master = master.try_clone().unwrap();
+    let reader = thread::spawn(move || read_pty(reader_master));
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .arg("hop")
+        .env("USAGI_HOME", home.path())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::from(slave.try_clone().unwrap()))
+        .stderr(Stdio::from(slave.try_clone().unwrap()))
+        .spawn()
+        .expect("PTY上でusagi hopを起動できる");
+
+    // Welcome の最初の Recent を開き、Workspace が描画された後に終了する。入力は PTY の
+    // line discipline が raw mode へ切り替わる時間を確保してから送る。
+    thread::sleep(Duration::from_millis(150));
+    master.write_all(b"1").unwrap();
+    master.flush().unwrap();
+    thread::sleep(Duration::from_millis(150));
+    master.write_all(b"q").unwrap();
+    master.flush().unwrap();
+
+    let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
+        Ok(status) => status,
+        Err(error) => {
+            drop(slave);
+            drop(master);
+            let captured = reader.join().unwrap();
+            panic!(
+                "{error}: {}",
+                String::from_utf8_lossy(&captured).replace('\u{1b}', "<ESC>")
+            );
+        }
+    };
+    let attributes_after = terminal_attributes(&slave).unwrap();
+
+    // slave をすべて閉じると reader が EOF/EIO を受け取れる。
+    drop(slave);
+    drop(master);
+    let captured = reader.join().unwrap();
+    let output = String::from_utf8_lossy(&captured);
+
+    assert!(status.success(), "PTY output: {output}");
+    assert!(output.contains("Recent"), "PTY output: {output}");
+    assert!(output.contains("pty-workspace"), "PTY output: {output}");
+    assert!(output.contains("Sessions"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
+    assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
+
+    assert_eq!(attributes_after.c_iflag, attributes_before.c_iflag);
+    assert_eq!(attributes_after.c_oflag, attributes_before.c_oflag);
+    assert_eq!(attributes_after.c_cflag, attributes_before.c_cflag);
+    assert_eq!(attributes_after.c_lflag, attributes_before.c_lflag);
+    assert_eq!(attributes_after.c_cc, attributes_before.c_cc);
+}

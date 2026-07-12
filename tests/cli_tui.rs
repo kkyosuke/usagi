@@ -1,11 +1,20 @@
 //! 配布バイナリの CLI 解析から TUI 起動画面までを通す結合テスト。
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::{Command, Output};
 
 fn run(args: &[&OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_usagi"))
         .args(args)
+        .output()
+        .expect("usagi バイナリを起動できる")
+}
+
+fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args(args)
+        .env("USAGI_HOME", home)
         .output()
         .expect("usagi バイナリを起動できる")
 }
@@ -18,8 +27,9 @@ fn stdout(output: &Output) -> String {
 fn welcome_entry_renders_the_welcome_screen() {
     // 引数なしと `hop` はどちらも welcome 画面を選ぶ。テストでは stdout が tty でないため、
     // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
+    let home = tempfile::tempdir().unwrap();
     for args in [&[][..], &[OsStr::new("hop")][..]] {
-        let output = run(args);
+        let output = run_with_home(args, home.path());
         assert!(output.status.success(), "args={args:?}");
         let out = stdout(&output);
         assert!(out.contains("USAGI"), "args={args:?}");
@@ -34,10 +44,10 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
     // `usagi daemon status` を実バイナリで走らせ、合成ルートが束ねる実ストア
     // （`FsRecordFile` を backing にした `DaemonRecordStore`）を通す。データディレクトリを
     // 空の一時パスへ向けるので、レコードは無く「daemon not running」を報告する。
-    let home = std::env::temp_dir().join(format!("usagi-daemon-status-{}", std::process::id()));
+    let home = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
         .args([OsStr::new("daemon"), OsStr::new("status")])
-        .env("USAGI_HOME", &home)
+        .env("USAGI_HOME", home.path())
         .output()
         .expect("usagi バイナリを起動できる");
     assert!(output.status.success());
@@ -47,8 +57,11 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
 #[test]
 fn config_entry_renders_the_config_screen() {
     // `usagi config` は Config 画面を選ぶ。stdout が tty でないため、合成ルートは対話ループの
-    // 代わりに Config の 1 フレームを描いて返す。
-    let output = run(&[OsStr::new("config")]);
+    // 代わりに Config の 1 フレームを描いて返す。Config 自体は workspace registry を使わない
+    // ため、registry が壊れていても起動できる。
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
+    let output = run_with_home(&[OsStr::new("config")], home.path());
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("Config"));
@@ -67,20 +80,54 @@ fn other_entries_route_to_their_banner_screens() {
 }
 
 #[test]
-fn open_forwards_an_explicit_or_current_workspace_path() {
-    let explicit = std::env::temp_dir().join("usagi-cli-tui-explicit");
-    let output = run(&[OsStr::new("open"), explicit.as_os_str()]);
-    assert!(output.status.success());
-    let out = stdout(&output);
-    assert!(out.contains("workspace TUI"));
-    assert!(out.contains(&explicit.display().to_string()));
+fn open_registers_and_renders_an_explicit_or_current_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+    let explicit = roots.path().join("explicit-workspace");
+    std::fs::create_dir(&explicit).unwrap();
 
-    let current = std::env::current_dir().unwrap();
-    let output = run(&[OsStr::new("open")]);
+    let output = run_with_home(&[OsStr::new("open"), explicit.as_os_str()], home.path());
     assert!(output.status.success());
     let out = stdout(&output);
-    assert!(out.contains("workspace TUI"));
-    assert!(out.contains(&current.display().to_string()));
+    assert!(out.contains("explicit-workspace"));
+    assert!(out.contains("Sessions"));
+    assert!(!out.contains("workspace TUI ("));
+
+    // 非 tty でも open は registry へ登録し、続く hop の Recent に現れる。
+    let registry = std::fs::read_to_string(home.path().join("workspaces.json")).unwrap();
+    assert!(registry.contains("explicit-workspace"));
+    let output = run_with_home(&[OsStr::new("hop")], home.path());
+    assert!(output.status.success());
+    let out = stdout(&output);
+    assert!(out.contains("Recent"));
+    assert!(out.contains("explicit-workspace"));
+
+    let current = roots.path().join("current-workspace");
+    std::fs::create_dir(&current).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .arg("open")
+        .current_dir(&current)
+        .env("USAGI_HOME", home.path())
+        .output()
+        .expect("usagi バイナリを起動できる");
+    assert!(output.status.success());
+    let out = stdout(&output);
+    assert!(out.contains("current-workspace"));
+    assert!(out.contains("Sessions"));
+}
+
+#[test]
+fn open_rejects_a_missing_or_non_directory_workspace_path() {
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("missing-workspace");
+    let file = home.path().join("not-a-directory");
+    std::fs::write(&file, "not a workspace").unwrap();
+
+    for path in [&missing, &file] {
+        let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], home.path());
+        assert!(!output.status.success(), "path={}", path.display());
+        assert!(!output.stderr.is_empty(), "path={}", path.display());
+    }
 }
 
 #[test]
@@ -99,12 +146,77 @@ fn clap_errors_do_not_launch_a_tui() {
 
 #[cfg(unix)]
 #[test]
-fn open_accepts_a_non_utf8_workspace_path() {
+fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
     use std::os::unix::ffi::OsStringExt;
 
-    let path = std::ffi::OsString::from_vec(b"/tmp/usagi-\xff".to_vec());
-    let output = run(&[OsStr::new("open"), &path]);
+    let home = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsString::from_vec(b"usagi-\xff".to_vec());
+    let path = roots.path().join(name);
+    match std::fs::create_dir(&path) {
+        Ok(()) => {}
+        // APFS などは非 UTF-8 filename の作成・lookup 自体を拒否する。その環境では実在する
+        // fixture を作れないため、この契約は非 UTF-8 filename を扱える filesystem 上で検証する。
+        Err(_) if cfg!(target_os = "macos") => return,
+        Err(error) => panic!("non-UTF-8 workspace fixtureを作成できない: {error}"),
+    }
+    let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], home.path());
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("workspace TUI"));
+    assert!(stdout(&output).contains("Sessions"));
+    // JSON の path は UTF-8 string なので、非 UTF-8 path は一時 workspace として開き、
+    // 壊れた registry を永続化しない。
+    assert!(!home.path().join("workspaces.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn open_validates_non_utf8_workspace_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let roots = tempfile::tempdir().unwrap();
+
+    let missing_name = std::ffi::OsString::from_vec(b"missing-\xff".to_vec());
+    let missing = roots.path().join(missing_name);
+    let output = run_with_home(&[OsStr::new("open"), missing.as_os_str()], home.path());
+    assert!(!output.status.success());
+    assert!(!output.stderr.is_empty());
+
+    // 相対の非 UTF-8 path も、filesystem が扱える場合は絶対 path へ解決して開ける。
+    let relative = std::ffi::OsString::from_vec(b"relative-\xff".to_vec());
+    let absolute_relative = roots.path().join(&relative);
+    let relative_fixture_exists = std::fs::create_dir(&absolute_relative).is_ok();
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("open"), relative.as_os_str()])
+        .current_dir(roots.path())
+        .env("USAGI_HOME", home.path())
+        .output()
+        .expect("usagi バイナリを起動できる");
+    if relative_fixture_exists {
+        assert!(output.status.success());
+        assert!(stdout(&output).contains("Sessions"));
+    } else {
+        assert!(!output.status.success());
+        assert!(!output.stderr.is_empty());
+    }
+
+    // 非 UTF-8 filename を扱える filesystem では、通常 file も directory と誤認しない。
+    let file_name = std::ffi::OsString::from_vec(b"file-\xff".to_vec());
+    let file = roots.path().join(file_name);
+    match std::fs::write(&file, "not a workspace") {
+        Ok(()) => {
+            let output = run_with_home(&[OsStr::new("open"), file.as_os_str()], home.path());
+            assert!(!output.status.success());
+            assert!(!output.stderr.is_empty());
+        }
+        Err(_) if cfg!(target_os = "macos") => {}
+        Err(error) => panic!("non-UTF-8 file fixtureを作成できない: {error}"),
+    }
+
+    // fixture を作れた環境では相対指定が実在するディレクトリへ解決された。
+    if relative_fixture_exists {
+        assert!(absolute_relative.is_dir());
+    }
+    assert!(!home.path().join("workspaces.json").exists());
 }

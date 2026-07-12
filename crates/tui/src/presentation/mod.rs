@@ -17,13 +17,17 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::views::config;
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
+use crate::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
+
+pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
 
 /// 起動バナーを `out` に書き出す。
 ///
@@ -34,13 +38,11 @@ pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()>
     writeln!(out, "{}", info.describe())
 }
 
-/// 対話ループが終了する理由。合成ルートがこれを見て後続の動作を決める。
+/// 対話ループが終了する理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Exit {
-    /// ユーザーが終了した（`q` / Ctrl-C、または welcome で Esc）。
+    /// ユーザーが終了した（`q` / Ctrl-C、または起点画面で Esc）。
     Quit,
-    /// ユーザーが選んだ workspace を開く。合成ルートが workspace 画面へ接続する。
-    OpenWorkspace(PathBuf),
 }
 
 /// 対話ループの開始画面。合成ルートが `usagi`（Welcome）か `usagi config`（Config）かで選ぶ。
@@ -53,6 +55,7 @@ pub enum Start {
 }
 
 /// いま表示している画面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Welcome,
     Open,
@@ -60,14 +63,13 @@ enum Screen {
     Config,
 }
 
-/// welcome 画面でキー `key` を処理した結果の遷移。
+/// welcome 画面のキー処理結果。
 enum WelcomeStep {
-    /// 同じ画面に留まる。
     Stay,
-    /// 終了する。
     Quit,
-    /// Open（workspace 一覧）へ進む。
     OpenList,
+    /// Recent の単体 workspace を開く。
+    OpenRecent(usize),
     /// New（新規 workspace 作成フォーム）へ進む。
     NewForm,
     /// Config（設定画面）へ進む。
@@ -94,27 +96,30 @@ enum NewStep {
     Back,
 }
 
-/// Open 画面でキー `key` を処理した結果の遷移。
+/// Open 画面のキー処理結果。
 enum OpenStep {
-    /// 同じ画面に留まる。
     Stay,
-    /// 終了する。
     Quit,
-    /// welcome へ戻る。
     Back,
-    /// 選んだ workspace を開く。
     Choose(PathBuf),
 }
 
-/// welcome のメニュー操作 `action` を画面遷移へ写す。遷移先が未実装の項目（recent）は
-/// 同じ画面に留まる。
+/// Workspace 画面のキー処理結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceStep {
+    Stay,
+    Quit,
+    Back,
+}
+
+/// welcome のメニュー操作を画面遷移へ写す。
 fn welcome_action(action: MenuAction) -> WelcomeStep {
     match action {
         MenuAction::Quit => WelcomeStep::Quit,
         MenuAction::Open => WelcomeStep::OpenList,
+        MenuAction::OpenRecent(index) => WelcomeStep::OpenRecent(index),
         MenuAction::New => WelcomeStep::NewForm,
         MenuAction::Config => WelcomeStep::ConfigScreen,
-        MenuAction::OpenRecent(_) => WelcomeStep::Stay,
     }
 }
 
@@ -128,8 +133,7 @@ fn step_config(key: Key) -> ConfigStep {
     }
 }
 
-/// welcome 画面のキー処理（純粋）。上下で選択を動かし、確定・ショートカットを遷移へ写す。
-/// 最上位画面なので Esc も終了として扱う。
+/// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
         Key::Up => {
@@ -196,8 +200,7 @@ fn step_new_horizontal(form: &mut New, right: bool) {
     }
 }
 
-/// Open 画面のキー処理（純粋）。上下で選択を動かし、Enter で開く workspace を確定、
-/// Esc で welcome へ戻り、`q` / Ctrl-C で終了する。
+/// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     match key {
         Key::Up => {
@@ -217,26 +220,75 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
     }
 }
 
-/// `start` で選んだ画面を起点にした対話ループ。毎フレーム現在の画面を端末サイズで描き、キーを
-/// 1 つ読んで画面遷移を進める。welcome の Open から workspace 一覧へ、New から作成フォームへ、
-/// Config から設定画面へ入り、いずれも Esc で welcome へ戻る。選んだ workspace は
-/// [`Exit::OpenWorkspace`]、終了操作は [`Exit::Quit`] を返す。`usagi config` のように Config を
-/// 起点にしても、Esc で welcome へ戻る（welcome が home）。
-///
-/// `workspaces` は登録済み workspace の一覧（読み出しは実 IO なので合成ルートが渡す）。`now` は
-/// 相対時刻に使う（この層は実時計を読まない）。実端末の制御は注入された [`Terminal`] に委ね、
-/// この関数は「何を描き、キーをどう解釈して遷移するか」だけを持つ純粋な制御ループである。
+/// Workspace 画面のキー処理。上下は session、左右は tab を循環する。
+fn step_workspace(workspace: &mut WorkspaceView, key: Key) -> WorkspaceStep {
+    match key {
+        Key::Up => workspace.select_prev(),
+        Key::Down => workspace.select_next(),
+        Key::Left => workspace.tab_prev(),
+        Key::Right => workspace.tab_next(),
+        Key::Escape => return WorkspaceStep::Back,
+        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Enter | Key::Backspace | Key::Char(_) | Key::Other => {}
+    }
+    WorkspaceStep::Stay
+}
+
+/// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
+fn recent_path(recent: &Recent) -> Option<&Path> {
+    match recent {
+        Recent::Workspace(overview) => Some(&overview.workspace.path),
+        Recent::Unite(_) => None,
+    }
+}
+
+/// 1 つの Workspace snapshot を、終了または Esc まで同じ Terminal 上で駆動する。
+fn drive_workspace(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+) -> io::Result<WorkspaceStep> {
+    let mut workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+    loop {
+        let (height, width) = term.size()?;
+        term.draw(&workspace::render(height, width, &workspace))?;
+        match step_workspace(&mut workspace, term.read_key()?) {
+            WorkspaceStep::Stay => {}
+            exit => return Ok(exit),
+        }
+    }
+}
+
+/// Workspace を起点にした公開 runtime。direct `usagi open <path>` は合成側で [`WorkspaceLoader`]
+/// を一度呼び、その snapshot をこの関数へ渡す。起点より前の画面が無いため Esc も終了となる。
 ///
 /// # Errors
 ///
 /// 端末への描画またはキー読み取りに失敗した場合、そのエラーを返す。
+pub fn run_workspace(term: &mut dyn Terminal, snapshot: WorkspaceSnapshot) -> io::Result<Exit> {
+    drive_workspace(term, snapshot).map(|_| Exit::Quit)
+}
+
+/// `start` で選んだ画面を起点にした対話 runtime。
+///
+/// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
+/// で開き、同じ Workspace runtime を駆動する。Workspace で Esc を押すと呼び出し元へ戻るため、
+/// Open 経由なら Open、Recent 経由なら Welcome が再描画される。`q` / Ctrl-C はどの画面でも
+/// runtime 全体を終了する。
+///
+/// `workspaces` / `recent` / `now` は永続化・実時計を持つ呼び出し側から渡す。
+///
+/// # Errors
+///
+/// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
 pub fn run(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
     now: DateTime<Utc>,
     start: Start,
+    loader: &mut dyn WorkspaceLoader,
 ) -> io::Result<Exit> {
-    let mut welcome = Welcome::empty();
+    let mut welcome = Welcome::new(recent);
     let mut open = Open::new(workspaces);
     let mut new_form = New::default();
     let mut screen = match start {
@@ -260,12 +312,35 @@ pub fn run(
                 WelcomeStep::OpenList => screen = Screen::Open,
                 WelcomeStep::NewForm => screen = Screen::New,
                 WelcomeStep::ConfigScreen => screen = Screen::Config,
+                WelcomeStep::OpenRecent(index) => {
+                    let Some(path) = welcome
+                        .recent()
+                        .get(index)
+                        .and_then(recent_path)
+                        .map(Path::to_path_buf)
+                    else {
+                        continue;
+                    };
+                    let snapshot = loader.open(&path)?;
+                    welcome.record_opened(&snapshot.workspace);
+                    open.record_opened(&snapshot.workspace);
+                    if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
+                        return Ok(Exit::Quit);
+                    }
+                }
             },
             Screen::Open => match step_open(&mut open, key) {
                 OpenStep::Stay => {}
                 OpenStep::Quit => return Ok(Exit::Quit),
                 OpenStep::Back => screen = Screen::Welcome,
-                OpenStep::Choose(path) => return Ok(Exit::OpenWorkspace(path)),
+                OpenStep::Choose(path) => {
+                    let snapshot = loader.open(&path)?;
+                    welcome.record_opened(&snapshot.workspace);
+                    open.record_opened(&snapshot.workspace);
+                    if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
+                        return Ok(Exit::Quit);
+                    }
+                }
             },
             Screen::New => match step_new(&mut new_form, key) {
                 NewStep::Stay => {}
@@ -281,7 +356,7 @@ pub fn run(
     }
 }
 
-/// 端末 runtime が実装されるまで、選ばれた TUI 画面を識別できる一行を出力する暫定 runner。
+/// 選ばれた TUI 画面を識別できる一行を出力する非対話 runner。
 ///
 /// 出力先とアプリ情報は呼び出し側から注入するため、実 stdout を直接所有しない。
 pub struct BannerScreenRunner<'a, W: Write + ?Sized> {
@@ -323,19 +398,24 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, ConfigStep, Exit, NewStep, Start, WelcomeStep, run, step_config,
-        step_new, welcome_action, write_banner,
+        BannerScreenRunner, ConfigStep, Exit, NewStep, Start, WelcomeStep, WorkspaceLoader,
+        WorkspaceSnapshot, run as run_from_start, run_workspace, step_config, step_new,
+        welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use std::collections::VecDeque;
     use std::io::{self, Write};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use usagi_core::domain::AppInfo;
-    use usagi_core::domain::workspace::Workspace;
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::recent::{Recent, UniteOverview};
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+    use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
+    use usagi_core::domain::workspace_state::WorkspaceState;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -347,9 +427,49 @@ mod tests {
         Workspace::new(name, format!("/tmp/{name}"))
     }
 
-    /// テスト用の [`Terminal`]。あらかじめ積んだキー列を順に返し、描いたフレームを記録する。
-    /// `fail_size` / `fail_draw` でサイズ取得・描画のエラーを模す。キーが尽きると
-    /// `read_key` はエラーになるので、各テストは終了キーで締めてループを止める。
+    fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
+        let mut workspace = ws(name);
+        workspace.updated_at = now() - Duration::minutes(minutes);
+        workspace
+    }
+
+    fn state(name: &str) -> WorkspaceState {
+        WorkspaceState {
+            sessions: vec![SessionRecord {
+                name: format!("{name}-session"),
+                display_name: None,
+                origin: SessionOrigin::Human,
+                started_from: None,
+                root: PathBuf::from(format!("/tmp/{name}/session")),
+                created_at: now(),
+                last_active: None,
+                notes: Scratchpad::default(),
+                prs: Vec::new(),
+            }],
+            root_notes: Scratchpad::default(),
+            updated_at: now(),
+        }
+    }
+
+    fn snapshot(name: &str) -> WorkspaceSnapshot {
+        WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    fn recent(name: &str) -> Recent {
+        Recent::Workspace(WorkspaceOverview::new(ws(name), 1, 0, 0))
+    }
+
+    fn run(
+        term: &mut dyn Terminal,
+        workspaces: Vec<Workspace>,
+        recent: Vec<Recent>,
+        now: DateTime<Utc>,
+        loader: &mut dyn WorkspaceLoader,
+    ) -> io::Result<Exit> {
+        run_from_start(term, workspaces, recent, now, Start::Welcome, loader)
+    }
+
+    /// テスト用 Terminal。キー列を順に返し、描いたフレームを記録する。
     #[derive(Default)]
     struct FakeTerminal {
         keys: VecDeque<Key>,
@@ -372,7 +492,6 @@ mod tests {
             if self.fail_size {
                 return Err(io::Error::other("size failed"));
             }
-            // 0 は welcome::render 側で 24x80 にフォールバックされる。
             Ok((0, 0))
         }
 
@@ -391,60 +510,85 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_quits_on_the_quit_shortcut() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('q')]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        // 1 度描いてから q で抜ける。最初のフレームは welcome 画面。
-        assert_eq!(term.frames.len(), 1);
-        let joined = term.frames[0].join("\n");
-        assert!(joined.contains("USAGI"));
-        assert!(joined.contains("Menu"));
+    #[derive(Default)]
+    struct FakeLoader {
+        opened: Vec<PathBuf>,
+        fail: bool,
+        opened_at: Option<DateTime<Utc>>,
     }
 
-    #[test]
-    fn run_quits_on_ctrl_c_and_on_escape_at_welcome() {
-        for quit_key in [Key::Quit, Key::Escape] {
-            let mut term = FakeTerminal::with_keys(&[quit_key]);
-            assert_eq!(
-                run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-                Exit::Quit
-            );
-            assert_eq!(term.frames.len(), 1);
+    impl WorkspaceLoader for FakeLoader {
+        fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
+            self.opened.push(path.to_path_buf());
+            if self.fail {
+                return Err(io::Error::other("open failed"));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace");
+            let mut snapshot = snapshot(name);
+            if let Some(opened_at) = self.opened_at {
+                snapshot.workspace.updated_at = opened_at;
+            }
+            Ok(snapshot)
         }
     }
 
     #[test]
-    fn run_navigates_welcome_before_quitting() {
-        let mut term = FakeTerminal::with_keys(&[Key::Down, Key::Down, Key::Up, Key::Quit]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        // 各キーの前に 1 度ずつ描くので 4 フレーム。
-        assert_eq!(term.frames.len(), 4);
+    fn run_quits_from_welcome_and_handles_menu_navigation() {
+        for keys in [
+            vec![Key::Char('q')],
+            vec![Key::Quit],
+            vec![Key::Escape],
+            vec![Key::Down, Key::Down, Key::Up, Key::Quit],
+            vec![Key::Down, Key::Down, Key::Down, Key::Enter],
+        ] {
+            let mut term = FakeTerminal::with_keys(&keys);
+            assert_eq!(
+                run(
+                    &mut term,
+                    Vec::new(),
+                    Vec::new(),
+                    now(),
+                    &mut FakeLoader::default(),
+                )
+                .unwrap(),
+                Exit::Quit
+            );
+            assert!(term.frames[0].join("\n").contains("Menu"));
+        }
     }
 
     #[test]
-    fn run_stays_on_welcome_for_unwired_items_and_unknown_keys() {
-        // recent 番号キー '1'（recent なしで無効）と未知の 'z'、Other は welcome に留まり、
-        // q で抜ける。
-        let mut term =
-            FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('z'), Key::Other, Key::Char('q')]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
+    fn run_ignores_unknown_welcome_keys() {
+        let keys = [
+            Key::Char('z'),
+            Key::Left,
+            Key::Right,
+            Key::Backspace,
+            Key::Other,
+            Key::Char('q'),
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+        run(
+            &mut term,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert_eq!(term.frames.len(), keys.len());
+        assert!(
+            term.frames
+                .iter()
+                .all(|frame| frame.join("\n").contains("Menu"))
         );
-        assert_eq!(term.frames.len(), 4);
-        // どのフレームも welcome のまま（Open / New / Config へは行かない）。
-        assert!(term.frames.iter().all(|f| f.join("\n").contains("Menu")));
     }
 
     #[test]
-    fn welcome_action_maps_each_menu_action() {
+    fn welcome_action_maps_every_destination() {
         assert!(matches!(
             welcome_action(MenuAction::Quit),
             WelcomeStep::Quit
@@ -454,6 +598,10 @@ mod tests {
             WelcomeStep::OpenList
         ));
         assert!(matches!(
+            welcome_action(MenuAction::OpenRecent(2)),
+            WelcomeStep::OpenRecent(2)
+        ));
+        assert!(matches!(
             welcome_action(MenuAction::New),
             WelcomeStep::NewForm
         ));
@@ -461,262 +609,425 @@ mod tests {
             welcome_action(MenuAction::Config),
             WelcomeStep::ConfigScreen
         ));
-        // recent は未配線（run は recent なしの welcome を使う）ので留まる。
-        assert!(matches!(
-            welcome_action(MenuAction::OpenRecent(0)),
-            WelcomeStep::Stay
-        ));
     }
 
     #[test]
-    fn step_config_maps_keys_to_back_quit_or_stay() {
+    fn config_can_be_opened_from_welcome_or_used_as_the_start() {
+        let mut from_welcome =
+            FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q')]);
+        run(
+            &mut from_welcome,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(from_welcome.frames[0].join("\n").contains("Menu"));
+        assert!(from_welcome.frames[1].join("\n").contains("Config"));
+        assert!(from_welcome.frames[2].join("\n").contains("Menu"));
+
+        let mut direct = FakeTerminal::with_keys(&[Key::Char('x'), Key::Quit]);
+        run_from_start(
+            &mut direct,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            Start::Config,
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert_eq!(direct.frames.len(), 2);
+        assert!(
+            direct
+                .frames
+                .iter()
+                .all(|frame| frame.join("\n").contains("Config"))
+        );
+    }
+
+    #[test]
+    fn step_config_maps_back_quit_and_stay() {
         assert!(matches!(step_config(Key::Escape), ConfigStep::Back));
         assert!(matches!(step_config(Key::Quit), ConfigStep::Quit));
         assert!(matches!(step_config(Key::Char('x')), ConfigStep::Stay));
-        assert!(matches!(step_config(Key::Down), ConfigStep::Stay));
     }
 
     #[test]
-    fn run_enters_config_from_welcome_and_returns() {
-        // 'c'(Config) で Config 画面へ、Esc で welcome へ戻り、q で終了する。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q')]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
+    fn new_form_opens_edits_and_returns_to_welcome() {
+        let keys = [
+            Key::Char('e'),
+            Key::Down,
+            Key::Char('a'),
+            Key::Backspace,
+            Key::Escape,
+            Key::Char('q'),
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+        run(
+            &mut term,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(term.frames[0].join("\n").contains("Menu"));
+        assert!(
+            term.frames[1..5]
+                .iter()
+                .all(|frame| frame.join("\n").contains("New Project"))
         );
-        assert_eq!(term.frames.len(), 3);
-        assert!(term.frames[0].join("\n").contains("Menu")); // welcome
-        assert!(term.frames[1].join("\n").contains("Config")); // config 画面
-        assert!(term.frames[2].join("\n").contains("Menu")); // welcome へ戻る
+        assert!(term.frames[5].join("\n").contains("Menu"));
     }
 
     #[test]
-    fn run_starts_at_config_stays_then_quits() {
-        // `usagi config` 相当: Config から開始。設定項目が無いので編集不能キーでは留まり、
-        // Ctrl-C（Key::Quit）で終了する。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('x'), Key::Quit]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Config).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 2);
-        // 開始画面が Config で、留まる間も Config。
-        assert!(term.frames[0].join("\n").contains("Config"));
-        assert!(term.frames[1].join("\n").contains("Config"));
-    }
-
-    #[test]
-    fn run_enters_the_new_form_from_welcome_and_returns() {
-        // 'e'(New) で New フォームへ、Esc で welcome へ戻り、q で終了する。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Escape, Key::Char('q')]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 3);
-        assert!(term.frames[0].join("\n").contains("Menu")); // welcome
-        assert!(term.frames[1].join("\n").contains("New Project")); // New フォーム
-        assert!(term.frames[2].join("\n").contains("Menu")); // welcome へ戻る
-    }
-
-    #[test]
-    fn run_stays_on_the_new_form_while_editing_then_quits() {
-        // New へ入り、フォーム内でフィールド移動（留まる）してから終了（Ctrl-C 相当）する。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Down, Key::Quit]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 3);
-        // New に入ったあと、編集操作の間も New に留まる。
-        assert!(term.frames[1].join("\n").contains("New Project"));
-        assert!(term.frames[2].join("\n").contains("New Project"));
-    }
-
-    #[test]
-    fn step_new_edits_navigates_and_returns_back_or_quits() {
+    fn step_new_handles_every_edit_and_exit_key() {
         let mut form = New::default();
-        // 上下でフィールド移動。
         assert!(matches!(step_new(&mut form, Key::Down), NewStep::Stay));
         assert_eq!(form.focus(), Field::Url);
         assert!(matches!(step_new(&mut form, Key::Up), NewStep::Stay));
         assert_eq!(form.focus(), Field::Mode);
-        // モード選択では ←→ でモードを切り替える。
         step_new(&mut form, Key::Right);
         assert_eq!(form.mode(), Mode::Existing);
         step_new(&mut form, Key::Left);
         assert_eq!(form.mode(), Mode::Clone);
-        // テキスト欄では入力・Backspace・←→ キャレット移動。
-        step_new(&mut form, Key::Down); // Url
+        step_new(&mut form, Key::Down);
         step_new(&mut form, Key::Char('a'));
         step_new(&mut form, Key::Char('b'));
-        assert_eq!(form.url(), "ab");
-        step_new(&mut form, Key::Left); // キャレットを a|b の間へ
-        step_new(&mut form, Key::Right); // 末尾へ戻す
-        assert!(matches!(step_new(&mut form, Key::Backspace), NewStep::Stay));
+        step_new(&mut form, Key::Left);
+        step_new(&mut form, Key::Right);
+        step_new(&mut form, Key::Backspace);
         assert_eq!(form.url(), "a");
-        // Enter / Other は留まる。
         assert!(matches!(step_new(&mut form, Key::Enter), NewStep::Stay));
         assert!(matches!(step_new(&mut form, Key::Other), NewStep::Stay));
-        // Esc は welcome へ戻り、Quit は終了。
         assert!(matches!(step_new(&mut form, Key::Escape), NewStep::Back));
         assert!(matches!(step_new(&mut form, Key::Quit), NewStep::Quit));
     }
 
     #[test]
-    fn run_quits_when_the_quit_item_is_confirmed() {
-        // Quit 項目（末尾）まで移動してから Enter で抜ける。
-        let mut term = FakeTerminal::with_keys(&[Key::Down, Key::Down, Key::Down, Key::Enter]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 4);
+    fn quitting_from_new_exits_the_runtime() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Quit]);
+        run(
+            &mut term,
+            Vec::new(),
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert!(term.frames[1].join("\n").contains("New Project"));
     }
 
     #[test]
-    fn run_enters_the_open_list_from_welcome() {
-        // 先頭項目 Open を Enter で確定すると Open 画面へ進む。
-        let mut term = FakeTerminal::with_keys(&[Key::Enter, Key::Quit]);
+    fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('q')]);
+        let mut loader = FakeLoader::default();
         assert_eq!(
-            run(&mut term, vec![ws("alpha")], now(), Start::Welcome).unwrap(),
+            run(&mut term, vec![ws("alpha")], Vec::new(), now(), &mut loader,).unwrap(),
             Exit::Quit
         );
-        assert_eq!(term.frames.len(), 2);
-        // frame0 は welcome、frame1 は Open 画面（workspace 一覧）。
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert_eq!(term.frames.len(), 3);
         assert!(term.frames[0].join("\n").contains("Menu"));
         assert!(term.frames[1].join("\n").contains("Open Workspace"));
+        assert!(term.frames[2].join("\n").contains("alpha-session"));
+    }
+
+    #[test]
+    fn open_navigation_and_workspace_escape_return_to_open() {
+        let keys = [
+            Key::Char('o'),
+            Key::Down,
+            Key::Up,
+            Key::Down,
+            Key::Enter,
+            Key::Down,
+            Key::Right,
+            Key::Left,
+            Key::Up,
+            Key::Enter,
+            Key::Char('z'),
+            Key::Other,
+            Key::Escape,
+            Key::Left,
+            Key::Right,
+            Key::Char('z'),
+            Key::Other,
+            Key::Char('q'),
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        run(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/beta")]);
+        assert!(
+            term.frames
+                .last()
+                .unwrap()
+                .join("\n")
+                .contains("Open Workspace")
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Terminal — workspace 'root'"))
+        );
+    }
+
+    #[test]
+    fn open_prev_wraps_and_escape_returns_to_welcome() {
+        let keys = [Key::Char('o'), Key::Up, Key::Escape, Key::Char('q')];
+        let mut term = FakeTerminal::with_keys(&keys);
+        run(
+            &mut term,
+            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
         assert!(term.frames[1].join("\n").contains("alpha"));
+        assert!(term.frames[2].join("\n").contains("beta"));
+        assert!(term.frames[3].join("\n").contains("Menu"));
     }
 
     #[test]
-    fn run_enters_the_open_list_with_the_o_shortcut() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Quit]);
-        assert_eq!(
-            run(&mut term, vec![ws("alpha")], now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert!(term.frames[1].join("\n").contains("Workspaces"));
+    fn open_touch_refreshes_open_and_welcome_recency_models() {
+        let alpha = ws_minutes_ago("alpha", 20);
+        let beta = ws_minutes_ago("beta", 10);
+        let recent = vec![
+            Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
+            Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
+        ];
+        let keys = [
+            Key::Char('o'),
+            Key::Enter,
+            Key::Escape,
+            Key::Escape,
+            Key::Char('q'),
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            opened_at: Some(now()),
+            ..FakeLoader::default()
+        };
+
+        run(&mut term, vec![alpha, beta], recent, now(), &mut loader).unwrap();
+
+        let refreshed_open = term.frames[3].join("\n");
+        assert!(refreshed_open.contains("↳ /tmp/alpha"));
+        assert!(refreshed_open.contains("just now"));
+        assert!(refreshed_open.find("alpha").unwrap() < refreshed_open.find("beta").unwrap());
+
+        let refreshed_welcome = term.frames[4].join("\n");
+        assert!(refreshed_welcome.contains("just now"));
+        assert!(refreshed_welcome.find("alpha").unwrap() < refreshed_welcome.find("beta").unwrap());
     }
 
     #[test]
-    fn run_returns_the_workspace_chosen_in_the_open_list() {
-        // Open へ入り、Enter で選択中（先頭 alpha）の workspace を開く。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter]);
-        let exit = run(
+    fn empty_open_enter_stays_and_open_quit_exits() {
+        let keys = [Key::Char('o'), Key::Enter, Key::Down, Key::Up, Key::Quit];
+        let mut term = FakeTerminal::with_keys(&keys);
+        run(
             &mut term,
-            vec![ws("alpha"), ws("beta")],
+            Vec::new(),
+            Vec::new(),
             now(),
-            Start::Welcome,
+            &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(exit, Exit::OpenWorkspace(PathBuf::from("/tmp/alpha")));
-    }
-
-    #[test]
-    fn run_open_list_navigates_before_choosing() {
-        // Down で beta に移り、Enter で beta を開く。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Down, Key::Enter]);
-        let exit = run(
-            &mut term,
-            vec![ws("alpha"), ws("beta")],
-            now(),
-            Start::Welcome,
-        )
-        .unwrap();
-        assert_eq!(exit, Exit::OpenWorkspace(PathBuf::from("/tmp/beta")));
-    }
-
-    #[test]
-    fn run_open_list_prev_wraps_to_the_last_workspace() {
-        // Up で末尾 beta に回り込み、Enter で beta を開く。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Up, Key::Enter]);
-        let exit = run(
-            &mut term,
-            vec![ws("alpha"), ws("beta")],
-            now(),
-            Start::Welcome,
-        )
-        .unwrap();
-        assert_eq!(exit, Exit::OpenWorkspace(PathBuf::from("/tmp/beta")));
-    }
-
-    #[test]
-    fn run_open_list_returns_to_welcome_on_escape() {
-        // Open へ入り、Esc で welcome に戻ってから終了する。
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Escape, Key::Quit]);
-        assert_eq!(
-            run(&mut term, vec![ws("alpha")], now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 3);
-        assert!(term.frames[1].join("\n").contains("Open Workspace"));
-        // Esc 後は welcome に戻る。
-        assert!(term.frames[2].join("\n").contains("Menu"));
-    }
-
-    #[test]
-    fn run_open_list_quits_on_q_and_ignores_other_keys() {
-        // Open で未知の 'z' と Other は留まり、'q' で終了する。
-        let mut term =
-            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('z'), Key::Other, Key::Char('q')]);
-        assert_eq!(
-            run(&mut term, vec![ws("alpha")], now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 4);
-    }
-
-    #[test]
-    fn run_open_list_enter_on_an_empty_list_stays() {
-        // workspace が無いと Enter では開けず留まり、Esc で戻って終了する。
-        let mut term =
-            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Escape, Key::Quit]);
-        assert_eq!(
-            run(&mut term, Vec::new(), now(), Start::Welcome).unwrap(),
-            Exit::Quit
-        );
-        assert_eq!(term.frames.len(), 4);
         assert!(term.frames[1].join("\n").contains("No workspaces yet"));
+        assert_eq!(term.frames.len(), keys.len());
     }
 
     #[test]
-    fn run_propagates_a_size_failure() {
-        let mut term = FakeTerminal {
+    fn recent_loads_workspace_and_escape_returns_to_welcome() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q')]);
+        let mut loader = FakeLoader::default();
+        run(
+            &mut term,
+            Vec::new(),
+            vec![recent("recent")],
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/recent")]);
+        assert!(term.frames[1].join("\n").contains("recent-session"));
+        assert!(term.frames[2].join("\n").contains("Recent"));
+    }
+
+    #[test]
+    fn recent_touch_refreshes_welcome_and_open_recency_models() {
+        let alpha = ws_minutes_ago("alpha", 20);
+        let beta = ws_minutes_ago("beta", 10);
+        let recent = vec![
+            Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
+            Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
+        ];
+        let keys = [Key::Char('2'), Key::Escape, Key::Char('o'), Key::Char('q')];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            opened_at: Some(now()),
+            ..FakeLoader::default()
+        };
+
+        run(&mut term, vec![beta, alpha], recent, now(), &mut loader).unwrap();
+
+        let refreshed_welcome = term.frames[2].join("\n");
+        assert!(refreshed_welcome.contains("just now"));
+        assert!(refreshed_welcome.find("alpha").unwrap() < refreshed_welcome.find("beta").unwrap());
+
+        let refreshed_open = term.frames[3].join("\n");
+        assert!(refreshed_open.contains("↳ /tmp/beta"));
+        assert!(refreshed_open.contains("just now"));
+        assert!(refreshed_open.find("alpha").unwrap() < refreshed_open.find("beta").unwrap());
+    }
+
+    #[test]
+    fn unite_recent_stays_without_loading_a_workspace() {
+        let unite = Recent::Unite(UniteOverview::new(vec![
+            WorkspaceOverview::new(ws("primary"), 0, 0, 0),
+            WorkspaceOverview::new(ws("other"), 0, 0, 0),
+        ]));
+        let empty = Recent::Unite(UniteOverview::new(Vec::new()));
+        let keys = [Key::Char('2'), Key::Char('1'), Key::Char('q')];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        run(
+            &mut term,
+            Vec::new(),
+            vec![unite, empty],
+            now(),
+            &mut loader,
+        )
+        .unwrap();
+        assert!(loader.opened.is_empty());
+        assert_eq!(term.frames.len(), 3);
+    }
+
+    #[test]
+    fn missing_recent_number_stays_on_welcome() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('3'), Key::Char('q')]);
+        run(
+            &mut term,
+            Vec::new(),
+            vec![recent("only")],
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert_eq!(term.frames.len(), 2);
+    }
+
+    #[test]
+    fn quitting_from_a_recent_workspace_exits_the_runtime() {
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q')]);
+        run(
+            &mut term,
+            Vec::new(),
+            vec![recent("recent")],
+            now(),
+            &mut FakeLoader::default(),
+        )
+        .unwrap();
+        assert_eq!(term.frames.len(), 2);
+        assert!(term.frames[1].join("\n").contains("recent-session"));
+    }
+
+    #[test]
+    fn workspace_loader_failure_is_propagated() {
+        for (keys, recent) in [
+            (vec![Key::Char('o'), Key::Enter], Vec::new()),
+            (vec![Key::Char('1')], vec![recent("alpha")]),
+        ] {
+            let mut term = FakeTerminal::with_keys(&keys);
+            let mut loader = FakeLoader {
+                fail: true,
+                ..FakeLoader::default()
+            };
+            let error = run(&mut term, vec![ws("alpha")], recent, now(), &mut loader).unwrap_err();
+            assert_eq!(error.to_string(), "open failed");
+        }
+    }
+
+    #[test]
+    fn direct_workspace_handles_navigation_and_both_exit_keys() {
+        for exit in [Key::Escape, Key::Quit, Key::Char('q')] {
+            let keys = [
+                Key::Down,
+                Key::Up,
+                Key::Right,
+                Key::Left,
+                Key::Enter,
+                Key::Char('z'),
+                Key::Other,
+                exit,
+            ];
+            let mut term = FakeTerminal::with_keys(&keys);
+            assert_eq!(
+                run_workspace(&mut term, snapshot("direct")).unwrap(),
+                Exit::Quit
+            );
+            assert_eq!(term.frames.len(), keys.len());
+            assert!(term.frames[0].join("\n").contains("direct-session"));
+        }
+    }
+
+    #[test]
+    fn runtime_io_failures_are_propagated() {
+        let mut size_failure = FakeTerminal {
             fail_size: true,
             ..FakeTerminal::default()
         };
-        let error = run(&mut term, Vec::new(), now(), Start::Welcome).unwrap_err();
-        assert_eq!(error.to_string(), "size failed");
-    }
+        assert_eq!(
+            run_workspace(&mut size_failure, snapshot("x"))
+                .unwrap_err()
+                .to_string(),
+            "size failed"
+        );
 
-    #[test]
-    fn run_propagates_a_draw_failure() {
-        let mut term = FakeTerminal {
+        let mut draw_failure = FakeTerminal {
             fail_draw: true,
             ..FakeTerminal::default()
         };
-        let error = run(&mut term, Vec::new(), now(), Start::Welcome).unwrap_err();
-        assert_eq!(error.to_string(), "draw failed");
+        assert_eq!(
+            run(
+                &mut draw_failure,
+                Vec::new(),
+                Vec::new(),
+                now(),
+                &mut FakeLoader::default(),
+            )
+            .unwrap_err()
+            .to_string(),
+            "draw failed"
+        );
+
+        let mut read_failure = FakeTerminal::default();
+        assert_eq!(
+            run_workspace(&mut read_failure, snapshot("x"))
+                .unwrap_err()
+                .to_string(),
+            "no more keys"
+        );
     }
 
     #[test]
-    fn run_propagates_a_read_failure() {
-        // キーを積まないと read_key がエラーになる（入力読み取りの失敗を模す）。
-        let mut term = FakeTerminal::default();
-        let error = run(&mut term, Vec::new(), now(), Start::Welcome).unwrap_err();
-        assert_eq!(error.to_string(), "no more keys");
-    }
-
-    #[test]
-    fn exit_derives_are_exercised() {
+    fn public_value_derives_are_exercised() {
+        let snapshot = snapshot("derive");
+        assert_eq!(snapshot.clone(), snapshot);
+        assert!(format!("{snapshot:?}").contains("derive"));
         let quit = Exit::Quit;
         assert_eq!(quit.clone(), Exit::Quit);
         assert!(format!("{quit:?}").contains("Quit"));
-        let open = Exit::OpenWorkspace(PathBuf::from("/tmp/x"));
-        assert_eq!(open.clone(), open);
-        assert!(format!("{open:?}").contains("OpenWorkspace"));
-        assert_ne!(quit, open);
     }
 
     fn info() -> AppInfo {
@@ -746,11 +1057,9 @@ mod tests {
         let mut buf = Vec::new();
         let info = info();
         let mut runner = BannerScreenRunner::new(&mut buf, &info);
-
         for entry in &entries {
             dispatch(entry, &mut runner).unwrap();
         }
-
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             "usagi v0.1.0: welcome TUI\n\
@@ -778,9 +1087,11 @@ mod tests {
         out.flush().unwrap();
         let info = info();
         let mut runner = BannerScreenRunner::new(&mut out, &info);
-
-        let error = dispatch(&EntryScreen::Welcome, &mut runner).unwrap_err();
-
-        assert_eq!(error.to_string(), "write failed");
+        assert_eq!(
+            dispatch(&EntryScreen::Welcome, &mut runner)
+                .unwrap_err()
+                .to_string(),
+            "write failed"
+        );
     }
 }

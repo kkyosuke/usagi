@@ -15,6 +15,7 @@
 use chrono::{DateTime, Utc};
 
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
@@ -116,13 +117,13 @@ fn activate(key: char) -> MenuAction {
 }
 
 impl Welcome {
-    /// recent 項目（最近使った順）を添えてメニューを組む。recent は先頭 [`RECENT_SLOTS`] 件
-    /// だけ取り、`1`〜`3` の番号キーで開ける。
+    /// recent 項目（最近使った順）を添えてメニューを組む。表示と番号キーの対象は
+    /// 先頭 [`RECENT_SLOTS`] 件だけだが、後で touch された項目を再整列できるよう全件を保持する。
     #[must_use]
     pub fn new(recent: Vec<Recent>) -> Self {
         Self {
             items: default_items(),
-            recent: recent.into_iter().take(RECENT_SLOTS).collect(),
+            recent,
             selected_index: 0,
             notice: None,
         }
@@ -143,7 +144,23 @@ impl Welcome {
     /// recent 項目（単体 workspace / unite が混在する）。
     #[must_use]
     pub fn recent(&self) -> &[Recent] {
-        &self.recent
+        &self.recent[..self.recent.len().min(RECENT_SLOTS)]
+    }
+
+    /// `workspace` と同じ path の単体 recent に touch 後の identity / timestamp を反映し、
+    /// 最終利用時刻の降順へ戻す。overview の集計値は既存 model の値を保つ。
+    pub(crate) fn record_opened(&mut self, workspace: &Workspace) {
+        let Some(overview) = self.recent.iter_mut().find_map(|recent| match recent {
+            Recent::Workspace(overview) if overview.workspace.path == workspace.path => {
+                Some(overview)
+            }
+            Recent::Workspace(_) | Recent::Unite(_) => None,
+        }) else {
+            return;
+        };
+        overview.workspace = workspace.clone();
+        self.recent
+            .sort_by_key(|recent| std::cmp::Reverse(recent.updated_at()));
     }
 
     /// 選択中の項目の添字。
@@ -197,7 +214,7 @@ impl Welcome {
     /// 番号キー `key` に対応する recent 項目を開く操作。空スロットや範囲外は `None`。
     fn recent_action(&self, key: char) -> Option<MenuAction> {
         let digit = usize::try_from(key.to_digit(10)?).ok()?;
-        if (1..=self.recent.len()).contains(&digit) {
+        if (1..=self.recent().len()).contains(&digit) {
             Some(MenuAction::OpenRecent(digit - 1))
         } else {
             None
@@ -555,11 +572,42 @@ mod tests {
             workspace("delta", 4),
         ]);
         assert_eq!(welcome.recent().len(), 3);
+        assert_eq!(welcome.action_for('4'), None);
         // MenuItem / MenuAction の derive も計測対象なのでここで触れる。
         assert_eq!(welcome.items()[0], welcome.items()[0]);
         assert!(format!("{:?}", welcome.items()[0]).contains("Open"));
         assert_eq!(MenuAction::OpenRecent(0), MenuAction::OpenRecent(0));
         assert!(format!("{:?}", MenuAction::Open).contains("Open"));
+    }
+
+    #[test]
+    fn record_opened_promotes_a_hidden_recent_and_preserves_its_counts() {
+        let mut welcome = Welcome::new(vec![
+            workspace("alpha", 1),
+            unite(&[("pair-a", 2), ("pair-b", 3)]),
+            workspace("beta", 3),
+            workspace("gamma", 4),
+            workspace("delta", 5),
+        ]);
+        let mut touched = Workspace::new("delta", "/tmp/delta");
+        touched.updated_at = now();
+
+        welcome.record_opened(&touched);
+
+        assert_eq!(welcome.recent().len(), 3);
+        assert_eq!(
+            welcome.recent()[0],
+            Recent::Workspace(WorkspaceOverview::new(touched, 2, 4, 1))
+        );
+        let names = welcome
+            .recent()
+            .iter()
+            .map(|recent| match recent {
+                Recent::Workspace(overview) => overview.workspace.name.as_str(),
+                Recent::Unite(_) => "unite",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["delta", "alpha", "unite"]);
     }
 
     #[test]

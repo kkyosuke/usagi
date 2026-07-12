@@ -7,6 +7,39 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use usagi_core::domain::workspace::Workspace;
+use usagi_core::domain::workspace_state::WorkspaceState;
+
+/// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSnapshot {
+    /// 開く workspace。
+    pub workspace: Workspace,
+    /// workspace 配下のセッション状態。
+    pub state: WorkspaceState,
+}
+
+impl WorkspaceSnapshot {
+    /// workspace と state を組にする。
+    #[must_use]
+    pub fn new(workspace: Workspace, state: WorkspaceState) -> Self {
+        Self { workspace, state }
+    }
+}
+
+/// Workspace を開く application port。
+///
+/// path の検証・登録・最終利用時刻の更新・state 読み込みは実 IO を持つ合成側が実装する。
+/// Open 一覧と Recent はともにこの 1 つの port を経由する。
+pub trait WorkspaceLoader {
+    /// `path` の workspace を開き、画面描画用 snapshot を返す。
+    ///
+    /// # Errors
+    ///
+    /// workspace の解決・登録・更新・state 読み込みに失敗した場合、そのエラーを返す。
+    fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot>;
+}
+
 /// TUI をどの画面から開始するかを表す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryScreen {
@@ -64,9 +97,9 @@ pub enum Key {
     Up,
     /// 選択を 1 つ下へ移す。
     Down,
-    /// キャレットを 1 つ左へ／モード選択では前の選択へ（←）。
+    /// キャレットやタブを 1 つ左へ／モード選択では前の選択へ（←）。
     Left,
-    /// キャレットを 1 つ右へ／モード選択では次の選択へ（→）。
+    /// キャレットやタブを 1 つ右へ／モード選択では次の選択へ（→）。
     Right,
     /// 選択中の項目を確定する。
     Enter,
@@ -219,7 +252,10 @@ mod tests {
         let keys = [
             Key::Up,
             Key::Down,
+            Key::Left,
+            Key::Right,
             Key::Enter,
+            Key::Backspace,
             Key::Escape,
             Key::Quit,
             Key::Char('o'),
