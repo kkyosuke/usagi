@@ -24,6 +24,7 @@ use usagi::infrastructure::resource::process_alive;
 
 /// The compiled `usagi` binary under test.
 const BIN: &str = env!("CARGO_BIN_EXE_usagi");
+const POLL: Duration = Duration::from_millis(10);
 
 fn daemon_e2e_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -51,7 +52,7 @@ fn wait_for(path: &Path, budget: Duration) -> bool {
         if path.exists() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL);
     }
     path.exists()
 }
@@ -95,7 +96,7 @@ fn connect(sock: &Path) -> UnixStream {
             }
             Err(e) if Instant::now() < deadline => {
                 let _ = e;
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(POLL);
             }
             Err(e) => panic!("connecting to the daemon socket: {e}"),
         }
@@ -450,7 +451,7 @@ fn wait_until(mut cond: impl FnMut() -> bool, budget: Duration) -> bool {
         if cond() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(POLL);
     }
     cond()
 }
@@ -513,8 +514,9 @@ fn daemon_owned_terminal_survives_detach_and_disconnect() {
 
         // The daemon owns the process, so it stays alive after the client that
         // viewed it detached and disconnected — this is "close the TUI, the
-        // agent keeps running". (Give the daemon a tick to notice the drop.)
-        std::thread::sleep(Duration::from_millis(700));
+        // agent keeps running". Give the daemon an idle socket tick to notice
+        // the disconnect before checking the process.
+        std::thread::sleep(Duration::from_millis(100));
         assert!(
             process_alive(pid),
             "the daemon-owned terminal (pid {pid}) died when its client detached"
@@ -581,7 +583,9 @@ fn spawn_runs_the_given_command_and_reports_its_exit() {
             &mut stream,
             &ClientMessage::Spawn {
                 worktree: worktree.path().to_path_buf(),
-                command: Some("sleep 1; printf usagi-cmd-$USAGI_E2E_MARKER; sleep 1".to_string()),
+                command: Some(
+                    "sleep 0.25; printf usagi-cmd-$USAGI_E2E_MARKER; sleep 0.25".to_string(),
+                ),
                 env: [("USAGI_E2E_MARKER".to_string(), "env-ok".to_string())].into(),
                 cols: 80,
                 rows: 24,
