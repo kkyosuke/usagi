@@ -151,6 +151,11 @@ impl AppState {
     pub const fn active(&self) -> Target {
         self.active
     }
+    /// この Home が投影している workspace identity。
+    #[must_use]
+    pub const fn workspace(&self) -> WorkspaceId {
+        self.workspace
+    }
     /// snapshot の stable session identity。
     #[must_use]
     pub fn sessions(&self) -> &[SessionId] {
