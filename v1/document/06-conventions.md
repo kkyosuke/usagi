@@ -134,7 +134,7 @@ Markdown 差分を含むため、Markdown link check は必須である。
 
 full test / coverage gate を必須とする条件は次のとおり。
 
-- push / PR 前または CI で Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。
+- push / PR 前または CI で Rust 差分（`*.rs`、`Cargo.toml`、`Cargo.lock`、Rust の build / test / coverage に影響する `scripts/`・`.github/workflows/`・hook）を含む。**`v1/` 配下の差分は Rust 差分に数えない**（退避された旧実装で、独立した Cargo プロジェクトのためルートのビルド・テスト・カバレッジ計測の対象外）。
 - docs-only を除き、`scripts/recommend-tests.sh` が fail-safe として `cargo test --quiet` を推奨する（未知の path、空 diff、複数層にまたがる変更、共有基盤の変更など）。
 - 変更が層境界、永続化、process / PTY / terminal IO、設定解決、テスト基盤、coverage 除外、CI / hook の gate に影響する。
 - selected tests で対象リスクを説明できない、または直接 consumer を特定できない。
@@ -164,7 +164,7 @@ scripts/recommend-tests.sh origin/main
 |---|---|
 | pre-commit | workspace root コミットの拒否（backstop） / ブランチ名チェック / staged な `.rs` を `cargo fmt` |
 | commit-msg | Conventional Commits 形式チェック |
-| pre-push | `cargo clippy -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip） |
+| pre-push | `cargo clippy -- -D warnings` / テストカバレッジ 100% 確認（`cargo llvm-cov`。テスト実行を兼ねる。`*.rs` 差分が無い push は skip。`v1/` 配下の差分は Rust 差分に数えず、v1 だけの push では clippy / coverage を skip する — v1 のテスト実行・カバレッジ強制は行わない） |
 
 ### workspace root コミットの拒否（backstop）
 
