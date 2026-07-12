@@ -5,6 +5,7 @@
 
 pub mod daemon;
 pub mod frontmatter;
+pub mod id;
 pub mod issue;
 pub mod memory;
 pub mod note;
