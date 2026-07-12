@@ -254,4 +254,16 @@ mod tests {
             Err(AdapterError::ProvisionFailed)
         ));
     }
+
+    #[test]
+    fn exposes_its_profile_and_validates_its_own_durable_snapshot() {
+        let mut adapter = ClaudeAdapter::with_revision(FakeProvisioner(Some(Ok(provision()))), 3);
+        assert_eq!(adapter.profile().id.as_str(), PROFILE_NAME);
+        assert_eq!(adapter.profile().revision, 3);
+        let snapshot = adapter.resolve(&request()).unwrap().snapshot;
+        assert_eq!(
+            adapter.validate_snapshot(&snapshot).unwrap(),
+            adapter.profile().clone()
+        );
+    }
 }
