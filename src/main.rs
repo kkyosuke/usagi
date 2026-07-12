@@ -7,8 +7,10 @@
 //! CLI が TUI 起動を要求した場合は、両クレートに依存できるこの合成ルートだけが
 //! CLI の起動要求を TUI の初期画面へ変換する。
 
+use std::cell::RefCell;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use crossterm::cursor;
@@ -19,13 +21,14 @@ use crossterm::terminal::{
     self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{execute, queue};
+use fs2::FileExt;
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Sleeper,
-    Terminator,
+    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
+    Sleeper, Terminator,
 };
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::store::workspace::Storage;
@@ -308,6 +311,46 @@ impl Sleeper for RealSleeper {
     }
 }
 
+/// The single-instance lock: an exclusive `flock` on `<data-dir>/daemon/daemon.lock`
+/// (following `store_lock`'s style). The locked file is retained for the process's
+/// lifetime, so the OS releases the lock only when the daemon exits.
+struct FileInstanceLock {
+    path: PathBuf,
+    held: RefCell<Option<std::fs::File>>,
+}
+
+impl InstanceLock for FileInstanceLock {
+    fn acquire(&self) -> std::io::Result<bool> {
+        // How long to wait for a departing holder (a restart hands off in
+        // milliseconds) before concluding another daemon genuinely holds it.
+        const TIMEOUT: Duration = Duration::from_secs(2);
+        const POLL: Duration = Duration::from_millis(20);
+
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.path)?;
+
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    // Retain the locked handle; dropping it would release the lock.
+                    *self.held.borrow_mut() = Some(file);
+                    return Ok(true);
+                }
+                Err(_) if Instant::now() < deadline => std::thread::sleep(POLL),
+                Err(_) => return Ok(false),
+            }
+        }
+    }
+}
+
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -362,13 +405,18 @@ fn main() -> std::io::Result<()> {
     match args.get(1).and_then(|arg| arg.to_str()) {
         Some("daemon") => {
             let command = args.get(2).map(|arg| arg.to_string_lossy());
-            let path = paths::data_dir()
+            let daemon_dir = paths::data_dir()
                 .map_err(|err| std::io::Error::other(format!("{err:#}")))?
-                .join("daemon")
-                .join("daemon.json");
-            let store = DaemonRecordStore::new(FsRecordFile { path });
+                .join("daemon");
+            let store = DaemonRecordStore::new(FsRecordFile {
+                path: daemon_dir.join("daemon.json"),
+            });
             let launcher = ServeLauncher {
                 exe: std::env::current_exe()?,
+            };
+            let lock = FileInstanceLock {
+                path: daemon_dir.join("daemon.lock"),
+                held: RefCell::new(None),
             };
             let env = DaemonEnv {
                 store: &store,
@@ -377,6 +425,7 @@ fn main() -> std::io::Result<()> {
                 shutdown: &SignalShutdown,
                 launcher: &launcher,
                 sleeper: &RealSleeper,
+                lock: &lock,
                 pid: std::process::id(),
             };
             usagi_daemon::presentation::run(&mut stdout, command.as_deref(), &info, &env)

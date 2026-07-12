@@ -6,8 +6,8 @@ use std::io;
 
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, LivenessProbe, RecordFile, ShutdownSignal, Sleeper,
-    Terminator,
+    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
+    Sleeper, Terminator,
 };
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
@@ -150,4 +150,25 @@ pub struct NoopSleeper;
 
 impl Sleeper for NoopSleeper {
     fn sleep(&self) {}
+}
+
+/// An [`InstanceLock`] with a fixed outcome, so `serve` tests exercise acquiring
+/// the single-instance lock, being refused, and failing without real locking.
+pub enum FakeLock {
+    /// The lock is acquired by this process.
+    Acquired,
+    /// The lock is held by another daemon.
+    Held,
+    /// Acquiring the lock fails.
+    Failing,
+}
+
+impl InstanceLock for FakeLock {
+    fn acquire(&self) -> io::Result<bool> {
+        match self {
+            FakeLock::Acquired => Ok(true),
+            FakeLock::Held => Ok(false),
+            FakeLock::Failing => Err(io::Error::other("lock failed")),
+        }
+    }
 }

@@ -106,6 +106,28 @@ pub trait Sleeper {
     fn sleep(&self);
 }
 
+/// The authoritative single-instance guard held by a running `serve`.
+///
+/// The real implementation takes an exclusive advisory lock (`flock`-style, via
+/// `fs2`, following [`super::persistence::store_lock`]'s style) on a per-daemon
+/// lock file and holds it for the process's lifetime; it is real IO bound at the
+/// synthesis root. Because the OS releases an `flock` when the holding process
+/// dies, this guards against multiple daemons even across crashes — something the
+/// record + liveness check cannot do race-free.
+///
+/// [`acquire`](InstanceLock::acquire) waits briefly for a departing holder before
+/// giving up, so a `restart` hands the lock from the exiting daemon to the new
+/// one without a race, while a genuine second daemon is refused.
+pub trait InstanceLock {
+    /// Try to become the single running daemon, waiting briefly for a departing
+    /// holder. Returns `true` when the lock is now held by this process, or
+    /// `false` when another daemon still holds it.
+    ///
+    /// # Errors
+    /// Returns an error when the lock file cannot be opened or locked.
+    fn acquire(&self) -> io::Result<bool>;
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,
