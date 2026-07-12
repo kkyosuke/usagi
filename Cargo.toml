@@ -5,10 +5,11 @@
 # 3 クレートに置く（共通: usagi-core / daemon 面: usagi-daemon / TUI 面: usagi-tui）。
 # 構成の設計判断は document/proposals/06-v2-workspace-layout.md を参照。
 #
-# version は auto-release（.github/workflows/auto-release.yml）がルート Cargo.toml の
-# `version = "..."` 行をリリース起点として監視しているため、workspace 継承にせず
-# リテラルでここに置く。退避時点の v1 の version をそのまま引き継ぎ、
-# v2 として最初にリリースするときに初めて bump する。
+# リリース起点は v1/Cargo.toml の version（auto-release が監視。リリースはまだ
+# v1 のバイナリを出荷する）。このルートの version はリリースに影響しないが、
+# 退避時点の v1 の version を引き継いだリテラルを置いておき（workspace 継承に
+# しない。auto-release は `version = "..."` 行を grep するため）、v2 として最初に
+# リリースするときにリリース起点をこちらへ切り替える。
 [package]
 name = "usagi"
 version = "2.6.0"

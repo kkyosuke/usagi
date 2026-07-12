@@ -1,0 +1,60 @@
+name: v1 Test
+
+# v1/ は退避された旧実装だが、リリースはまだ v1 のバイナリを出荷する
+# （auto-release.yml / release.yml）。そのため v1/ に変更が入る push / PR では
+# v1 自身のマニフェストで fmt / clippy / full test を回し、出荷物が壊れて
+# いないことをマージ前に検証する。ルートの v2 パッケージのゲートは
+# test.yml / coverage.yml が担う（v1 はルート workspace の対象外）。
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'v1/**'
+      - '.github/workflows/v1-test.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'v1/**'
+      - '.github/workflows/v1-test.yml'
+
+concurrency:
+  group: v1-test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  v1-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: rust-v1-test
+          workspaces: v1
+
+      - name: Check formatting
+        run: cargo fmt --all --manifest-path v1/Cargo.toml -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --manifest-path v1/Cargo.toml -- -D warnings
+
+      - name: Run tests
+        run: |
+          set +e
+          cargo test --quiet --manifest-path v1/Cargo.toml > /tmp/usagi-v1-cargo-test.log 2>&1
+          status=$?
+          set -e
+          tail -n 160 /tmp/usagi-v1-cargo-test.log
+          exit "$status"

@@ -1,5 +1,8 @@
 name: Release
 
+# リリース成果物はまだ v1（v1/ に退避された旧実装）のバイナリ。
+# ルートの v2 パッケージではなく v1/Cargo.toml を対象にビルドする。
+
 on:
   push:
     tags:
@@ -141,26 +144,26 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
+          workspaces: v1
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
 
       - name: Prepare artifact
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
           mkdir -p dist
-          cp ${{ matrix.artifact_name }} dist/
-          cp ../../../scripts/install.sh dist/
+          cp "v1/target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
+          cp scripts/install.sh dist/
           chmod +x dist/install.sh
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             ASSET_FILENAME="${{ matrix.asset_name }}.zip"
-            7z a ../../../../$ASSET_FILENAME *
+            7z a "../$ASSET_FILENAME" *
             echo "ASSET_FILENAME=$ASSET_FILENAME" >> $GITHUB_ENV
           else
             ASSET_FILENAME="${{ matrix.asset_name }}.tar.gz"
-            tar -czvf ../../../../$ASSET_FILENAME .
+            tar -czvf "../$ASSET_FILENAME" .
             echo "ASSET_FILENAME=$ASSET_FILENAME" >> $GITHUB_ENV
           fi
 

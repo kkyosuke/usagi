@@ -181,9 +181,10 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/test.yml` | `main` への push / PR | fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
+| `.github/workflows/test.yml` | `main` への push / PR | ルート（v2 パッケージ）の fmt / clippy と full test を独立 job で並列実行（`ubuntu-latest`）。従来の `test` check 名は fmt / clippy gate として維持 |
+| `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
-| `.github/workflows/release-build-check.yml` | `Cargo.toml` / `Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
+| `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
 | `.github/workflows/enforce-pr-base.yml` | PR | ベースブランチが `main` であることを強制 |
@@ -193,15 +194,17 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 
 ## リリース
 
-リリースは **`Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
+リリースは **`v1/Cargo.toml` の `version` 変更を起点に自動化**されている。手動でタグを切る必要はない。
+出荷するバイナリは v1（`v1/` に退避された実装）であり、ルートの v2 パッケージの version はリリースに影響しない。
 
 ### 手順
 
 1. リリースしたい変更を `main` にマージする。
-2. `Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（例: `0.1.0` → `0.2.0`）。
+2. `v1/Cargo.toml` の `version` を上げる PR を作成し `main` にマージする（例: `0.1.0` → `0.2.0`）。
+   `create-release-pr.yml` を手動実行（`workflow_dispatch`）すると、この version bump PR を自動で作成できる。
 3. 以降は自動で進む:
-   - `auto-release.yml` が `main` への `Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
-   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
+   - `auto-release.yml` が `main` への `v1/Cargo.toml` 変更 push を検知し、version が前コミットから変わっていれば `v<version>` タグを対象にリリースを起動する。
+   - reusable な `release.yml` が呼ばれ、4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 のバイナリをビルドし、`v<version>` タグと GitHub Release を作成して成果物を添付する。
 
 > version が変わらない push、または同名タグが既に存在する場合はスキップされる。
 
@@ -215,7 +218,8 @@ pre-commit は、**workspace root のチェックアウト（`.usagi/sessions/` 
 
 | ファイル | トリガー | 役割 |
 |---|---|---|
-| `.github/workflows/auto-release.yml` | `main` への `Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
-| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・ビルド・GitHub Release 作成 |
+| `.github/workflows/create-release-pr.yml` | 手動（`workflow_dispatch`） | `v1/Cargo.toml` の version を上げるリリース PR を作成する |
+| `.github/workflows/auto-release.yml` | `main` への `v1/Cargo.toml` 変更 push | version 変更を検知し `release.yml` を呼び出す |
+| `.github/workflows/release.yml` | `v*` タグ push / `workflow_call` | リリースノート生成・v1 のビルド・GitHub Release 作成 |
 
 `release.yml` は `v*` タグの手動 push でも従来どおり動作する（`workflow_call` は追加のトリガー）。
