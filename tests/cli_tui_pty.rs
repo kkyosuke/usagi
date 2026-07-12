@@ -49,6 +49,21 @@ fn terminal_attributes(terminal: &File) -> io::Result<libc::termios> {
     Ok(unsafe { attributes.assume_init() })
 }
 
+/// PTY の window size を更新して、foreground process に resize を通知する。
+fn resize_pty(terminal: &File, columns: u16, rows: u16) -> io::Result<()> {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `terminal` owns the PTY master and `size` points to a fully initialized winsize.
+    if unsafe { libc::ioctl(terminal.as_raw_fd(), libc::TIOCSWINSZ, &raw const size) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn read_pty(mut master: File) -> Vec<u8> {
     let mut output = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -118,6 +133,15 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     master.write_all(b"1").unwrap();
     master.flush().unwrap();
     thread::sleep(Duration::from_millis(150));
+    // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
+    // new surface instead of leaving cells from the former 100-column frame behind.
+    resize_pty(&master, 80, 20).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    // The legacy workspace loop observes resize on the next frame boundary. `x` is a no-op key
+    // which requests that boundary without changing the visible Home state.
+    master.write_all(b"x").unwrap();
+    master.flush().unwrap();
+    thread::sleep(Duration::from_millis(100));
     master.write_all(b"q").unwrap();
     master.flush().unwrap();
 
@@ -149,6 +173,10 @@ fn hop_recent_opens_workspace_and_restores_the_terminal() {
     assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25h"), "PTY output: {output}");
+    assert!(
+        output.matches("\u{1b}[2J").count() >= 2,
+        "the initial and resized surfaces must both be cleared: {output}"
+    );
 
     assert_eq!(attributes_after.c_iflag, attributes_before.c_iflag);
     assert_eq!(attributes_after.c_oflag, attributes_before.c_oflag);
