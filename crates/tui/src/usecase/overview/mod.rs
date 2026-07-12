@@ -29,6 +29,8 @@ pub struct CommandInfo {
     pub description: &'static str,
     /// 引数ヒントに表示する 1 行の書式。
     pub usage: &'static str,
+    /// command palette の help に表示する詳しい説明。
+    pub long_description: &'static str,
 }
 
 /// 入力から解釈した Overview コマンド。
@@ -58,6 +60,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
             name: "config",
             description: "Edit this workspace's local settings",
             usage: "config",
+            long_description: "Open the local settings surface for this workspace.",
         },
         factory: |arguments| Command::Config { arguments },
     },
@@ -66,6 +69,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
             name: "env",
             description: "Edit this workspace's environment variables",
             usage: "env",
+            long_description: "View and edit environment variables used by workspace commands.",
         },
         factory: |arguments| Command::Env { arguments },
     },
@@ -74,6 +78,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
             name: "issue",
             description: "Browse task issues",
             usage: "issue [list|graph|gantt|show <number>]",
+            long_description: "List issues or inspect an issue, dependency graph, or gantt view.",
         },
         factory: |arguments| Command::Issue { arguments },
     },
@@ -82,6 +87,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
             name: "session",
             description: "Create, list, select, or remove sessions",
             usage: "session [create|list|overview|remove] <name>",
+            long_description: "Manage the sessions that belong to this workspace.",
         },
         factory: |arguments| Command::Session { arguments },
     },
@@ -91,6 +97,46 @@ const DEFINITIONS: &[CommandDefinition] = &[
 #[must_use]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
+}
+
+/// registry metadata に対する読み取り専用の境界。
+///
+/// palette はこの境界だけを使うため、テストでは小さな fake registry で completion と help を
+/// 固定できる。実装側の registry は [`commands`] を単一情報源にする。
+pub trait CommandRegistry {
+    /// 登録済み command metadata を名前順で返す。
+    fn commands(&self) -> Vec<CommandInfo>;
+}
+
+/// 実行用 registry metadata を読む default 実装。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DefaultRegistry;
+
+impl CommandRegistry for DefaultRegistry {
+    fn commands(&self) -> Vec<CommandInfo> {
+        commands().collect()
+    }
+}
+
+/// `input` の先頭 token に前方一致する command metadata。
+#[must_use]
+pub fn complete(registry: &impl CommandRegistry, input: &str) -> Vec<CommandInfo> {
+    let typed = input.split_whitespace().next().unwrap_or_default();
+    registry
+        .commands()
+        .into_iter()
+        .filter(|command| command.name.starts_with(typed))
+        .collect()
+}
+
+/// `input` の先頭 token と一致する command の help metadata。
+#[must_use]
+pub fn help(registry: &impl CommandRegistry, input: &str) -> Option<CommandInfo> {
+    let name = input.split_whitespace().next()?;
+    registry
+        .commands()
+        .into_iter()
+        .find(|command| command.name == name)
 }
 
 impl Command {
@@ -193,7 +239,18 @@ pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, CommandResult, ParseError, commands, dispatch, interpret};
+    use super::{
+        Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
+        commands, complete, dispatch, help, interpret,
+    };
+
+    struct FakeRegistry(Vec<CommandInfo>);
+
+    impl CommandRegistry for FakeRegistry {
+        fn commands(&self) -> Vec<CommandInfo> {
+            self.0.clone()
+        }
+    }
 
     #[test]
     fn command_metadata_is_complete_and_sorted() {
@@ -205,6 +262,29 @@ mod tests {
                 .iter()
                 .all(|command| !command.description.is_empty() && !command.usage.is_empty())
         );
+    }
+
+    #[test]
+    fn completion_and_help_use_the_injected_registry_metadata() {
+        let fake = FakeRegistry(vec![CommandInfo {
+            name: "status",
+            description: "Show workspace status",
+            usage: "status [--short]",
+            long_description: "Summarize the current workspace state without changing it.",
+        }]);
+
+        assert_eq!(
+            complete(&fake, "st")
+                .iter()
+                .map(|item| item.name)
+                .collect::<Vec<_>>(),
+            ["status"]
+        );
+        assert_eq!(
+            help(&fake, "status --short").unwrap().long_description,
+            "Summarize the current workspace state without changing it."
+        );
+        assert!(complete(&DefaultRegistry, "zz").is_empty());
     }
 
     #[test]

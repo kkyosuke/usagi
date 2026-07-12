@@ -23,7 +23,7 @@ use crate::presentation::widgets;
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
-const FOOTER: &str = "↑↓ move / / filter / u Unite / c cleanup / Enter open / Esc back";
+const FOOTER: &str = "↑↓/jk move / / filter / u Unite / c cleanup / Enter open / Esc back / q quit";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 52;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。

@@ -113,6 +113,7 @@ impl Terminal for CrosstermTerminal {
                         KeyCode::Right => Key::Right,
                         KeyCode::Enter => Key::Enter,
                         KeyCode::Backspace => Key::Backspace,
+                        KeyCode::Tab => Key::Tab,
                         KeyCode::Escape => Key::Escape,
                         KeyCode::Char(ch) => Key::Char(ch),
                         _ => Key::Other,

@@ -1,14 +1,14 @@
 ---
 number: 242
 title: feat(tui): Overview の completion/history/help と top-level UX を追加する
-status: todo
+status: done
 priority: medium
 labels: [tui, parity-b]
 dependson: [226, 230]
 related: []
 parent: 227
 created_at: 2026-07-12T21:12:33.836768+00:00
-updated_at: 2026-07-12T21:12:33.836768+00:00
+updated_at: 2026-07-12T22:55:39.529965+00:00
 ---
 
 ## 目的

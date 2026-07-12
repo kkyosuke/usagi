@@ -122,6 +122,8 @@ pub enum Key {
     Enter,
     /// キャレット手前の 1 文字を削除する（Backspace）。
     Backspace,
+    /// Overview などの入力欄で候補を補完する（Tab）。
+    Tab,
     /// 一段戻る・取り消す（Esc）。最上位の画面では終了として扱う。
     Escape,
     /// 画面を終了する（Ctrl-C など）。

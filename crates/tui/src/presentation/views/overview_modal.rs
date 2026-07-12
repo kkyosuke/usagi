@@ -1,7 +1,8 @@
 //! Overview modal（コマンドパレット `:`）。
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に
-//! 打つと候補が前方一致で絞り込まれ、↑↓ で選べる。中央に浮かぶ枠付きダイアログとして
+//! 打つと候補が前方一致で絞り込まれ、Tab で補完、↑↓ で履歴を遡れる。選択中 command の
+//! usage / long help と直前の結果も同じ固定位置に表示する。中央に浮かぶ枠付きダイアログとして
 //! 描く（配置は共通の [`modal`] widget に委譲）。
 //!
 //! 状態 [`OverviewModal`] は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
@@ -22,6 +23,18 @@ const MAX_MATCHES: usize = 8;
 pub struct OverviewModal {
     input: TextInput,
     selected: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    result: Option<PaletteResult>,
+}
+
+/// command 実行後に palette の結果帯へ残す安全な 1 行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteResult {
+    /// 成功または通常の通知。
+    Notice(String),
+    /// 入力・実行時の安全なエラー。
+    Error(String),
 }
 
 impl OverviewModal {
@@ -49,13 +62,22 @@ impl OverviewModal {
         self.selected
     }
 
+    /// この palette を開いてから実行した command history。
+    #[must_use]
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// 直前の command 実行結果。
+    #[must_use]
+    pub fn result(&self) -> Option<&PaletteResult> {
+        self.result.as_ref()
+    }
+
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
     #[must_use]
     pub fn matches(&self) -> Vec<overview::CommandInfo> {
-        let typed = self.input.value().trim();
-        overview::commands()
-            .filter(|cmd| cmd.name.starts_with(typed))
-            .collect()
+        overview::complete(&overview::DefaultRegistry, self.input.value())
     }
 
     /// 選択中候補の command 名を入力欄へ補完する。候補が無ければ no-op。
@@ -63,6 +85,64 @@ impl OverviewModal {
         if let Some(command) = self.matches().get(self.selected) {
             self.input = TextInput::with_value(command.name);
         }
+    }
+
+    /// 直近の history を入力欄へ呼び戻す。空の入力欄でのみ有効なので、候補選択の ↑ と
+    /// 衝突しない。呼び戻せたかを返す。
+    pub fn recall_previous(&mut self) -> bool {
+        if (!self.input.value().trim().is_empty() && self.history_index.is_none())
+            || self.history.is_empty()
+        {
+            return false;
+        }
+        let index = self
+            .history_index
+            .map_or(self.history.len() - 1, |index| index.saturating_sub(1));
+        self.history_index = Some(index);
+        self.input = TextInput::with_value(&self.history[index]);
+        self.selected = 0;
+        true
+    }
+
+    /// history を新しい方へ進める。最後の次では空の新規入力に戻る。呼び戻せたかを返す。
+    pub fn recall_next(&mut self) -> bool {
+        let Some(index) = self.history_index else {
+            return false;
+        };
+        if index + 1 == self.history.len() {
+            self.history_index = None;
+            self.input = TextInput::default();
+        } else {
+            let next = index + 1;
+            self.history_index = Some(next);
+            self.input = TextInput::with_value(&self.history[next]);
+        }
+        self.selected = 0;
+        true
+    }
+
+    /// 現在の submission を history に記録する。同じ command が連続した場合は重複させない。
+    pub fn record_submission(&mut self) {
+        let submission = self.submission();
+        if !submission.is_empty() && self.history.last() != Some(&submission) {
+            self.history.push(submission);
+        }
+        self.history_index = None;
+    }
+
+    /// command 実行の通常結果を結果帯へ表示する。
+    pub fn set_result(&mut self, result: impl Into<String>) {
+        self.result = Some(PaletteResult::Notice(result.into()));
+    }
+
+    /// command 実行の安全なエラーを結果帯へ表示する。
+    pub fn set_error(&mut self, error: impl Into<String>) {
+        self.result = Some(PaletteResult::Error(error.into()));
+    }
+
+    /// 結果帯を消す。
+    pub fn clear_result(&mut self) {
+        self.result = None;
     }
 
     /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
@@ -81,12 +161,14 @@ impl OverviewModal {
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
         self.selected = 0;
+        self.history_index = None;
     }
 
     /// キャレット手前の 1 文字を削除し、選択を先頭に戻す。
     pub fn backspace(&mut self) {
         self.input.backspace();
         self.selected = 0;
+        self.history_index = None;
     }
 
     /// キャレットを 1 文字左へ。
@@ -174,8 +256,34 @@ fn body(state: &OverviewModal) -> Vec<String> {
             lines.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
         }
     }
+    let help = matches
+        .get(state.selected)
+        .copied()
+        .or_else(|| overview::help(&overview::DefaultRegistry, state.input()));
+    if let Some(help) = help {
+        lines.push(Style::new().dim().paint(&format!("  {}", help.usage)));
+        lines.push(
+            Style::new()
+                .dim()
+                .paint(&format!("  {}", help.long_description)),
+        );
+    }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  ↑↓: select   Esc: close"));
+    match state.result() {
+        Some(PaletteResult::Notice(result)) => {
+            lines.push(Role::Success.style().paint(&format!("  {result}")));
+        }
+        Some(PaletteResult::Error(error)) => {
+            lines.push(Role::Danger.style().paint(&format!("  {error}")));
+        }
+        None => lines.push(String::new()),
+    }
+    lines.push(String::new());
+    lines.push(
+        Style::new()
+            .dim()
+            .paint("  Tab: complete   ↑↓: history/select   Esc: close"),
+    );
     lines
 }
 
@@ -207,7 +315,7 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverviewModal, render, render_over};
+    use super::{OverviewModal, PaletteResult, render, render_over};
     use crate::presentation::widgets::display_width;
 
     fn strip(line: &str) -> String {
@@ -312,6 +420,61 @@ mod tests {
 
         let empty = OverviewModal::new();
         assert_eq!(empty.submission(), "config");
+    }
+
+    #[test]
+    fn history_recall_moves_between_submissions_without_duplicating_them() {
+        let mut modal = OverviewModal::new();
+        type_str(&mut modal, "issue list");
+        modal.record_submission();
+        modal.record_submission();
+        modal = OverviewModal::new();
+        type_str(&mut modal, "session list");
+        modal.record_submission();
+        assert_eq!(modal.history(), ["session list"]);
+
+        // Seed a second command through the public history state transition.
+        modal.backspace();
+        for _ in 0..11 {
+            modal.backspace();
+        }
+        type_str(&mut modal, "issue list");
+        modal.record_submission();
+        modal = modal.clone();
+        modal.backspace();
+        for _ in 0..10 {
+            modal.backspace();
+        }
+        assert!(modal.recall_previous());
+        assert_eq!(modal.input(), "issue list");
+        assert!(modal.recall_previous());
+        assert_eq!(modal.input(), "session list");
+        assert!(modal.recall_next());
+        assert_eq!(modal.input(), "issue list");
+        assert!(modal.recall_next());
+        assert_eq!(modal.input(), "");
+    }
+
+    #[test]
+    fn render_shows_long_help_and_a_result_strip() {
+        let mut modal = OverviewModal::new();
+        modal.set_result("Settings saved");
+        let text = joined(&modal);
+        assert!(text.contains("Open the local settings surface"));
+        assert!(text.contains("Settings saved"));
+        assert!(text.contains("Tab: complete"));
+        assert_eq!(
+            modal.result(),
+            Some(&PaletteResult::Notice("Settings saved".to_owned()))
+        );
+
+        modal.set_error("Settings are unavailable");
+        assert_eq!(
+            modal.result(),
+            Some(&PaletteResult::Error("Settings are unavailable".to_owned()))
+        );
+        modal.clear_result();
+        assert_eq!(modal.result(), None);
     }
 
     #[test]

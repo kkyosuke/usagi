@@ -24,7 +24,7 @@ use crate::presentation::widgets::{self, modal};
 /// 画面上部に置くタイトル。
 const TITLE: &str = "USAGI";
 /// 最下行に固定するキー操作ヒント。
-const FOOTER: &str = "↑↓: move / Enter or letter: select / 1-3: recent / q: quit";
+const FOOTER: &str = "↑↓/jk: move / Enter or letter: select / 1-3: recent / q: quit";
 /// 左のメニュー列の固定表示幅。
 const MENU_WIDTH: usize = 18;
 /// 右の recent 列の固定表示幅。

@@ -190,11 +190,11 @@ fn step_config(key: Key) -> ConfigStep {
 /// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
-        Key::Up => {
+        Key::Up | Key::Char('k') => {
             welcome.select_prev();
             WelcomeStep::Stay
         }
-        Key::Down => {
+        Key::Down | Key::Char('j') => {
             welcome.select_next();
             WelcomeStep::Stay
         }
@@ -203,7 +203,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         Key::Char(ch) => welcome
             .action_for(ch)
             .map_or(WelcomeStep::Stay, welcome_action),
-        Key::Left | Key::Right | Key::Backspace | Key::Other => WelcomeStep::Stay,
+        Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Other => WelcomeStep::Stay,
     }
 }
 
@@ -212,11 +212,11 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// フォームの確定（作成）は作成処理が入るまで留まる。
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
-        Key::Up => {
+        Key::Up | Key::Char('k') => {
             form.focus_prev();
             NewStep::Stay
         }
-        Key::Down => {
+        Key::Down | Key::Char('j') => {
             form.focus_next();
             NewStep::Stay
         }
@@ -238,7 +238,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit => NewStep::Quit,
-        Key::Enter | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::Other => NewStep::Stay,
     }
 }
 
@@ -282,15 +282,15 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 OpenStep::Stay
             }
             Key::Quit => OpenStep::Quit,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Other => OpenStep::Stay,
+            Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::Other => OpenStep::Stay,
         };
     }
     match key {
-        Key::Up => {
+        Key::Up | Key::Char('k') => {
             open.select_prev();
             OpenStep::Stay
         }
-        Key::Down => {
+        Key::Down | Key::Char('j') => {
             open.select_next();
             OpenStep::Stay
         }
@@ -326,7 +326,9 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Other => OpenStep::Stay,
+        Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Other => {
+            OpenStep::Stay
+        }
     }
 }
 
@@ -334,14 +336,24 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 /// Enter の command 実行は command handler が接続されるまで no-op とする。
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
-        Key::Up => modal.select_prev(),
-        Key::Down => modal.select_next(),
+        Key::Up => {
+            if !modal.recall_previous() {
+                modal.select_prev();
+            }
+        }
+        Key::Down => {
+            if !modal.recall_next() {
+                modal.select_next();
+            }
+        }
         Key::Left => modal.cursor_left(),
         Key::Right => modal.cursor_right(),
         Key::Backspace => modal.backspace(),
+        Key::Tab => modal.complete_selected(),
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
-        Key::Enter | Key::Quit | Key::Other => {}
+        Key::Enter => modal.record_submission(),
+        Key::Quit | Key::Other => {}
     }
     false
 }
@@ -356,6 +368,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Right
         | Key::Enter
         | Key::Backspace
+        | Key::Tab
         | Key::Quit
         | Key::Char(_)
         | Key::Other => {}
@@ -376,7 +389,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('p') => ui.open_prs(),
         Key::Escape => return WorkspaceStep::Back,
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Backspace | Key::Char(_) | Key::Other => {}
+        Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -394,7 +407,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Escape => ui.workspace.enter_switch(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         // action 実行は Closeup command handler が接続されるまで no-op。
-        Key::Enter | Key::Backspace | Key::Char(_) | Key::Other => {}
+        Key::Enter | Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -886,6 +899,16 @@ mod tests {
 
     #[test]
     fn modal_reducers_capture_edit_selection_and_close_keys() {
+        let mut overview = OverviewModal::new();
+        assert!(!step_overview(&mut overview, Key::Tab));
+        assert_eq!(overview.input(), "config");
+        assert!(!step_overview(&mut overview, Key::Enter));
+        for _ in 0..6 {
+            assert!(!step_overview(&mut overview, Key::Backspace));
+        }
+        assert!(!step_overview(&mut overview, Key::Up));
+        assert_eq!(overview.input(), "config");
+
         let mut overview = OverviewModal::new();
         for key in [Key::Down, Key::Up, Key::Left, Key::Right] {
             assert!(!step_overview(&mut overview, key));
