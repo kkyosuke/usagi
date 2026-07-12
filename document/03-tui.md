@@ -1,10 +1,10 @@
 # 3. TUI
 
-> [ドキュメント目次](README.md) ｜ ← 前へ [2. アーキテクチャ](02-architecture.md) ｜ 次へ → [6. 開発規約](06-conventions.md)
+> [ドキュメント目次](README.md) ｜ ← 前へ [2. アーキテクチャ](02-architecture.md) ｜ 次へ → [4. daemon IPC](04-ipc.md)
 
 v2 TUI の現在の画面遷移、live pane、および TUI-local resume state の仕様である。daemon
-の resource schema や wire protocol は本書では所有せず、[2. アーキテクチャ](02-architecture.md)
-を境界の正本とする。
+の resource schema や wire protocol は本書では所有せず、[4. daemon IPC](04-ipc.md) と
+[5. daemon](05-daemon.md) を境界の正本とする。
 
 ## 目次
 

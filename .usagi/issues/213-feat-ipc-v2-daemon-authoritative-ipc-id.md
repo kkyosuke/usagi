@@ -1,13 +1,13 @@
 ---
 number: 213
 title: feat(ipc): v2 daemon-authoritative IPC／ID を段階実装する
-status: todo
+status: done
 priority: high
 labels: [epic, ipc, daemon]
 dependson: [212]
 related: [159, 209]
 created_at: 2026-07-12T11:38:03.490662+00:00
-updated_at: 2026-07-12T11:38:03.490662+00:00
+updated_at: 2026-07-12T23:28:19.350950+00:00
 ---
 
 ## 目的
