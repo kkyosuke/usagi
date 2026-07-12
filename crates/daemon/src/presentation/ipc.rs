@@ -19,16 +19,14 @@ fn decode_envelope(value: serde_json::Value) -> io::Result<Envelope> {
 fn write_bootstrap(writer: &mut dyn Write, value: &Bootstrap, limit: usize) -> io::Result<()> {
     write_json_frame(
         writer,
-        &serde_json::to_value(value)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        &serde_json::to_value(value).expect("protocol bootstrap serializes"),
         limit,
     )
 }
 fn write_envelope(writer: &mut dyn Write, value: &Envelope, limit: usize) -> io::Result<()> {
     write_json_frame(
         writer,
-        &serde_json::to_value(value)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        &serde_json::to_value(value).expect("protocol envelope serializes"),
         limit,
     )
 }

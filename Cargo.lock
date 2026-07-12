@@ -852,6 +852,7 @@ dependencies = [
 name = "usagi-daemon"
 version = "0.0.0"
 dependencies = [
+ "serde",
  "serde_json",
  "usagi-core",
 ]
