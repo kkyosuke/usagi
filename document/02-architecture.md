@@ -176,7 +176,8 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
 ```
 
 - **`Run` トレイト**: 各コマンドの実行を `fn run(&self, out) -> io::Result<()>` に一様化する。
-  巨大な match ではなく、コマンドごとのハンドラ型（`cli/commands/`）が `Run` を実装する。
+  巨大な match ではなく、コマンドごとのハンドラ型が `Run` を実装する。ハンドラは
+  **1 コマンド = 1 ファイル**（`cli/commands/<command>.rs`）に置く。
 - **dispatch**: `Command::into_handler` が解析済みコマンドを対応ハンドラに変換する 1 か所の対応付け。
 - **エントリ `run(args, version, out, err)`**: 実 IO を注入して受け取り、終了コードを返す。
   `args` は単相化を増やさないよう `Vec<OsString>` の具体型で受ける。配布 version は
