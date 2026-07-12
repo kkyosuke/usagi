@@ -1,14 +1,14 @@
 ---
 number: 189
 title: perf(test): daemon/PTY E2E の process 起動と待機を短縮する
-status: todo
+status: done
 priority: medium
 labels: [perf, test]
 dependson: []
 related: [181]
 parent: 177
 created_at: 2026-07-11T00:41:58.929117+00:00
-updated_at: 2026-07-11T00:41:58.929117+00:00
+updated_at: 2026-07-12T22:27:02.386684+00:00
 ---
 
 ## 背景

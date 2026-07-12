@@ -15,6 +15,8 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 pub mod controller;
 /// Session create/remove の pending 表示と safe landing を扱う純粋 reducer。
 pub mod lifecycle;
+/// Closeup の terminal / Agent tab と placeholder を扱う純粋 reducer。
+pub mod pane;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]

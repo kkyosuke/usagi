@@ -1,14 +1,14 @@
 ---
 number: 230
 title: feat(tui): fake attach flow で Welcome/Open/Recent から Home を接続する
-status: todo
+status: done
 priority: high
 labels: [tui, entry]
 dependson: [223, 225]
 related: []
 parent: 227
 created_at: 2026-07-12T21:11:18.202008+00:00
-updated_at: 2026-07-12T21:11:18.202008+00:00
+updated_at: 2026-07-12T22:30:51.482650+00:00
 ---
 
 ## 目的

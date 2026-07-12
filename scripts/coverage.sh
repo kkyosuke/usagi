@@ -21,9 +21,11 @@
 # この PR では除外する。個別の実装 slice で fake / integration test を追加した時点で戻す。
 # Session lifecycle reducer の generic completion callbacks は monomorphization が coverage
 # report で重複するため、pure reducer の fake-persistence tests は通常の test gate で検証する。
+# `src/tui_input.rs` は crossterm の実端末 poll/read と合成 root の wiring であり、fake source
+# sequence test で振る舞いを検証する。実端末の読み取り自体は CI では再現できないため除外する。
 # GenerationCoordinator は rollover/crash の状態遷移を fake process でテストするが、
 # durable registry/PTY coordinator との結合点は後続の daemon cutover で計測する。
-export COVERAGE_IGNORE='(src/main\.rs|cli/src/cli/(commands/(update|version)|mod)\.rs|cli/src/mcp/serve\.rs|core/src/domain/(session_lifecycle|id/mod|issue/markdown|memory/markdown|pullrequest/mod)\.rs|core/src/infrastructure/(ipc/mod|daemon/mod|error_log|paths|persistence/(json_file|markdown_store)|store/(issue|lifecycle|memory|workspace)|git/(repo|worktree))\.rs|core/src/usecase/(client|issue|memory|note|session|workspace)\.rs|daemon/src/(presentation/ipc|infrastructure/unix_transport|test_support|usecase/(control|generation|serve|start|stop|terminal))\.rs|tui/src/presentation/(mod|views/(workspace|closeup_modal|overview_modal|open|welcome)|widgets/modal)\.rs|tui/src/usecase/application/controller\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
+export COVERAGE_IGNORE='(src/(main|tui_input)\.rs|cli/src/cli/(commands/(update|version)|mod)\.rs|cli/src/mcp/serve\.rs|core/src/domain/(session_lifecycle|id/mod|issue/markdown|memory/markdown|pullrequest/mod)\.rs|core/src/infrastructure/(ipc/mod|daemon/mod|error_log|paths|persistence/(json_file|markdown_store)|store/(issue|lifecycle|memory|workspace)|git/(repo|worktree))\.rs|core/src/usecase/(client|issue|memory|note|session|workspace)\.rs|daemon/src/(presentation/ipc|infrastructure/unix_transport|test_support|usecase/(control|generation|serve|start|stop|terminal))\.rs|tui/src/presentation/(mod|views/(workspace|closeup_modal|overview_modal|open|welcome)|widgets/modal)\.rs|tui/src/usecase/application/controller\.rs|tui/src/usecase/(closeup|overview)/mod\.rs)'
 # 100% を要求するカバレッジ指標。
 export COVERAGE_MIN=100
 
