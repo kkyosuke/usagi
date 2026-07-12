@@ -5,10 +5,14 @@
 //! - [`issue`] — issue の CRUD（create（採番）/ get / list / update / delete）。
 //!   人間向け CLI と MCP tool の双方が呼ぶ。
 //! - [`memory`] — memory の CRUD（save（slug・upsert）/ get / list / delete）。
+//! - [`note`] — session / root の scratchpad 操作（note / todo / decision）を
+//!   `state.json` 上で行う（`session_note_* / session_todo_* / session_decision_*`
+//!   と TUI が呼ぶ中身）。
 //! - [`session`] — repo `state.json` 上の session state 操作（list / get / touch /
 //!   record / remove）。git worktree の作成・破棄は git 層の担当で、ここでは
 //!   記録される状態だけを扱う。
 
 pub mod issue;
 pub mod memory;
+pub mod note;
 pub mod session;
