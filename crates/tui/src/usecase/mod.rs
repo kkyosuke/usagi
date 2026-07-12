@@ -7,3 +7,5 @@
 pub mod application;
 pub mod closeup;
 pub mod overview;
+/// Live terminal input vocabulary, encoder, and default prefix classifier.
+pub mod terminal_input;
