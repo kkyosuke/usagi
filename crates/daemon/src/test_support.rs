@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::io;
 
-use usagi_core::infrastructure::daemon::{LivenessProbe, RecordFile};
+use usagi_core::infrastructure::daemon::{LivenessProbe, RecordFile, Terminator};
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
 #[derive(Default)]
@@ -43,5 +43,40 @@ pub struct FixedProbe(pub bool);
 impl LivenessProbe for FixedProbe {
     fn is_alive(&self, _pid: u32) -> bool {
         self.0
+    }
+}
+
+/// A [`Terminator`] that records the pids it is asked to terminate and can be
+/// configured to fail, so tests can assert who was signalled and cover the
+/// error path.
+#[derive(Default)]
+pub struct RecordingTerminator {
+    fail: bool,
+    terminated: RefCell<Vec<u32>>,
+}
+
+impl RecordingTerminator {
+    /// A terminator whose `terminate` always fails.
+    pub fn failing() -> Self {
+        Self {
+            fail: true,
+            terminated: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The pids `terminate` was called with, in order.
+    pub fn terminated(&self) -> Vec<u32> {
+        self.terminated.borrow().clone()
+    }
+}
+
+impl Terminator for RecordingTerminator {
+    fn terminate(&self, pid: u32) -> io::Result<()> {
+        self.terminated.borrow_mut().push(pid);
+        if self.fail {
+            Err(io::Error::other("terminate failed"))
+        } else {
+            Ok(())
+        }
     }
 }

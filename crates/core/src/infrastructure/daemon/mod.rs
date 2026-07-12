@@ -55,6 +55,19 @@ pub trait LivenessProbe {
     fn is_alive(&self, pid: u32) -> bool;
 }
 
+/// Requests a process to terminate — the effecting half of `stop`.
+///
+/// The real implementation (SIGTERM on Unix) is real IO bound at the synthesis
+/// root; tests inject a fake. Only the recorded daemon pid is ever passed, after
+/// [`classify`](crate::domain::daemon::classify) has confirmed it is alive.
+pub trait Terminator {
+    /// Ask the process `pid` to terminate.
+    ///
+    /// # Errors
+    /// Returns an error when the termination request cannot be delivered.
+    fn terminate(&self, pid: u32) -> io::Result<()>;
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,
