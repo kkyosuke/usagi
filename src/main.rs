@@ -24,6 +24,7 @@ use fs2::FileExt;
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::settings::Settings;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
@@ -36,11 +37,12 @@ use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     ClientError, ClientPolicy, DaemonClient, DaemonReply, IpcClient,
 };
+use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
-use usagi_tui::presentation::views::config;
+use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
@@ -60,6 +62,32 @@ struct CrosstermTerminal {
     input: EventPump<CrosstermSource, NoBackend<()>>,
     input_started: Instant,
     renderer: FrameRenderer,
+}
+
+/// Temporary composition adapter until the settings backend owns persistence.
+/// The TUI only sees the shared `SettingsPort` and therefore already has the
+/// same scope isolation and save-error contract as the future backend.
+#[derive(Default)]
+struct VolatileSettingsPort {
+    global: Settings,
+    workspace: Settings,
+}
+
+impl SettingsPort for VolatileSettingsPort {
+    fn read(&mut self, scope: SettingsScope) -> std::io::Result<Settings> {
+        Ok(match scope {
+            SettingsScope::Global => self.global.clone(),
+            SettingsScope::Workspace => self.workspace.clone(),
+        })
+    }
+
+    fn save(&mut self, scope: SettingsScope, settings: &Settings) -> std::io::Result<()> {
+        match scope {
+            SettingsScope::Global => self.global = settings.clone(),
+            SettingsScope::Workspace => self.workspace = settings.clone(),
+        }
+        Ok(())
+    }
 }
 
 impl Terminal for CrosstermTerminal {
@@ -112,8 +140,8 @@ impl Terminal for CrosstermTerminal {
                         KeyCode::Left => Key::Left,
                         KeyCode::Right => Key::Right,
                         KeyCode::Enter => Key::Enter,
-                        KeyCode::Backspace => Key::Backspace,
                         KeyCode::Tab => Key::Tab,
+                        KeyCode::Backspace => Key::Backspace,
                         KeyCode::Escape => Key::Escape,
                         KeyCode::Char(ch) => Key::Char(ch),
                         _ => Key::Other,
@@ -293,8 +321,17 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader { storage };
+        let mut settings = VolatileSettingsPort::default();
         run_in_terminal(|terminal| {
-            presentation::run(terminal, workspaces, recent, now, start, &mut loader)
+            presentation::run_with_settings(
+                terminal,
+                workspaces,
+                recent,
+                now,
+                start,
+                &mut loader,
+                &mut settings,
+            )
         })?;
     } else {
         // サイズ 0 は各 render 側で 80x24 にフォールバックされる。
@@ -304,7 +341,11 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 let recent = workspace_usecase::recent(&storage).map_err(io_error)?;
                 welcome::render(0, 0, &Welcome::new(recent), now)
             }
-            Start::Config => config::render(0, 0),
+            Start::Config => {
+                let mut settings = VolatileSettingsPort::default();
+                let config = Config::load(&mut settings);
+                config::render(0, 0, &config)
+            }
         };
         for line in frame {
             writeln!(out, "{line}")?;

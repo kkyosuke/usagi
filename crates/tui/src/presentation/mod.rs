@@ -22,7 +22,7 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
-use crate::presentation::views::config;
+use crate::presentation::views::config::{self, Config};
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
@@ -31,6 +31,7 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
+use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
 
@@ -257,8 +258,24 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 
 /// Config 画面のキー処理（純粋）。Esc で welcome へ戻り、`Ctrl-C` で終了する。設定項目は
 /// まだ無いので、その他のキーは留まる。
-fn step_config(key: Key) -> ConfigStep {
+fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
+        Key::Tab => {
+            config.toggle_scope();
+            ConfigStep::Stay
+        }
+        Key::Left => {
+            config.cycle_theme(false);
+            ConfigStep::Stay
+        }
+        Key::Right => {
+            config.cycle_theme(true);
+            ConfigStep::Stay
+        }
+        Key::Char('s' | 'S') => {
+            config.save(settings);
+            ConfigStep::Stay
+        }
         Key::Escape => ConfigStep::Back,
         Key::Quit => ConfigStep::Quit,
         _ => ConfigStep::Stay,
@@ -445,8 +462,8 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         Key::Left
         | Key::Right
         | Key::Enter
-        | Key::Backspace
         | Key::Tab
+        | Key::Backspace
         | Key::Quit
         | Key::Char(_)
         | Key::Other => {}
@@ -463,6 +480,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         Key::Left
         | Key::Right
         | Key::Enter
+        | Key::Tab
         | Key::Backspace
         | Key::Quit
         | Key::Char(_)
@@ -625,17 +643,19 @@ pub fn run_workspace(term: &mut dyn Terminal, snapshot: WorkspaceSnapshot) -> io
 /// # Errors
 ///
 /// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
-pub fn run(
+pub fn run_with_settings(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
     recent: Vec<Recent>,
     now: DateTime<Utc>,
     start: Start,
     loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
     let mut open = Open::new(workspaces);
     let mut new_form = New::default();
+    let mut config_form = Config::load(settings);
     let mut screen = match start {
         Start::Welcome => Screen::Welcome,
         Start::Config => Screen::Config,
@@ -646,7 +666,7 @@ pub fn run(
             Screen::Welcome => welcome::render(height, width, &welcome, now),
             Screen::Open => open::render(height, width, &open, now),
             Screen::New => new::render(height, width, &new_form),
-            Screen::Config => config::render(height, width),
+            Screen::Config => config::render(height, width, &config_form),
         };
         term.draw(&frame)?;
         let key = term.read_key()?;
@@ -698,12 +718,49 @@ pub fn run(
                 NewStep::Quit => return Ok(Exit::Quit),
                 NewStep::Back => screen = Screen::Welcome,
             },
-            Screen::Config => match step_config(key) {
+            Screen::Config => match step_config(&mut config_form, key, settings) {
                 ConfigStep::Stay => {}
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
             },
         }
+    }
+}
+
+/// Run the screen graph with transient default settings. Embedders that own a
+/// settings backend should call [`run_with_settings`] and inject its port.
+///
+/// # Errors
+///
+/// Returns terminal or workspace loading errors from the screen graph.
+pub fn run(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+) -> io::Result<Exit> {
+    let mut settings = DefaultSettingsPort;
+    run_with_settings(term, workspaces, recent, now, start, loader, &mut settings)
+}
+
+struct DefaultSettingsPort;
+
+impl SettingsPort for DefaultSettingsPort {
+    fn read(
+        &mut self,
+        _scope: usagi_core::usecase::settings::SettingsScope,
+    ) -> io::Result<usagi_core::domain::settings::Settings> {
+        Ok(usagi_core::domain::settings::Settings::default())
+    }
+
+    fn save(
+        &mut self,
+        _scope: usagi_core::usecase::settings::SettingsScope,
+        _settings: &usagi_core::domain::settings::Settings,
+    ) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -749,11 +806,12 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, ConfigStep, Exit, NewStep, OverlayDataPort, OverlayDocument,
-        OverviewModal, PrModal, SnapshotOverlayData, Start, WelcomeStep, WorkspaceLoader,
-        WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start,
-        run_workspace, run_workspace_with_overlay_data, step_config, step_new, step_overview,
-        step_pr, step_workspace, welcome_action, write_banner,
+        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
+        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SnapshotOverlayData, Start,
+        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, run as run_from_start, run_workspace, run_workspace_with_overlay_data,
+        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
+        write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -1040,9 +1098,24 @@ mod tests {
 
     #[test]
     fn step_config_maps_back_quit_and_stay() {
-        assert!(matches!(step_config(Key::Escape), ConfigStep::Back));
-        assert!(matches!(step_config(Key::Quit), ConfigStep::Quit));
-        assert!(matches!(step_config(Key::Char('x')), ConfigStep::Stay));
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load(&mut settings);
+        assert!(matches!(
+            step_config(&mut config, Key::Escape, &mut settings),
+            ConfigStep::Back
+        ));
+        assert!(matches!(
+            step_config(&mut config, Key::Quit, &mut settings),
+            ConfigStep::Quit
+        ));
+        assert!(matches!(
+            step_config(&mut config, Key::Char('x'), &mut settings),
+            ConfigStep::Stay
+        ));
+        assert!(matches!(
+            step_config(&mut config, Key::Tab, &mut settings),
+            ConfigStep::Stay
+        ));
     }
 
     #[test]
