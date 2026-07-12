@@ -57,7 +57,7 @@ pub enum PendingRow {
 impl PendingRow {
     /// pending row が表す既存 session。create skeleton は identity を持たない。
     #[must_use]
-    pub const fn session_id(&self) -> Option<SessionId> {
+    pub fn session_id(&self) -> Option<SessionId> {
         match self {
             Self::Creating { .. } => None,
             Self::Removing { row } => Some(row.id),
@@ -114,7 +114,7 @@ impl LifecycleState {
     }
 
     #[must_use]
-    pub const fn workspace(&self) -> WorkspaceId {
+    pub fn workspace(&self) -> WorkspaceId {
         self.workspace
     }
     #[must_use]
@@ -122,19 +122,19 @@ impl LifecycleState {
         &self.sessions
     }
     #[must_use]
-    pub const fn selected(&self) -> Selection {
+    pub fn selected(&self) -> Selection {
         self.selected
     }
     #[must_use]
-    pub const fn active(&self) -> Target {
+    pub fn active(&self) -> Target {
         self.active
     }
     #[must_use]
-    pub const fn mode(&self) -> Mode {
+    pub fn mode(&self) -> Mode {
         self.mode
     }
     #[must_use]
-    pub const fn interaction_count(&self) -> u64 {
+    pub fn interaction_count(&self) -> u64 {
         self.interaction_count
     }
     #[must_use]
@@ -926,5 +926,50 @@ mod tests {
             }),
         );
         assert_eq!(state.pending().len(), 1);
+    }
+
+    #[test]
+    fn completion_handles_an_existing_create_row_and_last_remove_row() {
+        let existing = row("existing");
+        let create = OperationId::new();
+        let mut state = state(vec![existing.clone()]);
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Accepted {
+                operation_id: create,
+                row: PendingRow::Creating {
+                    label: "existing".into(),
+                },
+            }),
+        );
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Succeeded {
+                operation_id: create,
+                revision: 1,
+                created: Some(existing.clone()),
+            }),
+        );
+        assert_eq!(state.sessions(), std::slice::from_ref(&existing));
+
+        let last = row("last");
+        let remove = OperationId::new();
+        state.sessions.push(last.clone());
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Accepted {
+                operation_id: remove,
+                row: PendingRow::Removing { row: last.clone() },
+            }),
+        );
+        let _ = update(
+            &mut state,
+            Event::Daemon(DaemonEvent::Succeeded {
+                operation_id: remove,
+                revision: 1,
+                created: None,
+            }),
+        );
+        assert_eq!(state.active(), Target::Session(existing.id));
     }
 }
