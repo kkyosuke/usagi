@@ -59,9 +59,12 @@ Welcome 画面は対話的に動く。合成ルートが端末を raw mode + 代
 ループの代わりに Welcome の 1 フレームを出力して終了する。
 
 Welcome の **Open** を選ぶと workspace 一覧（Open 画面）へ進む。登録済み workspace
-（`workspaces.json`）を名前・最終利用の相対時刻で並べ、`↑↓` で選択して Enter で開く。Welcome
-右側の Recent は最終利用日時が新しい順に最大 3 件を表示し、`1`〜`3` で一覧を経由せず同じ
-Workspace 画面を開く。どちらの導線も開いた workspace の最終利用日時を更新する。
+（`workspaces.json`）を名前・最終利用の相対時刻で並べ、`↑↓` で選択して Enter で開く。`/` は
+名前の部分一致 filter を開始し、Enter で filter 入力を確定する。`u` は Single と Unite を切り替え、
+Unite では Space で複数の workspace を選び、Enter で registry 順に開く。`c` は欠損した
+ディレクトリを指す registry entry の削除を確認し、`y` でだけ削除する。Welcome 右側の Recent は
+最終利用日時が新しい順に最大 3 件を表示し、`1`〜`3` で一覧を経由せず同じ Workspace 画面を開く。
+どちらの導線も開いた workspace の最終利用日時を更新する。
 
 Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面）へ進む。`↑↓` でフィールドを移り、
 モード選択では `←→` で Clone / Existing を切り替え、テキスト欄では文字入力・Backspace・`←→` の

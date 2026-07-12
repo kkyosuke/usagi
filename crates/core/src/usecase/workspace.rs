@@ -59,6 +59,37 @@ pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Worksp
     Ok(workspace)
 }
 
+/// Remove the registered workspaces whose paths are in `paths`.
+///
+/// This is intentionally a registry operation owned by core. Callers decide
+/// which entries are stale (for example after checking the filesystem), while
+/// this usecase keeps the read-modify-write transaction under the registry
+/// lock. The returned values are the entries that were actually removed.
+///
+/// # Errors
+///
+/// Returns an error when the registry lock cannot be acquired or the registry
+/// cannot be read or written.
+pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _lock = storage.lock()?;
+    let mut workspaces = storage.load_workspaces()?;
+    let mut removed = Vec::new();
+    workspaces.retain(|workspace| {
+        let should_remove = paths.iter().any(|path| path == &workspace.path);
+        if should_remove {
+            removed.push(workspace.clone());
+        }
+        !should_remove
+    });
+    if !removed.is_empty() {
+        storage.save_workspaces(&workspaces)?;
+    }
+    Ok(removed)
+}
+
 /// Build recent-list entries for all registered workspaces, ordered by
 /// `updated_at` descending.
 ///
@@ -167,7 +198,7 @@ mod tests {
 
     use chrono::{DateTime, TimeZone, Utc};
 
-    use super::{open, recent};
+    use super::{open, recent, remove};
     use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::domain::note::Scratchpad;
     use crate::domain::pullrequest::PrLink;
@@ -291,6 +322,28 @@ mod tests {
         fs::write(storage.dir().join("workspaces.json"), "{ broken").unwrap();
 
         assert!(open(&storage, tmp.path(), ts(12)).is_err());
+    }
+
+    #[test]
+    fn remove_deletes_only_the_requested_registered_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path());
+        let alpha = workspace("alpha", "/tmp/alpha", ts(1));
+        let beta = workspace("beta", "/tmp/beta", ts(2));
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone()])
+            .unwrap();
+
+        assert_eq!(
+            remove(&storage, std::slice::from_ref(&alpha.path)).unwrap(),
+            vec![alpha]
+        );
+        assert_eq!(storage.load_workspaces().unwrap(), vec![beta]);
+        assert!(
+            remove(&storage, &[PathBuf::from("/tmp/unknown")])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]

@@ -181,6 +181,19 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .unwrap_or_default();
         Ok(WorkspaceSnapshot::new(workspace, state))
     }
+
+    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
+        let missing: Vec<PathBuf> = workspaces
+            .iter()
+            .filter(|workspace| !workspace.path.is_dir())
+            .map(|workspace| workspace.path.clone())
+            .collect();
+        Ok(workspace_usecase::remove(&self.storage, &missing)
+            .map_err(io_error)?
+            .into_iter()
+            .map(|workspace| workspace.path)
+            .collect())
+    }
 }
 
 /// 開始画面が最初の描画に必要とする workspace data を読む。
