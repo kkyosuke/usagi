@@ -312,9 +312,12 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
 - **内部フックコマンド**: usagi はエージェント起動時に、Claude の `PreToolUse` フックへ
   `usagi guard-workspace`（worktree 外へのツール呼び出しを拒否）を、Stop フックへ
   `usagi agent-phase <phase>`（ライフサイクル phase 報告）を配線する。この 2 つは人間向けでは
-  ないため `--help` に出さない（`hide = true`）が、CLI コマンドツリーの一部として同じ `Run`
-  dispatch に載る。フックは終了コードだけを見るので、いまは黙って正常終了するスタブ
-  （guard-workspace は許可のみで**まだ enforcing ではない**）。
+  ないため `--help` に出さない（`hide = true`）。呼び手（人手でもエージェントの推論でもなく
+  エージェントのハーネスが自動実行）も目的も人間向けコマンドと違うので、ハンドラは
+  `cli/commands/` ではなく **`cli/hooks/`** に分離する（clap の `Command` ツリーと `Run`
+  dispatch は共有）。MCP tool と違い Claude のフックはシェルコマンドしか呼べないため、この統合は
+  CLI コマンドとして持つしかない。フックは終了コードだけを見るので、いまは黙って正常終了する
+  スタブ（guard-workspace は許可のみで**まだ enforcing ではない**）。
 
 ## 入口面 MCP の tool dispatch
 

@@ -19,7 +19,7 @@ impl Run for Version {
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::commands::execute;
+    use crate::cli::execute;
     use crate::cli::{Command, RunOutcome};
 
     #[test]
