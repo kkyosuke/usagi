@@ -1,0 +1,295 @@
+//! Open 画面（登録済み workspace を開く）。
+//!
+//! welcome の Open から開く画面。usagi に登録済みの workspace を一覧で並べ、選んで開く。
+//! 各行は workspace 名と最終利用の相対時刻を出し、リストの下に選択中の絶対パスを添える。
+//! 状態（[`Open`]）は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
+//! （ANSI 付き `Vec<String>`）に変換する。マスコット・タイトル・フッタの配置は共通の
+//! [`mascot_screen`] レイアウトに任せ、この view はボディ（一覧＋選択パス）だけを組む。
+//!
+//! 表示する workspace は永続化ストア（[`usagi_core::infrastructure::store::workspace`]）が
+//! 持つが、その読み出しは実 IO なので合成ルートが行い、この層は受け取った一覧を描くだけである。
+//! `now` は相対時刻に使うので呼び出し側が渡す（この層は実時計を読まない）。
+
+use chrono::{DateTime, Utc};
+
+use usagi_core::domain::workspace::Workspace;
+
+use crate::presentation::layouts::mascot_screen;
+use crate::presentation::theme::{Role, Style};
+use crate::presentation::widgets;
+
+/// 画面上部に置くタイトル。
+const TITLE: &str = "Open Workspace";
+/// 最下行に固定するキー操作ヒント。
+const FOOTER: &str = "↑↓: move / Enter: open / Esc: back / q: quit";
+/// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
+const BLOCK_WIDTH: usize = 52;
+/// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
+const NAME_WIDTH: usize = 24;
+
+/// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
+#[derive(Debug, Clone)]
+pub struct Open {
+    workspaces: Vec<Workspace>,
+    selected_index: usize,
+}
+
+impl Open {
+    /// workspace 一覧（登録順）からメニューを組む。
+    #[must_use]
+    pub fn new(workspaces: Vec<Workspace>) -> Self {
+        Self {
+            workspaces,
+            selected_index: 0,
+        }
+    }
+
+    /// 一覧の workspace。
+    #[must_use]
+    pub fn workspaces(&self) -> &[Workspace] {
+        &self.workspaces
+    }
+
+    /// 選択中の項目の添字。
+    #[must_use]
+    pub fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    /// 一覧が空か。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.workspaces.is_empty()
+    }
+
+    /// 選択中の workspace。空のときは `None`。
+    #[must_use]
+    pub fn selected(&self) -> Option<&Workspace> {
+        self.workspaces.get(self.selected_index)
+    }
+
+    /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。空一覧では何もしない。
+    pub fn select_next(&mut self) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        self.selected_index = (self.selected_index + 1) % self.workspaces.len();
+    }
+
+    /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。空一覧では何もしない。
+    pub fn select_prev(&mut self) {
+        if self.workspaces.is_empty() {
+            return;
+        }
+        self.selected_index = self
+            .selected_index
+            .checked_sub(1)
+            .unwrap_or(self.workspaces.len() - 1);
+    }
+}
+
+/// ANSI 付き断片を表示幅 `width` に詰める（広ければ切り、狭ければ空白で右を埋める）。
+fn fit(text: &str, width: usize) -> String {
+    let clipped = widgets::clip_to_width(text, width);
+    let visible = widgets::display_width(&clipped);
+    format!("{clipped}{}", " ".repeat(width.saturating_sub(visible)))
+}
+
+/// 一覧の 1 行 `> name...... 3d ago`。選択行はカーソルと名前を強調する。
+fn workspace_row(workspace: &Workspace, is_selected: bool, now: DateTime<Utc>) -> String {
+    let cursor = if is_selected {
+        Role::Danger.style().bold().paint(">")
+    } else {
+        " ".to_string()
+    };
+    let name = fit(&workspace.name, NAME_WIDTH);
+    let name = if is_selected {
+        Role::Accent.style().bold().paint(&name)
+    } else {
+        name
+    };
+    let relative = Style::new()
+        .dim()
+        .paint(&widgets::relative_time(workspace.updated_at, now));
+    format!("{cursor} {name}  {relative}")
+}
+
+/// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
+fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+    let left_pad = " ".repeat(widgets::centered_padding(width, BLOCK_WIDTH));
+    let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
+
+    let mut lines = vec![
+        indent(&Role::Success.style().bold().paint("Workspaces")),
+        String::new(),
+    ];
+
+    if open.is_empty() {
+        lines.push(indent(
+            &Style::new()
+                .dim()
+                .paint("No workspaces yet — create one from New."),
+        ));
+        return lines;
+    }
+
+    for (i, workspace) in open.workspaces().iter().enumerate() {
+        lines.push(indent(&workspace_row(
+            workspace,
+            i == open.selected_index(),
+            now,
+        )));
+    }
+
+    // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
+    if let Some(workspace) = open.selected() {
+        lines.push(String::new());
+        let path = format!("↳ {}", workspace.path.display());
+        lines.push(indent(&Style::new().dim().paint(&path)));
+    }
+    lines
+}
+
+/// 生の端末サイズ `raw_height`×`raw_width` に対する Open 画面 1 フレーム分の行。
+/// マスコット・タイトル・フッタの配置は共通の [`mascot_screen`] レイアウトに任せ、この関数は
+/// ボディ（workspace 一覧）だけを組む。`now` は相対時刻に使うので呼び出し側が渡す。
+#[must_use]
+pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+    mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
+        body_lines(width, open, now)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Open, render};
+    use crate::presentation::widgets::display_width;
+    use chrono::{DateTime, Duration, Utc};
+    use usagi_core::domain::workspace::Workspace;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn workspace(name: &str, minutes_ago: i64) -> Workspace {
+        let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
+        workspace.updated_at = now() - Duration::minutes(minutes_ago);
+        workspace
+    }
+
+    fn strip(line: &str) -> String {
+        let mut out = String::new();
+        let mut chars = line.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) && c != '[' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
+    }
+
+    fn rendered(open: &Open) -> String {
+        render(24, 80, open, now())
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn new_open_starts_at_the_first_item() {
+        let open = Open::new(vec![workspace("alpha", 5), workspace("beta", 10)]);
+        assert_eq!(open.selected_index(), 0);
+        assert_eq!(open.workspaces().len(), 2);
+        assert!(!open.is_empty());
+        assert_eq!(open.selected().unwrap().name, "alpha");
+        // derive された Clone / Debug も計測対象なのでここで触れる。
+        assert!(format!("{:?}", open.clone()).contains("Open"));
+    }
+
+    #[test]
+    fn empty_open_has_no_selection() {
+        let open = Open::new(Vec::new());
+        assert!(open.is_empty());
+        assert_eq!(open.selected(), None);
+    }
+
+    #[test]
+    fn select_next_advances_and_wraps() {
+        let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
+        open.select_next();
+        assert_eq!(open.selected_index(), 1);
+        open.select_next(); // wrap to 0
+        assert_eq!(open.selected_index(), 0);
+    }
+
+    #[test]
+    fn select_prev_wraps_to_the_last_item() {
+        let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
+        open.select_prev();
+        assert_eq!(open.selected_index(), 1);
+        open.select_prev();
+        assert_eq!(open.selected_index(), 0);
+    }
+
+    #[test]
+    fn selection_movement_is_a_no_op_when_empty() {
+        let mut open = Open::new(Vec::new());
+        open.select_next();
+        open.select_prev();
+        assert_eq!(open.selected_index(), 0);
+    }
+
+    #[test]
+    fn render_lists_workspaces_with_their_relative_time_and_selected_path() {
+        let open = Open::new(vec![workspace("alpha", 11), workspace("beta", 180)]);
+        let joined = rendered(&open);
+        assert!(joined.contains("Open Workspace"));
+        assert!(joined.contains("Workspaces"));
+        assert!(joined.contains("alpha"));
+        assert!(joined.contains("beta"));
+        assert!(joined.contains("11min ago"));
+        // 選択中（先頭 alpha）の絶対パスが下に出る。
+        assert!(joined.contains("↳ /tmp/alpha"));
+        // フッタのヒント。
+        assert!(joined.contains("Esc: back"));
+    }
+
+    #[test]
+    fn render_marks_only_the_selected_row() {
+        let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
+        open.select_next();
+        let frame = render(24, 80, &open, now());
+        // カーソル ">" はちょうど 1 行に出る。
+        assert_eq!(frame.iter().filter(|l| strip(l).contains('>')).count(), 1);
+        // 選択が動くと下のパスも追随する。
+        let joined: String = frame
+            .iter()
+            .map(|l| strip(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("↳ /tmp/b"));
+    }
+
+    #[test]
+    fn render_shows_a_placeholder_when_there_are_no_workspaces() {
+        let joined = rendered(&Open::new(Vec::new()));
+        assert!(joined.contains("No workspaces yet"));
+    }
+
+    #[test]
+    fn render_clips_a_long_name_and_rows_fit_the_width() {
+        let open = Open::new(vec![workspace(&"x".repeat(60), 1)]);
+        let frame = render(24, 80, &open, now());
+        // どの行も端末幅を超えない（長い名前は省略記号で切られる）。
+        assert!(frame.iter().all(|l| display_width(l) <= 80));
+    }
+}

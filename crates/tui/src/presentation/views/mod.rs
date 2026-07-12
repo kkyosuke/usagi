@@ -7,6 +7,7 @@
 pub mod closeup_modal;
 pub mod config;
 pub mod new;
+pub mod open;
 pub mod overview_modal;
 pub mod pr_modal;
 pub mod welcome;

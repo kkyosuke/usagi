@@ -30,6 +30,21 @@ fn welcome_entry_renders_the_welcome_screen() {
 }
 
 #[test]
+fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
+    // `usagi daemon status` を実バイナリで走らせ、合成ルートが束ねる実ストア
+    // （`FsRecordFile` を backing にした `DaemonRecordStore`）を通す。データディレクトリを
+    // 空の一時パスへ向けるので、レコードは無く「daemon not running」を報告する。
+    let home = std::env::temp_dir().join(format!("usagi-daemon-status-{}", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("daemon"), OsStr::new("status")])
+        .env("USAGI_HOME", &home)
+        .output()
+        .expect("usagi バイナリを起動できる");
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("daemon not running"));
+}
+
+#[test]
 fn other_entries_route_to_their_banner_screens() {
     let cases: &[(&[&OsStr], &str)] = &[
         (&[OsStr::new("config")], "config TUI"),

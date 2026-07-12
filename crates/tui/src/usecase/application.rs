@@ -66,7 +66,9 @@ pub enum Key {
     Down,
     /// 選択中の項目を確定する。
     Enter,
-    /// 画面を終了する（Esc / Ctrl-C など）。
+    /// 一段戻る・取り消す（Esc）。最上位の画面では終了として扱う。
+    Escape,
+    /// 画面を終了する（Ctrl-C など）。
     Quit,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
@@ -212,6 +214,7 @@ mod tests {
             Key::Up,
             Key::Down,
             Key::Enter,
+            Key::Escape,
             Key::Quit,
             Key::Char('o'),
             Key::Other,

@@ -1,10 +1,10 @@
 //! うさぎ（マスコット）を頂く全画面レイアウト。
 //!
-//! welcome / config など、マスコット＋タイトルを上に置き、その下のボディを垂直中央寄せし、
+//! welcome / open / config など、マスコット＋タイトルを上に置き、その下にボディを流し、
 //! フッタを最下行に固定する全画面 view が共有する chrome。各 view はこの scaffold に
 //! 「タイトル」「ボディ（画面固有の内容）」「フッタのヒント」を渡すだけでよく、マスコットの
-//! 描画・中央寄せ・フッタ固定はここに集約する。これにより、どの画面でもマスコットとタイトルが
-//! 同じ体裁・同じ配置で出る（画面をまたいでもうさぎが揃う）。
+//! 描画・配置・フッタ固定はここに集約する。マスコットはボディの高さに依存しない位置へ置くので、
+//! どの画面でもマスコットとタイトルが同じ体裁・同じ行に出る（画面をまたいでもうさぎが飛ばない）。
 //!
 //! ボディは端末幅に依存して組む（2 カラムの中央寄せなど）ため、`render` は正規化済みの幅を
 //! 受け取るクロージャ `build_body` にボディの構築を委ね、幅の正規化を 1 か所に保つ。色は
@@ -24,26 +24,33 @@ pub fn centered_line(width: usize, text: &str, style: Style) -> String {
 }
 
 /// マスコット＋タイトルのヘッダ行。垂直配置は [`render`] が行うので先頭余白は付けない。
-/// マスコットの下に 1 行空け、タイトルを Success 太字で中央寄せする。
+/// マスコットはピンク（[`Role::Feature`]）で塗り、その下に 1 行空けてタイトルを Success 太字で
+/// 中央寄せする。
 fn header_lines(width: usize, title: &str) -> Vec<String> {
-    let mut lines = icon::centered(width);
+    let mut lines: Vec<String> = icon::centered(width)
+        .iter()
+        .map(|line| Role::Feature.style().paint(line))
+        .collect();
     lines.push(String::new());
     lines.push(centered_line(width, title, Role::Success.style().bold()));
     lines
 }
 
-/// `content_lines` 行のコンテンツを、フッタ 1 行の上で `height` 行に垂直中央寄せするときの
-/// 上の空行数。
-fn centered_top_padding(height: usize, content_lines: usize) -> usize {
-    height.saturating_sub(content_lines + 1) / 2
+/// ヘッダ（マスコット＋タイトル）を置く上余白。**ボディの高さに依存させない**のが要点で、
+/// 端末高さの一定割合（約 1/5）に固定する。これで welcome と open のようにボディの高さが違う
+/// 画面をまたいでもマスコットが同じ行に来る（画面遷移でうさぎが飛ばない）。ただしボディが高くて
+/// 収まらない画面ではフッタを画面外へ押し出さないよう、コンテンツが収まる範囲まで余白を詰める。
+fn header_top_padding(height: usize, content_lines: usize) -> usize {
+    (height / 5).min(height.saturating_sub(content_lines + 1))
 }
 
 /// マスコット＋タイトルを頂く全画面フレームを組む。
 ///
-/// ヘッダ（マスコット＋タイトル）とその下の `build_body` が返すボディを 1 塊として垂直中央寄せし、
-/// `footer` を dim のヒント行として最下行に固定する。ヘッダとボディの間には 1 行の余白を挟む。
-/// サイズ 0 は 80×24 にフォールバックする。`build_body` には正規化済みの端末幅を渡すので、view は
-/// その幅でボディ（幅依存の中央寄せなど）を組める。
+/// ヘッダ（マスコット＋タイトル）を [`header_top_padding`] で**ボディの高さに依存しない**位置へ
+/// 置き、その下に `build_body` が返すボディを流し、`footer` を dim のヒント行として最下行に固定する。
+/// ヘッダを body 非依存で置くことで、ボディの高さが違う画面をまたいでもマスコットが同じ行に揃う。
+/// ヘッダとボディの間には 1 行の余白を挟む。サイズ 0 は 80×24 にフォールバックする。`build_body` には
+/// 正規化済みの端末幅を渡すので、view はその幅でボディ（幅依存の中央寄せなど）を組める。
 #[must_use]
 pub fn render(
     raw_height: usize,
@@ -61,7 +68,7 @@ pub fn render(
     let footer_line = centered_line(width, footer, Style::new().dim());
 
     let mut lines = Vec::with_capacity(height);
-    let top_padding = centered_top_padding(height, content.len());
+    let top_padding = header_top_padding(height, content.len());
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -131,6 +138,33 @@ mod tests {
         let top = frame.iter().take_while(|l| l.is_empty()).count();
         assert!(top > 0);
         assert!(!frame[top].is_empty());
+    }
+
+    #[test]
+    fn mascot_row_is_independent_of_body_height() {
+        // ボディの高さが違っても、マスコットは同じ行に来る（画面遷移で飛ばない）。
+        let short = render(40, 80, "T", "f", |_w| vec!["one".to_string()]);
+        let tall = render(40, 80, "T", "f", |_w| {
+            (0..12).map(|i| i.to_string()).collect()
+        });
+        let mascot_row = |frame: &[String]| {
+            frame
+                .iter()
+                .position(|l| strip(l).contains("(\\(\\"))
+                .expect("マスコットの行がある")
+        };
+        assert_eq!(mascot_row(&short), mascot_row(&tall));
+    }
+
+    #[test]
+    fn mascot_is_painted_pink() {
+        let frame = render(24, 80, "T", "f", |_w| vec![String::new()]);
+        let mascot = frame
+            .iter()
+            .find(|l| strip(l).contains("(\\(\\"))
+            .expect("マスコットの行がある");
+        // ピンク（ANSI-256 の 211）の SGR で塗られている。
+        assert!(mascot.contains("38;5;211"));
     }
 
     #[test]
