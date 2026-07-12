@@ -43,6 +43,18 @@ pub trait RecordFile {
     fn remove(&self) -> io::Result<()>;
 }
 
+/// Probes whether a process is alive — the liveness half of classifying a daemon
+/// record.
+///
+/// Pairs with [`classify`](crate::domain::daemon::classify): the store supplies
+/// the record and this probe supplies the `alive` flag. The real implementation
+/// (signal 0 on Unix) is real IO bound at the synthesis root; tests inject a
+/// fake so the surrounding logic stays pure.
+pub trait LivenessProbe {
+    /// Whether the process with `pid` is currently alive.
+    fn is_alive(&self, pid: u32) -> bool;
+}
+
 /// Persists a [`DaemonRecord`] as JSON through a [`RecordFile`].
 pub struct DaemonRecordStore<F> {
     file: F,
