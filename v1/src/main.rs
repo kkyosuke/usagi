@@ -625,9 +625,14 @@ fn spawn_detached(command: &str, cwd: &Path, log_path: &Path) -> anyhow::Result<
     Ok(())
 }
 
-/// How often the daemon's control plane beats: the stop-request check and the
-/// session monitor tick.
+/// How often the daemon's control plane refreshes sessions and reaps terminals.
 const DAEMON_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long an idle daemon waits before checking for a stop request or an IPC
+/// connection. This is deliberately shorter than [`DAEMON_POLL`]: shutdown
+/// should not inherit the session-monitor cadence, and an idle socket must
+/// accept a newly connected client promptly.
+const DAEMON_IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// How often the IPC endpoint is serviced while clients are connected. This is
 /// the ceiling on input echo latency for an attached TUI (a keystroke waits at
@@ -673,16 +678,20 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
     server.replace_sessions(usagi::infrastructure::daemon_sessions_store::read(dir)?);
     server.adopt_persisted_terminals(dir);
 
+    let mut next_stop_check = std::time::Instant::now();
     let mut next_control = std::time::Instant::now();
     let mut next_reap = std::time::Instant::now();
     loop {
-        // The control-plane beat runs on the slow cadence regardless of how
-        // fast the IPC endpoint is being serviced.
-        if std::time::Instant::now() >= next_control {
-            next_control = std::time::Instant::now() + DAEMON_POLL;
+        if std::time::Instant::now() >= next_stop_check {
+            next_stop_check = std::time::Instant::now() + DAEMON_IDLE_TICK;
             if usagi::infrastructure::daemon_store::take_stop_request(dir)? {
                 break;
             }
+        }
+        // Session refreshes run on the slow cadence regardless of how fast the
+        // IPC endpoint is being serviced.
+        if std::time::Instant::now() >= next_control {
+            next_control = std::time::Instant::now() + DAEMON_POLL;
             // Refresh the monitored-sessions snapshot. Best-effort: a transient
             // store error must not tear the daemon down, so it is logged and
             // the loop continues. On a change, push the fresh snapshot to every
@@ -713,7 +722,7 @@ fn run_daemon_serve(dir: &Path) -> anyhow::Result<()> {
         std::thread::sleep(if server.has_clients() {
             DAEMON_IPC_TICK
         } else {
-            DAEMON_POLL
+            DAEMON_IDLE_TICK
         });
     }
 
