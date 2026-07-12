@@ -129,6 +129,16 @@ pub fn centered_padding(term_width: usize, content_width: usize) -> usize {
     term_width.saturating_sub(content_width) / 2
 }
 
+/// `text` を表示幅 `width` にそろえる: 広ければ [`clip_to_width`] で切り、狭ければ末尾を空白で
+/// 詰める。ANSI エスケープは 0 桁として扱うので、色付き行でも見た目どおりの幅になる。ペインや
+/// カラムを固定幅にそろえて桁を合わせるのに使う。
+#[must_use]
+pub fn pad_to_width(text: &str, width: usize) -> String {
+    let clipped = clip_to_width(text, width);
+    let pad = width.saturating_sub(display_width(&clipped));
+    format!("{clipped}{}", " ".repeat(pad))
+}
+
 /// 生の端末サイズを正規化する。非対話環境が報告する 0 を 80x24 のフォールバックに置き換える。
 #[must_use]
 pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
@@ -238,6 +248,21 @@ mod tests {
     fn centered_padding_centers_and_saturates() {
         assert_eq!(centered_padding(10, 4), 3);
         assert_eq!(centered_padding(4, 10), 0); // 内容が広いと 0
+    }
+
+    #[test]
+    fn pad_to_width_pads_and_clips() {
+        use super::pad_to_width;
+        // 狭い: 末尾を空白で詰める。
+        assert_eq!(pad_to_width("ab", 5), "ab   ");
+        // ちょうど: そのまま。
+        assert_eq!(pad_to_width("abc", 3), "abc");
+        // 広い: 省略記号付きに切る（表示幅は width 以内）。
+        assert!(display_width(&pad_to_width("abcdef", 4)) <= 4);
+        // ANSI は 0 桁: 色付き "hi" を 4 桁に詰めると末尾に空白 2。
+        let padded = pad_to_width("\u{1b}[31mhi\u{1b}[0m", 4);
+        assert_eq!(display_width(&padded), 4);
+        assert!(padded.ends_with("  "));
     }
 
     #[test]

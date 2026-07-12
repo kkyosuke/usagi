@@ -7,3 +7,4 @@
 pub mod config;
 pub mod new;
 pub mod welcome;
+pub mod workspace;
