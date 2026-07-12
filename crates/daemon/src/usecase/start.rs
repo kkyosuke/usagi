@@ -25,7 +25,7 @@ use usagi_core::infrastructure::daemon::{
 
 /// How many times to poll for the launched daemon's record before giving up.
 /// At the synthesis root's ~50ms sleep this is a ~2s window.
-const MAX_POLLS: usize = 40;
+pub(crate) const MAX_POLLS: usize = 40;
 
 /// Launch a background daemon and report the outcome.
 ///
@@ -60,13 +60,32 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
         ));
     }
 
+    let pid = launch_and_confirm(store, probe, launcher, sleeper)?;
+    Ok(format!("{describe}: daemon started (pid {pid})"))
+}
+
+/// Spawn a detached daemon and poll `daemon.json` until it registers a live
+/// record, returning its pid. Shared by [`start`] and
+/// [`restart`](crate::usecase::restart::restart), which differ only in the
+/// guard and reporting around it.
+///
+/// # Errors
+///
+/// Returns the launcher's spawn error, the store's load error, or a timeout
+/// error when the launched daemon does not register within [`MAX_POLLS`] polls.
+pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
+    store: &DaemonRecordStore<F>,
+    probe: &P,
+    launcher: &L,
+    sleeper: &K,
+) -> io::Result<u32> {
     launcher.launch()?;
 
     for _ in 0..MAX_POLLS {
         if let Some(record) = store.load()?
             && probe.is_alive(record.pid)
         {
-            return Ok(format!("{describe}: daemon started (pid {})", record.pid));
+            return Ok(record.pid);
         }
         sleeper.sleep();
     }
