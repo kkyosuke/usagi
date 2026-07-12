@@ -7,7 +7,8 @@
 
 use std::collections::VecDeque;
 
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::{AgentRuntimeRef, SessionId, WorkspaceId};
+use usagi_core::domain::session_lifecycle::AgentPhase;
 
 use crate::usecase::terminal_input::{LiveInput, RuntimeEvent};
 use crate::usecase::{closeup, overview};
@@ -100,6 +101,85 @@ impl Notice {
     }
 }
 
+/// A phase projected for one Home target. `Done` folds daemon `ended` and
+/// `exited` together because neither leaves an interactive Agent pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetPhase {
+    /// No known Agent runtime belongs to the target.
+    Absent,
+    /// All known runtimes are ready.
+    Ready,
+    /// At least one runtime is executing work.
+    Running,
+    /// At least one runtime is waiting for input.
+    Waiting,
+    /// At least one runtime has ended or exited.
+    Done,
+}
+
+impl TargetPhase {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Absent => 0,
+            Self::Ready => 1,
+            Self::Running => 2,
+            Self::Waiting => 3,
+            Self::Done => 4,
+        }
+    }
+
+    fn from_agent_phase(phase: AgentPhase) -> Self {
+        match phase {
+            AgentPhase::Ready => Self::Ready,
+            AgentPhase::Running => Self::Running,
+            AgentPhase::Waiting => Self::Waiting,
+            AgentPhase::Ended | AgentPhase::Exited => Self::Done,
+        }
+    }
+}
+
+/// One runtime-local phase entry. The complete runtime reference is retained so
+/// an update for one pane can never overwrite another pane in the same session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePhase {
+    pub runtime: AgentRuntimeRef,
+    pub phase: TargetPhase,
+}
+
+/// A message which a backend adapter has explicitly classified as safe to show.
+/// No raw protocol error or detail field is representable by this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeMessage(String);
+
+impl SafeMessage {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A safe error summary. `error_id` is the only diagnostic identifier retained
+/// by the TUI-local projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafeError {
+    pub message: SafeMessage,
+    pub error_id: String,
+}
+
+/// Feedback displayed in Home's fixed status area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Feedback {
+    Progress(SafeMessage),
+    OperationError(SafeError),
+    TerminalError(SafeError),
+    Disconnected,
+}
+
 /// controller が所有する application state。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
@@ -110,6 +190,8 @@ pub struct AppState {
     selected: Selection,
     active: Target,
     notice: Option<Notice>,
+    runtimes: Vec<RuntimePhase>,
+    feedback: Option<Feedback>,
     pending: Vec<PendingOperation>,
     next_pending_token: u64,
     size: Option<(u16, u16)>,
@@ -128,6 +210,8 @@ impl AppState {
             selected: Selection::Target(root),
             active: root,
             notice: None,
+            runtimes: Vec::new(),
+            feedback: None,
             pending: Vec::new(),
             next_pending_token: 1,
             size: None,
@@ -173,6 +257,29 @@ impl AppState {
     #[must_use]
     pub fn pending(&self) -> &[PendingOperation] {
         &self.pending
+    }
+    /// Runtime phases retained for the current workspace only.
+    #[must_use]
+    pub fn runtimes(&self) -> &[RuntimePhase] {
+        &self.runtimes
+    }
+    /// The current safe feedback for the fixed Home feedback area.
+    #[must_use]
+    pub fn feedback(&self) -> Option<&Feedback> {
+        self.feedback.as_ref()
+    }
+    /// Aggregates phase for a target using `done > waiting > running > ready > absent`.
+    #[must_use]
+    pub fn phase_for(&self, target: Target) -> TargetPhase {
+        let Target::Session(session) = target else {
+            return TargetPhase::Absent;
+        };
+        self.runtimes
+            .iter()
+            .filter(|entry| entry.runtime.session_id == session)
+            .map(|entry| entry.phase)
+            .max_by_key(|phase| phase.rank())
+            .unwrap_or(TargetPhase::Absent)
     }
     /// 最後に受け取った terminal geometry。
     #[must_use]
@@ -285,6 +392,14 @@ pub enum BackendEvent {
     Sessions(Vec<SessionId>),
     /// backend が safe と保証した notice。
     Notice(Notice),
+    /// A phase event for exactly one Agent runtime pane.
+    RuntimePhase {
+        runtime: AgentRuntimeRef,
+        phase: AgentPhase,
+    },
+    /// Safe progress, error, or connection feedback. Raw protocol details are
+    /// deliberately excluded from the TUI event vocabulary.
+    Feedback(Feedback),
 }
 
 /// 非同期 request の成否。
@@ -381,7 +496,7 @@ pub enum EntryRoute {
     /// The complete registered-workspace list.
     Open,
     /// An attached Home controller.
-    Home(AppState),
+    Home(Box<AppState>),
 }
 
 /// Entry reducer input. The terminal adapter maps concrete keys to this small
@@ -513,8 +628,10 @@ pub fn update_entry(state: &mut EntryState, event: EntryEvent) -> Vec<Effect> {
             state.opening = None;
             match result {
                 Ok(snapshot) if snapshot.workspace == workspace => {
-                    state.route =
-                        EntryRoute::Home(AppState::home(snapshot.workspace, snapshot.sessions));
+                    state.route = EntryRoute::Home(Box::new(AppState::home(
+                        snapshot.workspace,
+                        snapshot.sessions,
+                    )));
                     state.failed = None;
                     state.error = None;
                 }
@@ -621,11 +738,37 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::Input(_) | AppEvent::Tick => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
             state.sessions = sessions;
+            state
+                .runtimes
+                .retain(|entry| state.sessions.contains(&entry.runtime.session_id));
             state.reconcile_selection();
             Vec::new()
         }
         AppEvent::Backend(BackendEvent::Notice(notice)) => {
             state.notice = Some(notice);
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }) => {
+            if runtime.terminal.workspace_id != state.workspace
+                || runtime.terminal.session_id != Some(runtime.session_id)
+                || !state.sessions.contains(&runtime.session_id)
+            {
+                return Vec::new();
+            }
+            let phase = TargetPhase::from_agent_phase(phase);
+            if let Some(entry) = state
+                .runtimes
+                .iter_mut()
+                .find(|entry| entry.runtime.fences(&runtime))
+            {
+                entry.phase = phase;
+            } else {
+                state.runtimes.push(RuntimePhase { runtime, phase });
+            }
+            Vec::new()
+        }
+        AppEvent::Backend(BackendEvent::Feedback(feedback)) => {
+            state.feedback = Some(feedback);
             Vec::new()
         }
         AppEvent::OperationResult(result) => {
@@ -793,9 +936,27 @@ pub fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use usagi_core::domain::id::{
+        AgentRuntimeId, DaemonGeneration, TerminalId, TerminalRef, WorktreeId,
+    };
 
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
+    }
+
+    fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
+        AgentRuntimeRef::new(
+            AgentRuntimeId::new(),
+            TerminalRef {
+                daemon_generation: DaemonGeneration::new(),
+                terminal_id: TerminalId::new(),
+                workspace_id: workspace,
+                session_id: Some(session),
+                worktree_id: WorktreeId::new(),
+            },
+            session,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1014,6 +1175,106 @@ mod tests {
         for (runtime, expected) in cases {
             assert_eq!(AppEvent::from(runtime), expected);
         }
+    }
+
+    #[test]
+    fn phase_projection_isolated_per_runtime_and_uses_the_documented_rank() {
+        let (workspace, first, second) = ids();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let first_a = runtime(workspace, first);
+        let first_b = runtime(workspace, first);
+        let second_runtime = runtime(workspace, second);
+
+        for (runtime, phase) in [
+            (first_a.clone(), AgentPhase::Running),
+            (first_b.clone(), AgentPhase::Waiting),
+            (second_runtime.clone(), AgentPhase::Ready),
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::RuntimePhase { runtime, phase }),
+            );
+        }
+        assert_eq!(state.runtimes().len(), 3);
+        assert_eq!(
+            state.phase_for(Target::Session(first)),
+            TargetPhase::Waiting
+        );
+        assert_eq!(state.phase_for(Target::Session(second)), TargetPhase::Ready);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: first_a,
+                phase: AgentPhase::Ended,
+            }),
+        );
+        assert_eq!(state.runtimes().len(), 3);
+        assert_eq!(state.phase_for(Target::Session(first)), TargetPhase::Done);
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: second_runtime,
+                phase: AgentPhase::Exited,
+            }),
+        );
+        assert_eq!(state.phase_for(Target::Session(second)), TargetPhase::Done);
+        assert_eq!(
+            state.phase_for(Target::Root(workspace)),
+            TargetPhase::Absent
+        );
+    }
+
+    #[test]
+    fn phase_projection_rejects_other_workspaces_and_removed_sessions() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+        let foreign = runtime(WorkspaceId::new(), session);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: foreign,
+                phase: AgentPhase::Running,
+            }),
+        );
+        assert!(state.runtimes().is_empty());
+
+        let known = runtime(workspace, session);
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::RuntimePhase {
+                runtime: known,
+                phase: AgentPhase::Running,
+            }),
+        );
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Sessions(Vec::new())),
+        );
+        assert!(state.runtimes().is_empty());
+    }
+
+    #[test]
+    fn feedback_keeps_only_safe_message_and_error_id() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let error = SafeError {
+            message: SafeMessage::new("Could not start terminal"),
+            error_id: "err-42".to_string(),
+        };
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::TerminalError(
+                error.clone(),
+            ))),
+        );
+        assert_eq!(state.feedback(), Some(&Feedback::TerminalError(error)));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
+        );
+        assert_eq!(state.feedback(), Some(&Feedback::Disconnected));
     }
 
     #[test]
