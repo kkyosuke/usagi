@@ -1063,6 +1063,7 @@ mod tests {
     struct RecordingSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
 
     impl SessionCommandPort for RecordingSessionPort {
+        #[coverage(off)]
         fn execute(
             &mut self,
             workspace: &Workspace,
