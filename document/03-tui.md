@@ -89,6 +89,13 @@ daemon の snapshot revision を workspace 間で持ち越さない。remove の
 現在選択中の session record に限る。root を remove しようとした場合と daemon が request を受理できない場合は、
 modal に安全な error を表示する。
 
+`session remove -s [--force]`（`--select` も同義）は、現在選択中の row を即時削除せず、中央の
+session checklist を開く。`↑`/`↓` または `j`/`k` で cursor を移動し、Space で複数 row を選び、Enter で
+選んだ session の削除を開始する。Esc は選択を捨てて元の Switch / Closeup surface に戻る。空一覧、未選択の
+Enter、modal 表示中の背景入力は安全な no-op であり、追加の確認 step はない。modal は開いた snapshot の
+`name`、`root`、`created_at` を entry の incarnation fence として保持する。refresh により一致しない entry は
+request 前に除外するため、同名再作成や一覧更新で別の session を削除しない。
+
 modal は view ごとに予約した body 行数で描画する。候補数、empty state、result、error、loading、editor の
 内容が変化しても、開いている modal の枠高さは変わらない。端末が短い場合は予約領域を安全に clip し、
 Home 背景との合成範囲を越えない。

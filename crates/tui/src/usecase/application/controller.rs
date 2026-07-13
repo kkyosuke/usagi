@@ -2022,6 +2022,12 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
                 workspace: state.workspace,
             }]
         }
+        overview::SessionCommand::SelectRemove { .. } => {
+            state.notice = Some(Notice::new(
+                "session selection is available in the live TUI",
+            ));
+            Vec::new()
+        }
         overview::SessionCommand::Remove { force } => match state.active {
             Target::Session(session) => {
                 state.overlay = None;

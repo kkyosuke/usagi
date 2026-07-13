@@ -29,6 +29,7 @@ use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::remove_modal::{self, RemoveModal};
 use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
@@ -135,6 +136,7 @@ enum WorkspaceStep {
 enum WorkspaceModal {
     Overview(OverviewModal),
     Pr(PrModal),
+    Remove(RemoveModal),
     Text(TextOverlay),
 }
 
@@ -403,6 +405,31 @@ impl WorkspaceUi {
         ));
     }
 
+    /// Open the v1-compatible checklist over the current daemon snapshot.
+    /// The modal captures records, not row indexes; dispatch performs another
+    /// incarnation check before it asks the daemon to remove anything.
+    #[coverage(off)]
+    fn open_remove_selector(&mut self, force: bool) {
+        self.modal = Some(WorkspaceModal::Remove(RemoveModal::new(
+            self.workspace.sessions().to_vec(),
+            force,
+        )));
+    }
+
+    /// Snapshot reconciliation may remove the Closeup target. Rebuild its
+    /// display label and action focus from the surviving sidebar projection
+    /// before the selector gives input back to Closeup.
+    #[coverage(off)]
+    fn refresh_closeup_after_session_snapshot(&mut self) {
+        if self.workspace.mode() == Mode::Closeup {
+            self.closeup = CloseupModal::with_selection_mode(
+                self.workspace.focused_label(),
+                self.modal_selection_mode,
+            );
+            self.closeup_action_forced = false;
+        }
+    }
+
     /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
     #[coverage(off)]
     fn open_prs(&mut self) {
@@ -663,6 +690,9 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                         Ok(command @ SessionCommand::Create { .. }) => {
                             begin_session_create(ui, command);
                         }
+                        Ok(SessionCommand::SelectRemove { force }) => {
+                            ui.open_remove_selector(force);
+                        }
                         Ok(command) => match ui
                             .session_commands
                             .as_mut()
@@ -751,6 +781,118 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
             }
         }
     }
+}
+
+/// Apply the selector's checked entries one at a time through the existing
+/// daemon-owned port. A checked record must still match the current projection;
+/// a refreshed or removed row is skipped rather than rebound by its display
+/// position or name.
+#[coverage(off)]
+fn submit_remove_selector(
+    ui: &mut WorkspaceUi,
+    entries: Vec<usagi_core::domain::session::SessionRecord>,
+    force: bool,
+) {
+    for entry in entries {
+        let current = ui
+            .workspace
+            .sessions()
+            .iter()
+            .find(|candidate| remove_modal::same_incarnation(candidate, &entry))
+            .cloned();
+        let Some(current) = current else {
+            if let Some(WorkspaceModal::Remove(modal)) = ui.modal.as_mut() {
+                modal.remove_entry(&entry);
+                modal.set_feedback("skipped a session that no longer exists");
+            }
+            continue;
+        };
+        let result = ui
+            .session_commands
+            .as_mut()
+            .expect("session port is available")
+            .execute(
+                ui.workspace.record(),
+                Some(&current),
+                SessionCommand::Remove { force },
+            );
+        match result {
+            Ok(result) => {
+                let Some(sessions) = result.sessions else {
+                    // A successful-looking acknowledgement without an
+                    // authoritative snapshot cannot prove which incarnation
+                    // survived. Keep the checked row instead of claiming a
+                    // local deletion.
+                    if let Some(WorkspaceModal::Remove(modal)) = ui.modal.as_mut() {
+                        modal.set_feedback(result.message);
+                    }
+                    continue;
+                };
+                ui.workspace.replace_sessions(sessions);
+                ui.refresh_closeup_after_session_snapshot();
+                if let Some(WorkspaceModal::Remove(modal)) = ui.modal.as_mut() {
+                    modal.reconcile(ui.workspace.sessions());
+                }
+            }
+            Err(error) => {
+                if let Some(WorkspaceModal::Remove(modal)) = ui.modal.as_mut() {
+                    modal.set_feedback(error);
+                }
+            }
+        }
+    }
+    if matches!(ui.modal.as_ref(), Some(WorkspaceModal::Remove(modal)) if modal.is_empty()) {
+        ui.modal = None;
+    }
+}
+
+/// The selector captures all normal and live input while open. Esc simply
+/// restores the underlying Switch / Closeup surface; Enter adds no confirmation
+/// step, matching v1.
+#[coverage(off)]
+fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
+    let submit = {
+        let WorkspaceModal::Remove(modal) = ui.modal.as_mut().expect("remove modal is active")
+        else {
+            return false;
+        };
+        match key {
+            Key::Up | Key::Char('k') => {
+                modal.move_up();
+                None
+            }
+            Key::Down | Key::Char('j') => {
+                modal.move_down();
+                None
+            }
+            Key::Char(' ') => {
+                modal.toggle();
+                None
+            }
+            Key::Enter => {
+                let entries = modal.selected_entries();
+                if entries.is_empty() {
+                    modal.set_feedback("select at least one session");
+                    None
+                } else {
+                    Some((entries, modal.force()))
+                }
+            }
+            Key::Escape => return true,
+            Key::Left
+            | Key::Right
+            | Key::Backspace
+            | Key::Tab
+            | Key::Quit
+            | Key::Char(_)
+            | Key::Live(_)
+            | Key::Other => None,
+        }
+    };
+    if let Some((entries, force)) = submit {
+        submit_remove_selector(ui, entries, force);
+    }
+    false
 }
 
 /// Input-only Overview reducer retained for modal rendering scenarios. Runtime
@@ -1002,6 +1144,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         let close = match modal {
             WorkspaceModal::Overview(_) => step_overview_command(ui, key),
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
+            WorkspaceModal::Remove(_) => step_remove_selector(ui, key),
             WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
         };
         if close {
@@ -1026,6 +1169,9 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
             overview_modal::render_over(height, width, &base, modal)
         }
         Some(WorkspaceModal::Pr(modal)) => pr_modal::render_over(height, width, &base, modal),
+        Some(WorkspaceModal::Remove(modal)) => {
+            remove_modal::render_over(height, width, &base, modal)
+        }
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
         None if ui.closeup_modal_visible() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
@@ -1433,6 +1579,7 @@ mod tests {
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
+    use crate::usecase::terminal_input::LiveTerminalAction;
     use chrono::{DateTime, Duration, Utc};
     use std::collections::VecDeque;
     use std::io::{self, Write};
@@ -1521,8 +1668,19 @@ mod tests {
             selected: Option<&SessionRecord>,
             command: SessionCommand,
         ) -> Result<SessionCommandResult, String> {
-            let created = match &command {
-                SessionCommand::Create { name } => Some(name.clone()),
+            let sessions = match &command {
+                SessionCommand::Create { name } => Some(vec![SessionRecord {
+                    name: name.clone(),
+                    display_name: None,
+                    origin: SessionOrigin::Human,
+                    started_from: None,
+                    root: workspace.path.join(".usagi/sessions").join(name),
+                    created_at: now(),
+                    last_active: None,
+                    notes: Scratchpad::default(),
+                    prs: Vec::new(),
+                }]),
+                SessionCommand::Remove { .. } => Some(Vec::new()),
                 _ => None,
             };
             self.0.lock().unwrap().push((
@@ -1530,19 +1688,6 @@ mod tests {
                 selected.map(|session| session.name.clone()),
                 command,
             ));
-            let sessions = created.map(|name| {
-                vec![SessionRecord {
-                    name: name.clone(),
-                    display_name: None,
-                    origin: SessionOrigin::Human,
-                    started_from: None,
-                    root: workspace.path.join(".usagi/sessions").join(&name),
-                    created_at: now(),
-                    last_active: None,
-                    notes: Scratchpad::default(),
-                    prs: Vec::new(),
-                }]
-            });
             Ok(SessionCommandResult {
                 message: "daemon accepted".to_owned(),
                 sessions,
@@ -2697,6 +2842,64 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+    }
+
+    #[test]
+    fn session_remove_select_opens_a_checklist_and_removes_only_the_checked_session() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(SnapshotSessionPort(calls.clone())),
+            ModalSelectionMode::Prompt,
+        );
+        ui.open_overview();
+        for ch in "session remove -s".chars() {
+            assert_eq!(step_workspace(&mut ui, Key::Char(ch)), WorkspaceStep::Stay);
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Remove(_))));
+        assert!(
+            render_workspace(40, 80, &ui)
+                .join("\n")
+                .contains("Remove sessions")
+        );
+
+        // The checklist owns input: a live action cannot open a pane behind it.
+        assert_eq!(
+            step_workspace(&mut ui, Key::Live(LiveTerminalAction::Agent)),
+            WorkspaceStep::Stay
+        );
+        assert!(ui.workspace.pane().tabs().is_empty());
+        assert_eq!(step_workspace(&mut ui, Key::Char(' ')), WorkspaceStep::Stay);
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                "alpha".to_owned(),
+                Some("alpha-session".to_owned()),
+                SessionCommand::Remove { force: false },
+            )]
+        );
+        assert!(ui.modal.is_none());
+    }
+
+    #[test]
+    fn session_remove_select_escape_restores_the_underlying_closeup() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        ui.enter_closeup();
+        ui.open_remove_selector(false);
+        assert_eq!(step_workspace(&mut ui, Key::Escape), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
     }
 
     #[test]

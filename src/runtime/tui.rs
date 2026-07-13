@@ -108,6 +108,9 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             }
             SessionCommand::List => (SessionAction::List, serde_json::json!({})),
             SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
+            SessionCommand::SelectRemove { .. } => {
+                return Err("session selection must be handled by the TUI".to_owned());
+            }
             SessionCommand::Remove { force } => {
                 let selected =
                     selected.ok_or_else(|| "workspace root cannot be removed".to_owned())?;
