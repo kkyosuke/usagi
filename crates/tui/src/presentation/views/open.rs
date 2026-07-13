@@ -586,6 +586,7 @@ mod tests {
         assert_eq!(open.filter(), "axb");
         let frame = render(24, 80, &open, now()).join("\n");
         assert!(rendered(&open).contains("Filter: axb"));
+        assert!(frame.contains("\u{1b}[1;36max\u{1b}[0m"));
         // The character at the edit position is underlined in the same accent
         // colour as the rest of the input, matching New's shared input style.
         assert!(frame.contains("\u{1b}[1;4;36mb\u{1b}[0m"));
