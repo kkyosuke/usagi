@@ -2627,6 +2627,20 @@ mod tests {
         );
         // The daemon snapshot returned by the port replaces the sidebar rows.
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+
+        // The snapshot row is immediately a real navigation target. Before the
+        // pane-state synchronization this selection made the next render panic
+        // because the newly-created session had no entry in `Workspace::panes`.
+        assert_eq!(step_workspace(&mut ui, Key::Down), WorkspaceStep::Stay);
+        assert_eq!(
+            ui.workspace
+                .selected_session()
+                .map(|session| session.name.as_str()),
+            Some("review")
+        );
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
     }
 
     #[test]

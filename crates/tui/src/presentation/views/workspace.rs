@@ -315,6 +315,18 @@ impl Workspace {
     #[coverage(off)]
     pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
         let selected_name = self.focused_session().map(|session| session.name.clone());
+        // `pane()` is a read-only projection used by every render. Keep its
+        // per-session state map in lockstep with the daemon-owned snapshot before
+        // exposing a newly-created row to selection; otherwise selecting that row
+        // makes `pane()` look up a key that was never initialized and panics.
+        self.panes.retain(|name, _| {
+            name.is_empty() || sessions.iter().any(|session| session.name == *name)
+        });
+        for session in &sessions {
+            self.panes.entry(session.name.clone()).or_insert_with(|| {
+                PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner)))
+            });
+        }
         self.state.sessions = sessions;
         self.selected = selected_name
             .and_then(|name| {
@@ -1612,6 +1624,44 @@ mod tests {
         assert_eq!(ws.sessions().len(), 1);
         assert_eq!(ws.sessions()[0].name, "fresh");
         assert!(ws.root_selected());
+    }
+
+    #[test]
+    fn created_session_snapshot_is_selectable_and_has_an_empty_pane_state() {
+        let mut ws = Workspace::new(
+            WorkspaceRecord::new("empty", "/tmp/empty"),
+            WorkspaceState::new(),
+        );
+
+        // This is the snapshot delivered when the create skeleton completes.
+        ws.replace_sessions(vec![session("fresh", None, SessionOrigin::Unknown)]);
+
+        ws.select_next();
+        assert_eq!(
+            ws.selected_session().map(|session| session.name.as_str()),
+            Some("fresh")
+        );
+        assert!(
+            ws.pane().tabs().is_empty(),
+            "new rows have a pane projection"
+        );
+
+        ws.enter_closeup();
+        assert!(
+            joined(&ws).contains("fresh"),
+            "Closeup renders the new session"
+        );
+    }
+
+    #[test]
+    fn snapshot_removal_discards_the_removed_session_pane_state() {
+        let mut ws = workspace();
+        assert!(ws.panes.contains_key("tui"));
+
+        ws.replace_sessions(vec![session("daemon", None, SessionOrigin::Unknown)]);
+
+        assert!(!ws.panes.contains_key("tui"));
+        assert!(ws.panes.contains_key("daemon"));
     }
 
     #[test]
