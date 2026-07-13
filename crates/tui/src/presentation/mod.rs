@@ -25,6 +25,7 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
 
+use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::config::{self, Config};
 use crate::presentation::views::new::{self, Field, New};
@@ -1410,21 +1411,34 @@ fn render_quit_confirmation(
     base: &[String],
     modal_state: QuitModal,
 ) -> Vec<String> {
-    let message = match modal_state.action {
-        QuitAction::CloseTui => "Close the TUI? Daemon sessions keep running.",
-        QuitAction::EndWorkspace => "End this workspace and stop all live sessions?",
+    let (title, heading, message, confirm_role) = match modal_state.action {
+        QuitAction::CloseTui => (
+            Role::Accent.style().bold().paint("Close TUI"),
+            Role::Accent.style().bold().paint("Close this TUI?"),
+            "Daemon sessions keep running.",
+            Role::Success,
+        ),
+        QuitAction::EndWorkspace => (
+            Role::Danger.style().bold().paint("End workspace"),
+            Role::Danger.style().bold().paint("End this workspace?"),
+            "All live sessions will be stopped.",
+            Role::Danger,
+        ),
     };
     modal::render_over(
         height,
         width,
         base,
-        "Confirm",
+        &title,
         52,
         &[
-            message.to_owned(),
+            heading,
+            Style::new().dim().paint(message),
             String::new(),
-            modal::confirmation_buttons(modal_state.confirm_selected),
-            "  Enter: select   ←→/Tab: choose   o/c: select".to_owned(),
+            modal::confirmation_buttons(modal_state.confirm_selected, confirm_role),
+            Style::new()
+                .dim()
+                .paint("  Enter: select   ←→/Tab: choose   o/c: select"),
         ],
     )
 }
@@ -3074,8 +3088,11 @@ mod tests {
             Exit::Quit
         );
 
-        assert!(term.frames[1].join("\n").contains("stop all live sessions"));
-        assert!(term.frames[1].join("\n").contains("[ ok ]  [cancel]"));
+        let confirmation = term.frames[1].join("\n");
+        assert!(confirmation.contains("All live sessions will be stopped."));
+        assert!(confirmation.contains("[  ok  ]"));
+        assert!(confirmation.contains("[cancel]"));
+        assert!(confirmation.contains("\u{1b}[1;7;31m"));
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[(

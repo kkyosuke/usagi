@@ -6,6 +6,7 @@
 //! 短ければ空白で詰めて右端を揃える。色付け（枠色）はテーマ導入時に載せるため無色で描く。
 
 use super::{centered_padding, clip_to_width, display_width, normalize_size};
+use crate::presentation::theme::{Role, Style};
 use unicode_width::UnicodeWidthChar;
 
 /// 背景の ANSI スタイルを modal へ滲ませないための SGR reset。
@@ -63,17 +64,26 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body
 }
 
-/// Two-button confirmation row shared by destructive and dismiss-only modals.
-/// The selected button uses a filled bracket so it remains recognisable without
-/// relying on colour.
+/// Two fixed-width buttons shared by destructive and dismiss-only modals.
+/// Selection uses role colour, bold weight, and reverse video; focus never
+/// changes the bracket geometry.
 #[must_use]
 #[coverage(off)]
-pub fn confirmation_buttons(confirm_selected: bool) -> String {
-    if confirm_selected {
-        "  [ ok ]  [cancel]".to_owned()
+pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
+    let selected = |role: Role| role.style().bold().reverse();
+    let idle = Style::new().dim();
+    let (ok, cancel) = if confirm_selected {
+        (
+            selected(confirm_role).paint("[  ok  ]"),
+            idle.paint("[cancel]"),
+        )
     } else {
-        "  [ok]  [ cancel ]".to_owned()
-    }
+        (
+            idle.paint("[  ok  ]"),
+            selected(Role::Accent).paint("[cancel]"),
+        )
+    };
+    format!("  {ok}  {cancel}")
 }
 
 /// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
@@ -255,11 +265,18 @@ mod tests {
         boxed, columns, confirmation_buttons, fixed_body, modal_inner_width, render_modal,
         render_over,
     };
+    use crate::presentation::theme::Role;
 
     #[test]
     fn confirmation_buttons_mark_the_selected_choice() {
-        assert_eq!(confirmation_buttons(true), "  [ ok ]  [cancel]");
-        assert_eq!(confirmation_buttons(false), "  [ok]  [ cancel ]");
+        let ok_selected = confirmation_buttons(true, Role::Success);
+        let cancel_selected = confirmation_buttons(false, Role::Danger);
+        assert_eq!(display_width(&ok_selected), display_width(&cancel_selected));
+        assert_eq!(display_width(&ok_selected), 20);
+        assert!(ok_selected.contains("[  ok  ]"));
+        assert!(cancel_selected.contains("[cancel]"));
+        assert!(ok_selected.contains("\u{1b}[1;7;32m"));
+        assert!(cancel_selected.contains("\u{1b}[1;7;36m"));
     }
     use crate::presentation::widgets::display_width;
 
