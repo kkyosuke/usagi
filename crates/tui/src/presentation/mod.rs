@@ -801,7 +801,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 ///   Enter で registry 経由に実行する。
 /// - tab が前面のとき（tab あり・非 forced）は tab を操作し、menu には触れない。
 ///
-/// Esc は Workspace 自体を閉じず、forced modal を閉じるか Switch へ一段戻す。
+/// Esc は Workspace の mode を変えない。forced action modal が前面なら、それだけを閉じる。
 ///
 /// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
 #[coverage(off)]
@@ -870,9 +870,9 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Escape => ui.workspace.enter_switch(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Up
+        Key::Escape
+        | Key::Up
         | Key::Down
         | Key::Enter
         | Key::Backspace
@@ -919,14 +919,12 @@ fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
     ui.closeup_action_forced = false;
 }
 
-/// Esc / close on the action modal: with tabs present clear the forced request and
-/// keep the tabs front; otherwise step back to Switch.
+/// Esc / close on the action modal clears only a forced request. The Closeup mode
+/// itself remains active, including when it has no tabs.
 #[coverage(off)]
 fn close_closeup_modal(ui: &mut WorkspaceUi) {
     if ui.closeup_action_forced {
         ui.closeup_action_forced = false;
-    } else {
-        ui.workspace.enter_switch();
     }
 }
 
@@ -2226,8 +2224,8 @@ mod tests {
         assert!(frame(10).contains("#42"));
         assert!(frame(12).contains("terminal"));
 
-        // 次の Esc は Closeup -> Switch。終了は明示的な Quit のみ。
-        assert!(frame(13).contains("Switch"));
+        // Closeup 上の Esc は mode を変えない。終了は明示的な Quit のみ。
+        assert!(frame(13).contains("\u{f00e} Closeup"));
         assert!(!frame(13).contains("Open terminal"));
     }
 
@@ -2308,6 +2306,12 @@ mod tests {
         let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
         ui.enter_closeup();
         assert!(ui.closeup_modal_visible(), "no tabs -> modal is front");
+        assert_eq!(step_workspace(&mut ui, Key::Escape), WorkspaceStep::Stay);
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert!(
+            ui.closeup_modal_visible(),
+            "Esc keeps the tab-less Closeup open"
+        );
 
         ui.workspace.open_pane(PaneKind::Agent);
         ui.workspace.open_pane(PaneKind::Terminal);

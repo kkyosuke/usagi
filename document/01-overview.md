@@ -89,7 +89,7 @@ Workspace 画面は、`state.json` から読んだ session 一覧と root 行を
 で、`↑↓`（`j` / `k`）で session と root の選択を循環し、`←→`（`h` / `l`）で Preview / Terminal /
 Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
 モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
-タブを切り替え、Esc で Switch へ戻る。
+タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` で行い、Esc は mode を変えない。
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
@@ -102,8 +102,8 @@ Home 背景を保ったまま合成し、モーダル表示中はその入力が
 `session remove [--force]` は daemon IPC へ request を送る。remove は現在選択中 session にだけ作用し、
 root を対象にした remove は実行しない。
 
-Esc は最前面から `モーダル → Closeup → Switch → 呼び出し元` の順に戻る。Switch からは Open
-経由なら Open、Recent 経由なら Welcome へ戻り、`usagi open` で直接開いた場合は終了する。
+Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
+Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
 `q` は基底の Switch / Closeup で TUI を終了し、最前面モーダルではそのモーダルが受け取る。
 Ctrl-C は表示状態にかかわらず TUI を終了する。タブ本文はプレースホルダで、daemon が所有する
 端末への attach はまだ行わない。
