@@ -33,7 +33,9 @@ use usagi_tui::presentation::{
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
-use usagi_tui::usecase::terminal_input::{KeyCode, LiveInput, RuntimeEvent};
+use usagi_tui::usecase::terminal_input::{
+    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, RuntimeEvent,
+};
 
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
@@ -184,6 +186,10 @@ struct CrosstermTerminal {
     input: EventPump<CrosstermSource, NoBackend<()>>,
     input_started: Instant,
     renderer: FrameRenderer,
+    /// live-terminal `Ctrl-O` prefix の SSoT。leader を保持して follow-up を
+    /// [`Key::Live`] へ翻訳する。`Ctrl-O`・`Ctrl-^` 以外は passthrough として従来の
+    /// `Key` マッピングに委ねるため、live terminal への passthrough を壊さない。
+    live_input: LiveInputClassifier,
 }
 
 #[derive(Default)]
@@ -248,40 +254,59 @@ impl Terminal for CrosstermTerminal {
     fn read_key(&mut self) -> std::io::Result<Key> {
         loop {
             match self.input.next(self.input_started.elapsed())? {
-                RuntimeEvent::Input(LiveInput::Key(key)) => {
-                    if key.modifiers.control && key.code == KeyCode::Char('c') {
+                RuntimeEvent::Input(input) => {
+                    // Ctrl-C stays an unconditional quit before the prefix classifier,
+                    // matching the previous management contract.
+                    if let LiveInput::Key(key) = &input
+                        && key.modifiers.control
+                        && key.code == KeyCode::Char('c')
+                    {
                         return Ok(Key::Quit);
                     }
-                    if !matches!(
-                        key.kind,
-                        usagi_tui::usecase::terminal_input::KeyEventKind::Press
-                    ) {
-                        return Ok(Key::Other);
+                    let now = self.input_started.elapsed();
+                    match self.live_input.classify(now, input.clone()) {
+                        // A resolved `Ctrl-O` prefix action drives the live runtime.
+                        LiveInputOutput::Action(action) => return Ok(Key::Live(action)),
+                        // Leader pending, unknown follow-up, or key release: keep reading.
+                        LiveInputOutput::Swallowed => {}
+                        // Everything else is a normal key; preserve the prior mapping so
+                        // non-prefix keys and future PTY passthrough are unchanged.
+                        LiveInputOutput::Passthrough(_) => return Ok(passthrough_key(&input)),
                     }
-                    return Ok(match key.code {
-                        KeyCode::Up => Key::Up,
-                        KeyCode::Down => Key::Down,
-                        KeyCode::Left => Key::Left,
-                        KeyCode::Right => Key::Right,
-                        KeyCode::Enter => Key::Enter,
-                        KeyCode::Tab => Key::Tab,
-                        KeyCode::Backspace => Key::Backspace,
-                        KeyCode::Escape => Key::Escape,
-                        KeyCode::Char(ch) => Key::Char(ch),
-                        _ => Key::Other,
-                    });
                 }
                 RuntimeEvent::Resize { .. } => {
                     self.renderer.reset_surface();
                     return Ok(Key::Other);
                 }
-                RuntimeEvent::Input(
-                    LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_),
-                )
-                | RuntimeEvent::Backend(()) => return Ok(Key::Other),
+                RuntimeEvent::Backend(()) => return Ok(Key::Other),
                 RuntimeEvent::Tick => {}
             }
         }
+    }
+}
+
+/// Map a non-prefix live input to the management `Key` vocabulary. The classifier
+/// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
+/// for every other key and text/paste payload.
+#[coverage(off)]
+fn passthrough_key(input: &LiveInput) -> Key {
+    let LiveInput::Key(key) = input else {
+        return Key::Other;
+    };
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return Key::Other;
+    }
+    match key.code {
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Escape => Key::Escape,
+        KeyCode::Char(ch) => Key::Char(ch),
+        _ => Key::Other,
     }
 }
 
@@ -401,6 +426,7 @@ fn run_in_terminal(
         ),
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
+        live_input: LiveInputClassifier::default(),
     };
     let result = run(&mut terminal);
     let mut teardown = std::io::stdout();
