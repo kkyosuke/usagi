@@ -213,11 +213,36 @@ pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
     from.format("%Y-%m-%d").to_string()
 }
 
+/// Session sidebar 用の簡潔な相対時刻。`now` / `5m ago` / `3h ago` と表す。
+#[must_use]
+pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - from).num_seconds();
+    if secs < 60 {
+        return "now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m ago");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{days}d ago");
+    }
+    if days < 30 {
+        return format!("{}w ago", days / 7);
+    }
+    from.format("%Y-%m-%d").to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        block_caret, centered_padding, clip_to_width, display_width, normalize_size, relative_time,
-        wrap_to_width,
+        block_caret, centered_padding, clip_to_width, display_width, normalize_size,
+        relative_session_time, relative_time, wrap_to_width,
     };
     use crate::presentation::theme::Role;
     use chrono::{DateTime, Duration, Utc};
@@ -348,6 +373,24 @@ mod tests {
         assert_eq!(relative_time(now - Duration::hours(3), now), "3h ago");
         assert_eq!(relative_time(now - Duration::days(2), now), "2d ago");
         assert_eq!(relative_time(now - Duration::days(20), now), "2w ago");
+    }
+
+    #[test]
+    fn relative_session_time_uses_the_compact_sidebar_vocabulary() {
+        let now = at("2026-06-25T12:00:00Z");
+        assert_eq!(relative_session_time(now, now), "now");
+        assert_eq!(
+            relative_session_time(now - Duration::seconds(59), now),
+            "now"
+        );
+        assert_eq!(
+            relative_session_time(now - Duration::minutes(11), now),
+            "11m ago"
+        );
+        assert_eq!(
+            relative_session_time(now - Duration::hours(3), now),
+            "3h ago"
+        );
     }
 
     #[test]
