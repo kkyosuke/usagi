@@ -29,6 +29,19 @@ pub enum Theme {
     System,
 }
 
+/// How Overview and Closeup accept a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModalSelectionMode {
+    /// Type the command into a prompt.
+    Prompt,
+    /// Choose a command from the visible action list. The default, and the
+    /// state an unrecognised stored token degrades to.
+    #[default]
+    #[serde(other)]
+    Action,
+}
+
 /// The global, per-user application settings.
 ///
 /// A missing field (and the whole file) falls back to [`Default`], and each enum
@@ -39,6 +52,8 @@ pub enum Theme {
 pub struct Settings {
     /// The UI color theme.
     pub theme: Theme,
+    /// The command-selection interaction used by Overview and Closeup modals.
+    pub modal_selection_mode: ModalSelectionMode,
 }
 
 #[cfg(test)]

@@ -9,8 +9,9 @@
 //! カーソル移動と選択の純粋操作だけを公開する。
 
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, modal};
+use crate::presentation::widgets::{self, TextInput, modal};
 use crate::usecase::closeup;
+use usagi_core::domain::settings::ModalSelectionMode;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
@@ -21,6 +22,8 @@ const BODY_HEIGHT: usize = 9;
 pub struct CloseupModal {
     session: String,
     selected: usize,
+    selection_mode: ModalSelectionMode,
+    input: TextInput,
 }
 
 impl CloseupModal {
@@ -28,9 +31,21 @@ impl CloseupModal {
     #[must_use]
     #[coverage(off)]
     pub fn new(session: impl Into<String>) -> Self {
+        Self::with_selection_mode(session, ModalSelectionMode::Action)
+    }
+
+    /// Open a modal using the configured command-selection interaction.
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_selection_mode(
+        session: impl Into<String>,
+        selection_mode: ModalSelectionMode,
+    ) -> Self {
         Self {
             session: session.into(),
             selected: 0,
+            selection_mode,
+            input: TextInput::default(),
         }
     }
 
@@ -46,6 +61,13 @@ impl CloseupModal {
     #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Returns whether this modal accepts an action choice or a typed prompt.
+    #[must_use]
+    #[coverage(off)]
+    pub fn selection_mode(&self) -> ModalSelectionMode {
+        self.selection_mode
     }
 
     /// アクション一覧。
@@ -67,7 +89,42 @@ impl CloseupModal {
     #[must_use]
     #[coverage(off)]
     pub fn submission(&self) -> String {
-        self.selected_action().name.to_owned()
+        match self.selection_mode {
+            ModalSelectionMode::Action => self.selected_action().name.to_owned(),
+            ModalSelectionMode::Prompt => self.input.value().to_owned(),
+        }
+    }
+
+    /// Insert one character in Prompt mode.
+    #[coverage(off)]
+    pub fn insert_char(&mut self, c: char) {
+        if self.selection_mode == ModalSelectionMode::Prompt {
+            self.input.insert(c);
+        }
+    }
+
+    /// Delete one character in Prompt mode.
+    #[coverage(off)]
+    pub fn backspace(&mut self) {
+        if self.selection_mode == ModalSelectionMode::Prompt {
+            self.input.backspace();
+        }
+    }
+
+    /// Move the prompt caret left in Prompt mode.
+    #[coverage(off)]
+    pub fn cursor_left(&mut self) {
+        if self.selection_mode == ModalSelectionMode::Prompt {
+            self.input.move_left();
+        }
+    }
+
+    /// Move the prompt caret right in Prompt mode.
+    #[coverage(off)]
+    pub fn cursor_right(&mut self) {
+        if self.selection_mode == ModalSelectionMode::Prompt {
+            self.input.move_right();
+        }
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
@@ -103,6 +160,23 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
 /// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
 #[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
+    if state.selection_mode == ModalSelectionMode::Prompt {
+        let prompt = if state.input.value().is_empty() {
+            "_".to_string()
+        } else {
+            state.input.value().to_owned()
+        };
+        return modal::fixed_body(
+            vec![
+                Style::new().dim().paint("Type a command:"),
+                String::new(),
+                format!("❯ {prompt}"),
+                String::new(),
+                Style::new().dim().paint("  Enter: run   Esc: back"),
+            ],
+            BODY_HEIGHT,
+        );
+    }
     let mut lines = vec![Style::new().dim().paint("Run a command:"), String::new()];
     for (i, action) in state.actions().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
@@ -154,6 +228,7 @@ pub fn render_over(
 mod tests {
     use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::display_width;
+    use usagi_core::domain::settings::ModalSelectionMode;
 
     #[test]
     fn action_selection_keeps_the_closeup_box_height_stable() {
@@ -228,6 +303,18 @@ mod tests {
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
         assert_eq!(modal.submission(), "close");
+    }
+
+    #[test]
+    fn prompt_mode_accepts_a_typed_command_instead_of_an_action_choice() {
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        modal.insert_char('c');
+        modal.insert_char('l');
+        modal.insert_char('o');
+        modal.backspace();
+        assert_eq!(modal.selection_mode(), ModalSelectionMode::Prompt);
+        assert_eq!(modal.submission(), "cl");
+        assert!(joined(&modal).contains("Type a command:"));
     }
 
     #[test]

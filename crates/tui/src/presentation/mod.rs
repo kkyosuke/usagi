@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
 
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
@@ -92,6 +93,8 @@ enum ConfigStep {
     Quit,
     /// welcome へ戻る。
     Back,
+    /// Persisted successfully; show the confirmation frame, then return home.
+    Saved,
 }
 
 /// New 画面でキー `key` を処理した結果の遷移。
@@ -233,6 +236,7 @@ impl OverlayDataPort for SnapshotOverlayData {
 struct WorkspaceUi {
     workspace: WorkspaceView,
     closeup: CloseupModal,
+    modal_selection_mode: ModalSelectionMode,
     modal: Option<WorkspaceModal>,
     overlay_data: Box<dyn OverlayDataPort>,
     session_commands: Box<dyn SessionCommandPort>,
@@ -242,23 +246,27 @@ impl WorkspaceUi {
     #[cfg(test)]
     #[coverage(off)]
     fn with_overlay_data(workspace: WorkspaceView, overlay_data: Box<dyn OverlayDataPort>) -> Self {
-        Self::with_ports(
+        Self::with_ports_and_selection_mode(
             workspace,
             overlay_data,
             Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
         )
     }
 
     #[coverage(off)]
-    fn with_ports(
+    fn with_ports_and_selection_mode(
         workspace: WorkspaceView,
         overlay_data: Box<dyn OverlayDataPort>,
         session_commands: Box<dyn SessionCommandPort>,
+        modal_selection_mode: ModalSelectionMode,
     ) -> Self {
-        let closeup = CloseupModal::new(workspace.focused_label());
+        let closeup =
+            CloseupModal::with_selection_mode(workspace.focused_label(), modal_selection_mode);
         Self {
             workspace,
             closeup,
+            modal_selection_mode,
             modal: None,
             overlay_data,
             session_commands,
@@ -269,14 +277,19 @@ impl WorkspaceUi {
     #[coverage(off)]
     fn enter_closeup(&mut self) {
         self.workspace.enter_closeup();
-        self.closeup = CloseupModal::new(self.workspace.focused_label());
+        self.closeup = CloseupModal::with_selection_mode(
+            self.workspace.focused_label(),
+            self.modal_selection_mode,
+        );
         self.modal = None;
     }
 
     /// 現在 mode を保ったまま Workspace scope の command palette を重ねる。
     #[coverage(off)]
     fn open_overview(&mut self) {
-        self.modal = Some(WorkspaceModal::Overview(OverviewModal::new()));
+        self.modal = Some(WorkspaceModal::Overview(
+            OverviewModal::with_selection_mode(self.modal_selection_mode),
+        ));
     }
 
     /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
@@ -322,8 +335,8 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
     }
 }
 
-/// Config 画面のキー処理（純粋）。Esc で welcome へ戻り、`Ctrl-C` で終了する。設定項目は
-/// まだ無いので、その他のキーは留まる。
+/// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、成功後は confirmation
+/// frame を表示して welcome へ戻る。
 #[coverage(off)]
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
@@ -331,17 +344,28 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
             config.toggle_scope();
             ConfigStep::Stay
         }
-        Key::Left => {
-            config.cycle_theme(false);
+        Key::Up | Key::Char('k') => {
+            config.previous_field();
             ConfigStep::Stay
         }
-        Key::Right => {
-            config.cycle_theme(true);
+        Key::Down | Key::Char('j') => {
+            config.next_field();
             ConfigStep::Stay
         }
-        Key::Char('s' | 'S') => {
-            config.save(settings);
+        Key::Left | Key::Char('h') => {
+            config.cycle_selected(false);
             ConfigStep::Stay
+        }
+        Key::Right | Key::Char('l') => {
+            config.cycle_selected(true);
+            ConfigStep::Stay
+        }
+        Key::Enter if config.can_save() => {
+            if config.save(settings) {
+                ConfigStep::Saved
+            } else {
+                ConfigStep::Stay
+            }
         }
         Key::Escape => ConfigStep::Back,
         Key::Quit => ConfigStep::Quit,
@@ -640,6 +664,18 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// Workspace 自体を閉じず Switch へ一段戻す。
 #[coverage(off)]
 fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if ui.closeup.selection_mode() == ModalSelectionMode::Prompt {
+        match key {
+            Key::Left => ui.closeup.cursor_left(),
+            Key::Right => ui.closeup.cursor_right(),
+            Key::Backspace => ui.closeup.backspace(),
+            Key::Char(ch) => ui.closeup.insert_char(ch),
+            Key::Escape => ui.workspace.enter_switch(),
+            Key::Quit => return WorkspaceStep::Quit,
+            Key::Up | Key::Down | Key::Tab | Key::Enter | Key::Other => {}
+        }
+        return WorkspaceStep::Stay;
+    }
     match key {
         Key::Up | Key::Char('k') => ui.closeup.select_prev(),
         Key::Down | Key::Char('j') => ui.closeup.select_next(),
@@ -761,8 +797,29 @@ fn drive_workspace_with_ports(
     overlay_data: Box<dyn OverlayDataPort>,
     session_commands: Box<dyn SessionCommandPort>,
 ) -> io::Result<WorkspaceStep> {
+    drive_workspace_with_ports_and_selection_mode(
+        term,
+        snapshot,
+        overlay_data,
+        session_commands,
+        ModalSelectionMode::Action,
+    )
+}
+
+fn drive_workspace_with_ports_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    overlay_data: Box<dyn OverlayDataPort>,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+) -> io::Result<WorkspaceStep> {
     let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
-    let mut ui = WorkspaceUi::with_ports(workspace, overlay_data, session_commands);
+    let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+        workspace,
+        overlay_data,
+        session_commands,
+        modal_selection_mode,
+    );
     loop {
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
@@ -865,7 +922,14 @@ pub fn run_with_settings(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
+                    if drive_workspace_with_ports_and_selection_mode(
+                        term,
+                        snapshot,
+                        Box::new(SnapshotOverlayData),
+                        Box::new(UnavailableSessionCommandPort),
+                        config_form.global_modal_selection_mode(),
+                    )? == WorkspaceStep::Quit
+                    {
                         return Ok(Exit::Quit);
                     }
                 }
@@ -879,7 +943,14 @@ pub fn run_with_settings(
                         let snapshot = loader.open(&path)?;
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        if drive_workspace(term, snapshot)? == WorkspaceStep::Quit {
+                        if drive_workspace_with_ports_and_selection_mode(
+                            term,
+                            snapshot,
+                            Box::new(SnapshotOverlayData),
+                            Box::new(UnavailableSessionCommandPort),
+                            config_form.global_modal_selection_mode(),
+                        )? == WorkspaceStep::Quit
+                        {
                             return Ok(Exit::Quit);
                         }
                     }
@@ -898,6 +969,11 @@ pub fn run_with_settings(
                 ConfigStep::Stay => {}
                 ConfigStep::Quit => return Ok(Exit::Quit),
                 ConfigStep::Back => screen = Screen::Welcome,
+                ConfigStep::Saved => {
+                    let (height, width) = term.size()?;
+                    term.draw(&config::render(height, width, &config_form))?;
+                    screen = Screen::Welcome;
+                }
             },
         }
     }
@@ -993,10 +1069,11 @@ mod tests {
     use super::{
         BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SnapshotOverlayData, Start, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start, run_workspace,
-        run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
-        step_overview, step_pr, step_workspace, welcome_action, write_banner,
+        SnapshotOverlayData, Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
+        WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start,
+        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
+        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
+        write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -1016,6 +1093,7 @@ mod tests {
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+    use usagi_core::domain::settings::ModalSelectionMode;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
 
@@ -1328,6 +1406,42 @@ mod tests {
             step_config(&mut config, Key::Tab, &mut settings),
             ConfigStep::Stay
         ));
+    }
+
+    #[test]
+    fn step_config_saves_only_from_the_dirty_save_row() {
+        let mut settings = DefaultSettingsPort;
+        let mut config = Config::load(&mut settings);
+        assert!(matches!(
+            step_config(&mut config, Key::Enter, &mut settings),
+            ConfigStep::Stay
+        ));
+        step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
+        assert!(matches!(
+            step_config(&mut config, Key::Enter, &mut settings),
+            ConfigStep::Saved
+        ));
+    }
+
+    #[test]
+    fn workspace_ui_passes_prompt_selection_to_both_command_modals() {
+        let workspace = WorkspaceView::new(ws("prompt"), state("prompt"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Prompt,
+        );
+        ui.open_overview();
+        let Some(WorkspaceModal::Overview(overview)) = ui.modal.as_ref() else {
+            panic!("overview modal should open");
+        };
+        assert_eq!(overview.selection_mode(), ModalSelectionMode::Prompt);
+        ui.modal = None;
+        ui.enter_closeup();
+        assert_eq!(ui.closeup.selection_mode(), ModalSelectionMode::Prompt);
     }
 
     #[test]
