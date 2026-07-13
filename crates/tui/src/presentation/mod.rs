@@ -218,6 +218,28 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
     }
 }
 
+/// Workspace 起動ごとに Overview の [`SessionCommandPort`] を新しく作る境界。
+///
+/// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
+/// port を都度 fresh に生成して daemon の revision state を workspace 間で持ち越さない。
+/// TUI は daemon を知らないので、合成ルートが daemon-backed factory を実装して注入し、
+/// テストは fake factory を渡す。
+pub trait SessionCommandPortFactory {
+    /// Build a fresh session command port for one workspace launch.
+    fn create(&mut self) -> Box<dyn SessionCommandPort>;
+}
+
+/// 既定では session command を接続しない factory。
+///
+/// daemon-backed port を注入しない embedder / テスト経路で使う。
+struct UnavailableSessionCommandPortFactory;
+
+impl SessionCommandPortFactory for UnavailableSessionCommandPortFactory {
+    fn create(&mut self) -> Box<dyn SessionCommandPort> {
+        Box::new(UnavailableSessionCommandPort)
+    }
+}
+
 /// 永続化済み snapshot を読む既定の overlay data port。
 struct SnapshotOverlayData;
 
@@ -922,6 +944,7 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
 ///
 /// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
 #[coverage(off)]
+#[allow(clippy::too_many_arguments)] // screen data と注入 port（loader / settings / session port factory）を合成側から受ける入口。
 pub fn run_with_settings(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -930,6 +953,7 @@ pub fn run_with_settings(
     start: Start,
     loader: &mut dyn WorkspaceLoader,
     settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
     let mut open = open_from_registry(workspaces, welcome.recent());
@@ -972,7 +996,7 @@ pub fn run_with_settings(
                         term,
                         snapshot,
                         Box::new(SnapshotOverlayData),
-                        Box::new(UnavailableSessionCommandPort),
+                        session_commands.create(),
                         config_form.global_modal_selection_mode(),
                     )? == WorkspaceStep::Quit
                     {
@@ -993,7 +1017,7 @@ pub fn run_with_settings(
                             term,
                             snapshot,
                             Box::new(SnapshotOverlayData),
-                            Box::new(UnavailableSessionCommandPort),
+                            session_commands.create(),
                             config_form.global_modal_selection_mode(),
                         )? == WorkspaceStep::Quit
                         {
@@ -1041,7 +1065,17 @@ pub fn run(
     loader: &mut dyn WorkspaceLoader,
 ) -> io::Result<Exit> {
     let mut settings = DefaultSettingsPort;
-    run_with_settings(term, workspaces, recent, now, start, loader, &mut settings)
+    let mut session_commands = UnavailableSessionCommandPortFactory;
+    run_with_settings(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        &mut settings,
+        &mut session_commands,
+    )
 }
 
 struct DefaultSettingsPort;
@@ -1115,11 +1149,12 @@ mod tests {
     use super::{
         BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SessionCommandResult, SnapshotOverlayData, Start, UnavailableSessionCommandPort,
-        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, run as run_from_start, run_workspace, run_workspace_with_overlay_data,
-        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
-        step_workspace, welcome_action, write_banner,
+        SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
+        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start, run_with_settings,
+        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
+        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
+        write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -1200,6 +1235,65 @@ mod tests {
                 command,
             ));
             Ok(SessionCommandResult::message("daemon accepted"))
+        }
+    }
+
+    /// screen graph の workspace 遷移が実 port を通すことを検証する fake port。
+    /// `session create <name>` に対しては、daemon lifecycle snapshot を模して
+    /// `name` の session row を返し、sidebar への反映まで観測できるようにする。
+    #[derive(Clone)]
+    struct SnapshotSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
+
+    impl SessionCommandPort for SnapshotSessionPort {
+        #[coverage(off)]
+        fn execute(
+            &mut self,
+            workspace: &Workspace,
+            selected: Option<&SessionRecord>,
+            command: SessionCommand,
+        ) -> Result<SessionCommandResult, String> {
+            let created = match &command {
+                SessionCommand::Create { name } => Some(name.clone()),
+                _ => None,
+            };
+            self.0.lock().unwrap().push((
+                workspace.name.clone(),
+                selected.map(|session| session.name.clone()),
+                command,
+            ));
+            let sessions = created.map(|name| {
+                vec![SessionRecord {
+                    name: name.clone(),
+                    display_name: None,
+                    origin: SessionOrigin::Human,
+                    started_from: None,
+                    root: workspace.path.join(".usagi/sessions").join(&name),
+                    created_at: now(),
+                    last_active: None,
+                    notes: Scratchpad::default(),
+                    prs: Vec::new(),
+                }]
+            });
+            Ok(SessionCommandResult {
+                message: "daemon accepted".to_owned(),
+                sessions,
+            })
+        }
+    }
+
+    /// workspace 起動ごとに [`SnapshotSessionPort`] を新しく作る fake factory。
+    /// 記録した command 列と生成回数を共有し、全起動経路が実 port を fresh に
+    /// 通していることを固定する。
+    struct SnapshotSessionPortFactory {
+        calls: Arc<Mutex<Vec<SessionCommandCall>>>,
+        created: Arc<Mutex<usize>>,
+    }
+
+    impl SessionCommandPortFactory for SnapshotSessionPortFactory {
+        #[coverage(off)]
+        fn create(&mut self) -> Box<dyn SessionCommandPort> {
+            *self.created.lock().unwrap() += 1;
+            Box::new(SnapshotSessionPort(self.calls.clone()))
         }
     }
 
@@ -2040,6 +2134,89 @@ mod tests {
                 .join("\n")
                 .contains("daemon accepted")
         );
+    }
+
+    #[test]
+    fn open_workspace_connects_the_injected_session_command_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let created = Arc::new(Mutex::new(0usize));
+        let mut factory = SnapshotSessionPortFactory {
+            calls: calls.clone(),
+            created: created.clone(),
+        };
+        let mut keys = vec![Key::Char('o'), Key::Enter, Key::Char(':')];
+        keys.extend("session create review".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                vec![ws("alpha")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                "alpha".to_owned(),
+                None,
+                SessionCommand::Create {
+                    name: "review".to_owned()
+                }
+            )]
+        );
+        assert_eq!(*created.lock().unwrap(), 1);
+        // The daemon snapshot returned by the port replaces the sidebar rows.
+        assert!(term.frames.last().unwrap().join("\n").contains("review"));
+    }
+
+    #[test]
+    fn recent_workspace_connects_the_injected_session_command_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let created = Arc::new(Mutex::new(0usize));
+        let mut factory = SnapshotSessionPortFactory {
+            calls: calls.clone(),
+            created: created.clone(),
+        };
+        let mut keys = vec![Key::Char('1'), Key::Char(':')];
+        keys.extend("session list".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+
+        assert_eq!(
+            run_with_settings(
+                &mut term,
+                Vec::new(),
+                vec![recent("home")],
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut factory,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/home")]);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("home".to_owned(), None, SessionCommand::List)]
+        );
+        assert_eq!(*created.lock().unwrap(), 1);
     }
 
     #[test]

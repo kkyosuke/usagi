@@ -28,8 +28,8 @@ use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
-    self, BannerScreenRunner, Exit, SessionCommandPort, SessionCommandResult, Start,
-    WorkspaceLoader, WorkspaceSnapshot,
+    self, BannerScreenRunner, Exit, SessionCommandPort, SessionCommandPortFactory,
+    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -156,6 +156,19 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             message,
             sessions: Some(snapshot.project(workspace)),
         })
+    }
+}
+
+/// Overview の session command port を workspace 起動ごとに新しく作る合成側 factory。
+///
+/// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
+/// daemon の revision state を持ち越さないよう port を都度生成する。
+struct DaemonSessionCommandPortFactory;
+
+impl SessionCommandPortFactory for DaemonSessionCommandPortFactory {
+    #[coverage(off)]
+    fn create(&mut self) -> Box<dyn SessionCommandPort> {
+        Box::new(DaemonSessionCommandPort::default())
     }
 }
 
@@ -423,6 +436,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = VolatileSettingsPort::default();
+        let mut session_commands = DaemonSessionCommandPortFactory;
         run_in_terminal(|terminal| {
             presentation::run_with_settings(
                 terminal,
@@ -432,6 +446,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 start,
                 &mut loader,
                 &mut settings,
+                &mut session_commands,
             )
         })?;
     } else {
