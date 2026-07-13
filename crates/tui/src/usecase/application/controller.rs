@@ -73,32 +73,26 @@ pub struct CreateSessionForm {
 
 impl CreateSessionForm {
     #[must_use]
-    #[coverage(off)]
     pub const fn field(&self) -> CreateSessionField {
         self.field
     }
     #[must_use]
-    #[coverage(off)]
     pub fn name(&self) -> &str {
         &self.name
     }
     #[must_use]
-    #[coverage(off)]
     pub fn profile(&self) -> &str {
         &self.profile
     }
     #[must_use]
-    #[coverage(off)]
     pub fn model(&self) -> &str {
         &self.model
     }
     #[must_use]
-    #[coverage(off)]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
     }
 
-    #[coverage(off)]
     fn selected_mut(&mut self) -> &mut String {
         match self.field {
             CreateSessionField::Name => &mut self.name,
@@ -107,7 +101,6 @@ impl CreateSessionForm {
         }
     }
 
-    #[coverage(off)]
     fn next_field(&mut self) {
         self.field = match self.field {
             CreateSessionField::Name => CreateSessionField::Profile,
@@ -116,19 +109,16 @@ impl CreateSessionForm {
         };
     }
 
-    #[coverage(off)]
     fn push(&mut self, character: char) {
         self.selected_mut().push(character);
         self.error = None;
     }
 
-    #[coverage(off)]
     fn backspace(&mut self) {
         self.selected_mut().pop();
         self.error = None;
     }
 
-    #[coverage(off)]
     fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
         let name = required_create_value(&self.name, "session name is required")?;
         let profile = optional_profile(&self.profile)?;
@@ -150,7 +140,6 @@ pub struct SessionCreateIntent {
     pub model: Option<ModelSelector>,
 }
 
-#[coverage(off)]
 fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
     let value = value.trim();
     (!value.is_empty())
@@ -158,7 +147,6 @@ fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
         .ok_or_else(|| Notice::new(message))
 }
 
-#[coverage(off)]
 fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
     let value = value.trim();
     if value.is_empty() {
@@ -170,7 +158,6 @@ fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
     }
 }
 
-#[coverage(off)]
 fn optional_model(value: &str) -> Result<Option<ModelSelector>, Notice> {
     let value = value.trim();
     if value.is_empty() {
@@ -2060,6 +2047,44 @@ mod tests {
 
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
+    }
+
+    #[test]
+    fn create_session_form_edits_and_validates_each_field() {
+        let mut form = CreateSessionForm::default();
+        assert_eq!(form.field(), CreateSessionField::Name);
+        assert_eq!(form.name(), "");
+        assert_eq!(form.profile(), "");
+        assert_eq!(form.model(), "");
+        assert!(form.error().is_none());
+
+        assert!(required_create_value(" ", "required").is_err());
+        assert_eq!(required_create_value(" name ", "required").unwrap(), "name");
+        assert_eq!(optional_profile("").unwrap(), None);
+        assert!(optional_profile("invalid profile").is_err());
+        assert_eq!(optional_model("").unwrap(), None);
+        assert!(optional_model("invalid\nmodel").is_err());
+
+        for character in "session".chars() {
+            form.push(character);
+        }
+        form.next_field();
+        for character in "codex".chars() {
+            form.push(character);
+        }
+        form.next_field();
+        for character in "gpt-5".chars() {
+            form.push(character);
+        }
+        form.backspace();
+        form.push('5');
+
+        let request = form.request().unwrap();
+        assert_eq!(request.name, "session");
+        assert_eq!(request.profile.unwrap().as_str(), "codex");
+        assert_eq!(request.model.unwrap().as_str(), "gpt-5");
+        form.next_field();
+        assert_eq!(form.field(), CreateSessionField::Name);
     }
 
     #[test]
