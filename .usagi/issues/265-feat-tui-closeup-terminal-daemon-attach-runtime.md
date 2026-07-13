@@ -1,14 +1,14 @@
 ---
 number: 265
 title: feat(tui): Closeup terminal を daemon attach runtime へ接続する
-status: todo
+status: done
 priority: high
 labels: [tui, terminal, ipc]
 dependson: [264, 282]
 related: [235, 257, 279, 282]
 parent: 227
 created_at: 2026-07-13T00:16:40.138277+00:00
-updated_at: 2026-07-13T11:20:30.723116+00:00
+updated_at: 2026-07-13T11:29:05.987189+00:00
 ---
 
 ## 目的

@@ -24,6 +24,8 @@ pub mod lifecycle_adapter;
 pub mod pane;
 /// daemon terminal inventory/stream と pane reducer を結合する client-side state machine。
 pub mod pane_runtime;
+/// daemon-owned generic terminal launch / attach adapter for Closeup panes.
+pub mod terminal_launch;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
