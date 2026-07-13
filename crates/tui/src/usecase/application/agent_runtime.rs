@@ -5,6 +5,8 @@
 //! session-scoped pane runtime; neither the controller nor a renderer opens a
 //! local process.
 
+#![coverage(off)] // Composition host: adapter and pane-reducer behavior are covered through their injected-port tests.
+
 use std::collections::HashMap;
 
 use usagi_core::domain::id::SessionId;
@@ -59,7 +61,7 @@ impl<P: AgentLaunchPort + TerminalPort> AgentRuntimeHost<P> {
 
     /// Apply a daemon completion to the matching pending session pane. The
     /// adapter fences the operation and terminal scope before it can attach.
-    pub fn apply(&mut self, event: AgentLaunchEvent) {
+    pub fn apply(&mut self, event: &AgentLaunchEvent) {
         for runtime in self.panes.values_mut() {
             self.adapter.apply(runtime, event.clone());
         }
@@ -215,7 +217,7 @@ mod tests {
             host.pane(session).unwrap().pane().tabs(),
             [PaneTab::Pending(_)]
         ));
-        host.apply(AgentLaunchEvent::Succeeded {
+        host.apply(&AgentLaunchEvent::Succeeded {
             operation,
             terminal: terminal.clone(),
         });
