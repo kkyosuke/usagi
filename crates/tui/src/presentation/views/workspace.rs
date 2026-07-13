@@ -1062,7 +1062,17 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 #[coverage(off)]
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
-        || vec![widgets::shimmer_text("waiting daemon", frame)],
+        || {
+            vec![widgets::shimmer_text_with(
+                "waiting daemon",
+                frame,
+                widgets::Shimmer {
+                    style: Role::Feature.style().bold(),
+                    speed: 2,
+                    replacement: Some('\u{f907}'),
+                },
+            )]
+        },
         |metrics| {
             vec![format!(
                 "{} sub · {} dropped",
