@@ -499,6 +499,12 @@ impl Workspace {
         self.selected == self.state.sessions.len() + 1
     }
 
+    /// Move the sidebar cursor to the persistent `+ new session` row.
+    #[coverage(off)]
+    pub fn select_new_session(&mut self) {
+        self.selected = self.state.sessions.len() + 1;
+    }
+
     #[must_use]
     #[coverage(off)]
     pub fn creating_session_inline(&self) -> bool {

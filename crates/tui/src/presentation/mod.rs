@@ -1060,7 +1060,11 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             ui.workspace.begin_inline_session_create(None);
         }
         Key::Enter | Key::Char('t') => ui.enter_closeup(),
-        Key::Char('\u{1}' | 'c') => ui.workspace.begin_inline_session_create(None),
+        Key::Char('\u{1}') => {
+            ui.workspace.select_new_session();
+            ui.workspace.begin_inline_session_create(None);
+        }
+        Key::Char('c') => ui.workspace.begin_inline_session_create(None),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Char('v') => ui.open_preview(),
@@ -3254,6 +3258,25 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Char('f')), WorkspaceStep::Stay);
         assert!(ui.workspace.creating_session_inline());
         assert_eq!(ui.workspace.inline_create_value(), Some("f"));
+    }
+
+    #[test]
+    fn ctrl_a_moves_the_cursor_to_the_inline_new_session_input() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        assert!(ui.workspace.root_selected());
+
+        assert_eq!(
+            step_workspace(&mut ui, Key::Char('\u{1}')),
+            WorkspaceStep::Stay
+        );
+        assert!(ui.workspace.new_session_selected());
+        assert!(ui.workspace.creating_session_inline());
     }
 
     #[test]
