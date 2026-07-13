@@ -278,13 +278,13 @@ fn fit(text: &str, width: usize) -> String {
 #[coverage(off)]
 fn workspace_name_row(workspace: &Workspace, is_selected: bool) -> String {
     let cursor = if is_selected {
-        Style::new().bold().paint(">")
+        Role::Danger.style().bold().paint(">")
     } else {
         " ".to_string()
     };
     let name = fit(&workspace.name, NAME_WIDTH);
     let name = if is_selected {
-        Style::new().bold().paint(&name)
+        Role::Accent.style().bold().paint(&name)
     } else {
         name
     };
@@ -307,11 +307,16 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
 #[coverage(off)]
 fn filter_line(open: &Open) -> String {
     let input = &open.filter;
-    let cursor = Style::new().bold().paint("▏");
+    let cursor = Role::Accent.style().bold().underline().paint("▏");
     let value = if input.is_empty() {
         format!("{cursor}{}", Style::new().dim().paint("type to filter"))
     } else {
-        format!("{}{}{}", input.before(), cursor, input.after())
+        format!(
+            "{}{}{}",
+            Role::Accent.style().paint(input.before()),
+            cursor,
+            Role::Accent.style().paint(input.after())
+        )
     };
     format!("{} {value}", Style::new().dim().paint("Filter:"))
 }
@@ -323,7 +328,7 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
 
     let mut lines = vec![
-        indent(&Style::new().bold().paint("Workspaces")),
+        indent(&Role::Success.style().bold().paint("Workspaces")),
         String::new(),
     ];
 
@@ -346,9 +351,9 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     }
     for (i, overview) in open.filtered().into_iter().enumerate() {
         let marker = if open.is_unite() && open.unite_paths.contains(&overview.workspace.path) {
-            "✓ "
+            Role::Success.style().bold().paint("✓ ")
         } else {
-            ""
+            String::new()
         };
         lines.push(indent(&format!(
             "{marker}{}",
