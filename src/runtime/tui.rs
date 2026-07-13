@@ -286,11 +286,13 @@ fn run_in_terminal(
         setup,
         EnterAlternateScreen,
         EnableMouseCapture,
+        terminal::DisableLineWrap,
         cursor::Hide
     ) {
         let _ = execute!(
             setup,
             cursor::Show,
+            terminal::EnableLineWrap,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -313,6 +315,7 @@ fn run_in_terminal(
     let _ = execute!(
         teardown,
         cursor::Show,
+        terminal::EnableLineWrap,
         DisableMouseCapture,
         LeaveAlternateScreen
     );
