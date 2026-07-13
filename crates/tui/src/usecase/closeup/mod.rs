@@ -65,7 +65,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
         info: CommandInfo {
             name: "close",
             description: "Remove the selected session",
-            usage: "close [--force]",
+            usage: "close [-f|--force]",
         },
         factory: |arguments| Command::Close { arguments },
     },

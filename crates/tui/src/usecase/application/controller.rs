@@ -2123,11 +2123,10 @@ fn terminal_arguments(arguments: &str) -> Result<String, Notice> {
 
 #[coverage(off)]
 fn parse_close_force(arguments: &str) -> Option<bool> {
-    match arguments {
-        "" => Some(false),
-        "--force" => Some(true),
-        _ => None,
-    }
+    crate::usecase::session_remove::parse(arguments)
+        .ok()
+        .filter(|request| request.target.is_none())
+        .map(|request| request.force)
 }
 
 #[coverage(off)]

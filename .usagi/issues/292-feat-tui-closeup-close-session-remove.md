@@ -1,14 +1,14 @@
 ---
 number: 292
 title: feat(tui): Closeup close を session remove と共通化する
-status: todo
+status: done
 priority: high
 labels: [tui, closeup, session, parity]
 dependson: [258]
 related: [260, 268, 274, 285, 286, 288]
 parent: 227
 created_at: 2026-07-13T12:10:03.702657+00:00
-updated_at: 2026-07-13T12:10:45.569179+00:00
+updated_at: 2026-07-13T12:19:00.400494+00:00
 ---
 
 ## 背景

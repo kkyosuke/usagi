@@ -7,5 +7,7 @@
 pub mod application;
 pub mod closeup;
 pub mod overview;
+/// Shared syntax for destructive session removal commands.
+pub mod session_remove;
 /// Live terminal input vocabulary, encoder, and default prefix classifier.
 pub mod terminal_input;
