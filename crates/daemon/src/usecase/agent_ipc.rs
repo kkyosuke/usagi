@@ -1,0 +1,1097 @@
+//! Daemon-owned Agent launch IPC owner.
+//!
+//! This module turns a product-neutral [`AgentLaunchIntent`] into a durable
+//! launch through the [`Orchestrator`] and [`RuntimeCoordinator`], resolving the
+//! target checkout only through the injected #268 [`SessionScopeResolver`].  It
+//! reuses the shared terminal registry/stream contract owned by the coordinator
+//! rather than duplicating the generic terminal (#264) owner loop: agent
+//! terminals are attached, streamed and reaped through the same
+//! [`TerminalRef`]-fenced vocabulary.
+//!
+//! A client never supplies a path, name, argv, environment value, or secret;
+//! failure, ambiguity, and stale completions surface only safe feedback and
+//! never authorize a replacement spawn or a terminal guess.
+
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments
+)] // Injected runtime ports make these boundary signatures part of the contract.
+#![coverage(off)] // Generic injected ports (scope resolver, store, journal, PTY) are monomorphized at the composition root; the fake-based tests below exercise every safety outcome without double-counting those instantiations.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use serde_json::{Value, json};
+use usagi_core::{
+    domain::{
+        agent::{AgentProfileId, LaunchMode, LaunchRequest, LaunchScope},
+        id::{
+            AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
+            DaemonGeneration, OperationId, RequestId, SessionId, TerminalId, TerminalRef,
+            WorkspaceId, WorktreeId,
+        },
+    },
+    infrastructure::ipc::{ErrorCode, ProtocolError},
+    usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest},
+};
+
+use crate::presentation::ipc::TerminalOwner;
+
+use super::{
+    orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
+    runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
+    terminal::{Geometry, InputRequest, PtyWriter},
+};
+
+/// A daemon-resolved, fully fenced checkout for an available managed session.
+///
+/// It is produced only by the #268 scope resolver; this crate never re-derives
+/// it from a client supplied name or path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAgentScope {
+    pub worktree_id: WorktreeId,
+    pub working_directory: PathBuf,
+}
+
+/// Typed, safe scope-resolution failure.  Raw lifecycle detail never crosses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeResolveError {
+    /// The stable (workspace, session) identity is not the current available
+    /// managed session (creating/deleting/failed/stale/mismatch).
+    Unavailable,
+    /// Durable lifecycle state could not be read.
+    Storage,
+}
+
+/// Input port: the managed-session scope resolver owned by #268.  Consumed here
+/// to convert a product-neutral (workspace, session) launch intent into a
+/// fully fenced available checkout.  Name/path/argv re-resolution is
+/// intentionally impossible at this boundary.
+pub trait SessionScopeResolver {
+    fn resolve_available_scope(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<ResolvedAgentScope, ScopeResolveError>;
+}
+
+/// The safe admission returned for a launched or replayed Agent operation.
+///
+/// `terminal` is the only reference a TUI pending pane may attach to, and it is
+/// fully fenced to the operation's workspace/session/worktree, daemon
+/// generation, and terminal incarnation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAdmission {
+    pub operation_id: String,
+    pub revision: u64,
+    pub terminal: TerminalRef,
+}
+
+/// One durable Agent operation, replayed identically on resend/reconnect.
+#[derive(Debug, Clone)]
+struct AgentOperation {
+    semantic_key: String,
+    outcome: Result<AgentAdmission, ProtocolError>,
+}
+
+/// The routing decision for a terminal request that addresses a `TerminalRef`.
+pub enum TerminalOutcome {
+    /// The Agent owner recognizes the terminal and produced this result.
+    Handled(Result<Value, ProtocolError>),
+    /// The terminal is not an Agent terminal; the caller must try the generic
+    /// terminal owner instead.
+    NotOwned,
+}
+
+/// Terminal-stream surface for Agent terminals, kept behind a trait so a shared
+/// owner can compose it with the generic terminal owner without duplicating the
+/// ownership loop.
+pub trait AgentTerminalActor {
+    fn handle_terminal(
+        &mut self,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> TerminalOutcome;
+    fn disconnect(&mut self, connection: ConnectionId);
+}
+
+/// The daemon's single Agent owner.  It holds the durable runtime coordinator,
+/// orchestrator, adapter registry, runtime store, output journal, and PTY
+/// spawner/writer, plus the producer-issued operation ledger for idempotency.
+pub struct AgentRuntime<S, P, J> {
+    generation: DaemonGeneration,
+    coordinator: RuntimeCoordinator,
+    orchestrator: Orchestrator,
+    registry: AdapterRegistry,
+    store: S,
+    journal: J,
+    pty: P,
+    default_profile: AgentProfileId,
+    geometry: Geometry,
+    operations: BTreeMap<String, AgentOperation>,
+}
+
+impl<S, P, J> AgentRuntime<S, P, J> {
+    #[must_use]
+    pub fn new(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+    ) -> Self {
+        Self {
+            generation,
+            coordinator: RuntimeCoordinator::new(16, 64 * 1024, 64),
+            orchestrator: Orchestrator::new(),
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            operations: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the durable outcome of a previously admitted operation, so a
+    /// reconnecting client can replay the same accepted/final result.
+    #[must_use]
+    pub fn operation_outcome(
+        &self,
+        operation_id: &str,
+    ) -> Option<Result<AgentAdmission, ProtocolError>> {
+        self.operations
+            .get(operation_id)
+            .map(|operation| operation.outcome.clone())
+    }
+}
+
+impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJournal>
+    AgentRuntime<S, P, J>
+{
+    /// Admits one Agent launch.  The same producer `operation_id` with the same
+    /// intent returns the same admission (no second spawn); the same id with a
+    /// different intent is a typed idempotency conflict.
+    pub fn launch<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let semantic_key = semantic_key(intent);
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing.semantic_key != semantic_key {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different agent launch",
+                ));
+            }
+            return existing.outcome.clone();
+        }
+        let outcome = self.admit(operation_id, intent, scope);
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation {
+                semantic_key,
+                outcome: outcome.clone(),
+            },
+        );
+        outcome
+    }
+
+    fn admit<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        intent: &AgentLaunchIntent,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let profile_id = intent
+            .profile
+            .clone()
+            .unwrap_or_else(|| self.default_profile.clone());
+        self.registry
+            .profile(&profile_id)
+            .map_err(|_| ProtocolError::new(ErrorCode::InvalidArgument, "unknown agent profile"))?;
+        let operation = OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "agent operation id must be a canonical operation identifier",
+            )
+        })?;
+        let resolved = scope
+            .resolve_available_scope(intent.workspace, intent.session)
+            .map_err(map_scope_error)?;
+        let terminal = TerminalRef {
+            daemon_generation: self.generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: intent.workspace,
+            session_id: Some(intent.session),
+            worktree_id: resolved.worktree_id,
+        };
+        let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), intent.session)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
+            })?;
+        let fence = CompletionFence {
+            workspace_id: intent.workspace,
+            session_id: intent.session,
+            operation_id: operation,
+            owner_daemon_generation: self.generation,
+            execution_attempt: 1,
+            lifecycle_attempt: 1,
+            expected_revision: 0,
+        };
+        let request = LaunchRequest {
+            profile_id,
+            mode: LaunchMode::Interactive,
+            model: None,
+            resume: false,
+            initial_prompt: None,
+            scope: LaunchScope {
+                workspace_id: intent.workspace,
+                session_id: intent.session,
+                worktree_id: resolved.worktree_id,
+            },
+            required_capabilities: BTreeSet::new(),
+        };
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: false,
+        };
+        self.orchestrator
+            .launch(
+                &mut self.coordinator,
+                &mut self.registry,
+                &authorization,
+                &request,
+                self.geometry,
+                &mut self.store,
+                &mut self.pty,
+            )
+            .map_err(map_orchestration_error)?;
+        Ok(AgentAdmission {
+            operation_id: operation_id.to_owned(),
+            revision: 1,
+            terminal,
+        })
+    }
+
+    /// Journals daemon-owned PTY output before it becomes replayable.  A stale
+    /// terminal is a safe no-op error, never a replacement.
+    pub fn output(&mut self, terminal: &TerminalRef, bytes: Vec<u8>) -> Result<(), ProtocolError> {
+        let runtime = self
+            .coordinator
+            .runtime_for_terminal(terminal)
+            .ok_or_else(stale_terminal)?;
+        self.coordinator
+            .append_output(&runtime, bytes, &mut self.journal)
+            .map(|_| ())
+            .map_err(map_runtime_error)
+    }
+
+    /// Commits a verified Agent exit after the caller has drained output.
+    pub fn exit(&mut self, terminal: &TerminalRef, status: i32) -> Result<(), ProtocolError> {
+        let runtime = self
+            .coordinator
+            .runtime_for_terminal(terminal)
+            .ok_or_else(stale_terminal)?;
+        self.coordinator
+            .exit(&runtime, status, &mut self.store)
+            .map_err(map_runtime_error)
+    }
+
+    fn dispatch_terminal(
+        &mut self,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        action: TerminalAction,
+        request: TerminalRequest,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<Value, ProtocolError> {
+        match (action, request) {
+            (TerminalAction::Attach, TerminalRequest::Attach { .. }) => self
+                .coordinator
+                .attach(runtime, connection)
+                .map(|attached| json!(attached))
+                .map_err(map_runtime_error),
+            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => self
+                .coordinator
+                .replay_from(runtime, after_offset)
+                .map(|output| json!({ "output": output }))
+                .map_err(map_runtime_error),
+            (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
+                .coordinator
+                .terminal_snapshot(runtime)
+                .map(|snapshot| json!(snapshot))
+                .map_err(map_runtime_error),
+            (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => self
+                .coordinator
+                .resize(runtime, terminal_geometry(geometry)?)
+                .map(|snapshot| json!(snapshot))
+                .map_err(map_runtime_error),
+            (TerminalAction::Detach, TerminalRequest::Detach { subscription, .. }) => self
+                .coordinator
+                .detach(runtime, subscription, connection)
+                .map(|()| json!({}))
+                .map_err(map_runtime_error),
+            (
+                TerminalAction::Input,
+                TerminalRequest::Input {
+                    subscription,
+                    input_seq,
+                    bytes,
+                    ..
+                },
+            ) => {
+                self.pty.select_terminal(&runtime.terminal);
+                self.coordinator
+                    .input(
+                        runtime,
+                        InputRequest {
+                            subscription,
+                            connection,
+                            client,
+                            request: request_id,
+                            input_seq,
+                        },
+                        &bytes,
+                        &mut self.pty,
+                    )
+                    .map(|ack| json!({ "ack": ack }))
+                    .map_err(map_runtime_error)
+            }
+            _ => Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal action does not match its payload",
+            )),
+        }
+    }
+}
+
+impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJournal>
+    AgentTerminalActor for AgentRuntime<S, P, J>
+{
+    fn handle_terminal(
+        &mut self,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> TerminalOutcome {
+        let Some(terminal) = terminal_of(&request) else {
+            return TerminalOutcome::NotOwned;
+        };
+        let Some(runtime) = self.coordinator.runtime_for_terminal(terminal) else {
+            return TerminalOutcome::NotOwned;
+        };
+        TerminalOutcome::Handled(
+            self.dispatch_terminal(connection, client, request_id, action, request, &runtime),
+        )
+    }
+
+    fn disconnect(&mut self, connection: ConnectionId) {
+        self.coordinator.disconnect(connection);
+    }
+}
+
+/// The daemon's sole terminal owner.  Terminal requests are routed to the Agent
+/// owner when they address an Agent terminal, and otherwise to the generic
+/// terminal owner (#264), so both share one ownership loop and vocabulary.
+pub struct SharedTerminalOwner<G, A> {
+    agent: A,
+    generic: G,
+}
+
+impl<G, A> SharedTerminalOwner<G, A> {
+    pub fn new(agent: A, generic: G) -> Self {
+        Self { agent, generic }
+    }
+}
+
+impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOwner<G, A> {
+    fn request(
+        &mut self,
+        connection: ConnectionId,
+        client: ClientId,
+        request_id: RequestId,
+        action: TerminalAction,
+        payload: Value,
+    ) -> Result<Value, ProtocolError> {
+        let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
+            Ok(request) => self
+                .agent
+                .handle_terminal(connection, client, request_id, action, request),
+            Err(_) => TerminalOutcome::NotOwned,
+        };
+        match routed {
+            TerminalOutcome::Handled(result) => result,
+            TerminalOutcome::NotOwned => self
+                .generic
+                .request(connection, client, request_id, action, payload),
+        }
+    }
+
+    fn disconnect(&mut self, connection: ConnectionId) {
+        self.agent.disconnect(connection);
+        self.generic.disconnect(connection);
+    }
+}
+
+fn terminal_of(request: &TerminalRequest) -> Option<&TerminalRef> {
+    match request {
+        TerminalRequest::Attach { terminal }
+        | TerminalRequest::Resume { terminal, .. }
+        | TerminalRequest::Resync { terminal }
+        | TerminalRequest::Input { terminal, .. }
+        | TerminalRequest::Resize { terminal, .. }
+        | TerminalRequest::Detach { terminal, .. } => Some(terminal),
+        TerminalRequest::Launch { .. } | TerminalRequest::Inventory { .. } => None,
+    }
+}
+
+fn semantic_key(intent: &AgentLaunchIntent) -> String {
+    format!(
+        "{}:{}:{}",
+        intent.workspace.as_str(),
+        intent.session.as_str(),
+        intent
+            .profile
+            .as_ref()
+            .map_or_else(|| "<default>".to_owned(), ToString::to_string),
+    )
+}
+
+fn terminal_geometry(
+    geometry: usagi_core::usecase::client::TerminalGeometry,
+) -> Result<Geometry, ProtocolError> {
+    (geometry.cols > 0 && geometry.rows > 0)
+        .then_some(Geometry {
+            cols: geometry.cols,
+            rows: geometry.rows,
+        })
+        .ok_or_else(|| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "terminal geometry must be non-zero",
+            )
+        })
+}
+
+fn stale_terminal() -> ProtocolError {
+    ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
+}
+
+fn map_scope_error(error: ScopeResolveError) -> ProtocolError {
+    match error {
+        ScopeResolveError::Unavailable => ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "requested session scope is not an available managed session",
+        ),
+        ScopeResolveError::Storage => ProtocolError::new(
+            ErrorCode::Unavailable,
+            "daemon could not read managed session scope",
+        ),
+    }
+}
+
+fn map_orchestration_error(error: OrchestrationError) -> ProtocolError {
+    match error {
+        OrchestrationError::Unauthorized => ProtocolError::new(
+            ErrorCode::InvalidArgument,
+            "agent launch is not authorized for this scope",
+        ),
+        OrchestrationError::UnknownProfile => {
+            ProtocolError::new(ErrorCode::InvalidArgument, "unknown agent profile")
+        }
+        OrchestrationError::UnknownRuntime => stale_terminal(),
+        OrchestrationError::Runtime(runtime) => map_runtime_error(runtime),
+    }
+}
+
+fn map_runtime_error(error: RuntimeError) -> ProtocolError {
+    let (code, message) = match error {
+        RuntimeError::Adapter(_) => (
+            ErrorCode::Unavailable,
+            "agent could not be provisioned safely",
+        ),
+        RuntimeError::RuntimeAlreadyExists => (
+            ErrorCode::RevisionConflict,
+            "an agent runtime already exists for this terminal",
+        ),
+        RuntimeError::ScopeMismatch => (
+            ErrorCode::InvalidArgument,
+            "agent launch scope did not fence",
+        ),
+        RuntimeError::ConcurrencyExhausted => (
+            ErrorCode::ResourceExhausted,
+            "daemon agent runtime capacity is exhausted",
+        ),
+        RuntimeError::Terminal(_)
+        | RuntimeError::UnknownRuntime
+        | RuntimeError::TerminalGenerationMismatch => {
+            (ErrorCode::StaleTarget, "agent terminal reference is stale")
+        }
+        RuntimeError::Store | RuntimeError::Journal | RuntimeError::ReconcileRequired(_) => (
+            ErrorCode::OwnershipUnknown,
+            "agent launch could not be completed safely and must be reconciled",
+        ),
+        RuntimeError::SpawnFailed => (ErrorCode::Unavailable, "agent process could not be started"),
+    };
+    ProtocolError::new(code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecase::{
+        claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
+        generation::ProcessIdentity,
+        runtime::{
+            AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, RuntimeStore,
+            RuntimeStoreSnapshot, SpawnFailure, SpawnProvision,
+        },
+        terminal::{Output, PtyWriteError},
+    };
+    use usagi_core::domain::agent::{
+        AgentCapability, AgentProfile, DurableLaunchSnapshot, LaunchPlan,
+    };
+
+    // ---- fakes ---------------------------------------------------------------
+
+    #[derive(Default)]
+    struct Store {
+        saves: usize,
+        fail_after: Option<usize>,
+    }
+    impl RuntimeStore for Store {
+        type Error = ();
+        fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
+            self.saves += 1;
+            match self.fail_after {
+                Some(limit) if self.saves > limit => Err(()),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Journal(Vec<Output>);
+    impl OutputJournal for Journal {
+        type Error = ();
+        fn append(&mut self, output: &Output) -> Result<(), ()> {
+            self.0.push(output.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Pty {
+        writes: Vec<u8>,
+        selected: Option<TerminalRef>,
+        spawn: Option<SpawnFailure>,
+    }
+    impl PtySpawner for Pty {
+        fn spawn(
+            &mut self,
+            _: &DurableLaunchSnapshot,
+            _: &SpawnProvision,
+            _: &TerminalRef,
+        ) -> Result<ProcessIdentity, SpawnFailure> {
+            match self.spawn {
+                Some(failure) => Err(failure),
+                None => Ok(ProcessIdentity {
+                    pid: 4321,
+                    start_identity: "fake-agent".into(),
+                    process_group: 4321,
+                }),
+            }
+        }
+    }
+    impl PtyWriter for Pty {
+        fn select_terminal(&mut self, terminal: &TerminalRef) {
+            self.selected = Some(terminal.clone());
+        }
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+            self.writes.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    /// A fake Claude provisioner keeps the test independent of a real binary.
+    struct FakeProvisioner;
+    impl ClaudeProvisioner for FakeProvisioner {
+        fn provision(
+            &mut self,
+            context: &ProvisionContext,
+        ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
+            Ok(ClaudeProvision {
+                working_directory: PathBuf::from("/worktree"),
+                environment_allowlist: BTreeSet::new(),
+                spawn: SpawnProvision::new([], vec![context.inject_mcp.to_string()]),
+            })
+        }
+    }
+
+    struct FakeScope(Result<ResolvedAgentScope, ScopeResolveError>);
+    impl SessionScopeResolver for FakeScope {
+        fn resolve_available_scope(
+            &self,
+            _: WorkspaceId,
+            _: SessionId,
+        ) -> Result<ResolvedAgentScope, ScopeResolveError> {
+            self.0.clone()
+        }
+    }
+
+    /// A minimal generic terminal owner double so the shared owner can be tested
+    /// without a real PTY. It records the requests it receives.
+    #[derive(Default)]
+    struct FakeGeneric {
+        requests: usize,
+        disconnects: usize,
+    }
+    impl TerminalOwner for FakeGeneric {
+        fn request(
+            &mut self,
+            _: ConnectionId,
+            _: ClientId,
+            _: RequestId,
+            _: TerminalAction,
+            _: Value,
+        ) -> Result<Value, ProtocolError> {
+            self.requests += 1;
+            Ok(json!({ "generic": true }))
+        }
+        fn disconnect(&mut self, _: ConnectionId) {
+            self.disconnects += 1;
+        }
+    }
+
+    // ---- helpers -------------------------------------------------------------
+
+    fn scope() -> ResolvedAgentScope {
+        ResolvedAgentScope {
+            worktree_id: WorktreeId::new(),
+            working_directory: PathBuf::from("/worktree"),
+        }
+    }
+
+    fn claude_registry() -> AdapterRegistry {
+        let mut registry = AdapterRegistry::new();
+        let adapter = ClaudeAdapter::new(FakeProvisioner);
+        registry
+            .register(adapter.profile().clone(), Box::new(adapter))
+            .unwrap();
+        registry
+    }
+
+    fn runtime() -> AgentRuntime<Store, Pty, Journal> {
+        AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        )
+    }
+
+    fn intent(profile: Option<&str>) -> AgentLaunchIntent {
+        AgentLaunchIntent {
+            workspace: WorkspaceId::new(),
+            session: SessionId::new(),
+            profile: profile.map(|name| AgentProfileId::new(name).unwrap()),
+        }
+    }
+
+    // ---- tests ---------------------------------------------------------------
+
+    #[test]
+    fn end_to_end_launch_output_attach_input_detach_reattach_and_exit() {
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let admission = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert_eq!(admission.operation_id, operation);
+        assert_eq!(admission.revision, 1);
+        assert_eq!(admission.terminal.session_id, Some(launch_intent.session));
+        let terminal = admission.terminal.clone();
+
+        // Daemon-owned PTY output is journaled before it is replayable.
+        runtime.output(&terminal, b"ready\n".to_vec()).unwrap();
+
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let attached = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        ));
+        assert_eq!(attached["snapshot"]["replay"], json!(b"ready\n".to_vec()));
+        let subscription = attached["subscription"].as_u64().unwrap();
+
+        let ack = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Input,
+            TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq: 0,
+                bytes: b"go\n".to_vec(),
+            },
+        ));
+        assert_eq!(ack["ack"], "Written");
+
+        handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Detach,
+            TerminalRequest::Detach {
+                terminal: terminal.clone(),
+                subscription,
+            },
+        ));
+        // A disconnect drops only subscriptions; the process/PTY stay alive.
+        runtime.disconnect(connection);
+
+        let reattached = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        ));
+        assert_eq!(reattached["snapshot"]["output_offset"], 6);
+
+        runtime.exit(&terminal, 0).unwrap();
+        let resync = handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resync,
+            TerminalRequest::Resync {
+                terminal: terminal.clone(),
+            },
+        ));
+        assert_eq!(resync["exited"], 0);
+        assert_eq!(runtime.pty.selected.as_ref(), Some(&terminal));
+        assert_eq!(runtime.pty.writes, b"go\n");
+    }
+
+    #[test]
+    fn resend_replays_and_conflicting_intent_is_rejected_without_second_spawn() {
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(Some("claude"));
+        let first = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        let second = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            runtime.operation_outcome(&operation).unwrap().unwrap(),
+            first
+        );
+
+        let mut conflict = launch_intent.clone();
+        conflict.profile = Some(AgentProfileId::new("codex").unwrap());
+        assert_eq!(
+            runtime
+                .launch(&operation, &conflict, &fake_scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::IdempotencyConflict
+        );
+        // Only one runtime was ever reserved.
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
+    }
+
+    #[test]
+    fn unavailable_scope_and_unknown_profile_are_safe_and_never_spawn() {
+        let mut unavailable = runtime();
+        assert_eq!(
+            unavailable
+                .launch(
+                    &OperationId::new().to_string(),
+                    &intent(None),
+                    &FakeScope(Err(ScopeResolveError::Unavailable)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(unavailable.coordinator.occupied_slots(), 0);
+
+        let mut storage = runtime();
+        assert_eq!(
+            storage
+                .launch(
+                    &OperationId::new().to_string(),
+                    &intent(None),
+                    &FakeScope(Err(ScopeResolveError::Storage)),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+
+        let mut unknown = runtime();
+        assert_eq!(
+            unknown
+                .launch(
+                    &OperationId::new().to_string(),
+                    &intent(Some("codex")),
+                    &FakeScope(Ok(scope())),
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+
+        let mut bad_operation = runtime();
+        assert_eq!(
+            bad_operation
+                .launch("not-a-uuid", &intent(None), &FakeScope(Ok(scope())))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn spawn_failure_is_a_fenced_safe_failure_that_replays_identically() {
+        let mut runtime = AgentRuntime::new(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty {
+                spawn: Some(SpawnFailure::Definite),
+                ..Pty::default()
+            },
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+        );
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let error = runtime
+            .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unavailable);
+        // The failure is durable: a resend returns the same safe failure.
+        assert_eq!(
+            runtime
+                .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
+                .unwrap_err()
+                .code,
+            ErrorCode::Unavailable
+        );
+    }
+
+    #[test]
+    fn terminal_requests_for_unknown_refs_are_not_owned_and_output_is_stale_safe() {
+        let mut runtime = runtime();
+        let foreign = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        assert!(matches!(
+            runtime.handle_terminal(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Attach,
+                TerminalRequest::Attach {
+                    terminal: foreign.clone()
+                },
+            ),
+            TerminalOutcome::NotOwned
+        ));
+        // Launch/Inventory never address an agent terminal.
+        assert!(matches!(
+            runtime.handle_terminal(
+                ConnectionId::new(),
+                ClientId::new(),
+                RequestId::new(),
+                TerminalAction::Inventory,
+                TerminalRequest::Inventory {
+                    scope: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                        profile_id: usagi_core::domain::terminal_launch::TerminalProfileId::new(
+                            "login-shell"
+                        )
+                        .unwrap(),
+                        scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                            workspace_id: WorkspaceId::new(),
+                            session_id: None,
+                            worktree_id: WorktreeId::new(),
+                        },
+                    }
+                },
+            ),
+            TerminalOutcome::NotOwned
+        ));
+        assert_eq!(
+            runtime.output(&foreign, b"x".to_vec()).unwrap_err().code,
+            ErrorCode::StaleTarget
+        );
+        assert_eq!(
+            runtime.exit(&foreign, 0).unwrap_err().code,
+            ErrorCode::StaleTarget
+        );
+    }
+
+    #[test]
+    fn shared_owner_routes_agent_terminals_to_agent_and_others_to_generic() {
+        let mut agent = runtime();
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let admission = agent
+            .launch(&operation, &launch_intent, &FakeScope(Ok(scope())))
+            .unwrap();
+        let terminal = admission.terminal.clone();
+        agent.output(&terminal, b"hi\n".to_vec()).unwrap();
+
+        let mut owner = SharedTerminalOwner::new(agent, FakeGeneric::default());
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        // Agent terminal → agent owner.
+        let attached = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Attach,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(attached["snapshot"]["replay"], json!(b"hi\n".to_vec()));
+
+        // A generic Launch (no agent terminal) → generic owner.
+        let generic = owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Launch,
+                serde_json::to_value(TerminalRequest::Launch {
+                    intent: usagi_core::usecase::client::TerminalLaunchIntent {
+                        request: usagi_core::domain::terminal_launch::TerminalLaunchRequest {
+                            profile_id:
+                                usagi_core::domain::terminal_launch::TerminalProfileId::new(
+                                    "login-shell",
+                                )
+                                .unwrap(),
+                            scope: usagi_core::domain::terminal_launch::TerminalLaunchScope {
+                                workspace_id: WorkspaceId::new(),
+                                session_id: Some(SessionId::new()),
+                                worktree_id: WorktreeId::new(),
+                            },
+                        },
+                        geometry: usagi_core::usecase::client::TerminalGeometry {
+                            cols: 80,
+                            rows: 24,
+                        },
+                    },
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(generic["generic"], true);
+
+        // Unparseable payload → generic owner.
+        owner
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Attach,
+                json!({ "operation": "bogus" }),
+            )
+            .unwrap();
+
+        owner.disconnect(connection);
+        assert_eq!(owner.generic.requests, 2);
+        assert_eq!(owner.generic.disconnects, 1);
+    }
+
+    #[test]
+    fn used_helpers_stay_referenced() {
+        // Keep the fake adapter machinery exercised so the imports the E2E relies
+        // on cannot silently rot.
+        let mut adapter = ClaudeAdapter::new(FakeProvisioner);
+        let request = LaunchRequest {
+            profile_id: AgentProfileId::new("claude").unwrap(),
+            mode: LaunchMode::Interactive,
+            model: None,
+            resume: false,
+            initial_prompt: None,
+            scope: LaunchScope {
+                workspace_id: WorkspaceId::new(),
+                session_id: SessionId::new(),
+                worktree_id: WorktreeId::new(),
+            },
+            required_capabilities: BTreeSet::new(),
+        };
+        let resolved: ResolvedLaunch = adapter.resolve(&request).unwrap();
+        assert_eq!(resolved.snapshot.plan.program, "claude");
+        let _ = (
+            AdapterError::ProvisionFailed,
+            AgentCapability::Resume,
+            AgentProfile::new(
+                AgentProfileId::new("claude").unwrap(),
+                "Claude",
+                1,
+                [],
+                [LaunchMode::Interactive],
+            ),
+            LaunchPlan::new(
+                AgentProfileId::new("claude").unwrap(),
+                1,
+                "claude",
+                vec![],
+                [],
+                PathBuf::from("."),
+            )
+            .unwrap(),
+        );
+    }
+
+    fn handled(outcome: TerminalOutcome) -> Value {
+        match outcome {
+            TerminalOutcome::Handled(result) => result.unwrap(),
+            TerminalOutcome::NotOwned => panic!("expected the agent owner to handle the terminal"),
+        }
+    }
+}

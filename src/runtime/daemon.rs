@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
+use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
     Sleeper, Terminator,
@@ -22,12 +24,26 @@ use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
+use usagi_daemon::usecase::agent_ipc::{
+    AgentRuntime, AgentTerminalActor, ResolvedAgentScope, ScopeResolveError, SessionScopeResolver,
+    SharedTerminalOwner, TerminalOutcome,
+};
+use usagi_daemon::usecase::claude::{
+    ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner,
+};
+use usagi_daemon::usecase::codex::{
+    CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisioner,
+};
 use usagi_daemon::usecase::generation::ProcessIdentity;
 use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
-use usagi_daemon::usecase::session_runtime::{SessionRuntime, SystemGit};
-use usagi_daemon::usecase::terminal::{Geometry, PtyWriteError, PtyWriter, SpawnFailure};
+use usagi_daemon::usecase::orchestration::AdapterRegistry;
+use usagi_daemon::usecase::runtime::{
+    OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
+};
+use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
+use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
 
 struct TrustedLoginShell {
@@ -73,6 +89,261 @@ impl TerminalStore for FileTerminalStore {
         let temporary = self.0.with_extension("json.tmp");
         std::fs::write(&temporary, encoded)?;
         std::fs::rename(temporary, &self.0)
+    }
+}
+
+/// Persists the durable Agent runtime snapshot next to the terminal store.
+struct FileRuntimeStore(PathBuf);
+impl RuntimeStore for FileRuntimeStore {
+    type Error = std::io::Error;
+    fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
+        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
+        let temporary = self.0.with_extension("json.tmp");
+        std::fs::write(&temporary, encoded)?;
+        std::fs::rename(temporary, &self.0)
+    }
+}
+
+/// The registry's bounded in-memory replay buffer already serves reconnect
+/// within retention; a durable on-disk output journal is intentionally deferred
+/// with daemon-crash PTY FD continuation (out of scope for this issue).
+struct DiscardJournal;
+impl OutputJournal for DiscardJournal {
+    type Error = std::convert::Infallible;
+    fn append(&mut self, _output: &Output) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Resolves the checkout path for a launch scope through the single managed
+/// session writer, so agents never receive a client supplied path.
+struct RootCodexProvisioner {
+    sessions: SharedSessionRuntime,
+}
+impl CodexProvisioner for RootCodexProvisioner {
+    fn provision(
+        &mut self,
+        context: &ProvisionContext,
+    ) -> Result<CodexProvision, CodexProvisionFailure> {
+        let working_directory = working_directory(&self.sessions, context)
+            .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
+        Ok(CodexProvision {
+            working_directory,
+            environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
+            spawn: SpawnProvision::new([], Vec::new()),
+        })
+    }
+}
+struct RootClaudeProvisioner {
+    sessions: SharedSessionRuntime,
+}
+impl ClaudeProvisioner for RootClaudeProvisioner {
+    fn provision(
+        &mut self,
+        context: &ProvisionContext,
+    ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
+        let working_directory = working_directory(&self.sessions, context)
+            .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
+        Ok(ClaudeProvision {
+            working_directory,
+            environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
+            spawn: SpawnProvision::new([], Vec::new()),
+        })
+    }
+}
+fn working_directory(
+    sessions: &SharedSessionRuntime,
+    context: &ProvisionContext,
+) -> Result<PathBuf, ()> {
+    sessions
+        .lock()
+        .map_err(|_| ())?
+        .resolve_scope(
+            context.scope.workspace_id,
+            context.scope.session_id,
+            context.scope.worktree_id,
+        )
+        .map(|scope| scope.path)
+        .map_err(|_| ())
+}
+
+/// The #268 scope resolver, adapted to the Agent owner's product-neutral
+/// `(workspace, session)` input by deriving the available session's worktree.
+struct SharedScopeResolver(SharedSessionRuntime);
+impl SessionScopeResolver for SharedScopeResolver {
+    fn resolve_available_scope(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<ResolvedAgentScope, ScopeResolveError> {
+        let runtime = self.0.lock().map_err(|_| ScopeResolveError::Storage)?;
+        let snapshot = runtime
+            .snapshot()
+            .map_err(|_: SessionRuntimeError| ScopeResolveError::Storage)?;
+        let worktree_id =
+            available_worktree(&snapshot, session).ok_or(ScopeResolveError::Unavailable)?;
+        let scope = runtime
+            .resolve_scope(workspace, session, worktree_id)
+            .map_err(|_| ScopeResolveError::Unavailable)?;
+        Ok(ResolvedAgentScope {
+            worktree_id: scope.worktree_id,
+            working_directory: scope.path,
+        })
+    }
+}
+fn available_worktree(snapshot: &serde_json::Value, session: SessionId) -> Option<WorktreeId> {
+    let target = serde_json::to_value(session).ok()?;
+    snapshot
+        .get("sessions")?
+        .as_array()?
+        .iter()
+        .find(|candidate| {
+            candidate.get("session_id") == Some(&target)
+                && candidate
+                    .get("lifecycle")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("available")
+        })
+        .and_then(|candidate| serde_json::from_value(candidate.get("worktree_id")?.clone()).ok())
+}
+
+type RootAgentRuntime = AgentRuntime<FileRuntimeStore, AgentPty, DiscardJournal>;
+type SharedAgentRuntime = Arc<Mutex<RootAgentRuntime>>;
+
+/// Locks the shared Agent owner for one terminal request; a poisoned lock is a
+/// safe unavailable error rather than a client-side fallback.
+struct SharedAgent(SharedAgentRuntime);
+impl AgentTerminalActor for SharedAgent {
+    fn handle_terminal(
+        &mut self,
+        connection: usagi_core::domain::id::ConnectionId,
+        client: usagi_core::domain::id::ClientId,
+        request_id: usagi_core::domain::id::RequestId,
+        action: usagi_core::usecase::client::TerminalAction,
+        request: usagi_core::usecase::client::TerminalRequest,
+    ) -> TerminalOutcome {
+        match self.0.lock() {
+            Ok(mut agent) => AgentTerminalActor::handle_terminal(
+                &mut *agent,
+                connection,
+                client,
+                request_id,
+                action,
+                request,
+            ),
+            Err(_) => {
+                TerminalOutcome::Handled(Err(usagi_core::infrastructure::ipc::ProtocolError::new(
+                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                    "agent owner is unavailable",
+                )))
+            }
+        }
+    }
+    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
+        if let Ok(mut agent) = self.0.lock() {
+            AgentTerminalActor::disconnect(&mut *agent, connection);
+        }
+    }
+}
+
+enum AgentPtyObservation {
+    Output(TerminalRef, Vec<u8>),
+    Exited(TerminalRef, i32),
+}
+
+/// The daemon-owned PTY spawner/writer for Agent runtimes.  It spawns the real
+/// rendered plan, drains output to the Agent owner, and reaps the child to
+/// commit a durable exit — never a client-driven process.
+struct AgentPty {
+    terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
+    selected: Option<String>,
+    observations: Sender<AgentPtyObservation>,
+}
+impl AgentPty {
+    fn new() -> (Self, Receiver<AgentPtyObservation>) {
+        let (observations, receiver) = mpsc::channel();
+        (
+            Self {
+                terminals: BTreeMap::new(),
+                selected: None,
+                observations,
+            },
+            receiver,
+        )
+    }
+}
+impl PtySpawner for AgentPty {
+    fn spawn(
+        &mut self,
+        launch: &DurableLaunchSnapshot,
+        provision: &SpawnProvision,
+        terminal: &TerminalRef,
+    ) -> Result<ProcessIdentity, SpawnFailure> {
+        let plan = &launch.plan;
+        let mut argv = plan.argv.clone();
+        argv.extend(provision.arguments().iter().cloned());
+        let pty = PtyTerminal::spawn_with(
+            &plan.program,
+            &argv,
+            &[],
+            &plan.working_directory,
+            Geometry { cols: 80, rows: 24 },
+        )
+        .map_err(|_| SpawnFailure::Definite)?;
+        let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
+        let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
+        let pty = Arc::new(Mutex::new(pty));
+        self.terminals
+            .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
+        let observations = self.observations.clone();
+        let output_terminal = terminal.clone();
+        let exit_pty = Arc::clone(&pty);
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut bytes = [0_u8; 4096];
+            while let Ok(count) = reader.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                if observations
+                    .send(AgentPtyObservation::Output(
+                        output_terminal.clone(),
+                        bytes[..count].to_vec(),
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            if let Ok(status) = exit_pty
+                .lock()
+                .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
+            {
+                let _ = observations.send(AgentPtyObservation::Exited(output_terminal, status));
+            }
+        });
+        Ok(ProcessIdentity {
+            pid,
+            start_identity: "daemon-owned-agent-pty".to_owned(),
+            process_group: pid,
+        })
+    }
+}
+impl PtyWriter for AgentPty {
+    fn select_terminal(&mut self, terminal: &TerminalRef) {
+        self.selected = Some(terminal.terminal_id.as_str().clone());
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+        let Some(key) = self.selected.as_ref() else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        let Some(terminal) = self.terminals.get(key) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        terminal
+            .lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .write_all(bytes)
     }
 }
 
@@ -219,7 +490,61 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let (pty, observations) = DaemonPty::new();
     let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
     start_terminal_observer(Arc::clone(&terminal), observations)?;
-    start_ipc_accept_loop(listener, server, runtime, terminal)
+    let (agent_pty, agent_observations) = AgentPty::new();
+    let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
+    start_agent_observer(Arc::clone(&agent), agent_observations)?;
+    start_ipc_accept_loop(listener, server, runtime, terminal, agent)
+}
+
+fn open_agent_runtime(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    sessions: SharedSessionRuntime,
+    pty: AgentPty,
+) -> SharedAgentRuntime {
+    let mut registry = AdapterRegistry::new();
+    // Duplicate registration cannot happen for the two literal profiles; a
+    // failure here would only drop an adapter, so the launch would surface a
+    // safe unknown-profile error rather than crash the daemon.
+    let _ = registry.register_supported(
+        CodexAdapter::new(RootCodexProvisioner {
+            sessions: Arc::clone(&sessions),
+        }),
+        ClaudeAdapter::new(RootClaudeProvisioner { sessions }),
+    );
+    Arc::new(Mutex::new(AgentRuntime::new(
+        generation,
+        registry,
+        FileRuntimeStore(data_dir.join("daemon").join("agents.json")),
+        DiscardJournal,
+        pty,
+        AgentProfileId::new("claude").expect("literal profile id is canonical"),
+        Geometry { cols: 80, rows: 24 },
+    )))
+}
+
+fn start_agent_observer(
+    agent: SharedAgentRuntime,
+    observations: Receiver<AgentPtyObservation>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("usagi-agent-observer".to_string())
+        .spawn(move || {
+            while let Ok(observation) = observations.recv() {
+                let Ok(mut agent) = agent.lock() else {
+                    break;
+                };
+                match observation {
+                    AgentPtyObservation::Output(reference, bytes) => {
+                        let _ = agent.output(&reference, bytes);
+                    }
+                    AgentPtyObservation::Exited(reference, status) => {
+                        let _ = agent.exit(&reference, status);
+                    }
+                }
+            }
+        })
+        .map(|_| ())
 }
 
 fn open_session_runtime(
@@ -273,6 +598,7 @@ fn start_ipc_accept_loop(
     server: usagi_core::infrastructure::ipc::ServerProtocol,
     runtime: SharedSessionRuntime,
     terminal: SharedTerminalRuntime,
+    agent: SharedAgentRuntime,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -281,8 +607,11 @@ fn start_ipc_accept_loop(
                 match listener.accept() {
                     Ok(stream) => {
                         let server = server.clone();
-                        let runtime = Arc::clone(&runtime);
+                        let session = Arc::clone(&runtime);
+                        let scope_sessions = Arc::clone(&runtime);
                         let terminal = Arc::clone(&terminal);
+                        let agent_owner = Arc::clone(&agent);
+                        let agent_launch = Arc::clone(&agent);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -291,39 +620,23 @@ fn start_ipc_accept_loop(
                                     return;
                                 };
                                 let mut reader = stream;
-                                let mut terminal = SharedTerminal(terminal);
+                                let mut owner = SharedTerminalOwner::new(
+                                    SharedAgent(agent_owner),
+                                    SharedTerminal(terminal),
+                                );
                                 let _ = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
                                     &mut reader,
                                     &mut writer,
                                     &server,
-                                    &mut terminal,
-                                    |request_id, body, hello| {
-                                        let request = body.get("kind").and_then(serde_json::Value::as_str).filter(|kind| *kind == "session").and_then(|_| serde_json::from_value::<usagi_core::usecase::client::DaemonRequest>(body.clone()).ok()).and_then(|request| match request {
-                                            usagi_core::usecase::client::DaemonRequest::Session { action, operation_id, payload } => Some((action, operation_id, payload)),
-                                            _ => None,
-                                        });
-                                        let Some((action, operation_id, payload)) = request else {
-                                            return usagi_daemon::presentation::ipc::dispatch(request_id, body, hello);
-                                        };
-                                            let result = runtime.lock().map_err(|_| usagi_daemon::usecase::session_runtime::SessionRuntimeError::Storage).and_then(|mut runtime| runtime.handle(action, &operation_id, &payload));
-                                            match result {
-                                                Ok(reply) => {
-                                                    let outcome = match action {
-                                                        usagi_core::usecase::client::SessionAction::Create | usagi_core::usecase::client::SessionAction::Remove => usagi_core::infrastructure::ipc::ResponseOutcome::Accepted {
-                                                            operation_id: usagi_core::infrastructure::ipc::OperationId(reply.operation_id),
-                                                            operation_revision: reply.revision,
-                                                        },
-                                                        _ => usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
-                                                    };
-                                                    usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome, body: reply.body } }
-                                                }
-                                                Err(error) => {
-                                                    let code = if error == usagi_daemon::usecase::session_runtime::SessionRuntimeError::IdempotencyConflict { usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict } else { usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument };
-                                                    usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(code, error.safe_message())), body: serde_json::json!(null) } }
-                                                }
-                                            }
-                                    }
-                                    ,
+                                    &mut owner,
+                                    |request_id, body, hello| match body
+                                        .get("kind")
+                                        .and_then(serde_json::Value::as_str)
+                                    {
+                                        Some("session") => dispatch_session(&session, request_id, &body, hello),
+                                        Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
+                                    },
                                 );
                             });
                     }
@@ -335,6 +648,123 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+fn dispatch_session(
+    session: &SharedSessionRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::ResponseOutcome;
+    use usagi_core::usecase::client::{DaemonRequest, SessionAction};
+    let request = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Session {
+                action,
+                operation_id,
+                payload,
+            } => Some((action, operation_id, payload)),
+            _ => None,
+        });
+    let Some((action, operation_id, payload)) = request else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let result = session
+        .lock()
+        .map_err(|_| SessionRuntimeError::Storage)
+        .and_then(|mut session| session.handle(action, &operation_id, &payload));
+    match result {
+        Ok(reply) => {
+            let outcome = match action {
+                SessionAction::Create | SessionAction::Remove => ResponseOutcome::Accepted {
+                    operation_id: usagi_core::infrastructure::ipc::OperationId(reply.operation_id),
+                    operation_revision: reply.revision,
+                },
+                _ => ResponseOutcome::Ok,
+            };
+            envelope(hello, request_id, outcome, reply.body)
+        }
+        Err(error) => {
+            let code = if error == SessionRuntimeError::IdempotencyConflict {
+                usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict
+            } else {
+                usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument
+            };
+            envelope(
+                hello,
+                request_id,
+                ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(
+                    code,
+                    error.safe_message(),
+                )),
+                serde_json::json!(null),
+            )
+        }
+    }
+}
+
+fn dispatch_agent(
+    agent: &SharedAgentRuntime,
+    scope_sessions: &SharedSessionRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::DaemonRequest;
+    let request = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Agent {
+                operation_id,
+                intent,
+            } => Some((operation_id, intent)),
+            _ => None,
+        });
+    let Some((operation_id, intent)) = request else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let scope = SharedScopeResolver(Arc::clone(scope_sessions));
+    let result = agent
+        .lock()
+        .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
+        .and_then(|mut agent| agent.launch(&operation_id, &intent, &scope));
+    match result {
+        Ok(admission) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Accepted {
+                operation_id: usagi_core::infrastructure::ipc::OperationId(admission.operation_id),
+                operation_revision: admission.revision,
+            },
+            serde_json::json!({ "terminal": admission.terminal }),
+        ),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::json!(null),
+        ),
+    }
+}
+
+fn envelope(
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    outcome: usagi_core::infrastructure::ipc::ResponseOutcome,
+    body: serde_json::Value,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    usagi_core::infrastructure::ipc::Envelope {
+        protocol: hello.protocol,
+        daemon_generation: hello.daemon_generation.clone(),
+        kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response {
+            request_id,
+            outcome,
+            body,
+        },
+    }
 }
 
 struct FsRecordFile {
