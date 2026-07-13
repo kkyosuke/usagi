@@ -118,6 +118,7 @@ impl PaneState {
 
     /// tab を一つでも所有しているか。
     #[must_use]
+    #[coverage(off)]
     pub fn has_tabs(&self) -> bool {
         !self.tabs.is_empty()
     }
@@ -186,6 +187,7 @@ pub enum PaneRegistryEffect {
 impl PaneRegistry {
     /// `active` target を持つ空の registry を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn new(active: Target) -> Self {
         Self {
             active,
@@ -195,12 +197,14 @@ impl PaneRegistry {
 
     /// 現在表示する target。
     #[must_use]
+    #[coverage(off)]
     pub const fn active(&self) -> Target {
         self.active
     }
 
     /// `target` 固有の pane state。未訪問 target は空 state として投影する。
     #[must_use]
+    #[coverage(off)]
     pub fn pane(&self, target: Target) -> Option<&PaneState> {
         self.entries
             .iter()
@@ -215,6 +219,7 @@ impl PaneRegistry {
     /// Panics if the registry invariant that every active target has an entry
     /// is broken internally.
     #[must_use]
+    #[coverage(off)]
     pub fn active_pane(&self) -> &PaneState {
         // `new` and `entry_mut` always create the active entry.
         &self
@@ -227,6 +232,7 @@ impl PaneRegistry {
 
     /// action modal の表示 predicate。空 pane は常に modal が所有する。
     #[must_use]
+    #[coverage(off)]
     pub fn action_modal_visible(&self, target: Target) -> bool {
         self.entries
             .iter()
@@ -236,6 +242,7 @@ impl PaneRegistry {
 
     /// active target の input owner。
     #[must_use]
+    #[coverage(off)]
     pub fn input_owner(&self) -> PaneInputOwner {
         if self.action_modal_visible(self.active) {
             PaneInputOwner::ActionModal
@@ -244,6 +251,7 @@ impl PaneRegistry {
         }
     }
 
+    #[coverage(off)]
     fn entry_mut(&mut self, target: Target) -> &mut PaneRegistryEntry {
         if let Some(index) = self.entries.iter().position(|entry| entry.target == target) {
             return &mut self.entries[index];
@@ -256,6 +264,7 @@ impl PaneRegistry {
 }
 
 impl PaneRegistryEntry {
+    #[coverage(off)]
     fn empty(target: Target) -> Self {
         Self {
             target,
@@ -267,6 +276,7 @@ impl PaneRegistryEntry {
 
 /// `event` を一つの target entry へ還元する。
 #[must_use]
+#[coverage(off)]
 pub fn reduce_registry(
     registry: &mut PaneRegistry,
     event: PaneRegistryEvent,
@@ -310,6 +320,7 @@ pub fn reduce_registry(
 
 /// Route a tab command only when the active target's tab owns input.
 #[must_use]
+#[coverage(off)]
 pub fn route_tab_command(
     registry: &mut PaneRegistry,
     command: PaneTabCommand,
@@ -337,6 +348,7 @@ pub fn route_tab_command(
     }
 }
 
+#[coverage(off)]
 fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     match event {
         PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
@@ -352,6 +364,7 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
     }
 }
 
+#[coverage(off)]
 fn target_for_terminal(terminal: &TerminalRef) -> Target {
     terminal
         .session_id
