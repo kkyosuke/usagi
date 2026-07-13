@@ -831,7 +831,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             .map(|feedback| feedback_label(Some(feedback)))
             .map(|message| format!("feedback: {message}"));
         let mut rows = vec![header];
-        rows.extend(widgets::tab_chrome::empty_pane_with_detail(
+        rows.extend(widgets::session_tab::empty_pane_with_detail(
             width,
             height.saturating_sub(2),
             "No tabs stirring yet. Enter starts one.",
@@ -843,12 +843,12 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     let tabs = home
         .pane_tabs
         .iter()
-        .map(|tab| widgets::tab_chrome::Tab {
+        .map(|tab| widgets::session_tab::Tab {
             label: &tab.label,
             selected: tab.selected,
         })
         .collect::<Vec<_>>();
-    let chrome = widgets::tab_chrome::render(width, &tabs);
+    let chrome = widgets::session_tab::render(width, &tabs);
     with_footer(
         vec![
             header,
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     #[coverage(off)]
-    fn modal_composition_keeps_the_home_tab_chrome_as_its_background() {
+    fn modal_composition_keeps_the_home_session_tab_as_its_background() {
         let workspace = WorkspaceId::new();
         let operation = OperationId::new();
         let target = Target::Root(workspace);
