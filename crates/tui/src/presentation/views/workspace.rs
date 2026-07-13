@@ -288,6 +288,24 @@ impl Workspace {
         &self.state.sessions
     }
 
+    /// Replace only the sidebar's session projection from a daemon lifecycle
+    /// snapshot.  The legacy workspace state remains read-only auxiliary data.
+    /// A removed selected row safely falls back to root; a same-name recreated
+    /// row is treated as the snapshot's current incarnation.
+    #[coverage(off)]
+    pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        let selected_name = self.focused_session().map(|session| session.name.clone());
+        self.state.sessions = sessions;
+        self.selected = selected_name
+            .and_then(|name| {
+                self.state
+                    .sessions
+                    .iter()
+                    .position(|session| session.name == name)
+            })
+            .map_or(0, |index| index + 1);
+    }
+
     /// The workspace record passed to the daemon lifecycle command port.
     #[must_use]
     #[coverage(off)]
@@ -1346,6 +1364,18 @@ mod tests {
         assert!(format!("{:?}", ws.clone()).contains("actual"));
         assert!(format!("{:?}", ws.tabs()[0]).contains("Preview"));
         assert_eq!(ws.tabs()[0], ws.tabs()[0]);
+    }
+
+    #[test]
+    fn daemon_snapshot_replaces_sidebar_rows_without_persisting_legacy_state() {
+        let mut ws = workspace();
+        ws.select_next();
+
+        ws.replace_sessions(vec![session("fresh", None, SessionOrigin::Unknown)]);
+
+        assert_eq!(ws.sessions().len(), 1);
+        assert_eq!(ws.sessions()[0].name, "fresh");
+        assert!(ws.root_selected());
     }
 
     #[test]
