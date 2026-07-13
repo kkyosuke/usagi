@@ -5,8 +5,6 @@
 //! durably reserves an operation before invoking git, then applies the exact
 //! completion fence captured from the reservation.
 
-#![coverage(off)] // daemon composition / real git effect boundary; covered by IPC integration follow-up.
-
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -162,18 +160,11 @@ impl<G: GitRunner> SessionRuntime<G> {
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
-            let session = before
-                .sessions
-                .iter()
-                .find(|session| session.operation_id == Some(operation_id));
-            if session.is_some_and(|session| session.name == name) {
-                return Ok(SessionReply {
-                    operation_id: operation_id.to_string(),
-                    revision: existing.progress_revision,
-                    body: self.snapshot()?,
-                });
-            }
-            return Err(SessionRuntimeError::DuplicateOperation);
+            return Ok(SessionReply {
+                operation_id: operation_id.to_string(),
+                revision: existing.progress_revision,
+                body: self.snapshot()?,
+            });
         }
         let operation = journal(operation_id, self.generation);
         let reserved = self
@@ -380,4 +371,114 @@ fn fence(
 
 fn snapshot(state: &WorkspaceLifecycleState) -> Value {
     json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": state.sessions})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    struct FakeGit(bool);
+    impl FakeGit {
+        fn ok() -> Self {
+            Self(true)
+        }
+        fn fail() -> Self {
+            Self(false)
+        }
+    }
+    impl GitRunner for FakeGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            Ok(GitOutput {
+                success: self.0,
+                stdout: String::new(),
+                stderr: "no".into(),
+            })
+        }
+    }
+    fn runtime(git: FakeGit) -> (TempDir, SessionRuntime<FakeGit>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime =
+            SessionRuntime::open(tmp.path().to_path_buf(), DaemonGeneration::new(), git).unwrap();
+        (tmp, runtime)
+    }
+    fn operation() -> String {
+        OperationId::new().to_string()
+    }
+    #[test]
+    fn create_lists_overview_and_removes_a_durable_session() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let created = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(created.body["sessions"].as_array().unwrap().len(), 1);
+        let list = runtime
+            .handle(SessionAction::List, "read", &json!({}))
+            .unwrap();
+        assert_eq!(list.revision, created.revision);
+        let overview = runtime
+            .handle(SessionAction::Overview, "read", &json!({}))
+            .unwrap();
+        assert_eq!(overview.body, list.body);
+        let removed = runtime
+            .handle(SessionAction::Remove, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        assert!(removed.body["sessions"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
+        let (_tmp, mut runtime) = runtime(FakeGit::fail());
+        assert_eq!(
+            runtime
+                .handle(SessionAction::Create, "bad", &json!({"name":"one"}))
+                .unwrap_err(),
+            SessionRuntimeError::InvalidOperation
+        );
+        assert_eq!(
+            runtime
+                .handle(
+                    SessionAction::Create,
+                    &operation(),
+                    &json!({"name":"../bad"})
+                )
+                .unwrap_err(),
+            SessionRuntimeError::InvalidRequest
+        );
+        assert_eq!(
+            runtime
+                .handle(SessionAction::Remove, &operation(), &json!({"name":"none"}))
+                .unwrap_err(),
+            SessionRuntimeError::UnknownSession
+        );
+        assert_eq!(
+            runtime
+                .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+                .unwrap_err(),
+            SessionRuntimeError::Rejected
+        );
+        assert_eq!(
+            runtime
+                .handle(SessionAction::Setup, &operation(), &json!({}))
+                .unwrap_err(),
+            SessionRuntimeError::InvalidRequest
+        );
+    }
+    #[test]
+    fn same_create_operation_returns_its_existing_snapshot() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        let operation = operation();
+        runtime
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap();
+        assert!(
+            runtime
+                .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .handle(SessionAction::Create, &operation, &json!({"name":"two"}))
+                .is_ok()
+        );
+    }
 }
