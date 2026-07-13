@@ -53,12 +53,19 @@ impl Color {
     }
 }
 
-/// 文字装飾のビットマスク。SGR パラメータ（bold=1 / dim=2 / italic=3 / underline=4）と
+/// 文字装飾のビットマスク。SGR パラメータ（bold=1 / dim=2 / italic=3 / underline=4 /
+/// reverse=7）と
 /// 対応づけて `(bit, "sgr")` の表で持ち、[`Style::paint`] が SGR の昇順で出力する。
-const ATTRS: [(u8, &str); 4] = [(1 << 0, "1"), (1 << 1, "2"), (1 << 2, "3"), (1 << 3, "4")];
+const ATTRS: [(u8, &str); 5] = [
+    (1 << 0, "1"),
+    (1 << 1, "2"),
+    (1 << 2, "3"),
+    (1 << 3, "4"),
+    (1 << 4, "7"),
+];
 
 /// 前景色と文字装飾の組。色そのものは [`Color`]、色でない属性（bold / dim / italic /
-/// underline）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
+/// underline / reverse）はビットマスクで持つ。[`Style::paint`] でテキストを SGR で包む。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Style {
     fg: Option<Color>,
@@ -105,6 +112,13 @@ impl Style {
     #[must_use]
     pub fn underline(mut self) -> Self {
         self.attrs |= ATTRS[3].0;
+        self
+    }
+
+    /// 前景色と背景色を反転する。編集可能な入力の block cursor に使う。
+    #[must_use]
+    pub fn reverse(mut self) -> Self {
+        self.attrs |= ATTRS[4].0;
         self
     }
 
@@ -203,8 +217,9 @@ mod tests {
             .dim()
             .italic()
             .underline()
+            .reverse()
             .paint("y");
-        assert_eq!(styled, "\u{1b}[1;2;3;4;36my\u{1b}[0m");
+        assert_eq!(styled, "\u{1b}[1;2;3;4;7;36my\u{1b}[0m");
     }
 
     #[test]
