@@ -1,0 +1,166 @@
+//! 右ペインの Chrome 風 tab strip と空 pane の純粋な描画部品。
+//!
+//! tab の identity / selection は reducer の責務である。この widget は投影済みの
+//! `selected` フラグだけを描き、label や表示順を identity として扱わない。
+
+use crate::presentation::theme::{Role, Style};
+
+use super::icon;
+
+/// tab strip に渡す表示専用の 1 tab。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tab<'a> {
+    /// 表示ラベル。
+    pub label: &'a str,
+    /// reducer が stable identity から決めた選択状態。
+    pub selected: bool,
+}
+
+/// Chrome 風 tab strip を上段の chip と下段の active marker として描く。
+///
+/// 常に 2 行を返す。選択された chip は accent、直下の marker は accent の `▔` となる。
+/// 幅が狭い場合も、行全体を ANSI 対応の [`super::clip_to_width`] で詰める。
+#[must_use]
+pub fn render(width: usize, tabs: &[Tab<'_>]) -> [String; 2] {
+    let mut chips = String::from(" ");
+    let mut marker = String::from(" ");
+    for (index, tab) in tabs.iter().enumerate() {
+        if index > 0 {
+            chips.push(' ');
+            marker.push(' ');
+        }
+        let text = format!(" {} ", tab.label);
+        let chip_width = super::display_width(&text);
+        if tab.selected {
+            chips.push_str(&Role::Accent.style().bold().paint(&text));
+            marker.push_str(&Role::Accent.style().bold().paint(&"▔".repeat(chip_width)));
+        } else {
+            chips.push_str(&Style::new().dim().paint(&text));
+            marker.push_str(&" ".repeat(chip_width));
+        }
+    }
+    [
+        super::pad_to_width(&super::clip_to_width(&chips, width), width),
+        super::pad_to_width(&super::clip_to_width(&marker, width), width),
+    ]
+}
+
+/// tab が無い右ペイン本文を、静的うさぎと案内文で中央に置く。
+///
+/// この関数は tick や runtime を受け取らないため、同じ geometry と message なら常に同じ
+/// フレームを返す。狭すぎる場合は通常の clipping により安全に縮退する。
+#[must_use]
+pub fn empty_pane(width: usize, rows: usize, message: &str) -> Vec<String> {
+    empty_pane_with_detail(width, rows, message, None)
+}
+
+/// [`empty_pane`] に、画面が提供する安全な補足を加える。
+///
+/// 補足は feedback のように renderer がすでに表示安全と保証した文字列だけを渡す。
+#[must_use]
+pub fn empty_pane_with_detail(
+    width: usize,
+    rows: usize,
+    message: &str,
+    detail: Option<&str>,
+) -> Vec<String> {
+    let mut block = icon::centered(width)
+        .into_iter()
+        .map(|line| Role::Feature.style().bold().paint(&line))
+        .collect::<Vec<_>>();
+    block.push(String::new());
+    for text in std::iter::once(message).chain(detail) {
+        let caption = Style::new().dim().paint(&super::clip_to_width(text, width));
+        block.push(super::pad_to_width(&caption, width));
+    }
+
+    let top = rows.saturating_sub(block.len()) / 2;
+    let mut lines = vec![String::new(); top];
+    lines.extend(block);
+    lines.truncate(rows);
+    lines.resize(rows, String::new());
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Tab, empty_pane, empty_pane_with_detail, render};
+    use crate::presentation::widgets::display_width;
+
+    fn strip(text: &str) -> String {
+        let mut plain = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for byte in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&byte) && byte != '[' {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn selected_tab_has_an_accent_marker_below_its_chip() {
+        let rows = render(
+            40,
+            &[
+                Tab {
+                    label: "Terminal",
+                    selected: false,
+                },
+                Tab {
+                    label: "Agent",
+                    selected: true,
+                },
+            ],
+        );
+        assert!(strip(&rows[0]).contains(" Terminal   Agent "));
+        assert!(!strip(&rows[1]).starts_with('▔'));
+        assert!(strip(&rows[1]).contains('▔'));
+        assert!(rows.iter().all(|row| display_width(row) == 40));
+    }
+
+    #[test]
+    fn chrome_clips_ansi_styled_long_labels_at_narrow_widths() {
+        let rows = render(
+            6,
+            &[Tab {
+                label: "Terminal (resolving)",
+                selected: true,
+            }],
+        );
+        assert!(rows.iter().all(|row| display_width(row) == 6));
+        assert!(rows[0].ends_with("\u{1b}[0m") || rows[0].ends_with(' '));
+    }
+
+    #[test]
+    fn empty_pane_centers_static_rabbit_and_message() {
+        let rows = empty_pane(30, 11, "No tabs stirring yet. Enter starts one.");
+        let plain = rows.iter().map(|row| strip(row)).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 11);
+        assert!(plain.iter().any(|row| row.contains("(='-')")));
+        assert!(plain.iter().any(|row| row.contains("No tabs stirring yet")));
+        assert!(rows.iter().all(|row| display_width(row) <= 30));
+        assert_eq!(
+            rows,
+            empty_pane(30, 11, "No tabs stirring yet. Enter starts one.")
+        );
+    }
+
+    #[test]
+    fn empty_pane_keeps_a_safe_detail_below_the_invitation() {
+        let rows = empty_pane_with_detail(60, 12, "No tabs stirring yet.", Some("feedback: safe"));
+        let plain = rows.iter().map(|row| strip(row)).collect::<Vec<_>>();
+        assert!(
+            plain
+                .iter()
+                .any(|row| row.contains("No tabs stirring yet."))
+        );
+        assert!(plain.iter().any(|row| row.contains("feedback: safe")));
+    }
+}

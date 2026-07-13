@@ -812,17 +812,48 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
     };
+    let header = widgets::pad_to_width(
+        &format!(
+            " {}  {}",
+            Role::Accent.style().bold().paint(home.active_label()),
+            Style::new().dim().paint("active target"),
+        ),
+        width,
+    );
+    let footer = Style::new().dim().paint(&widgets::clip_to_width(
+        &format!("[{mode}] active pane"),
+        width,
+    ));
+    if home.pane_tabs.is_empty() {
+        let feedback = home
+            .feedback
+            .as_ref()
+            .map(|feedback| feedback_label(Some(feedback)))
+            .map(|message| format!("feedback: {message}"));
+        let mut rows = vec![header];
+        rows.extend(widgets::session_tab::empty_pane_with_detail(
+            width,
+            height.saturating_sub(2),
+            "No tabs stirring yet. Enter starts one.",
+            feedback.as_deref(),
+        ));
+        return with_footer(rows, height, footer);
+    }
+
+    let tabs = home
+        .pane_tabs
+        .iter()
+        .map(|tab| widgets::session_tab::Tab {
+            label: &tab.label,
+            selected: tab.selected,
+        })
+        .collect::<Vec<_>>();
+    let chrome = widgets::session_tab::render(width, &tabs);
     with_footer(
         vec![
-            widgets::pad_to_width(
-                &format!(
-                    " {}  {}",
-                    Role::Accent.style().bold().paint(home.active_label()),
-                    Style::new().dim().paint("active target"),
-                ),
-                width,
-            ),
-            home_tab_menu(width, &home.pane_tabs),
+            header,
+            chrome[0].clone(),
+            chrome[1].clone(),
             String::new(),
             Style::new()
                 .dim()
@@ -838,32 +869,8 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             )),
         ],
         height,
-        Style::new().dim().paint(&widgets::clip_to_width(
-            &format!("[{mode}] active pane"),
-            width,
-        )),
+        footer,
     )
-}
-
-/// controller Home の pane reducer tab を並べる。選択中だけを accent にし、tab が無い
-/// target 選択中も strip の位置を保ってレイアウトを安定させる。
-#[coverage(off)]
-fn home_tab_menu(width: usize, tabs: &[HomePaneTab]) -> String {
-    let tabs = if tabs.is_empty() {
-        Style::new().dim().paint(" no panes")
-    } else {
-        tabs.iter()
-            .map(|tab| {
-                if tab.selected {
-                    format!("[{}]", Role::Accent.style().bold().paint(&tab.label))
-                } else {
-                    format!(" {} ", Style::new().dim().paint(&tab.label))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    widgets::pad_to_width(&format!(" {tabs}"), width)
 }
 
 #[coverage(off)]
@@ -905,7 +912,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{HomeProjection, Mode, ProjectedSession, Workspace, render, render_home};
-    use crate::presentation::widgets::display_width;
+    use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, SafeError, SafeMessage,
         Selection, Target, update,
@@ -1034,7 +1041,7 @@ mod tests {
         assert!(text.contains("root  workspace root"));
         assert_eq!(text.matches("same label  snapshot").count(), 2);
         assert!(text.contains("+ new session  action"));
-        assert!(text.contains("cwd: /work"));
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
@@ -1062,7 +1069,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(lines.iter().any(|line| line.contains(" * first")));
         assert!(lines.iter().any(|line| line.contains(">  second")));
-        assert!(joined_home(&home).contains("cwd: /work/first"));
+        let text = joined_home(&home);
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
@@ -1092,7 +1100,7 @@ mod tests {
         // session は typed identity で検出され root へ縮退する。
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.active(), Target::Root(workspace));
-        assert!(joined_home(&refreshed).contains("cwd: /work"));
+        assert!(joined_home(&refreshed).contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
@@ -1106,7 +1114,7 @@ mod tests {
         let one_row_body = render_home(3, 20, &home);
         assert_eq!(zero_body.len(), 2);
         assert_eq!(one_row_body.len(), 3);
-        assert!(joined_home(&home).contains("cwd: /work"));
+        assert!(joined_home(&home).contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
@@ -1124,7 +1132,7 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "work", "/work", &[]);
         let text = joined_home(&home);
-        assert!(text.contains("agent: absent"));
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(text.contains("feedback: operation error: Session creation failed (err-safe-7)"));
         assert!(!text.contains("daemon internal detail: token=secret"));
 
@@ -1133,7 +1141,9 @@ mod tests {
             AppEvent::Backend(BackendEvent::Feedback(Feedback::Disconnected)),
         );
         let home = HomeProjection::from_state(&state, "work", "/work", &[]);
-        assert!(joined_home(&home).contains("feedback: disconnected; reconnect to continue"));
+        let text = joined_home(&home);
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
+        assert!(text.contains("feedback: disconnected; reconnect to continue"));
     }
 
     #[test]
@@ -1165,8 +1175,40 @@ mod tests {
         .with_pane(&pane);
 
         let text = joined_home(&home);
-        assert!(text.contains("[Agent (starting)]"));
-        assert!(!text.contains("no panes"));
+        assert!(text.contains(" Agent (starting) "));
+        assert!(text.contains('▔'));
+        assert!(!text.contains("No tabs stirring yet"));
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn modal_composition_keeps_the_home_session_tab_as_its_background() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let target = Target::Root(workspace);
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+        let state = AppState::home(workspace, Vec::new());
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let base = render_home(18, 100, &home);
+        let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
+
+        let plain = over.iter().map(|line| strip(line)).collect::<Vec<_>>();
+        assert!(plain[3].contains("Agent (starting)"));
+        assert!(plain[4].contains('▔'));
+        assert!(plain.iter().any(|line| line.contains("┌─ Action")));
+        assert!(over.iter().all(|line| display_width(line) == 100));
     }
 
     #[test]
