@@ -221,14 +221,14 @@ pub struct Tab {
     pub label: &'static str,
 }
 
-/// Workspace 画面の状態。左ペインは [`WorkspaceState`] のセッション群＋末尾の root 行を
-/// 選択でき、右ペインのタブは Switch / Closeup のどちらでも切り替えられる。
+/// Workspace 画面の状態。左ペインは root 行を先頭に、[`WorkspaceState`] のセッション群を
+/// 選択できる。右ペインのタブは Switch / Closeup のどちらでも切り替えられる。
 #[derive(Debug, Clone)]
 pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
     mode: Mode,
-    /// 選択行。`0..sessions.len()` はセッション、`sessions.len()` は root 行。
+    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行。
     selected: usize,
     tabs: Vec<Tab>,
     active_tab: usize,
@@ -308,7 +308,7 @@ impl Workspace {
         &self.tabs
     }
 
-    /// 選択行の添字（`sessions.len()` は root 行）。
+    /// 選択行の添字（`0` は root 行）。
     #[must_use]
     pub fn selected(&self) -> usize {
         self.selected
@@ -323,7 +323,7 @@ impl Workspace {
     /// root 行を選択しているか。
     #[must_use]
     pub fn root_selected(&self) -> bool {
-        self.selected == self.state.sessions.len()
+        self.selected == 0
     }
 
     /// フォーカス中 session の表示ラベル。root 行では `"root"`。
@@ -381,12 +381,12 @@ impl Workspace {
         lines
     }
 
-    /// 左ペインの選択を 1 つ下へ（末尾の root の次は先頭へ回り込む）。
+    /// 左ペインの選択を 1 つ下へ（末尾の session の次は先頭の root へ回り込む）。
     pub fn select_next(&mut self) {
         self.selected = (self.selected + 1) % self.row_count();
     }
 
-    /// 左ペインの選択を 1 つ上へ（先頭の次は末尾の root へ回り込む）。
+    /// 左ペインの選択を 1 つ上へ（先頭の root の次は末尾の session へ回り込む）。
     pub fn select_prev(&mut self) {
         let rows = self.row_count();
         self.selected = (self.selected + rows - 1) % rows;
@@ -403,14 +403,16 @@ impl Workspace {
         self.active_tab = (self.active_tab + len - 1) % len;
     }
 
-    /// 選択できる行数（セッション数＋root 行 1）。
+    /// 選択できる行数（root 行 1＋セッション数）。
     fn row_count(&self) -> usize {
         self.state.sessions.len() + 1
     }
 
     /// フォーカス中のセッション（root 選択なら `None`）。
     fn focused_session(&self) -> Option<&SessionRecord> {
-        self.state.sessions.get(self.selected)
+        self.selected
+            .checked_sub(1)
+            .and_then(|index| self.state.sessions.get(index))
     }
 }
 
@@ -453,19 +455,23 @@ fn root_row(width: usize, ws: &Workspace) -> String {
     menu_row(width, ws.root_selected(), "root", "workspace root")
 }
 
-/// 選択可能な 1 行。`0..sessions.len()` は session、末尾は root。
+/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
 fn selectable_row(width: usize, ws: &Workspace, index: usize) -> String {
-    ws.sessions().get(index).map_or_else(
-        || root_row(width, ws),
-        |session| {
-            menu_row(
-                width,
-                index == ws.selected,
-                session.display_label(),
-                session.origin.as_str(),
-            )
-        },
-    )
+    if index == 0 {
+        root_row(width, ws)
+    } else {
+        ws.sessions().get(index - 1).map_or_else(
+            || root_row(width, ws),
+            |session| {
+                menu_row(
+                    width,
+                    index == ws.selected,
+                    session.display_label(),
+                    session.origin.as_str(),
+                )
+            },
+        )
+    }
 }
 
 /// `capacity` 行の viewport に選択行が必ず入るよう、先頭 index を決める。
@@ -496,8 +502,8 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
 /// 左ペインの footer（キー操作ヒント、dim）。
 fn left_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "[switch] ↑↓ session",
-        Mode::Closeup => "[closeup] session selected",
+        Mode::Switch => "[switch] ↑↓ target",
+        Mode::Closeup => "[closeup] target selected",
     };
     Style::new()
         .dim()
@@ -525,14 +531,6 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         rows.push(Role::Success.style().bold().paint("Sessions"));
     }
     for index in start..end {
-        // 全行が収まる場合だけ、session と root の間に余白を残す。
-        if index == ws.sessions().len()
-            && start == 0
-            && end == ws.row_count()
-            && viewport_capacity > ws.row_count()
-        {
-            rows.push(String::new());
-        }
         rows.push(selectable_row(width, ws, index));
     }
     rows.resize(body_capacity, String::new());
@@ -1131,23 +1129,23 @@ mod tests {
         assert_eq!(ws.mode(), Mode::Switch);
         assert_eq!(ws.selected(), 0);
         assert_eq!(ws.active_tab(), 0);
-        assert!(!ws.root_selected());
+        assert!(ws.root_selected());
         assert!(format!("{:?}", ws.clone()).contains("actual"));
         assert!(format!("{:?}", ws.tabs()[0]).contains("Preview"));
         assert_eq!(ws.tabs()[0], ws.tabs()[0]);
     }
 
     #[test]
-    fn select_cycles_through_sessions_then_the_root_row() {
+    fn select_cycles_from_the_root_through_sessions() {
         let mut ws = workspace();
         ws.select_next();
         assert_eq!(ws.selected(), 1);
         ws.select_next();
-        assert!(ws.root_selected());
+        assert_eq!(ws.selected(), 2);
         ws.select_next();
-        assert_eq!(ws.selected(), 0);
-        ws.select_prev();
         assert!(ws.root_selected());
+        ws.select_prev();
+        assert_eq!(ws.selected(), 2);
     }
 
     #[test]
@@ -1174,7 +1172,7 @@ mod tests {
         assert_eq!(ws.active_tab(), 0);
         ws.tab_next();
         assert_eq!(ws.active_tab(), 1);
-        assert!(joined(&ws).contains("Terminal — session 'UI work'"));
+        assert!(joined(&ws).contains("Terminal — workspace 'root'"));
     }
 
     #[test]
@@ -1217,16 +1215,15 @@ mod tests {
             .prs
             .push(PrLink::new(42, "https://example.com/pull/42"));
 
+        assert_eq!(ws.focused_label(), "root");
+        assert!(ws.focused_prs().is_empty());
+
+        ws.select_next();
         assert_eq!(ws.focused_label(), "UI work");
         assert_eq!(ws.focused_prs()[0].number, 42);
 
         ws.select_next();
         assert_eq!(ws.focused_label(), "daemon");
-        assert!(ws.focused_prs().is_empty());
-
-        ws.select_next();
-        assert!(ws.root_selected());
-        assert_eq!(ws.focused_label(), "root");
         assert!(ws.focused_prs().is_empty());
     }
 
@@ -1247,7 +1244,7 @@ mod tests {
     fn render_uses_mode_specific_footers_and_keeps_tabs_visible() {
         let mut ws = workspace();
         let switch = joined(&ws);
-        assert!(switch.contains("[switch] ↑↓ session"));
+        assert!(switch.contains("[switch] ↑↓ target"));
         assert!(switch.contains("←→/hl tab"));
         assert!(switch.contains("Enter/t closeup"));
         assert!(switch.contains("p PR"));
@@ -1263,11 +1260,11 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(closeup.contains("[closeup] session selected"));
+        assert!(closeup.contains("[closeup] target selected"));
         assert!(closeup.contains("←→/hl tab"));
         assert!(closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
-        assert!(closeup.contains("Terminal — session 'UI work'"));
+        assert!(closeup.contains("Terminal — workspace 'root'"));
         assert!(
             closeup_frame
                 .iter()
@@ -1286,8 +1283,8 @@ mod tests {
         assert!(text.contains("human"));
         assert!(text.contains("daemon"));
         assert!(text.contains("mcp"));
-        assert!(text.contains("tui · human"));
-        assert!(text.contains("/tmp/actual/.usagi/sessions/tui"));
+        assert!(text.contains("Preview — workspace 'root'"));
+        assert!(text.contains("/tmp/actual"));
         assert!(text.contains("root"));
         assert!(text.contains("Preview"));
         assert!(text.contains("Terminal"));
@@ -1296,18 +1293,33 @@ mod tests {
     }
 
     #[test]
+    fn render_places_the_selected_root_before_every_session() {
+        let text = joined(&workspace());
+        let root = text
+            .find("> root  workspace root")
+            .expect("selected root row");
+        let first = text.find("UI work  human").expect("first session row");
+        let second = text.find("daemon  mcp").expect("second session row");
+        assert!(root < first);
+        assert!(first < second);
+    }
+
+    #[test]
     fn render_reflects_selected_session_and_root() {
         let mut ws = workspace();
-        ws.select_next();
-        let session_text = joined(&ws);
-        assert!(session_text.contains("daemon · mcp"));
-        assert!(session_text.contains("/tmp/actual/.usagi/sessions/daemon"));
-
-        ws.select_next();
-        assert!(ws.root_selected());
         let root_text = joined(&ws);
         assert!(root_text.contains("Preview — workspace 'root'"));
         assert!(root_text.contains("/tmp/actual"));
+
+        ws.select_next();
+        let session_text = joined(&ws);
+        assert!(session_text.contains("tui · human"));
+        assert!(session_text.contains("/tmp/actual/.usagi/sessions/tui"));
+
+        ws.select_next();
+        let second_session_text = joined(&ws);
+        assert!(second_session_text.contains("daemon · mcp"));
+        assert!(second_session_text.contains("/tmp/actual/.usagi/sessions/daemon"));
     }
 
     #[test]
@@ -1328,11 +1340,10 @@ mod tests {
             tiny_frame
                 .iter()
                 .map(|line| strip(line))
-                .any(|line| line.contains("> session-00"))
+                .any(|line| line.contains("> root"))
         );
-        for expected in (0..12)
-            .map(|index| format!("session-{index:02}"))
-            .chain(std::iter::once("root".to_string()))
+        for expected in std::iter::once("root".to_string())
+            .chain((0..12).map(|index| format!("session-{index:02}")))
         {
             let frame = render(8, 100, &ws);
             let selected = frame
@@ -1341,14 +1352,6 @@ mod tests {
                 .find(|line| line.trim_start().starts_with('>'))
                 .expect("selected row must be inside the viewport");
             assert!(selected.contains(&expected), "selected row: {selected}");
-            if expected == "root" {
-                let text = frame
-                    .iter()
-                    .map(|line| strip(line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(!text.contains("session-00"));
-            }
             ws.select_next();
         }
     }

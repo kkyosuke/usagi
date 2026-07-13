@@ -1396,11 +1396,11 @@ mod tests {
                 .join("\n")
                 .contains("Open Workspace")
         );
-        assert!(
-            term.frames
-                .iter()
-                .any(|frame| frame.join("\n").contains("Terminal — workspace 'root'"))
-        );
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("Terminal — session 'beta-session'")
+        }));
     }
 
     #[test]
@@ -1583,6 +1583,7 @@ mod tests {
     #[test]
     fn workspace_modes_modals_tabs_and_escape_stack_are_interactive() {
         let keys = [
+            Key::Down,
             Key::Right,
             Key::Enter,
             Key::Down,
@@ -1608,33 +1609,34 @@ mod tests {
         let frame = |index: usize| term.frames[index].join("\n");
         assert!(frame(0).contains("Switch"));
         assert!(frame(0).contains("Preview"));
-        assert!(frame(1).contains("Terminal — session 'direct-session'"));
+        assert!(frame(2).contains("Terminal — session 'direct-session'"));
 
         // Closeup modal は workspace と tab strip の上に重なり、左右移動後の tab を保つ。
-        assert!(frame(2).contains("terminal"));
-        assert!(frame(2).contains("direct-session"));
-        assert!(frame(2).contains("Terminal"));
+        assert!(frame(3).contains("terminal"));
+        assert!(frame(3).contains("direct-session"));
+        assert!(frame(3).contains("Terminal"));
 
         // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
-        assert!(frame(4).contains("workspace commands"));
-        assert!(frame(5).contains("no matching command"));
-        assert!(frame(5).contains("Command"));
-        assert!(frame(8).contains("terminal"));
+        assert!(frame(5).contains("workspace commands"));
+        assert!(frame(6).contains("no matching command"));
+        assert!(frame(6).contains("Command"));
+        assert!(frame(9).contains("terminal"));
 
         // PR modal も実データを表示し、閉じると同じ Closeup に戻る。
-        assert!(frame(9).contains("Pull Request"));
-        assert!(frame(9).contains("#42"));
-        assert!(frame(9).contains("Terminal"));
-        assert!(frame(11).contains("terminal"));
+        assert!(frame(10).contains("Pull Request"));
+        assert!(frame(10).contains("#42"));
+        assert!(frame(10).contains("Terminal"));
+        assert!(frame(12).contains("terminal"));
 
         // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
-        assert!(frame(12).contains("Switch"));
-        assert!(!frame(12).contains("Open terminal"));
+        assert!(frame(13).contains("Switch"));
+        assert!(!frame(13).contains("Open terminal"));
     }
 
     #[test]
     fn workspace_text_overlays_keep_home_visible_and_capture_scroll_keys() {
         let keys = [
+            Key::Down,
             Key::Char('v'),
             Key::Down,
             Key::Escape,
@@ -1656,15 +1658,15 @@ mod tests {
         );
         let frame = |index: usize| term.frames[index].join("\n");
 
-        assert!(frame(1).contains("Preview"));
-        assert!(frame(1).contains("session: overlays-session"));
-        assert!(frame(1).contains("overlays-session")); // Home background remains visible.
-        assert!(frame(4).contains("Diff"));
-        assert!(frame(4).contains("unavailable until a backend"));
-        assert!(frame(7).contains("Notes"));
-        assert!(frame(7).contains("No notes are available"));
-        assert!(frame(10).contains("Pull Request"));
-        assert!(frame(10).contains("#42"));
+        assert!(frame(2).contains("Preview"));
+        assert!(frame(2).contains("session: overlays-session"));
+        assert!(frame(2).contains("overlays-session")); // Home background remains visible.
+        assert!(frame(5).contains("Diff"));
+        assert!(frame(5).contains("unavailable until a backend"));
+        assert!(frame(8).contains("Notes"));
+        assert!(frame(8).contains("No notes are available"));
+        assert!(frame(11).contains("Pull Request"));
+        assert!(frame(11).contains("#42"));
     }
 
     #[test]
