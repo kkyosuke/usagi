@@ -594,6 +594,7 @@ mod tests {
         )));
         assert!(selected_live(no_selection.pane()).is_none());
         let mut no_selection = no_selection;
+        no_selection.attach(&mut daemon, &terminal);
         no_selection.input(&mut daemon, b"ignored");
         no_selection.resize(&mut daemon, Geometry { cols: 1, rows: 1 });
         let mut unattached = PaneRuntime::new(pane(terminal.clone()));
