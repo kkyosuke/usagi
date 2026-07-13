@@ -163,17 +163,14 @@ mod tests {
 
     struct BrokenWriter;
     impl Write for BrokenWriter {
-        #[coverage(off)]
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("broken"))
         }
-        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
-    #[coverage(off)]
     fn server() -> ServerProtocol {
         server_protocol(
             DaemonGeneration("current".into()),
@@ -185,7 +182,6 @@ mod tests {
             },
         )
     }
-    #[coverage(off)]
     fn hello() -> Bootstrap {
         Bootstrap::ClientHello(ClientHello {
             client_id: ClientId("client".into()),
@@ -205,7 +201,6 @@ mod tests {
             },
         })
     }
-    #[coverage(off)]
     fn request() -> Envelope {
         Envelope {
             protocol: ProtocolVersion {
@@ -221,7 +216,6 @@ mod tests {
         }
     }
     #[test]
-    #[coverage(off)]
     fn handshake_returns_hello_and_preserves_build_as_diagnostic() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -236,7 +230,6 @@ mod tests {
         ));
     }
     #[test]
-    #[coverage(off)]
     fn connection_requires_hello_then_correlates_response() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -251,7 +244,6 @@ mod tests {
         assert!(matches!(response.kind, EnvelopeKind::Response { .. }));
     }
     #[test]
-    #[coverage(off)]
     fn connection_rejects_normal_message_before_handshake() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &request(), 1024).unwrap();
@@ -263,7 +255,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn connection_returns_generation_error_with_request_id() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -287,7 +278,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn handshake_handles_close_wrong_first_message_and_negotiation_error() {
         assert!(
             handshake(
@@ -330,7 +320,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn connection_rejects_client_event_after_handshake() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -360,7 +349,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn connection_accepts_clean_close_and_propagates_handshake_write_errors() {
         assert!(
             handle_connection(
@@ -384,7 +372,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn dispatch_preserves_the_request_correlation_and_body() {
         let hello = handshake(
             &mut Cursor::new({

@@ -362,21 +362,18 @@ mod tests {
     use std::path::Path;
     use usagi_core::domain::workspace::Workspace;
 
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
-    #[coverage(off)]
     fn workspace(name: &str, minutes_ago: i64) -> Workspace {
         let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
         workspace.updated_at = now() - Duration::minutes(minutes_ago);
         workspace
     }
 
-    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -394,7 +391,6 @@ mod tests {
         out
     }
 
-    #[coverage(off)]
     fn rendered(open: &Open) -> String {
         render(24, 80, open, now())
             .iter()
@@ -404,7 +400,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_open_starts_at_the_first_item() {
         let open = Open::new(vec![workspace("alpha", 5), workspace("beta", 10)]);
         assert_eq!(open.selected_index(), 0);
@@ -416,7 +411,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn empty_open_has_no_selection() {
         let open = Open::new(Vec::new());
         assert!(open.is_empty());
@@ -424,7 +418,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn select_next_advances_and_wraps() {
         let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
         open.select_next();
@@ -434,7 +427,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn select_prev_wraps_to_the_last_item() {
         let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
         open.select_prev();
@@ -444,7 +436,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selection_movement_is_a_no_op_when_empty() {
         let mut open = Open::new(Vec::new());
         open.select_next();
@@ -453,7 +444,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn record_opened_updates_recency_order_and_keeps_the_selected_path() {
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 10)]);
         let touched = workspace("beta", 0);
@@ -466,7 +456,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_lists_workspaces_with_their_relative_time_and_selected_path() {
         let open = Open::new(vec![workspace("alpha", 11), workspace("beta", 180)]);
         let joined = rendered(&open);
@@ -482,7 +471,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_marks_only_the_selected_row() {
         let mut open = Open::new(vec![workspace("a", 1), workspace("b", 2)]);
         open.select_next();
@@ -499,14 +487,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_a_placeholder_when_there_are_no_workspaces() {
         let joined = rendered(&Open::new(Vec::new()));
         assert!(joined.contains("No workspaces yet"));
     }
 
     #[test]
-    #[coverage(off)]
     fn render_clips_a_long_name_and_rows_fit_the_width() {
         let open = Open::new(vec![workspace(&"x".repeat(60), 1)]);
         let frame = render(24, 80, &open, now());
@@ -515,7 +501,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn filter_matches_names_case_insensitively_and_keeps_selection_in_hits() {
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("Beta", 2)]);
         open.begin_filter();
@@ -529,7 +514,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn unite_members_follow_registry_order_and_cleanup_removes_them() {
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
         open.toggle_unite();

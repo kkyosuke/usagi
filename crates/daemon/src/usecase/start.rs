@@ -105,7 +105,6 @@ mod tests {
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
 
-    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -114,7 +113,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn launches_and_reports_the_registered_pid() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // The launcher mimics the spawned serve registering pid 5555.
@@ -126,7 +124,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn refuses_when_a_live_daemon_already_runs() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
@@ -142,7 +139,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn times_out_when_the_daemon_never_registers() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // An idle launcher spawns nothing, so no record ever appears.
@@ -151,7 +147,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn propagates_load_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
         let launcher = TestLauncher::idle(&store);

@@ -458,7 +458,6 @@ mod tests {
         failure: Option<usize>,
     }
     impl PtyWriter for Writer {
-        #[coverage(off)]
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.written.extend_from_slice(bytes);
             self.failure.map_or(Ok(()), |applied_prefix| {
@@ -466,7 +465,6 @@ mod tests {
             })
         }
     }
-    #[coverage(off)]
     fn reference() -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -476,7 +474,6 @@ mod tests {
             worktree_id: WorktreeId::new(),
         }
     }
-    #[coverage(off)]
     fn registry(reference: TerminalRef) -> TerminalRegistry {
         let mut registry = TerminalRegistry::new(4, 2);
         registry
@@ -484,7 +481,6 @@ mod tests {
             .unwrap();
         registry
     }
-    #[coverage(off)]
     fn input(
         subscription: u64,
         connection: ConnectionId,
@@ -502,7 +498,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn attach_is_atomic_and_disconnect_keeps_terminal() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -517,7 +512,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn duplicate_registration_and_exact_detach_are_fenced() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -530,7 +524,6 @@ mod tests {
         assert_eq!(registry.detach(&r, subscription, connection), Ok(()));
     }
     #[test]
-    #[coverage(off)]
     fn output_offsets_are_contiguous_and_old_output_requires_resync() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -552,7 +545,6 @@ mod tests {
         assert_eq!(registry.replay_from(&r, 3).unwrap()[0].data, b"def");
     }
     #[test]
-    #[coverage(off)]
     fn input_is_acked_only_once_after_write_and_partial_is_ambiguous() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -634,7 +626,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn stale_refs_and_wrong_attachment_are_rejected() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -652,7 +643,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn resize_and_exit_follow_final_output() {
         let r = reference();
         let mut registry = registry(r.clone());

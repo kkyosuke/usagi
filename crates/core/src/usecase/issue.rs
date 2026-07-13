@@ -160,19 +160,16 @@ mod tests {
     use crate::infrastructure::store::issue::IssueStore;
     use chrono::{DateTime, TimeZone, Utc};
 
-    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
-    #[coverage(off)]
     fn store() -> (tempfile::TempDir, IssueStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         (tmp, store)
     }
 
-    #[coverage(off)]
     fn spec(title: &str) -> NewIssue {
         NewIssue {
             title: title.to_string(),
@@ -183,7 +180,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn create_allocates_sequential_numbers_and_defaults_to_todo() {
         let (_tmp, store) = store();
         let first = create(&store, spec("first"), ts(20)).unwrap();
@@ -196,7 +192,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn get_reads_back_a_created_issue_and_none_for_missing() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -205,7 +200,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn list_returns_summaries_in_number_order() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -219,7 +213,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn update_applies_only_the_set_fields_and_stamps_the_time() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -240,7 +233,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn update_can_replace_every_field_and_clear_the_optionals() {
         let (_tmp, store) = store();
         let mut base = spec("first");
@@ -271,7 +263,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn update_is_none_for_a_missing_issue() {
         let (_tmp, store) = store();
         assert!(
@@ -282,7 +273,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn delete_removes_a_created_issue_and_reports_success() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();

@@ -91,7 +91,6 @@ mod tests {
     use usagi_core::infrastructure::git::GitOutput;
 
     /// `git ls-remote --tags` 風の出力を組み立てる。
-    #[coverage(off)]
     fn ls_remote(tags: &[&str]) -> GitOutput {
         let stdout = tags
             .iter()
@@ -106,7 +105,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn parse_version_accepts_v_prefix_and_rejects_malformed() {
         assert_eq!(parse_version("v1.2.3"), Some((1, 2, 3)));
         assert_eq!(parse_version("10.0.1"), Some((10, 0, 1)));
@@ -116,7 +114,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn latest_version_picks_the_maximum_and_ignores_junk() {
         let stdout = ls_remote(&["v1.2.0", "v1.10.0", "v1.3.0", "nightly", "v1.10.0^{}"]).stdout;
         assert_eq!(latest_version(&stdout), Some((1, 10, 0)));
@@ -125,21 +122,18 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn status_message_reports_update_available() {
         let msg = status_message("2.6.0", &ls_remote(&["v2.6.0", "v2.7.0"]));
         assert_eq!(msg, "usagi 2.6.0: update available -> 2.7.0");
     }
 
     #[test]
-    #[coverage(off)]
     fn status_message_reports_up_to_date() {
         let msg = status_message("2.7.0", &ls_remote(&["v2.6.0", "v2.7.0"]));
         assert_eq!(msg, "usagi 2.7.0: up to date");
     }
 
     #[test]
-    #[coverage(off)]
     fn status_message_reports_unknown_when_no_valid_tags() {
         assert_eq!(
             status_message("2.6.0", &ls_remote(&["nightly"])),
@@ -148,7 +142,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn status_message_reports_git_failure() {
         let failed = GitOutput {
             success: false,
@@ -162,7 +155,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn status_message_reports_bad_current_version() {
         assert_eq!(
             status_message("not-semver", &ls_remote(&["v2.7.0"])),
@@ -171,7 +163,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn handler_runs_via_dispatch() {
         // execute の StubGit は v9.9.10 を含み、現在 9.9.9 なので更新ありを報告する。
         let (outcome, output) = execute(Command::Update);

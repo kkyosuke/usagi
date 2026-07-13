@@ -186,7 +186,6 @@ mod tests {
     use chrono::TimeZone;
     use std::fs;
 
-    #[coverage(off)]
     fn at(year: i32, month: u32, day: u32) -> DateTime<Local> {
         Local
             .with_ymd_and_hms(year, month, day, 10, 30, 0)
@@ -194,7 +193,6 @@ mod tests {
             .expect("valid local timestamp")
     }
 
-    #[coverage(off)]
     fn temp_log() -> (tempfile::TempDir, ErrorLog) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let log = ErrorLog::new(dir.path().join("logs"));
@@ -202,7 +200,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn append_creates_the_dated_file_and_records_the_message() {
         let (_dir, log) = temp_log();
         log.append(at(2026, 6, 16), "boom").unwrap();
@@ -213,7 +210,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn append_groups_multi_line_messages_under_one_timestamp() {
         let (_dir, log) = temp_log();
         log.append(at(2026, 6, 16), "boom\ncaused by: io").unwrap();
@@ -223,7 +219,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn append_keeps_adding_entries_to_the_same_day() {
         let (_dir, log) = temp_log();
         log.append(at(2026, 6, 16), "first").unwrap();
@@ -234,7 +229,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn append_reports_an_error_when_the_directory_cannot_be_created() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         // A file where the logs directory should be makes create_dir_all fail.
@@ -245,7 +239,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn prune_on_a_missing_directory_removes_nothing() {
         let (_dir, log) = temp_log();
         assert_eq!(
@@ -256,7 +249,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn prune_removes_only_files_older_than_the_retention_window() {
         let (_dir, log) = temp_log();
         let today = at(2026, 6, 16);
@@ -276,7 +268,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn prune_reports_an_error_when_the_log_path_is_not_a_directory() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         // A file at the logs path exists() but cannot be read as a directory.
@@ -290,7 +281,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn parse_date_only_accepts_well_formed_log_names() {
         assert_eq!(
             parse_date("error-2026-06-16.log"),
@@ -302,7 +292,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn record_writes_an_entry_under_the_data_directory() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().expect("failed to create temp dir");
@@ -327,7 +316,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_default_roots_the_log_under_the_data_directory() {
         let _guard = crate::test_support::process_env_guard();
         unsafe {

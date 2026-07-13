@@ -413,7 +413,6 @@ mod tests {
     struct Store(Vec<RuntimeStoreSnapshot>);
     impl RuntimeStore for Store {
         type Error = ();
-        #[coverage(off)]
         fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
@@ -422,7 +421,6 @@ mod tests {
     struct FailingStore(usize);
     impl RuntimeStore for FailingStore {
         type Error = ();
-        #[coverage(off)]
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0 += 1;
             if self.0 == 2 { Err(()) } else { Ok(()) }
@@ -433,7 +431,6 @@ mod tests {
         calls: usize,
     }
     impl AgentAdapter for Resolver {
-        #[coverage(off)]
         fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
             self.calls += 1;
             Ok(ResolvedLaunch {
@@ -455,7 +452,6 @@ mod tests {
     }
     struct Spawner(Result<ProcessIdentity, SpawnFailure>);
     impl PtySpawner for Spawner {
-        #[coverage(off)]
         fn spawn(
             &mut self,
             _: &DurableLaunchSnapshot,
@@ -469,13 +465,11 @@ mod tests {
     struct Journal(Vec<Output>);
     impl OutputJournal for Journal {
         type Error = ();
-        #[coverage(off)]
         fn append(&mut self, output: &Output) -> Result<(), ()> {
             self.0.push(output.clone());
             Ok(())
         }
     }
-    #[coverage(off)]
     fn request() -> LaunchRequest {
         LaunchRequest {
             profile_id: AgentProfileId::new("test").unwrap(),
@@ -491,7 +485,6 @@ mod tests {
             required_capabilities: BTreeSet::new(),
         }
     }
-    #[coverage(off)]
     fn refs(request: &LaunchRequest) -> (AgentRuntimeRef, CompletionFence) {
         let generation = DaemonGeneration::new();
         let terminal = TerminalRef {
@@ -515,7 +508,6 @@ mod tests {
         };
         (runtime, fence)
     }
-    #[coverage(off)]
     fn process() -> ProcessIdentity {
         ProcessIdentity {
             pid: 7,
@@ -523,7 +515,6 @@ mod tests {
             process_group: 7,
         }
     }
-    #[coverage(off)]
     fn launch<S: RuntimeStore>(
         coordinator: &mut RuntimeCoordinator,
         request: &LaunchRequest,
@@ -543,7 +534,6 @@ mod tests {
         )
     }
     #[test]
-    #[coverage(off)]
     fn resolve_once_persists_before_spawn_and_replays_after_detach() {
         let first_request = request();
         let (runtime, fence) = refs(&first_request);
@@ -575,7 +565,6 @@ mod tests {
         assert_eq!(c.occupied_slots(), 1);
     }
     #[test]
-    #[coverage(off)]
     fn ambiguous_spawn_and_unknown_identity_block_replacement() {
         let second_request = request();
         let (runtime, fence) = refs(&second_request);
@@ -601,7 +590,6 @@ mod tests {
         assert_eq!(c.occupied_slots(), 1);
     }
     #[test]
-    #[coverage(off)]
     fn verified_exit_or_disappearance_releases_slot() {
         let first_request = request();
         let (runtime, fence) = refs(&first_request);
@@ -637,7 +625,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn runtime_failures_remain_typed_and_fail_closed() {
         let initial_request = request();
         let (runtime, fence) = refs(&initial_request);
@@ -700,7 +687,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn spawn_and_persistence_uncertainty_are_retained_for_reconcile() {
         let failed_request = request();
         let (runtime, fence) = refs(&failed_request);
@@ -762,11 +748,9 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn invalid_resolver_provenance_and_duplicate_terminal_reservation_are_rejected() {
         struct BadResolver;
         impl AgentAdapter for BadResolver {
-            #[coverage(off)]
             fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
                 let mut resolved = Resolver::default().resolve(request)?;
                 resolved.snapshot.request.resume = true;
@@ -812,11 +796,9 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
         struct RejectingResolver;
         impl AgentAdapter for RejectingResolver {
-            #[coverage(off)]
             fn resolve(&mut self, _: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
                 Err(AdapterError::Validation(
                     LaunchValidationError::InvalidProgram,
@@ -826,7 +808,6 @@ mod tests {
         struct RejectingStore;
         impl RuntimeStore for RejectingStore {
             type Error = ();
-            #[coverage(off)]
             fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
                 Err(())
             }
@@ -834,7 +815,6 @@ mod tests {
         struct RejectingJournal;
         impl OutputJournal for RejectingJournal {
             type Error = ();
-            #[coverage(off)]
             fn append(&mut self, _: &Output) -> Result<(), ()> {
                 Err(())
             }

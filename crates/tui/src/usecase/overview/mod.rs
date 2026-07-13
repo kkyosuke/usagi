@@ -257,14 +257,12 @@ mod tests {
     struct FakeRegistry(Vec<CommandInfo>);
 
     impl CommandRegistry for FakeRegistry {
-        #[coverage(off)]
         fn commands(&self) -> Vec<CommandInfo> {
             self.0.clone()
         }
     }
 
     #[test]
-    #[coverage(off)]
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
@@ -277,7 +275,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn completion_and_help_use_the_injected_registry_metadata() {
         let fake = FakeRegistry(vec![CommandInfo {
             name: "status",
@@ -301,7 +298,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
             (
@@ -336,7 +332,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn rejects_empty_and_unknown_commands_with_display_messages() {
         let empty = interpret(" \t ").unwrap_err();
         assert_eq!(empty, ParseError::Empty);
@@ -348,7 +343,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn dispatches_through_the_handler_interface() {
         assert_eq!(
             dispatch("session list").unwrap(),

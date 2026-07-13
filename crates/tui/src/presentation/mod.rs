@@ -872,26 +872,22 @@ mod tests {
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
 
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
-    #[coverage(off)]
     fn ws(name: &str) -> Workspace {
         Workspace::new(name, format!("/tmp/{name}"))
     }
 
-    #[coverage(off)]
     fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
         let mut workspace = ws(name);
         workspace.updated_at = now() - Duration::minutes(minutes);
         workspace
     }
 
-    #[coverage(off)]
     fn state(name: &str) -> WorkspaceState {
         WorkspaceState {
             sessions: vec![SessionRecord {
@@ -910,12 +906,10 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
     }
 
-    #[coverage(off)]
     fn snapshot_with_pr(name: &str) -> WorkspaceSnapshot {
         let mut snapshot = snapshot(name);
         let mut pr = PrLink::new(42, "https://example.com/pull/42");
@@ -924,12 +918,10 @@ mod tests {
         snapshot
     }
 
-    #[coverage(off)]
     fn recent(name: &str) -> Recent {
         Recent::Workspace(WorkspaceOverview::new(ws(name), 1, 0, 0))
     }
 
-    #[coverage(off)]
     fn run(
         term: &mut dyn Terminal,
         workspaces: Vec<Workspace>,
@@ -950,7 +942,6 @@ mod tests {
     }
 
     impl FakeTerminal {
-        #[coverage(off)]
         fn with_keys(keys: &[Key]) -> Self {
             Self {
                 keys: keys.iter().copied().collect(),
@@ -960,7 +951,6 @@ mod tests {
     }
 
     impl Terminal for FakeTerminal {
-        #[coverage(off)]
         fn size(&mut self) -> io::Result<(usize, usize)> {
             if self.fail_size {
                 return Err(io::Error::other("size failed"));
@@ -968,7 +958,6 @@ mod tests {
             Ok((0, 0))
         }
 
-        #[coverage(off)]
         fn draw(&mut self, frame: &[String]) -> io::Result<()> {
             if self.fail_draw {
                 return Err(io::Error::other("draw failed"));
@@ -977,7 +966,6 @@ mod tests {
             Ok(())
         }
 
-        #[coverage(off)]
         fn read_key(&mut self) -> io::Result<Key> {
             self.keys
                 .pop_front()
@@ -997,7 +985,6 @@ mod tests {
     struct FixedOverlayData;
 
     impl OverlayDataPort for FixedOverlayData {
-        #[coverage(off)]
         fn preview(&self, _workspace: &WorkspaceView) -> OverlayDocument {
             OverlayDocument::Ready(vec!["injected preview".to_string()])
         }
@@ -1019,7 +1006,6 @@ mod tests {
     }
 
     impl WorkspaceLoader for FakeLoader {
-        #[coverage(off)]
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
             self.opened.push(path.to_path_buf());
             if self.fail {
@@ -1036,7 +1022,6 @@ mod tests {
             Ok(snapshot)
         }
 
-        #[coverage(off)]
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
             self.cleanup_calls += 1;
             Ok(self.cleanup_removed.clone())
@@ -1044,7 +1029,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn run_quits_from_welcome_and_handles_menu_navigation() {
         for keys in [
             vec![Key::Char('q')],
@@ -1070,7 +1054,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn run_ignores_unknown_welcome_keys() {
         let keys = [
             Key::Char('z'),
@@ -1098,7 +1081,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn welcome_action_maps_every_destination() {
         assert!(matches!(
             welcome_action(MenuAction::Quit),
@@ -1123,7 +1105,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn config_can_be_opened_from_welcome_or_used_as_the_start() {
         let mut from_welcome =
             FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q')]);
@@ -1159,7 +1140,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn step_config_maps_back_quit_and_stay() {
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
@@ -1182,7 +1162,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn modal_reducers_capture_edit_selection_and_close_keys() {
         let mut overview = OverviewModal::new();
         assert!(!step_overview(&mut overview, Key::Tab));
@@ -1225,7 +1204,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn switch_pr_modal_captures_keys_without_moving_the_background() {
         let snapshot = snapshot_with_pr("switch");
         let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
@@ -1252,7 +1230,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_form_opens_edits_and_returns_to_welcome() {
         let keys = [
             Key::Char('e'),
@@ -1281,7 +1258,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn step_new_handles_every_edit_and_exit_key() {
         let mut form = New::default();
         assert!(matches!(step_new(&mut form, Key::Down), NewStep::Stay));
@@ -1306,7 +1282,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn quitting_from_new_exits_the_runtime() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Quit]);
         run(
@@ -1321,7 +1296,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('q')]);
         let mut loader = FakeLoader::default();
@@ -1337,7 +1311,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_filter_cleanup_confirmation_and_unite_selection_use_the_injected_loader() {
         let alpha = ws("alpha");
         let beta = ws("beta");
@@ -1424,7 +1397,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_navigation_and_workspace_escape_return_to_open() {
         let keys = [
             Key::Char('o'),
@@ -1473,7 +1445,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_prev_wraps_and_escape_returns_to_welcome() {
         let keys = [Key::Char('o'), Key::Up, Key::Escape, Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
@@ -1491,7 +1462,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn open_touch_refreshes_open_and_welcome_recency_models() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
@@ -1525,7 +1495,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn empty_open_enter_stays_and_open_quit_exits() {
         let keys = [Key::Char('o'), Key::Enter, Key::Down, Key::Up, Key::Quit];
         let mut term = FakeTerminal::with_keys(&keys);
@@ -1542,7 +1511,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn recent_loads_workspace_and_escape_returns_to_welcome() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q')]);
         let mut loader = FakeLoader::default();
@@ -1560,7 +1528,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn recent_touch_refreshes_welcome_and_open_recency_models() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
@@ -1588,7 +1555,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn unite_recent_stays_without_loading_a_workspace() {
         let unite = Recent::Unite(UniteOverview::new(vec![
             WorkspaceOverview::new(ws("primary"), 0, 0, 0),
@@ -1611,7 +1577,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn missing_recent_number_stays_on_welcome() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('3'), Key::Char('q')]);
         run(
@@ -1626,7 +1591,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn quitting_from_a_recent_workspace_exits_the_runtime() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q')]);
         run(
@@ -1642,7 +1606,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn workspace_loader_failure_is_propagated() {
         for (keys, recent) in [
             (vec![Key::Char('o'), Key::Enter], Vec::new()),
@@ -1659,7 +1622,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn workspace_modes_modals_tabs_and_escape_stack_are_interactive() {
         let keys = [
             Key::Down,
@@ -1713,7 +1675,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn workspace_text_overlays_keep_home_visible_and_capture_scroll_keys() {
         let keys = [
             Key::Down,
@@ -1750,7 +1711,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn workspace_accepts_an_injected_overlay_data_port() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('v'), Key::Escape, Key::Quit]);
         assert_eq!(
@@ -1766,7 +1726,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn direct_workspace_handles_navigation_shortcuts_and_exit_keys() {
         for (navigation, exit) in [
             (vec![Key::Escape], Key::Escape),
@@ -1799,7 +1758,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn runtime_io_failures_are_propagated() {
         let mut size_failure = FakeTerminal {
             fail_size: true,
@@ -1839,7 +1797,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn public_value_derives_are_exercised() {
         let snapshot = snapshot("derive");
         assert_eq!(snapshot.clone(), snapshot);
@@ -1849,7 +1806,6 @@ mod tests {
         assert!(format!("{quit:?}").contains("Quit"));
     }
 
-    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -1858,7 +1814,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_banner_writes_description_line() {
         let mut buf = Vec::new();
         write_banner(&mut buf, &info()).unwrap();
@@ -1866,7 +1821,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn banner_screen_runner_names_every_tui_screen() {
         let entries = [
             EntryScreen::Welcome,
@@ -1894,19 +1848,16 @@ mod tests {
     struct FailingWriter;
 
     impl Write for FailingWriter {
-        #[coverage(off)]
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write failed"))
         }
 
-        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
     #[test]
-    #[coverage(off)]
     fn banner_screen_runner_propagates_write_failure() {
         let mut out = FailingWriter;
         out.flush().unwrap();

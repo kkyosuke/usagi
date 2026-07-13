@@ -247,12 +247,10 @@ mod tests {
     use crate::infrastructure::store::state::WorkspaceStateStore;
     use chrono::{DateTime, TimeZone, Utc};
 
-    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
-    #[coverage(off)]
     fn session(name: &str) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -268,7 +266,6 @@ mod tests {
     }
 
     /// A store seeded with one session "alpha" so session-targeted ops resolve.
-    #[coverage(off)]
     fn store_with_alpha() -> (tempfile::TempDir, WorkspaceStateStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStateStore::new(tmp.path());
@@ -281,7 +278,6 @@ mod tests {
         (tmp, store)
     }
 
-    #[coverage(off)]
     fn empty_store() -> (tempfile::TempDir, WorkspaceStateStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStateStore::new(tmp.path());
@@ -289,7 +285,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn note_set_get_and_clear_on_a_session() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -304,7 +299,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn note_and_todos_work_on_the_root_and_create_state() {
         // The root always resolves; a mutation on an empty store creates state.
         let (_tmp, store) = empty_store();
@@ -318,7 +312,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn mutations_return_false_for_an_unknown_session() {
         let (_tmp, store) = store_with_alpha();
         let ghost = Target::Session("ghost");
@@ -334,7 +327,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn todo_add_update_and_remove() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -360,7 +352,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn decisions_are_appended_with_the_supplied_time() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -376,7 +367,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn reads_are_empty_without_a_state_file() {
         let (_tmp, store) = empty_store();
         assert_eq!(note(&store, Target::Root).unwrap(), None);

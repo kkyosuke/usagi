@@ -229,7 +229,6 @@ mod tests {
     use crate::presentation::widgets::display_width;
 
     #[test]
-    #[coverage(off)]
     fn boxed_without_title_has_plain_top_border() {
         let out = boxed("", 4, &["ab".to_string()]);
         assert_eq!(out[0], "┌──────┐"); // span = inner+2 = 6
@@ -239,7 +238,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn boxed_embeds_the_title_in_the_top_border() {
         let out = boxed("題", 8, &[]);
         assert!(out[0].starts_with("┌─ 題 "));
@@ -249,7 +247,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn boxed_clips_a_line_wider_than_the_box() {
         let out = boxed("", 4, &["abcdefgh".to_string()]);
         // 内容部は inner_width=4 に切られ `…` が付く。
@@ -258,7 +255,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn modal_inner_width_clamps_to_the_screen() {
         assert_eq!(modal_inner_width(80, 40), 40); // 収まる
         assert_eq!(modal_inner_width(10, 40), 6); // 10 - 4
@@ -266,7 +262,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_modal_centers_the_box_over_a_blank_frame() {
         let lines = render_modal(10, 40, "T", 10, &["hi".to_string()]);
         assert_eq!(lines.len(), 10);
@@ -278,7 +273,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_modal_falls_back_and_truncates_to_height() {
         // 高さ 0 → 24 にフォールバック。
         assert_eq!(render_modal(0, 0, "", 10, &[]).len(), 24);
@@ -296,7 +290,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_preserves_the_background_outside_the_centered_box() {
         let base: Vec<String> = (0..9)
             .map(|row| format!("row-{row}-{}", ".".repeat(33)))
@@ -316,7 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_keeps_ansi_and_full_width_cells_aligned() {
         // 色付き全角文字の中間に box 境界が入る（left=5）ケース。
         let background = format!("\u{1b}[31m{}\u{1b}[0m", "界".repeat(10));
@@ -334,7 +326,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_handles_tiny_terminals_without_overflow() {
         for width in 1..=4 {
             let base = vec!["abcdef".to_string(); 2];
@@ -350,7 +341,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_normalizes_missing_rows_and_zero_size() {
         let lines = render_over(0, 0, &["background".to_string()], "T", 10, &[]);
         assert_eq!(lines.len(), 24);
@@ -359,7 +349,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn column_slice_keeps_zero_width_combining_characters() {
         let sliced = columns("a\u{301}b", 0, 2);
         assert_eq!(display_width(&sliced), 2);

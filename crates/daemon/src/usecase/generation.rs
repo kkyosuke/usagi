@@ -434,11 +434,9 @@ mod tests {
     use super::*;
     use usagi_core::domain::id::{SessionId, TerminalId, WorkspaceId};
 
-    #[coverage(off)]
     fn generation() -> DaemonGeneration {
         DaemonGeneration::new()
     }
-    #[coverage(off)]
     fn coordinator() -> (GenerationCoordinator, DaemonGeneration) {
         let mut registry = GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT);
         let active = generation();
@@ -448,7 +446,6 @@ mod tests {
         registry.activate_initial(active).unwrap();
         (registry, active)
     }
-    #[coverage(off)]
     fn terminal(owner: DaemonGeneration) -> TerminalRef {
         TerminalRef {
             daemon_generation: owner,
@@ -458,7 +455,6 @@ mod tests {
             worktree_id: WorktreeId::new(),
         }
     }
-    #[coverage(off)]
     fn identity() -> ProcessIdentity {
         ProcessIdentity {
             pid: 7,
@@ -468,7 +464,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn rollover_routes_live_terminal_to_draining_owner_and_fences_old_control() {
         let (mut registry, old) = coordinator();
         let pane = terminal(old);
@@ -485,7 +480,6 @@ mod tests {
         assert_eq!(registry.require_active(next), Ok(()));
     }
     #[test]
-    #[coverage(off)]
     fn rollover_is_busy_for_running_external_io_and_never_allows_a_third_generation() {
         let (mut registry, old) = coordinator();
         let next = generation();
@@ -507,7 +501,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn pid_reuse_becomes_identity_unknown_and_blocks_attach_replacement_and_signal_assumptions() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);
@@ -533,7 +526,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn crash_with_verified_child_is_orphan_until_explicitly_acknowledged() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);
@@ -556,7 +548,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn incomplete_spawn_record_is_never_deleted_or_replaced_after_crash() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);

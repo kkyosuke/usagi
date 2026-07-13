@@ -50,7 +50,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[coverage(off)]
     fn data_dir_prefers_env_override_then_falls_back() {
         // Serialize $USAGI_HOME mutation against other globals-mutating tests.
         let _guard = crate::test_support::process_env_guard();

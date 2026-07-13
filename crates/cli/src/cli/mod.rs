@@ -299,14 +299,12 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
     /// `&str` の並びを `run` が受け取る argv（`Vec<OsString>`）に変換する。
-    #[coverage(off)]
     fn argv(tokens: &[&str]) -> Vec<std::ffi::OsString> {
         tokens.iter().map(std::ffi::OsString::from).collect()
     }
 
     /// オプションなしのサブコマンドを解析できる。
     #[test]
-    #[coverage(off)]
     fn parses_simple_subcommands() {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "hop"]).unwrap().command,
@@ -332,7 +330,6 @@ mod tests {
 
     /// 内部フックコマンド（ヘルプ非表示だが実行可能）も解析できる。
     #[test]
-    #[coverage(off)]
     fn parses_hidden_internal_commands() {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "guard-workspace"])
@@ -349,7 +346,6 @@ mod tests {
 
     /// `open` は任意のパス、`completion` は `value_enum` を受け取る。
     #[test]
-    #[coverage(off)]
     fn parses_options() {
         assert!(matches!(
             Cli::try_parse_from(["usagi", "open"]).unwrap().command,
@@ -370,7 +366,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn session_commands_become_daemon_requests() {
         for (argv, action) in [
             (
@@ -404,7 +399,6 @@ mod tests {
 
     /// TUI を開くコマンドは、解析済み引数を保った起動要求を返す。
     #[test]
-    #[coverage(off)]
     fn run_returns_tui_requests_without_output() {
         for (tokens, expected) in [
             (&["usagi", "hop"][..], TuiRequest::Welcome),
@@ -430,7 +424,6 @@ mod tests {
 
     /// サブコマンドなしはトップレベルのヘルプを `out` に出す。
     #[test]
-    #[coverage(off)]
     fn run_without_subcommand_prints_help() {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -449,7 +442,6 @@ mod tests {
 
     /// `--help` は `out` に出て終了コード 0。
     #[test]
-    #[coverage(off)]
     fn run_help_goes_to_stdout() {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -468,7 +460,6 @@ mod tests {
 
     /// `--version` フラグと `version` サブコマンドはどちらも注入された配布 version を出す。
     #[test]
-    #[coverage(off)]
     fn run_reports_injected_version() {
         for tokens in [&["usagi", "--version"][..], &["usagi", "version"][..]] {
             let mut out = Vec::new();
@@ -483,7 +474,6 @@ mod tests {
 
     /// 不正なコマンドは `err` に出て非 0 終了。
     #[test]
-    #[coverage(off)]
     fn run_reports_unknown_command_on_stderr() {
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -502,7 +492,6 @@ mod tests {
 
     /// 余分な引数は clap の使い方エラーになり、TUI 起動要求へ到達しない。
     #[test]
-    #[coverage(off)]
     fn run_rejects_extra_tui_command_arguments_without_launching() {
         for tokens in [
             &["usagi", "hop", "extra"][..],
@@ -523,7 +512,6 @@ mod tests {
     /// clap が派生する update / 補助メタデータ関数も実行して被覆する
     /// （parse だけでは通らない `*_for_update` / `has_subcommand` 系を明示的に叩く）。
     #[test]
-    #[coverage(off)]
     fn exercises_clap_generated_metadata() {
         let _ = Cli::command_for_update();
 
