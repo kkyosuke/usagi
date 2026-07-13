@@ -74,8 +74,8 @@ Closeup tab は pending operation または live `TerminalRef` を持つ。pendi
 `OperationId` にだけ対応し、live tab は完全な `TerminalRef` で識別する。選択中の live tab だけを
 attach し、選択外の tab は background のまま保持する。
 
-右ペインは tab を Chrome 風の chip と、その直下の active marker で描く。chip の表示順・label は
-表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
+右ペインは session 名の右に tab を Chrome 風の chip として描き、その直下に active marker を置く。path は
+右ペインには表示しない。chip の表示順・label は表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
 幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は v1 の選択 session と同じ
 Nerd Font うさぎ `󰤇`（U+F0907）だけを
 frame ごとに chip 内で進め、ラベル全体を着色しない。

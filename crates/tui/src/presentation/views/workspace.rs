@@ -47,7 +47,7 @@ pub struct ProjectedSession {
     pub label: String,
     /// sidebar に表示する起源などの補足。
     pub detail: String,
-    /// session pane の cwd。
+    /// daemon snapshot が与えた session の cwd。
     pub cwd: PathBuf,
 }
 
@@ -59,7 +59,6 @@ pub struct ProjectedSession {
 pub struct HomeProjection {
     workspace: WorkspaceId,
     workspace_name: String,
-    root_cwd: PathBuf,
     sessions: Vec<ProjectedSession>,
     selected: Selection,
     active: Target,
@@ -92,7 +91,7 @@ impl HomeProjection {
     pub fn from_state(
         state: &AppState,
         workspace_name: impl Into<String>,
-        root_cwd: impl Into<PathBuf>,
+        _root_cwd: impl Into<PathBuf>,
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
         let sessions = state
@@ -104,7 +103,6 @@ impl HomeProjection {
         Self {
             workspace: state.workspace(),
             workspace_name: workspace_name.into(),
-            root_cwd: root_cwd.into(),
             sessions,
             selected: state.selected(),
             active: state.active(),
@@ -152,19 +150,6 @@ impl HomeProjection {
         );
         rows.push(Selection::NewSession);
         rows
-    }
-
-    #[coverage(off)]
-    fn active_cwd(&self) -> &Path {
-        match self.active {
-            Target::Root(id) if id == self.workspace => &self.root_cwd,
-            Target::Session(id) => self
-                .sessions
-                .iter()
-                .find(|session| session.id == id)
-                .map_or(self.root_cwd.as_path(), |session| session.cwd.as_path()),
-            Target::Root(_) => &self.root_cwd,
-        }
     }
 
     #[coverage(off)]
@@ -690,7 +675,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
-/// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
+/// closeup の header: フォーカス中 session の identity。tab は次行に描画する。
 #[coverage(off)]
 fn closeup_header(width: usize, ws: &Workspace) -> String {
     let name = Role::Accent.style().bold().paint(ws.focused_label());
@@ -960,13 +945,9 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
     };
-    let header = widgets::pad_to_width(
-        &format!(
-            " {}  {}",
-            Role::Accent.style().bold().paint(home.active_label()),
-            Style::new().dim().paint("active target"),
-        ),
-        width,
+    let header = format!(
+        " {}",
+        Role::Accent.style().bold().paint(home.active_label())
     );
     let footer = Style::new().dim().paint(&widgets::clip_to_width(
         &format!("[{mode}] active pane"),
@@ -1011,16 +992,11 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             pending_indicator: indicator.as_deref(),
         })
         .collect::<Vec<_>>();
-    let chrome = widgets::session_tab::render(width, &tabs);
+    let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
     with_footer(
         vec![
-            header,
             chrome[0].clone(),
             chrome[1].clone(),
-            String::new(),
-            Style::new()
-                .dim()
-                .paint(&format!("  cwd: {}", home.active_cwd().display())),
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
                 &format!("  agent: {}", phase_label(home.active_phase)),
@@ -1357,7 +1333,9 @@ mod tests {
             &mut pane,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
-        let state = AppState::home(workspace, vec![session]);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -1370,6 +1348,13 @@ mod tests {
         assert!(text.contains("Agent (starting)"));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
+        assert!(!text.contains("/work/session"));
+
+        let frame = render_home(30, 100, &home);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("session").expect("session name");
+        let tab = right_header.find("Agent (starting)").expect("agent tab");
+        assert!(name < tab);
     }
 
     #[test]
@@ -1478,8 +1463,8 @@ mod tests {
         let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
 
         let plain = over.iter().map(|line| strip(line)).collect::<Vec<_>>();
-        assert!(plain[3].contains("Agent (starting)"));
-        assert!(plain[4].contains('▔'));
+        assert!(plain[2].contains("Agent (starting)"));
+        assert!(plain[3].contains('▔'));
         assert!(plain.iter().any(|line| line.contains("┌─ Action")));
         assert!(over.iter().all(|line| display_width(line) == 100));
     }
