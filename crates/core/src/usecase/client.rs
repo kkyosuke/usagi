@@ -25,6 +25,9 @@ use crate::infrastructure::ipc::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    /// Manage a daemon-owned periodic metrics subscription.  Metrics are
+    /// observational only: they never authorize a client-side fallback.
+    Metrics { action: MetricsAction },
     /// A lifecycle mutation. `operation_id` makes accepted work discoverable
     /// after a client disconnects.
     Session {
@@ -44,6 +47,24 @@ pub enum DaemonRequest {
         operation_id: String,
         intent: AgentLaunchIntent,
     },
+}
+
+/// Control vocabulary for the daemon metrics stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsAction {
+    Subscribe,
+    Unsubscribe,
+}
+
+/// A deliberately small, versioned snapshot emitted by the daemon.  Counters
+/// are process-local observations, not durable state or a control surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonMetrics {
+    pub schema_version: u16,
+    pub sampled_at_ms: u64,
+    pub active_subscribers: u32,
+    pub dropped_updates: u64,
 }
 
 /// Product-neutral Agent launch intent sent by a TUI client.
@@ -349,6 +370,30 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod metrics_schema_tests {
+    use super::{DaemonMetrics, DaemonRequest, MetricsAction};
+
+    #[test]
+    fn metrics_schema_is_tagged_and_versioned() {
+        assert_eq!(
+            serde_json::to_value(DaemonRequest::Metrics {
+                action: MetricsAction::Subscribe,
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "metrics", "action": "subscribe"})
+        );
+        let snapshot: DaemonMetrics = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "sampled_at_ms": 42,
+            "active_subscribers": 2,
+            "dropped_updates": 3
+        }))
+        .unwrap();
+        assert_eq!(snapshot.schema_version, 1);
     }
 }
 

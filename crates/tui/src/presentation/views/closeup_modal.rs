@@ -24,6 +24,8 @@ pub struct CloseupModal {
     selected: usize,
     selection_mode: ModalSelectionMode,
     input: TextInput,
+    expanded: bool,
+    selected_subcommand: usize,
 }
 
 impl CloseupModal {
@@ -46,6 +48,8 @@ impl CloseupModal {
             selected: 0,
             selection_mode,
             input: TextInput::default(),
+            expanded: false,
+            selected_subcommand: 0,
         }
     }
 
@@ -81,7 +85,7 @@ impl CloseupModal {
     #[must_use]
     #[coverage(off)]
     pub fn selected_action(&self) -> closeup::CommandInfo {
-        self.actions()[self.selected]
+        self.matches()[self.selected]
     }
 
     /// Enter で controller へ渡す registry command。Closeup は入力欄を持たないため、
@@ -90,7 +94,15 @@ impl CloseupModal {
     #[coverage(off)]
     pub fn submission(&self) -> String {
         match self.selection_mode {
-            ModalSelectionMode::Action => self.selected_action().name.to_owned(),
+            ModalSelectionMode::Action if self.expanded => format!(
+                "{} {}",
+                self.selected_action().name,
+                self.subcommands()[self.selected_subcommand]
+            ),
+            ModalSelectionMode::Action => self
+                .matches()
+                .get(self.selected)
+                .map_or_else(String::new, |action| action.name.to_owned()),
             ModalSelectionMode::Prompt => self.input.value().to_owned(),
         }
     }
@@ -98,46 +110,91 @@ impl CloseupModal {
     /// Insert one character in Prompt mode.
     #[coverage(off)]
     pub fn insert_char(&mut self, c: char) {
-        if self.selection_mode == ModalSelectionMode::Prompt {
-            self.input.insert(c);
-        }
+        self.input.insert(c);
+        self.selected = 0;
+        self.expanded = false;
     }
 
     /// Delete one character in Prompt mode.
     #[coverage(off)]
     pub fn backspace(&mut self) {
-        if self.selection_mode == ModalSelectionMode::Prompt {
-            self.input.backspace();
-        }
+        self.input.backspace();
+        self.selected = 0;
+        self.expanded = false;
     }
 
     /// Move the prompt caret left in Prompt mode.
     #[coverage(off)]
     pub fn cursor_left(&mut self) {
-        if self.selection_mode == ModalSelectionMode::Prompt {
-            self.input.move_left();
-        }
+        self.input.move_left();
     }
 
     /// Move the prompt caret right in Prompt mode.
     #[coverage(off)]
     pub fn cursor_right(&mut self) {
-        if self.selection_mode == ModalSelectionMode::Prompt {
-            self.input.move_right();
-        }
+        self.input.move_right();
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
     #[coverage(off)]
     pub fn select_next(&mut self) {
-        self.selected = (self.selected + 1) % self.actions().len();
+        if self.expanded {
+            let len = self.subcommands().len();
+            if len > 0 {
+                self.selected_subcommand = (self.selected_subcommand + 1) % len;
+            }
+            return;
+        }
+        let len = self.matches().len();
+        if len > 0 {
+            self.selected = (self.selected + 1) % len;
+        }
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
     #[coverage(off)]
     pub fn select_prev(&mut self) {
-        let len = self.actions().len();
-        self.selected = (self.selected + len - 1) % len;
+        if self.expanded {
+            let len = self.subcommands().len();
+            if len > 0 {
+                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
+            }
+            return;
+        }
+        let len = self.matches().len();
+        if len > 0 {
+            self.selected = (self.selected + len - 1) % len;
+        }
+    }
+
+    /// Expand the selected action's inline subcommand picker when available.
+    #[coverage(off)]
+    pub fn expand_selected(&mut self) {
+        if !self.matches().is_empty() && !self.subcommands().is_empty() {
+            self.expanded = true;
+            self.selected_subcommand = 0;
+        }
+    }
+
+    /// Collapse an inline subcommand picker. Returns whether it was open.
+    #[coverage(off)]
+    pub fn collapse(&mut self) -> bool {
+        std::mem::take(&mut self.expanded)
+    }
+
+    fn subcommands(&self) -> &'static [&'static str] {
+        match self.selected_action().name {
+            "close" => &["--force"],
+            "terminal" => &["open", "new"],
+            _ => &[],
+        }
+    }
+
+    fn matches(&self) -> Vec<closeup::CommandInfo> {
+        self.actions()
+            .into_iter()
+            .filter(|action| action.name.starts_with(self.input.value()))
+            .collect()
     }
 }
 
@@ -177,15 +234,40 @@ fn body(state: &CloseupModal) -> Vec<String> {
             BODY_HEIGHT,
         );
     }
-    let mut lines = vec![Style::new().dim().paint("Run a command:"), String::new()];
-    for (i, action) in state.actions().iter().enumerate() {
+    let mut lines = vec![
+        Style::new().dim().paint("Run a command:  (type to filter)"),
+        format!(
+            "❯ {}",
+            widgets::block_caret(
+                state.input.value(),
+                state.input.cursor(),
+                &Role::Accent.style()
+            )
+        ),
+        String::new(),
+    ];
+    for (i, action) in state.matches().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
+        if state.expanded && i == state.selected {
+            for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
+                let marker = if sub_index == state.selected_subcommand {
+                    "›"
+                } else {
+                    " "
+                };
+                lines.push(
+                    Style::new()
+                        .dim()
+                        .paint(&format!("      {marker} {subcommand}")),
+                );
+            }
+        }
     }
     lines.push(String::new());
     lines.push(
         Style::new()
             .dim()
-            .paint("  ↑↓: select   Enter: run   Esc: back"),
+            .paint("  ↑↓: select   →: expand   Enter: run   Esc: back"),
     );
     modal::fixed_body(lines, BODY_HEIGHT)
 }

@@ -13,6 +13,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
 - [managed session request](#managed-session-request)
+- [daemon metrics subscription](#daemon-metrics-subscription)
 - [agent launch request](#agent-launch-request)
 - [generic terminal request](#generic-terminal-request)
 
@@ -64,6 +65,27 @@ handshake の成功後だけ受理する。
 `ProtocolError` は machine-readable な code、safe message、retry mode、side-effect classification、
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
 場合は `resync_required` を使う。OS error、secret、raw launch provision は error detail に含めない。
+
+## daemon metrics subscription
+
+`metrics` request は TUI が daemon の観測用 stream を登録または解除するための control
+vocabulary である。`subscribe` は TUI 起動時および接続を回復した後に送り、正常終了時には
+`unsubscribe` を送る。接続が切れた subscription は connection-local であり、再接続で resume
+せず新しく登録する。
+
+daemon が送る snapshot は次の versioned schema である。これは表示・診断専用で、TUI が
+session / terminal の所有権や local fallback を判断する根拠にはしない。
+
+| field | type | meaning |
+|---|---|---|
+| `schema_version` | `u16` | metrics payload schema version。現在は `1` |
+| `sampled_at_ms` | `u64` | daemon が sample を作成した monotonic timestamp |
+| `active_subscribers` | `u32` | sample 作成時の observer 数 |
+| `dropped_updates` | `u64` | slow observer の bounded queue で coalesce した update 数 |
+
+各 subscriber は容量 1 の queue を持つ。daemon は tick で block せず、queue が埋まった
+observer の中間 sample を落として count する。切断された observer は次の publish で取り除く。
+このため遅い TUI や一つの接続の切断が daemon tick または他 TUI の配信を止めない。
 
 ## managed session request
 
