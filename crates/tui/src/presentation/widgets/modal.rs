@@ -6,7 +6,7 @@
 //! 短ければ空白で詰めて右端を揃える。色付け（枠色）はテーマ導入時に載せるため無色で描く。
 
 use super::{centered_padding, clip_to_width, display_width, normalize_size};
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use unicode_width::UnicodeWidthChar;
 
 /// 背景の ANSI スタイルを modal へ滲ませないための SGR reset。
@@ -71,7 +71,10 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
 #[coverage(off)]
 pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
     let selected = |role: Role| role.style().bold();
-    let idle = Style::new().dim();
+    // `dim` alone inherits the terminal's current foreground colour. Give idle
+    // labels an explicit white base so focus changes cannot leave a stale
+    // success/danger colour behind.
+    let idle = Style::new().fg(Color::White).dim();
     let (ok, cancel) = if confirm_selected {
         (
             selected(confirm_role).paint("[  ok  ]"),
@@ -80,7 +83,7 @@ pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> Strin
     } else {
         (
             idle.paint("[  ok  ]"),
-            selected(Role::Accent).paint("[cancel]"),
+            selected(Role::Warning).paint("[cancel]"),
         )
     };
     format!("  {ok}  {cancel}")
@@ -279,7 +282,9 @@ mod tests {
         assert!(ok_selected.contains("[  ok  ]"));
         assert!(cancel_selected.contains("[cancel]"));
         assert!(ok_selected.contains("\u{1b}[1;32m"));
-        assert!(cancel_selected.contains("\u{1b}[1;36m"));
+        assert!(cancel_selected.contains("\u{1b}[1;33m"));
+        assert!(ok_selected.contains("\u{1b}[2;37m"));
+        assert!(cancel_selected.contains("\u{1b}[2;37m"));
     }
     use crate::presentation::widgets::display_width;
 
