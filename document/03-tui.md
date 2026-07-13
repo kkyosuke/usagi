@@ -39,6 +39,11 @@ workspace の root へ戻す。これにより、削除済み session を target
 Home の mode は Switch と Closeup である。Overview、Closeup action、PR、preview、diff、text、notes、
 environment は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。
 
+Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。Closeup
+の `Ctrl-A` は active target の Closeup action overlay を開き、作成フォームを開かない。Closeup の `Ctrl-O`
+は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は
+`LiveInputClassifier` が pane navigation として予約するため、この management transition に渡さない。
+
 ## Overview と modal
 
 Overview palette の Tab は選択中のトップレベル command を補完する。`session` の第 1 引数は
