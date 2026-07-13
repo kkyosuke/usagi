@@ -29,6 +29,7 @@ use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
@@ -1276,6 +1277,22 @@ pub fn run_with_settings(
     }
 }
 
+/// v1 と同じ Welcome 起動エフェクトを再生する。入力は読まないため、スプラッシュ中の
+/// type-ahead はそのまま Welcome の最初のキー入力へ渡る。
+///
+/// # Errors
+///
+/// 端末サイズの取得、描画、フレーム間待機のいずれかに失敗した場合、そのエラーを返す。
+#[coverage(off)]
+pub fn play_startup_splash(term: &mut dyn Terminal) -> io::Result<()> {
+    for frame in 0..splash::FRAMES {
+        let (height, width) = term.size()?;
+        term.draw(&splash::render(height, width, frame))?;
+        term.wait(splash::ANIM_TICK)?;
+    }
+    Ok(())
+}
+
 /// Run the screen graph with transient default settings. Embedders that own a
 /// settings backend should call [`run_with_settings`] and inject its port.
 ///
@@ -1378,10 +1395,11 @@ mod tests {
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions, render_workspace,
-        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
-        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
-        step_workspace, welcome_action, write_banner,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
+        play_startup_splash, render_workspace, run as run_from_start, run_with_settings,
+        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
+        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
+        write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -1551,6 +1569,7 @@ mod tests {
     struct FakeTerminal {
         keys: VecDeque<Key>,
         frames: Vec<Vec<String>>,
+        waits: Vec<std::time::Duration>,
         fail_size: bool,
         fail_draw: bool,
     }
@@ -1577,6 +1596,11 @@ mod tests {
                 return Err(io::Error::other("draw failed"));
             }
             self.frames.push(frame.to_vec());
+            Ok(())
+        }
+
+        fn wait(&mut self, duration: std::time::Duration) -> io::Result<()> {
+            self.waits.push(duration);
             Ok(())
         }
 
@@ -1665,6 +1689,25 @@ mod tests {
             );
             assert!(term.frames[0].join("\n").contains("Menu"));
         }
+    }
+
+    #[test]
+    fn startup_splash_draws_and_paces_every_v1_frame_without_reading_input() {
+        let mut term = FakeTerminal::default();
+
+        play_startup_splash(&mut term).unwrap();
+
+        assert_eq!(
+            term.frames.len(),
+            crate::presentation::views::splash::FRAMES
+        );
+        assert_eq!(term.waits.len(), crate::presentation::views::splash::FRAMES);
+        assert!(
+            term.waits
+                .iter()
+                .all(|wait| *wait == crate::presentation::views::splash::ANIM_TICK)
+        );
+        assert!(term.keys.is_empty());
     }
 
     #[test]

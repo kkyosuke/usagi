@@ -6,6 +6,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
@@ -164,6 +165,14 @@ pub trait Terminal {
     ///
     /// 端末への書き込みに失敗した場合、そのエラーを返す。
     fn draw(&mut self, frame: &[String]) -> io::Result<()>;
+
+    /// 装飾的なアニメーションの次フレームまで待機する。実時間を直接読む代わりに
+    /// 合成側へ委譲するので、presentation のテストは待機なしで検証できる。
+    ///
+    /// # Errors
+    ///
+    /// 端末ランタイムが待機に失敗した場合、そのエラーを返す。
+    fn wait(&mut self, duration: Duration) -> io::Result<()>;
 
     /// 次のキー入力を 1 つ読む（入力があるまでブロックする）。
     ///
