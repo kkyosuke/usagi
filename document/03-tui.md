@@ -73,6 +73,12 @@ attach し、選択外の tab は background のまま保持する。
 `No tabs stirring yet. Enter starts one.` の案内を中央に表示する。この空状態は tick や runtime 接続に
 依存しない。overlay はこの Home frame を背景のまま合成する。
 
+Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
+workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
+TUI は daemon の accepted response 後に Agent pending tab を置き、同じ operation の成功 final が返す
+完全な `TerminalRef` にだけ attach する。daemon 不通、拒否、未知・古い completion では local spawn や
+名前からの terminal 推測をしない。
+
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
 変化したときだけ送る。detach はこの client の subscription を外すだけで、PTY を kill しない。
