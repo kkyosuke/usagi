@@ -33,10 +33,6 @@ use usagi_core::domain::id::{SessionId, WorkspaceId};
 const LEFT_WIDTH: usize = 28;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
-/// The v1 sidebar rabbit occupies three stable rows above the footer.
-const MASCOT_ROWS: usize = 3;
-/// v1's fixed inset from the sidebar's left edge.
-const MASCOT_INDENT: usize = 1;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -104,6 +100,9 @@ pub struct HomeProjection {
     active_phase: TargetPhase,
     feedback: Option<Feedback>,
     mascot_tick: u64,
+    /// Presentation-only message. Runtime state currently supplies `None`; this
+    /// keeps a future event source out of the renderer and prevents dummy copy.
+    mascot_speech: Option<widgets::mascot::MascotSpeech>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     closeup_action_visible: bool,
@@ -151,6 +150,7 @@ impl HomeProjection {
             active_phase: state.phase_for(state.active()),
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
+            mascot_speech: None,
             pane_tabs: Vec::new(),
             pane_error: None,
             closeup_action_visible: matches!(
@@ -179,6 +179,14 @@ impl HomeProjection {
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
+        self
+    }
+
+    /// Attach a presentation-safe mascot message without changing controller or
+    /// input state. `None` intentionally leaves the mascot silent.
+    #[must_use]
+    pub fn with_mascot_speech(mut self, speech: Option<widgets::mascot::MascotSpeech>) -> Self {
+        self.mascot_speech = speech;
         self
     }
 
@@ -857,10 +865,20 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     }
 
     let body_capacity = height - 1;
-    // Keep the menu usable first.  Once it has a heading and at least one row,
-    // reserve the three bottom rows for the v1-style usagi above the footer.
-    let show_mascot = body_capacity >= MASCOT_ROWS + 3;
-    let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
+    // Keep the menu usable first. The mascot block includes its always-reserved
+    // blank row, so the viewport and footer cannot drift when speech adds rows.
+    let mascot = widgets::mascot::sidebar_block(width, 0, None);
+    let show_mascot = mascot
+        .as_ref()
+        .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
+    let mascot_rows = if show_mascot {
+        mascot
+            .as_ref()
+            .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
+    } else {
+        0
+    };
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
     let show_heading = content_capacity > 1;
     let pending_rows = 2 * usize::from(ws.pending_session().is_some());
     let viewport_capacity = content_capacity
@@ -884,7 +902,8 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
-        rows.extend(home_mascot(width, 0));
+        rows.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
+        rows.push(String::new());
     }
     rows.push(left_footer(width, ws));
     rows
@@ -1068,8 +1087,19 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
             .collect();
     }
     let body_capacity = height - 1;
-    let show_mascot = body_capacity >= MASCOT_ROWS + 3;
-    let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
+    let mascot =
+        widgets::mascot::sidebar_block(width, home.mascot_tick, home.mascot_speech.as_ref());
+    let show_mascot = mascot
+        .as_ref()
+        .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
+    let mascot_rows = if show_mascot {
+        mascot
+            .as_ref()
+            .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
+    } else {
+        0
+    };
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
     let show_heading = content_capacity > 1;
     let viewport_capacity = content_capacity - usize::from(show_heading);
     let selected_index = rows
@@ -1092,7 +1122,8 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
     }
     lines.resize(content_capacity, String::new());
     if show_mascot {
-        lines.extend(home_mascot(width, home.mascot_tick));
+        lines.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
+        lines.push(String::new());
     }
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ↑↓ cursor · Enter target",
@@ -1125,24 +1156,6 @@ fn home_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> 
 fn home_row_height(row: Selection) -> usize {
     usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
 }
-
-/// The v1 sidebar mascot's resting browsing pose. It is deliberately a pure
-/// function of the reducer-owned tick: the eyes blink and one ear twitches,
-/// while every frame keeps the same three-row rectangle. The shared fixed inset
-/// keeps the ears, face, and feet aligned as one left-bottom sidebar block.
-fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
-    let phase = tick % 6;
-    let ears = if phase == 5 { " (\\(/" } else { " (\\(\\" };
-    let face = if phase == 4 { " (-.-)?" } else { " (o.o)?" };
-    let feet = "o(_(\")(\")";
-    [ears, face, feet].map(|line| {
-        Role::Feature.style().bold().paint(&widgets::pad_to_width(
-            &format!("{}{}", " ".repeat(MASCOT_INDENT), line),
-            width,
-        ))
-    })
-}
-
 #[coverage(off)]
 fn home_row_lines(width: usize, home: &HomeProjection, row: Selection) -> Vec<String> {
     let target = match row {
@@ -1343,9 +1356,10 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, HomeProjection, LEFT_WIDTH, MASCOT_INDENT, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame,
+        CHROME_ROWS, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace, render,
+        render_home, render_with_skeleton_frame,
     };
+    use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
@@ -1360,6 +1374,8 @@ mod tests {
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+
+    const MASCOT_INDENT: usize = 1;
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
 
@@ -1609,6 +1625,31 @@ mod tests {
 
         let narrow = render_home(8, 8, &blink);
         assert!(narrow.iter().all(|line| display_width(line) == 8));
+    }
+
+    #[test]
+    fn home_speech_reserves_a_blank_row_and_does_not_change_home_state() {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let speech = MascotSpeech::new(["同期済み".to_owned()]).expect("speech");
+        let home = HomeProjection::from_state(&state, "work", "/work", &[])
+            .with_mascot_speech(Some(speech));
+        let frame = render_home(30, 80, &home);
+        let left_rows = frame[CHROME_ROWS..]
+            .iter()
+            .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
+            .collect::<Vec<_>>();
+        let bottom = left_rows
+            .iter()
+            .position(|line| line.contains("╰──┬"))
+            .expect("bubble tail");
+        assert!(left_rows[bottom + 2].contains("(o.o)?"));
+        assert!(
+            left_rows[bottom + 4].trim().is_empty(),
+            "reserved blank row"
+        );
+        assert!(left_rows[bottom + 5].contains("[switch]"));
+        assert_eq!(home.selected, state.selected());
+        assert_eq!(home.active, state.active());
     }
 
     #[test]
@@ -2121,7 +2162,8 @@ mod tests {
             .expect("sidebar ears");
         assert!(left_rows[ears + 1].contains("(o.o)?"));
         assert!(left_rows[ears + 2].contains("o(_(\")(\")"));
-        assert!(left_rows[ears + 3].contains("[switch]"));
+        assert!(left_rows[ears + 3].trim().is_empty(), "reserved blank row");
+        assert!(left_rows[ears + 4].contains("[switch]"));
         assert_eq!(left_rows[ears].find('('), Some(MASCOT_INDENT + 1));
         assert_eq!(left_rows[ears + 1].find('('), Some(MASCOT_INDENT + 1));
         assert_eq!(left_rows[ears + 2].find('o'), Some(MASCOT_INDENT));

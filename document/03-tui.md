@@ -133,9 +133,16 @@ Home 背景との合成範囲を越えない。
 
 ## Sidebar mascot
 
-Home の左 sidebar は footer の直上に 3 行の usagi を表示する。frame は reducer が所有する tick でだけ
-進み、瞬きと耳の動きは純粋 render で決まる。狭いペインでは menu の viewport を優先して mascot を省略し、
-表示する場合も幅に clip する。modal は Home frame の上に合成されるため、mascot は背景の一部として残る。
+Home の左 sidebar は footer の直上に usagi を表示する。frame は reducer が所有する tick でだけ
+進み、瞬きと耳の動きは純粋 render で決まる。mascot block の直下には常に 1 行の空行を予約し、footer、
+session viewport、pending row と重ならない。狭いペインでは menu の viewport を優先して mascot block 全体を
+省略する。
+
+presentation が表示安全な message を供給した場合だけ、mascot の上に黄色太字の角丸 speech bubble を出す。
+bubble は `╰─┬─╯` の tail を mascot の頭へ向け、Unicode 表示幅で折り返し、各行を sidebar 幅に clip する。
+message が無いときは無言の mascot のままで、renderer はダミー文言を生成しない。bubble と mascot は装飾であり、
+入力 focus や terminal tab の input owner を取得しない。modal は Home frame の上に合成されるため、mascot は背景の
+一部として残る。
 
 ## Closeup pane
 
