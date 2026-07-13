@@ -752,20 +752,49 @@ fn header_spacer(width: usize) -> String {
 
 // ── left pane: session menu ─────────────────────────────────────────────────
 
-/// main 行。フォーカス中は強調する。
+/// main は session と同じ2行の marker stack で描く。
 #[coverage(off)]
-fn root_row(width: usize, ws: &Workspace) -> String {
-    menu_row(width, ws.root_selected(), "main", "workspace main")
+fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
+    let selected = ws.root_selected();
+    let (marker, continuation) = if selected {
+        match ws.mode() {
+            Mode::Switch => (
+                Role::Danger.style().bold().paint("\u{f0907}"),
+                Role::Danger.style().bold().paint("|"),
+            ),
+            Mode::Closeup => (
+                Role::Success.style().bold().paint("|"),
+                Role::Success.style().bold().paint("|"),
+            ),
+        }
+    } else {
+        (" ".to_owned(), " ".to_owned())
+    };
+    let name = if selected {
+        Role::Accent.style().bold().paint("main")
+    } else {
+        "main".to_owned()
+    };
+    vec![
+        widgets::pad_to_width(&format!("{marker} {name}"), width),
+        widgets::pad_to_width(
+            &format!(
+                "{continuation} {}",
+                Style::new().dim().paint("workspace main")
+            ),
+            width,
+        ),
+    ]
 }
 
 /// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
 #[coverage(off)]
 fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     if index == 0 {
-        vec![root_row(width, ws)]
+        root_rows(width, ws)
     } else {
         ws.sessions().get(index - 1).map_or_else(
-            || vec![root_row(width, ws)],
+            || root_rows(width, ws),
             |session| session_menu_rows(width, index == ws.selected, ws.mode(), session),
         )
     }
@@ -795,23 +824,6 @@ fn workspace_viewport_start(selected: usize, row_count: usize, capacity: usize) 
         start += 1;
     }
     start.min(row_count.saturating_sub(1))
-}
-
-/// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
-#[coverage(off)]
-fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
-    } else {
-        " ".to_string()
-    };
-    let name = if selected {
-        Role::Accent.style().bold().paint(name)
-    } else {
-        name.to_string()
-    };
-    let detail = Style::new().dim().paint(detail);
-    widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
 }
 
 /// A real daemon-backed `SessionRecord` has a fixed two-line sidebar footprint.
@@ -969,10 +981,10 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let now = Utc::now();
     for index in start..ws.row_count() {
         let entry = if index == 0 {
-            vec![root_row(width, ws)]
+            root_rows(width, ws)
         } else {
             ws.sessions().get(index - 1).map_or_else(
-                || vec![root_row(width, ws)],
+                || root_rows(width, ws),
                 |session| {
                     session_menu_rows_at(width, index == ws.selected, ws.mode(), session, now)
                 },
@@ -2332,16 +2344,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("> main"));
+        assert!(text.contains("\u{f0907} main"));
         assert!(!text.contains("(o.o)?"));
     }
 
     #[test]
     fn render_places_the_selected_root_before_every_session() {
         let text = joined(&workspace());
-        let root = text
-            .find("> main  workspace main")
-            .expect("selected main row");
+        let root = text.find("\u{f0907} main").expect("selected main row");
         let first = text.find("UI work").expect("first session row");
         let second = text.find("daemon").expect("second session row");
         assert!(root < first);
@@ -2383,7 +2393,10 @@ mod tests {
         let frame = render(30, 100, &workspace());
         let cursor_rows = frame
             .iter()
-            .filter(|line| strip(line).trim_start().starts_with('>'))
+            .filter(|line| {
+                let trimmed = strip(line).trim_start().to_owned();
+                trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+            })
             .count();
         assert_eq!(cursor_rows, 1);
     }
@@ -2396,7 +2409,7 @@ mod tests {
             tiny_frame
                 .iter()
                 .map(|line| strip(line))
-                .any(|line| line.contains("> main"))
+                .any(|line| line.contains("\u{f0907} main"))
         );
         for expected in std::iter::once("main".to_string())
             .chain((0..12).map(|index| format!("session-{index:02}")))
