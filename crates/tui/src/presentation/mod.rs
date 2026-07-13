@@ -33,6 +33,7 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
+use crate::usecase::closeup;
 use crate::usecase::overview::{self, SessionCommand};
 use usagi_core::usecase::settings::SettingsPort;
 
@@ -681,8 +682,8 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     WorkspaceStep::Stay
 }
 
-/// Closeup のキー処理。action menu の上下選択と背面 tab の左右移動を行う。Esc は
-/// Workspace 自体を閉じず Switch へ一段戻す。
+/// Closeup のキー処理。Action mode は上下で選んだ command、Prompt mode は入力した
+/// command を Enter で実行する。Esc は Workspace 自体を閉じず Switch へ一段戻す。
 #[coverage(off)]
 fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     if ui.closeup.selection_mode() == ModalSelectionMode::Prompt {
@@ -693,7 +694,11 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             Key::Char(ch) => ui.closeup.insert_char(ch),
             Key::Escape => ui.workspace.enter_switch(),
             Key::Quit => return WorkspaceStep::Quit,
-            Key::Up | Key::Down | Key::Tab | Key::Enter | Key::Other => {}
+            Key::Enter => {
+                let input = ui.closeup.submission();
+                execute_closeup_command(ui, &input);
+            }
+            Key::Up | Key::Down | Key::Tab | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -709,15 +714,28 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('n') => ui.open_text(),
         Key::Escape => ui.workspace.enter_switch(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Enter => match ui.closeup.selected_action().name {
-            "agent" => ui.workspace.open_pane(PaneKind::Agent),
-            "terminal" => ui.workspace.open_pane(PaneKind::Terminal),
-            _ => {}
-        },
+        Key::Enter => {
+            let input = ui.closeup.submission();
+            execute_closeup_command(ui, &input);
+        }
         Key::Char('x') => ui.workspace.close_pane(),
         Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
+}
+
+/// Execute the Closeup command shared by Action and Prompt interaction modes.
+///
+/// The closeup registry remains the single source of command names; commands
+/// without a connected runtime effect intentionally keep the existing no-op
+/// behaviour in both modes.
+#[coverage(off)]
+fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
+    match closeup::interpret(input) {
+        Ok(closeup::Command::Agent { .. }) => ui.workspace.open_pane(PaneKind::Agent),
+        Ok(closeup::Command::Terminal { .. }) => ui.workspace.open_pane(PaneKind::Terminal),
+        Ok(closeup::Command::Close { .. } | closeup::Command::Diff { .. }) | Err(_) => {}
+    }
 }
 
 /// Workspace 画面のキー処理。Ctrl-C は常に終了し、それ以外は最前面 modal、現在 mode の
@@ -1489,6 +1507,31 @@ mod tests {
         ui.modal = None;
         ui.enter_closeup();
         assert_eq!(ui.closeup.selection_mode(), ModalSelectionMode::Prompt);
+    }
+
+    #[test]
+    fn closeup_prompt_executes_the_typed_action() {
+        let workspace = WorkspaceView::new(ws("prompt"), state("prompt"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Prompt,
+        );
+
+        ui.enter_closeup();
+        for character in "agent".chars() {
+            step_workspace(&mut ui, Key::Char(character));
+        }
+        step_workspace(&mut ui, Key::Enter);
+        assert_eq!(ui.workspace.pane().tabs().len(), 1);
+
+        ui.enter_closeup();
+        for character in "terminal".chars() {
+            step_workspace(&mut ui, Key::Char(character));
+        }
+        step_workspace(&mut ui, Key::Enter);
+        assert_eq!(ui.workspace.pane().tabs().len(), 2);
     }
 
     #[test]
