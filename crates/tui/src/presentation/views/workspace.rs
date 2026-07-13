@@ -32,6 +32,8 @@ const LEFT_WIDTH: usize = 28;
 const CHROME_ROWS: usize = 2;
 /// The v1 sidebar rabbit occupies three stable rows above the footer.
 const MASCOT_ROWS: usize = 3;
+/// v1's fixed inset from the sidebar's left edge.
+const MASCOT_INDENT: usize = 1;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -578,8 +580,12 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     }
 
     let body_capacity = height - 1;
-    let show_heading = body_capacity > 1;
-    let viewport_capacity = body_capacity - usize::from(show_heading);
+    // Keep the menu usable first.  Once it has a heading and at least one row,
+    // reserve the three bottom rows for the v1-style usagi above the footer.
+    let show_mascot = body_capacity >= MASCOT_ROWS + 2;
+    let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
+    let show_heading = content_capacity > 1;
+    let viewport_capacity = content_capacity - usize::from(show_heading);
     let start = viewport_start(ws.selected, ws.row_count(), viewport_capacity);
     let end = (start + viewport_capacity).min(ws.row_count());
 
@@ -590,7 +596,10 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     for index in start..end {
         rows.push(selectable_row(width, ws, index));
     }
-    rows.resize(body_capacity, String::new());
+    rows.resize(content_capacity, String::new());
+    if show_mascot {
+        rows.extend(home_mascot(width, 0));
+    }
     rows.push(left_footer(width, ws));
     rows
 }
@@ -793,16 +802,16 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
 
 /// The v1 sidebar mascot's resting browsing pose. It is deliberately a pure
 /// function of the reducer-owned tick: the eyes blink and one ear twitches,
-/// while every frame keeps the same three-row rectangle.
+/// while every frame keeps the same three-row rectangle. The shared fixed inset
+/// keeps the ears, face, and feet aligned as one left-bottom sidebar block.
 fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
     let phase = tick % 6;
     let ears = if phase == 5 { " (\\(/" } else { " (\\(\\" };
     let face = if phase == 4 { " (-.-)?" } else { " (o.o)?" };
     let feet = "o(_(\")(\")";
     [ears, face, feet].map(|line| {
-        let left = width.saturating_sub(widgets::display_width(line)) / 2;
         Role::Feature.style().bold().paint(&widgets::pad_to_width(
-            &format!("{}{}", " ".repeat(left), line),
+            &format!("{}{}", " ".repeat(MASCOT_INDENT), line),
             width,
         ))
     })
@@ -964,7 +973,10 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HomeProjection, Mode, ProjectedSession, Workspace, render, render_home};
+    use super::{
+        CHROME_ROWS, HomeProjection, LEFT_WIDTH, MASCOT_INDENT, Mode, ProjectedSession, Workspace,
+        render, render_home,
+    };
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, SafeError, SafeMessage,
@@ -1493,6 +1505,40 @@ mod tests {
         assert!(text.contains("Terminal"));
         assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
+    }
+
+    #[test]
+    fn render_places_the_v1_style_usagi_above_the_left_footer() {
+        let frame = render(30, 100, &workspace());
+        let left_width = LEFT_WIDTH;
+        let left_rows = frame[CHROME_ROWS..]
+            .iter()
+            .map(|line| strip(line).chars().take(left_width).collect::<String>())
+            .collect::<Vec<_>>();
+
+        let ears = left_rows
+            .iter()
+            .position(|line| line.contains("(\\(\\"))
+            .expect("sidebar ears");
+        assert!(left_rows[ears + 1].contains("(o.o)?"));
+        assert!(left_rows[ears + 2].contains("o(_(\")(\")"));
+        assert!(left_rows[ears + 3].contains("[switch]"));
+        assert_eq!(left_rows[ears].find('('), Some(MASCOT_INDENT + 1));
+        assert_eq!(left_rows[ears + 1].find('('), Some(MASCOT_INDENT + 1));
+        assert_eq!(left_rows[ears + 2].find('o'), Some(MASCOT_INDENT));
+    }
+
+    #[test]
+    fn render_prioritizes_the_session_menu_over_the_usagi_when_short() {
+        let frame = render(6, 100, &workspace());
+        let text = frame
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("> root"));
+        assert!(!text.contains("(o.o)?"));
     }
 
     #[test]
