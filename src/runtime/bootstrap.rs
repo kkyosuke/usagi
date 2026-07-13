@@ -30,22 +30,22 @@ fn wait_for_ready<S, C>(connect: &mut C) -> io::Result<S>
 where
     C: FnMut() -> io::Result<S>,
 {
-    let mut last_error = None;
+    let mut last_error = io::Error::other("daemon did not publish an endpoint");
     for _ in 0..READINESS_ATTEMPTS {
         match connect() {
             Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
+            Err(error) => last_error = error,
         }
         thread::sleep(READINESS_DELAY);
     }
-    let detail = last_error.map_or_else(
-        || "daemon did not publish an endpoint".to_owned(),
-        |error| format!("daemon did not become ready: {error}"),
-    );
-    Err(io::Error::new(io::ErrorKind::TimedOut, detail))
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("daemon did not become ready: {last_error}"),
+    ))
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::connect_or_start;
     use std::cell::Cell;
