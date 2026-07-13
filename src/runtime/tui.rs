@@ -278,8 +278,9 @@ impl Terminal for CrosstermTerminal {
                     self.renderer.reset_surface();
                     return Ok(Key::Other);
                 }
-                RuntimeEvent::Backend(()) => return Ok(Key::Other),
-                RuntimeEvent::Tick => {}
+                // Tick wakes the TUI while a background session command owns
+                // the daemon port, so the pending skeleton can redraw.
+                RuntimeEvent::Backend(()) | RuntimeEvent::Tick => return Ok(Key::Other),
             }
         }
     }
