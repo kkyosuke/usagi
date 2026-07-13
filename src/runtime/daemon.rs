@@ -555,10 +555,43 @@ pub(crate) fn client(
         || run_lifecycle(&exe, "start"),
         || run_lifecycle(&exe, "restart"),
         &expected_build,
-        matches!(paths::build_channel(), paths::BuildChannel::Development),
+        bootstrap::should_force_restart(
+            matches!(paths::build_channel(), paths::BuildChannel::Development),
+            invoked_by_cargo_run(),
+        ),
         IpcClient::server_build,
     )
     .map_err(|error| ClientError::Lifecycle(error.to_string()))
+}
+
+/// `cargo run` remains the only debug entry point that intentionally replaces
+/// a matching development daemon. Integration tests execute the binary from a
+/// test harness, so their parent is not Cargo and they reuse the endpoint.
+#[cfg(unix)]
+#[coverage(off)]
+fn invoked_by_cargo_run() -> bool {
+    let parent = unsafe { libc::getppid() };
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &parent.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    let words: Vec<_> = command.split_whitespace().collect();
+    words
+        .first()
+        .is_some_and(|program| program.rsplit('/').next() == Some("cargo"))
+        && words.get(1).is_some_and(|argument| *argument == "run")
+}
+
+#[cfg(not(unix))]
+#[coverage(off)]
+fn invoked_by_cargo_run() -> bool {
+    false
 }
 
 #[coverage(off)]

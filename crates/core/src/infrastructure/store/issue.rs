@@ -491,11 +491,15 @@ mod tests {
         let text = fs::read_to_string(store.index_path()).unwrap();
         assert!(text.contains("\"version\": 1"));
 
-        let entry = fs::read_dir(home.path().join("logs"))
-            .expect("logs dir exists")
-            .next()
-            .expect("a log file was written")
-            .expect("readable entry");
+        let entry = fs::read_dir(
+            crate::infrastructure::paths::data_dir()
+                .unwrap()
+                .join("logs"),
+        )
+        .expect("logs dir exists")
+        .next()
+        .expect("a log file was written")
+        .expect("readable entry");
         assert!(
             fs::read_to_string(entry.path())
                 .unwrap()
@@ -558,11 +562,15 @@ mod tests {
         assert_eq!(rebuilt, vec![1, 3]);
         assert!(store.scan().is_err());
 
-        let entry = fs::read_dir(home.path().join("logs"))
-            .expect("logs dir exists")
-            .next()
-            .expect("a log file was written")
-            .expect("readable entry");
+        let entry = fs::read_dir(
+            crate::infrastructure::paths::data_dir()
+                .unwrap()
+                .join("logs"),
+        )
+        .expect("logs dir exists")
+        .next()
+        .expect("a log file was written")
+        .expect("readable entry");
         assert!(
             fs::read_to_string(entry.path())
                 .unwrap()

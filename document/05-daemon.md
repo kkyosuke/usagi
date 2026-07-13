@@ -33,7 +33,8 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 `usagi daemon` は daemon 面の process lifecycle を操作する入口である。すべての TUI 起動、daemon-owned
 CLI operation、MCP server は共有 bootstrap を通る。release binary は同じ build identity の active endpoint を
 再利用し、異なる build は lifecycle restart と readiness / handshake 確認を経て切替える。debug binary は
-development channel の daemon を bootstrap ごとに restart する。locator はあるが接続不能・draining・不正な
+development channel を使い、ローカルの `cargo run` 起動時だけ同 build daemon も restart する。test harness や
+直接実行した debug binary は同 build daemon を再利用する。locator はあるが接続不能・draining・不正な
 場合は replacement を起動せず、安全な typed lifecycle error を表示する。client が daemon-owned terminal や
 managed session をローカルに代替実行することはない。
 
