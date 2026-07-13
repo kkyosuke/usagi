@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::agent::AgentProfileId;
+use crate::domain::id::{SessionId, WorkspaceId};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
     ErrorCode, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode,
@@ -32,6 +34,25 @@ pub enum DaemonRequest {
         action: TerminalAction,
         payload: Value,
     },
+    /// Start an Agent owned by the daemon. The daemon resolves the selected
+    /// session's worktree and its default profile; clients never send argv,
+    /// environment values, or a local process fallback.
+    Agent {
+        operation_id: String,
+        intent: AgentLaunchIntent,
+    },
+}
+
+/// Product-neutral Agent launch intent sent by a TUI client.
+///
+/// The stable session identity is enough for the daemon to resolve its durable
+/// worktree scope. An omitted profile deliberately delegates selection to the
+/// daemon's default policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchIntent {
+    pub workspace: WorkspaceId,
+    pub session: SessionId,
+    pub profile: Option<AgentProfileId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

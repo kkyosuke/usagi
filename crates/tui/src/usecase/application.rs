@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
 
+/// Daemon-authoritative Agent launch adapter for Closeup panes.
+pub mod agent_launch;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
