@@ -43,6 +43,12 @@ Closeup tab は pending operation または live `TerminalRef` を持つ。pendi
 `OperationId` にだけ対応し、live tab は完全な `TerminalRef` で識別する。選択中の live tab だけを
 attach し、選択外の tab は background のまま保持する。
 
+右ペインは tab を Chrome 風の chip と、その直下の active marker で描く。chip の表示順・label は
+表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
+幅が狭い場合も ANSI を閉じた上で chip を clipping する。tab が無い target は、静的うさぎと
+`No tabs stirring yet. Enter starts one.` の案内を中央に表示する。この空状態は tick や runtime 接続に
+依存しない。overlay はこの Home frame を背景のまま合成する。
+
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
 変化したときだけ送る。detach はこの client の subscription を外すだけで、PTY を kill しない。

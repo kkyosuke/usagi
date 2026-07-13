@@ -14,6 +14,7 @@
 pub mod icon;
 pub mod loading;
 pub mod modal;
+pub mod tab_chrome;
 pub mod text_input;
 
 pub use text_input::TextInput;
