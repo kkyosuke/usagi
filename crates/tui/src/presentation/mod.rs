@@ -897,6 +897,26 @@ pub fn run_workspace_with_session_port(
     .map(|_| Exit::Quit)
 }
 
+/// Open list 用に、registry の生値と recent projection を結び付ける。
+///
+/// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
+/// projection が無いときだけ、生値から 0 件の overview を組み立てる。
+#[coverage(off)]
+fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
+    let open_overviews = recent
+        .iter()
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => Some(overview.clone()),
+            Recent::Unite(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if open_overviews.is_empty() && !workspaces.is_empty() {
+        Open::new(workspaces)
+    } else {
+        Open::with_overviews(open_overviews)
+    }
+}
+
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
@@ -920,7 +940,7 @@ pub fn run_with_settings(
     settings: &mut dyn SettingsPort,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
-    let mut open = Open::new(workspaces);
+    let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
     let mut config_form = Config::load(settings);
     let mut screen = match start {
@@ -990,7 +1010,7 @@ pub fn run_with_settings(
                     }
                 }
                 OpenStep::ConfirmCleanup => {
-                    let removed = loader.cleanup_missing(open.workspaces())?;
+                    let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
                 }
             },

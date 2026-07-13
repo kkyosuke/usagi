@@ -1,7 +1,8 @@
 //! Open 画面（登録済み workspace を開く）。
 //!
 //! welcome の Open から開く画面。usagi に登録済みの workspace を一覧で並べ、選んで開く。
-//! 各行は workspace 名と最終利用の相対時刻を出し、リストの下に選択中の絶対パスを添える。
+//! 各 row は workspace 名に続けて session 数、未完了 issue 数、最終更新の相対時刻を
+//! 2 行で出し、リストの下に選択中の絶対パスを添える。
 //! 状態（[`Open`]）は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。マスコット・タイトル・フッタの配置は共通の
 //! [`mascot_screen`] レイアウトに任せ、この view はボディ（一覧＋選択パス）だけを組む。
@@ -14,7 +15,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
 
-use usagi_core::domain::workspace::Workspace;
+use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
@@ -25,14 +26,14 @@ const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
 const FOOTER: &str = "↑↓/jk move / / filter / u Unite / c cleanup / Enter open / Esc back / q quit";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
-const BLOCK_WIDTH: usize = 52;
+const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
-const NAME_WIDTH: usize = 24;
+const NAME_WIDTH: usize = 42;
 
 /// Open 画面の状態。登録済み workspace の一覧と選択位置を持つ。端末 IO は持たない。
 #[derive(Debug, Clone)]
 pub struct Open {
-    workspaces: Vec<Workspace>,
+    workspaces: Vec<WorkspaceOverview>,
     selected_index: usize,
     filter: String,
     filtering: bool,
@@ -42,10 +43,29 @@ pub struct Open {
 }
 
 impl Open {
-    /// workspace 一覧（登録順）からメニューを組む。
+    /// workspace 一覧から、session などの集計値なしのメニューを組む。
     #[must_use]
     #[coverage(off)]
     pub fn new(workspaces: Vec<Workspace>) -> Self {
+        Self::with_overviews(
+            workspaces
+                .into_iter()
+                .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0))
+                .collect(),
+        )
+    }
+
+    /// 集計済み overview から名前順のメニューを組む。
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_overviews(mut workspaces: Vec<WorkspaceOverview>) -> Self {
+        workspaces.sort_by(|left, right| {
+            left.workspace
+                .name
+                .to_lowercase()
+                .cmp(&right.workspace.name.to_lowercase())
+                .then_with(|| left.workspace.name.cmp(&right.workspace.name))
+        });
         Self {
             workspaces,
             selected_index: 0,
@@ -60,8 +80,11 @@ impl Open {
     /// 一覧の workspace。
     #[must_use]
     #[coverage(off)]
-    pub fn workspaces(&self) -> &[Workspace] {
-        &self.workspaces
+    pub fn workspaces(&self) -> Vec<Workspace> {
+        self.workspaces
+            .iter()
+            .map(|overview| overview.workspace.clone())
+            .collect()
     }
 
     /// 選択中の項目の添字。
@@ -82,7 +105,9 @@ impl Open {
     #[must_use]
     #[coverage(off)]
     pub fn selected(&self) -> Option<&Workspace> {
-        self.filtered().get(self.selected_index).copied()
+        self.filtered()
+            .get(self.selected_index)
+            .map(|overview| &overview.workspace)
     }
 
     /// Whether filter text input owns printable keys.
@@ -163,8 +188,8 @@ impl Open {
     pub fn unite_paths(&self) -> Vec<std::path::PathBuf> {
         self.workspaces
             .iter()
-            .filter(|workspace| self.unite_paths.contains(&workspace.path))
-            .map(|workspace| workspace.path.clone())
+            .filter(|overview| self.unite_paths.contains(&overview.workspace.path))
+            .map(|overview| overview.workspace.path.clone())
             .collect()
     }
 
@@ -184,41 +209,40 @@ impl Open {
     #[coverage(off)]
     pub fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
         self.workspaces
-            .retain(|workspace| !paths.iter().any(|path| path == &workspace.path));
+            .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
         self.unite_paths.retain(|path| !paths.contains(path));
         self.cleanup_confirming = false;
         self.selected_index = 0;
     }
 
     #[coverage(off)]
-    fn filtered(&self) -> Vec<&Workspace> {
+    fn filtered(&self) -> Vec<&WorkspaceOverview> {
         let filter = self.filter.to_lowercase();
         self.workspaces
             .iter()
-            .filter(|workspace| workspace.name.to_lowercase().contains(&filter))
+            .filter(|overview| overview.workspace.name.to_lowercase().contains(&filter))
             .collect()
     }
 
-    /// `workspace` と同じ path の項目に touch 後の値を反映し、最終利用時刻の降順へ
-    /// 再整列する。順序が変わっても現在選択中の path を保つ。
+    /// `workspace` と同じ path の項目に touch 後の値を反映する。
+    ///
+    /// Open list は名前順なので、最終利用時刻の更新で行を並べ替えない。
     #[coverage(off)]
     pub(crate) fn record_opened(&mut self, workspace: &Workspace) {
         let selected_path = self.selected().map(|selected| selected.path.clone());
         let Some(current) = self
             .workspaces
             .iter_mut()
-            .find(|current| current.path == workspace.path)
+            .find(|current| current.workspace.path == workspace.path)
         else {
             return;
         };
-        *current = workspace.clone();
-        self.workspaces
-            .sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
+        current.workspace = workspace.clone();
         self.selected_index = selected_path
             .and_then(|selected_path| {
                 self.filtered()
                     .iter()
-                    .position(|current| current.path == selected_path)
+                    .position(|current| current.workspace.path == selected_path)
             })
             .unwrap_or_default();
     }
@@ -258,9 +282,9 @@ fn fit(text: &str, width: usize) -> String {
     format!("{clipped}{}", " ".repeat(width.saturating_sub(visible)))
 }
 
-/// 一覧の 1 行 `> name...... 3d ago`。選択行はカーソルと名前を強調する。
+/// 一覧の名前行。選択行はカーソルと名前を強調する。
 #[coverage(off)]
-fn workspace_row(workspace: &Workspace, is_selected: bool, now: DateTime<Utc>) -> String {
+fn workspace_name_row(workspace: &Workspace, is_selected: bool) -> String {
     let cursor = if is_selected {
         Role::Danger.style().bold().paint(">")
     } else {
@@ -272,10 +296,19 @@ fn workspace_row(workspace: &Workspace, is_selected: bool, now: DateTime<Utc>) -
     } else {
         name
     };
-    let relative = Style::new()
-        .dim()
-        .paint(&widgets::relative_time(workspace.updated_at, now));
-    format!("{cursor} {name}  {relative}")
+    format!("{cursor} {name}")
+}
+
+/// 一覧の名前行の下に置く、workspace の状態をひと目で読める補助行。
+#[coverage(off)]
+fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> String {
+    let sessions = overview.session_count;
+    let session_label = if sessions == 1 { "session" } else { "sessions" };
+    let updated = widgets::relative_time(overview.workspace.updated_at, now);
+    Style::new().dim().paint(&format!(
+        "    ⎇ {sessions} {session_label}  ·  ● {} open  ·  ◷ updated {updated}",
+        overview.open_issue_count,
+    ))
 }
 
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
@@ -285,7 +318,7 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
 
     let mut lines = vec![
-        indent(&Role::Success.style().bold().paint("Workspaces")),
+        indent(&Role::Success.style().bold().paint("Workspaces · A–Z")),
         String::new(),
     ];
 
@@ -303,26 +336,27 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         &Role::Success
             .style()
             .bold()
-            .paint(&format!("Workspaces · {mode}")),
+            .paint(&format!("Workspaces · A–Z · {mode}")),
     );
     if open.filtering() || !open.filter().is_empty() {
         lines.push(indent(&format!(
-            "Filter: {}{}",
+            "⌕ {}{}",
             open.filter(),
             if open.filtering() { "▌" } else { "" }
         )));
         lines.push(String::new());
     }
-    for (i, workspace) in open.filtered().into_iter().enumerate() {
-        let marker = if open.is_unite() && open.unite_paths.contains(&workspace.path) {
+    for (i, overview) in open.filtered().into_iter().enumerate() {
+        let marker = if open.is_unite() && open.unite_paths.contains(&overview.workspace.path) {
             "✓ "
         } else {
             ""
         };
         lines.push(indent(&format!(
             "{marker}{}",
-            workspace_row(workspace, i == open.selected_index(), now,)
+            workspace_name_row(&overview.workspace, i == open.selected_index())
         )));
+        lines.push(indent(&workspace_stats_row(overview, now)));
     }
 
     // 一覧の下に選択中 workspace の絶対パスを添える（どこを開くのか一目でわかるように）。
@@ -360,7 +394,7 @@ mod tests {
     use crate::presentation::widgets::display_width;
     use chrono::{DateTime, Duration, Utc};
     use std::path::Path;
-    use usagi_core::domain::workspace::Workspace;
+    use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -444,14 +478,14 @@ mod tests {
     }
 
     #[test]
-    fn record_opened_updates_recency_order_and_keeps_the_selected_path() {
+    fn record_opened_keeps_alphabetical_order_and_the_selected_path() {
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 10)]);
         let touched = workspace("beta", 0);
 
         open.record_opened(&touched);
 
-        assert_eq!(open.workspaces()[0], touched);
-        assert_eq!(open.selected_index(), 1);
+        assert_eq!(open.workspaces()[1], touched);
+        assert_eq!(open.selected_index(), 0);
         assert_eq!(open.selected().unwrap().path, Path::new("/tmp/alpha"));
     }
 
@@ -464,6 +498,8 @@ mod tests {
         assert!(joined.contains("alpha"));
         assert!(joined.contains("beta"));
         assert!(joined.contains("11min ago"));
+        assert!(joined.contains("⎇ 0 sessions"));
+        assert!(joined.contains("updated 11min ago"));
         // 選択中（先頭 alpha）の絶対パスが下に出る。
         assert!(joined.contains("↳ /tmp/alpha"));
         // フッタのヒント。
@@ -509,7 +545,7 @@ mod tests {
 
         assert_eq!(open.filter(), "bE");
         assert_eq!(open.selected().unwrap().name, "Beta");
-        assert!(rendered(&open).contains("Filter: bE▌"));
+        assert!(rendered(&open).contains("⌕ bE▌"));
         assert!(!rendered(&open).contains("↳ /tmp/alpha"));
     }
 
@@ -536,5 +572,21 @@ mod tests {
             open.unite_paths(),
             vec![Path::new("/tmp/beta").to_path_buf()]
         );
+    }
+
+    #[test]
+    fn overview_rows_sort_case_insensitively_and_show_live_figures() {
+        let mut zeta = workspace("zeta", 5);
+        zeta.updated_at = now() - Duration::hours(2);
+        let alpha = workspace("Alpha", 5);
+        let open = Open::with_overviews(vec![
+            WorkspaceOverview::new(zeta, 3, 2, 1),
+            WorkspaceOverview::new(alpha, 1, 0, 0),
+        ]);
+
+        assert_eq!(open.workspaces()[0].name, "Alpha");
+        let joined = rendered(&open);
+        assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
+        assert!(joined.contains("Workspaces · A–Z"));
     }
 }
