@@ -19,23 +19,17 @@ pub struct Tab<'a> {
     pub pending_indicator: Option<&'a str>,
 }
 
-/// v1's selected-session gutter glyph, reused as the one-cell pending-pane
-/// runner. It is a Nerd Font PUA glyph and therefore occupies one terminal
-/// column where the v1 sidebar icon does.
-pub const SELECTED_SESSION_RABBIT: &str = "\u{f0907}";
-
-/// The one-cell, coloured indicator for an in-flight pane launch.
+/// The coloured runner for an in-flight pane launch.
 ///
-/// The glyph is intentionally the only coloured portion of a pending chip;
-/// `frame` alternates the semantic colour while the tab's label remains dim.
+/// Only the rabbit carries colour. Its leading padding advances with `frame`,
+/// so it runs through the loading chip while the tab label stays dim.
 #[must_use]
 pub fn pending_indicator(frame: u64) -> String {
-    let style = if frame.is_multiple_of(2) {
-        Role::Danger.style().bold()
-    } else {
-        Role::Warning.style().bold()
-    };
-    style.paint(SELECTED_SESSION_RABBIT)
+    format!(
+        "{}{}",
+        " ".repeat((frame % 4) as usize),
+        Role::Feature.style().bold().paint("🐇")
+    )
 }
 
 /// Chrome 風 tab strip を上段の chip と下段の active marker として描く。
@@ -54,9 +48,8 @@ pub fn render(width: usize, tabs: &[Tab<'_>]) -> [String; 2] {
         let text = format!(" {}{} ", tab.pending_indicator.unwrap_or(""), tab.label);
         let chip_width = super::display_width(&text);
         if tab.selected {
-            // A pending glyph owns its colour.  Keep its label neutral so the
-            // coloured state is one character, as in v1's selected-session
-            // gutter marker.
+            // The running rabbit owns its colour. Keep its label neutral so
+            // loading looks like a rabbit crossing the chip, not a colour band.
             let chip = if tab.pending_indicator.is_some() {
                 Style::new().dim().paint(&text)
             } else {
@@ -126,9 +119,7 @@ pub fn empty_pane_with_detail(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SELECTED_SESSION_RABBIT, Tab, empty_pane, empty_pane_with_detail, pending_indicator, render,
-    };
+    use super::{Tab, empty_pane, empty_pane_with_detail, pending_indicator, render};
     use crate::presentation::widgets::display_width;
 
     fn strip(text: &str) -> String {
@@ -186,10 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_indicator_is_a_coloured_one_cell_v1_rabbit() {
+    fn pending_indicator_is_a_coloured_rabbit_that_runs_across_frames() {
         let indicator = pending_indicator(0);
-        assert!(indicator.contains(SELECTED_SESSION_RABBIT));
-        assert_eq!(display_width(&indicator), 1);
+        let later = pending_indicator(3);
+        assert!(indicator.contains('🐇'));
+        assert_eq!(display_width(&indicator), 2);
+        assert_ne!(indicator, later);
+        assert_eq!(display_width(&later), 5);
         assert!(indicator.ends_with("\u{1b}[0m"));
         let tab = render(
             40,
@@ -199,7 +193,7 @@ mod tests {
                 pending_indicator: Some(&indicator),
             }],
         );
-        assert!(tab[0].contains(SELECTED_SESSION_RABBIT));
+        assert!(tab[0].contains('🐇'));
         assert!(tab[0].contains("\u{1b}[2m"));
     }
 

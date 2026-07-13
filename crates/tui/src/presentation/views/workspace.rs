@@ -719,6 +719,9 @@ fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
         .map(|(tab, label)| widgets::session_tab::Tab {
             label,
             selected: pane_tab_selected(tab, ws.pane().selected()),
+            // The legacy Workspace loop has no frame clock; HomeProjection
+            // supplies the animated pending glyph in the runtime-backed path.
+            pending_indicator: None,
         })
         .collect::<Vec<_>>();
     widgets::session_tab::render(width, &tabs)
