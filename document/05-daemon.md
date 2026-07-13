@@ -150,6 +150,9 @@ non-blocking に fan-out する。observer が遅い場合は中間 snapshot を
 Agent runtime の進行を block しない。登録、解除、再接続時の protocol は
 [4. daemon IPC](04-ipc.md#daemon-metrics-subscription) を正本とする。
 
+TUI は最新 snapshot を workspace の左ペイン下部、v1 互換の sidebar footer の直上に表示する。
+この行は操作対象ではないため、狭い terminal では session 一覧と footer を優先して省略される。
+
 ## generation と orphan safety
 
 generation coordinator は active daemon を一つだけ持つ。active generation だけが session/control mutation
