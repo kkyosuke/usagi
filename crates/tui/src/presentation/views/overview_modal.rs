@@ -116,7 +116,13 @@ impl OverviewModal {
             self.input = TextInput::with_value(&input);
             return;
         }
-        if let Some(command) = self.matches().get(self.selected) {
+        // Top-level candidates are only valid while the cursor is still on the
+        // command word.  Once arguments are present, `completion` above is the
+        // sole source of candidates; falling back to `matches` would otherwise
+        // replace an uncompletable argument with its first command word.
+        if !self.input.value().contains(char::is_whitespace)
+            && let Some(command) = self.matches().get(self.selected)
+        {
             self.input = TextInput::with_value(command.name);
         }
     }
@@ -492,6 +498,22 @@ mod tests {
         }
         modal.complete_selected();
         assert_eq!(modal.input(), "session create");
+    }
+
+    #[test]
+    fn tab_without_a_completion_keeps_the_closeup_command_input_unchanged() {
+        let mut modal = OverviewModal::new();
+        type_str(&mut modal, "session create a");
+        modal.cursor_left();
+        let input = modal.input().to_owned();
+        let cursor = modal.cursor();
+        let selected = modal.selected();
+
+        modal.complete_selected();
+
+        assert_eq!(modal.input(), input);
+        assert_eq!(modal.cursor(), cursor);
+        assert_eq!(modal.selected(), selected);
     }
 
     #[test]
