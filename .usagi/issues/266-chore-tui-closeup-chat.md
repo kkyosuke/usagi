@@ -1,13 +1,13 @@
 ---
 number: 266
 title: chore(tui): Closeup の未実装 chat 操作を削除する
-status: todo
+status: done
 priority: high
 labels: [chore, tui]
 dependson: []
 related: [143]
 created_at: 2026-07-13T00:17:05.050534+00:00
-updated_at: 2026-07-13T00:17:05.050534+00:00
+updated_at: 2026-07-13T00:21:55.523464+00:00
 ---
 
 ## 目的

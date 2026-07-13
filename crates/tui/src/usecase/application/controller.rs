@@ -1945,7 +1945,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
                 None
             }
         },
-        closeup::Command::Chat { .. } | closeup::Command::Diff { .. } => {
+        closeup::Command::Diff { .. } => {
             state.notice = Some(Notice::new(format!("{command_name} is not available")));
             None
         }
@@ -2883,6 +2883,20 @@ mod tests {
                 session,
                 force: true,
             }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenCloseupOverlay));
+        assert!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitCloseup("chat".to_owned())),
+            )
+            .is_empty()
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("unknown closeup command: \"chat\"")
         );
     }
 
