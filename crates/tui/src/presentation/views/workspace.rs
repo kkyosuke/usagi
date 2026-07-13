@@ -675,21 +675,15 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
-/// closeup の header: フォーカス中 session の identity。tab は次行に描画する。
+/// closeup の header: フォーカス中 session の identity。
 #[coverage(off)]
-fn closeup_header(width: usize, ws: &Workspace) -> String {
-    let name = Role::Accent.style().bold().paint(ws.focused_label());
-    let detail = ws.focused_session().map_or_else(
-        || ws.path().display().to_string(),
-        |session| format!("{} · {}", session.name, session.origin),
-    );
-    let detail = Style::new().dim().paint(&detail);
-    widgets::pad_to_width(&format!(" {name}  {detail}"), width)
+fn closeup_header(ws: &Workspace) -> String {
+    format!(" {}", Role::Accent.style().bold().paint(ws.focused_label()))
 }
 
-/// tabmenu: pane reducer の stable selection を Chrome 風タブへ投影する。
+/// tabmenu: pane reducer の stable selection を session 名の右の Chrome 風タブへ投影する。
 #[coverage(off)]
-fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
+fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
     let labels = ws
         .pane()
         .tabs()
@@ -709,24 +703,7 @@ fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
             pending_indicator: None,
         })
         .collect::<Vec<_>>();
-    widgets::session_tab::render(width, &tabs)
-}
-
-/// content: アクティブなタブと、フォーカス中の実 workspace / session path。
-#[coverage(off)]
-fn content_lines(ws: &Workspace) -> Vec<String> {
-    let (kind, path) = ws.focused_session().map_or_else(
-        || ("workspace", ws.path()),
-        |session| ("session", session.root.as_path()),
-    );
-    vec![
-        String::new(),
-        Style::new()
-            .dim()
-            .paint(&format!("  {kind} '{}'", ws.focused_label())),
-        String::new(),
-        Style::new().dim().paint(&format!("  {}", path.display())),
-    ]
+    widgets::session_tab::render_with_prefix(width, header, &tabs)
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
@@ -744,19 +721,20 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
 #[coverage(off)]
 fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = vec![closeup_header(width, ws)];
+    let header = closeup_header(ws);
+    let mut rows = Vec::new();
     if ws.has_panes() {
-        let chrome = tab_menu(width, ws);
+        let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
     } else {
+        rows.push(widgets::pad_to_width(&header, width));
         rows.extend(widgets::session_tab::empty_pane(
             width,
             height.saturating_sub(2),
             "No tabs stirring yet. Enter starts one.",
         ));
     }
-    rows.extend(content_lines(ws));
     with_footer(rows, height, right_footer(width, ws))
 }
 
@@ -1522,7 +1500,7 @@ mod tests {
         assert_eq!(ws.selected(), 0);
         let text = joined(&ws);
         assert!(text.contains("0 sessions"));
-        assert!(text.contains("/tmp/empty"));
+        assert!(!text.contains("/tmp/empty"));
     }
 
     #[test]
@@ -1643,7 +1621,7 @@ mod tests {
         assert!(text.contains("daemon"));
         assert!(text.contains("mcp"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(text.contains("/tmp/actual"));
+        assert!(!text.contains("/tmp/actual"));
         assert!(text.contains("root"));
         assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
@@ -1700,16 +1678,27 @@ mod tests {
         let mut ws = workspace();
         let root_text = joined(&ws);
         assert!(root_text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(root_text.contains("/tmp/actual"));
+        assert!(!root_text.contains("/tmp/actual"));
 
         ws.select_next();
         let session_text = joined(&ws);
-        assert!(session_text.contains("tui · human"));
+        assert!(session_text.contains("UI work"));
         assert!(session_text.contains("No tabs stirring yet. Enter starts one."));
+
+        ws.open_pane(PaneKind::Terminal);
+        let frame = render(30, 100, &ws);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("UI work").expect("session name");
+        let tab = right_header
+            .find("Terminal (resolving)")
+            .expect("terminal tab");
+        assert!(name < tab);
+        assert!(!frame.iter().any(|line| strip(line).contains("/tmp/actual")));
+        ws.close_pane();
 
         ws.select_next();
         let second_session_text = joined(&ws);
-        assert!(second_session_text.contains("daemon · mcp"));
+        assert!(second_session_text.contains("daemon"));
         assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
     }
 
