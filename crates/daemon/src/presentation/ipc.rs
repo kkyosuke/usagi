@@ -48,9 +48,9 @@ pub fn handshake<R: Read, W: Write>(
 }
 
 /// Dispatch requests without leaking presentation-local state mutation back to
-/// callers. Session operations are admitted durably by their producer-supplied
-/// operation id; terminal requests retain their typed body for the terminal
-/// owner to process.
+/// callers. Session and Agent operations are admitted durably by their
+/// producer-supplied operation id; terminal requests retain their typed body
+/// for the terminal owner to process.
 #[must_use]
 #[coverage(off)]
 pub fn dispatch(
@@ -61,7 +61,7 @@ pub fn dispatch(
     let outcome = body
         .get("kind")
         .and_then(serde_json::Value::as_str)
-        .filter(|kind| *kind == "session")
+        .filter(|kind| matches!(*kind, "session" | "agent"))
         .and_then(|_| body.get("operation_id"))
         .and_then(serde_json::Value::as_str)
         .map_or(ResponseOutcome::Ok, |operation_id| {
@@ -392,5 +392,32 @@ mod tests {
         assert!(
             matches!(reply.kind, EnvelopeKind::Response { request_id: usagi_core::infrastructure::ipc::RequestId(ref value), .. } if value == "r")
         );
+    }
+
+    #[test]
+    fn dispatch_admits_agent_launch_with_its_producer_operation() {
+        let hello = handshake(
+            &mut Cursor::new({
+                let mut bytes = Vec::new();
+                write_json_frame(&mut bytes, &hello(), 1024).unwrap();
+                bytes
+            }),
+            &mut Vec::new(),
+            &server(),
+        )
+        .unwrap()
+        .unwrap();
+        let reply = dispatch(
+            usagi_core::infrastructure::ipc::RequestId("r".into()),
+            json!({"kind": "agent", "operation_id": "operation"}),
+            &hello,
+        );
+        assert!(matches!(
+            reply.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Accepted { operation_id: OperationId(ref value), operation_revision: 1 },
+                ..
+            } if value == "operation"
+        ));
     }
 }
