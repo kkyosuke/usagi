@@ -3,7 +3,7 @@
 //! tab の identity / selection は reducer の責務である。この widget は投影済みの
 //! `selected` フラグだけを描き、label や表示順を identity として扱わない。
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 
 use super::icon;
 
@@ -14,6 +14,24 @@ pub struct Tab<'a> {
     pub label: &'a str,
     /// reducer が stable identity から決めた選択状態。
     pub selected: bool,
+    /// Pending launch indicator. Only this one-cell glyph is coloured so a
+    /// loading tab does not turn its whole label into a moving colour band.
+    pub pending_indicator: Option<&'a str>,
+}
+
+/// The coloured runner for an in-flight pane launch.
+///
+/// Only the rabbit carries colour. Its leading padding advances with `frame`,
+/// so it runs through the loading chip while the tab label stays dim.
+const RUNNING_RABBIT: &str = "\u{f0907}";
+
+#[must_use]
+pub fn pending_indicator(frame: u64) -> String {
+    format!(
+        "{}{}",
+        " ".repeat((frame % 4) as usize),
+        Role::Feature.style().bold().paint(RUNNING_RABBIT)
+    )
 }
 
 /// Chrome 風 tab strip を上段の chip と下段の active marker として描く。
@@ -29,10 +47,17 @@ pub fn render(width: usize, tabs: &[Tab<'_>]) -> [String; 2] {
             chips.push(' ');
             marker.push(' ');
         }
-        let text = format!(" {} ", tab.label);
+        let text = format!(" {}{} ", tab.pending_indicator.unwrap_or(""), tab.label);
         let chip_width = super::display_width(&text);
         if tab.selected {
-            chips.push_str(&Role::Accent.style().bold().paint(&text));
+            // The running rabbit owns its colour. Keep its label neutral so
+            // loading looks like a rabbit crossing the chip, not a colour band.
+            let chip = if tab.pending_indicator.is_some() {
+                Style::new().dim().paint(&text)
+            } else {
+                Role::Accent.style().bold().paint(&text)
+            };
+            chips.push_str(&chip);
             marker.push_str(&Role::Accent.style().bold().paint(&"▔".repeat(chip_width)));
         } else {
             chips.push_str(&Style::new().dim().paint(&text));
@@ -64,14 +89,26 @@ pub fn empty_pane_with_detail(
     message: &str,
     detail: Option<&str>,
 ) -> Vec<String> {
+    // White + dim is deliberately explicit rather than inheriting the terminal
+    // foreground: both the rabbit and every caption remain neutral gray.
+    // Paint only after clipping so every styled line owns its final reset.
+    let gray = Style::new().fg(Color::White).dim();
     let mut block = icon::centered(width)
         .into_iter()
-        .map(|line| Role::Feature.style().bold().paint(&line))
+        .map(|line| gray.paint(&super::pad_to_width(&line, width)))
         .collect::<Vec<_>>();
     block.push(String::new());
     for text in std::iter::once(message).chain(detail) {
-        let caption = Style::new().dim().paint(&super::clip_to_width(text, width));
-        block.push(super::pad_to_width(&caption, width));
+        let caption = super::clip_to_width(text, width);
+        let centered = format!(
+            "{}{}",
+            " ".repeat(super::centered_padding(
+                width,
+                super::display_width(&caption)
+            )),
+            caption
+        );
+        block.push(gray.paint(&super::pad_to_width(&centered, width)));
     }
 
     let top = rows.saturating_sub(block.len()) / 2;
@@ -84,7 +121,9 @@ pub fn empty_pane_with_detail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, empty_pane, empty_pane_with_detail, render};
+    use super::{
+        RUNNING_RABBIT, Tab, empty_pane, empty_pane_with_detail, pending_indicator, render,
+    };
     use crate::presentation::widgets::display_width;
 
     fn strip(text: &str) -> String {
@@ -112,10 +151,12 @@ mod tests {
                 Tab {
                     label: "Terminal",
                     selected: false,
+                    pending_indicator: None,
                 },
                 Tab {
                     label: "Agent",
                     selected: true,
+                    pending_indicator: None,
                 },
             ],
         );
@@ -132,10 +173,32 @@ mod tests {
             &[Tab {
                 label: "Terminal (resolving)",
                 selected: true,
+                pending_indicator: None,
             }],
         );
         assert!(rows.iter().all(|row| display_width(row) == 6));
         assert!(rows[0].ends_with("\u{1b}[0m") || rows[0].ends_with(' '));
+    }
+
+    #[test]
+    fn pending_indicator_is_a_coloured_rabbit_that_runs_across_frames() {
+        let indicator = pending_indicator(0);
+        let later = pending_indicator(3);
+        assert!(indicator.contains(RUNNING_RABBIT));
+        assert_eq!(display_width(&indicator), 1);
+        assert_ne!(indicator, later);
+        assert_eq!(display_width(&later), 4);
+        assert!(indicator.ends_with("\u{1b}[0m"));
+        let tab = render(
+            40,
+            &[Tab {
+                label: "Agent (starting)",
+                selected: true,
+                pending_indicator: Some(&indicator),
+            }],
+        );
+        assert!(tab[0].contains(RUNNING_RABBIT));
+        assert!(tab[0].contains("\u{1b}[2m"));
     }
 
     #[test]
@@ -146,6 +209,11 @@ mod tests {
         assert!(plain.iter().any(|row| row.contains("(='-')")));
         assert!(plain.iter().any(|row| row.contains("No tabs stirring yet")));
         assert!(rows.iter().all(|row| display_width(row) <= 30));
+        assert!(
+            rows.iter()
+                .filter(|row| row.contains("(='-')"))
+                .all(|row| row.starts_with("\u{1b}[2;37m") && row.ends_with("\u{1b}[0m"))
+        );
         assert_eq!(
             rows,
             empty_pane(30, 11, "No tabs stirring yet. Enter starts one.")
@@ -162,5 +230,30 @@ mod tests {
                 .any(|row| row.contains("No tabs stirring yet."))
         );
         assert!(plain.iter().any(|row| row.contains("feedback: safe")));
+    }
+
+    #[test]
+    fn empty_pane_centers_each_caption_and_closes_gray_style_when_clipped() {
+        let rows = empty_pane_with_detail(13, 9, "launch pane", Some("safe detail"));
+        let plain = rows.iter().map(|row| strip(row)).collect::<Vec<_>>();
+        let caption = plain.iter().find(|row| row.contains("launch")).unwrap();
+        assert!(
+            caption.starts_with(' '),
+            "caption should be pane-centered: {caption:?}"
+        );
+        assert!(
+            rows.iter()
+                .filter(|row| row.contains("launch") || row.contains("safe"))
+                .all(|row| row.starts_with("\u{1b}[2;37m") && row.ends_with("\u{1b}[0m"))
+        );
+
+        let narrow = empty_pane(1, 7, "wide message");
+        assert!(narrow.iter().all(|row| display_width(row) <= 1));
+        assert!(
+            narrow
+                .iter()
+                .filter(|row| row.contains("\u{1b}[2;37m"))
+                .all(|row| row.ends_with("\u{1b}[0m"))
+        );
     }
 }
