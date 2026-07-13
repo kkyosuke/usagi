@@ -466,6 +466,7 @@ pub struct AppState {
     pending: Vec<PendingOperation>,
     next_pending_token: u64,
     interaction_count: u64,
+    mascot_tick: u64,
     size: Option<(u16, u16)>,
     has_live_pane: bool,
     ctrl_c_grace: bool,
@@ -493,6 +494,7 @@ impl AppState {
             pending: Vec::new(),
             next_pending_token: 1,
             interaction_count: 0,
+            mascot_tick: 0,
             size: None,
             has_live_pane: false,
             ctrl_c_grace: false,
@@ -510,6 +512,11 @@ impl AppState {
     #[coverage(off)]
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
+    }
+    /// Home sidebar mascot animation frame. Only [`AppEvent::Tick`] advances it.
+    #[must_use]
+    pub const fn mascot_tick(&self) -> u64 {
+        self.mascot_tick
     }
     /// Open note editor, including unsaved values after a save failure.
     #[must_use]
@@ -1527,8 +1534,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.interaction_count = state.interaction_count.saturating_add(1);
             Vec::new()
         }
-        AppEvent::Tick
-        | AppEvent::Backend(
+        AppEvent::Tick => {
+            state.mascot_tick = state.mascot_tick.saturating_add(1);
+            Vec::new()
+        }
+        AppEvent::Backend(
             BackendEvent::NotesLoaded { .. }
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
@@ -1890,6 +1900,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
     }
     match overview::interpret(input) {
         Ok(overview::Command::Env { .. }) => open_environment(state),
+        Ok(overview::Command::Session { arguments }) => submit_overview_session(state, &arguments),
         Ok(command) => {
             state.overlay = None;
             state.notice = Some(Notice::new(format!("Requested {}", command.name())));
@@ -1902,6 +1913,51 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(error.to_string()));
             Vec::new()
         }
+    }
+}
+
+#[coverage(off)]
+fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    let command = match overview::parse_session(arguments) {
+        Ok(command) => command,
+        Err(message) => {
+            state.notice = Some(Notice::new(message));
+            return Vec::new();
+        }
+    };
+    match command {
+        overview::SessionCommand::Create { name } => {
+            state.overlay = None;
+            request_create_session(
+                state,
+                SessionCreateIntent {
+                    name,
+                    profile: None,
+                    model: None,
+                },
+            )
+        }
+        overview::SessionCommand::List | overview::SessionCommand::Overview => {
+            state.overlay = None;
+            state.notice = Some(Notice::new("Refreshing sessions"));
+            vec![Effect::RefreshSessions {
+                workspace: state.workspace,
+            }]
+        }
+        overview::SessionCommand::Remove { force } => match state.active {
+            Target::Session(session) => {
+                state.overlay = None;
+                vec![Effect::RemoveSession {
+                    workspace: state.workspace,
+                    session,
+                    force,
+                }]
+            }
+            Target::Root(_) => {
+                state.notice = Some(Notice::new("workspace root cannot be removed"));
+                Vec::new()
+            }
+        },
     }
 }
 
@@ -2011,23 +2067,9 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         }
         AppKey::Enter => match form.request() {
             Ok(intent) => {
-                let token = PendingToken(state.next_pending_token);
-                state.next_pending_token += 1;
-                let operation_id = OperationId::new();
-                state.pending.push(PendingOperation {
-                    token,
-                    kind: PendingKind::CreateSession,
-                    operation_id,
-                    interaction_at_accept: state.interaction_count,
-                });
                 state.create_session = None;
                 state.overlay = None;
-                vec![Effect::CreateSession {
-                    workspace: state.workspace,
-                    token,
-                    operation_id,
-                    intent,
-                }]
+                request_create_session(state, intent)
             }
             Err(error) => {
                 form.error = Some(error);
@@ -2038,6 +2080,25 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         // this form owns input.
         _ => Vec::new(),
     }
+}
+
+#[coverage(off)]
+fn request_create_session(state: &mut AppState, intent: SessionCreateIntent) -> Vec<Effect> {
+    let token = PendingToken(state.next_pending_token);
+    state.next_pending_token += 1;
+    let operation_id = OperationId::new();
+    state.pending.push(PendingOperation {
+        token,
+        kind: PendingKind::CreateSession,
+        operation_id,
+        interaction_at_accept: state.interaction_count,
+    });
+    vec![Effect::CreateSession {
+        workspace: state.workspace,
+        token,
+        operation_id,
+        intent,
+    }]
 }
 
 /// effect を dispatch し、queue 済みの backend event を reducer へ戻すテスト helper。
@@ -2138,6 +2199,17 @@ mod tests {
     }
 
     #[test]
+    fn tick_advances_only_the_mascot_animation_frame() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.mascot_tick(), 0);
+        let _ = update(&mut state, AppEvent::Tick);
+        assert_eq!(state.mascot_tick(), 1);
+    }
+
+    #[test]
+    #[coverage(off)]
     fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
         let (workspace, session, _) = ids();
         let mut state = NewState::new(NewMode::Clone, clone_form());
@@ -2827,6 +2899,49 @@ mod tests {
     }
 
     #[test]
+    fn overview_session_commands_use_typed_lifecycle_effects() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let create = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session create feature-x".into())),
+        );
+        assert!(matches!(
+            &create[..],
+            [Effect::CreateSession { workspace: actual, intent, .. }]
+                if *actual == workspace && intent.name == "feature-x" && intent.profile.is_none() && intent.model.is_none()
+        ));
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session list".into())),
+            ),
+            vec![Effect::RefreshSessions { workspace }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session remove --force".into())),
+            ),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+            }]
+        );
+    }
+
+    #[test]
+    #[coverage(off)]
     fn closeup_registry_dispatches_agent_and_validated_session_remove() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);

@@ -30,6 +30,8 @@ use usagi_core::domain::id::{SessionId, WorkspaceId};
 const LEFT_WIDTH: usize = 28;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
+/// The v1 sidebar rabbit occupies three stable rows above the footer.
+const MASCOT_ROWS: usize = 3;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -62,6 +64,7 @@ pub struct HomeProjection {
     mode: HomeMode,
     active_phase: TargetPhase,
     feedback: Option<Feedback>,
+    mascot_tick: u64,
     pane_tabs: Vec<HomePaneTab>,
 }
 
@@ -106,6 +109,7 @@ impl HomeProjection {
             },
             active_phase: state.phase_for(state.active()),
             feedback: state.feedback().cloned(),
+            mascot_tick: state.mascot_tick(),
             pane_tabs: Vec::new(),
         }
     }
@@ -740,8 +744,10 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
         return vec![home_row(width, home, rows[0])];
     }
     let body_capacity = height - 1;
-    let show_heading = body_capacity > 1;
-    let viewport_capacity = body_capacity - usize::from(show_heading);
+    let show_mascot = body_capacity >= MASCOT_ROWS + 2;
+    let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
+    let show_heading = content_capacity > 1;
+    let viewport_capacity = content_capacity - usize::from(show_heading);
     let selected_index = rows
         .iter()
         .position(|row| *row == home.selected)
@@ -757,12 +763,32 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
             .iter()
             .map(|row| home_row(width, home, *row)),
     );
-    lines.resize(body_capacity, String::new());
+    lines.resize(content_capacity, String::new());
+    if show_mascot {
+        lines.extend(home_mascot(width, home.mascot_tick));
+    }
     lines.push(Style::new().dim().paint(&widgets::clip_to_width(
         "[switch] ↑↓ cursor · Enter target",
         width,
     )));
     lines
+}
+
+/// The v1 sidebar mascot's resting browsing pose. It is deliberately a pure
+/// function of the reducer-owned tick: the eyes blink and one ear twitches,
+/// while every frame keeps the same three-row rectangle.
+fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
+    let phase = tick % 6;
+    let ears = if phase == 5 { " (\\(/" } else { " (\\(\\" };
+    let face = if phase == 4 { " (-.-)?" } else { " (o.o)?" };
+    let feet = "o(_(\")(\")";
+    [ears, face, feet].map(|line| {
+        let left = width.saturating_sub(widgets::display_width(line)) / 2;
+        Role::Feature.style().bold().paint(&widgets::pad_to_width(
+            &format!("{}{}", " ".repeat(left), line),
+            width,
+        ))
+    })
 }
 
 #[coverage(off)]
@@ -1118,6 +1144,27 @@ mod tests {
     }
 
     #[test]
+    fn home_sidebar_mascot_animates_only_on_tick_and_stays_in_the_background() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let initial = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let first = render_home(20, 80, &initial).join("\n");
+        assert!(strip(&first).contains("(o.o)?"));
+
+        for _ in 0..4 {
+            let _ = update(&mut state, AppEvent::Tick);
+        }
+        let blink = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let blink_frame = render_home(20, 80, &blink).join("\n");
+        assert_eq!(state.mascot_tick(), 4);
+        assert!(strip(&blink_frame).contains("(-.-)?"));
+
+        let narrow = render_home(8, 8, &blink);
+        assert!(narrow.iter().all(|line| display_width(line) == 8));
+    }
+
+    #[test]
+    #[coverage(off)]
     fn home_feedback_area_renders_safe_error_and_disconnect_without_raw_detail() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());

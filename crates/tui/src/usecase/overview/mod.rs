@@ -44,6 +44,15 @@ pub enum Command {
     Session { arguments: String },
 }
 
+/// `session` command の daemon-authoritative 操作意図。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCommand {
+    Create { name: String },
+    List,
+    Overview,
+    Remove { force: bool },
+}
+
 type CommandFactory = fn(String) -> Command;
 
 #[derive(Clone, Copy)]
@@ -93,6 +102,10 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
 ];
 
+/// `session` が受け付ける workspace-level subcommand。実行の解釈は session
+/// handler が所有し、ここは palette の補完候補だけを一元化する。
+const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove"];
+
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
 #[coverage(off)]
@@ -130,6 +143,59 @@ pub fn complete(registry: &impl CommandRegistry, input: &str) -> Vec<CommandInfo
         .into_iter()
         .filter(|command| command.name.starts_with(typed))
         .collect()
+}
+
+/// Tab 補完後の入力。トップレベル command は選択候補の名前へ、`session` の第 1
+/// 引数は一意な prefix に対応する subcommand へ補完する。曖昧または未知の入力は
+/// 破壊せず `None` を返す。
+#[must_use]
+pub fn completion(input: &str) -> Option<String> {
+    let mut tokens = input.split_whitespace();
+    let command = tokens.next()?;
+    let subcommand = tokens.next();
+    if tokens.next().is_some() {
+        return None;
+    }
+    match (command, subcommand) {
+        ("session", Some(prefix)) => {
+            let mut matches = SESSION_SUBCOMMANDS
+                .iter()
+                .copied()
+                .filter(|candidate| candidate.starts_with(prefix));
+            let candidate = matches.next()?;
+            matches
+                .next()
+                .is_none()
+                .then(|| format!("session {candidate}"))
+        }
+        _ => None,
+    }
+}
+
+/// `session` の引数を typed intent へ解釈する。
+///
+/// Remove は表示名を identity に使わず、controller が現在 active な stable
+/// `SessionId` へ解決する。`list` と `overview` は daemon snapshot を refresh する。
+///
+/// # Errors
+///
+/// 未知の subcommand、必須 name の欠落、または許可しない引数を返す。
+pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
+    let (verb, rest) = arguments
+        .split_once(char::is_whitespace)
+        .map_or((arguments, ""), |(verb, rest)| (verb, rest.trim()));
+    match verb {
+        "create" if !rest.is_empty() => Ok(SessionCommand::Create {
+            name: rest.to_owned(),
+        }),
+        "create" => Err("session name is required"),
+        "list" if rest.is_empty() => Ok(SessionCommand::List),
+        "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
+        "remove" if rest.is_empty() => Ok(SessionCommand::Remove { force: false }),
+        "remove" if rest == "--force" => Ok(SessionCommand::Remove { force: true }),
+        "remove" => Err("invalid session remove arguments"),
+        _ => Err("unknown session command"),
+    }
 }
 
 /// `input` の先頭 token と一致する command の help metadata。
@@ -251,7 +317,7 @@ pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
 mod tests {
     use super::{
         Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
-        commands, complete, dispatch, help, interpret,
+        SessionCommand, commands, complete, completion, dispatch, help, interpret, parse_session,
     };
 
     struct FakeRegistry(Vec<CommandInfo>);
@@ -298,6 +364,47 @@ mod tests {
     }
 
     #[test]
+    fn completes_a_unique_session_subcommand_prefix() {
+        assert_eq!(completion("session c"), Some("session create".to_owned()));
+        assert_eq!(completion("session o"), Some("session overview".to_owned()));
+        assert_eq!(completion("session z"), None);
+        assert_eq!(completion("session create extra"), None);
+        assert_eq!(completion("issue list"), None);
+    }
+
+    #[test]
+    fn parses_session_commands_without_a_name_based_remove_target() {
+        assert_eq!(
+            parse_session("create feature-x"),
+            Ok(SessionCommand::Create {
+                name: "feature-x".into()
+            })
+        );
+        assert_eq!(parse_session("list"), Ok(SessionCommand::List));
+        assert_eq!(parse_session("overview"), Ok(SessionCommand::Overview));
+        assert_eq!(
+            parse_session("remove --force"),
+            Ok(SessionCommand::Remove { force: true })
+        );
+        assert_eq!(
+            parse_session("remove"),
+            Ok(SessionCommand::Remove { force: false })
+        );
+        assert_eq!(parse_session("create"), Err("session name is required"));
+        assert_eq!(parse_session("list extra"), Err("unknown session command"));
+        assert_eq!(
+            parse_session("overview extra"),
+            Err("unknown session command")
+        );
+        assert_eq!(
+            parse_session("remove old-name"),
+            Err("invalid session remove arguments")
+        );
+        assert_eq!(parse_session("rename x"), Err("unknown session command"));
+    }
+
+    #[test]
+    #[coverage(off)]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
             (

@@ -14,6 +14,7 @@ use crate::usecase::closeup;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 50;
+const BODY_HEIGHT: usize = 9;
 
 /// アクションメニューの状態。対象セッション名と、アクション一覧上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -114,7 +115,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
     }
     lines.push(String::new());
     lines.push(Style::new().dim().paint("  ↑↓: select   Esc: switch"));
-    lines
+    modal::fixed_body(lines, BODY_HEIGHT)
 }
 
 /// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
@@ -150,6 +151,22 @@ mod tests {
     use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::display_width;
 
+    #[test]
+    fn action_selection_keeps_the_closeup_box_height_stable() {
+        let mut modal = CloseupModal::new("daemon");
+        let before = render(40, 80, &modal)
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        modal.select_next();
+        let after = render(40, 80, &modal)
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        assert_eq!(before, after);
+    }
+
+    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();

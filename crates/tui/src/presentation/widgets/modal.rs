@@ -50,6 +50,19 @@ pub fn modal_inner_width(width: usize, desired: usize) -> usize {
     desired.min(width.saturating_sub(4))
 }
 
+/// Reserve `body_height` rows for a modal body.
+///
+/// Modal views use this after composing their state-dependent rows so a result,
+/// error, or shorter list cannot move the border while the modal is open.
+/// Extra rows are clipped at the body boundary; terminal-height clipping remains
+/// the responsibility of [`render_modal`] and [`render_over`].
+#[must_use]
+pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
+    body.truncate(body_height);
+    body.resize(body_height, String::new());
+    body
+}
+
 /// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
 /// 残りは空行で埋めるので、イベントループはフルスクリーン画面と同じ手順で描き直せる。
 /// サイズ 0 は [`normalize_size`] で 80×24 にフォールバックする。
@@ -225,7 +238,7 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{boxed, columns, modal_inner_width, render_modal, render_over};
+    use super::{boxed, columns, fixed_body, modal_inner_width, render_modal, render_over};
     use crate::presentation::widgets::display_width;
 
     #[test]
@@ -262,6 +275,13 @@ mod tests {
     }
 
     #[test]
+    fn fixed_body_reserves_rows_and_clips_overflow() {
+        assert_eq!(fixed_body(vec!["one".into()], 3), vec!["one", "", ""]);
+        assert_eq!(fixed_body(vec!["one".into(), "two".into()], 1), vec!["one"]);
+    }
+
+    #[test]
+    #[coverage(off)]
     fn render_modal_centers_the_box_over_a_blank_frame() {
         let lines = render_modal(10, 40, "T", 10, &["hi".to_string()]);
         assert_eq!(lines.len(), 10);

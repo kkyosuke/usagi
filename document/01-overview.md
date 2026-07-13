@@ -96,7 +96,10 @@ Diff / Notes のタブを循環する。Enter または `t` で選択行の Clos
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
 長文を scroll し、データを提供できない diff や空の Notes は安全な fallback を表示する。いずれも
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
-`q` は終了キーにならない。Closeup action、Overview command、Pull Request の実行はまだ接続せず、
+`q` は終了キーにならない。Overview の `session create <name>`、`session list`、
+`session overview`、`session remove [--force]` は daemon-authoritative lifecycle effect を依頼する。
+create は pending operation を作り、list / overview は snapshot を refresh し、remove は現在選択中の stable
+session identity だけに作用する。Closeup action、他の Overview command、Pull Request の実行はまだ接続せず、
 今回は表示と選択だけを行う。
 
 Esc は最前面から `モーダル → Closeup → Switch → 呼び出し元` の順に戻る。Switch からは Open
