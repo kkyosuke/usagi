@@ -307,15 +307,27 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
 #[coverage(off)]
 fn filter_line(open: &Open) -> String {
     let input = &open.filter;
-    let cursor = Role::Accent.style().bold().underline().paint("▏");
+    // New 画面と同じく、入力全体を accent で描き、編集位置の 1 文字だけを
+    // underline にする。前後を別 style にしても入力全体の色感が途切れない。
+    let accent = Role::Accent.style().bold();
+    let caret = Role::Accent.style().bold().underline();
     let value = if input.is_empty() {
-        format!("{cursor}{}", Style::new().dim().paint("type to filter"))
+        format!(
+            "{}{}",
+            caret.paint(" "),
+            Style::new().dim().paint("type to filter")
+        )
     } else {
+        let rest = input.after();
+        let (caret_char, after) = match rest.chars().next() {
+            Some(ch) => (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..]),
+            None => (" ", ""),
+        };
         format!(
             "{}{}{}",
-            Role::Accent.style().paint(input.before()),
-            cursor,
-            Role::Accent.style().paint(input.after())
+            accent.paint(input.before()),
+            caret.paint(caret_char),
+            accent.paint(after)
         )
     };
     format!("{} {value}", Style::new().dim().paint("Filter:"))
@@ -529,7 +541,8 @@ mod tests {
     fn render_shows_a_placeholder_when_there_are_no_workspaces() {
         let joined = rendered(&Open::new(Vec::new()));
         assert!(joined.contains("No workspaces yet"));
-        assert!(joined.contains("Filter: ▏type to filter"));
+        assert!(joined.contains("Filter:"));
+        assert!(joined.contains("type to filter"));
     }
 
     #[test]
@@ -571,7 +584,11 @@ mod tests {
         open.push_filter('x');
 
         assert_eq!(open.filter(), "axb");
-        assert!(rendered(&open).contains("Filter: ax▏b"));
+        let frame = render(24, 80, &open, now()).join("\n");
+        assert!(rendered(&open).contains("Filter: axb"));
+        // The character at the edit position is underlined in the same accent
+        // colour as the rest of the input, matching New's shared input style.
+        assert!(frame.contains("\u{1b}[1;4;36mb\u{1b}[0m"));
     }
 
     #[test]
