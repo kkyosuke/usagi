@@ -494,6 +494,14 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.pop_filter();
             OpenStep::Stay
         }
+        Key::Left => {
+            open.filter_left();
+            OpenStep::Stay
+        }
+        Key::Right => {
+            open.filter_right();
+            OpenStep::Stay
+        }
         Key::Escape => OpenStep::Back,
         Key::Quit => OpenStep::Quit,
         Key::Enter => {
@@ -526,7 +534,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Left | Key::Right | Key::Other => OpenStep::Stay,
+        Key::Other => OpenStep::Stay,
     }
 }
 

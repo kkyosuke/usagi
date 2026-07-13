@@ -19,7 +19,7 @@ use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets;
+use crate::presentation::widgets::{self, TextInput};
 
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
@@ -36,7 +36,7 @@ const NAME_WIDTH: usize = 42;
 pub struct Open {
     workspaces: Vec<WorkspaceOverview>,
     selected_index: usize,
-    filter: String,
+    filter: TextInput,
     unite: bool,
     unite_paths: HashSet<std::path::PathBuf>,
     cleanup_confirming: bool,
@@ -69,7 +69,7 @@ impl Open {
         Self {
             workspaces,
             selected_index: 0,
-            filter: String::new(),
+            filter: TextInput::new(),
             unite: false,
             unite_paths: HashSet::new(),
             cleanup_confirming: false,
@@ -113,7 +113,7 @@ impl Open {
     #[must_use]
     #[coverage(off)]
     pub fn filter(&self) -> &str {
-        &self.filter
+        self.filter.value()
     }
 
     /// Whether selection builds a Unite set rather than choosing one workspace.
@@ -133,15 +133,27 @@ impl Open {
     /// Append one character to the filter and return selection to its first hit.
     #[coverage(off)]
     pub fn push_filter(&mut self, ch: char) {
-        self.filter.push(ch);
+        self.filter.insert(ch);
         self.selected_index = 0;
     }
 
     /// Delete one filter character and return selection to its first hit.
     #[coverage(off)]
     pub fn pop_filter(&mut self) {
-        self.filter.pop();
+        self.filter.backspace();
         self.selected_index = 0;
+    }
+
+    /// Move the always-active filter cursor one character left.
+    #[coverage(off)]
+    pub fn filter_left(&mut self) {
+        self.filter.move_left();
+    }
+
+    /// Move the always-active filter cursor one character right.
+    #[coverage(off)]
+    pub fn filter_right(&mut self) {
+        self.filter.move_right();
     }
 
     /// Switch between Single and Unite selection. A new Unite set starts empty.
@@ -197,7 +209,7 @@ impl Open {
 
     #[coverage(off)]
     fn filtered(&self) -> Vec<&WorkspaceOverview> {
-        let filter = self.filter.to_lowercase();
+        let filter = self.filter.value().to_lowercase();
         self.workspaces
             .iter()
             .filter(|overview| overview.workspace.name.to_lowercase().contains(&filter))
@@ -266,13 +278,13 @@ fn fit(text: &str, width: usize) -> String {
 #[coverage(off)]
 fn workspace_name_row(workspace: &Workspace, is_selected: bool) -> String {
     let cursor = if is_selected {
-        Role::Danger.style().bold().paint(">")
+        Style::new().bold().paint(">")
     } else {
         " ".to_string()
     };
     let name = fit(&workspace.name, NAME_WIDTH);
     let name = if is_selected {
-        Role::Accent.style().bold().paint(&name)
+        Style::new().bold().paint(&name)
     } else {
         name
     };
@@ -291,6 +303,19 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
     ))
 }
 
+/// 共通 [`TextInput`] の編集位置を明示した、常時フォーカスされる Filter 行。
+#[coverage(off)]
+fn filter_line(open: &Open) -> String {
+    let input = &open.filter;
+    let cursor = Style::new().bold().paint("▏");
+    let value = if input.is_empty() {
+        format!("{cursor}{}", Style::new().dim().paint("type to filter"))
+    } else {
+        format!("{}{}{}", input.before(), cursor, input.after())
+    };
+    format!("{} {value}", Style::new().dim().paint("Filter:"))
+}
+
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
 #[coverage(off)]
 fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
@@ -298,26 +323,11 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let indent = |line: &str| format!("{left_pad}{}", widgets::clip_to_width(line, BLOCK_WIDTH));
 
     let mut lines = vec![
-        indent(&Role::Success.style().bold().paint("Workspaces · A–Z")),
+        indent(&Style::new().bold().paint("Workspaces")),
         String::new(),
     ];
 
-    let mode = if open.is_unite() { "Unite" } else { "Single" };
-    lines[0] = indent(
-        &Role::Success
-            .style()
-            .bold()
-            .paint(&format!("Workspaces · A–Z · {mode}")),
-    );
-    let filter = if open.filter().is_empty() {
-        Style::new().dim().paint("type to filter")
-    } else {
-        Role::Accent.style().paint(open.filter())
-    };
-    lines.push(indent(&format!(
-        "{} {filter}",
-        Style::new().dim().paint("Filter:")
-    )));
+    lines.push(indent(&filter_line(open)));
     lines.push(String::new());
 
     if open.is_empty() {
@@ -514,7 +524,7 @@ mod tests {
     fn render_shows_a_placeholder_when_there_are_no_workspaces() {
         let joined = rendered(&Open::new(Vec::new()));
         assert!(joined.contains("No workspaces yet"));
-        assert!(joined.contains("Filter: type to filter"));
+        assert!(joined.contains("Filter: ▏type to filter"));
     }
 
     #[test]
@@ -545,6 +555,18 @@ mod tests {
         let joined = rendered(&open);
         assert!(joined.contains("Filter: z"));
         assert!(joined.contains("No workspaces match the filter."));
+    }
+
+    #[test]
+    fn filter_renders_the_shared_input_cursor_at_its_edit_position() {
+        let mut open = Open::new(vec![workspace("alpha", 1)]);
+        open.push_filter('a');
+        open.push_filter('b');
+        open.filter_left();
+        open.push_filter('x');
+
+        assert_eq!(open.filter(), "axb");
+        assert!(rendered(&open).contains("Filter: ax▏b"));
     }
 
     #[test]
@@ -585,6 +607,7 @@ mod tests {
         assert_eq!(open.workspaces()[0].name, "Alpha");
         let joined = rendered(&open);
         assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
-        assert!(joined.contains("Workspaces · A–Z"));
+        assert!(joined.contains("Workspaces"));
+        assert!(!joined.contains("A–Z"));
     }
 }
