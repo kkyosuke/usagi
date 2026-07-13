@@ -766,7 +766,7 @@ fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     } else {
         ws.sessions().get(index - 1).map_or_else(
             || vec![root_row(width, ws)],
-            |session| session_menu_rows(width, index == ws.selected, session),
+            |session| session_menu_rows(width, index == ws.selected, ws.mode(), session),
         )
     }
 }
@@ -818,8 +818,13 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
 /// The first line reserves the note glyph; the second projects only persisted
 /// metadata, never a synthetic diff/GIF state or an executable shortcut.
 #[coverage(off)]
-fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> Vec<String> {
-    session_menu_rows_at(width, selected, session, Utc::now())
+fn session_menu_rows(
+    width: usize,
+    selected: bool,
+    mode: Mode,
+    session: &SessionRecord,
+) -> Vec<String> {
+    session_menu_rows_at(width, selected, mode, session, Utc::now())
 }
 
 /// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
@@ -828,11 +833,15 @@ fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> V
 fn session_menu_rows_at(
     width: usize,
     selected: bool,
+    mode: Mode,
     session: &SessionRecord,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
+    let marker = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("\u{f0907}"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
     } else {
         " ".to_owned()
     };
@@ -848,13 +857,21 @@ fn session_menu_rows_at(
         "✎"
     };
     let first = widgets::pad_to_width(
-        &format!("{cursor} {label}  {}", Style::new().dim().paint(note)),
+        &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
         width,
     );
     let modified = widgets::relative_session_time(session.last_active_or_created(), now);
+    let continuation = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("|"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
+    } else {
+        " ".to_owned()
+    };
     let metadata = pr_summary(&session.prs).map_or_else(
-        || format!("  {modified}"),
-        |pr| format!("  {modified} · {pr}"),
+        || format!("{continuation} {modified}"),
+        |pr| format!("{continuation} {modified} · {pr}"),
     );
     vec![
         first,
@@ -956,7 +973,9 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
         } else {
             ws.sessions().get(index - 1).map_or_else(
                 || vec![root_row(width, ws)],
-                |session| session_menu_rows_at(width, index == ws.selected, session, now),
+                |session| {
+                    session_menu_rows_at(width, index == ws.selected, ws.mode(), session, now)
+                },
             )
         };
         if rows.len() + entry.len() > viewport_capacity {
@@ -2213,16 +2232,22 @@ mod tests {
         let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(40, true, &record, base);
+        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, base);
         assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
         assert!(strip(&rows[0]).contains("✎"));
         assert!(strip(&rows[1]).contains("12m ago"));
         assert!(strip(&rows[1]).contains("PR #42"));
         assert!(!strip(&rows[1]).contains("diff"));
         assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(18, true, &record, base);
+        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, base);
         assert!(strip(&narrow[0]).contains("✎"));
         assert!(narrow.iter().all(|row| display_width(row) == 18));
+
+        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, base);
+        assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
+        assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
     }
 
     #[test]
@@ -2380,7 +2405,10 @@ mod tests {
             let selected = frame
                 .iter()
                 .map(|line| strip(line))
-                .find(|line| line.trim_start().starts_with('>'))
+                .find(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+                })
                 .expect("selected row must be inside the viewport");
             assert!(selected.contains(&expected), "selected row: {selected}");
             ws.select_next();
