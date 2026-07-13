@@ -391,6 +391,18 @@ mod tests {
             relative_session_time(now - Duration::hours(3), now),
             "3h ago"
         );
+        assert_eq!(
+            relative_session_time(now - Duration::days(2), now),
+            "2d ago"
+        );
+        assert_eq!(
+            relative_session_time(now - Duration::days(20), now),
+            "2w ago"
+        );
+        assert_eq!(
+            relative_session_time(at("2026-05-01T00:00:00Z"), now),
+            "2026-05-01"
+        );
     }
 
     #[test]
