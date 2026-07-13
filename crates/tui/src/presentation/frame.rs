@@ -15,8 +15,16 @@ use unicode_width::UnicodeWidthChar;
 pub enum Cell {
     /// Nothing has been drawn at this column.
     Empty,
-    /// A visible scalar and any ANSI escape sequences immediately preceding it.
-    Glyph { text: String, width: u8 },
+    /// A visible scalar, its display width, and the ANSI SGR state active for it.
+    ///
+    /// `text` keeps only the escape sequences that must be emitted at this
+    /// position. `style` is retained separately so that an incremental render
+    /// also redraws every glyph whose already-drawn terminal attributes change.
+    Glyph {
+        text: String,
+        width: u8,
+        style: String,
+    },
     /// The second column of the preceding double-width [`Cell::Glyph`].
     Continuation,
 }
@@ -90,6 +98,7 @@ impl Frame {
         }
         let mut column = 0;
         let mut pending_ansi = String::new();
+        let mut active_style = String::new();
         let mut last_glyph = None;
         let chars = line.chars().collect::<Vec<_>>();
         let mut index = 0;
@@ -97,6 +106,7 @@ impl Frame {
             if chars[index] == '\u{1b}' {
                 let (sequence, consumed) = ansi_sequence(&chars[index..]);
                 pending_ansi.push_str(&sequence);
+                update_active_style(&mut active_style, &sequence);
                 index += consumed;
                 continue;
             }
@@ -123,6 +133,7 @@ impl Frame {
             self.cells[cell_index] = Cell::Glyph {
                 text,
                 width: u8::try_from(glyph_width).expect("unicode display width fits in u8"),
+                style: active_style.clone(),
             };
             for offset in 1..glyph_width {
                 self.cells[cell_index + offset] = Cell::Continuation;
@@ -316,9 +327,24 @@ fn ansi_sequence(chars: &[char]) -> (String, usize) {
     (chars.iter().collect(), chars.len())
 }
 
+/// Reflect an ANSI SGR sequence in the state used for frame diffing. The
+/// renderer only needs this state for equality: output still preserves the
+/// original escape placement in each glyph's `text`.
+fn update_active_style(active_style: &mut String, sequence: &str) {
+    if !sequence.starts_with("\u{1b}[") || !sequence.ends_with('m') {
+        return;
+    }
+    let params = &sequence[2..sequence.len() - 1];
+    if params.is_empty() || params.split(';').any(|param| param == "0") {
+        active_style.clear();
+    } else {
+        active_style.push_str(sequence);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Frame, FrameRenderer, Span};
+    use super::{Cell, Frame, FrameRenderer, Span, update_active_style};
 
     fn frame(width: usize, height: usize, lines: &[&str]) -> Frame {
         Frame::from_lines(width, height, lines)
@@ -331,7 +357,8 @@ mod tests {
             rendered.cell(0, 0),
             Some(&Cell::Glyph {
                 text: "A".into(),
-                width: 1
+                width: 1,
+                style: String::new(),
             })
         );
         assert!(matches!(
@@ -386,18 +413,18 @@ mod tests {
         let combining = frame(2, 1, &["e\u{301}x"]);
         assert!(matches!(
             combining.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1 }) if text == "e\u{301}"
+            Some(Cell::Glyph { text, width: 1, .. }) if text == "e\u{301}"
         ));
         let leading_combining = frame(2, 1, &["\u{301}x"]);
         assert!(matches!(
             leading_combining.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1 }) if text == "\u{301}x"
+            Some(Cell::Glyph { text, width: 1, .. }) if text == "\u{301}x"
         ));
 
         let malformed = frame(2, 1, &["\u{1b}X"]);
         assert!(matches!(
             malformed.cell(0, 0),
-            Some(Cell::Glyph { text, width: 1 }) if text == "\u{1b}X"
+            Some(Cell::Glyph { text, width: 1, .. }) if text == "\u{1b}X"
         ));
         assert_eq!(frame(2, 1, &["\u{1b}[31"]).cell(0, 0), Some(&Cell::Empty));
     }
@@ -453,6 +480,39 @@ mod tests {
                 text: "語".into(),
             }]
         );
+    }
+
+    #[test]
+    fn changing_a_style_repaints_every_glyph_in_its_span() {
+        let mut renderer = FrameRenderer::new();
+        let _ = renderer.render(frame(6, 1, &["  Open "]));
+
+        let diff = renderer.render(frame(6, 1, &["  \u{1b}[1;36mOpen\u{1b}[0m "]));
+
+        assert_eq!(
+            diff.spans,
+            vec![Span {
+                row: 0,
+                column: 2,
+                text: "\u{1b}[1;36mOpen\u{1b}[0m".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn sgr_style_state_ignores_non_sgr_sequences_accumulates_and_resets() {
+        let mut style = String::new();
+        update_active_style(&mut style, "\u{1b}[2J");
+        assert!(style.is_empty());
+
+        update_active_style(&mut style, "\u{1b}[1;36m");
+        update_active_style(&mut style, "\u{1b}[4m");
+        assert_eq!(style, "\u{1b}[1;36m\u{1b}[4m");
+
+        update_active_style(&mut style, "\u{1b}[0m");
+        assert!(style.is_empty());
+        update_active_style(&mut style, "\u{1b}[m");
+        assert!(style.is_empty());
     }
 
     #[test]
