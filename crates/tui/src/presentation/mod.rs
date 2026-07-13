@@ -2564,7 +2564,7 @@ mod tests {
         assert_eq!(term.frames.len(), keys.len());
 
         let frame = |index: usize| term.frames[index].join("\n");
-        assert!(frame(0).contains("Switch"));
+        assert!(frame(0).contains("switch"));
         assert!(frame(0).contains("No tabs stirring yet. Enter starts one."));
         assert!(frame(2).contains("No tabs stirring yet. Enter starts one."));
 
@@ -2584,7 +2584,7 @@ mod tests {
         assert!(frame(12).contains("terminal"));
 
         // Closeup 上の Esc は mode を変えない。終了は明示的な Quit のみ。
-        assert!(frame(13).contains("\u{f00e} Closeup"));
+        assert!(frame(13).contains("\u{f00e} closeup"));
         assert!(!frame(13).contains("Open terminal"));
     }
 

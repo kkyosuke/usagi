@@ -5,11 +5,13 @@
 //! [`crate::presentation::widgets::pad_to_width`] で各行を自ペインの幅にそろえるので、色付き行でも
 //! 桁がずれない。
 
-use crate::presentation::theme::Style;
+use crate::presentation::theme::{Color, Style};
 use crate::presentation::widgets;
 
 /// 縦区切り線の桁数。
 const DIVIDER_WIDTH: usize = 1;
+/// 下端の footer 領域として縦区切りを引かない行数。
+const FOOTER_ROWS: usize = 2;
 
 /// 全幅を割った左右ペインの表示幅。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,17 +33,25 @@ pub fn split(width: usize, desired_left: usize) -> Panes {
     Panes { left, right }
 }
 
-/// 左ペイン `left`・右ペイン `right` の行を dim の縦区切りで横に結合し、`height` 行の
-/// フレームにする。各行は [`widgets::pad_to_width`] で自ペインの幅にそろえ、行が尽きたペインは
-/// 空白で埋める。
+/// 左ペイン `left`・右ペイン `right` の行を白い縦区切りで横に結合し、`height` 行の
+/// フレームにする。下端 2 行は共通 footer 領域のため divider を引かない。各行は
+/// [`widgets::pad_to_width`] で自ペインの幅にそろえ、行が尽きたペインは空白で埋める。
 #[must_use]
 pub fn join(height: usize, left: &[String], right: &[String], panes: Panes) -> Vec<String> {
-    let divider = Style::new().dim().paint("│");
+    // The divider is structural chrome, rather than secondary metadata.  Keep it
+    // visibly brighter than the dim sidebar copy so the two panes remain legible
+    // through the intentionally generous blank space in the home screen.
+    let divider = Style::new().fg(Color::White).paint("│");
     (0..height)
         .map(|i| {
             let l = widgets::pad_to_width(left.get(i).map_or("", String::as_str), panes.left);
             let r = widgets::pad_to_width(right.get(i).map_or("", String::as_str), panes.right);
-            format!("{l}{divider}{r}")
+            let separator = if i + FOOTER_ROWS < height {
+                divider.as_str()
+            } else {
+                " "
+            };
+            format!("{l}{separator}{r}")
         })
         .collect()
 }
@@ -91,5 +101,8 @@ mod tests {
         // 行が尽きた側は空白で埋まる（左は 1 行だけ）。
         assert!(rows[1].starts_with(' '));
         assert!(rows[1].contains("R2"));
+        assert!(rows[0].contains("\u{1b}[37m│\u{1b}[0m"));
+        assert!(!rows[1].contains('│'));
+        assert!(!rows[2].contains('│'));
     }
 }
