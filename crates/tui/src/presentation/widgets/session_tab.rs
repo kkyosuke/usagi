@@ -40,8 +40,17 @@ pub fn pending_indicator(frame: u64) -> String {
 /// 幅が狭い場合も、行全体を ANSI 対応の [`super::clip_to_width`] で詰める。
 #[must_use]
 pub fn render(width: usize, tabs: &[Tab<'_>]) -> [String; 2] {
-    let mut chips = String::from(" ");
-    let mut marker = String::from(" ");
+    render_with_prefix(width, "", tabs)
+}
+
+/// [`render`] と同じ tab strip を、先頭の表示専用ラベルの直後に配置する。
+///
+/// `prefix` は chip 行にだけ描画し、marker 行には同じ表示幅の空白を置く。そのため
+/// session 名などの右に tab を置いても、active marker は選択した chip の真下に揃う。
+#[must_use]
+pub fn render_with_prefix(width: usize, prefix: &str, tabs: &[Tab<'_>]) -> [String; 2] {
+    let mut chips = format!("{prefix} ");
+    let mut marker = " ".repeat(super::display_width(prefix) + 1);
     for (index, tab) in tabs.iter().enumerate() {
         if index > 0 {
             chips.push(' ');

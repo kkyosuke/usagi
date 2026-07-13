@@ -36,6 +36,7 @@ use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::closeup;
 use crate::usecase::overview::{self, SessionCommand};
+use crate::usecase::terminal_input::LiveTerminalAction;
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
@@ -264,6 +265,11 @@ struct WorkspaceUi {
     closeup: CloseupModal,
     modal_selection_mode: ModalSelectionMode,
     modal: Option<WorkspaceModal>,
+    /// Closeup に tab があるときでも action modal を前面へ出す明示要求。tab が無い
+    /// Closeup では常に modal が出るため、このフラグは tab がある間だけ意味を持つ。
+    /// `Ctrl-O a`（[`LiveTerminalAction::OpenCloseupModal`]）で立て、Switch へ戻る・
+    /// action を選ぶ・modal を閉じると倒す。
+    closeup_action_forced: bool,
     overlay_data: Box<dyn OverlayDataPort>,
     /// A create owns the port in its worker until completion, preventing a
     /// second lifecycle request while its sidebar skeleton is visible.
@@ -305,6 +311,7 @@ impl WorkspaceUi {
             closeup,
             modal_selection_mode,
             modal: None,
+            closeup_action_forced: false,
             overlay_data,
             session_commands: Some(session_commands),
             session_completions,
@@ -314,6 +321,9 @@ impl WorkspaceUi {
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
+    ///
+    /// tab が無い target では action modal がそのまま前面に出る。tab がある target
+    /// では tab を前面にするため、`closeup_action_forced` は倒したまま入る。
     #[coverage(off)]
     fn enter_closeup(&mut self) {
         self.workspace.enter_closeup();
@@ -322,6 +332,15 @@ impl WorkspaceUi {
             self.modal_selection_mode,
         );
         self.modal = None;
+        self.closeup_action_forced = false;
+    }
+
+    /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
+    /// あるときは `Ctrl-O a` で明示要求した間だけ出る。
+    #[coverage(off)]
+    fn closeup_modal_visible(&self) -> bool {
+        self.workspace.mode() == Mode::Closeup
+            && (!self.workspace.has_panes() || self.closeup_action_forced)
     }
 
     /// 現在 mode を保ったまま Workspace scope の command palette を重ねる。
@@ -430,7 +449,9 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         Key::Char(ch) => welcome
             .action_for(ch)
             .map_or(WelcomeStep::Stay, welcome_action),
-        Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Other => WelcomeStep::Stay,
+        Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Live(_) | Key::Other => {
+            WelcomeStep::Stay
+        }
     }
 }
 
@@ -466,7 +487,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::Live(_) | Key::Other => NewStep::Stay,
     }
 }
 
@@ -550,7 +571,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Other => OpenStep::Stay,
+        Key::Live(_) | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -609,7 +630,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::Other => {}
+        Key::Quit | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -703,7 +724,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::Other => {}
+        Key::Quit | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -722,6 +743,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::Char(_)
+        | Key::Live(_)
         | Key::Other => {}
     }
     false
@@ -741,6 +763,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::Char(_)
+        | Key::Live(_)
         | Key::Other => {}
     }
     false
@@ -763,31 +786,55 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
+        // Live-terminal prefix actions are Closeup-scoped; Switch ignores them.
+        Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
 
-/// Closeup のキー処理。Action mode は上下で選んだ command、Prompt mode は入力した
-/// command を Enter で実行する。Esc は Workspace 自体を閉じず Switch へ一段戻す。
+/// Closeup のキー処理。tab の有無で入力の所有者を切り替える:
+///
+/// - live-terminal prefix（`Ctrl-O` leader）で解決した [`Key::Live`] は、modal の表示に
+///   かかわらず [`LiveInputClassifier`] 契約として [`apply_live_action`] が処理する。
+/// - action modal が前面のとき（tab 無し、または `Ctrl-O a` で forced）は action menu を
+///   操作する。Action mode は上下で選んだ command、Prompt mode は入力した command を
+///   Enter で registry 経由に実行する。
+/// - tab が前面のとき（tab あり・非 forced）は tab を操作し、menu には触れない。
+///
+/// Esc は Workspace 自体を閉じず、forced modal を閉じるか Switch へ一段戻す。
+///
+/// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
 #[coverage(off)]
 fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if let Key::Live(action) = key {
+        return apply_live_action(ui, action);
+    }
+    if !ui.closeup_modal_visible() {
+        return step_closeup_tabs(ui, key);
+    }
     if ui.closeup.selection_mode() == ModalSelectionMode::Prompt {
         match key {
             Key::Left => ui.closeup.cursor_left(),
             Key::Right => ui.closeup.cursor_right(),
             Key::Backspace => ui.closeup.backspace(),
             Key::Char(ch) => ui.closeup.insert_char(ch),
-            Key::Escape => ui.workspace.enter_switch(),
+            Key::Escape => close_closeup_modal(ui),
             Key::Quit => return WorkspaceStep::Quit,
             Key::Enter => {
                 let input = ui.closeup.submission();
                 execute_closeup_command(ui, &input);
             }
-            Key::Up | Key::Down | Key::Tab | Key::Other => {}
+            Key::Up | Key::Down | Key::Tab | Key::Live(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
+    step_closeup_menu(ui, key)
+}
+
+/// action modal が前面のときの menu 操作。Enter は選択 action で pane を開き、開いた後は
+/// forced modal を倒して新しい tab を前面へ出す。
+#[coverage(off)]
+fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Up | Key::Char('k') => ui.closeup.select_prev(),
         Key::Down | Key::Char('j') => ui.closeup.select_next(),
@@ -798,28 +845,102 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Escape => ui.workspace.enter_switch(),
+        Key::Escape => close_closeup_modal(ui),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         Key::Enter => {
             let input = ui.closeup.submission();
             execute_closeup_command(ui, &input);
         }
         Key::Char('x') => ui.workspace.close_pane(),
-        Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
+        Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
+}
+
+/// tab が前面のときの操作。左右で tab を巡回し、`x` で閉じる。overlay / quit は共通。
+/// action menu は前面に無いので上下・Enter は無視する。
+#[coverage(off)]
+fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    match key {
+        Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
+        Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Char('x') => ui.workspace.close_pane(),
+        Key::Char(':') => ui.open_overview(),
+        Key::Char('p') => ui.open_prs(),
+        Key::Char('v') => ui.open_preview(),
+        Key::Char('d') => ui.open_diff(),
+        Key::Char('n') => ui.open_text(),
+        Key::Escape => ui.workspace.enter_switch(),
+        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Up
+        | Key::Down
+        | Key::Enter
+        | Key::Backspace
+        | Key::Tab
+        | Key::Char(_)
+        | Key::Live(_)
+        | Key::Other => {}
+    }
+    WorkspaceStep::Stay
+}
+
+/// live-terminal prefix（`Ctrl-O` leader）で解決したアクションを Closeup へ適用する。
+/// [`LiveInputClassifier`] が契約の単一情報源で、ここはその action を view 操作へ写すだけ。
+///
+/// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
+#[coverage(off)]
+fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> WorkspaceStep {
+    match action {
+        LiveTerminalAction::Switch => {
+            ui.closeup_action_forced = false;
+            ui.workspace.enter_switch();
+        }
+        LiveTerminalAction::OpenCloseupModal => {
+            ui.closeup = CloseupModal::with_selection_mode(
+                ui.workspace.focused_label(),
+                ui.modal_selection_mode,
+            );
+            ui.closeup_action_forced = true;
+        }
+        LiveTerminalAction::NextTab => ui.workspace.tab_next(),
+        LiveTerminalAction::PreviousTab => ui.workspace.tab_prev(),
+        LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
+        LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
+        LiveTerminalAction::QuitConfirmation => return WorkspaceStep::Quit,
+        LiveTerminalAction::PreviousSession => ui.workspace.select_prev(),
+    }
+    WorkspaceStep::Stay
+}
+
+/// Open a pane and hide the (possibly forced) action modal so the new tab is front.
+#[coverage(off)]
+fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
+    ui.workspace.open_pane(kind);
+    ui.closeup_action_forced = false;
+}
+
+/// Esc / close on the action modal: with tabs present clear the forced request and
+/// keep the tabs front; otherwise step back to Switch.
+#[coverage(off)]
+fn close_closeup_modal(ui: &mut WorkspaceUi) {
+    if ui.closeup_action_forced {
+        ui.closeup_action_forced = false;
+    } else {
+        ui.workspace.enter_switch();
+    }
 }
 
 /// Execute the Closeup command shared by Action and Prompt interaction modes.
 ///
 /// The closeup registry remains the single source of command names; commands
 /// without a connected runtime effect intentionally keep the existing no-op
-/// behaviour in both modes.
+/// behaviour in both modes. Opening a pane also drops the forced action modal so
+/// the freshly opened tab is front (see [`open_pane_from_menu`]).
 #[coverage(off)]
 fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
     match closeup::interpret(input) {
-        Ok(closeup::Command::Agent { .. }) => ui.workspace.open_pane(PaneKind::Agent),
-        Ok(closeup::Command::Terminal { .. }) => ui.workspace.open_pane(PaneKind::Terminal),
+        Ok(closeup::Command::Agent { .. }) => open_pane_from_menu(ui, PaneKind::Agent),
+        Ok(closeup::Command::Terminal { .. }) => open_pane_from_menu(ui, PaneKind::Terminal),
         Ok(closeup::Command::Close { .. } | closeup::Command::Diff { .. }) | Err(_) => {}
     }
 }
@@ -861,7 +982,7 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
         }
         Some(WorkspaceModal::Pr(modal)) => pr_modal::render_over(height, width, &base, modal),
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
-        None if ui.workspace.mode() == Mode::Closeup && !ui.workspace.has_panes() => {
+        None if ui.closeup_modal_visible() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
         }
         None => base,
@@ -1601,6 +1722,8 @@ mod tests {
 
     #[test]
     fn closeup_prompt_executes_the_typed_action() {
+        use crate::usecase::terminal_input::LiveTerminalAction;
+
         let workspace = WorkspaceView::new(ws("prompt"), state("prompt"));
         let mut ui = WorkspaceUi::with_ports_and_selection_mode(
             workspace,
@@ -1609,6 +1732,7 @@ mod tests {
             ModalSelectionMode::Prompt,
         );
 
+        // With no tabs the prompt modal is front, so a typed command runs directly.
         ui.enter_closeup();
         for character in "agent".chars() {
             step_workspace(&mut ui, Key::Char(character));
@@ -1616,7 +1740,13 @@ mod tests {
         step_workspace(&mut ui, Key::Enter);
         assert_eq!(ui.workspace.pane().tabs().len(), 1);
 
+        // A tab is now present, so the prompt is hidden until `Ctrl-O a` forces it
+        // back over the tabs; only then does the typed command run.
         ui.enter_closeup();
+        assert!(!ui.closeup_modal_visible(), "prompt is hidden behind tabs");
+
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert!(ui.closeup_modal_visible());
         for character in "terminal".chars() {
             step_workspace(&mut ui, Key::Char(character));
         }
@@ -2146,6 +2276,78 @@ mod tests {
             agent_frames
                 .iter()
                 .any(|frame| frame.contains("No tabs stirring yet. Enter starts one."))
+        );
+    }
+
+    #[test]
+    fn closeup_action_modal_appears_without_tabs_and_hides_once_a_tab_opens() {
+        // Req 1/3/4: Enter enters Closeup; with no tabs the action modal is the
+        // front surface, and opening a tab hides it so the tab strip is front.
+        let keys = [Key::Down, Key::Enter, Key::Enter, Key::Quit];
+        let mut term = FakeTerminal::with_keys(&keys);
+        assert_eq!(
+            run_workspace(&mut term, snapshot("gate")).unwrap(),
+            Exit::Quit
+        );
+        let frame = |index: usize| term.frames[index].join("\n");
+
+        assert!(frame(2).contains("Run a command:"));
+        assert!(frame(3).contains("Agent (starting)"));
+        assert!(!frame(3).contains("Run a command:"));
+    }
+
+    #[test]
+    fn closeup_prefix_cycles_tabs_and_toggles_the_forced_action_modal() {
+        // Req 2/5/6: with tabs present the Ctrl-O prefix owns the stream — `a`
+        // forces the action modal, Esc drops back to the tabs, `n`/`p` cycle the
+        // selected tab, and `o` returns to Switch.
+        use crate::usecase::application::pane::PaneKind;
+        use crate::usecase::terminal_input::LiveTerminalAction;
+
+        let workspace = WorkspaceView::new(ws("prefix"), state("prefix"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        ui.enter_closeup();
+        assert!(ui.closeup_modal_visible(), "no tabs -> modal is front");
+
+        ui.workspace.open_pane(PaneKind::Agent);
+        ui.workspace.open_pane(PaneKind::Terminal);
+        assert!(ui.workspace.has_panes());
+        assert!(!ui.closeup_modal_visible(), "tabs present -> modal hidden");
+
+        // Ctrl-O n / Ctrl-O p move the stable tab selection and restore it.
+        let before = ui.workspace.pane().selected().clone();
+        assert_eq!(
+            step_workspace(&mut ui, Key::Live(LiveTerminalAction::NextTab)),
+            WorkspaceStep::Stay
+        );
+        assert_ne!(ui.workspace.pane().selected(), &before);
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousTab));
+        assert_eq!(ui.workspace.pane().selected(), &before);
+
+        // Ctrl-O a forces the action modal over the tabs; Esc clears the force
+        // and keeps the tabs (it does not leave Closeup).
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert!(ui.closeup_modal_visible());
+        assert_eq!(step_workspace(&mut ui, Key::Escape), WorkspaceStep::Stay);
+        assert!(!ui.closeup_modal_visible());
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+
+        // Ctrl-O o returns Closeup to Switch.
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+    }
+
+    #[test]
+    fn closeup_prefix_quit_and_passthrough_keys_are_preserved() {
+        // Quit still terminates, and a live prefix `q` maps to the quit action.
+        use crate::usecase::terminal_input::LiveTerminalAction;
+
+        let workspace = WorkspaceView::new(ws("prefix-quit"), state("prefix-quit"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        ui.enter_closeup();
+        assert_eq!(
+            step_workspace(&mut ui, Key::Live(LiveTerminalAction::QuitConfirmation)),
+            WorkspaceStep::Quit
         );
     }
 
