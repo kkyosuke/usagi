@@ -99,7 +99,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
     fn execute(
         &mut self,
         workspace: &Workspace,
-        selected: Option<&usagi_core::domain::session::SessionRecord>,
+        _selected: Option<&usagi_core::domain::session::SessionRecord>,
         command: SessionCommand,
     ) -> Result<SessionCommandResult, String> {
         let (action, payload) = match command {
@@ -111,14 +111,10 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             SessionCommand::SelectRemove { .. } => {
                 return Err("session selection must be handled by the TUI".to_owned());
             }
-            SessionCommand::Remove { force } => {
-                let selected =
-                    selected.ok_or_else(|| "workspace root cannot be removed".to_owned())?;
-                (
-                    SessionAction::Remove,
-                    serde_json::json!({"name": selected.name, "force": force}),
-                )
-            }
+            SessionCommand::Remove { name, force } => (
+                SessionAction::Remove,
+                serde_json::json!({"name": name, "force": force}),
+            ),
         };
         let operation_id = usagi_core::domain::id::OperationId::new().to_string();
         let mut client =

@@ -103,8 +103,8 @@ Home 背景を保ったまま合成し、モーダル表示中はその入力が
 launch を依頼する。その他の引数は安全な feedback で拒否し、local PTY や name/path lookup には fallback
 しない。terminal stream の IPC 境界は [daemon IPC](04-ipc.md#generic-terminal-request) が正本である。
 Overview の `session create <name>`、`session list`、`session overview`、
-`session remove [--force]` は daemon IPC へ request を送る。remove は現在選択中 session にだけ作用し、
-root を対象にした remove は実行しない。
+`session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した
+session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
 
 `session remove -s [--force]` は削除対象を複数選ぶ checklist modal を開く。選択 modal の入力、snapshot
 reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-modal) が正本である。

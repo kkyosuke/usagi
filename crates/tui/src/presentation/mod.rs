@@ -814,7 +814,10 @@ fn submit_remove_selector(
             .execute(
                 ui.workspace.record(),
                 Some(&current),
-                SessionCommand::Remove { force },
+                SessionCommand::Remove {
+                    name: current.name.clone(),
+                    force,
+                },
             );
         match result {
             Ok(result) => {
@@ -2880,10 +2883,43 @@ mod tests {
             vec![(
                 "alpha".to_owned(),
                 Some("alpha-session".to_owned()),
-                SessionCommand::Remove { force: false },
+                SessionCommand::Remove {
+                    name: "alpha-session".to_owned(),
+                    force: false,
+                },
             )]
         );
         assert!(ui.modal.is_none());
+    }
+
+    #[test]
+    fn session_remove_name_dispatches_the_named_target_without_using_the_cursor() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(SnapshotSessionPort(calls.clone())),
+            ModalSelectionMode::Prompt,
+        );
+        ui.open_overview();
+        for ch in "session remove alpha-session --force".chars() {
+            assert_eq!(step_workspace(&mut ui, Key::Char(ch)), WorkspaceStep::Stay);
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                "alpha".to_owned(),
+                None,
+                SessionCommand::Remove {
+                    name: "alpha-session".to_owned(),
+                    force: true,
+                },
+            )]
+        );
+        assert!(ui.workspace.sessions().is_empty());
     }
 
     #[test]

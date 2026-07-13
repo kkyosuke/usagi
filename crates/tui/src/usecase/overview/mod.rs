@@ -57,6 +57,7 @@ pub enum SessionCommand {
         force: bool,
     },
     Remove {
+        name: String,
         force: bool,
     },
 }
@@ -199,21 +200,31 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
         "create" => Err("session name is required"),
         "list" if rest.is_empty() => Ok(SessionCommand::List),
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
-        "remove" if rest.is_empty() => Ok(SessionCommand::Remove { force: false }),
-        "remove" if rest == "--force" => Ok(SessionCommand::Remove { force: true }),
-        "remove" if matches!(rest, "-s" | "--select") => {
-            Ok(SessionCommand::SelectRemove { force: false })
-        }
-        "remove"
-            if matches!(
-                rest,
-                "-s --force" | "--force -s" | "--select --force" | "--force --select"
-            ) =>
-        {
+        "remove" => parse_remove(rest),
+        _ => Err("unknown session command"),
+    }
+}
+
+/// Parse the explicit deletion target or the selector flags. A bare `remove`
+/// is deliberately rejected: it must never infer a target from the current row.
+fn parse_remove(arguments: &str) -> Result<SessionCommand, &'static str> {
+    let tokens: Vec<_> = arguments.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["-s" | "--select"] => Ok(SessionCommand::SelectRemove { force: false }),
+        ["-s" | "--select", "--force"] | ["--force", "-s" | "--select"] => {
             Ok(SessionCommand::SelectRemove { force: true })
         }
-        "remove" => Err("invalid session remove arguments"),
-        _ => Err("unknown session command"),
+        [name] if !name.starts_with('-') => Ok(SessionCommand::Remove {
+            name: (*name).to_owned(),
+            force: false,
+        }),
+        [name, "--force"] | ["--force", name] if !name.starts_with('-') => {
+            Ok(SessionCommand::Remove {
+                name: (*name).to_owned(),
+                force: true,
+            })
+        }
+        _ => Err("invalid session remove arguments"),
     }
 }
 
@@ -392,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_session_commands_without_a_name_based_remove_target() {
+    fn parses_session_commands_with_explicit_remove_targets() {
         assert_eq!(
             parse_session("create feature-x"),
             Ok(SessionCommand::Create {
@@ -402,12 +413,18 @@ mod tests {
         assert_eq!(parse_session("list"), Ok(SessionCommand::List));
         assert_eq!(parse_session("overview"), Ok(SessionCommand::Overview));
         assert_eq!(
-            parse_session("remove --force"),
-            Ok(SessionCommand::Remove { force: true })
+            parse_session("remove feature-x --force"),
+            Ok(SessionCommand::Remove {
+                name: "feature-x".into(),
+                force: true,
+            })
         );
         assert_eq!(
-            parse_session("remove"),
-            Ok(SessionCommand::Remove { force: false })
+            parse_session("remove feature-x"),
+            Ok(SessionCommand::Remove {
+                name: "feature-x".into(),
+                force: false,
+            })
         );
         assert_eq!(
             parse_session("remove -s"),
@@ -424,7 +441,7 @@ mod tests {
             Err("unknown session command")
         );
         assert_eq!(
-            parse_session("remove old-name"),
+            parse_session("remove"),
             Err("invalid session remove arguments")
         );
         assert_eq!(
