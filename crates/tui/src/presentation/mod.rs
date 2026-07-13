@@ -31,6 +31,7 @@ use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
+use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::overview::{self, SessionCommand};
 use usagi_core::usecase::settings::SettingsPort;
@@ -716,8 +717,13 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('n') => ui.open_text(),
         Key::Escape => ui.workspace.enter_switch(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        // action 実行は Closeup command handler が接続されるまで no-op。
-        Key::Enter | Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
+        Key::Enter => match ui.closeup.selected_action().name {
+            "agent" => ui.workspace.open_pane(PaneKind::Agent),
+            "terminal" => ui.workspace.open_pane(PaneKind::Terminal),
+            _ => {}
+        },
+        Key::Char('x') => ui.workspace.close_pane(),
+        Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -758,7 +764,7 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
         }
         Some(WorkspaceModal::Pr(modal)) => pr_modal::render_over(height, width, &base, modal),
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
-        None if ui.workspace.mode() == Mode::Closeup => {
+        None if ui.workspace.mode() == Mode::Closeup && !ui.workspace.has_panes() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
         }
         None => base,
@@ -1743,7 +1749,7 @@ mod tests {
         assert!(term.frames.iter().any(|frame| {
             frame
                 .join("\n")
-                .contains("Terminal — session 'beta-session'")
+                .contains("No tabs stirring yet. Enter starts one.")
         }));
     }
 
@@ -1940,13 +1946,12 @@ mod tests {
 
         let frame = |index: usize| term.frames[index].join("\n");
         assert!(frame(0).contains("Switch"));
-        assert!(frame(0).contains("Preview"));
-        assert!(frame(2).contains("Terminal — session 'direct-session'"));
+        assert!(frame(0).contains("No tabs stirring yet. Enter starts one."));
+        assert!(frame(2).contains("No tabs stirring yet. Enter starts one."));
 
         // Closeup modal は workspace と tab strip の上に重なり、左右移動後の tab を保つ。
         assert!(frame(3).contains("terminal"));
         assert!(frame(3).contains("direct-session"));
-        assert!(frame(3).contains("Terminal"));
 
         // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
         assert!(frame(5).contains("workspace commands"));
@@ -1957,12 +1962,59 @@ mod tests {
         // PR modal も実データを表示し、閉じると同じ Closeup に戻る。
         assert!(frame(10).contains("Pull Request"));
         assert!(frame(10).contains("#42"));
-        assert!(frame(10).contains("Terminal"));
         assert!(frame(12).contains("terminal"));
 
         // 次の Esc は Closeup -> Switch。終了は明示的な Quit のみ。
         assert!(frame(13).contains("Switch"));
         assert!(!frame(13).contains("Open terminal"));
+    }
+
+    #[test]
+    fn closeup_actions_project_agent_and_terminal_tabs_into_the_runtime_frame() {
+        let mut agent = FakeTerminal::with_keys(&[Key::Down, Key::Enter, Key::Enter, Key::Quit]);
+        assert_eq!(
+            run_workspace(&mut agent, snapshot("chrome-agent")).unwrap(),
+            Exit::Quit
+        );
+        let mut terminal = FakeTerminal::with_keys(&[
+            Key::Down,
+            Key::Enter,
+            Key::Down,
+            Key::Down,
+            Key::Down,
+            Key::Enter,
+            Key::Quit,
+        ]);
+        assert_eq!(
+            run_workspace(&mut terminal, snapshot("chrome-terminal")).unwrap(),
+            Exit::Quit
+        );
+        let agent_frames = agent
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        let terminal_frames = terminal
+            .frames
+            .iter()
+            .map(|frame| frame.join("\n"))
+            .collect::<Vec<_>>();
+        assert!(
+            agent_frames
+                .iter()
+                .any(|frame| frame.contains("Agent (starting)"))
+        );
+        assert!(
+            terminal_frames
+                .iter()
+                .any(|frame| frame.contains("Terminal (resolving)"))
+        );
+        assert!(agent_frames.iter().any(|frame| frame.contains('▔')));
+        assert!(
+            agent_frames
+                .iter()
+                .any(|frame| frame.contains("No tabs stirring yet. Enter starts one."))
+        );
     }
 
     #[test]

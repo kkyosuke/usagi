@@ -149,6 +149,8 @@ pub enum PaneEvent {
     Exited(TerminalRef),
     /// 保存済み terminal を再接続候補として復元する。
     Restore(LivePane),
+    /// Close the selected pane tab. Selecting a target without a tab is a no-op.
+    CloseSelected,
 }
 
 /// reducer が adapter / route reducer へ返す局所 effect。
@@ -188,7 +190,42 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
         PaneEvent::Failed { operation, message } => fail(state, operation, message),
         PaneEvent::Exited(terminal) => exit(state, &terminal),
         PaneEvent::Restore(pane) => restore(state, pane),
+        PaneEvent::CloseSelected => close_selected(state),
     }
+}
+
+#[coverage(off)]
+fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
+    let Some(index) = state
+        .tabs
+        .iter()
+        .position(|tab| match (tab, &state.selected) {
+            (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
+                pending.operation == *selected
+            }
+            (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
+                live.terminal == *selected
+            }
+            (PaneTab::Pending(_) | PaneTab::Live(_), PaneSelection::Target(_))
+            | (PaneTab::Pending(_), PaneSelection::Tab(TabSelection::Live(_)))
+            | (PaneTab::Live(_), PaneSelection::Tab(TabSelection::Pending(_))) => false,
+        })
+    else {
+        return Vec::new();
+    };
+    let target = match state.tabs.remove(index) {
+        PaneTab::Pending(pending) => pending.target,
+        PaneTab::Live(live) => match live.terminal.session_id {
+            Some(session) => Target::Session(session),
+            None => Target::Root(live.terminal.workspace_id),
+        },
+    };
+    if state.tabs.is_empty() {
+        state.selected = PaneSelection::Target(target);
+        return vec![PaneEffect::ReturnToCloseup];
+    }
+    state.selected = selection_for(&state.tabs[index.min(state.tabs.len() - 1)]);
+    Vec::new()
 }
 
 #[coverage(off)]
@@ -428,6 +465,30 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn closing_the_selected_pending_tab_selects_the_next_tab_then_returns_to_target() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let first = request(&mut state, target, PaneKind::Terminal);
+        let second = request(&mut state, target, PaneKind::Agent);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(first))),
+        );
+
+        assert!(reduce(&mut state, PaneEvent::CloseSelected).is_empty());
+        assert_eq!(state.tabs().len(), 1);
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Pending(second))
+        );
+        assert_eq!(
+            reduce(&mut state, PaneEvent::CloseSelected),
+            vec![PaneEffect::ReturnToCloseup]
+        );
+        assert_eq!(state.selected(), &PaneSelection::Target(target));
     }
 
     #[test]
