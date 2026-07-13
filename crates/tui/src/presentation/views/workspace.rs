@@ -16,6 +16,7 @@ use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
 use usagi_core::domain::workspace_state::WorkspaceState;
+use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
@@ -302,6 +303,8 @@ pub struct Workspace {
     panes: BTreeMap<String, PaneState>,
     /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
     pending_session: Option<String>,
+    /// 最新の daemon observation。永続 workspace state には保存しない。
+    metrics: Option<DaemonMetrics>,
 }
 
 impl Workspace {
@@ -328,6 +331,7 @@ impl Workspace {
             pane_owner,
             panes,
             pending_session: None,
+            metrics: None,
         }
     }
 
@@ -399,6 +403,12 @@ impl Workspace {
     #[coverage(off)]
     pub fn pending_session(&self) -> Option<&str> {
         self.pending_session.as_deref()
+    }
+
+    /// Replaces the daemon-observed metrics shown in the sidebar footer area.
+    #[coverage(off)]
+    pub fn set_metrics(&mut self, metrics: Option<DaemonMetrics>) {
+        self.metrics = metrics;
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -865,6 +875,19 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
         .paint(&widgets::clip_to_width(hint, width))
 }
 
+/// daemon observation is deliberately placed immediately above the v1-style
+/// sidebar footer: it is useful ambient state, not navigable content.
+#[coverage(off)]
+fn metrics_line(width: usize, metrics: &DaemonMetrics) -> String {
+    let text = format!(
+        "daemon · {} sub · {} dropped",
+        metrics.active_subscribers, metrics.dropped_updates
+    );
+    Style::new()
+        .dim()
+        .paint(&widgets::clip_to_width(&text, width))
+}
+
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
 /// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
 #[coverage(off)]
@@ -893,7 +916,10 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     } else {
         0
     };
-    let content_capacity = body_capacity.saturating_sub(mascot_rows);
+    let metrics_rows = usize::from(ws.metrics.is_some());
+    let content_capacity = body_capacity
+        .saturating_sub(mascot_rows)
+        .saturating_sub(metrics_rows);
     let pending_rows = 2 * usize::from(ws.pending_session().is_some());
     let viewport_capacity = content_capacity.saturating_sub(pending_rows);
     let start = workspace_viewport_start(ws.selected, ws.row_count(), viewport_capacity);
@@ -924,6 +950,9 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     if show_mascot {
         rows.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
         rows.push(String::new());
+    }
+    if let Some(metrics) = &ws.metrics {
+        rows.push(metrics_line(width, metrics));
     }
     rows.push(left_footer(width, ws));
     rows
@@ -2203,6 +2232,27 @@ mod tests {
         assert_eq!(left_rows[ears].find('('), Some(MASCOT_INDENT + 1));
         assert_eq!(left_rows[ears + 1].find('('), Some(MASCOT_INDENT + 1));
         assert_eq!(left_rows[ears + 2].find('o'), Some(MASCOT_INDENT));
+    }
+
+    #[test]
+    fn render_places_daemon_metrics_directly_above_the_left_footer() {
+        let mut ws = workspace();
+        ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 1,
+            sampled_at_ms: 42,
+            active_subscribers: 3,
+            dropped_updates: 5,
+        }));
+        let frame = render(30, 100, &ws);
+        let left_rows = frame[CHROME_ROWS..]
+            .iter()
+            .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
+            .collect::<Vec<_>>();
+        let metrics = left_rows
+            .iter()
+            .position(|line| line.contains("3 sub · 5 dropped"))
+            .expect("metrics line");
+        assert!(left_rows[metrics + 1].contains("[switch]"));
     }
 
     #[test]
