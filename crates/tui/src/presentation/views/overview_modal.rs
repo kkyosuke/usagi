@@ -580,9 +580,9 @@ mod tests {
     }
 
     #[test]
-    fn tab_without_a_completion_keeps_the_closeup_command_input_unchanged() {
+    fn tab_without_an_argument_completion_preserves_the_entire_input_state() {
         let mut modal = OverviewModal::new();
-        type_str(&mut modal, "session create a");
+        type_str(&mut modal, "session create ");
         modal.cursor_left();
         let input = modal.input().to_owned();
         let cursor = modal.cursor();
