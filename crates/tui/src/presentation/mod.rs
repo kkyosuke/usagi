@@ -118,7 +118,6 @@ enum OpenStep {
 enum WorkspaceStep {
     Stay,
     Quit,
-    Back,
 }
 
 /// Workspace の基底画面より手前に重ねる modal。
@@ -616,7 +615,8 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
 }
 
 /// Switch のキー処理。session 選択と preview tab の移動を行い、Enter / `t` で
-/// 選択行の Closeup action menu へ入る。
+/// 選択行の Closeup action menu へ入る。基底の workspace は back stack の終端なので、
+/// Esc はここから抜けず no-op とする。
 #[coverage(off)]
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
@@ -630,9 +630,8 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Escape => return WorkspaceStep::Back,
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
+        Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -769,13 +768,14 @@ fn drive_workspace_with_ports(
         term.draw(&render_workspace(height, width, &ui))?;
         match step_workspace(&mut ui, term.read_key()?) {
             WorkspaceStep::Stay => {}
-            exit => return Ok(exit),
+            WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),
         }
     }
 }
 
 /// Workspace を起点にした公開 runtime。direct `usagi open <path>` は合成側で [`WorkspaceLoader`]
-/// を一度呼び、その snapshot をこの関数へ渡す。起点より前の画面が無いため Esc も終了となる。
+/// を一度呼び、その snapshot をこの関数へ渡す。基底の Switch で Esc を押しても workspace
+/// からは抜けず、終了には `q` / Ctrl-C を使う。
 ///
 /// # Errors
 ///
@@ -809,9 +809,9 @@ pub fn run_workspace_with_session_port(
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
-/// で開き、同じ Workspace runtime を駆動する。Workspace で Esc を押すと呼び出し元へ戻るため、
-/// Open 経由なら Open、Recent 経由なら Welcome が再描画される。`q` / Ctrl-C はどの画面でも
-/// runtime 全体を終了する。
+/// で開き、同じ Workspace runtime を駆動する。Workspace の基底 Switch では Esc は無効で、
+/// Closeup や前面 modal を閉じるためだけに使う。`q` / Ctrl-C はどの画面でも runtime 全体を
+/// 終了する。
 ///
 /// `workspaces` / `recent` / `now` は永続化・実時計を持つ呼び出し側から渡す。
 ///
@@ -1547,7 +1547,6 @@ mod tests {
             Key::Char(' '),
             Key::Enter,
             Key::Escape,
-            Key::Escape,
             Key::Char('q'),
         ]);
         let mut unite_loader = FakeLoader::default();
@@ -1559,14 +1558,11 @@ mod tests {
             &mut unite_loader,
         )
         .unwrap();
-        assert_eq!(
-            unite_loader.opened,
-            vec![PathBuf::from("/tmp/alpha"), PathBuf::from("/tmp/beta")]
-        );
+        assert_eq!(unite_loader.opened, vec![PathBuf::from("/tmp/alpha")]);
     }
 
     #[test]
-    fn open_navigation_and_workspace_escape_return_to_open() {
+    fn open_navigation_keeps_workspace_open_when_escape_is_pressed() {
         let keys = [
             Key::Char('o'),
             Key::Down,
@@ -1581,11 +1577,6 @@ mod tests {
             Key::Char('z'),
             Key::Other,
             Key::Escape,
-            Key::Escape,
-            Key::Left,
-            Key::Right,
-            Key::Char('z'),
-            Key::Other,
             Key::Char('q'),
         ];
         let mut term = FakeTerminal::with_keys(&keys);
@@ -1604,7 +1595,7 @@ mod tests {
                 .last()
                 .unwrap()
                 .join("\n")
-                .contains("Open Workspace")
+                .contains("beta-session")
         );
         assert!(term.frames.iter().any(|frame| {
             frame
@@ -1631,20 +1622,14 @@ mod tests {
     }
 
     #[test]
-    fn open_touch_refreshes_open_and_welcome_recency_models() {
+    fn open_touch_keeps_workspace_open_when_escape_is_pressed() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
         let recent = vec![
             Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
             Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
         ];
-        let keys = [
-            Key::Char('o'),
-            Key::Enter,
-            Key::Escape,
-            Key::Escape,
-            Key::Char('q'),
-        ];
+        let keys = [Key::Char('o'), Key::Enter, Key::Escape, Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
             opened_at: Some(now()),
@@ -1653,14 +1638,14 @@ mod tests {
 
         run(&mut term, vec![alpha, beta], recent, now(), &mut loader).unwrap();
 
-        let refreshed_open = term.frames[3].join("\n");
-        assert!(refreshed_open.contains("↳ /tmp/alpha"));
-        assert!(refreshed_open.contains("just now"));
-        assert!(refreshed_open.find("alpha").unwrap() < refreshed_open.find("beta").unwrap());
-
-        let refreshed_welcome = term.frames[4].join("\n");
-        assert!(refreshed_welcome.contains("just now"));
-        assert!(refreshed_welcome.find("alpha").unwrap() < refreshed_welcome.find("beta").unwrap());
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert!(
+            term.frames
+                .last()
+                .unwrap()
+                .join("\n")
+                .contains("alpha-session")
+        );
     }
 
     #[test]
@@ -1680,7 +1665,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_loads_workspace_and_escape_returns_to_welcome() {
+    fn recent_loads_workspace_and_escape_keeps_it_open() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q')]);
         let mut loader = FakeLoader::default();
         run(
@@ -1693,18 +1678,18 @@ mod tests {
         .unwrap();
         assert_eq!(loader.opened, vec![PathBuf::from("/tmp/recent")]);
         assert!(term.frames[1].join("\n").contains("recent-session"));
-        assert!(term.frames[2].join("\n").contains("Recent"));
+        assert!(term.frames[2].join("\n").contains("recent-session"));
     }
 
     #[test]
-    fn recent_touch_refreshes_welcome_and_open_recency_models() {
+    fn recent_touch_keeps_workspace_open_when_escape_is_pressed() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
         let recent = vec![
             Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
             Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
         ];
-        let keys = [Key::Char('2'), Key::Escape, Key::Char('o'), Key::Char('q')];
+        let keys = [Key::Char('2'), Key::Escape, Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
             opened_at: Some(now()),
@@ -1713,14 +1698,8 @@ mod tests {
 
         run(&mut term, vec![beta, alpha], recent, now(), &mut loader).unwrap();
 
-        let refreshed_welcome = term.frames[2].join("\n");
-        assert!(refreshed_welcome.contains("just now"));
-        assert!(refreshed_welcome.find("alpha").unwrap() < refreshed_welcome.find("beta").unwrap());
-
-        let refreshed_open = term.frames[3].join("\n");
-        assert!(refreshed_open.contains("↳ /tmp/beta"));
-        assert!(refreshed_open.contains("just now"));
-        assert!(refreshed_open.find("alpha").unwrap() < refreshed_open.find("beta").unwrap());
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+        assert!(term.frames[2].join("\n").contains("alpha-session"));
     }
 
     #[test]
@@ -1806,7 +1785,7 @@ mod tests {
             Key::Down,
             Key::Escape,
             Key::Escape,
-            Key::Escape,
+            Key::Quit,
         ];
         let mut term = FakeTerminal::with_keys(&keys);
 
@@ -1829,7 +1808,7 @@ mod tests {
         // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
         assert!(frame(5).contains("workspace commands"));
         assert!(frame(6).contains("no matching command"));
-        assert!(frame(6).contains("Command"));
+        assert!(frame(6).contains("Overview"));
         assert!(frame(9).contains("terminal"));
 
         // PR modal も実データを表示し、閉じると同じ Closeup に戻る。
@@ -1838,7 +1817,7 @@ mod tests {
         assert!(frame(10).contains("Terminal"));
         assert!(frame(12).contains("terminal"));
 
-        // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
+        // 次の Esc は Closeup -> Switch。終了は明示的な Quit のみ。
         assert!(frame(13).contains("Switch"));
         assert!(!frame(13).contains("Open terminal"));
     }
@@ -1923,7 +1902,7 @@ mod tests {
     #[test]
     fn direct_workspace_handles_navigation_shortcuts_and_exit_keys() {
         for (navigation, exit) in [
-            (vec![Key::Escape], Key::Escape),
+            (vec![Key::Escape, Key::Escape], Key::Quit),
             (Vec::new(), Key::Quit),
             (Vec::new(), Key::Char('q')),
         ] {
