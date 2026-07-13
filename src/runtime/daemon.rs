@@ -162,6 +162,9 @@ impl PtyWriter for DaemonPty {
 struct SharedTerminal(
     Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>,
 );
+type SharedSessionRuntime = Arc<Mutex<SessionRuntime<SystemGit>>>;
+type SharedTerminalRuntime =
+    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>;
 impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
     fn request(
         &mut self,
@@ -209,31 +212,49 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         },
     );
     let repo_root = std::env::current_dir()?;
-    let runtime = Arc::new(Mutex::new(
-        SessionRuntime::open(
-            repo_root.clone(),
-            usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
-                .map_err(|error| std::io::Error::other(error.to_string()))?,
-            SystemGit,
-        )
-        .map_err(|error| std::io::Error::other(error.safe_message()))?,
-    ));
+    let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let runtime = open_session_runtime(repo_root.clone(), daemon_generation)?;
     let (pty, observations) = DaemonPty::new();
-    let terminal = Arc::new(Mutex::new(GenericTerminalRuntime::new(
-        usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
-            .map_err(|error| std::io::Error::other(error.to_string()))?,
+    let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
+    start_terminal_observer(Arc::clone(&terminal), observations)?;
+    start_ipc_accept_loop(listener, server, runtime, terminal)
+}
+
+fn open_session_runtime(
+    repo_root: PathBuf,
+    generation: usagi_core::domain::id::DaemonGeneration,
+) -> std::io::Result<SharedSessionRuntime> {
+    SessionRuntime::open(repo_root, generation, SystemGit)
+        .map(|runtime| Arc::new(Mutex::new(runtime)))
+        .map_err(|error| std::io::Error::other(error.safe_message()))
+}
+
+fn new_terminal_runtime(
+    data_dir: &Path,
+    generation: usagi_core::domain::id::DaemonGeneration,
+    repo_root: PathBuf,
+    pty: DaemonPty,
+) -> SharedTerminalRuntime {
+    Arc::new(Mutex::new(GenericTerminalRuntime::new(
+        generation,
         TrustedLoginShell {
             repository_root: repo_root,
         },
         FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
         pty,
-    )));
-    let observed_terminal = Arc::clone(&terminal);
+    )))
+}
+
+fn start_terminal_observer(
+    terminal: SharedTerminalRuntime,
+    observations: Receiver<PtyObservation>,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-terminal-observer".to_string())
         .spawn(move || {
             while let Ok(observation) = observations.recv() {
-                let Ok(mut terminal) = observed_terminal.lock() else {
+                let Ok(mut terminal) = terminal.lock() else {
                     break;
                 };
                 match observation {
@@ -242,7 +263,16 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                     }
                 }
             }
-        })?;
+        })
+        .map(|_| ())
+}
+
+fn start_ipc_accept_loop(
+    listener: SecureUnixListener,
+    server: usagi_core::infrastructure::ipc::ServerProtocol,
+    runtime: SharedSessionRuntime,
+    terminal: SharedTerminalRuntime,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
