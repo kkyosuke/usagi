@@ -106,6 +106,9 @@ Overview の `session create <name>`、`session list`、`session overview`、
 `session remove [--force]` は daemon IPC へ request を送る。remove は現在選択中 session にだけ作用し、
 root を対象にした remove は実行しない。
 
+`session remove -s [--force]` は削除対象を複数選ぶ checklist modal を開く。選択 modal の入力、snapshot
+reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-modal) が正本である。
+
 Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
 `q` は基底の Switch / Closeup で TUI を終了し、最前面モーダルではそのモーダルが受け取る。
