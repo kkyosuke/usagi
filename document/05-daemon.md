@@ -120,6 +120,20 @@ launch は reservation を永続化してから実 PTY を一度だけ spawn し
 owner を一つの shared terminal owner が `TerminalRef` の所有元へ routing する。connection close は当該
 connection の subscription だけを外し、Agent process・PTY・completion worker は kill しない。
 
+root の provisioner は Codex を既定 profile とし、`codex login status` または `claude auth status` を spawn
+前に実行する。probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
+credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
+差し替え可能な境界であり、fixture executable を使う確認では実 CLI や実認証を必要としない。
+
+### fixture による手動確認
+
+Agent owner の実 PTY fixture は次を確認する。実 CLI を install または login する必要はない。
+
+1. `cargo test -p usagi-daemon --test agent_real_pty` を実行する。
+2. 成功 fixture が launch、output、attach、input、detach、reattach、exit を通り、同じ operation の replay が
+   completed terminal を返すことを確認する。
+3. PATH を空にした failure fixture が executable を spawn せず、safe `unavailable` を replay することを確認する。
+
 pending Agent pane を attachable にするのは、同じ `OperationId` の成功 final が返す完全な `TerminalRef`
 だけである。late / duplicate / wrong-generation / wrong-scope の completion は現 incarnation を変更しない。
 TUI 側の pending pane と fenced attach policy は [3. TUI](03-tui.md) を正本とする。
