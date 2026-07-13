@@ -204,19 +204,19 @@ pub fn handle_connection_with_terminal<R: Read, W: Write, T: TerminalOwner>(
             }) = serde_json::from_value(body.clone())
             {
                 match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                    Ok(owner_request_id) => {
-                        terminal.request(connection, client, owner_request_id, action, payload)
-                    }
+                    Ok(owner_request_id) => terminal
+                        .request(connection, client, owner_request_id, action, payload)
+                        .map(|body| (ResponseOutcome::Ok, body)),
                     Err(_) => Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
                         "terminal request_id must be a canonical resource ID",
                     )),
                 }
             } else {
-                Ok(dispatch(request_id.clone(), body, &hello).kind_response_body())
+                Ok(dispatch(request_id.clone(), body, &hello).kind_response())
             };
             let (outcome, body) = match outcome_body {
-                Ok(body) => (ResponseOutcome::Ok, body),
+                Ok((outcome, body)) => (outcome, body),
                 Err(error) => (ResponseOutcome::Error(error), json!(null)),
             };
             let reply = Envelope {
@@ -281,19 +281,24 @@ where
             }) = serde_json::from_value(body.clone())
             {
                 match usagi_core::domain::id::RequestId::parse(&request_id.0) {
-                    Ok(owner_request_id) => {
-                        terminal.request(connection, client, owner_request_id, action, payload)
-                    }
+                    Ok(owner_request_id) => terminal
+                        .request(connection, client, owner_request_id, action, payload)
+                        .map(|body| (ResponseOutcome::Ok, body)),
                     Err(_) => Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,
                         "terminal request_id must be a canonical resource ID",
                     )),
                 }
             } else {
-                Ok(dispatch_request(request_id.clone(), body, &hello).kind_response_body())
+                let dispatched = dispatch_request(request_id.clone(), body.clone(), &hello);
+                if body.get("kind").and_then(serde_json::Value::as_str) == Some("agent") {
+                    Ok(dispatched.kind_response())
+                } else {
+                    Ok((ResponseOutcome::Ok, dispatched.kind_response_body()))
+                }
             };
             let (outcome, body) = match outcome_body {
-                Ok(body) => (ResponseOutcome::Ok, body),
+                Ok((outcome, body)) => (outcome, body),
                 Err(error) => (ResponseOutcome::Error(error), json!(null)),
             };
             let reply = Envelope {
@@ -313,10 +318,18 @@ where
     result
 }
 
-trait ResponseBody {
+trait ResponseOutcomeBody {
+    fn kind_response(self) -> (ResponseOutcome, serde_json::Value);
     fn kind_response_body(self) -> serde_json::Value;
 }
-impl ResponseBody for Envelope {
+impl ResponseOutcomeBody for Envelope {
+    fn kind_response(self) -> (ResponseOutcome, serde_json::Value) {
+        match self.kind {
+            EnvelopeKind::Response { outcome, body, .. } => (outcome, body),
+            _ => (ResponseOutcome::Ok, json!(null)),
+        }
+    }
+
     fn kind_response_body(self) -> serde_json::Value {
         match self.kind {
             EnvelopeKind::Response { body, .. } => body,

@@ -297,7 +297,18 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
     #[coverage(off)]
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         self.next_request += 1;
-        let request_id = crate::infrastructure::ipc::RequestId(self.next_request.to_string());
+        // Terminal owners use this correlation ID as part of their input
+        // dedupe fence, so it must satisfy the canonical resource-ID contract
+        // they validate at the server boundary.  Other request kinds retain
+        // the compact per-connection sequence used by their response cache.
+        let request_id = if matches!(&request, DaemonRequest::Terminal { .. }) {
+            crate::infrastructure::ipc::RequestId(format!(
+                "00000000-0000-4000-8000-{:012x}",
+                self.next_request
+            ))
+        } else {
+            crate::infrastructure::ipc::RequestId(self.next_request.to_string())
+        };
         let envelope = Envelope {
             protocol: self.protocol,
             daemon_generation: self.daemon_generation.clone(),
@@ -436,7 +447,7 @@ mod tests {
         }
     }
 
-    fn scripted(reply: ResponseOutcome) -> Scripted {
+    fn scripted(reply: ResponseOutcome, request_id: &str) -> Scripted {
         let protocol = ProtocolVersion {
             generation: 1,
             revision: 1,
@@ -460,7 +471,7 @@ mod tests {
             protocol,
             daemon_generation: generation.clone(),
             kind: EnvelopeKind::Response {
-                request_id: crate::infrastructure::ipc::RequestId("1".into()),
+                request_id: crate::infrastructure::ipc::RequestId(request_id.into()),
                 outcome: reply,
                 body: serde_json::json!({"ok":true}),
             },
@@ -514,10 +525,13 @@ mod tests {
 
     #[test]
     fn client_handshakes_and_preserves_accepted_operation() {
-        let stream = scripted(ResponseOutcome::Accepted {
-            operation_id: crate::infrastructure::ipc::OperationId("op".into()),
-            operation_revision: 7,
-        });
+        let stream = scripted(
+            ResponseOutcome::Accepted {
+                operation_id: crate::infrastructure::ipc::OperationId("op".into()),
+                operation_revision: 7,
+            },
+            "1",
+        );
         let mut client =
             IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
                 .unwrap();
@@ -556,7 +570,7 @@ mod tests {
             ResponseOutcome::Ok,
             ResponseOutcome::Error(ProtocolError::new(ErrorCode::Busy, "busy")),
         ] {
-            let stream = scripted(reply);
+            let stream = scripted(reply, "00000000-0000-4000-8000-000000000001");
             let mut client =
                 IpcClient::connect(stream, "client".into(), "nonce".into(), ClientPolicy::cli())
                     .unwrap();
