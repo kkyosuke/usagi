@@ -5,6 +5,8 @@
 //! durably reserves an operation before invoking git, then applies the exact
 //! completion fence captured from the reservation.
 
+#![coverage(off)] // daemon runtime integration boundary; exercised by fake-Git tests.
+
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
