@@ -2475,17 +2475,18 @@ mod tests {
         );
     }
 
+    /// Welcome→Open で開いた workspace が、hard-code の `UnavailableSessionCommandPort`
+    /// ではなく注入 factory から port を取り出すこと（＝本 fix）を固定する。factory が
+    /// production では daemon port を返すため、これで全経路が実 port を通ることを担保する。
     #[test]
-    fn open_workspace_connects_the_injected_session_command_port() {
+    fn open_workspace_pulls_the_session_command_port_from_the_factory() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let created = Arc::new(Mutex::new(0usize));
         let mut factory = SnapshotSessionPortFactory {
             calls: calls.clone(),
             created: created.clone(),
         };
-        let mut keys = vec![Key::Char('o'), Key::Enter, Key::Char(':')];
-        keys.extend("session create review".chars().map(Key::Char));
-        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
+        let keys = [Key::Char('o'), Key::Enter, Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         let mut settings = DefaultSettingsPort;
@@ -2505,32 +2506,20 @@ mod tests {
             Exit::Quit
         );
 
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![(
-                "alpha".to_owned(),
-                None,
-                SessionCommand::Create {
-                    name: "review".to_owned()
-                }
-            )]
-        );
+        assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
         assert_eq!(*created.lock().unwrap(), 1);
-        // The daemon snapshot returned by the port replaces the sidebar rows.
-        assert!(term.frames.last().unwrap().join("\n").contains("review"));
     }
 
+    /// Welcome の Recent 経由で開いた workspace も同じ factory から port を取り出す。
     #[test]
-    fn recent_workspace_connects_the_injected_session_command_port() {
+    fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let created = Arc::new(Mutex::new(0usize));
         let mut factory = SnapshotSessionPortFactory {
             calls: calls.clone(),
             created: created.clone(),
         };
-        let mut keys = vec![Key::Char('1'), Key::Char(':')];
-        keys.extend("session list".chars().map(Key::Char));
-        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
+        let keys = [Key::Char('1'), Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         let mut settings = DefaultSettingsPort;
@@ -2551,11 +2540,37 @@ mod tests {
         );
 
         assert_eq!(loader.opened, vec![PathBuf::from("/tmp/home")]);
+        assert_eq!(*created.lock().unwrap(), 1);
+    }
+
+    /// Overview の `session create` が注入 port へ届き、返された daemon snapshot が
+    /// sidebar の session 行へ反映されることを固定する。
+    #[test]
+    fn session_create_reaches_the_port_and_snapshot_reflects_in_the_sidebar() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let port = SnapshotSessionPort(calls.clone());
+        let mut keys = vec![Key::Char(':')];
+        keys.extend("session create review".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
+        let mut term = FakeTerminal::with_keys(&keys);
+
+        assert_eq!(
+            run_workspace_with_session_port(&mut term, snapshot("alpha"), Box::new(port)).unwrap(),
+            Exit::Quit
+        );
+
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![("home".to_owned(), None, SessionCommand::List)]
+            vec![(
+                "alpha".to_owned(),
+                None,
+                SessionCommand::Create {
+                    name: "review".to_owned()
+                }
+            )]
         );
-        assert_eq!(*created.lock().unwrap(), 1);
+        // The daemon snapshot returned by the port replaces the sidebar rows.
+        assert!(term.frames.last().unwrap().join("\n").contains("review"));
     }
 
     #[test]
