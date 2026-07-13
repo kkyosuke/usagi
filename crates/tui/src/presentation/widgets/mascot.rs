@@ -76,8 +76,11 @@ pub fn sidebar_block(
         return None;
     }
 
+    // `available` already fits the mascot, whose width exceeds the bubble chrome.
+    // A non-empty `MascotSpeech` therefore always has at least one content cell.
+    let inner_width = available - SPEECH_CHROME;
     let mut plain_rows = speech
-        .and_then(|speech| bubble_rows(speech, available))
+        .map(|speech| bubble_rows(speech, inner_width))
         .unwrap_or_default();
     let bubble_rows = plain_rows.len();
     plain_rows.extend(rabbit_rows(tick));
@@ -110,17 +113,15 @@ fn rabbit_rows(tick: u64) -> [String; 3] {
     [ears.to_owned(), face.to_owned(), RABBIT[2].to_owned()]
 }
 
-fn bubble_rows(speech: &MascotSpeech, max_width: usize) -> Option<Vec<String>> {
-    let inner = max_width.checked_sub(SPEECH_CHROME)?;
-    if inner == 0 {
-        return None;
-    }
+fn bubble_rows(speech: &MascotSpeech, inner: usize) -> Vec<String> {
     let content = speech
         .lines()
         .iter()
         .flat_map(|line| wrap_to_width(line, inner))
         .collect::<Vec<_>>();
-    let content_width = content.iter().map(|row| display_width(row)).max()?;
+    let content_width = content
+        .iter()
+        .fold(0, |widest, row| widest.max(display_width(row)));
     let span = content_width + 2;
     let mut rows = Vec::with_capacity(content.len() + 2);
     rows.push(format!("╭{}╮", "─".repeat(span)));
@@ -134,7 +135,7 @@ fn bubble_rows(speech: &MascotSpeech, max_width: usize) -> Option<Vec<String>> {
     }
     bottom.push('╯');
     rows.push(bottom);
-    Some(rows)
+    rows
 }
 
 fn strip_ansi(text: &str) -> String {
@@ -196,5 +197,14 @@ mod tests {
     fn empty_speech_and_too_narrow_mascot_are_safely_omitted() {
         assert!(MascotSpeech::new([String::new()]).is_none());
         assert!(sidebar_block(7, 0, None).is_none());
+    }
+
+    #[test]
+    fn mascot_animation_keeps_its_footprint_while_twitching_and_blinking() {
+        let twitch = sidebar_block(20, 5, None).expect("mascot fits");
+        let blink = sidebar_block(20, 4, None).expect("mascot fits");
+        assert!(plain(twitch.rows()).contains("(\\(/"));
+        assert!(plain(blink.rows()).contains("(-.-)?"));
+        assert_eq!(twitch.reserved_rows(), blink.reserved_rows());
     }
 }
