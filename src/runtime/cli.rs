@@ -4,29 +4,10 @@ use std::io::Write;
 
 use usagi_cli::cli::{RunOutcome, TuiRequest};
 use usagi_core::domain::AppInfo;
-use usagi_core::infrastructure::git::{GitOutput, GitRunner};
 use usagi_core::usecase::client::{ClientPolicy, DaemonClient, DaemonReply};
 use usagi_tui::usecase::application::EntryScreen;
 
 use super::{daemon, tui};
-
-struct SystemGit;
-
-impl GitRunner for SystemGit {
-    #[coverage(off)]
-    fn run(&self, repo: &std::path::Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()?;
-        Ok(GitOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
-}
 
 #[coverage(off)]
 pub(crate) fn dispatch(
@@ -35,7 +16,7 @@ pub(crate) fn dispatch(
     err: &mut dyn Write,
     info: &AppInfo,
 ) -> std::io::Result<()> {
-    match usagi_cli::cli::run(args, info.version, Box::new(SystemGit), out, err)? {
+    match usagi_cli::cli::run(args, info.version, out, err)? {
         RunOutcome::Exit(code) => std::process::exit(code),
         RunOutcome::LaunchTui(request) => {
             let entry = match request {
@@ -71,5 +52,18 @@ pub(crate) fn dispatch(
                 Ok(())
             }
         },
+        RunOutcome::SelfUpdate { command } => {
+            let result = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()?;
+            out.write_all(&result.stdout)?;
+            err.write_all(&result.stderr)?;
+            if result.status.success() {
+                writeln!(out, "usagi was updated; restart it to use the new binary.")
+            } else {
+                std::process::exit(result.status.code().unwrap_or(1));
+            }
+        }
     }
 }

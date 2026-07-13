@@ -361,12 +361,8 @@ enum Commands {
     },
     /// Sync the current repository's worktree state to .usagi/state.json
     Status,
-    /// Update the default branch from its remote and distribute it into each session worktree (only where it merges cleanly)
-    Update {
-        /// Fetch and report what would change without modifying any branch or worktree
-        #[arg(long)]
-        dry_run: bool,
-    },
+    /// Download and install the latest released usagi binary
+    Update,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -461,7 +457,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Run { n } => usagi::presentation::cli::run::run(n),
         Commands::Status => usagi::presentation::cli::status::run(),
-        Commands::Update { dry_run } => usagi::presentation::cli::update::run(dry_run),
+        Commands::Update => usagi::presentation::cli::update::run(),
     };
 
     trace_command(name, result.is_ok());
@@ -492,7 +488,7 @@ fn command_name(command: &Commands) -> Option<&'static str> {
         Commands::Op { .. } => Some("op"),
         Commands::Run { .. } => Some("run"),
         Commands::Status => Some("status"),
-        Commands::Update { .. } => Some("update"),
+        Commands::Update => Some("update"),
         Commands::LlmMcp { .. } | Commands::Mcp => None,
     }
 }
