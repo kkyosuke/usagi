@@ -51,9 +51,27 @@ struct DaemonSessionCommandPort {
     last_revision: u64,
 }
 
-struct DaemonMetricsPort;
+struct DaemonMetricsPort {
+    last_sample: Option<Instant>,
+    latest: Option<DaemonMetrics>,
+}
+impl DaemonMetricsPort {
+    const fn new() -> Self {
+        Self {
+            last_sample: None,
+            latest: None,
+        }
+    }
+}
 impl MetricsPort for DaemonMetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics> {
+        if self
+            .last_sample
+            .is_some_and(|sample| sample.elapsed() < Duration::from_secs(1))
+        {
+            return self.latest.clone();
+        }
+        self.last_sample = Some(Instant::now());
         let mut client = crate::runtime::daemon::client(ClientPolicy::tui()).ok()?;
         match client
             .request(DaemonRequest::Metrics {
@@ -61,7 +79,10 @@ impl MetricsPort for DaemonMetricsPort {
             })
             .ok()?
         {
-            DaemonReply::Ok(value) => serde_json::from_value(value).ok(),
+            DaemonReply::Ok(value) => {
+                self.latest = serde_json::from_value(value).ok();
+                self.latest.clone()
+            }
             DaemonReply::Accepted { .. } => None,
         }
     }
@@ -658,7 +679,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     modal_selection_mode,
                     Box::new(DaemonAgentCommandPort),
-                    Box::new(DaemonMetricsPort),
+                    Box::new(DaemonMetricsPort::new()),
                 )
             })
         })?;
