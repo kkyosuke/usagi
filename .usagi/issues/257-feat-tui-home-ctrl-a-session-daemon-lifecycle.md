@@ -1,14 +1,14 @@
 ---
 number: 257
 title: feat(tui): Home Ctrl+A 新規 session 作成を daemon lifecycle へ接続する
-status: in-progress
+status: done
 priority: high
 labels: [tui, session, lifecycle, parity]
 dependson: [217, 219, 220, 225, 231, 234, 250, 251, 252, 253, 254]
 related: [222, 224, 246]
 parent: 227
 created_at: 2026-07-12T23:28:40.613981+00:00
-updated_at: 2026-07-12T23:58:15.548642+00:00
+updated_at: 2026-07-13T00:15:42.300968+00:00
 ---
 
 ## 背景・再現
