@@ -323,7 +323,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
 #[must_use]
 #[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
-    modal::render_modal(raw_height, raw_width, "Command", INNER_WIDTH, &body(state))
+    modal::render_modal(raw_height, raw_width, "Overview", INNER_WIDTH, &body(state))
 }
 
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
@@ -340,7 +340,7 @@ pub fn render_over(
     // Leave a row of Home visible above and below a fixed-height palette on a
     // short terminal. The normal-size body remains unchanged.
     let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
-    modal::render_over(raw_height, raw_width, base, "Command", INNER_WIDTH, &body)
+    modal::render_over(raw_height, raw_width, base, "Overview", INNER_WIDTH, &body)
 }
 
 #[cfg(test)]
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn render_shows_the_prompt_commands_and_footer() {
         let text = joined(&OverviewModal::new());
-        assert!(text.contains("Command")); // タイトル
+        assert!(text.contains("Overview")); // タイトル
         assert!(text.contains('❯')); // プロンプト
         assert!(text.contains("workspace commands"));
         assert!(text.contains("config"));
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(frame.len(), 24);
         assert!(frame.iter().all(|line| display_width(line) == 80));
         assert!(frame[0].starts_with("workspace-row-0-"));
-        assert!(text.contains("Command"));
+        assert!(text.contains("Overview"));
         assert!(text.contains("workspace commands"));
         // modal の左右にも元フレームが残る。
         let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();

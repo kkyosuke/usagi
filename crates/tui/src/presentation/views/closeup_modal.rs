@@ -84,7 +84,7 @@ impl CloseupModal {
     }
 }
 
-/// 1 アクション行: 選択中は `›` マーカー、`key` バッジ（warning）、ラベル（accent）、説明（dim）。
+/// 1 アクション行: 選択中は `›` マーカー、command 名（accent）、説明（dim）。
 #[coverage(off)]
 fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
@@ -92,29 +92,27 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
     } else {
         " ".to_string()
     };
-    let key = Role::Warning.style().bold().paint(action.name);
     let label = Role::Accent
         .style()
         .bold()
         .paint(&format!("{:<14}", action.name));
     let desc = Style::new().dim().paint(action.description);
-    widgets::clip_to_width(&format!("  {marker} {key}  {label}{desc}"), inner)
+    widgets::clip_to_width(&format!("  {marker} {label}{desc}"), inner)
 }
 
-/// アクションメニューのボディ（枠の内側の行）: 対象セッションの見出し・アクション一覧・フッタ。
+/// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
 #[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
-    let mut lines = vec![
-        Style::new()
-            .dim()
-            .paint(&format!("session: {}", state.session())),
-        String::new(),
-    ];
+    let mut lines = vec![Style::new().dim().paint("Run a command:"), String::new()];
     for (i, action) in state.actions().iter().enumerate() {
         lines.push(action_row(*action, i == state.selected, INNER_WIDTH));
     }
     lines.push(String::new());
-    lines.push(Style::new().dim().paint("  ↑↓: select   Esc: switch"));
+    lines.push(
+        Style::new()
+            .dim()
+            .paint("  ↑↓: select   Enter: run   Esc: back"),
+    );
     modal::fixed_body(lines, BODY_HEIGHT)
 }
 
@@ -123,7 +121,13 @@ fn body(state: &CloseupModal) -> Vec<String> {
 #[must_use]
 #[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<String> {
-    modal::render_modal(raw_height, raw_width, "Session", INNER_WIDTH, &body(state))
+    modal::render_modal(
+        raw_height,
+        raw_width,
+        &format!("Closeup: {}", state.session()),
+        INNER_WIDTH,
+        &body(state),
+    )
 }
 
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
@@ -140,7 +144,7 @@ pub fn render_over(
         raw_height,
         raw_width,
         base,
-        "Session",
+        &format!("Closeup: {}", state.session()),
         INNER_WIDTH,
         &body(state),
     )
@@ -229,12 +233,13 @@ mod tests {
     #[test]
     fn render_shows_the_session_actions_and_footer() {
         let text = joined(&CloseupModal::new("daemon"));
-        assert!(text.contains("Session")); // タイトル
-        assert!(text.contains("session: daemon"));
+        assert!(text.contains("Closeup: daemon")); // タイトル
+        assert!(text.contains("Run a command:"));
         assert!(text.contains("terminal"));
         assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
-        assert!(text.contains("Esc: switch"));
+        assert!(text.contains("Enter: run"));
+        assert!(text.contains("Esc: back"));
         // 選択マーカーは 1 つ。
         assert!(text.contains('›'));
     }
@@ -270,8 +275,7 @@ mod tests {
         assert_eq!(frame.len(), 24);
         assert!(frame.iter().all(|line| display_width(line) == 80));
         assert!(frame[0].starts_with("workspace-row-0-"));
-        assert!(text.contains("Session"));
-        assert!(text.contains("session: daemon"));
+        assert!(text.contains("Closeup: daemon"));
         let modal_row = frame.iter().find(|line| line.contains('┌')).unwrap();
         assert!(modal_row.starts_with("workspace"));
         assert!(modal_row.trim_end().ends_with('.'));
