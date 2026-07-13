@@ -168,7 +168,12 @@ impl Frame {
 
     #[coverage(off)]
     fn span_text(&self, row: usize, start: usize, end: usize) -> String {
-        let mut text = String::new();
+        // The terminal keeps SGR state across cursor moves and across our
+        // incremental writes. A diff span has no reliable knowledge of the
+        // previous physical style at its cursor position, so make every span
+        // self-contained. Without this, replacing a coloured cell with plain
+        // text can leave the old foreground colour on screen.
+        let mut text = RESET.to_owned();
         // 差分 span は色付き run の途中から始まることがある。その glyph 自身には
         // SGR 開始列がなくても `style` には現在の属性が残っているので、span の先頭で
         // 再出力する。これをしないと、後から追記された入力文字だけが terminal の
@@ -190,6 +195,9 @@ impl Frame {
             }
         }
         if reopened_style && !text.ends_with(RESET) {
+            text.push_str(RESET);
+        }
+        if !text.ends_with(RESET) {
             text.push_str(RESET);
         }
         text
@@ -466,7 +474,7 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 2,
-                text: "Z".into(),
+                text: "\u{1b}[0mZ\u{1b}[0m".into(),
             }]
         );
     }
@@ -481,7 +489,7 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 3,
-                text: "   ".into(),
+                text: "\u{1b}[0m   \u{1b}[0m".into(),
             }]
         );
     }
@@ -496,7 +504,7 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 1,
-                text: "語".into(),
+                text: "\u{1b}[0m語\u{1b}[0m".into(),
             }]
         );
     }
@@ -513,7 +521,7 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 2,
-                text: "\u{1b}[1;36mOpen\u{1b}[0m".into(),
+                text: "\u{1b}[0m\u{1b}[1;36mOpen\u{1b}[0m".into(),
             }]
         );
     }
@@ -530,7 +538,7 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 1,
-                text: "\u{1b}[1;36mbc\u{1b}[0m".into(),
+                text: "\u{1b}[0m\u{1b}[1;36mbc\u{1b}[0m".into(),
             }]
         );
     }
@@ -567,7 +575,24 @@ mod tests {
             vec![Span {
                 row: 0,
                 column: 0,
-                text: "wide".into()
+                text: "\u{1b}[0mwide\u{1b}[0m".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn clearing_a_coloured_cell_resets_the_terminal_before_plain_text() {
+        let mut renderer = FrameRenderer::new();
+        let _ = renderer.render(frame(4, 1, &["\u{1b}[1;32mok\u{1b}[0m"]));
+
+        let diff = renderer.render(frame(4, 1, &["ok"]));
+
+        assert_eq!(
+            diff.spans,
+            vec![Span {
+                row: 0,
+                column: 0,
+                text: "\u{1b}[0mok\u{1b}[0m".into(),
             }]
         );
     }
