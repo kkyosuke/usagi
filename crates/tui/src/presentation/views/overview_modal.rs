@@ -29,6 +29,8 @@ pub struct OverviewModal {
     selected: usize,
     history: Vec<String>,
     history_index: Option<usize>,
+    expanded: bool,
+    selected_subcommand: usize,
     result: Option<PaletteResult>,
 }
 
@@ -124,6 +126,7 @@ impl OverviewModal {
             && let Some(command) = self.matches().get(self.selected)
         {
             self.input = TextInput::with_value(command.name);
+            self.selected = 0;
         }
     }
 
@@ -198,13 +201,38 @@ impl OverviewModal {
         if self.selection_mode == ModalSelectionMode::Prompt {
             return self.input.value().to_owned();
         }
-        if self.input.value().trim().is_empty() {
-            self.matches()
-                .get(self.selected)
-                .map_or_else(String::new, |command| command.name.to_owned())
-        } else {
-            self.input.value().to_owned()
+        if self.expanded {
+            return self
+                .selected_command()
+                .map(|command| {
+                    format!(
+                        "{} {}",
+                        command.name,
+                        self.subcommands()[self.selected_subcommand]
+                    )
+                })
+                .unwrap_or_default();
         }
+        if self.input.value().contains(char::is_whitespace) || self.matches().is_empty() {
+            return self.input.value().to_owned();
+        }
+        self.selected_command()
+            .map_or_else(String::new, |command| command.name.to_owned())
+    }
+
+    /// Expand the selected command's action picker when it has subcommands.
+    #[coverage(off)]
+    pub fn expand_selected(&mut self) {
+        if !self.subcommands().is_empty() {
+            self.expanded = true;
+            self.selected_subcommand = 0;
+        }
+    }
+
+    /// Collapse an expanded action picker. Returns whether a picker was open.
+    #[coverage(off)]
+    pub fn collapse(&mut self) -> bool {
+        std::mem::take(&mut self.expanded)
     }
 
     /// キャレット位置に 1 文字挿入し、選択を先頭に戻す（候補集合が変わるため）。
@@ -213,6 +241,7 @@ impl OverviewModal {
         self.input.insert(c);
         self.selected = 0;
         self.history_index = None;
+        self.expanded = false;
     }
 
     /// キャレット手前の 1 文字を削除し、選択を先頭に戻す。
@@ -221,6 +250,7 @@ impl OverviewModal {
         self.input.backspace();
         self.selected = 0;
         self.history_index = None;
+        self.expanded = false;
     }
 
     /// キャレットを 1 文字左へ。
@@ -238,6 +268,13 @@ impl OverviewModal {
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
     #[coverage(off)]
     pub fn select_next(&mut self) {
+        if self.expanded {
+            let len = self.subcommands().len();
+            if len > 0 {
+                self.selected_subcommand = (self.selected_subcommand + 1) % len;
+            }
+            return;
+        }
         let len = self.matches().len();
         if len > 0 {
             self.selected = (self.selected + 1) % len;
@@ -247,9 +284,27 @@ impl OverviewModal {
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
     #[coverage(off)]
     pub fn select_prev(&mut self) {
+        if self.expanded {
+            let len = self.subcommands().len();
+            if len > 0 {
+                self.selected_subcommand = (self.selected_subcommand + len - 1) % len;
+            }
+            return;
+        }
         let len = self.matches().len();
         if len > 0 {
             self.selected = (self.selected + len - 1) % len;
+        }
+    }
+
+    fn selected_command(&self) -> Option<overview::CommandInfo> {
+        self.matches().get(self.selected).copied()
+    }
+
+    fn subcommands(&self) -> &'static [&'static str] {
+        match self.selected_command().map(|command| command.name) {
+            Some("session") => &["list", "overview", "remove"],
+            _ => &[],
         }
     }
 }
@@ -297,6 +352,23 @@ fn body(state: &OverviewModal) -> Vec<String> {
         lines.push(Style::new().dim().paint(&format!("  {header}")));
         for (i, hint) in matches.iter().take(MAX_MATCHES).enumerate() {
             lines.push(hint_row(*hint, i == state.selected, INNER_WIDTH));
+            if state.selection_mode == ModalSelectionMode::Action
+                && state.expanded
+                && i == state.selected
+            {
+                for (sub_index, subcommand) in state.subcommands().iter().enumerate() {
+                    let marker = if sub_index == state.selected_subcommand {
+                        "›"
+                    } else {
+                        " "
+                    };
+                    lines.push(
+                        Style::new()
+                            .dim()
+                            .paint(&format!("      {marker} {subcommand}")),
+                    );
+                }
+            }
         }
     }
     let help = matches
@@ -325,7 +397,11 @@ fn body(state: &OverviewModal) -> Vec<String> {
     lines.push(
         Style::new()
             .dim()
-            .paint("  Tab: complete   ↑↓: history/select   Esc: close"),
+            .paint(if state.selection_mode == ModalSelectionMode::Action {
+                "Tab: complete ↑↓ select → expand Enter run Esc: close"
+            } else {
+                "  Enter: run   Esc: close"
+            }),
     );
     modal::fixed_body(lines, BODY_HEIGHT)
 }
@@ -459,6 +535,25 @@ mod tests {
         assert_eq!(modal.selected(), 3);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
+    }
+
+    #[test]
+    fn action_mode_expands_and_cycles_session_subcommands() {
+        let mut modal = OverviewModal::new();
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "config");
+
+        modal.select_prev(); // session
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "session list");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session overview");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session remove");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session list");
+        assert!(modal.collapse());
+        assert!(!modal.collapse());
     }
 
     #[test]
