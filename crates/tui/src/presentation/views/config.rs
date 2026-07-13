@@ -286,7 +286,7 @@ fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
 mod tests {
     use super::{Config, Field, render};
     use std::io;
-    use usagi_core::domain::settings::{Settings, Theme};
+    use usagi_core::domain::settings::{ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     #[derive(Default)]
@@ -423,11 +423,36 @@ mod tests {
 
         config.previous_field();
         config.cycle_modal_selection_mode();
+        config.cycle_modal_selection_mode();
+        config.cycle_selected(true);
+        assert_eq!(
+            config.settings().modal_selection_mode,
+            ModalSelectionMode::Prompt
+        );
         config.next_field();
         assert!(config.can_save());
         assert!(config.save(&mut port));
         assert_eq!(config.notice(), Some("saved"));
         assert!(!config.is_dirty());
         assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+    }
+
+    #[test]
+    fn field_navigation_wraps_and_save_refuses_a_clean_draft() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(!config.cycle_selected(true));
+        assert!(!config.save(&mut port));
+
+        config.previous_field();
+        assert_eq!(config.field(), Field::ModalSelectionMode);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Theme);
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Theme);
     }
 }

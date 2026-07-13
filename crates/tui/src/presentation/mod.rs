@@ -1426,6 +1426,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_ui_passes_prompt_selection_to_both_command_modals() {
         let workspace = WorkspaceView::new(ws("prompt"), state("prompt"));
         let mut ui = WorkspaceUi::with_ports_and_selection_mode(

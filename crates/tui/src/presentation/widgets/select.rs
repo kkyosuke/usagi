@@ -4,6 +4,8 @@ use crate::presentation::theme::Style;
 
 /// Fixed label column used by Config selects so their value controls align.
 const LABEL_WIDTH: usize = 13;
+/// Fixed value column so changing `dark` to `light` does not move a centred row.
+const VALUE_WIDTH: usize = 6;
 
 /// Render a labelled select row. The selected value is bracketed so a static
 /// frame remains understandable without colour, while focus adds emphasis.
@@ -16,7 +18,7 @@ pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String 
     } else {
         Style::new()
     };
-    let control = style.paint(&format!("< {value} >"));
+    let control = style.paint(&format!("< {value:<VALUE_WIDTH$} >"));
     format!("{marker} {changed} {label:<LABEL_WIDTH$}{control}")
 }
 
@@ -53,7 +55,7 @@ mod tests {
         let theme = render("Theme", "dark", false, false);
         let mode = render("Modal mode", "action", false, false);
         assert_eq!(theme.find('<'), mode.find('<'));
-        assert!(theme.contains("< dark >"));
+        assert!(theme.contains("< dark   >"));
         assert!(mode.contains("< action >"));
     }
 }
