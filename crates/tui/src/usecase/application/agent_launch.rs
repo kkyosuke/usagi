@@ -461,4 +461,94 @@ mod tests {
             .unwrap();
         adapter.port_mut().detach(&terminal);
     }
+
+    #[test]
+    fn daemon_errors_completions_and_optional_profile_are_safe() {
+        let mut no_profile = request();
+        no_profile.profile = None;
+        let unavailable = ClientError::Unavailable("offline".into());
+        let rejected = ClientError::Protocol(usagi_core::infrastructure::ipc::ProtocolError::new(
+            usagi_core::infrastructure::ipc::ErrorCode::Busy,
+            "busy",
+        ));
+        assert_eq!(
+            AgentLaunchError::from(unavailable),
+            AgentLaunchError::Unavailable
+        );
+        assert_eq!(AgentLaunchError::from(rejected), AgentLaunchError::Rejected);
+
+        let client = FakeClient {
+            replies: VecDeque::from([Ok(DaemonReply::Ok(json!(null)))]),
+            ..FakeClient::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(client);
+        assert_eq!(
+            adapter.launch(&no_profile),
+            Err(AgentLaunchError::UnexpectedReply)
+        );
+        assert!(matches!(
+            &adapter.client().requests[0],
+            DaemonRequest::Agent { payload, .. } if payload["profile_id"].is_null()
+        ));
+
+        let request = request();
+        let client = FakeClient {
+            replies: VecDeque::from([Ok(DaemonReply::Accepted {
+                operation_id: OperationId::new().to_string(),
+                revision: 1,
+            })]),
+            ..FakeClient::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(client);
+        assert_eq!(
+            adapter.launch(&request),
+            Err(AgentLaunchError::UnexpectedReply)
+        );
+
+        let mut runtime = PaneRuntime::new(PaneState::new(PaneSelection::Target(Target::Session(
+            request.session,
+        ))));
+        let mut port = FakeTerminal::default();
+        adapter.apply_completion(
+            &mut runtime,
+            &mut port,
+            AgentLaunchCompletion::Failed {
+                operation_id: request.operation_id,
+                message: "safe failure".into(),
+            },
+        );
+        assert_eq!(runtime.pane().error(), None);
+        assert!(port.inventory().unwrap().is_empty());
+        let terminal = terminal(&request);
+        let _ = port.resync(&terminal).unwrap();
+        port.input(&terminal, b"x").unwrap();
+        port.resize(&terminal, Geometry { cols: 81, rows: 24 })
+            .unwrap();
+        port.detach(&terminal);
+    }
+
+    #[test]
+    fn effect_runner_returns_daemon_admission_errors() {
+        let request = request();
+        let client = FakeClient {
+            replies: VecDeque::from([Err(ClientError::Unavailable("offline".into()))]),
+            ..FakeClient::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(client);
+        let mut runtime = PaneRuntime::new(PaneState::new(PaneSelection::Target(Target::Session(
+            request.session,
+        ))));
+        let mut port = FakeTerminal::default();
+        let effect = Effect::LaunchAgent {
+            workspace: request.workspace,
+            session: request.session,
+            operation_id: request.operation_id,
+            profile: request.profile,
+        };
+        assert_eq!(
+            adapter.dispatch_effect(&mut runtime, &mut port, &effect),
+            Err(AgentLaunchError::Unavailable)
+        );
+        assert!(runtime.pane().tabs().is_empty());
+    }
 }
