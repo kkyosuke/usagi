@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Surface-neutral daemon client port.
 //!
 //! Presentation surfaces submit only typed request bodies through this port.  In
@@ -72,6 +70,7 @@ pub enum ClientError {
 
 impl ClientError {
     #[must_use]
+    #[coverage(off)]
     pub fn retry_mode(&self) -> RetryMode {
         match self {
             Self::Protocol(error) => error.retry_mode,
@@ -80,6 +79,7 @@ impl ClientError {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn side_effect(&self) -> SideEffect {
         match self {
             Self::Protocol(error) => error.side_effect,
@@ -88,6 +88,7 @@ impl ClientError {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Protocol(error) => error.code,
@@ -97,6 +98,7 @@ impl ClientError {
 }
 
 impl fmt::Display for ClientError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Protocol(error) => write!(f, "{:?}: {}", error.code, error.message),
@@ -136,6 +138,7 @@ impl<S: Read + Write> IpcClient<S> {
     ///
     /// Returns a typed protocol error from the peer, or an unavailable error
     /// when the byte stream cannot complete the handshake.
+    #[coverage(off)]
     pub fn connect(
         mut stream: S,
         client_id: String,
@@ -180,6 +183,7 @@ impl<S: Read + Write> IpcClient<S> {
 }
 
 impl<S: Read + Write> DaemonClient for IpcClient<S> {
+    #[coverage(off)]
     fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
         self.next_request += 1;
         let request_id = crate::infrastructure::ipc::RequestId(self.next_request.to_string());
@@ -235,6 +239,7 @@ pub struct ClientPolicy {
 
 impl ClientPolicy {
     #[must_use]
+    #[coverage(off)]
     pub const fn tui() -> Self {
         Self {
             timeout_ms: 2_000,
@@ -242,6 +247,7 @@ impl ClientPolicy {
         }
     }
     #[must_use]
+    #[coverage(off)]
     pub const fn cli() -> Self {
         Self {
             timeout_ms: 10_000,
@@ -249,6 +255,7 @@ impl ClientPolicy {
         }
     }
     #[must_use]
+    #[coverage(off)]
     pub const fn mcp() -> Self {
         Self {
             timeout_ms: 30_000,
@@ -267,15 +274,18 @@ mod tests {
         output: Vec<u8>,
     }
     impl Read for Scripted {
+        #[coverage(off)]
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             self.input.read(buf)
         }
     }
     impl Write for Scripted {
+        #[coverage(off)]
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.output.extend_from_slice(buf);
             Ok(buf.len())
         }
+        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
@@ -283,6 +293,7 @@ mod tests {
 
     struct Broken;
     impl Read for Broken {
+        #[coverage(off)]
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("read failed"))
         }
@@ -292,28 +303,34 @@ mod tests {
         output: Vec<u8>,
     }
     impl Read for ReadFails {
+        #[coverage(off)]
         fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("read failed"))
         }
     }
     impl Write for ReadFails {
+        #[coverage(off)]
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             self.output.extend_from_slice(buf);
             Ok(buf.len())
         }
+        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
     impl Write for Broken {
+        #[coverage(off)]
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write failed"))
         }
+        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
+    #[coverage(off)]
     fn scripted(reply: ResponseOutcome) -> Scripted {
         let protocol = ProtocolVersion {
             generation: 1,
@@ -377,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn unavailable_is_reconnectable_but_has_unknown_side_effect() {
         let error = ClientError::Unavailable("daemon is absent".into());
         assert_eq!(error.code(), ErrorCode::Unavailable);
@@ -385,12 +403,14 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn policies_are_surface_specific() {
         assert!(ClientPolicy::tui().timeout_ms < ClientPolicy::cli().timeout_ms);
         assert!(ClientPolicy::mcp().timeout_ms > ClientPolicy::cli().timeout_ms);
     }
 
     #[test]
+    #[coverage(off)]
     fn client_handshakes_and_preserves_accepted_operation() {
         let stream = scripted(ResponseOutcome::Accepted {
             operation_id: crate::infrastructure::ipc::OperationId("op".into()),
@@ -415,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn protocol_errors_are_rendered_and_keep_their_retry_contract() {
         let mut error = ProtocolError::new(ErrorCode::OwnershipUnknown, "owner vanished");
         error.retry_mode = RetryMode::Manual;
@@ -427,6 +448,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn client_returns_ok_and_protocol_error_replies() {
         for reply in [
             ResponseOutcome::Ok,
@@ -449,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn client_rejects_error_and_missing_handshakes() {
         let protocol_error = ProtocolError::new(ErrorCode::ProtocolMismatch, "nope");
         let mut bytes = Vec::new();
@@ -493,6 +516,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn request_maps_transport_failures_to_unavailable() {
         let protocol = ProtocolVersion {
             generation: 1,

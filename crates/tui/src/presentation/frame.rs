@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Pure terminal frame grid and incremental diff renderer.
 //!
 //! Views produce ANSI-decorated strings, while this module turns them into a
@@ -24,6 +22,7 @@ pub enum Cell {
 }
 
 impl Cell {
+    #[coverage(off)]
     fn width(&self) -> usize {
         match self {
             Self::Glyph { width, .. } => usize::from(*width),
@@ -46,6 +45,7 @@ impl Frame {
     /// ANSI escape sequences consume no columns.  A glyph which would extend
     /// beyond the right edge is omitted as a whole, never split across cells.
     #[must_use]
+    #[coverage(off)]
     pub fn from_lines<I, S>(width: usize, height: usize, lines: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -64,22 +64,26 @@ impl Frame {
 
     /// Number of display columns.
     #[must_use]
+    #[coverage(off)]
     pub const fn width(&self) -> usize {
         self.width
     }
 
     /// Number of display rows.
     #[must_use]
+    #[coverage(off)]
     pub const fn height(&self) -> usize {
         self.height
     }
 
     /// The cell at `row`, `column`, if it belongs to this frame.
     #[must_use]
+    #[coverage(off)]
     pub fn cell(&self, row: usize, column: usize) -> Option<&Cell> {
         (row < self.height && column < self.width).then(|| &self.cells[row * self.width + column])
     }
 
+    #[coverage(off)]
     fn set_line(&mut self, row: usize, line: &str) {
         if self.width == 0 {
             return;
@@ -133,6 +137,7 @@ impl Frame {
         }
     }
 
+    #[coverage(off)]
     fn glyph_start(&self, row: usize, column: usize) -> usize {
         let mut column = column;
         while column > 0 && matches!(self.cell(row, column), Some(Cell::Continuation)) {
@@ -141,11 +146,13 @@ impl Frame {
         column
     }
 
+    #[coverage(off)]
     fn glyph_end(&self, row: usize, column: usize) -> usize {
         let start = self.glyph_start(row, column);
         start + self.cell(row, start).map_or(1, Cell::width)
     }
 
+    #[coverage(off)]
     fn span_text(&self, row: usize, start: usize, end: usize) -> String {
         let mut text = String::new();
         for column in start..end {
@@ -190,6 +197,7 @@ impl FrameRenderer {
     /// Creates a renderer without a base frame. Its first render clears and
     /// paints the entire supplied frame.
     #[must_use]
+    #[coverage(off)]
     pub const fn new() -> Self {
         Self {
             previous: None,
@@ -199,6 +207,7 @@ impl FrameRenderer {
 
     /// Invalidates the surface while preserving no terminal-specific state.
     /// The next [`Self::render`] clears the surface and repaints every row.
+    #[coverage(off)]
     pub fn reset_surface(&mut self) {
         self.reset_pending = true;
     }
@@ -207,6 +216,7 @@ impl FrameRenderer {
     /// A changed geometry is a resize: it discards the base and returns a full
     /// surface clear followed by complete-row spans.
     #[must_use]
+    #[coverage(off)]
     pub fn render(&mut self, next: Frame) -> FrameDiff {
         let full_repaint = self.reset_pending
             || self.previous.as_ref().is_none_or(|previous| {
@@ -229,6 +239,7 @@ impl FrameRenderer {
     }
 }
 
+#[coverage(off)]
 fn full_spans(frame: &Frame) -> Vec<Span> {
     (0..frame.height)
         .map(|row| Span {
@@ -239,6 +250,7 @@ fn full_spans(frame: &Frame) -> Vec<Span> {
         .collect()
 }
 
+#[coverage(off)]
 fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
     let mut spans = Vec::new();
     for row in 0..next.height {
@@ -266,6 +278,7 @@ fn diff_spans(previous: &Frame, next: &Frame) -> Vec<Span> {
     spans
 }
 
+#[coverage(off)]
 fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Frame, row: usize) {
     loop {
         let mut expanded = false;
@@ -290,6 +303,7 @@ fn expand_wide_glyph_changes(changed: &mut [bool], previous: &Frame, next: &Fram
     }
 }
 
+#[coverage(off)]
 fn ansi_sequence(chars: &[char]) -> (String, usize) {
     if chars.len() < 2 || chars[1] != '[' {
         return (chars[0].to_string(), 1);
@@ -306,11 +320,13 @@ fn ansi_sequence(chars: &[char]) -> (String, usize) {
 mod tests {
     use super::{Cell, Frame, FrameRenderer, Span};
 
+    #[coverage(off)]
     fn frame(width: usize, height: usize, lines: &[&str]) -> Frame {
         Frame::from_lines(width, height, lines)
     }
 
     #[test]
+    #[coverage(off)]
     fn golden_frame_uses_display_columns_and_never_splits_wide_glyphs() {
         let rendered = frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]);
         assert_eq!(
@@ -340,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn ansi_has_zero_width_and_ambiguous_characters_are_one_column() {
         let ansi = frame(2, 1, &["\u{1b}[1;31mab\u{1b}[0m"]);
         assert!(matches!(
@@ -363,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn frame_handles_empty_geometry_combining_marks_and_malformed_ansi() {
         let empty = frame(0, 2, &["ignored"]);
         assert_eq!(empty.width(), 0);
@@ -389,6 +407,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn identical_frames_emit_no_content_writes() {
         let mut renderer = FrameRenderer::new();
         let first = frame(4, 1, &["same"]);
@@ -397,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn one_changed_span_only_writes_its_row_and_columns() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(6, 2, &["abcdef", "second"]));
@@ -412,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn shortening_writes_spaces_over_the_stale_suffix() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(6, 1, &["abcdef"]));
@@ -427,6 +448,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn a_diff_touching_wide_glyph_repaints_the_whole_glyph() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(4, 1, &["a界b"]));
@@ -442,6 +464,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn reset_and_resize_clear_then_repaint_every_row() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(3, 2, &["one", "two"]));

@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! TUI 面の presentation 層。画面描画（各画面の view・共通 widget）と
 //! キー入力のマッピングを置く。描画は v1 と同じく自前の差分レンダリングで行い、
 //! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
@@ -42,6 +40,7 @@ pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
 /// # Errors
 ///
 /// `out` への書き込みに失敗した場合、そのエラーを返す。
+#[coverage(off)]
 pub fn write_banner(out: &mut impl Write, info: &AppInfo) -> std::io::Result<()> {
     writeln!(out, "{}", info.describe())
 }
@@ -159,16 +158,19 @@ pub trait OverlayDataPort {
 struct SnapshotOverlayData;
 
 impl OverlayDataPort for SnapshotOverlayData {
+    #[coverage(off)]
     fn preview(&self, workspace: &WorkspaceView) -> OverlayDocument {
         OverlayDocument::Ready(workspace.focused_preview_lines())
     }
 
+    #[coverage(off)]
     fn diff(&self, _workspace: &WorkspaceView) -> OverlayDocument {
         OverlayDocument::Unavailable(
             "Diff data is unavailable until a backend supplies it.".to_string(),
         )
     }
 
+    #[coverage(off)]
     fn text(&self, workspace: &WorkspaceView) -> OverlayDocument {
         let lines = workspace.focused_note_lines();
         if lines.is_empty() {
@@ -178,6 +180,7 @@ impl OverlayDataPort for SnapshotOverlayData {
         }
     }
 
+    #[coverage(off)]
     fn pull_requests(
         &self,
         workspace: &WorkspaceView,
@@ -198,6 +201,7 @@ struct WorkspaceUi {
 }
 
 impl WorkspaceUi {
+    #[coverage(off)]
     fn with_overlay_data(workspace: WorkspaceView, overlay_data: Box<dyn OverlayDataPort>) -> Self {
         let closeup = CloseupModal::new(workspace.focused_label());
         Self {
@@ -209,6 +213,7 @@ impl WorkspaceUi {
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
+    #[coverage(off)]
     fn enter_closeup(&mut self) {
         self.workspace.enter_closeup();
         self.closeup = CloseupModal::new(self.workspace.focused_label());
@@ -216,11 +221,13 @@ impl WorkspaceUi {
     }
 
     /// 現在 mode を保ったまま Workspace scope の command palette を重ねる。
+    #[coverage(off)]
     fn open_overview(&mut self) {
         self.modal = Some(WorkspaceModal::Overview(OverviewModal::new()));
     }
 
     /// 選択中セッションの PR 一覧を現在 mode の上へ重ねる。root は空一覧になる。
+    #[coverage(off)]
     fn open_prs(&mut self) {
         self.modal = Some(match self.overlay_data.pull_requests(&self.workspace) {
             Ok(prs) => WorkspaceModal::Pr(PrModal::new(prs)),
@@ -231,16 +238,19 @@ impl WorkspaceUi {
         });
     }
 
+    #[coverage(off)]
     fn open_preview(&mut self) {
         let document = self.overlay_data.preview(&self.workspace);
         self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Preview", document)));
     }
 
+    #[coverage(off)]
     fn open_diff(&mut self) {
         let document = self.overlay_data.diff(&self.workspace);
         self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Diff", document)));
     }
 
+    #[coverage(off)]
     fn open_text(&mut self) {
         let document = self.overlay_data.text(&self.workspace);
         self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Notes", document)));
@@ -248,6 +258,7 @@ impl WorkspaceUi {
 }
 
 /// welcome のメニュー操作を画面遷移へ写す。
+#[coverage(off)]
 fn welcome_action(action: MenuAction) -> WelcomeStep {
     match action {
         MenuAction::Quit => WelcomeStep::Quit,
@@ -260,6 +271,7 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 
 /// Config 画面のキー処理（純粋）。Esc で welcome へ戻り、`Ctrl-C` で終了する。設定項目は
 /// まだ無いので、その他のキーは留まる。
+#[coverage(off)]
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
         Key::Tab => {
@@ -285,6 +297,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
 }
 
 /// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
+#[coverage(off)]
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -307,6 +320,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// New 画面のキー処理（純粋）。上下でフィールドを移り、←→ でモード切替（モード選択時）または
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
+#[coverage(off)]
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -341,6 +355,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
 
 /// New 画面の ←→ 操作。モード選択にフォーカスがあるときはモードを切り替え、テキスト欄では
 /// キャレットを左右へ動かす（`right` が右方向）。
+#[coverage(off)]
 fn step_new_horizontal(form: &mut New, right: bool) {
     if form.focus() == Field::Mode {
         form.toggle_mode();
@@ -352,6 +367,7 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 }
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
+#[coverage(off)]
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.cleanup_confirming() {
         return match key {
@@ -431,6 +447,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 
 /// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
 /// Enter の command 実行は command handler が接続されるまで no-op とする。
+#[coverage(off)]
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
         Key::Up => {
@@ -456,6 +473,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
 }
 
 /// PR modal の入力処理。Enter のブラウザ起動は外部 IO port が接続されるまで no-op とする。
+#[coverage(off)]
 fn step_pr(modal: &mut PrModal, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.select_prev(),
@@ -474,6 +492,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
 }
 
 /// 長文 overlay の入力処理。背景の cursor / tab は動かさない。
+#[coverage(off)]
 fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.scroll_up(),
@@ -493,6 +512,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
 
 /// Switch のキー処理。session 選択と preview tab の移動を行い、Enter / `t` で
 /// 選択行の Closeup action menu へ入る。
+#[coverage(off)]
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Up | Key::Char('k') => ui.workspace.select_prev(),
@@ -514,6 +534,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 
 /// Closeup のキー処理。action menu の上下選択と背面 tab の左右移動を行う。Esc は
 /// Workspace 自体を閉じず Switch へ一段戻す。
+#[coverage(off)]
 fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Up | Key::Char('k') => ui.closeup.select_prev(),
@@ -535,6 +556,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 
 /// Workspace 画面のキー処理。Ctrl-C は常に終了し、それ以外は最前面 modal、現在 mode の
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
+#[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     if key == Key::Quit {
         return WorkspaceStep::Quit;
@@ -559,6 +581,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 }
 
 /// Workspace と、その時点で最前面にある modal を 1 フレームへ合成する。
+#[coverage(off)]
 fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String> {
     let base = workspace::render(height, width, &ui.workspace);
     match &ui.modal {
@@ -575,6 +598,7 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
 }
 
 /// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
+#[coverage(off)]
 fn recent_path(recent: &Recent) -> Option<&Path> {
     match recent {
         Recent::Workspace(overview) => Some(&overview.workspace.path),
@@ -583,6 +607,7 @@ fn recent_path(recent: &Recent) -> Option<&Path> {
 }
 
 /// 1 つの Workspace snapshot を、終了または Esc まで同じ Terminal 上で駆動する。
+#[coverage(off)]
 fn drive_workspace(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -598,6 +623,7 @@ fn drive_workspace(
 /// # Errors
 ///
 /// 端末への描画またはキー読み取りに失敗した場合、そのエラーを返す。
+#[coverage(off)]
 pub fn run_workspace_with_overlay_data(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -606,6 +632,7 @@ pub fn run_workspace_with_overlay_data(
     drive_workspace_with_overlay_data(term, snapshot, overlay_data).map(|_| Exit::Quit)
 }
 
+#[coverage(off)]
 fn drive_workspace_with_overlay_data(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -629,6 +656,7 @@ fn drive_workspace_with_overlay_data(
 /// # Errors
 ///
 /// 端末への描画またはキー読み取りに失敗した場合、そのエラーを返す。
+#[coverage(off)]
 pub fn run_workspace(term: &mut dyn Terminal, snapshot: WorkspaceSnapshot) -> io::Result<Exit> {
     drive_workspace(term, snapshot).map(|_| Exit::Quit)
 }
@@ -645,6 +673,7 @@ pub fn run_workspace(term: &mut dyn Terminal, snapshot: WorkspaceSnapshot) -> io
 /// # Errors
 ///
 /// workspace の読み込み、端末への描画、キー読み取りのいずれかに失敗した場合、そのエラーを返す。
+#[coverage(off)]
 pub fn run_with_settings(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -735,6 +764,7 @@ pub fn run_with_settings(
 /// # Errors
 ///
 /// Returns terminal or workspace loading errors from the screen graph.
+#[coverage(off)]
 pub fn run(
     term: &mut dyn Terminal,
     workspaces: Vec<Workspace>,
@@ -750,6 +780,7 @@ pub fn run(
 struct DefaultSettingsPort;
 
 impl SettingsPort for DefaultSettingsPort {
+    #[coverage(off)]
     fn read(
         &mut self,
         _scope: usagi_core::usecase::settings::SettingsScope,
@@ -757,6 +788,7 @@ impl SettingsPort for DefaultSettingsPort {
         Ok(usagi_core::domain::settings::Settings::default())
     }
 
+    #[coverage(off)]
     fn save(
         &mut self,
         _scope: usagi_core::usecase::settings::SettingsScope,
@@ -777,29 +809,35 @@ pub struct BannerScreenRunner<'a, W: Write + ?Sized> {
 impl<'a, W: Write + ?Sized> BannerScreenRunner<'a, W> {
     /// 注入された出力先とアプリ情報から runner を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn new(out: &'a mut W, info: &'a AppInfo) -> Self {
         Self { out, info }
     }
 
     /// 画面を識別する `label` をアプリ情報とともに一行で書き出す。
+    #[coverage(off)]
     fn write_screen(&mut self, label: &str) -> io::Result<()> {
         writeln!(self.out, "{}: {label}", self.info.describe())
     }
 }
 
 impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
+    #[coverage(off)]
     fn welcome(&mut self) -> io::Result<()> {
         self.write_screen("welcome TUI")
     }
 
+    #[coverage(off)]
     fn workspace(&mut self, path: &Path) -> io::Result<()> {
         self.write_screen(&format!("workspace TUI ({})", path.display()))
     }
 
+    #[coverage(off)]
     fn config(&mut self) -> io::Result<()> {
         self.write_screen("config TUI")
     }
 
+    #[coverage(off)]
     fn doctor(&mut self) -> io::Result<()> {
         self.write_screen("doctor TUI")
     }
@@ -834,22 +872,26 @@ mod tests {
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
 
+    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
+    #[coverage(off)]
     fn ws(name: &str) -> Workspace {
         Workspace::new(name, format!("/tmp/{name}"))
     }
 
+    #[coverage(off)]
     fn ws_minutes_ago(name: &str, minutes: i64) -> Workspace {
         let mut workspace = ws(name);
         workspace.updated_at = now() - Duration::minutes(minutes);
         workspace
     }
 
+    #[coverage(off)]
     fn state(name: &str) -> WorkspaceState {
         WorkspaceState {
             sessions: vec![SessionRecord {
@@ -868,10 +910,12 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
     }
 
+    #[coverage(off)]
     fn snapshot_with_pr(name: &str) -> WorkspaceSnapshot {
         let mut snapshot = snapshot(name);
         let mut pr = PrLink::new(42, "https://example.com/pull/42");
@@ -880,10 +924,12 @@ mod tests {
         snapshot
     }
 
+    #[coverage(off)]
     fn recent(name: &str) -> Recent {
         Recent::Workspace(WorkspaceOverview::new(ws(name), 1, 0, 0))
     }
 
+    #[coverage(off)]
     fn run(
         term: &mut dyn Terminal,
         workspaces: Vec<Workspace>,
@@ -904,6 +950,7 @@ mod tests {
     }
 
     impl FakeTerminal {
+        #[coverage(off)]
         fn with_keys(keys: &[Key]) -> Self {
             Self {
                 keys: keys.iter().copied().collect(),
@@ -913,6 +960,7 @@ mod tests {
     }
 
     impl Terminal for FakeTerminal {
+        #[coverage(off)]
         fn size(&mut self) -> io::Result<(usize, usize)> {
             if self.fail_size {
                 return Err(io::Error::other("size failed"));
@@ -920,6 +968,7 @@ mod tests {
             Ok((0, 0))
         }
 
+        #[coverage(off)]
         fn draw(&mut self, frame: &[String]) -> io::Result<()> {
             if self.fail_draw {
                 return Err(io::Error::other("draw failed"));
@@ -928,6 +977,7 @@ mod tests {
             Ok(())
         }
 
+        #[coverage(off)]
         fn read_key(&mut self) -> io::Result<Key> {
             self.keys
                 .pop_front()
@@ -947,24 +997,29 @@ mod tests {
     struct FixedOverlayData;
 
     impl OverlayDataPort for FixedOverlayData {
+        #[coverage(off)]
         fn preview(&self, _workspace: &WorkspaceView) -> OverlayDocument {
             OverlayDocument::Ready(vec!["injected preview".to_string()])
         }
 
+        #[coverage(off)]
         fn diff(&self, _workspace: &WorkspaceView) -> OverlayDocument {
             OverlayDocument::Unavailable("injected diff fallback".to_string())
         }
 
+        #[coverage(off)]
         fn text(&self, _workspace: &WorkspaceView) -> OverlayDocument {
             OverlayDocument::Ready(vec!["injected text".to_string()])
         }
 
+        #[coverage(off)]
         fn pull_requests(&self, _workspace: &WorkspaceView) -> Result<Vec<PrLink>, String> {
             Err("injected PR fallback".to_string())
         }
     }
 
     impl WorkspaceLoader for FakeLoader {
+        #[coverage(off)]
         fn open(&mut self, path: &Path) -> io::Result<WorkspaceSnapshot> {
             self.opened.push(path.to_path_buf());
             if self.fail {
@@ -981,6 +1036,7 @@ mod tests {
             Ok(snapshot)
         }
 
+        #[coverage(off)]
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
             self.cleanup_calls += 1;
             Ok(self.cleanup_removed.clone())
@@ -988,6 +1044,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn run_quits_from_welcome_and_handles_menu_navigation() {
         for keys in [
             vec![Key::Char('q')],
@@ -1013,6 +1070,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn run_ignores_unknown_welcome_keys() {
         let keys = [
             Key::Char('z'),
@@ -1040,6 +1098,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn welcome_action_maps_every_destination() {
         assert!(matches!(
             welcome_action(MenuAction::Quit),
@@ -1064,6 +1123,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn config_can_be_opened_from_welcome_or_used_as_the_start() {
         let mut from_welcome =
             FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q')]);
@@ -1099,6 +1159,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn step_config_maps_back_quit_and_stay() {
         let mut settings = DefaultSettingsPort;
         let mut config = Config::load(&mut settings);
@@ -1121,6 +1182,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn modal_reducers_capture_edit_selection_and_close_keys() {
         let mut overview = OverviewModal::new();
         assert!(!step_overview(&mut overview, Key::Tab));
@@ -1163,6 +1225,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn switch_pr_modal_captures_keys_without_moving_the_background() {
         let snapshot = snapshot_with_pr("switch");
         let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
@@ -1189,6 +1252,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_form_opens_edits_and_returns_to_welcome() {
         let keys = [
             Key::Char('e'),
@@ -1217,6 +1281,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn step_new_handles_every_edit_and_exit_key() {
         let mut form = New::default();
         assert!(matches!(step_new(&mut form, Key::Down), NewStep::Stay));
@@ -1241,6 +1306,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn quitting_from_new_exits_the_runtime() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('e'), Key::Quit]);
         run(
@@ -1255,6 +1321,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('q')]);
         let mut loader = FakeLoader::default();
@@ -1270,6 +1337,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_filter_cleanup_confirmation_and_unite_selection_use_the_injected_loader() {
         let alpha = ws("alpha");
         let beta = ws("beta");
@@ -1356,6 +1424,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_navigation_and_workspace_escape_return_to_open() {
         let keys = [
             Key::Char('o'),
@@ -1404,6 +1473,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_prev_wraps_and_escape_returns_to_welcome() {
         let keys = [Key::Char('o'), Key::Up, Key::Escape, Key::Char('q')];
         let mut term = FakeTerminal::with_keys(&keys);
@@ -1421,6 +1491,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_touch_refreshes_open_and_welcome_recency_models() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
@@ -1454,6 +1525,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn empty_open_enter_stays_and_open_quit_exits() {
         let keys = [Key::Char('o'), Key::Enter, Key::Down, Key::Up, Key::Quit];
         let mut term = FakeTerminal::with_keys(&keys);
@@ -1470,6 +1542,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_loads_workspace_and_escape_returns_to_welcome() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q')]);
         let mut loader = FakeLoader::default();
@@ -1487,6 +1560,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_touch_refreshes_welcome_and_open_recency_models() {
         let alpha = ws_minutes_ago("alpha", 20);
         let beta = ws_minutes_ago("beta", 10);
@@ -1514,6 +1588,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn unite_recent_stays_without_loading_a_workspace() {
         let unite = Recent::Unite(UniteOverview::new(vec![
             WorkspaceOverview::new(ws("primary"), 0, 0, 0),
@@ -1536,6 +1611,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn missing_recent_number_stays_on_welcome() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('3'), Key::Char('q')]);
         run(
@@ -1550,6 +1626,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn quitting_from_a_recent_workspace_exits_the_runtime() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q')]);
         run(
@@ -1565,6 +1642,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_loader_failure_is_propagated() {
         for (keys, recent) in [
             (vec![Key::Char('o'), Key::Enter], Vec::new()),
@@ -1581,6 +1659,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_modes_modals_tabs_and_escape_stack_are_interactive() {
         let keys = [
             Key::Down,
@@ -1634,6 +1713,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_text_overlays_keep_home_visible_and_capture_scroll_keys() {
         let keys = [
             Key::Down,
@@ -1670,6 +1750,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_accepts_an_injected_overlay_data_port() {
         let mut term = FakeTerminal::with_keys(&[Key::Char('v'), Key::Escape, Key::Quit]);
         assert_eq!(
@@ -1685,6 +1766,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn direct_workspace_handles_navigation_shortcuts_and_exit_keys() {
         for (navigation, exit) in [
             (vec![Key::Escape], Key::Escape),
@@ -1717,6 +1799,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn runtime_io_failures_are_propagated() {
         let mut size_failure = FakeTerminal {
             fail_size: true,
@@ -1756,6 +1839,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn public_value_derives_are_exercised() {
         let snapshot = snapshot("derive");
         assert_eq!(snapshot.clone(), snapshot);
@@ -1765,6 +1849,7 @@ mod tests {
         assert!(format!("{quit:?}").contains("Quit"));
     }
 
+    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -1773,6 +1858,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_banner_writes_description_line() {
         let mut buf = Vec::new();
         write_banner(&mut buf, &info()).unwrap();
@@ -1780,6 +1866,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn banner_screen_runner_names_every_tui_screen() {
         let entries = [
             EntryScreen::Welcome,
@@ -1807,16 +1894,19 @@ mod tests {
     struct FailingWriter;
 
     impl Write for FailingWriter {
+        #[coverage(off)]
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write failed"))
         }
 
+        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
     #[test]
+    #[coverage(off)]
     fn banner_screen_runner_propagates_write_failure() {
         let mut out = FailingWriter;
         out.flush().unwrap();

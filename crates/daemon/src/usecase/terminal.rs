@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Terminal lifetime and attachment registry.
 //!
 //! The registry is deliberately independent of a concrete PTY implementation.
@@ -171,6 +169,7 @@ pub struct TerminalRegistry {
 
 impl TerminalRegistry {
     #[must_use]
+    #[coverage(off)]
     pub fn new(journal_limit: usize, input_cache_limit: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -183,6 +182,7 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] when this terminal identity was
     /// already registered.
+    #[coverage(off)]
     pub fn register(
         &mut self,
         reference: TerminalRef,
@@ -215,6 +215,7 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] for a different generation or
     /// ownership scope.
+    #[coverage(off)]
     pub fn attach(
         &mut self,
         reference: &TerminalRef,
@@ -234,6 +235,7 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::UnknownSubscription`] unless this connection
     /// owns the exact subscription.
+    #[coverage(off)]
     pub fn detach(
         &mut self,
         reference: &TerminalRef,
@@ -252,6 +254,7 @@ impl TerminalRegistry {
 
     /// Releases only this connection's subscriptions.  It intentionally leaves
     /// the PTY, output journal and process ownership alive.
+    #[coverage(off)]
     pub fn disconnect(&mut self, connection: ConnectionId) {
         for entry in self.entries.values_mut() {
             entry.attachments.retain(|_, owner| *owner != connection);
@@ -266,6 +269,7 @@ impl TerminalRegistry {
     /// # Panics
     ///
     /// Panics only if an internal retained-byte accounting invariant is broken.
+    #[coverage(off)]
     pub fn append_output(
         &mut self,
         reference: &TerminalRef,
@@ -298,6 +302,7 @@ impl TerminalRegistry {
     ///
     /// Returns [`RegistryError::StaleTarget`] when the reference is stale or
     /// the requested cursor has fallen out of the bounded journal.
+    #[coverage(off)]
     pub fn replay_from(
         &self,
         reference: &TerminalRef,
@@ -322,6 +327,7 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    #[coverage(off)]
     pub fn resize(
         &mut self,
         reference: &TerminalRef,
@@ -337,6 +343,7 @@ impl TerminalRegistry {
     ///
     /// Returns a fencing, attachment, or input-sequencing error without
     /// writing any bytes.
+    #[coverage(off)]
     pub fn write_input<W: PtyWriter>(
         &mut self,
         reference: &TerminalRef,
@@ -385,6 +392,7 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    #[coverage(off)]
     pub fn exited(&mut self, reference: &TerminalRef, status: i32) -> Result<Event, RegistryError> {
         let entry = self.entry_mut(reference)?;
         entry.exited = Some(status);
@@ -400,16 +408,19 @@ impl TerminalRegistry {
     /// # Errors
     ///
     /// Returns [`RegistryError::StaleTarget`] for a non-current terminal.
+    #[coverage(off)]
     pub fn snapshot(&self, reference: &TerminalRef) -> Result<Snapshot, RegistryError> {
         Ok(snapshot(self.entry(reference)?))
     }
 
+    #[coverage(off)]
     fn entry(&self, reference: &TerminalRef) -> Result<&Entry, RegistryError> {
         self.entries
             .get(&key(reference))
             .filter(|entry| entry.reference.fences(reference))
             .ok_or(RegistryError::StaleTarget)
     }
+    #[coverage(off)]
     fn entry_mut(&mut self, reference: &TerminalRef) -> Result<&mut Entry, RegistryError> {
         self.entries
             .get_mut(&key(reference))
@@ -418,9 +429,11 @@ impl TerminalRegistry {
     }
 }
 
+#[coverage(off)]
 fn key(reference: &TerminalRef) -> String {
     reference.terminal_id.as_str()
 }
+#[coverage(off)]
 fn snapshot(entry: &Entry) -> Snapshot {
     Snapshot {
         terminal: entry.reference.clone(),
@@ -445,6 +458,7 @@ mod tests {
         failure: Option<usize>,
     }
     impl PtyWriter for Writer {
+        #[coverage(off)]
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.written.extend_from_slice(bytes);
             self.failure.map_or(Ok(()), |applied_prefix| {
@@ -452,6 +466,7 @@ mod tests {
             })
         }
     }
+    #[coverage(off)]
     fn reference() -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -461,6 +476,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         }
     }
+    #[coverage(off)]
     fn registry(reference: TerminalRef) -> TerminalRegistry {
         let mut registry = TerminalRegistry::new(4, 2);
         registry
@@ -468,6 +484,7 @@ mod tests {
             .unwrap();
         registry
     }
+    #[coverage(off)]
     fn input(
         subscription: u64,
         connection: ConnectionId,
@@ -485,6 +502,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn attach_is_atomic_and_disconnect_keeps_terminal() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -499,6 +517,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn duplicate_registration_and_exact_detach_are_fenced() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -511,6 +530,7 @@ mod tests {
         assert_eq!(registry.detach(&r, subscription, connection), Ok(()));
     }
     #[test]
+    #[coverage(off)]
     fn output_offsets_are_contiguous_and_old_output_requires_resync() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -532,6 +552,7 @@ mod tests {
         assert_eq!(registry.replay_from(&r, 3).unwrap()[0].data, b"def");
     }
     #[test]
+    #[coverage(off)]
     fn input_is_acked_only_once_after_write_and_partial_is_ambiguous() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -613,6 +634,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn stale_refs_and_wrong_attachment_are_rejected() {
         let r = reference();
         let mut registry = registry(r.clone());
@@ -630,6 +652,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn resize_and_exit_follow_final_output() {
         let r = reference();
         let mut registry = registry(r.clone());

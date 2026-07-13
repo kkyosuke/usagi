@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Closeup コマンド面の application interface。
 //!
 //! Closeup のコマンド入力をトップレベルのコマンド名と未解釈の引数へ分け、
@@ -100,6 +98,7 @@ const DEFINITIONS: &[CommandDefinition] = &[
 
 /// Closeup 固有コマンドの metadata を名前順に返す。
 #[must_use]
+#[coverage(off)]
 pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
     DEFINITIONS.iter().map(|definition| definition.info)
 }
@@ -107,6 +106,7 @@ pub fn commands() -> impl ExactSizeIterator<Item = CommandInfo> {
 impl Command {
     /// registry に登録された command 名。
     #[must_use]
+    #[coverage(off)]
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Agent { .. } => "agent",
@@ -118,6 +118,7 @@ impl Command {
     }
     /// 解釈済みコマンドを、その実行方法を知る個別ハンドラへ変換する。
     #[must_use]
+    #[coverage(off)]
     pub fn into_handler(self) -> Box<dyn Run> {
         use commands as h;
 
@@ -142,6 +143,7 @@ pub enum CommandResult {
 }
 
 impl CommandResult {
+    #[coverage(off)]
     fn not_implemented(command: &'static str, arguments: &str) -> Self {
         Self::NotImplemented {
             command,
@@ -160,6 +162,7 @@ pub enum ParseError {
 }
 
 impl fmt::Display for ParseError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("closeup command is empty"),
@@ -178,6 +181,7 @@ impl std::error::Error for ParseError {}
 ///
 /// 入力が空の場合は [`ParseError::Empty`]、登録されていないコマンド名の場合は
 /// [`ParseError::Unknown`] を返す。
+#[coverage(off)]
 pub fn interpret(input: &str) -> Result<Command, ParseError> {
     let input = input.trim();
     if input.is_empty() {
@@ -200,6 +204,7 @@ pub fn interpret(input: &str) -> Result<Command, ParseError> {
 /// # Errors
 ///
 /// [`interpret`] が入力を解釈できなかった場合、その [`ParseError`] を返す。
+#[coverage(off)]
 pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
     Ok(interpret(input)?.into_handler().run())
 }
@@ -209,6 +214,7 @@ mod tests {
     use super::{Command, CommandResult, ParseError, commands, dispatch, interpret};
 
     #[test]
+    #[coverage(off)]
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
@@ -221,6 +227,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
             (
@@ -261,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn rejects_empty_and_unknown_commands_with_display_messages() {
         let empty = interpret(" \t ").unwrap_err();
         assert_eq!(empty, ParseError::Empty);
@@ -272,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn dispatches_through_the_handler_interface() {
         assert_eq!(
             dispatch("agent codex").unwrap(),

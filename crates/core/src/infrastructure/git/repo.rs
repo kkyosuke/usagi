@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Repository-level git queries.
 
 use std::path::Path;
@@ -13,6 +11,7 @@ use super::runner::GitRunner;
 /// # Errors
 ///
 /// Returns an error only when the `git` process could not be spawned.
+#[coverage(off)]
 pub fn is_repository(runner: &dyn GitRunner, repo: &Path) -> Result<bool> {
     let output = runner.run(repo, &["rev-parse", "--is-inside-work-tree"])?;
     Ok(output.success && output.stdout.trim() == "true")
@@ -24,6 +23,7 @@ pub fn is_repository(runner: &dyn GitRunner, repo: &Path) -> Result<bool> {
 /// # Errors
 ///
 /// Returns an error only when the `git` process could not be spawned.
+#[coverage(off)]
 pub fn short_hash(runner: &dyn GitRunner, repo: &Path) -> Result<Option<String>> {
     let output = runner.run(repo, &["rev-parse", "--short", "HEAD"])?;
     Ok(output.success.then(|| output.stdout.trim().to_owned()))
@@ -36,6 +36,7 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    #[coverage(off)]
     fn is_repository_is_true_only_when_git_says_so() {
         let yes = FakeGit::new(vec![ok("true\n")]);
         assert!(is_repository(&yes, Path::new("/repo")).unwrap());
@@ -53,6 +54,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn short_hash_returns_the_trimmed_hash_or_none() {
         let some = FakeGit::new(vec![ok("abc1234\n")]);
         assert_eq!(

@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Home の純粋な application controller。
 //!
 //! [`update`] は TUI-local の [`AppEvent`] を受け、状態を更新して外部へ依頼する
@@ -75,26 +73,32 @@ pub struct CreateSessionForm {
 
 impl CreateSessionForm {
     #[must_use]
+    #[coverage(off)]
     pub const fn field(&self) -> CreateSessionField {
         self.field
     }
     #[must_use]
+    #[coverage(off)]
     pub fn name(&self) -> &str {
         &self.name
     }
     #[must_use]
+    #[coverage(off)]
     pub fn profile(&self) -> &str {
         &self.profile
     }
     #[must_use]
+    #[coverage(off)]
     pub fn model(&self) -> &str {
         &self.model
     }
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
     }
 
+    #[coverage(off)]
     fn selected_mut(&mut self) -> &mut String {
         match self.field {
             CreateSessionField::Name => &mut self.name,
@@ -103,6 +107,7 @@ impl CreateSessionForm {
         }
     }
 
+    #[coverage(off)]
     fn next_field(&mut self) {
         self.field = match self.field {
             CreateSessionField::Name => CreateSessionField::Profile,
@@ -111,16 +116,19 @@ impl CreateSessionForm {
         };
     }
 
+    #[coverage(off)]
     fn push(&mut self, character: char) {
         self.selected_mut().push(character);
         self.error = None;
     }
 
+    #[coverage(off)]
     fn backspace(&mut self) {
         self.selected_mut().pop();
         self.error = None;
     }
 
+    #[coverage(off)]
     fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
         let name = required_create_value(&self.name, "session name is required")?;
         let profile = optional_profile(&self.profile)?;
@@ -142,6 +150,7 @@ pub struct SessionCreateIntent {
     pub model: Option<ModelSelector>,
 }
 
+#[coverage(off)]
 fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
     let value = value.trim();
     (!value.is_empty())
@@ -149,6 +158,7 @@ fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
         .ok_or_else(|| Notice::new(message))
 }
 
+#[coverage(off)]
 fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
     let value = value.trim();
     if value.is_empty() {
@@ -160,6 +170,7 @@ fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
     }
 }
 
+#[coverage(off)]
 fn optional_model(value: &str) -> Result<Option<ModelSelector>, Notice> {
     let value = value.trim();
     if value.is_empty() {
@@ -193,6 +204,7 @@ pub struct NoteEditor {
 }
 
 impl NoteEditor {
+    #[coverage(off)]
     fn loading(target: Target) -> Self {
         Self {
             target,
@@ -205,26 +217,31 @@ impl NoteEditor {
 
     /// Overlay が対象とする stable identity。
     #[must_use]
+    #[coverage(off)]
     pub const fn target(&self) -> Target {
         self.target
     }
     /// 現在の表示・編集値。
     #[must_use]
+    #[coverage(off)]
     pub fn scratchpad(&self) -> &Scratchpad {
         &self.scratchpad
     }
     /// 選択された section。
     #[must_use]
+    #[coverage(off)]
     pub const fn section(&self) -> NoteSection {
         self.section
     }
     /// todo / decision 追加用、または note の編集値。
     #[must_use]
+    #[coverage(off)]
     pub fn draft(&self) -> &str {
         &self.draft
     }
     /// port が分類した安全なエラー。
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
     }
@@ -247,6 +264,7 @@ pub struct EnvironmentEditor {
 }
 
 impl EnvironmentEditor {
+    #[coverage(off)]
     fn loading(target: Target) -> Self {
         Self {
             target,
@@ -256,14 +274,17 @@ impl EnvironmentEditor {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub const fn target(&self) -> Target {
         self.target
     }
     #[must_use]
+    #[coverage(off)]
     pub fn entries(&self) -> &[EnvironmentEntry] {
         &self.entries
     }
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
     }
@@ -294,6 +315,7 @@ pub struct PendingToken(u64);
 impl PendingToken {
     /// テストや backend adapter が token の数値を確認する。
     #[must_use]
+    #[coverage(off)]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -329,6 +351,7 @@ pub struct Notice {
 impl Notice {
     /// 表示用に検証済みの文言を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -353,6 +376,7 @@ pub enum TargetPhase {
 }
 
 impl TargetPhase {
+    #[coverage(off)]
     const fn rank(self) -> u8 {
         match self {
             Self::Absent => 0,
@@ -363,6 +387,7 @@ impl TargetPhase {
         }
     }
 
+    #[coverage(off)]
     fn from_agent_phase(phase: AgentPhase) -> Self {
         match phase {
             AgentPhase::Ready => Self::Ready,
@@ -388,11 +413,13 @@ pub struct SafeMessage(String);
 
 impl SafeMessage {
     #[must_use]
+    #[coverage(off)]
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -447,6 +474,7 @@ pub struct AppState {
 impl AppState {
     /// workspace root を selected / active にした Home を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn home(workspace: WorkspaceId, sessions: Vec<SessionId>) -> Self {
         let root = Target::Root(workspace);
         Self {
@@ -473,71 +501,85 @@ impl AppState {
 
     /// 常駐 route。
     #[must_use]
+    #[coverage(off)]
     pub const fn route(&self) -> Route {
         self.route
     }
     /// 最前面 overlay。閉じても [`route`](Self::route) は変わらない。
     #[must_use]
+    #[coverage(off)]
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
     }
     /// Open note editor, including unsaved values after a save failure.
     #[must_use]
+    #[coverage(off)]
     pub fn note_editor(&self) -> Option<&NoteEditor> {
         self.note_editor.as_ref()
     }
     /// Open new-session form, including values retained after validation failure.
     #[must_use]
+    #[coverage(off)]
     pub fn create_session_form(&self) -> Option<&CreateSessionForm> {
         self.create_session.as_ref()
     }
     /// Open environment editor, including unsaved values after a save failure.
     #[must_use]
+    #[coverage(off)]
     pub fn environment_editor(&self) -> Option<&EnvironmentEditor> {
         self.environment_editor.as_ref()
     }
     /// navigation cursor。
     #[must_use]
+    #[coverage(off)]
     pub const fn selected(&self) -> Selection {
         self.selected
     }
     /// command / Closeup の target。
     #[must_use]
+    #[coverage(off)]
     pub const fn active(&self) -> Target {
         self.active
     }
     /// この Home が投影している workspace identity。
     #[must_use]
+    #[coverage(off)]
     pub const fn workspace(&self) -> WorkspaceId {
         self.workspace
     }
     /// snapshot の stable session identity。
     #[must_use]
+    #[coverage(off)]
     pub fn sessions(&self) -> &[SessionId] {
         &self.sessions
     }
     /// 最後の safe notice。
     #[must_use]
+    #[coverage(off)]
     pub fn notice(&self) -> Option<&Notice> {
         self.notice.as_ref()
     }
     /// 実行中操作。
     #[must_use]
+    #[coverage(off)]
     pub fn pending(&self) -> &[PendingOperation] {
         &self.pending
     }
     /// Runtime phases retained for the current workspace only.
     #[must_use]
+    #[coverage(off)]
     pub fn runtimes(&self) -> &[RuntimePhase] {
         &self.runtimes
     }
     /// The current safe feedback for the fixed Home feedback area.
     #[must_use]
+    #[coverage(off)]
     pub fn feedback(&self) -> Option<&Feedback> {
         self.feedback.as_ref()
     }
     /// Aggregates phase for a target using `done > waiting > running > ready > absent`.
     #[must_use]
+    #[coverage(off)]
     pub fn phase_for(&self, target: Target) -> TargetPhase {
         let Target::Session(session) = target else {
             return TargetPhase::Absent;
@@ -551,24 +593,29 @@ impl AppState {
     }
     /// 最後に受け取った terminal geometry。
     #[must_use]
+    #[coverage(off)]
     pub const fn size(&self) -> Option<(u16, u16)> {
         self.size
     }
     /// Whether the current Home projection has a live terminal or Agent pane.
     #[must_use]
+    #[coverage(off)]
     pub const fn has_live_pane(&self) -> bool {
         self.has_live_pane
     }
     /// Whether the next management `Ctrl-C` is deliberately absorbed.
     #[must_use]
+    #[coverage(off)]
     pub const fn ctrl_c_grace(&self) -> bool {
         self.ctrl_c_grace
     }
 
+    #[coverage(off)]
     fn root(&self) -> Target {
         Target::Root(self.workspace)
     }
 
+    #[coverage(off)]
     fn rows(&self) -> Vec<Selection> {
         let mut rows = Vec::with_capacity(self.sessions.len() + 2);
         rows.push(Selection::Target(self.root()));
@@ -582,6 +629,7 @@ impl AppState {
         rows
     }
 
+    #[coverage(off)]
     fn move_selection(&mut self, direction: i8) {
         let rows = self.rows();
         let current = rows
@@ -596,6 +644,7 @@ impl AppState {
         self.selected = rows[next];
     }
 
+    #[coverage(off)]
     fn reconcile_selection(&mut self) {
         let rows = self.rows();
         if !rows.contains(&self.selected) {
@@ -676,6 +725,7 @@ pub enum AppKey {
 /// PTY byte. Some terminals expose Ctrl-A as byte U+0001 while others report a
 /// modified `a` or `Home`; all three map to the same Home action here.
 #[must_use]
+#[coverage(off)]
 pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
     let LiveInput::Key(key) = input else {
         return None;
@@ -722,6 +772,7 @@ pub enum AppEvent {
 }
 
 impl From<RuntimeEvent<BackendEvent>> for AppEvent {
+    #[coverage(off)]
     fn from(event: RuntimeEvent<BackendEvent>) -> Self {
         match event {
             RuntimeEvent::Input(input) => Self::Input(input),
@@ -857,6 +908,7 @@ pub struct EntryWorkspace {
 impl EntryWorkspace {
     /// Create a selectable workspace projection.
     #[must_use]
+    #[coverage(off)]
     pub fn new(id: WorkspaceId, label: impl Into<String>) -> Self {
         Self {
             id,
@@ -877,6 +929,7 @@ pub struct HomeSnapshot {
 impl HomeSnapshot {
     /// Create a Home snapshot projection.
     #[must_use]
+    #[coverage(off)]
     pub fn new(workspace: WorkspaceId, sessions: Vec<SessionId>) -> Self {
         Self {
             workspace,
@@ -938,6 +991,7 @@ impl EntryState {
     /// from the current Open list; the backend remains authoritative for that
     /// stale registration and reports an in-screen error if it cannot attach.
     #[must_use]
+    #[coverage(off)]
     pub fn new(workspaces: Vec<EntryWorkspace>, recents: Vec<WorkspaceId>) -> Self {
         Self {
             route: EntryRoute::Welcome,
@@ -951,34 +1005,40 @@ impl EntryState {
 
     /// The current entry route.
     #[must_use]
+    #[coverage(off)]
     pub const fn route(&self) -> &EntryRoute {
         &self.route
     }
 
     /// Registered Open Single choices.
     #[must_use]
+    #[coverage(off)]
     pub fn workspaces(&self) -> &[EntryWorkspace] {
         &self.workspaces
     }
 
     /// Recent typed identities displayed by Welcome.
     #[must_use]
+    #[coverage(off)]
     pub fn recents(&self) -> &[WorkspaceId] {
         &self.recents
     }
 
     /// The attach currently in flight, if any.
     #[must_use]
+    #[coverage(off)]
     pub const fn opening(&self) -> Option<WorkspaceId> {
         self.opening
     }
 
     /// The last attach error, suitable for rendering on the current entry screen.
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
     }
 
+    #[coverage(off)]
     fn start_open(&mut self, workspace: WorkspaceId) -> Vec<Effect> {
         if self.opening.is_some() {
             return Vec::new();
@@ -992,6 +1052,7 @@ impl EntryState {
 
 /// Reduce one entry event and return any backend work it requests.
 #[must_use]
+#[coverage(off)]
 pub fn update_entry(state: &mut EntryState, event: EntryEvent) -> Vec<Effect> {
     match event {
         EntryEvent::ShowOpen if matches!(state.route, EntryRoute::Welcome) => {
@@ -1059,18 +1120,21 @@ pub struct FakeEntryBackend {
 
 impl FakeEntryBackend {
     /// Queue one attach completion (including a deliberately stale one).
+    #[coverage(off)]
     pub fn push_event(&mut self, event: EntryEvent) {
         self.events.push_back(event);
     }
 
     /// Effects dispatched by the entry reducer.
     #[must_use]
+    #[coverage(off)]
     pub fn effects(&self) -> &[Effect] {
         &self.effects
     }
 }
 
 /// Dispatch entry effects and replay queued fake-backend completions.
+#[coverage(off)]
 pub fn run_entry_fake_cycle(
     state: &mut EntryState,
     backend: &mut FakeEntryBackend,
@@ -1131,6 +1195,7 @@ pub enum NewValidationError {
 
 impl NewValidationError {
     #[must_use]
+    #[coverage(off)]
     pub const fn message(self) -> &'static str {
         match self {
             Self::RepositoryRequired => "repository URL is required",
@@ -1148,6 +1213,7 @@ impl NewValidationError {
 ///
 /// Returns a safe field-specific validation error when a required value is
 /// empty after trimming.
+#[coverage(off)]
 pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, NewValidationError> {
     match mode {
         NewMode::Clone => {
@@ -1168,10 +1234,12 @@ pub fn validate_new_form(mode: NewMode, form: &NewForm) -> Result<NewRequest, Ne
     }
 }
 
+#[coverage(off)]
 fn required(value: &str, error: NewValidationError) -> Result<String, NewValidationError> {
     trimmed(value).ok_or(error)
 }
 
+#[coverage(off)]
 fn trimmed(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
@@ -1215,6 +1283,7 @@ pub struct NewState {
 
 impl NewState {
     #[must_use]
+    #[coverage(off)]
     pub fn new(mode: NewMode, form: NewForm) -> Self {
         Self {
             route: NewRoute::Form,
@@ -1229,30 +1298,37 @@ impl NewState {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub const fn route(&self) -> &NewRoute {
         &self.route
     }
     #[must_use]
+    #[coverage(off)]
     pub const fn mode(&self) -> NewMode {
         self.mode
     }
     #[must_use]
+    #[coverage(off)]
     pub const fn form(&self) -> &NewForm {
         &self.form
     }
     #[must_use]
+    #[coverage(off)]
     pub const fn pending(&self) -> Option<PendingToken> {
         self.pending
     }
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&Notice> {
         self.error.as_ref()
     }
     #[must_use]
+    #[coverage(off)]
     pub fn progress(&self) -> Option<&SafeMessage> {
         self.progress.as_ref()
     }
 
+    #[coverage(off)]
     fn request(&mut self, request: NewRequest) -> Vec<Effect> {
         if self.pending.is_some() {
             return Vec::new();
@@ -1286,6 +1362,7 @@ impl NewState {
 
 /// Reduce one New-form event and return the project/git/registry port request.
 #[must_use]
+#[coverage(off)]
 pub fn update_new(state: &mut NewState, event: NewEvent) -> Vec<Effect> {
     match event {
         NewEvent::Submit if matches!(state.route, NewRoute::Form) && state.pending.is_none() => {
@@ -1343,25 +1420,30 @@ pub struct FakeNewBackend {
 }
 
 impl FakeNewBackend {
+    #[coverage(off)]
     pub fn push_event(&mut self, event: NewEvent) {
         self.events.push_back(event);
     }
     #[must_use]
+    #[coverage(off)]
     pub fn effects(&self) -> &[Effect] {
         &self.effects
     }
 }
 
 impl NewProjectPort for FakeNewBackend {
+    #[coverage(off)]
     fn dispatch(&mut self, effect: Effect) {
         self.effects.push(effect);
     }
+    #[coverage(off)]
     fn next_event(&mut self) -> Option<NewEvent> {
         self.events.pop_front()
     }
 }
 
 /// Dispatch New effects and replay queued fake-backend completions.
+#[coverage(off)]
 pub fn run_new_fake_cycle(
     state: &mut NewState,
     backend: &mut impl NewProjectPort,
@@ -1392,25 +1474,30 @@ pub struct FakeBackend {
 
 impl FakeBackend {
     /// backend から届く event を末尾に積む。
+    #[coverage(off)]
     pub fn push_event(&mut self, event: BackendEvent) {
         self.events.push_back(event);
     }
     /// dispatch された effect を確認する。
     #[must_use]
+    #[coverage(off)]
     pub fn effects(&self) -> &[Effect] {
         &self.effects
     }
     /// effect log を取り出し、空にする。
     #[must_use]
+    #[coverage(off)]
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
 }
 
 impl BackendPort for FakeBackend {
+    #[coverage(off)]
     fn dispatch(&mut self, effect: Effect) {
         self.effects.push(effect);
     }
+    #[coverage(off)]
     fn next_event(&mut self) -> Option<BackendEvent> {
         self.events.pop_front()
     }
@@ -1418,6 +1505,7 @@ impl BackendPort for FakeBackend {
 
 /// event を state へ還元し、必要な外部 effect を返す。
 #[must_use]
+#[coverage(off)]
 pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     match event {
         AppEvent::Backend(event) if update_editor_backend(state, &event) => Vec::new(),
@@ -1502,6 +1590,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
     }
 }
 
+#[coverage(off)]
 fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     match event {
         BackendEvent::NotesLoaded { target, scratchpad } => {
@@ -1547,6 +1636,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
     true
 }
 
+#[coverage(off)]
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     state.interaction_count = state.interaction_count.saturating_add(1);
     if let Some(overlay) = state.overlay {
@@ -1578,6 +1668,7 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
+#[coverage(off)]
 fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Effect> {
     if matches!(key, AppKey::CtrlC | AppKey::CtrlQ) {
         return Vec::new();
@@ -1613,6 +1704,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     }
 }
 
+#[coverage(off)]
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
         AppKey::Up => {
@@ -1661,6 +1753,7 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
 }
 
+#[coverage(off)]
 fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> {
     let notes_open = state.overlay == Some(Overlay::Notes);
     let environment_open = state.overlay == Some(Overlay::Environment);
@@ -1740,6 +1833,7 @@ fn update_editor_key(state: &mut AppState, key: &AppKey) -> Option<Vec<Effect>> 
     }
 }
 
+#[coverage(off)]
 fn open_notes(state: &mut AppState) -> Vec<Effect> {
     let target = state.active;
     state.overlay = Some(Overlay::Notes);
@@ -1748,6 +1842,7 @@ fn open_notes(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::LoadNotes { target }]
 }
 
+#[coverage(off)]
 fn open_environment(state: &mut AppState) -> Vec<Effect> {
     let target = state.active;
     state.overlay = Some(Overlay::Environment);
@@ -1756,6 +1851,7 @@ fn open_environment(state: &mut AppState) -> Vec<Effect> {
     vec![Effect::LoadEnvironment { target }]
 }
 
+#[coverage(off)]
 fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
     let Some(editor) = state
         .note_editor
@@ -1787,6 +1883,7 @@ fn commit_note_draft(state: &mut AppState) -> Vec<Effect> {
     Vec::new()
 }
 
+#[coverage(off)]
 fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Overview) {
         return Vec::new();
@@ -1808,6 +1905,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
     }
 }
 
+#[coverage(off)]
 fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
     if state.overlay != Some(Overlay::Closeup) {
         return Vec::new();
@@ -1859,6 +1957,7 @@ fn submit_closeup(state: &mut AppState, input: &str) -> Vec<Effect> {
     effect.into_iter().collect()
 }
 
+#[coverage(off)]
 fn parse_close_force(arguments: &str) -> Option<bool> {
     match arguments {
         "" => Some(false),
@@ -1867,6 +1966,7 @@ fn parse_close_force(arguments: &str) -> Option<bool> {
     }
 }
 
+#[coverage(off)]
 fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     match state.selected {
         Selection::Target(target) => {
@@ -1878,12 +1978,14 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
     }
 }
 
+#[coverage(off)]
 fn open_create_session(state: &mut AppState) -> Vec<Effect> {
     state.create_session = Some(CreateSessionForm::default());
     state.overlay = Some(Overlay::CreateSession);
     Vec::new()
 }
 
+#[coverage(off)]
 fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
     let Some(form) = state.create_session.as_mut() else {
         state.overlay = None;
@@ -1939,6 +2041,7 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
 }
 
 /// effect を dispatch し、queue 済みの backend event を reducer へ戻すテスト helper。
+#[coverage(off)]
 pub fn run_fake_cycle(state: &mut AppState, backend: &mut impl BackendPort, effects: Vec<Effect>) {
     for effect in effects {
         backend.dispatch(effect);
@@ -1955,11 +2058,13 @@ mod tests {
         AgentRuntimeId, DaemonGeneration, TerminalId, TerminalRef, WorktreeId,
     };
 
+    #[coverage(off)]
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
     }
 
     #[test]
+    #[coverage(off)]
     fn management_classifier_treats_ctrl_a_byte_modified_key_and_home_equally() {
         let ctrl_a = |code| {
             LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
@@ -1991,6 +2096,7 @@ mod tests {
         );
     }
 
+    #[coverage(off)]
     fn clone_form() -> NewForm {
         NewForm {
             repository: " https://example.com/acme/app.git ".to_owned(),
@@ -2001,6 +2107,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn existing_form() -> NewForm {
         NewForm {
             path: " /work/existing ".to_owned(),
@@ -2009,6 +2116,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
         AgentRuntimeRef::new(
             AgentRuntimeId::new(),
@@ -2025,6 +2133,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_starts_with_root_selected_and_active() {
         let (workspace, first, second) = ids();
         let state = AppState::home(workspace, vec![first, second]);
@@ -2035,6 +2144,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
         let (workspace, session, _) = ids();
         let mut state = NewState::new(NewMode::Clone, clone_form());
@@ -2069,6 +2179,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_existing_failure_retains_form_and_retry_reuses_the_request() {
         let mut state = NewState::new(NewMode::Existing, existing_form());
         let effects = update_new(&mut state, NewEvent::Submit);
@@ -2108,6 +2219,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_validation_and_late_completion_keep_the_form_route() {
         let mut invalid = NewState::new(NewMode::Clone, NewForm::default());
         assert!(update_new(&mut invalid, NewEvent::Submit).is_empty());
@@ -2131,6 +2243,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_validation_reports_every_required_clone_and_existing_field() {
         let cases = [
             (
@@ -2177,6 +2290,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn table_driven_mode_and_overlay_scenarios() {
         struct Case {
             name: &'static str,
@@ -2229,6 +2343,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn management_ctrl_c_detaches_without_live_pane_and_confirms_with_one() {
         let (workspace, session, _) = ids();
         let mut idle = AppState::home(workspace, Vec::new());
@@ -2256,6 +2371,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn management_ctrl_q_always_confirms_and_confirmation_can_cancel() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2272,6 +2388,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn leaving_live_pane_arms_one_shot_ctrl_c_grace_and_other_input_clears_it() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2297,6 +2414,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn ordinary_modals_keep_ctrl_c_and_ctrl_q_inert() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2312,6 +2430,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn cursor_moves_without_changing_active_target() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2323,6 +2442,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2408,6 +2528,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn invalid_create_stays_open_and_late_success_does_not_move_after_interaction() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2446,6 +2567,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fake_backend_records_effects_and_replays_events() {
         let (workspace, first, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2466,6 +2588,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn snapshot_falls_back_missing_selected_and_active_sessions_to_root() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2480,6 +2603,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn future_events_update_only_their_local_state() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2507,6 +2631,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn runtime_stream_converts_to_controller_events() {
         let notice = Notice::new("connected");
         let cases = [
@@ -2537,6 +2662,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn phase_projection_isolated_per_runtime_and_uses_the_documented_rank() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2586,6 +2712,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn phase_projection_rejects_other_workspaces_and_removed_sessions() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2615,6 +2742,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn feedback_keeps_only_safe_message_and_error_id() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2637,6 +2765,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn navigation_wraps_up_and_ignores_non_command_characters() {
         let (workspace, first, _) = ids();
         let mut state = AppState::home(workspace, vec![first]);
@@ -2647,6 +2776,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn modal_registry_dispatches_once_and_rejects_invalid_root_and_repeated_requests() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2723,6 +2853,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn closeup_registry_dispatches_agent_and_validated_session_remove() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2756,6 +2887,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn entry_open_single_preserves_the_selected_identity_into_home() {
         let first = WorkspaceId::new();
         let chosen = WorkspaceId::new();
@@ -2790,6 +2922,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn entry_recent_uses_its_identity_and_ignores_stale_completion() {
         let recent = WorkspaceId::new();
         let delayed_workspace = WorkspaceId::new();
@@ -2821,6 +2954,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fake_entry_backend_replays_error_then_retry_without_opening_another_workspace() {
         let requested = WorkspaceId::new();
         let other = WorkspaceId::new();
@@ -2861,6 +2995,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn entry_empty_open_and_unknown_recent_are_noops() {
         let unknown = WorkspaceId::new();
         let mut state = EntryState::new(Vec::new(), Vec::new());
@@ -2873,6 +3008,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn entry_open_error_stays_on_its_screen_and_retries_the_same_identity() {
         let workspace = WorkspaceId::new();
         let mut state = EntryState::new(
@@ -2902,6 +3038,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn entry_rejects_a_snapshot_for_another_workspace_and_allows_retry() {
         let requested = WorkspaceId::new();
         let returned = WorkspaceId::new();
@@ -2929,6 +3066,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);

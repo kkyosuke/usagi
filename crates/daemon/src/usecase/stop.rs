@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The `usagi daemon stop` usecase: terminate a running daemon and reclaim its
 //! record.
 //!
@@ -38,6 +36,7 @@ use usagi_core::infrastructure::daemon::{
 ///
 /// Never in practice: the `Alive` arm unwraps the record, and `classify` reports
 /// `Alive` only when a record is present.
+#[coverage(off)]
 pub fn stop<F: RecordFile, P: LivenessProbe, T: Terminator>(
     store: &DaemonRecordStore<F>,
     probe: &P,
@@ -74,6 +73,7 @@ mod tests {
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
 
+    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -82,6 +82,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn reports_not_running_when_no_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let terminator = RecordingTerminator::default();
@@ -93,6 +94,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn terminates_and_clears_when_running() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
@@ -107,6 +109,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn clears_stale_record_without_terminating() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(4321)).unwrap();
@@ -120,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_terminate_error_and_keeps_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let record = DaemonRecord::new(4321);
@@ -131,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_load_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
         let terminator = RecordingTerminator::default();

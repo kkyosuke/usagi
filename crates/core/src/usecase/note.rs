@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Note scratchpad operations over the repo `state.json` store.
 //!
 //! Every session (and the workspace **root**) carries a [`Scratchpad`]: a
@@ -32,6 +30,7 @@ pub enum Target<'a> {
 
 /// The scratchpad for `target` within `state`, or `None` when a named session
 /// does not exist. The root always resolves.
+#[coverage(off)]
 fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a Scratchpad> {
     match target {
         Target::Root => Some(&state.root_notes),
@@ -44,6 +43,7 @@ fn scratchpad<'a>(state: &'a WorkspaceState, target: Target<'_>) -> Option<&'a S
 }
 
 /// Mutable counterpart of [`scratchpad`].
+#[coverage(off)]
 fn scratchpad_mut<'a>(
     state: &'a mut WorkspaceState,
     target: Target<'_>,
@@ -60,6 +60,7 @@ fn scratchpad_mut<'a>(
 
 /// Read the target's scratchpad, or a default (empty) one when there is no
 /// `state.json` or the target session does not exist.
+#[coverage(off)]
 fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
     Ok(store
         .load()?
@@ -71,6 +72,7 @@ fn read(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Scratchpad> {
 
 /// Apply `edit` to the target's scratchpad and persist, stamping `now`. Returns
 /// `false` (without writing) when the target session does not exist.
+#[coverage(off)]
 fn mutate(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -95,6 +97,7 @@ fn mutate(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
+#[coverage(off)]
 pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<String>> {
     Ok(read(store, target)?.note.filter(|n| !n.is_empty()))
 }
@@ -105,6 +108,7 @@ pub fn note(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Option<St
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
+#[coverage(off)]
 pub fn set_note(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -126,6 +130,7 @@ pub fn set_note(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
+#[coverage(off)]
 pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionTodo>> {
     Ok(read(store, target)?.todos)
 }
@@ -136,6 +141,7 @@ pub fn todos(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<Sess
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
+#[coverage(off)]
 pub fn add_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -155,6 +161,7 @@ pub fn add_todo(
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
+#[coverage(off)]
 pub fn update_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -183,6 +190,7 @@ pub fn update_todo(
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
+#[coverage(off)]
 pub fn remove_todo(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -203,6 +211,7 @@ pub fn remove_todo(
 /// # Errors
 ///
 /// Returns an error when `state.json` cannot be read or parsed.
+#[coverage(off)]
 pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<SessionDecision>> {
     Ok(read(store, target)?.decisions)
 }
@@ -213,6 +222,7 @@ pub fn decisions(store: &WorkspaceStateStore, target: Target<'_>) -> Result<Vec<
 /// # Errors
 ///
 /// Returns an error when the store cannot be locked, read, or written.
+#[coverage(off)]
 pub fn log_decision(
     store: &WorkspaceStateStore,
     target: Target<'_>,
@@ -237,10 +247,12 @@ mod tests {
     use crate::infrastructure::store::state::WorkspaceStateStore;
     use chrono::{DateTime, TimeZone, Utc};
 
+    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
+    #[coverage(off)]
     fn session(name: &str) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -256,6 +268,7 @@ mod tests {
     }
 
     /// A store seeded with one session "alpha" so session-targeted ops resolve.
+    #[coverage(off)]
     fn store_with_alpha() -> (tempfile::TempDir, WorkspaceStateStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStateStore::new(tmp.path());
@@ -268,6 +281,7 @@ mod tests {
         (tmp, store)
     }
 
+    #[coverage(off)]
     fn empty_store() -> (tempfile::TempDir, WorkspaceStateStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStateStore::new(tmp.path());
@@ -275,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn note_set_get_and_clear_on_a_session() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -289,6 +304,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn note_and_todos_work_on_the_root_and_create_state() {
         // The root always resolves; a mutation on an empty store creates state.
         let (_tmp, store) = empty_store();
@@ -302,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn mutations_return_false_for_an_unknown_session() {
         let (_tmp, store) = store_with_alpha();
         let ghost = Target::Session("ghost");
@@ -317,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn todo_add_update_and_remove() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -342,6 +360,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn decisions_are_appended_with_the_supplied_time() {
         let (_tmp, store) = store_with_alpha();
         let target = Target::Session("alpha");
@@ -357,6 +376,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn reads_are_empty_without_a_state_file() {
         let (_tmp, store) = empty_store();
         assert_eq!(note(&store, Target::Root).unwrap(), None);

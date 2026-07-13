@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Secure Unix-domain transport adapter.
 //!
 //! This module is deliberately outside `usagi-core`: core defines a byte-stream
@@ -50,6 +48,7 @@ impl SecureUnixListener {
     ///
     /// Returns an error for an unsafe existing path, a duplicate generation, or
     /// a filesystem/socket failure.
+    #[coverage(off)]
     pub fn bind(data_dir: &Path, generation: DaemonGeneration) -> io::Result<Self> {
         let daemon = data_dir.join("daemon");
         ensure_private_dir(&daemon)?;
@@ -90,6 +89,7 @@ impl SecureUnixListener {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn locator(&self) -> &EndpointLocator {
         &self.locator
     }
@@ -101,6 +101,7 @@ impl SecureUnixListener {
     ///
     /// Returns `WouldBlock` when no peer is pending and `PermissionDenied` for
     /// a peer whose OS credential does not match the daemon UID.
+    #[coverage(off)]
     pub fn accept(&self) -> io::Result<UnixStream> {
         let (stream, _) = self.listener.accept()?;
         if peer_uid(&stream)? != effective_uid() {
@@ -116,6 +117,7 @@ impl SecureUnixListener {
 }
 
 impl Drop for SecureUnixListener {
+    #[coverage(off)]
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
     }
@@ -129,6 +131,7 @@ impl Drop for SecureUnixListener {
 ///
 /// Returns an error if the locator or endpoint is unsafe, invalid, draining, or
 /// cannot be connected.
+#[coverage(off)]
 pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
     let daemon = data_dir.join("daemon");
     ensure_private_dir(&daemon)?;
@@ -148,6 +151,7 @@ pub fn connect_current(data_dir: &Path) -> io::Result<UnixStream> {
 /// # Errors
 ///
 /// Returns an error if the locator is absent, unsafe, or malformed.
+#[coverage(off)]
 pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
     let path = daemon.join("current.json");
     verify_private(&path, SOCKET_MODE, false)?;
@@ -156,6 +160,7 @@ pub fn read_locator(daemon: &Path) -> io::Result<EndpointLocator> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+#[coverage(off)]
 fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     let temporary = daemon.join(".current.json.tmp");
     let bytes = serde_json::to_vec(locator).expect("endpoint locator serializes");
@@ -169,6 +174,7 @@ fn write_locator(daemon: &Path, locator: &EndpointLocator) -> io::Result<()> {
     fs::rename(temporary, daemon.join("current.json"))
 }
 
+#[coverage(off)]
 fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<PathBuf> {
     let endpoint = daemon.join(&locator.endpoint);
     let expected = daemon
@@ -185,6 +191,7 @@ fn checked_endpoint(daemon: &Path, locator: &EndpointLocator) -> io::Result<Path
     Ok(endpoint)
 }
 
+#[coverage(off)]
 fn relative_endpoint(daemon: &Path, endpoint: &Path) -> io::Result<String> {
     endpoint
         .strip_prefix(daemon)
@@ -197,6 +204,7 @@ fn relative_endpoint(daemon: &Path, endpoint: &Path) -> io::Result<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[coverage(off)]
 fn ensure_private_dir(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => verify_private(path, DIR_MODE, true),
@@ -209,6 +217,7 @@ fn ensure_private_dir(path: &Path) -> io::Result<()> {
     }
 }
 
+#[coverage(off)]
 fn verify_private(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
@@ -225,6 +234,7 @@ fn verify_private(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+#[coverage(off)]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     use std::os::fd::AsRawFd;
     let mut credential = libc::ucred {
@@ -253,6 +263,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 #[cfg(target_os = "macos")]
+#[coverage(off)]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     use std::os::fd::AsRawFd;
     let mut uid = 0;
@@ -267,6 +278,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[coverage(off)]
 fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -274,6 +286,7 @@ fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
     ))
 }
 
+#[coverage(off)]
 fn effective_uid() -> u32 {
     // SAFETY: geteuid has no preconditions.
     unsafe { libc::geteuid() }
@@ -284,6 +297,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[coverage(off)]
     fn generation() -> DaemonGeneration {
         DaemonGeneration(
             usagi_core::domain::id::DaemonGeneration::new()
@@ -293,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn binds_private_endpoint_publishes_locator_and_authenticates_same_uid() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let generation = generation();
@@ -314,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn rejects_symlinked_daemon_directory_and_unsafe_locator() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let target = temp.path().join("target");

@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Workspace 画面（ホーム）。
 //!
 //! workspace を開いている間の主画面。全幅の **header** の下を 2 ペインに割る:
@@ -83,6 +81,7 @@ impl HomeProjection {
     /// state にある ID だけをその順番で採用する。欠損した表示情報は描画せず、controller
     /// 側の snapshot reconciliation が selected / active を root に縮退させる。
     #[must_use]
+    #[coverage(off)]
     pub fn from_state(
         state: &AppState,
         workspace_name: impl Into<String>,
@@ -116,6 +115,7 @@ impl HomeProjection {
     /// pending/live の identity は reducer に残し、表示層は identity を文字列や index に
     /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
     #[must_use]
+    #[coverage(off)]
     pub fn with_pane(mut self, pane: &PaneState) -> Self {
         self.pane_tabs = pane
             .tabs()
@@ -130,6 +130,7 @@ impl HomeProjection {
 
     /// 左 sidebar の rows。root と `+ new session` は session 数にかかわらず常設する。
     #[must_use]
+    #[coverage(off)]
     pub fn rows(&self) -> Vec<Selection> {
         let mut rows = Vec::with_capacity(self.sessions.len() + 2);
         rows.push(Selection::Target(Target::Root(self.workspace)));
@@ -142,6 +143,7 @@ impl HomeProjection {
         rows
     }
 
+    #[coverage(off)]
     fn active_cwd(&self) -> &Path {
         match self.active {
             Target::Root(id) if id == self.workspace => &self.root_cwd,
@@ -154,6 +156,7 @@ impl HomeProjection {
         }
     }
 
+    #[coverage(off)]
     fn active_label(&self) -> &str {
         match self.active {
             Target::Root(id) if id == self.workspace => "root",
@@ -167,6 +170,7 @@ impl HomeProjection {
     }
 }
 
+#[coverage(off)]
 fn pane_tab_label(tab: &PaneTab) -> String {
     match tab {
         PaneTab::Pending(pending) => match pending.kind {
@@ -180,6 +184,7 @@ fn pane_tab_label(tab: &PaneTab) -> String {
     }
 }
 
+#[coverage(off)]
 fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
     match (tab, selection) {
         (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
@@ -206,6 +211,7 @@ pub enum Mode {
 impl Mode {
     const ALL: [Self; 2] = [Self::Switch, Self::Closeup];
 
+    #[coverage(off)]
     fn label(self) -> &'static str {
         match self {
             Self::Switch => "Switch",
@@ -237,6 +243,7 @@ pub struct Workspace {
 impl Workspace {
     /// core の workspace とその永続化済み状態から画面状態を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
         Self {
             record: workspace,
@@ -255,24 +262,28 @@ impl Workspace {
 
     /// workspace 名。
     #[must_use]
+    #[coverage(off)]
     pub fn name(&self) -> &str {
         &self.record.name
     }
 
     /// workspace の絶対パス。
     #[must_use]
+    #[coverage(off)]
     pub fn path(&self) -> &Path {
         &self.record.path
     }
 
     /// セッション一覧。
     #[must_use]
+    #[coverage(off)]
     pub fn sessions(&self) -> &[SessionRecord] {
         &self.state.sessions
     }
 
     /// 現在の操作 mode。
     #[must_use]
+    #[coverage(off)]
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -280,6 +291,7 @@ impl Workspace {
     /// 選択中の session を操作する Closeup へ移る。
     ///
     /// session と tab の選択位置はそのまま維持する。
+    #[coverage(off)]
     pub fn enter_closeup(&mut self) {
         self.mode = Mode::Closeup;
     }
@@ -287,6 +299,7 @@ impl Workspace {
     /// session 一覧を操作する Switch へ戻る。
     ///
     /// session と tab の選択位置はそのまま維持する。
+    #[coverage(off)]
     pub fn enter_switch(&mut self) {
         self.mode = Mode::Switch;
     }
@@ -295,6 +308,7 @@ impl Workspace {
     ///
     /// controller が selected / active の source of truth へ育つまで、既存 Workspace
     /// view の session・tab state はそのまま保持する最小の adapter である。
+    #[coverage(off)]
     pub fn apply_home_mode(&mut self, mode: HomeMode) {
         self.mode = match mode {
             HomeMode::Switch => Mode::Switch,
@@ -304,30 +318,35 @@ impl Workspace {
 
     /// タブ一覧。
     #[must_use]
+    #[coverage(off)]
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
 
     /// 選択行の添字（`0` は root 行）。
     #[must_use]
+    #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
     }
 
     /// アクティブなタブの添字。
     #[must_use]
+    #[coverage(off)]
     pub fn active_tab(&self) -> usize {
         self.active_tab
     }
 
     /// root 行を選択しているか。
     #[must_use]
+    #[coverage(off)]
     pub fn root_selected(&self) -> bool {
         self.selected == 0
     }
 
     /// フォーカス中 session の表示ラベル。root 行では `"root"`。
     #[must_use]
+    #[coverage(off)]
     pub fn focused_label(&self) -> &str {
         self.focused_session()
             .map_or("root", SessionRecord::display_label)
@@ -335,6 +354,7 @@ impl Workspace {
 
     /// フォーカス中 session に記録された Pull Request。root 行では空。
     #[must_use]
+    #[coverage(off)]
     pub fn focused_prs(&self) -> &[PrLink] {
         self.focused_session()
             .map_or(&[], |session| session.prs.as_slice())
@@ -342,6 +362,7 @@ impl Workspace {
 
     /// フォーカス中 target の preview に出す安全な概要行。
     #[must_use]
+    #[coverage(off)]
     pub fn focused_preview_lines(&self) -> Vec<String> {
         let (kind, path) = self.focused_session().map_or_else(
             || ("workspace", self.path()),
@@ -356,6 +377,7 @@ impl Workspace {
 
     /// フォーカス中 target の scratchpad を text overlay 用の安全な行へ投影する。
     #[must_use]
+    #[coverage(off)]
     pub fn focused_note_lines(&self) -> Vec<String> {
         let notes = self
             .focused_session()
@@ -382,33 +404,39 @@ impl Workspace {
     }
 
     /// 左ペインの選択を 1 つ下へ（末尾の session の次は先頭の root へ回り込む）。
+    #[coverage(off)]
     pub fn select_next(&mut self) {
         self.selected = (self.selected + 1) % self.row_count();
     }
 
     /// 左ペインの選択を 1 つ上へ（先頭の root の次は末尾の session へ回り込む）。
+    #[coverage(off)]
     pub fn select_prev(&mut self) {
         let rows = self.row_count();
         self.selected = (self.selected + rows - 1) % rows;
     }
 
     /// 右ペインのタブを次へ（末尾で先頭へ回り込む）。
+    #[coverage(off)]
     pub fn tab_next(&mut self) {
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
     }
 
     /// 右ペインのタブを前へ（先頭で末尾へ回り込む）。
+    #[coverage(off)]
     pub fn tab_prev(&mut self) {
         let len = self.tabs.len();
         self.active_tab = (self.active_tab + len - 1) % len;
     }
 
     /// 選択できる行数（root 行 1＋セッション数）。
+    #[coverage(off)]
     fn row_count(&self) -> usize {
         self.state.sessions.len() + 1
     }
 
     /// フォーカス中のセッション（root 選択なら `None`）。
+    #[coverage(off)]
     fn focused_session(&self) -> Option<&SessionRecord> {
         self.selected
             .checked_sub(1)
@@ -419,6 +447,7 @@ impl Workspace {
 // ── header ──────────────────────────────────────────────────────────────────
 
 /// 全幅の header: workspace 名のパンくずとセッション数。左寄せ・dim の区切り。
+#[coverage(off)]
 fn header_line(width: usize, ws: &Workspace) -> String {
     let count = ws.sessions().len();
     let sep = Style::new().dim().paint(" › ");
@@ -444,6 +473,7 @@ fn header_line(width: usize, ws: &Workspace) -> String {
 }
 
 /// header と本文を分ける全幅の水平罫線（dim）。
+#[coverage(off)]
 fn rule_line(width: usize) -> String {
     Style::new().dim().paint(&"─".repeat(width))
 }
@@ -451,11 +481,13 @@ fn rule_line(width: usize) -> String {
 // ── left pane: session menu ─────────────────────────────────────────────────
 
 /// root 行。フォーカス中は強調する。
+#[coverage(off)]
 fn root_row(width: usize, ws: &Workspace) -> String {
     menu_row(width, ws.root_selected(), "root", "workspace root")
 }
 
 /// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
+#[coverage(off)]
 fn selectable_row(width: usize, ws: &Workspace, index: usize) -> String {
     if index == 0 {
         root_row(width, ws)
@@ -475,6 +507,7 @@ fn selectable_row(width: usize, ws: &Workspace, index: usize) -> String {
 }
 
 /// `capacity` 行の viewport に選択行が必ず入るよう、先頭 index を決める。
+#[coverage(off)]
 fn viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
     let visible = capacity.min(row_count);
     let max_start = row_count.saturating_sub(visible);
@@ -484,6 +517,7 @@ fn viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
 }
 
 /// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
+#[coverage(off)]
 fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
     let cursor = if selected {
         Role::Danger.style().bold().paint(">")
@@ -500,6 +534,7 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
+#[coverage(off)]
 fn left_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
         Mode::Switch => "[switch] ↑↓ target",
@@ -512,6 +547,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
 /// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
+#[coverage(off)]
 fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     if height == 0 {
         return Vec::new();
@@ -541,6 +577,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
 /// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
+#[coverage(off)]
 fn closeup_header(width: usize, ws: &Workspace) -> String {
     let name = Role::Accent.style().bold().paint(ws.focused_label());
     let detail = ws.focused_session().map_or_else(
@@ -552,6 +589,7 @@ fn closeup_header(width: usize, ws: &Workspace) -> String {
 }
 
 /// tabmenu: タブを並べ、アクティブを `[Label]` accent、他を dim で描く。
+#[coverage(off)]
 fn tab_menu(width: usize, ws: &Workspace) -> String {
     let tabs = ws
         .tabs
@@ -570,6 +608,7 @@ fn tab_menu(width: usize, ws: &Workspace) -> String {
 }
 
 /// content: アクティブなタブと、フォーカス中の実 workspace / session path。
+#[coverage(off)]
 fn content_lines(ws: &Workspace) -> Vec<String> {
     let tab = ws.tabs[ws.active_tab].label;
     let (kind, path) = ws.focused_session().map_or_else(
@@ -587,6 +626,7 @@ fn content_lines(ws: &Workspace) -> Vec<String> {
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
+#[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
         Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / Esc back / q quit",
@@ -598,6 +638,7 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 }
 
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
+#[coverage(off)]
 fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     let mut rows = vec![
         closeup_header(width, ws),
@@ -612,6 +653,7 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 /// `rows` を `height` 行に収め、`footer` を最下行に固定する（本文が溢れたら切り、足りなければ
 /// 空行で詰める）。
+#[coverage(off)]
 fn with_footer(mut rows: Vec<String>, height: usize, footer: String) -> Vec<String> {
     let body_cap = height.saturating_sub(1);
     rows.truncate(body_cap);
@@ -625,6 +667,7 @@ fn with_footer(mut rows: Vec<String>, height: usize, footer: String) -> Vec<Stri
 /// [`panes`] レイアウトで左（session menu）・右（closeup）の 2 ペインに割って組む。サイズ 0 は
 /// 80×24 にフォールバックする。
 #[must_use]
+#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
@@ -647,6 +690,7 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の `>` は
 /// navigation cursor、`*` は command target であり、異なる行でも同時に残る。
 #[must_use]
+#[coverage(off)]
 pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
@@ -664,6 +708,7 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     frame
 }
 
+#[coverage(off)]
 fn home_header_line(width: usize, home: &HomeProjection) -> String {
     let mode = match home.mode {
         HomeMode::Switch => "Switch",
@@ -685,6 +730,7 @@ fn home_header_line(width: usize, home: &HomeProjection) -> String {
     )
 }
 
+#[coverage(off)]
 fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
     if height == 0 {
         return Vec::new();
@@ -719,6 +765,7 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
     lines
 }
 
+#[coverage(off)]
 fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
     let cursor = if home.selected == row {
         Role::Danger.style().bold().paint(">")
@@ -759,6 +806,7 @@ fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
     )
 }
 
+#[coverage(off)]
 fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<String> {
     let mode = match home.mode {
         HomeMode::Switch => "Switch",
@@ -799,6 +847,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
 
 /// controller Home の pane reducer tab を並べる。選択中だけを accent にし、tab が無い
 /// target 選択中も strip の位置を保ってレイアウトを安定させる。
+#[coverage(off)]
 fn home_tab_menu(width: usize, tabs: &[HomePaneTab]) -> String {
     let tabs = if tabs.is_empty() {
         Style::new().dim().paint(" no panes")
@@ -817,6 +866,7 @@ fn home_tab_menu(width: usize, tabs: &[HomePaneTab]) -> String {
     widgets::pad_to_width(&format!(" {tabs}"), width)
 }
 
+#[coverage(off)]
 fn phase_label(phase: TargetPhase) -> &'static str {
     match phase {
         TargetPhase::Absent => "absent",
@@ -827,6 +877,7 @@ fn phase_label(phase: TargetPhase) -> &'static str {
     }
 }
 
+#[coverage(off)]
 fn feedback_label(feedback: Option<&Feedback>) -> String {
     match feedback {
         None => "none".to_string(),
@@ -871,12 +922,14 @@ mod tests {
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
 
+    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
+    #[coverage(off)]
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -891,6 +944,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn workspace() -> Workspace {
         let record = WorkspaceRecord::new("actual", "/tmp/actual");
         let state = WorkspaceState {
@@ -904,6 +958,7 @@ mod tests {
         Workspace::new(record, state)
     }
 
+    #[coverage(off)]
     fn workspace_with_sessions(count: usize) -> Workspace {
         let record = WorkspaceRecord::new("actual", "/tmp/actual");
         let state = WorkspaceState {
@@ -916,6 +971,7 @@ mod tests {
         Workspace::new(record, state)
     }
 
+    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -933,6 +989,7 @@ mod tests {
         out
     }
 
+    #[coverage(off)]
     fn joined(ws: &Workspace) -> String {
         render(30, 100, ws)
             .iter()
@@ -941,6 +998,7 @@ mod tests {
             .join("\n")
     }
 
+    #[coverage(off)]
     fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
         ProjectedSession {
             id,
@@ -950,6 +1008,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn joined_home(home: &HomeProjection) -> String {
         render_home(30, 100, home)
             .iter()
@@ -959,6 +1018,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_projection_keeps_root_sessions_and_new_in_identity_order() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
@@ -987,6 +1047,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_projection_draws_selected_and_active_markers_on_different_rows() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
@@ -1015,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_projection_never_marks_new_as_active_and_refresh_falls_back_to_root_cwd() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -1045,6 +1107,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_projection_handles_tiny_geometry_and_an_unrelated_root_target_safely() {
         let workspace = WorkspaceId::new();
         let state = AppState::home(workspace, Vec::new());
@@ -1059,6 +1122,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_feedback_area_renders_safe_error_and_disconnect_without_raw_detail() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
@@ -1086,6 +1150,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn home_projection_renders_the_pane_reducer_tab_strip_and_selection() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -1119,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspace_is_built_from_domain_records() {
         let ws = workspace();
         assert_eq!(ws.name(), "actual");
@@ -1136,6 +1202,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn select_cycles_from_the_root_through_sessions() {
         let mut ws = workspace();
         ws.select_next();
@@ -1149,6 +1216,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn an_empty_workspace_selects_and_cycles_the_root_row() {
         let mut ws = Workspace::new(
             WorkspaceRecord::new("empty", "/tmp/empty"),
@@ -1164,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn tab_navigation_wraps() {
         let mut ws = workspace();
         ws.tab_prev();
@@ -1176,6 +1245,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn mode_transitions_preserve_the_session_and_tab_selection() {
         let mut ws = workspace();
         ws.select_next();
@@ -1196,6 +1266,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn controller_mode_adapter_preserves_existing_view_selection() {
         let mut ws = workspace();
         ws.select_next();
@@ -1209,6 +1280,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn focused_label_and_pull_requests_follow_the_selected_session() {
         let mut ws = workspace();
         ws.state.sessions[0]
@@ -1228,6 +1300,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn header_shows_both_modes_and_highlights_the_current_one() {
         let mut ws = workspace();
         let switch_header = &render(30, 100, &ws)[0];
@@ -1241,6 +1314,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_uses_mode_specific_footers_and_keeps_tabs_visible() {
         let mut ws = workspace();
         let switch = joined(&ws);
@@ -1273,6 +1347,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_real_workspace_and_session_records() {
         let text = joined(&workspace());
         assert!(text.contains("USAGI"));
@@ -1293,6 +1368,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_places_the_selected_root_before_every_session() {
         let text = joined(&workspace());
         let root = text
@@ -1305,6 +1381,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_reflects_selected_session_and_root() {
         let mut ws = workspace();
         let root_text = joined(&ws);
@@ -1323,6 +1400,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_marks_only_one_selected_row() {
         let frame = render(30, 100, &workspace());
         let cursor_rows = frame
@@ -1333,6 +1411,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn session_viewport_keeps_every_selection_and_the_root_visible() {
         let mut ws = workspace_with_sessions(12);
         let tiny_frame = render(3, 100, &ws);
@@ -1357,6 +1436,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_fills_the_terminal_and_fits_its_width() {
         let frame = render(30, 100, &workspace());
         assert_eq!(frame.len(), 30);
@@ -1364,6 +1444,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_falls_back_for_a_zero_size() {
         let frame = render(0, 0, &workspace());
         assert_eq!(frame.len(), 24);
@@ -1371,6 +1452,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_does_not_overflow_a_short_terminal() {
         assert_eq!(render(2, 80, &workspace()).len(), 2);
         assert_eq!(render(1, 80, &workspace()).len(), 1);

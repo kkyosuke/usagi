@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The `usagi daemon serve` usecase: run the daemon in the foreground.
 //!
 //! `serve` is the daemon process itself (a hidden subcommand; `usagi daemon`
@@ -38,6 +36,7 @@ use usagi_core::infrastructure::daemon::{
 ///
 /// Returns the lock's acquire error, the store's load / save / clear error, the
 /// shutdown signal's wait error, or an `out` write error.
+#[coverage(off)]
 pub fn serve<W: Write, F: RecordFile, S: ShutdownSignal, M: InstanceLock>(
     out: &mut W,
     store: &DaemonRecordStore<F>,
@@ -75,6 +74,7 @@ mod tests {
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
 
+    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -83,6 +83,7 @@ mod tests {
     }
 
     /// Serve with the lock acquired and an immediate shutdown, returning output.
+    #[coverage(off)]
     fn serve_lines(store: &DaemonRecordStore<InMemoryRecordFile>, pid: u32) -> String {
         let mut buf = Vec::new();
         serve(
@@ -98,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn registers_serves_and_clears_when_it_holds_the_lock() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         assert_eq!(
@@ -109,6 +111,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn overwrites_a_stale_record_when_it_holds_the_lock() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         store.save(&DaemonRecord::new(9999)).unwrap();
@@ -121,6 +124,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn refuses_and_names_the_holder_when_the_lock_is_held() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
@@ -144,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn refuses_without_a_pid_when_the_lock_is_held_and_no_record_exists() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
@@ -163,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_lock_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
@@ -180,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_wait_error_and_keeps_the_record() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let mut buf = Vec::new();
@@ -199,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_load_error_when_refused() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
         let mut buf = Vec::new();

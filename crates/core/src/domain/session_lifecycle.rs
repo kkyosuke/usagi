@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Durable, daemon-owned session lifecycle state.
 //!
 //! This module deliberately does not extend the legacy `WorkspaceState` record.
@@ -57,6 +55,7 @@ pub struct LifecycleCapabilities {
 
 impl SessionLifecycle {
     #[must_use]
+    #[coverage(off)]
     pub const fn capabilities(self) -> LifecycleCapabilities {
         match self {
             Self::Creating | Self::Initializing => LifecycleCapabilities {
@@ -133,6 +132,7 @@ pub struct ManagedSession {
 
 impl ManagedSession {
     #[must_use]
+    #[coverage(off)]
     pub fn new_creating(name: String, operation_id: OperationId, now: DateTime<Utc>) -> Self {
         Self {
             session_id: SessionId::new(),
@@ -162,6 +162,7 @@ pub enum OperationStatus {
 }
 impl OperationStatus {
     #[must_use]
+    #[coverage(off)]
     pub const fn terminal(self) -> bool {
         matches!(
             self,
@@ -207,6 +208,7 @@ pub enum LifecycleError {
     MissingOperation,
 }
 impl std::fmt::Display for LifecycleError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -217,6 +219,7 @@ impl WorkspaceLifecycleState {
     pub const FORMAT: &'static str = "usagi-workspace-lifecycle";
     pub const MAJOR: u16 = 2;
     #[must_use]
+    #[coverage(off)]
     pub fn new(workspace_id: WorkspaceId, now: DateTime<Utc>) -> Self {
         Self {
             format: Self::FORMAT.into(),
@@ -234,6 +237,7 @@ impl WorkspaceLifecycleState {
     /// # Errors
     ///
     /// Returns an error when the envelope is not the exact version this reducer understands.
+    #[coverage(off)]
     pub fn validate(&self) -> Result<(), LifecycleError> {
         if self.format != Self::FORMAT {
             return Err(LifecycleError::UnsupportedFormat);
@@ -243,6 +247,7 @@ impl WorkspaceLifecycleState {
         }
         Ok(())
     }
+    #[coverage(off)]
     fn changed(&mut self, now: DateTime<Utc>) {
         self.state_revision += 1;
         self.updated_at = now;
@@ -287,6 +292,7 @@ pub enum LifecycleEvent {
 /// # Errors
 ///
 /// Returns an error for an invalid transition, unsupported envelope, or stale fence.
+#[coverage(off)]
 pub fn reduce(
     state: &mut WorkspaceLifecycleState,
     event: LifecycleEvent,
@@ -383,6 +389,7 @@ pub fn reduce(
     }
 }
 
+#[coverage(off)]
 fn create_completed(
     state: &mut WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -410,6 +417,7 @@ fn create_completed(
     Ok(())
 }
 
+#[coverage(off)]
 fn fenced_session(
     state: &WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -441,6 +449,7 @@ fn fenced_session(
     Ok((session_pos, operation_pos))
 }
 
+#[coverage(off)]
 fn complete<F>(
     state: &mut WorkspaceLifecycleState,
     fence: &CompletionFence,
@@ -470,9 +479,11 @@ where
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }
+    #[coverage(off)]
     fn op() -> OperationJournal {
         OperationJournal {
             operation_id: OperationId::new(),
@@ -482,6 +493,7 @@ mod tests {
             progress_revision: 0,
         }
     }
+    #[coverage(off)]
     fn fence(
         s: &WorkspaceLifecycleState,
         session: &ManagedSession,
@@ -498,12 +510,14 @@ mod tests {
         }
     }
     #[test]
+    #[coverage(off)]
     fn lifecycle_axes_and_capabilities_stay_separate() {
         assert!(SessionLifecycle::Available.capabilities().can_use);
         assert_eq!(AgentPhase::Running, AgentPhase::Running);
         assert_eq!(BranchStatus::Dirty, BranchStatus::Dirty);
     }
     #[test]
+    #[coverage(off)]
     fn creation_completion_and_reverse_snapshot_are_fenced() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let operation = op();
@@ -541,6 +555,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn delete_recreation_rejects_old_worker() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let create = op();
@@ -607,6 +622,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn crash_does_not_replay_setup_and_unknown_format_fails_closed() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let operation = op();
@@ -649,6 +665,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
+    #[coverage(off)]
     fn reducer_covers_recovery_cancel_and_transition_failures() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         assert!(SessionLifecycle::Creating.capabilities().can_cancel);

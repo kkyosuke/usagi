@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Issue CRUD operations over the issue store.
 //!
 //! The application-level operations both the human CLI (`usagi issue …`) and the
@@ -53,6 +51,7 @@ pub struct IssuePatch {
 /// # Errors
 ///
 /// Returns an error when the store cannot allocate a number or write the issue.
+#[coverage(off)]
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
     let lock = store.lock()?;
     let number = store.max_number()? + 1;
@@ -79,6 +78,7 @@ pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<
 /// # Errors
 ///
 /// Returns an error when the backing file cannot be read or parsed.
+#[coverage(off)]
 pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
     store.read(number)
 }
@@ -89,6 +89,7 @@ pub fn get(store: &IssueStore, number: u32) -> Result<Option<Issue>> {
 ///
 /// Returns an error when the index cannot be read and the markdown source cannot
 /// be rescanned.
+#[coverage(off)]
 pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
     store.summaries()
 }
@@ -99,6 +100,7 @@ pub fn list(store: &IssueStore) -> Result<Vec<IssueSummary>> {
 /// # Errors
 ///
 /// Returns an error when the issue cannot be read or the write fails.
+#[coverage(off)]
 pub fn update(
     store: &IssueStore,
     number: u32,
@@ -146,6 +148,7 @@ pub fn update(
 /// # Errors
 ///
 /// Returns an error when the lock cannot be taken or a file cannot be removed.
+#[coverage(off)]
 pub fn delete(store: &IssueStore, number: u32) -> Result<bool> {
     store.remove(number)
 }
@@ -157,16 +160,19 @@ mod tests {
     use crate::infrastructure::store::issue::IssueStore;
     use chrono::{DateTime, TimeZone, Utc};
 
+    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
+    #[coverage(off)]
     fn store() -> (tempfile::TempDir, IssueStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
         (tmp, store)
     }
 
+    #[coverage(off)]
     fn spec(title: &str) -> NewIssue {
         NewIssue {
             title: title.to_string(),
@@ -177,6 +183,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn create_allocates_sequential_numbers_and_defaults_to_todo() {
         let (_tmp, store) = store();
         let first = create(&store, spec("first"), ts(20)).unwrap();
@@ -189,6 +196,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn get_reads_back_a_created_issue_and_none_for_missing() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -197,6 +205,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn list_returns_summaries_in_number_order() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -210,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn update_applies_only_the_set_fields_and_stamps_the_time() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();
@@ -230,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn update_can_replace_every_field_and_clear_the_optionals() {
         let (_tmp, store) = store();
         let mut base = spec("first");
@@ -260,6 +271,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn update_is_none_for_a_missing_issue() {
         let (_tmp, store) = store();
         assert!(
@@ -270,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn delete_removes_a_created_issue_and_reports_success() {
         let (_tmp, store) = store();
         create(&store, spec("first"), ts(20)).unwrap();

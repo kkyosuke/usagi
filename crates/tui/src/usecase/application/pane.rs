@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Closeup の terminal / Agent tab を扱う純粋な reducer。
 //!
 //! daemon の inventory や stream はここに持ち込まない。adapter は request と completion、
@@ -77,6 +75,7 @@ pub struct PaneState {
 impl PaneState {
     /// target または tab の現在の選択で空の pane state を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn new(selected: PaneSelection) -> Self {
         Self {
             tabs: Vec::new(),
@@ -87,6 +86,7 @@ impl PaneState {
 
     /// local storage から復元した live tabs で state を作る。
     #[must_use]
+    #[coverage(off)]
     pub fn with_live(selected: PaneSelection, tabs: Vec<LivePane>) -> Self {
         Self {
             tabs: tabs.into_iter().map(PaneTab::Live).collect(),
@@ -97,18 +97,21 @@ impl PaneState {
 
     /// tab の表示順。
     #[must_use]
+    #[coverage(off)]
     pub fn tabs(&self) -> &[PaneTab] {
         &self.tabs
     }
 
     /// 現在の target / tab 選択。
     #[must_use]
+    #[coverage(off)]
     pub fn selected(&self) -> &PaneSelection {
         &self.selected
     }
 
     /// 直近の safe pane error。
     #[must_use]
+    #[coverage(off)]
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -159,6 +162,7 @@ pub enum PaneEffect {
 
 /// `event` を pane state へ還元し、必要な局所 effect を返す。
 #[must_use]
+#[coverage(off)]
 pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
     match event {
         PaneEvent::Select(selection) => {
@@ -187,6 +191,7 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
     }
 }
 
+#[coverage(off)]
 fn request(state: &mut PaneState, pending: PendingPane) -> Vec<PaneEffect> {
     if state.tabs.iter().any(
         |tab| matches!(tab, PaneTab::Pending(current) if current.operation == pending.operation),
@@ -198,6 +203,7 @@ fn request(state: &mut PaneState, pending: PendingPane) -> Vec<PaneEffect> {
     Vec::new()
 }
 
+#[coverage(off)]
 fn succeed(
     state: &mut PaneState,
     operation: OperationId,
@@ -257,6 +263,7 @@ fn succeed(
         .collect()
 }
 
+#[coverage(off)]
 fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<PaneEffect> {
     let Some((index, target)) = state
         .tabs
@@ -282,6 +289,7 @@ fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<P
     Vec::new()
 }
 
+#[coverage(off)]
 fn exit(state: &mut PaneState, terminal: &TerminalRef) -> Vec<PaneEffect> {
     let Some(index) = state
         .tabs
@@ -305,6 +313,7 @@ fn exit(state: &mut PaneState, terminal: &TerminalRef) -> Vec<PaneEffect> {
     Vec::new()
 }
 
+#[coverage(off)]
 fn restore(state: &mut PaneState, pane: LivePane) -> Vec<PaneEffect> {
     if state
         .tabs
@@ -325,6 +334,7 @@ fn restore(state: &mut PaneState, pane: LivePane) -> Vec<PaneEffect> {
         .collect()
 }
 
+#[coverage(off)]
 fn selection_for(tab: &PaneTab) -> PaneSelection {
     match tab {
         PaneTab::Pending(pending) => PaneSelection::Tab(TabSelection::Pending(pending.operation)),
@@ -340,10 +350,12 @@ mod tests {
 
     use super::*;
 
+    #[coverage(off)]
     fn target() -> Target {
         Target::Session(SessionId::new())
     }
 
+    #[coverage(off)]
     fn terminal(target: Target) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -360,6 +372,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn request(state: &mut PaneState, target: Target, kind: PaneKind) -> OperationId {
         let operation = OperationId::new();
         assert!(
@@ -377,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selected_target_turns_terminal_and_agent_placeholders_into_live_attached_tabs() {
         let target = target();
         let mut state = PaneState::new(PaneSelection::Target(target));
@@ -421,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selected_placeholder_reuses_a_live_tab_and_preserves_its_stable_selection() {
         let target = target();
         let existing = terminal(target);
@@ -459,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn failure_removes_placeholder_keeps_other_tabs_and_records_safe_error() {
         let target = target();
         let mut state = PaneState::new(PaneSelection::Target(target));
@@ -492,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn exit_selects_next_tab_or_returns_to_closeup_after_the_last_tab() {
         let target = target();
         let first = terminal(target);
@@ -522,6 +539,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn completion_and_exit_in_the_background_never_steal_the_selected_pane() {
         let requested = target();
         let background = target();
@@ -558,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn restored_selected_terminal_reattaches_but_other_input_does_not_cancel_pending_work() {
         let target = target();
         let saved = terminal(target);
@@ -581,6 +600,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn stale_and_duplicate_events_are_inert_and_selected_pending_promotes_to_live() {
         let workspace = WorkspaceId::new();
         let root = Target::Root(workspace);

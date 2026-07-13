@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Durable daemon-generation ownership and crash reconciliation.
 //!
 //! A generation registry is the authority for routing: control work is accepted
@@ -114,6 +112,7 @@ pub struct GenerationCoordinator {
 
 impl GenerationCoordinator {
     #[must_use]
+    #[coverage(off)]
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
@@ -125,6 +124,7 @@ impl GenerationCoordinator {
 
     /// Restores only a self-consistent snapshot. Corruption fails closed rather
     /// than forgetting terminal ownership.
+    #[coverage(off)]
     pub fn restore(snapshot: GenerationSnapshot, limit: usize) -> Result<Self, GenerationError> {
         let mut coordinator = Self::new(limit);
         for record in snapshot.records {
@@ -146,6 +146,7 @@ impl GenerationCoordinator {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn snapshot(&self) -> GenerationSnapshot {
         GenerationSnapshot {
             current: self.current,
@@ -156,6 +157,7 @@ impl GenerationCoordinator {
 
     /// Adds a listener that is ready to take part in a handoff but cannot yet
     /// mutate session/control state.
+    #[coverage(off)]
     pub fn register_standby(
         &mut self,
         generation: DaemonGeneration,
@@ -168,6 +170,7 @@ impl GenerationCoordinator {
         })
     }
 
+    #[coverage(off)]
     fn register_record(&mut self, record: GenerationRecord) -> Result<(), GenerationError> {
         if self.records.contains_key(&record.generation.as_str()) {
             return Err(GenerationError::DuplicateGeneration);
@@ -180,6 +183,7 @@ impl GenerationCoordinator {
     }
 
     /// Makes the first registered daemon active.
+    #[coverage(off)]
     pub fn activate_initial(
         &mut self,
         generation: DaemonGeneration,
@@ -195,6 +199,7 @@ impl GenerationCoordinator {
     /// Atomically performs the control handoff after `next` has become ready.
     /// A running non-terminal external effect makes rollover unsafe; queued
     /// work can be re-owned only after its old worker has stopped.
+    #[coverage(off)]
     pub fn rollover(
         &mut self,
         active: DaemonGeneration,
@@ -216,6 +221,7 @@ impl GenerationCoordinator {
 
     /// Rechecks control authority immediately before an effect and again before
     /// its state commit. Callers use this on both sides of external IO.
+    #[coverage(off)]
     pub fn require_active(&self, generation: DaemonGeneration) -> Result<(), GenerationError> {
         (self.current == Some(generation) && self.role(generation) == Some(GenerationRole::Active))
             .then_some(())
@@ -224,6 +230,7 @@ impl GenerationCoordinator {
 
     /// Resolves a terminal only through its owner generation's trusted record.
     /// Draining generations intentionally remain routable for terminal IO.
+    #[coverage(off)]
     pub fn terminal_endpoint(&self, terminal: &TerminalRef) -> Result<&str, GenerationError> {
         let ownership = self
             .terminals
@@ -247,6 +254,7 @@ impl GenerationCoordinator {
 
     /// Stores terminal ownership before spawn. A missing identity after crash is
     /// deliberately `identity_unknown`, never evidence that no child exists.
+    #[coverage(off)]
     pub fn reserve_terminal(&mut self, terminal: TerminalRef) -> Result<(), GenerationError> {
         self.require_active(terminal.daemon_generation)?;
         let key = terminal_key(&terminal);
@@ -264,6 +272,7 @@ impl GenerationCoordinator {
         Ok(())
     }
 
+    #[coverage(off)]
     pub fn record_spawn(
         &mut self,
         terminal: &TerminalRef,
@@ -278,6 +287,7 @@ impl GenerationCoordinator {
     /// Marks every terminal of a crashed generation as non-attachable. Exact
     /// identity evidence produces `orphan_running`; all other evidence is
     /// `identity_unknown` and must never be signalled.
+    #[coverage(off)]
     pub fn crash_generation<F>(&mut self, generation: DaemonGeneration, mut observe: F)
     where
         F: FnMut(&ProcessIdentity) -> ProcessObservation,
@@ -308,6 +318,7 @@ impl GenerationCoordinator {
     /// Replacement Agent spawn is blocked while an orphan from the same session
     /// and worktree remains unresolved.
     #[must_use]
+    #[coverage(off)]
     pub fn replacement_allowed(&self, session: SessionId, worktree: WorktreeId) -> bool {
         !self.terminals.values().any(|ownership| {
             ownership.terminal.session_id == Some(session)
@@ -321,6 +332,7 @@ impl GenerationCoordinator {
 
     /// Reconcile a terminal only after verified process disappearance, a
     /// completed terminate ACK, or an explicit human acknowledgement.
+    #[coverage(off)]
     pub fn resolve_orphan(
         &mut self,
         terminal: &TerminalRef,
@@ -342,6 +354,7 @@ impl GenerationCoordinator {
     }
 
     /// Retires a draining daemon only after every owned terminal is resolved.
+    #[coverage(off)]
     pub fn collect_draining(
         &mut self,
         generation: DaemonGeneration,
@@ -369,6 +382,7 @@ impl GenerationCoordinator {
         Ok(true)
     }
 
+    #[coverage(off)]
     fn ownership_mut(
         &mut self,
         terminal: &TerminalRef,
@@ -378,17 +392,20 @@ impl GenerationCoordinator {
             .filter(|known| known.terminal.fences(terminal))
             .ok_or(GenerationError::TerminalOwnedElsewhere)
     }
+    #[coverage(off)]
     fn role(&self, generation: DaemonGeneration) -> Option<GenerationRole> {
         self.records
             .get(&generation.as_str())
             .map(|record| record.role)
     }
+    #[coverage(off)]
     fn retained_generations(&self) -> usize {
         self.records
             .values()
             .filter(|record| record.role != GenerationRole::Retired)
             .count()
     }
+    #[coverage(off)]
     fn set_role(
         &mut self,
         generation: DaemonGeneration,
@@ -407,6 +424,7 @@ impl GenerationCoordinator {
     }
 }
 
+#[coverage(off)]
 fn terminal_key(terminal: &TerminalRef) -> String {
     terminal.terminal_id.as_str()
 }
@@ -416,9 +434,11 @@ mod tests {
     use super::*;
     use usagi_core::domain::id::{SessionId, TerminalId, WorkspaceId};
 
+    #[coverage(off)]
     fn generation() -> DaemonGeneration {
         DaemonGeneration::new()
     }
+    #[coverage(off)]
     fn coordinator() -> (GenerationCoordinator, DaemonGeneration) {
         let mut registry = GenerationCoordinator::new(DEFAULT_GENERATION_LIMIT);
         let active = generation();
@@ -428,6 +448,7 @@ mod tests {
         registry.activate_initial(active).unwrap();
         (registry, active)
     }
+    #[coverage(off)]
     fn terminal(owner: DaemonGeneration) -> TerminalRef {
         TerminalRef {
             daemon_generation: owner,
@@ -437,6 +458,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         }
     }
+    #[coverage(off)]
     fn identity() -> ProcessIdentity {
         ProcessIdentity {
             pid: 7,
@@ -446,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn rollover_routes_live_terminal_to_draining_owner_and_fences_old_control() {
         let (mut registry, old) = coordinator();
         let pane = terminal(old);
@@ -462,6 +485,7 @@ mod tests {
         assert_eq!(registry.require_active(next), Ok(()));
     }
     #[test]
+    #[coverage(off)]
     fn rollover_is_busy_for_running_external_io_and_never_allows_a_third_generation() {
         let (mut registry, old) = coordinator();
         let next = generation();
@@ -483,6 +507,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn pid_reuse_becomes_identity_unknown_and_blocks_attach_replacement_and_signal_assumptions() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);
@@ -508,6 +533,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn crash_with_verified_child_is_orphan_until_explicitly_acknowledged() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);
@@ -530,6 +556,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn incomplete_spawn_record_is_never_deleted_or_replaced_after_crash() {
         let (mut registry, owner) = coordinator();
         let pane = terminal(owner);

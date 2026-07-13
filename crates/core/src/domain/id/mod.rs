@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Typed v2 resource identities and pure fencing checks.
 //!
 //! Names, paths, PIDs, and daemon-local counters are attributes, never effecting
@@ -29,6 +27,7 @@ pub enum IdParseError {
 }
 
 impl fmt::Display for IdParseError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUuid => f.write_str("ID must be a UUID"),
@@ -42,6 +41,7 @@ impl fmt::Display for IdParseError {
 
 impl std::error::Error for IdParseError {}
 
+#[coverage(off)]
 fn parse_uuid(value: &str, expected_version: Option<usize>) -> Result<Uuid, IdParseError> {
     let uuid = Uuid::parse_str(value).map_err(|_| IdParseError::InvalidUuid)?;
     if uuid.hyphenated().to_string() != value {
@@ -71,6 +71,7 @@ macro_rules! resource_id {
             /// Issues a never-reused `UUIDv4` resource incarnation.
             #[allow(clippy::new_without_default)]
             #[must_use]
+            #[coverage(off)]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
             }
@@ -80,30 +81,35 @@ macro_rules! resource_id {
             /// # Errors
             ///
             /// Returns [`IdParseError`] when `value` is not canonical UUID text.
+            #[coverage(off)]
             pub fn parse(value: &str) -> Result<Self, IdParseError> {
                 parse_uuid(value, None).map(Self)
             }
 
             /// Returns the canonical UUID string used on the wire and in stores.
             #[must_use]
+            #[coverage(off)]
             pub fn as_str(&self) -> String {
                 self.0.hyphenated().to_string()
             }
         }
 
         impl fmt::Display for $name {
+            #[coverage(off)]
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(&self.as_str())
             }
         }
 
         impl Serialize for $name {
+            #[coverage(off)]
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 serializer.serialize_str(&self.as_str())
             }
         }
 
         impl<'de> Deserialize<'de> for $name {
+            #[coverage(off)]
             fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let value = String::deserialize(deserializer)?;
                 Self::parse(&value).map_err(de::Error::custom)
@@ -137,6 +143,7 @@ impl OperationId {
     /// Issues a `UUIDv7` durable-operation identity.
     #[allow(clippy::new_without_default)]
     #[must_use]
+    #[coverage(off)]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
     }
@@ -147,30 +154,35 @@ impl OperationId {
     ///
     /// Returns [`IdParseError`] when `value` is malformed, noncanonical, or not
     /// a `UUIDv7` value.
+    #[coverage(off)]
     pub fn parse(value: &str) -> Result<Self, IdParseError> {
         parse_uuid(value, Some(7)).map(Self)
     }
 
     /// Returns the canonical UUID string used on the wire and in stores.
     #[must_use]
+    #[coverage(off)]
     pub fn as_str(&self) -> String {
         self.0.hyphenated().to_string()
     }
 }
 
 impl fmt::Display for OperationId {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.as_str())
     }
 }
 
 impl Serialize for OperationId {
+    #[coverage(off)]
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&self.as_str())
     }
 }
 
 impl<'de> Deserialize<'de> for OperationId {
+    #[coverage(off)]
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         Self::parse(&value).map_err(de::Error::custom)
@@ -192,6 +204,7 @@ impl ProtocolVersion {
     /// # Errors
     ///
     /// Returns [`ProtocolVersionError`] when `generation` is zero.
+    #[coverage(off)]
     pub const fn new(generation: u16, revision: u16) -> Result<Self, ProtocolVersionError> {
         if generation == 0 {
             return Err(ProtocolVersionError::ZeroGeneration);
@@ -210,6 +223,7 @@ struct ProtocolVersionWire {
 }
 
 impl<'de> Deserialize<'de> for ProtocolVersion {
+    #[coverage(off)]
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = ProtocolVersionWire::deserialize(deserializer)?;
         Self::new(wire.generation, wire.revision).map_err(de::Error::custom)
@@ -224,6 +238,7 @@ pub enum ProtocolVersionError {
 }
 
 impl fmt::Display for ProtocolVersionError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("protocol generation must be greater than zero")
     }
@@ -257,6 +272,7 @@ impl TerminalRef {
     /// Returns whether `candidate` is exactly the currently registered terminal.
     /// A mismatch is stale; no name or path fallback is permitted.
     #[must_use]
+    #[coverage(off)]
     pub fn fences(&self, candidate: &Self) -> bool {
         self == candidate
     }
@@ -280,6 +296,7 @@ impl AgentRuntimeRef {
     ///
     /// Returns [`ScopeError`] for root terminals or a terminal from another
     /// session.
+    #[coverage(off)]
     pub fn new(
         agent_runtime_id: AgentRuntimeId,
         terminal: TerminalRef,
@@ -297,6 +314,7 @@ impl AgentRuntimeRef {
 
     /// Returns whether `candidate` is exactly this runtime pane.
     #[must_use]
+    #[coverage(off)]
     pub fn fences(&self, candidate: &Self) -> bool {
         self == candidate
     }
@@ -310,6 +328,7 @@ pub enum ScopeError {
 }
 
 impl fmt::Display for ScopeError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Agent runtime session must own its terminal")
     }
@@ -341,6 +360,7 @@ impl CompletionFence {
     /// Returns whether a late completion may apply to the currently registered
     /// operation state.  Any mismatch must be recorded as a no-op.
     #[must_use]
+    #[coverage(off)]
     pub fn fences(&self, candidate: &Self) -> bool {
         self == candidate
     }
@@ -356,6 +376,7 @@ pub enum LegacyIdentityError {
 }
 
 impl fmt::Display for LegacyIdentityError {
+    #[coverage(off)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing => f.write_str("legacy record has no typed identity"),
@@ -373,6 +394,7 @@ impl std::error::Error for LegacyIdentityError {}
 ///
 /// Returns [`LegacyIdentityError`] so callers retain the record for diagnostics
 /// but never treat it as a normal resource.
+#[coverage(off)]
 pub fn migrate_identity<T>(identity: Option<T>, ambiguous: bool) -> Result<T, LegacyIdentityError> {
     if ambiguous {
         return Err(LegacyIdentityError::Ambiguous);

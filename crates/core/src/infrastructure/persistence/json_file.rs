@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Shared helpers for the files usagi persists under its data directories.
 //!
 //! Every store treats a missing file as "no data yet" and writes through a temp
@@ -33,6 +31,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// server and the TUI both editing one repo's `index.json`) clobber each other's
 /// half-written temp before the rename. The pid keeps the name unique across
 /// processes, the counter within one.
+#[coverage(off)]
 fn unique_tmp_path(path: &Path) -> PathBuf {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(format!(
@@ -54,6 +53,7 @@ fn unique_tmp_path(path: &Path) -> PathBuf {
 /// the source-of-truth markdown on the next read — so paying an fsync on every
 /// write to make them power-loss durable is wasted IO in the store lock's hot path.
 /// Source-of-truth files (JSON state, memory/issue markdown) stay durable.
+#[coverage(off)]
 fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     let tmp = unique_tmp_path(path);
     // Clean up the temp file on any failure after it is created. The write
@@ -72,6 +72,7 @@ fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
 /// The body of [`write_atomically`]: create-write(-sync) the temp file, rename it
 /// onto `path`, then (when durable) fsync the parent. Split out so the caller can
 /// remove the temp file on any error this returns.
+#[coverage(off)]
 fn write_atomically_inner(tmp: &Path, path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     {
         let mut file =
@@ -97,6 +98,7 @@ fn write_atomically_inner(tmp: &Path, path: &Path, bytes: &[u8], durable: bool) 
 /// or returns an error on some platforms (e.g. Windows) and may fail if the
 /// parent cannot be opened. Such failures must not fail an otherwise-successful
 /// write, so every error here is intentionally swallowed.
+#[coverage(off)]
 fn fsync_parent_dir(path: &Path) {
     let Some(parent) = path.parent() else { return };
     let Ok(dir) = fs::File::open(parent) else {
@@ -112,6 +114,7 @@ fn fsync_parent_dir(path: &Path) {
 ///
 /// Returns an error when the file exists but cannot be read, or when its
 /// contents are not valid JSON for `T`.
+#[coverage(off)]
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -132,6 +135,7 @@ pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 ///
 /// Returns an error when `dir` cannot be created, `value` cannot be serialized,
 /// or the temp file cannot be written or renamed onto `path`.
+#[coverage(off)]
 pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<()> {
     write_json(dir, path, value, true)
 }
@@ -145,10 +149,12 @@ pub fn write_atomic<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<
 ///
 /// Returns an error when `dir` cannot be created, `value` cannot be serialized,
 /// or the temp file cannot be written or renamed onto `path`.
+#[coverage(off)]
 pub fn write_atomic_cache<T: Serialize>(dir: &Path, path: &Path, value: &T) -> Result<()> {
     write_json(dir, path, value, false)
 }
 
+#[coverage(off)]
 fn write_json<T: Serialize>(dir: &Path, path: &Path, value: &T, durable: bool) -> Result<()> {
     fs::create_dir_all(dir).context(format!("failed to create {}", dir.display()))?;
     let mut text = serde_json::to_string_pretty(value)?;
@@ -166,6 +172,7 @@ fn write_json<T: Serialize>(dir: &Path, path: &Path, value: &T, durable: bool) -
 /// # Errors
 ///
 /// Returns an error when the temp file cannot be written or renamed onto `path`.
+#[coverage(off)]
 pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
     write_atomically(path, text.as_bytes(), true)
 }
@@ -207,6 +214,7 @@ struct Versioned<T> {
 /// # Errors
 ///
 /// Returns an error when the file exists but cannot be read or parsed.
+#[coverage(off)]
 pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     Ok(read::<Versioned<T>>(path)?.map(|v| v.inner))
 }
@@ -219,6 +227,7 @@ pub fn read_versioned<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
 ///
 /// Returns an error when `dir` cannot be created, `payload` cannot be serialized,
 /// or the temp file cannot be written or renamed onto `path`.
+#[coverage(off)]
 pub fn write_versioned<T: Serialize + ?Sized>(dir: &Path, path: &Path, payload: &T) -> Result<()> {
     write_atomic(
         dir,
@@ -235,6 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[coverage(off)]
     fn write_text_atomic_writes_and_replaces_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note.md");
@@ -253,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_atomic_round_trips_json_and_leaves_no_temp() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.json");
@@ -279,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_removes_the_temp_file_when_the_rename_fails() {
         let dir = tempfile::tempdir().unwrap();
         // The target path is an existing, non-empty directory, so the final
@@ -300,6 +312,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_atomic_cache_round_trips_json_without_fsync() {
         // The cache variant skips the temp-file fsync and the parent-dir fsync
         // (the non-durable branch of `write_atomically`) but still writes atomically
@@ -327,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_atomic_creates_missing_directory() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("nested").join("data");
@@ -337,6 +351,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_versioned_round_trips_through_the_envelope() {
         #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug)]
         struct Payload {
@@ -362,6 +377,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fsync_parent_dir_succeeds_for_a_real_directory() {
         // The directory exists and opens, so the best-effort sync runs without
         // panicking and the function returns normally.
@@ -372,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fsync_parent_dir_swallows_an_unopenable_parent() {
         // `Path::new("bare.md").parent()` is `Some("")`, and opening "" fails;
         // the error is swallowed rather than propagated, so this must not panic.
@@ -379,12 +396,14 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fsync_parent_dir_is_a_noop_without_a_parent() {
         // `Path::new("").parent()` is `None`, exercising the early return.
         fsync_parent_dir(Path::new(""));
     }
 
     #[test]
+    #[coverage(off)]
     fn unique_tmp_path_differs_per_call_and_keeps_target_name() {
         let path = Path::new("/data/index.json");
         let a = unique_tmp_path(path);

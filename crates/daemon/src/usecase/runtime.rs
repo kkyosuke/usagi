@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Durable Agent runtime reservation and terminal-stream orchestration.
 
 #![allow(
@@ -64,6 +62,7 @@ pub struct ProvisionContext {
 
 impl ProvisionContext {
     #[must_use]
+    #[coverage(off)]
     pub fn from_request(request: &LaunchRequest) -> Self {
         Self {
             scope: request.scope.clone(),
@@ -76,6 +75,7 @@ impl ProvisionContext {
 
 impl SpawnProvision {
     #[must_use]
+    #[coverage(off)]
     pub fn new(
         environment: impl IntoIterator<
             Item = (usagi_core::domain::agent::EnvironmentVariableName, String),
@@ -89,6 +89,7 @@ impl SpawnProvision {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn environment(
         &self,
     ) -> &BTreeMap<usagi_core::domain::agent::EnvironmentVariableName, String> {
@@ -96,6 +97,7 @@ impl SpawnProvision {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn arguments(&self) -> &[String] {
         &self.arguments
     }
@@ -157,6 +159,7 @@ pub struct RuntimeCoordinator {
 
 impl RuntimeCoordinator {
     #[must_use]
+    #[coverage(off)]
     pub fn new(limit: usize, journal_limit: usize, input_cache_limit: usize) -> Self {
         Self {
             limit,
@@ -165,6 +168,7 @@ impl RuntimeCoordinator {
         }
     }
 
+    #[coverage(off)]
     pub fn launch<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
         &mut self,
         request: &LaunchRequest,
@@ -242,6 +246,7 @@ impl RuntimeCoordinator {
     }
 
     /// Journal output before it becomes available to terminal replay clients.
+    #[coverage(off)]
     pub fn append_output<J: OutputJournal>(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -267,6 +272,7 @@ impl RuntimeCoordinator {
     }
 
     /// Caller drains all output before this verified exit is committed.
+    #[coverage(off)]
     pub fn exit<S: RuntimeStore>(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -290,6 +296,7 @@ impl RuntimeCoordinator {
 
     /// Reconciliation performs no replacement spawn. A slot is released only
     /// on a verified disappearance (or [`Self::exit`]).
+    #[coverage(off)]
     pub fn reconcile<S: RuntimeStore>(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -309,6 +316,7 @@ impl RuntimeCoordinator {
         self.persist(store)
     }
 
+    #[coverage(off)]
     pub fn terminal_snapshot(&self, runtime: &AgentRuntimeRef) -> Result<Snapshot, RuntimeError> {
         self.record(runtime)?;
         self.terminals
@@ -317,6 +325,7 @@ impl RuntimeCoordinator {
     }
     /// Returns the immutable record only when the complete runtime reference
     /// fences it.  This exposes no ephemeral provision or terminal output.
+    #[coverage(off)]
     pub fn record_for(
         &self,
         runtime: &AgentRuntimeRef,
@@ -324,12 +333,14 @@ impl RuntimeCoordinator {
         self.record(runtime)
     }
     #[must_use]
+    #[coverage(off)]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {
         RuntimeStoreSnapshot {
             records: self.records.values().cloned().collect(),
         }
     }
     #[must_use]
+    #[coverage(off)]
     pub fn occupied_slots(&self) -> usize {
         self.records
             .values()
@@ -343,9 +354,11 @@ impl RuntimeCoordinator {
             })
             .count()
     }
+    #[coverage(off)]
     fn persist<S: RuntimeStore>(&self, store: &mut S) -> Result<(), RuntimeError> {
         store.save(self.snapshot()).map_err(|_| RuntimeError::Store)
     }
+    #[coverage(off)]
     fn validate_scope(
         &self,
         runtime: &AgentRuntimeRef,
@@ -358,12 +371,14 @@ impl RuntimeCoordinator {
             .then_some(())
             .ok_or(RuntimeError::ScopeMismatch)
     }
+    #[coverage(off)]
     fn record(&self, runtime: &AgentRuntimeRef) -> Result<&DurableRuntimeRecord, RuntimeError> {
         self.records
             .get(&runtime.agent_runtime_id.as_str())
             .filter(|record| record.runtime.fences(runtime))
             .ok_or(RuntimeError::UnknownRuntime)
     }
+    #[coverage(off)]
     fn record_mut(
         &mut self,
         runtime: &AgentRuntimeRef,
@@ -373,6 +388,7 @@ impl RuntimeCoordinator {
             .filter(|record| record.runtime.fences(runtime))
             .ok_or(RuntimeError::UnknownRuntime)
     }
+    #[coverage(off)]
     fn running(&self, runtime: &AgentRuntimeRef) -> Result<(), RuntimeError> {
         (self.record(runtime)?.state == RuntimeState::Running)
             .then_some(())
@@ -397,6 +413,7 @@ mod tests {
     struct Store(Vec<RuntimeStoreSnapshot>);
     impl RuntimeStore for Store {
         type Error = ();
+        #[coverage(off)]
         fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0.push(snapshot);
             Ok(())
@@ -405,6 +422,7 @@ mod tests {
     struct FailingStore(usize);
     impl RuntimeStore for FailingStore {
         type Error = ();
+        #[coverage(off)]
         fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
             self.0 += 1;
             if self.0 == 2 { Err(()) } else { Ok(()) }
@@ -415,6 +433,7 @@ mod tests {
         calls: usize,
     }
     impl AgentAdapter for Resolver {
+        #[coverage(off)]
         fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
             self.calls += 1;
             Ok(ResolvedLaunch {
@@ -436,6 +455,7 @@ mod tests {
     }
     struct Spawner(Result<ProcessIdentity, SpawnFailure>);
     impl PtySpawner for Spawner {
+        #[coverage(off)]
         fn spawn(
             &mut self,
             _: &DurableLaunchSnapshot,
@@ -449,11 +469,13 @@ mod tests {
     struct Journal(Vec<Output>);
     impl OutputJournal for Journal {
         type Error = ();
+        #[coverage(off)]
         fn append(&mut self, output: &Output) -> Result<(), ()> {
             self.0.push(output.clone());
             Ok(())
         }
     }
+    #[coverage(off)]
     fn request() -> LaunchRequest {
         LaunchRequest {
             profile_id: AgentProfileId::new("test").unwrap(),
@@ -469,6 +491,7 @@ mod tests {
             required_capabilities: BTreeSet::new(),
         }
     }
+    #[coverage(off)]
     fn refs(request: &LaunchRequest) -> (AgentRuntimeRef, CompletionFence) {
         let generation = DaemonGeneration::new();
         let terminal = TerminalRef {
@@ -492,6 +515,7 @@ mod tests {
         };
         (runtime, fence)
     }
+    #[coverage(off)]
     fn process() -> ProcessIdentity {
         ProcessIdentity {
             pid: 7,
@@ -499,6 +523,7 @@ mod tests {
             process_group: 7,
         }
     }
+    #[coverage(off)]
     fn launch<S: RuntimeStore>(
         coordinator: &mut RuntimeCoordinator,
         request: &LaunchRequest,
@@ -518,6 +543,7 @@ mod tests {
         )
     }
     #[test]
+    #[coverage(off)]
     fn resolve_once_persists_before_spawn_and_replays_after_detach() {
         let first_request = request();
         let (runtime, fence) = refs(&first_request);
@@ -549,6 +575,7 @@ mod tests {
         assert_eq!(c.occupied_slots(), 1);
     }
     #[test]
+    #[coverage(off)]
     fn ambiguous_spawn_and_unknown_identity_block_replacement() {
         let second_request = request();
         let (runtime, fence) = refs(&second_request);
@@ -574,6 +601,7 @@ mod tests {
         assert_eq!(c.occupied_slots(), 1);
     }
     #[test]
+    #[coverage(off)]
     fn verified_exit_or_disappearance_releases_slot() {
         let first_request = request();
         let (runtime, fence) = refs(&first_request);
@@ -609,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn runtime_failures_remain_typed_and_fail_closed() {
         let initial_request = request();
         let (runtime, fence) = refs(&initial_request);
@@ -671,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn spawn_and_persistence_uncertainty_are_retained_for_reconcile() {
         let failed_request = request();
         let (runtime, fence) = refs(&failed_request);
@@ -732,9 +762,11 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn invalid_resolver_provenance_and_duplicate_terminal_reservation_are_rejected() {
         struct BadResolver;
         impl AgentAdapter for BadResolver {
+            #[coverage(off)]
             fn resolve(&mut self, request: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
                 let mut resolved = Resolver::default().resolve(request)?;
                 resolved.snapshot.request.resume = true;
@@ -780,9 +812,11 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn pre_spawn_and_output_failures_do_not_create_a_replacement_path() {
         struct RejectingResolver;
         impl AgentAdapter for RejectingResolver {
+            #[coverage(off)]
             fn resolve(&mut self, _: &LaunchRequest) -> Result<ResolvedLaunch, AdapterError> {
                 Err(AdapterError::Validation(
                     LaunchValidationError::InvalidProgram,
@@ -792,6 +826,7 @@ mod tests {
         struct RejectingStore;
         impl RuntimeStore for RejectingStore {
             type Error = ();
+            #[coverage(off)]
             fn save(&mut self, _: RuntimeStoreSnapshot) -> Result<(), ()> {
                 Err(())
             }
@@ -799,6 +834,7 @@ mod tests {
         struct RejectingJournal;
         impl OutputJournal for RejectingJournal {
             type Error = ();
+            #[coverage(off)]
             fn append(&mut self, _: &Output) -> Result<(), ()> {
                 Err(())
             }
