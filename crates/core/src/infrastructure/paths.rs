@@ -75,6 +75,7 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[coverage(off)]
 mod tests {
     use super::*;
 
@@ -101,5 +102,13 @@ mod tests {
             std::env::remove_var(DATA_DIR_ENV);
         }
         assert!(data_dir().unwrap().to_string_lossy().contains(".usagi"));
+    }
+
+    #[test]
+    fn build_channel_variants_are_distinct() {
+        assert_ne!(BuildChannel::Production, BuildChannel::Development);
+        assert_eq!(BuildChannel::Production.clone(), BuildChannel::Production);
+        assert_eq!(format!("{:?}", BuildChannel::Production), "Production");
+        assert_eq!(format!("{:?}", BuildChannel::Development), "Development");
     }
 }
