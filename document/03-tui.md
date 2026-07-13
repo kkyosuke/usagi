@@ -74,7 +74,8 @@ attach し、選択外の tab は background のまま保持する。
 
 右ペインは tab を Chrome 風の chip と、その直下の active marker で描く。chip の表示順・label は
 表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
-幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は色付きの `🐇` だけを
+幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は v1 の選択 session と同じ
+Nerd Font うさぎ `󰤇`（U+F0907）だけを
 frame ごとに chip 内で進め、ラベル全体を着色しない。
 tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. Enter starts one.` の案内を、それぞれ
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の

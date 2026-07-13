@@ -23,12 +23,14 @@ pub struct Tab<'a> {
 ///
 /// Only the rabbit carries colour. Its leading padding advances with `frame`,
 /// so it runs through the loading chip while the tab label stays dim.
+const RUNNING_RABBIT: &str = "\u{f0907}";
+
 #[must_use]
 pub fn pending_indicator(frame: u64) -> String {
     format!(
         "{}{}",
         " ".repeat((frame % 4) as usize),
-        Role::Feature.style().bold().paint("🐇")
+        Role::Feature.style().bold().paint(RUNNING_RABBIT)
     )
 }
 
@@ -119,7 +121,9 @@ pub fn empty_pane_with_detail(
 
 #[cfg(test)]
 mod tests {
-    use super::{Tab, empty_pane, empty_pane_with_detail, pending_indicator, render};
+    use super::{
+        RUNNING_RABBIT, Tab, empty_pane, empty_pane_with_detail, pending_indicator, render,
+    };
     use crate::presentation::widgets::display_width;
 
     fn strip(text: &str) -> String {
@@ -180,10 +184,10 @@ mod tests {
     fn pending_indicator_is_a_coloured_rabbit_that_runs_across_frames() {
         let indicator = pending_indicator(0);
         let later = pending_indicator(3);
-        assert!(indicator.contains('🐇'));
-        assert_eq!(display_width(&indicator), 2);
+        assert!(indicator.contains(RUNNING_RABBIT));
+        assert_eq!(display_width(&indicator), 1);
         assert_ne!(indicator, later);
-        assert_eq!(display_width(&later), 5);
+        assert_eq!(display_width(&later), 4);
         assert!(indicator.ends_with("\u{1b}[0m"));
         let tab = render(
             40,
@@ -193,7 +197,7 @@ mod tests {
                 pending_indicator: Some(&indicator),
             }],
         );
-        assert!(tab[0].contains('🐇'));
+        assert!(tab[0].contains(RUNNING_RABBIT));
         assert!(tab[0].contains("\u{1b}[2m"));
     }
 

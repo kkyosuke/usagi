@@ -18,7 +18,7 @@ updated_at: 2026-07-13T02:40:06.770551+00:00
 
 - 空 pane の rabbit、案内、safe feedback を右ペイン中央へ置く。
 - rabbit と caption は灰色で描き、clip 後の style 適用と ANSI reset で狭幅でも後続へ色を漏らさない。
-- pending chip は `🐇` だけを着色し、frame ごとに chip 内を進める。label 全体は dim のままにする。
+- pending chip は v1 の Nerd Font うさぎ `󰤇`（U+F0907）だけを着色し、frame ごとに chip 内を進める。label 全体は dim のままにする。
 - pending → live/failure の stable identity reducer は表示 animation によって変更しない。
 
 ## 検証
