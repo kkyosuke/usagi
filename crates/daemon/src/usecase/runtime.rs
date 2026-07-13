@@ -17,29 +17,13 @@ use usagi_core::domain::{
     id::{AgentRuntimeRef, CompletionFence, TerminalRef},
 };
 
+pub use super::terminal::{
+    SpawnFailure, TerminalReconcileState as ReconcileState, TerminalRuntimeState as RuntimeState,
+};
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
     terminal::{Geometry, Output, RegistryError, Snapshot, TerminalRegistry},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeState {
-    Reserved,
-    Running,
-    Exited,
-    Reclaimed,
-    ReconcileRequired(ReconcileState),
-    SpawnFailed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReconcileState {
-    SpawnAmbiguous,
-    PersistAfterSpawn,
-    IdentityUnknown,
-    OrphanRunning,
-    PersistAfterExit,
-}
 
 /// Durable association; `launch` is never re-resolved during reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,11 +103,6 @@ pub trait PtySpawner {
         provision: &SpawnProvision,
         terminal: &TerminalRef,
     ) -> Result<ProcessIdentity, SpawnFailure>;
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnFailure {
-    Definite,
-    Ambiguous,
 }
 pub trait OutputJournal {
     type Error;
