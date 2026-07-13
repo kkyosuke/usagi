@@ -8,6 +8,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Mutex;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
 
@@ -16,8 +17,8 @@ use crate::usecase::terminal::{Geometry, PtyWriteError, PtyWriter};
 /// A spawned daemon-owned shell terminal.
 pub struct PtyTerminal {
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    writer: Box<dyn Write + Send>,
+    child: Mutex<Box<dyn Child + Send + Sync>>,
+    writer: Mutex<Box<dyn Write + Send>>,
 }
 
 impl PtyTerminal {
@@ -48,8 +49,8 @@ impl PtyTerminal {
         let writer = pair.master.take_writer().map_err(io_error)?;
         Ok(Self {
             master: pair.master,
-            child,
-            writer,
+            child: Mutex::new(child),
+            writer: Mutex::new(writer),
         })
     }
 
@@ -62,6 +63,12 @@ impl PtyTerminal {
     /// reader.
     pub fn reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
         self.master.try_clone_reader().map_err(io_error)
+    }
+
+    /// Returns the child PID observed directly from the freshly spawned PTY.
+    #[must_use]
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok()?.process_id()
     }
 
     /// Applies a terminal size change to the daemon-owned master.
@@ -87,8 +94,10 @@ impl PtyTerminal {
     ///
     /// Returns an error if the process cannot be waited for or reports an exit
     /// code outside the supported range.
-    pub fn wait(&mut self) -> std::io::Result<i32> {
+    pub fn wait(&self) -> std::io::Result<i32> {
         self.child
+            .lock()
+            .map_err(|_| std::io::Error::other("PTY child lock poisoned"))?
             .wait()
             .map_err(io_error)
             .and_then(|status| i32::try_from(status.exit_code()).map_err(std::io::Error::other))
@@ -98,6 +107,8 @@ impl PtyTerminal {
 impl PtyWriter for PtyTerminal {
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         self.writer
+            .lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
             .write_all(bytes)
             .map_err(|_| PtyWriteError { applied_prefix: 0 })
     }

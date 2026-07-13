@@ -18,6 +18,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use usagi_core::domain::{
     id::{CompletionFence, ConnectionId, TerminalRef},
     terminal_launch::{
@@ -34,7 +36,7 @@ use super::{
     },
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableTerminalRecord {
     pub terminal: TerminalRef,
     pub operation: CompletionFence,
@@ -42,7 +44,7 @@ pub struct DurableTerminalRecord {
     pub state: TerminalRuntimeState,
     pub process: Option<ProcessIdentity>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TerminalStoreSnapshot {
     pub records: Vec<DurableTerminalRecord>,
 }

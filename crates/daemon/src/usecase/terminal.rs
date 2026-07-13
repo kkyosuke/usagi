@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
 
 /// The durable process state shared by every daemon-owned terminal.
@@ -15,7 +15,8 @@ use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
 /// Agent adapters (Claude/Codex) and the generic shell path differ only in
 /// how they resolve a launch; once a `TerminalRef` is reserved, they use this
 /// same lifecycle vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalRuntimeState {
     Reserved,
     Running,
@@ -26,7 +27,8 @@ pub enum TerminalRuntimeState {
 }
 
 /// A fail-closed condition that must be reconciled, never replaced by spawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminalReconcileState {
     SpawnAmbiguous,
     PersistAfterSpawn,
@@ -103,6 +105,10 @@ pub enum InputAck {
 /// A fakeable PTY writer.  The actual PTY adapter must return only after bytes
 /// were accepted by the master endpoint.
 pub trait PtyWriter {
+    /// Selects the daemon-owned PTY that receives the following write.  Fake
+    /// writers may ignore it; real multiplexing adapters use the full fenced
+    /// terminal identity rather than a client-selected process handle.
+    fn select_terminal(&mut self, _terminal: &TerminalRef) {}
     /// # Errors
     ///
     /// Returns the number of bytes that may have reached the PTY on failure.
