@@ -180,7 +180,7 @@ mod tests {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.actions().len(), 5);
+        assert_eq!(modal.actions().len(), 4);
         assert_eq!(modal.selected_action().name, "agent");
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("tui"));
@@ -193,12 +193,12 @@ mod tests {
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
-        assert_eq!(modal.selected(), 4);
+        assert_eq!(modal.selected(), 3);
         assert_eq!(modal.selected_action().name, "terminal");
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
         modal.select_next();
-        assert_eq!(modal.selected_action().name, "chat");
+        assert_eq!(modal.selected_action().name, "close");
     }
 
     #[test]
@@ -206,7 +206,7 @@ mod tests {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
         modal.select_next();
-        assert_eq!(modal.submission(), "chat");
+        assert_eq!(modal.submission(), "close");
     }
 
     #[test]

@@ -37,7 +37,6 @@ pub struct CommandInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Agent { arguments: String },
-    Chat { arguments: String },
     Close { arguments: String },
     Diff { arguments: String },
     Terminal { arguments: String },
@@ -61,14 +60,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
             usage: "agent [name]",
         },
         factory: |arguments| Command::Agent { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "chat",
-            description: "Open local LLM chat in the selected session",
-            usage: "chat",
-        },
-        factory: |arguments| Command::Chat { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -110,7 +101,6 @@ impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Agent { .. } => "agent",
-            Self::Chat { .. } => "chat",
             Self::Close { .. } => "close",
             Self::Diff { .. } => "diff",
             Self::Terminal { .. } => "terminal",
@@ -124,7 +114,6 @@ impl Command {
 
         match self {
             Self::Agent { arguments } => Box::new(h::Agent { arguments }),
-            Self::Chat { arguments } => Box::new(h::Chat { arguments }),
             Self::Close { arguments } => Box::new(h::Close { arguments }),
             Self::Diff { arguments } => Box::new(h::Diff { arguments }),
             Self::Terminal { arguments } => Box::new(h::Terminal { arguments }),
@@ -217,7 +206,7 @@ mod tests {
     fn command_metadata_is_complete_and_sorted() {
         let definitions: Vec<_> = commands().collect();
         let names: Vec<_> = definitions.iter().map(|command| command.name).collect();
-        assert_eq!(names, ["agent", "chat", "close", "diff", "terminal"]);
+        assert_eq!(names, ["agent", "close", "diff", "terminal"]);
         assert!(
             definitions
                 .iter()
@@ -232,12 +221,6 @@ mod tests {
                 "agent   codex  ",
                 Command::Agent {
                     arguments: "codex".to_owned(),
-                },
-            ),
-            (
-                "chat",
-                Command::Chat {
-                    arguments: String::new(),
                 },
             ),
             (
@@ -274,6 +257,11 @@ mod tests {
         let unknown = interpret("bogus arg").unwrap_err();
         assert_eq!(unknown, ParseError::Unknown("bogus".to_owned()));
         assert_eq!(unknown.to_string(), "unknown closeup command: \"bogus\"");
+
+        assert_eq!(
+            interpret("chat"),
+            Err(ParseError::Unknown("chat".to_owned()))
+        );
     }
 
     #[test]
