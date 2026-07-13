@@ -549,6 +549,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
 /// Input-only Overview reducer retained for modal rendering scenarios. Runtime
 /// execution uses [`step_overview_command`] so session commands reach its port.
 #[cfg(test)]
+#[coverage(off)]
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
         Key::Up => {
