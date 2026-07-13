@@ -93,6 +93,9 @@ clap_complete = "4.5"
 
 # 合成ルートが daemon の pid 生存判定（Unix の signal 0）に使う。
 libc = "0.2"
+# daemon-owned terminal runtime.  The daemon opens the pseudo-terminal; TUI
+# clients only attach through IPC and never acquire a local PTY.
+portable-pty = "0.9"
 
 # clippy は CI / pre-push で `-D warnings` になるため、
 # 日常のビルドから pedantic まで warning として表面化させておく。
