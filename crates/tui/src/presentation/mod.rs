@@ -36,6 +36,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
+use crate::presentation::widgets::modal;
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::closeup;
@@ -158,6 +159,36 @@ enum WorkspaceModal {
     Remove(RemoveModal),
     Pr(PrModal),
     Text(TextOverlay),
+    Quit(QuitModal),
+}
+
+/// The result of a workspace-exit confirmation. Closing the TUI leaves the
+/// daemon alone; ending the workspace first asks it to stop its live sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitAction {
+    CloseTui,
+    EndWorkspace,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuitModal {
+    action: QuitAction,
+    confirm_selected: bool,
+}
+
+impl QuitModal {
+    #[coverage(off)]
+    const fn new(action: QuitAction) -> Self {
+        Self {
+            action,
+            confirm_selected: true,
+        }
+    }
+
+    #[coverage(off)]
+    fn toggle(&mut self) {
+        self.confirm_selected = !self.confirm_selected;
+    }
 }
 
 /// Home overlay が必要とするデータを取得する境界。
@@ -458,6 +489,11 @@ impl WorkspaceUi {
         )));
     }
 
+    #[coverage(off)]
+    fn open_quit_confirmation(&mut self, action: QuitAction) {
+        self.modal = Some(WorkspaceModal::Quit(QuitModal::new(action)));
+    }
+
     /// Snapshot reconciliation may remove the Closeup target. Rebuild its
     /// display label and action focus from the surviving sidebar projection
     /// before the selector gives input back to Closeup.
@@ -548,7 +584,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
             }
         }
         Key::Escape => ConfigStep::Back,
-        Key::Quit => ConfigStep::Quit,
+        Key::Quit | Key::CtrlQ => ConfigStep::Quit,
         _ => ConfigStep::Stay,
     }
 }
@@ -565,7 +601,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
             welcome.select_next();
             WelcomeStep::Stay
         }
-        Key::Escape | Key::Quit => WelcomeStep::Quit,
+        Key::Escape | Key::Quit | Key::CtrlQ => WelcomeStep::Quit,
         Key::Enter => welcome_action(welcome.selected_action()),
         Key::Char(ch) => welcome
             .action_for(ch)
@@ -607,7 +643,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
             NewStep::Stay
         }
         Key::Escape => NewStep::Back,
-        Key::Quit => NewStep::Quit,
+        Key::Quit | Key::CtrlQ => NewStep::Quit,
         Key::Enter | Key::Tab | Key::Live(_) | Key::Other => NewStep::Stay,
     }
 }
@@ -635,7 +671,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 open.cancel_cleanup();
                 OpenStep::Stay
             }
-            Key::Quit => OpenStep::Quit,
+            Key::Quit | Key::CtrlQ => OpenStep::Quit,
             _ => OpenStep::Stay,
         };
     }
@@ -661,7 +697,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             OpenStep::Stay
         }
         Key::Escape => OpenStep::Back,
-        Key::Quit => OpenStep::Quit,
+        Key::Quit | Key::CtrlQ => OpenStep::Quit,
         Key::Enter => {
             let paths = if open.is_unite() {
                 open.unite_paths()
@@ -762,7 +798,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -937,6 +973,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::Backspace
             | Key::Tab
             | Key::Quit
+            | Key::CtrlQ
             | Key::Char(_)
             | Key::Live(_)
             | Key::Other => None,
@@ -946,6 +983,65 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
         submit_remove_selector(ui, entries, force);
     }
     false
+}
+
+/// Confirming an end-workspace request stops every session through the same
+/// daemon-owned lifecycle operation used by the explicit remove command.
+#[coverage(off)]
+fn end_workspace(ui: &mut WorkspaceUi) {
+    let entries = ui.workspace.sessions().to_vec();
+    for entry in entries {
+        let _ = ui
+            .session_commands
+            .as_mut()
+            .expect("session port is available")
+            .execute(
+                ui.workspace.record(),
+                Some(&entry),
+                SessionCommand::Remove {
+                    name: entry.name.clone(),
+                    force: true,
+                },
+            );
+    }
+}
+
+#[coverage(off)]
+fn step_quit_confirmation(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    let WorkspaceModal::Quit(modal) = ui.modal.as_mut().expect("quit modal is active") else {
+        return WorkspaceStep::Stay;
+    };
+    match key {
+        Key::Left | Key::Right | Key::Tab => {
+            modal.toggle();
+            WorkspaceStep::Stay
+        }
+        Key::Char('o' | 'O') => {
+            modal.confirm_selected = true;
+            confirm_quit(ui)
+        }
+        Key::Char('c' | 'C') | Key::Escape => {
+            modal.confirm_selected = false;
+            ui.modal = None;
+            WorkspaceStep::Stay
+        }
+        Key::Enter => confirm_quit(ui),
+        _ => WorkspaceStep::Stay,
+    }
+}
+
+#[coverage(off)]
+fn confirm_quit(ui: &mut WorkspaceUi) -> WorkspaceStep {
+    let WorkspaceModal::Quit(modal) = ui.modal.take().expect("quit modal is active") else {
+        return WorkspaceStep::Stay;
+    };
+    if !modal.confirm_selected {
+        return WorkspaceStep::Stay;
+    }
+    if modal.action == QuitAction::EndWorkspace {
+        end_workspace(ui);
+    }
+    WorkspaceStep::Quit
 }
 
 /// Input-only Overview reducer retained for modal rendering scenarios. Runtime
@@ -971,7 +1067,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -989,6 +1085,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Tab
         | Key::Backspace
         | Key::Quit
+        | Key::CtrlQ
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1009,6 +1106,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Tab
         | Key::Backspace
         | Key::Quit
+        | Key::CtrlQ
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1032,7 +1130,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
         // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
@@ -1066,7 +1164,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             Key::Left => ui.closeup.cursor_left(),
             Key::Right => ui.closeup.cursor_right(),
             Key::Backspace => ui.closeup.backspace(),
-            Key::Char('q') | Key::Quit => return WorkspaceStep::Quit,
+            Key::Char('q') | Key::Quit | Key::CtrlQ => return WorkspaceStep::Quit,
             Key::Char(ch) => ui.closeup.insert_char(ch),
             Key::Escape => close_closeup_modal(ui),
             Key::Enter => {
@@ -1094,7 +1192,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Escape => close_closeup_modal(ui),
-        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
         Key::Enter => {
             let input = ui.closeup.submission();
             execute_closeup_command(ui, &input);
@@ -1119,7 +1217,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
         Key::Escape
         | Key::Up
         | Key::Down
@@ -1148,7 +1246,7 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::PreviousTab => ui.workspace.tab_prev(),
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
         LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
-        LiveTerminalAction::QuitConfirmation => return WorkspaceStep::Quit,
+        LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
         LiveTerminalAction::PreviousSession => ui.select_previous_session(),
     }
     WorkspaceStep::Stay
@@ -1245,10 +1343,20 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
         .ok_or("close does not accept a session target")
 }
 
-/// Workspace 画面のキー処理。Ctrl-C は常に終了し、それ以外は最前面 modal、現在 mode の
+/// Workspace 画面のキー処理。終了要求は確認 modal を開き、それ以外は最前面 modal、現在 mode の
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if key == Key::CtrlQ {
+        ui.open_quit_confirmation(QuitAction::EndWorkspace);
+        return WorkspaceStep::Stay;
+    }
+
+    if key == Key::Char('q') {
+        ui.open_quit_confirmation(QuitAction::CloseTui);
+        return WorkspaceStep::Stay;
+    }
+
     if key == Key::Quit {
         return WorkspaceStep::Quit;
     }
@@ -1259,6 +1367,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
             WorkspaceModal::Remove(_) => step_remove_selector(ui, key),
             WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
+            WorkspaceModal::Quit(_) => return step_quit_confirmation(ui, key),
         };
         if close {
             ui.modal = None;
@@ -1286,11 +1395,38 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
             remove_modal::render_over(height, width, &base, modal)
         }
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
+        Some(WorkspaceModal::Quit(modal)) => render_quit_confirmation(height, width, &base, *modal),
         None if ui.closeup_modal_visible() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
         }
         None => base,
     }
+}
+
+#[coverage(off)]
+fn render_quit_confirmation(
+    height: usize,
+    width: usize,
+    base: &[String],
+    modal_state: QuitModal,
+) -> Vec<String> {
+    let message = match modal_state.action {
+        QuitAction::CloseTui => "Close the TUI? Daemon sessions keep running.",
+        QuitAction::EndWorkspace => "End this workspace and stop all live sessions?",
+    };
+    modal::render_over(
+        height,
+        width,
+        base,
+        "Confirm",
+        52,
+        &[
+            message.to_owned(),
+            String::new(),
+            modal::confirmation_buttons(modal_state.confirm_selected),
+            "  Enter: select   ←→/Tab: choose   o/c: select".to_owned(),
+        ],
+    )
 }
 
 /// Recent が指す単体 workspace path。Unite の runtime は今回の対象外なので開かない。
@@ -1391,7 +1527,7 @@ fn drive_workspace_with_ports_and_selection_mode(
 
 /// Workspace を起点にした公開 runtime。direct `usagi open <path>` は合成側で [`WorkspaceLoader`]
 /// を一度呼び、その snapshot をこの関数へ渡す。基底の Switch で Esc を押しても workspace
-/// からは抜けず、終了には `q` / Ctrl-C を使う。
+/// からは抜けず、終了には `q`（TUI を閉じる）または Ctrl-Q（workspace を終了）を使う。
 ///
 /// # Errors
 ///
@@ -1527,8 +1663,8 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
 /// で開き、同じ Workspace runtime を駆動する。Workspace の基底 Switch では Esc は無効で、
-/// Closeup や前面 modal を閉じるためだけに使う。`q` / Ctrl-C はどの画面でも runtime 全体を
-/// 終了する。
+/// Closeup や前面 modal を閉じるためだけに使う。workspace では `q` が TUI を閉じ、Ctrl-Q が
+/// daemon-owned session を終了してから TUI を閉じる。
 ///
 /// `workspaces` / `recent` / `now` は永続化・実時計を持つ呼び出し側から渡す。
 ///
@@ -2112,7 +2248,7 @@ mod tests {
     #[test]
     fn run_quits_from_welcome_and_handles_menu_navigation() {
         for keys in [
-            vec![Key::Char('q')],
+            vec![Key::Char('q'), Key::Enter],
             vec![Key::Quit],
             vec![Key::Escape],
             vec![Key::Down, Key::Down, Key::Up, Key::Quit],
@@ -2162,6 +2298,7 @@ mod tests {
             Key::Backspace,
             Key::Other,
             Key::Char('q'),
+            Key::Enter,
         ];
         let mut term = FakeTerminal::with_keys(&keys);
         run(
@@ -2172,7 +2309,7 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(term.frames.len(), keys.len());
+        assert_eq!(term.frames.len(), keys.len() - 1);
         assert!(
             term.frames
                 .iter()
@@ -2207,7 +2344,7 @@ mod tests {
     #[test]
     fn config_can_be_opened_from_welcome_or_used_as_the_start() {
         let mut from_welcome =
-            FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q')]);
+            FakeTerminal::with_keys(&[Key::Char('c'), Key::Escape, Key::Char('q'), Key::Enter]);
         run(
             &mut from_welcome,
             Vec::new(),
@@ -2409,6 +2546,7 @@ mod tests {
             Key::Backspace,
             Key::Escape,
             Key::Char('q'),
+            Key::Enter,
         ];
         let mut term = FakeTerminal::with_keys(&keys);
         run(
@@ -2468,14 +2606,15 @@ mod tests {
 
     #[test]
     fn open_selection_loads_and_runs_workspace_on_the_same_terminal() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('q')]);
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('q'), Key::Enter]);
         let mut loader = FakeLoader::default();
         assert_eq!(
             run(&mut term, vec![ws("alpha")], Vec::new(), now(), &mut loader,).unwrap(),
             Exit::Quit
         );
         assert_eq!(loader.opened, vec![PathBuf::from("/tmp/alpha")]);
-        assert_eq!(term.frames.len(), 3);
+        assert_eq!(term.frames.len(), 4);
         assert!(term.frames[0].join("\n").contains("Menu"));
         assert!(term.frames[1].join("\n").contains("Open Workspace"));
         assert!(term.frames[2].join("\n").contains("alpha-session"));
@@ -2486,8 +2625,13 @@ mod tests {
         let alpha = ws("alpha");
         let beta = ws("beta");
 
-        let mut filter =
-            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('b'), Key::Enter, Key::Char('q')]);
+        let mut filter = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char('b'),
+            Key::Enter,
+            Key::Char('q'),
+            Key::Enter,
+        ]);
         run(
             &mut filter,
             vec![alpha.clone(), beta.clone()],
@@ -2567,6 +2711,7 @@ mod tests {
             Key::Other,
             Key::Escape,
             Key::Char('q'),
+            Key::Enter,
         ];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
@@ -2595,7 +2740,13 @@ mod tests {
 
     #[test]
     fn open_prev_wraps_and_escape_returns_to_welcome() {
-        let keys = [Key::Char('o'), Key::Up, Key::Escape, Key::Char('q')];
+        let keys = [
+            Key::Char('o'),
+            Key::Up,
+            Key::Escape,
+            Key::Char('q'),
+            Key::Enter,
+        ];
         let mut term = FakeTerminal::with_keys(&keys);
         run(
             &mut term,
@@ -2618,7 +2769,13 @@ mod tests {
             Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
             Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
         ];
-        let keys = [Key::Char('o'), Key::Enter, Key::Escape, Key::Char('q')];
+        let keys = [
+            Key::Char('o'),
+            Key::Enter,
+            Key::Escape,
+            Key::Char('q'),
+            Key::Enter,
+        ];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
             opened_at: Some(now()),
@@ -2655,7 +2812,8 @@ mod tests {
 
     #[test]
     fn recent_loads_workspace_and_escape_keeps_it_open() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q')]);
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Char('1'), Key::Escape, Key::Char('q'), Key::Enter]);
         let mut loader = FakeLoader::default();
         run(
             &mut term,
@@ -2678,7 +2836,7 @@ mod tests {
             Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
             Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
         ];
-        let keys = [Key::Char('2'), Key::Escape, Key::Char('q')];
+        let keys = [Key::Char('2'), Key::Escape, Key::Char('q'), Key::Enter];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader {
             opened_at: Some(now()),
@@ -2698,7 +2856,7 @@ mod tests {
             WorkspaceOverview::new(ws("other"), 0, 0, 0),
         ]));
         let empty = Recent::Unite(UniteOverview::new(Vec::new()));
-        let keys = [Key::Char('2'), Key::Char('1'), Key::Char('q')];
+        let keys = [Key::Char('2'), Key::Char('1'), Key::Char('q'), Key::Enter];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         run(
@@ -2715,7 +2873,7 @@ mod tests {
 
     #[test]
     fn missing_recent_number_stays_on_welcome() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('3'), Key::Char('q')]);
+        let mut term = FakeTerminal::with_keys(&[Key::Char('3'), Key::Char('q'), Key::Enter]);
         run(
             &mut term,
             Vec::new(),
@@ -2729,7 +2887,7 @@ mod tests {
 
     #[test]
     fn quitting_from_a_recent_workspace_exits_the_runtime() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q')]);
+        let mut term = FakeTerminal::with_keys(&[Key::Char('1'), Key::Char('q'), Key::Enter]);
         run(
             &mut term,
             Vec::new(),
@@ -2738,7 +2896,7 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert_eq!(term.frames.len(), 2);
+        assert_eq!(term.frames.len(), 3);
         assert!(term.frames[1].join("\n").contains("recent-session"));
     }
 
@@ -2766,7 +2924,7 @@ mod tests {
             Key::Enter,
             Key::Down,
             Key::Char(':'),
-            Key::Char('q'),
+            Key::Char('z'),
             Key::Left,
             Key::Backspace,
             Key::Escape,
@@ -2793,7 +2951,7 @@ mod tests {
         assert!(frame(3).contains("terminal"));
         assert!(frame(3).contains("direct-session"));
 
-        // Overview が Closeup の上に重なり、q は終了せず入力として処理される。
+        // Overview が Closeup の上に重なり、文字入力は modal が先に処理される。
         assert!(frame(5).contains("workspace commands"));
         assert!(frame(6).contains("no matching command"));
         assert!(frame(6).contains("Overview"));
@@ -2902,6 +3060,36 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_confirms_then_stops_live_sessions_before_closing_workspace() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Enter]);
+
+        assert_eq!(
+            run_workspace_with_session_port(
+                &mut term,
+                snapshot("end-workspace"),
+                Box::new(RecordingSessionPort(calls.clone())),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert!(term.frames[1].join("\n").contains("stop all live sessions"));
+        assert!(term.frames[1].join("\n").contains("[ ok ]  [cancel]"));
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(
+                "end-workspace".to_owned(),
+                Some("end-workspace-session".to_owned()),
+                SessionCommand::Remove {
+                    name: "end-workspace-session".to_owned(),
+                    force: true,
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn closeup_action_modal_appears_without_tabs_and_hides_once_a_tab_opens() {
         // Req 1/3/4: Enter enters Closeup; with no tabs the action modal is the
         // front surface, and opening a tab hides it so the tab strip is front.
@@ -2999,7 +3187,7 @@ mod tests {
 
     #[test]
     fn closeup_prefix_quit_and_passthrough_keys_are_preserved() {
-        // Quit still terminates, and a live prefix `q` maps to the quit action.
+        // A live prefix `q` opens the same TUI-close confirmation as `q`.
         use crate::usecase::terminal_input::LiveTerminalAction;
 
         let workspace = WorkspaceView::new(ws("prefix-quit"), state("prefix-quit"));
@@ -3007,8 +3195,9 @@ mod tests {
         ui.enter_closeup();
         assert_eq!(
             step_workspace(&mut ui, Key::Live(LiveTerminalAction::QuitConfirmation)),
-            WorkspaceStep::Quit
+            WorkspaceStep::Stay
         );
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Quit(_))));
     }
 
     #[test]
@@ -3048,7 +3237,7 @@ mod tests {
             calls: calls.clone(),
             created: created.clone(),
         };
-        let keys = [Key::Char('o'), Key::Enter, Key::Char('q')];
+        let keys = [Key::Char('o'), Key::Enter, Key::Char('q'), Key::Enter];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         let mut settings = DefaultSettingsPort;
@@ -3081,7 +3270,7 @@ mod tests {
             calls: calls.clone(),
             created: created.clone(),
         };
-        let keys = [Key::Char('1'), Key::Char('q')];
+        let keys = [Key::Char('1'), Key::Char('q'), Key::Enter];
         let mut term = FakeTerminal::with_keys(&keys);
         let mut loader = FakeLoader::default();
         let mut settings = DefaultSettingsPort;
@@ -3357,6 +3546,9 @@ mod tests {
             ];
             keys.extend(navigation);
             keys.push(exit);
+            if exit == Key::Char('q') {
+                keys.push(Key::Enter);
+            }
             let mut term = FakeTerminal::with_keys(&keys);
             assert_eq!(
                 run_workspace(&mut term, snapshot("direct")).unwrap(),

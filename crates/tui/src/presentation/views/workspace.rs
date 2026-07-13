@@ -1019,8 +1019,8 @@ fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
 #[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q quit",
-        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q quit",
+        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q close / Ctrl-Q end",
+        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q close / Ctrl-Q end",
     };
     Style::new()
         .dim()

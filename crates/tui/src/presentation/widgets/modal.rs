@@ -63,6 +63,19 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body
 }
 
+/// Two-button confirmation row shared by destructive and dismiss-only modals.
+/// The selected button uses a filled bracket so it remains recognisable without
+/// relying on colour.
+#[must_use]
+#[coverage(off)]
+pub fn confirmation_buttons(confirm_selected: bool) -> String {
+    if confirm_selected {
+        "  [ ok ]  [cancel]".to_owned()
+    } else {
+        "  [ok]  [ cancel ]".to_owned()
+    }
+}
+
 /// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
 /// 残りは空行で埋めるので、イベントループはフルスクリーン画面と同じ手順で描き直せる。
 /// サイズ 0 は [`normalize_size`] で 80×24 にフォールバックする。
@@ -238,7 +251,16 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{boxed, columns, fixed_body, modal_inner_width, render_modal, render_over};
+    use super::{
+        boxed, columns, confirmation_buttons, fixed_body, modal_inner_width, render_modal,
+        render_over,
+    };
+
+    #[test]
+    fn confirmation_buttons_mark_the_selected_choice() {
+        assert_eq!(confirmation_buttons(true), "  [ ok ]  [cancel]");
+        assert_eq!(confirmation_buttons(false), "  [ok]  [ cancel ]");
+    }
     use crate::presentation::widgets::display_width;
 
     #[test]
