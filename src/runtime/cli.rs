@@ -55,6 +55,7 @@ pub(crate) fn dispatch(
                 Ok(DaemonReply::Accepted {
                     operation_id,
                     revision,
+                    ..
                 }) => writeln!(
                     out,
                     "accepted operation {operation_id} (revision {revision})"

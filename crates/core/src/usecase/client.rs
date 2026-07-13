@@ -146,7 +146,13 @@ pub type TerminalProfileSelection = TerminalProfileId;
 #[derive(Debug, Clone, PartialEq)]
 pub enum DaemonReply {
     Ok(Value),
-    Accepted { operation_id: String, revision: u64 },
+    Accepted {
+        operation_id: String,
+        revision: u64,
+        /// Admission payload. Agent admission carries the fenced terminal that
+        /// was spawned by the daemon; clients must not rediscover it by name.
+        body: Value,
+    },
 }
 
 /// Typed daemon failure.  Surfaces may render its safe details, but must not
@@ -326,6 +332,7 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
                     } => Ok(DaemonReply::Accepted {
                         operation_id: operation_id.0,
                         revision: operation_revision,
+                        body,
                     }),
                     ResponseOutcome::Error(error) => Err(ClientError::Protocol(error)),
                 };
@@ -524,7 +531,8 @@ mod tests {
                 .unwrap(),
             DaemonReply::Accepted {
                 operation_id: "op".into(),
-                revision: 7
+                revision: 7,
+                body: serde_json::json!({"ok": true}),
             }
         );
     }

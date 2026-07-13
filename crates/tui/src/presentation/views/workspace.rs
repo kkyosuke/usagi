@@ -8,6 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use usagi_core::domain::pullrequest::PrLink;
@@ -243,7 +244,10 @@ pub struct Workspace {
     /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行。
     selected: usize,
     pane_owner: WorkspaceId,
-    pane: PaneState,
+    /// Pane state belongs to a selected target, never to the whole workspace.
+    /// The legacy view still projects sessions by name, so the name is used only
+    /// as the local map key; daemon operations retain their fenced identities.
+    panes: BTreeMap<String, PaneState>,
     /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
     pending_session: Option<String>,
 }
@@ -254,13 +258,23 @@ impl Workspace {
     #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
         let pane_owner = WorkspaceId::new();
+        let mut panes = BTreeMap::from([(
+            String::new(),
+            PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
+        )]);
+        for session in &state.sessions {
+            panes.insert(
+                session.name.clone(),
+                PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
+            );
+        }
         Self {
             record: workspace,
             state,
             mode: Mode::Switch,
             selected: 0,
             pane_owner,
-            pane: PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
+            panes,
             pending_session: None,
         }
     }
@@ -491,8 +505,9 @@ impl Workspace {
     pub fn open_pane(&mut self, kind: PaneKind) {
         let operation = usagi_core::domain::id::OperationId::new();
         let target = self.pane_target();
+        let pane = self.pane_mut();
         let _ = pane::reduce(
-            &mut self.pane,
+            pane,
             PaneEvent::Request {
                 operation,
                 target,
@@ -500,7 +515,7 @@ impl Workspace {
             },
         );
         let _ = pane::reduce(
-            &mut self.pane,
+            pane,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
     }
@@ -508,7 +523,7 @@ impl Workspace {
     /// Close the selected right-pane tab without affecting daemon ownership.
     #[coverage(off)]
     pub fn close_pane(&mut self) {
-        let _ = pane::reduce(&mut self.pane, PaneEvent::CloseSelected);
+        let _ = pane::reduce(self.pane_mut(), PaneEvent::CloseSelected);
     }
 
     #[coverage(off)]
@@ -520,24 +535,27 @@ impl Workspace {
     #[must_use]
     #[coverage(off)]
     pub fn pane(&self) -> &PaneState {
-        &self.pane
+        self.panes
+            .get(&self.pane_key())
+            .expect("a pane state exists for every selected target")
     }
 
     #[must_use]
     #[coverage(off)]
     pub fn has_panes(&self) -> bool {
-        !self.pane.tabs().is_empty()
+        !self.pane().tabs().is_empty()
     }
 
     #[coverage(off)]
     fn select_pane_tab(&mut self, direction: i8) {
-        let tabs = self.pane.tabs();
+        let pane = self.pane_mut();
+        let tabs = pane.tabs();
         if tabs.is_empty() {
             return;
         }
         let current = tabs
             .iter()
-            .position(|tab| pane_tab_selected(tab, self.pane.selected()))
+            .position(|tab| pane_tab_selected(tab, pane.selected()))
             .unwrap_or(0);
         let next = if direction > 0 {
             (current + 1) % tabs.len()
@@ -550,7 +568,21 @@ impl Workspace {
             }
             PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
         };
-        let _ = pane::reduce(&mut self.pane, PaneEvent::Select(selection));
+        let _ = pane::reduce(pane, PaneEvent::Select(selection));
+    }
+
+    #[coverage(off)]
+    fn pane_key(&self) -> String {
+        self.focused_session()
+            .map_or_else(String::new, |session| session.name.clone())
+    }
+
+    #[coverage(off)]
+    fn pane_mut(&mut self) -> &mut PaneState {
+        let key = self.pane_key();
+        self.panes
+            .entry(key)
+            .or_insert_with(|| PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner))))
     }
 
     /// 選択できる行数（root 行 1＋セッション数）。
@@ -1599,6 +1631,25 @@ mod tests {
         ws.close_pane();
         ws.close_pane();
         assert!(!ws.has_panes());
+    }
+
+    #[test]
+    fn pane_tabs_are_scoped_to_the_selected_session() {
+        let mut ws = workspace();
+
+        ws.select_next();
+        ws.open_pane(PaneKind::Agent);
+        assert_eq!(ws.pane().tabs().len(), 1);
+
+        ws.select_next();
+        assert!(ws.pane().tabs().is_empty());
+        ws.open_pane(PaneKind::Terminal);
+        assert_eq!(ws.pane().tabs().len(), 1);
+
+        ws.select_prev();
+        assert!(
+            matches!(ws.pane().tabs(), [PaneTab::Pending(pending)] if pending.kind == PaneKind::Agent)
+        );
     }
 
     #[test]
