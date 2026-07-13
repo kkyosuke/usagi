@@ -18,7 +18,6 @@ pub struct InMemoryRecordFile {
 
 impl InMemoryRecordFile {
     /// A file pre-seeded with `contents`, as if a record were already persisted.
-    #[coverage(off)]
     pub fn with(contents: &str) -> Self {
         Self {
             contents: RefCell::new(Some(contents.to_string())),
@@ -27,18 +26,15 @@ impl InMemoryRecordFile {
 }
 
 impl RecordFile for InMemoryRecordFile {
-    #[coverage(off)]
     fn read(&self) -> io::Result<Option<String>> {
         Ok(self.contents.borrow().clone())
     }
 
-    #[coverage(off)]
     fn write(&self, contents: &str) -> io::Result<()> {
         *self.contents.borrow_mut() = Some(contents.to_string());
         Ok(())
     }
 
-    #[coverage(off)]
     fn remove(&self) -> io::Result<()> {
         *self.contents.borrow_mut() = None;
         Ok(())
@@ -49,7 +45,6 @@ impl RecordFile for InMemoryRecordFile {
 pub struct FixedProbe(pub bool);
 
 impl LivenessProbe for FixedProbe {
-    #[coverage(off)]
     fn is_alive(&self, _pid: u32) -> bool {
         self.0
     }
@@ -66,7 +61,6 @@ pub struct RecordingTerminator {
 
 impl RecordingTerminator {
     /// A terminator whose `terminate` always fails.
-    #[coverage(off)]
     pub fn failing() -> Self {
         Self {
             fail: true,
@@ -75,14 +69,12 @@ impl RecordingTerminator {
     }
 
     /// The pids `terminate` was called with, in order.
-    #[coverage(off)]
     pub fn terminated(&self) -> Vec<u32> {
         self.terminated.borrow().clone()
     }
 }
 
 impl Terminator for RecordingTerminator {
-    #[coverage(off)]
     fn terminate(&self, pid: u32) -> io::Result<()> {
         self.terminated.borrow_mut().push(pid);
         if self.fail {
@@ -98,7 +90,6 @@ impl Terminator for RecordingTerminator {
 pub struct ImmediateShutdown;
 
 impl ShutdownSignal for ImmediateShutdown {
-    #[coverage(off)]
     fn wait(&self) -> io::Result<()> {
         Ok(())
     }
@@ -108,7 +99,6 @@ impl ShutdownSignal for ImmediateShutdown {
 pub struct FailingShutdown;
 
 impl ShutdownSignal for FailingShutdown {
-    #[coverage(off)]
     fn wait(&self) -> io::Result<()> {
         Err(io::Error::other("wait failed"))
     }
@@ -130,7 +120,6 @@ pub struct TestLauncher<'a, F> {
 
 impl<'a, F> TestLauncher<'a, F> {
     /// A launcher that registers `pid` into `store` on launch.
-    #[coverage(off)]
     pub fn registering(store: &'a DaemonRecordStore<F>, pid: u32) -> Self {
         Self {
             store,
@@ -139,7 +128,6 @@ impl<'a, F> TestLauncher<'a, F> {
     }
 
     /// A launcher that spawns nothing, so no record ever appears.
-    #[coverage(off)]
     pub fn idle(store: &'a DaemonRecordStore<F>) -> Self {
         Self {
             store,
@@ -149,7 +137,6 @@ impl<'a, F> TestLauncher<'a, F> {
 }
 
 impl<F: RecordFile> DaemonLauncher for TestLauncher<'_, F> {
-    #[coverage(off)]
     fn launch(&self) -> io::Result<()> {
         if let Some(pid) = self.register_pid {
             self.store.save(&DaemonRecord::new(pid))?;
@@ -162,7 +149,6 @@ impl<F: RecordFile> DaemonLauncher for TestLauncher<'_, F> {
 pub struct NoopSleeper;
 
 impl Sleeper for NoopSleeper {
-    #[coverage(off)]
     fn sleep(&self) {}
 }
 
@@ -178,7 +164,6 @@ pub enum FakeLock {
 }
 
 impl InstanceLock for FakeLock {
-    #[coverage(off)]
     fn acquire(&self) -> io::Result<bool> {
         match self {
             FakeLock::Acquired => Ok(true),

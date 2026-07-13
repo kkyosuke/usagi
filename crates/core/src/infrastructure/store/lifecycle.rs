@@ -79,12 +79,10 @@ mod tests {
     use crate::domain::id::{OperationId, WorkspaceId};
     use crate::domain::session_lifecycle::{OperationJournal, OperationStatus};
     use chrono::TimeZone;
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }
     #[test]
-    #[coverage(off)]
     fn daemon_owner_and_revisions_are_persisted() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());
@@ -113,7 +111,6 @@ mod tests {
         assert_eq!(store.load().unwrap().unwrap(), saved);
     }
     #[test]
-    #[coverage(off)]
     fn another_daemon_cannot_accept_an_operation() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());
@@ -143,7 +140,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn apply_rejects_an_uninitialized_store() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());

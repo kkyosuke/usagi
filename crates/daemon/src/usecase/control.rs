@@ -166,7 +166,6 @@ pub fn begin_remove(
 mod tests {
     #![allow(clippy::many_single_char_names)]
     use super::*;
-    #[coverage(off)]
     fn session() -> SessionSnapshot {
         SessionSnapshot {
             workspace_id: WorkspaceId::new(),
@@ -184,7 +183,6 @@ mod tests {
         }
     }
     #[test]
-    #[coverage(off)]
     fn phase_requires_token_and_new_sequence() {
         let mut s = session();
         assert!(report_phase(&mut s.runtimes[0], "t", 1, AgentPhase::Running).unwrap());
@@ -200,7 +198,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn target_is_never_guessed() {
         let mut s = session();
         let id = s.runtimes[0].id;
@@ -221,7 +218,6 @@ mod tests {
         assert_eq!(resolve_target(&s, Some(id)), Err(ControlError::Unavailable));
     }
     #[test]
-    #[coverage(off)]
     fn prompt_ack_loss_is_not_retried() {
         let mut p = Prompt {
             operation_id: OperationId::new(),
@@ -244,7 +240,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn remove_fences_future_delivery() {
         let mut s = session();
         let rev = s.state_revision;

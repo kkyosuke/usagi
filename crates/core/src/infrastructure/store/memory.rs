@@ -314,7 +314,6 @@ mod tests {
     use crate::domain::memory::MemoryType;
     use chrono::{TimeZone, Utc};
 
-    #[coverage(off)]
     fn memory(name: &str, title: &str) -> Memory {
         let ts = Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap();
         Memory {
@@ -330,7 +329,6 @@ mod tests {
 
     /// Pin a file's modification time so freshness tests are independent of the
     /// filesystem's timestamp granularity.
-    #[coverage(off)]
     fn set_mtime(path: &Path, secs_from_epoch: u64) {
         let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
         fs::OpenOptions::new()
@@ -342,7 +340,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_is_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -350,7 +347,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn dir_and_paths_point_under_usagi_memory() {
         let store = MemoryStore::new("/repo");
         assert_eq!(store.dir(), Path::new("/repo/.usagi/memory"));
@@ -365,7 +361,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_then_read_round_trips_and_writes_derived_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -380,7 +375,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_returns_none_for_a_missing_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -388,7 +382,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_and_remove_reject_a_path_traversing_name() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -410,7 +403,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn index_records_version_and_toc_lists_the_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -426,7 +418,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_same_name_overwrites_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -441,7 +432,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn toc_orders_newest_first() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -459,7 +449,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_deletes_the_file_and_reports_success() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -471,7 +460,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_rebuilds_the_derived_files_when_the_cache_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -492,7 +480,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_leaves_the_cache_untouched_when_the_name_is_absent_from_it() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -514,7 +501,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_index_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -530,7 +516,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_index_is_corrupt() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -565,7 +550,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -574,7 +558,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -586,7 +569,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -635,7 +617,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_errors_when_the_memory_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
@@ -652,7 +633,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_error_when_the_index_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -670,7 +650,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -682,7 +661,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_errors_when_the_backing_file_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -699,7 +677,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_errors_when_the_path_is_not_a_file() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -716,7 +693,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn the_lock_file_is_not_picked_up_as_a_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -727,7 +703,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn toc_and_index_are_ignored_by_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -738,7 +713,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn memory_entry_key_from_path_uses_the_file_stem() {
         assert_eq!(
             MemoryEntry::key_from_path(Path::new("/repo/.usagi/memory/one.md")),
@@ -747,7 +721,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_lenient_returns_the_parseable_memories() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -756,7 +729,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_a_memory_file_is_newer_than_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());

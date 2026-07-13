@@ -479,11 +479,9 @@ where
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }
-    #[coverage(off)]
     fn op() -> OperationJournal {
         OperationJournal {
             operation_id: OperationId::new(),
@@ -493,7 +491,6 @@ mod tests {
             progress_revision: 0,
         }
     }
-    #[coverage(off)]
     fn fence(
         s: &WorkspaceLifecycleState,
         session: &ManagedSession,
@@ -510,14 +507,12 @@ mod tests {
         }
     }
     #[test]
-    #[coverage(off)]
     fn lifecycle_axes_and_capabilities_stay_separate() {
         assert!(SessionLifecycle::Available.capabilities().can_use);
         assert_eq!(AgentPhase::Running, AgentPhase::Running);
         assert_eq!(BranchStatus::Dirty, BranchStatus::Dirty);
     }
     #[test]
-    #[coverage(off)]
     fn creation_completion_and_reverse_snapshot_are_fenced() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let operation = op();
@@ -555,7 +550,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn delete_recreation_rejects_old_worker() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let create = op();
@@ -622,7 +616,6 @@ mod tests {
         );
     }
     #[test]
-    #[coverage(off)]
     fn crash_does_not_replay_setup_and_unknown_format_fails_closed() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         let operation = op();
@@ -665,7 +658,6 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    #[coverage(off)]
     fn reducer_covers_recovery_cancel_and_transition_failures() {
         let mut state = WorkspaceLifecycleState::new(WorkspaceId::new(), now());
         assert!(SessionLifecycle::Creating.capabilities().can_cancel);

@@ -350,12 +350,10 @@ mod tests {
 
     use super::*;
 
-    #[coverage(off)]
     fn target() -> Target {
         Target::Session(SessionId::new())
     }
 
-    #[coverage(off)]
     fn terminal(target: Target) -> TerminalRef {
         TerminalRef {
             daemon_generation: DaemonGeneration::new(),
@@ -372,7 +370,6 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn request(state: &mut PaneState, target: Target, kind: PaneKind) -> OperationId {
         let operation = OperationId::new();
         assert!(
@@ -390,7 +387,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selected_target_turns_terminal_and_agent_placeholders_into_live_attached_tabs() {
         let target = target();
         let mut state = PaneState::new(PaneSelection::Target(target));
@@ -435,7 +431,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selected_placeholder_reuses_a_live_tab_and_preserves_its_stable_selection() {
         let target = target();
         let existing = terminal(target);
@@ -474,7 +469,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn failure_removes_placeholder_keeps_other_tabs_and_records_safe_error() {
         let target = target();
         let mut state = PaneState::new(PaneSelection::Target(target));
@@ -508,7 +502,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn exit_selects_next_tab_or_returns_to_closeup_after_the_last_tab() {
         let target = target();
         let first = terminal(target);
@@ -539,7 +532,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn completion_and_exit_in_the_background_never_steal_the_selected_pane() {
         let requested = target();
         let background = target();
@@ -576,7 +568,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn restored_selected_terminal_reattaches_but_other_input_does_not_cancel_pending_work() {
         let target = target();
         let saved = terminal(target);
@@ -600,7 +591,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn stale_and_duplicate_events_are_inert_and_selected_pending_promotes_to_live() {
         let workspace = WorkspaceId::new();
         let root = Target::Root(workspace);

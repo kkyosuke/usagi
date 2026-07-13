@@ -91,19 +91,16 @@ mod tests {
     use crate::infrastructure::store::memory::MemoryStore;
     use chrono::{DateTime, TimeZone, Utc};
 
-    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
-    #[coverage(off)]
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         (tmp, store)
     }
 
-    #[coverage(off)]
     fn spec(name: &str, title: &str) -> NewMemory {
         NewMemory {
             name: name.to_string(),
@@ -115,7 +112,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn save_slugifies_the_name_and_stamps_times() {
         let (_tmp, store) = store();
         let saved = save(&store, spec("My Fact!", "A fact"), ts(20)).unwrap();
@@ -127,7 +123,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn save_overwrites_by_name_and_preserves_created_at() {
         let (_tmp, store) = store();
         save(&store, spec("fact", "Old"), ts(20)).unwrap();
@@ -144,14 +139,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn get_is_none_for_a_missing_memory() {
         let (_tmp, store) = store();
         assert!(get(&store, "nope").unwrap().is_none());
     }
 
     #[test]
-    #[coverage(off)]
     fn list_returns_summaries_in_name_order() {
         let (_tmp, store) = store();
         save(&store, spec("beta", "B"), ts(20)).unwrap();
@@ -161,7 +154,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn delete_removes_a_saved_memory_and_reports_success() {
         let (_tmp, store) = store();
         save(&store, spec("fact", "A fact"), ts(20)).unwrap();

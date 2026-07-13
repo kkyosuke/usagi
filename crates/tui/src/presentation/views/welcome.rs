@@ -443,14 +443,12 @@ mod tests {
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
-    #[coverage(off)]
     fn overview(name: &str, minutes_ago: i64) -> WorkspaceOverview {
         let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
         workspace.updated_at = now() - Duration::minutes(minutes_ago);
@@ -458,13 +456,11 @@ mod tests {
     }
 
     /// 単体 workspace の recent 項目。
-    #[coverage(off)]
     fn workspace(name: &str, minutes_ago: i64) -> Recent {
         Recent::Workspace(overview(name, minutes_ago))
     }
 
     /// 与えた (名前, 何分前) のメンバーからなる unite の recent 項目。
-    #[coverage(off)]
     fn unite(members: &[(&str, i64)]) -> Recent {
         Recent::Unite(UniteOverview::new(
             members
@@ -474,7 +470,6 @@ mod tests {
         ))
     }
 
-    #[coverage(off)]
     fn strip(line: &str) -> String {
         // ANSI SGR を落として素のテキストにする（表示内容の検証用）。
         let mut out = String::new();
@@ -493,7 +488,6 @@ mod tests {
         out
     }
 
-    #[coverage(off)]
     fn rendered(welcome: &Welcome) -> String {
         render(24, 80, welcome, now())
             .iter()
@@ -503,7 +497,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_welcome_starts_at_the_first_item_without_a_notice() {
         let welcome = Welcome::empty();
         assert_eq!(welcome.selected_index(), 0);
@@ -515,14 +508,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn default_matches_empty() {
         assert_eq!(Welcome::default().selected_index(), 0);
         assert!(Welcome::default().recent().is_empty());
     }
 
     #[test]
-    #[coverage(off)]
     fn select_next_advances_and_wraps() {
         let mut welcome = Welcome::empty();
         welcome.select_next();
@@ -535,7 +526,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn select_prev_wraps_to_the_last_item() {
         let mut welcome = Welcome::empty();
         welcome.select_prev();
@@ -545,7 +535,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn movement_clears_an_existing_notice() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("saved".to_string()));
@@ -557,7 +546,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn set_notice_replaces_the_notice() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("done".to_string()));
@@ -567,7 +555,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selected_action_reports_the_current_item() {
         let mut welcome = Welcome::empty();
         assert_eq!(welcome.selected_action(), MenuAction::Open);
@@ -580,7 +567,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn action_for_maps_menu_shortcuts() {
         let welcome = Welcome::empty();
         assert_eq!(welcome.action_for('o'), Some(MenuAction::Open));
@@ -592,7 +578,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn action_for_maps_recent_number_keys() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 11),
@@ -606,7 +591,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn recent_is_limited_to_three() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 1),
@@ -624,7 +608,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn record_opened_promotes_a_hidden_recent_and_preserves_its_counts() {
         let mut welcome = Welcome::new(vec![
             workspace("alpha", 1),
@@ -655,7 +638,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_combines_every_section() {
         let welcome = Welcome::new(vec![workspace("alpha", 11)]);
         let joined = rendered(&welcome);
@@ -675,7 +657,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_distinguishes_unite_cards_from_workspace_cards() {
         let welcome = Welcome::new(vec![
             workspace("solo", 30),
@@ -693,7 +674,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_handles_an_empty_unite() {
         // 退化した空 unite でも落ちず、相対時刻を "—" で表す。
         let welcome = Welcome::new(vec![unite(&[])]);
@@ -703,7 +683,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_marks_only_the_selected_row() {
         let mut welcome = Welcome::empty();
         welcome.select_next(); // New を選択
@@ -713,7 +692,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_a_placeholder_when_there_are_no_recents() {
         let joined = rendered(&Welcome::empty());
         assert!(joined.contains("No recent workspace"));
@@ -721,7 +699,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_renders_the_notice_line() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("welcome back".to_string()));
@@ -730,7 +707,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_centers_the_body_and_pins_the_footer() {
         let welcome = Welcome::empty();
         let height = 40;
@@ -746,7 +722,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_keeps_the_notice_slot_stable_across_toggling() {
         let mut welcome = Welcome::empty();
         let without = render(24, 80, &welcome, now());
@@ -757,7 +732,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_does_not_lose_content_on_a_short_terminal() {
         let welcome = Welcome::empty();
         let frame = render(3, 80, &welcome, now());
@@ -772,7 +746,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_rows_fit_the_terminal_width() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 11),

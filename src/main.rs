@@ -847,7 +847,6 @@ mod tests {
     use usagi_core::infrastructure::store::workspace::Storage;
 
     #[test]
-    #[coverage(off)]
     fn config_start_degrades_a_broken_workspace_registry() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();

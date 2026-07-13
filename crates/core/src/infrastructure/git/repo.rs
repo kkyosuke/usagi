@@ -36,7 +36,6 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    #[coverage(off)]
     fn is_repository_is_true_only_when_git_says_so() {
         let yes = FakeGit::new(vec![ok("true\n")]);
         assert!(is_repository(&yes, Path::new("/repo")).unwrap());
@@ -54,7 +53,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn short_hash_returns_the_trimmed_hash_or_none() {
         let some = FakeGit::new(vec![ok("abc1234\n")]);
         assert_eq!(

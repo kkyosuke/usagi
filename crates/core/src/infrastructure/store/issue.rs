@@ -299,7 +299,6 @@ mod tests {
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use chrono::{TimeZone, Utc};
 
-    #[coverage(off)]
     fn issue(number: u32, title: &str) -> Issue {
         let ts = Utc.with_ymd_and_hms(2026, 6, 14, 0, 0, 0).unwrap();
         Issue {
@@ -320,7 +319,6 @@ mod tests {
 
     /// Pin a file's modification time so freshness tests are independent of the
     /// filesystem's timestamp granularity.
-    #[coverage(off)]
     fn set_mtime(path: &Path, secs_from_epoch: u64) {
         let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
         fs::OpenOptions::new()
@@ -332,7 +330,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_is_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -341,7 +338,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn dir_points_at_usagi_issues() {
         let store = IssueStore::new("/repo");
         assert_eq!(store.dir(), Path::new("/repo/.usagi/issues"));
@@ -352,7 +348,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_then_read_round_trips_and_writes_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -371,7 +366,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn index_records_the_format_version_and_summaries() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -383,7 +377,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_replaces_the_file_when_the_slug_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -401,7 +394,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn files_for_matches_any_numeric_prefix_not_just_zero_padded() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -415,7 +407,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_deletes_the_file_and_reports_success() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -427,7 +418,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_rebuilds_the_index_when_the_cache_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -448,7 +438,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_leaves_the_cache_untouched_when_the_number_is_absent_from_it() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -470,7 +459,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_index_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -486,7 +474,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_index_is_corrupt() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -521,7 +508,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -530,7 +516,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -542,7 +527,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -591,7 +575,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_errors_when_the_issues_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
@@ -608,7 +591,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_error_when_the_index_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -626,7 +608,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -638,7 +619,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_errors_when_the_backing_file_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -655,7 +635,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn max_number_reflects_files_added_outside_usagi() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -670,7 +649,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn creating_the_next_issue_does_not_clobber_a_file_missing_from_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -690,7 +668,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_renames_in_place_leaving_one_valid_file_and_a_fresh_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -710,7 +687,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn the_lock_file_is_not_picked_up_as_an_issue() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -721,7 +697,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_an_issue_file_is_newer_than_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -739,7 +714,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_trust_a_fresh_index_without_rereading_the_markdown() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -756,7 +730,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_a_file_is_added_outside_usagi() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -781,7 +754,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn summaries_rebuild_when_a_file_is_removed_outside_usagi() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -802,7 +774,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn non_markdown_files_are_ignored_by_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());
@@ -813,7 +784,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn scan_lenient_returns_the_parseable_issues() {
         let tmp = tempfile::tempdir().unwrap();
         let store = IssueStore::new(tmp.path());

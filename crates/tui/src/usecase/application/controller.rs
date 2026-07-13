@@ -2058,13 +2058,11 @@ mod tests {
         AgentRuntimeId, DaemonGeneration, TerminalId, TerminalRef, WorktreeId,
     };
 
-    #[coverage(off)]
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
     }
 
     #[test]
-    #[coverage(off)]
     fn management_classifier_treats_ctrl_a_byte_modified_key_and_home_equally() {
         let ctrl_a = |code| {
             LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
@@ -2096,7 +2094,6 @@ mod tests {
         );
     }
 
-    #[coverage(off)]
     fn clone_form() -> NewForm {
         NewForm {
             repository: " https://example.com/acme/app.git ".to_owned(),
@@ -2107,7 +2104,6 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn existing_form() -> NewForm {
         NewForm {
             path: " /work/existing ".to_owned(),
@@ -2116,7 +2112,6 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn runtime(workspace: WorkspaceId, session: SessionId) -> AgentRuntimeRef {
         AgentRuntimeRef::new(
             AgentRuntimeId::new(),
@@ -2133,7 +2128,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_starts_with_root_selected_and_active() {
         let (workspace, first, second) = ids();
         let state = AppState::home(workspace, vec![first, second]);
@@ -2144,7 +2138,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
         let (workspace, session, _) = ids();
         let mut state = NewState::new(NewMode::Clone, clone_form());
@@ -2179,7 +2172,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_existing_failure_retains_form_and_retry_reuses_the_request() {
         let mut state = NewState::new(NewMode::Existing, existing_form());
         let effects = update_new(&mut state, NewEvent::Submit);
@@ -2219,7 +2211,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_validation_and_late_completion_keep_the_form_route() {
         let mut invalid = NewState::new(NewMode::Clone, NewForm::default());
         assert!(update_new(&mut invalid, NewEvent::Submit).is_empty());
@@ -2243,7 +2234,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_validation_reports_every_required_clone_and_existing_field() {
         let cases = [
             (
@@ -2290,7 +2280,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn table_driven_mode_and_overlay_scenarios() {
         struct Case {
             name: &'static str,
@@ -2343,7 +2332,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn management_ctrl_c_detaches_without_live_pane_and_confirms_with_one() {
         let (workspace, session, _) = ids();
         let mut idle = AppState::home(workspace, Vec::new());
@@ -2371,7 +2359,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn management_ctrl_q_always_confirms_and_confirmation_can_cancel() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2388,7 +2375,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn leaving_live_pane_arms_one_shot_ctrl_c_grace_and_other_input_clears_it() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2414,7 +2400,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn ordinary_modals_keep_ctrl_c_and_ctrl_q_inert() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2430,7 +2415,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn cursor_moves_without_changing_active_target() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2442,7 +2426,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2567,7 +2550,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fake_backend_records_effects_and_replays_events() {
         let (workspace, first, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2588,7 +2570,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn snapshot_falls_back_missing_selected_and_active_sessions_to_root() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2603,7 +2584,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn future_events_update_only_their_local_state() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2631,7 +2611,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn runtime_stream_converts_to_controller_events() {
         let notice = Notice::new("connected");
         let cases = [
@@ -2662,7 +2641,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn phase_projection_isolated_per_runtime_and_uses_the_documented_rank() {
         let (workspace, first, second) = ids();
         let mut state = AppState::home(workspace, vec![first, second]);
@@ -2712,7 +2690,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn phase_projection_rejects_other_workspaces_and_removed_sessions() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2742,7 +2719,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn feedback_keeps_only_safe_message_and_error_id() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
@@ -2765,7 +2741,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn navigation_wraps_up_and_ignores_non_command_characters() {
         let (workspace, first, _) = ids();
         let mut state = AppState::home(workspace, vec![first]);
@@ -2776,7 +2751,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn modal_registry_dispatches_once_and_rejects_invalid_root_and_repeated_requests() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2853,7 +2827,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn closeup_registry_dispatches_agent_and_validated_session_remove() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
@@ -2922,7 +2895,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn entry_recent_uses_its_identity_and_ignores_stale_completion() {
         let recent = WorkspaceId::new();
         let delayed_workspace = WorkspaceId::new();
@@ -2954,7 +2926,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fake_entry_backend_replays_error_then_retry_without_opening_another_workspace() {
         let requested = WorkspaceId::new();
         let other = WorkspaceId::new();
@@ -2995,7 +2966,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn entry_empty_open_and_unknown_recent_are_noops() {
         let unknown = WorkspaceId::new();
         let mut state = EntryState::new(Vec::new(), Vec::new());
@@ -3008,7 +2978,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn entry_open_error_stays_on_its_screen_and_retries_the_same_identity() {
         let workspace = WorkspaceId::new();
         let mut state = EntryState::new(
@@ -3038,7 +3007,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn entry_rejects_a_snapshot_for_another_workspace_and_allows_retry() {
         let requested = WorkspaceId::new();
         let returned = WorkspaceId::new();
@@ -3066,7 +3034,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fake_port_keeps_note_and_environment_edits_on_safe_failures() {
         let (workspace, session, _) = ids();
         let target = Target::Session(session);

@@ -24,7 +24,6 @@ mod tests {
     use crate::cli::{Command, RunOutcome};
 
     #[test]
-    #[coverage(off)]
     fn prints_injected_value() {
         let (outcome, output) = execute(Command::Version);
         assert_eq!(outcome, RunOutcome::Exit(0));

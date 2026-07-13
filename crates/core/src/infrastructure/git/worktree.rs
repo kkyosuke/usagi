@@ -145,7 +145,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    #[coverage(off)]
     fn add_worktree_builds_the_expected_command_with_a_base() {
         let git = FakeGit::new(vec![ok("")]);
         add_worktree(
@@ -171,7 +170,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn add_worktree_omits_the_base_when_none_and_reports_failure() {
         let git = FakeGit::new(vec![ok("")]);
         add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
@@ -189,7 +187,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_worktree_passes_force_and_succeeds() {
         let git = FakeGit::new(vec![ok("")]);
         remove_worktree(&git, Path::new("/repo"), Path::new("/dest"), true).unwrap();
@@ -200,7 +197,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_worktree_treats_a_missing_worktree_as_a_noop() {
         let git = FakeGit::new(vec![fail("fatal: '/dest' is not a working tree")]);
         // No `--force` when false, and the "not a working tree" error is swallowed.
@@ -212,7 +208,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn remove_worktree_surfaces_other_failures() {
         let git = FakeGit::new(vec![fail(
             "fatal: '/dest' contains modified or untracked files",
@@ -225,7 +220,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn list_worktrees_parses_porcelain_including_a_detached_head() {
         let porcelain = "\
 worktree /repo
@@ -265,7 +259,6 @@ detached
     }
 
     #[test]
-    #[coverage(off)]
     fn list_worktrees_reports_failure() {
         let git = FakeGit::new(vec![fail("fatal: not a git repository")]);
         assert!(list_worktrees(&git, Path::new("/repo")).is_err());

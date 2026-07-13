@@ -297,7 +297,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[coverage(off)]
     fn generation() -> DaemonGeneration {
         DaemonGeneration(
             usagi_core::domain::id::DaemonGeneration::new()
@@ -307,7 +306,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn binds_private_endpoint_publishes_locator_and_authenticates_same_uid() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let generation = generation();
@@ -329,7 +327,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn rejects_symlinked_daemon_directory_and_unsafe_locator() {
         let temp = TempDir::new_in("/tmp").unwrap();
         let target = temp.path().join("target");

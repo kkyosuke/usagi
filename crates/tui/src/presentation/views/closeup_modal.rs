@@ -150,7 +150,6 @@ mod tests {
     use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::display_width;
 
-    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -168,7 +167,6 @@ mod tests {
         out
     }
 
-    #[coverage(off)]
     fn joined(state: &CloseupModal) -> String {
         render(24, 80, state)
             .iter()
@@ -178,7 +176,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_modal_targets_the_session_and_lists_actions() {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
@@ -193,7 +190,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
@@ -206,7 +202,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selected_action_submission_comes_from_the_registry() {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
@@ -215,7 +210,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_the_session_actions_and_footer() {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Session")); // タイトル
@@ -229,7 +223,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_marks_the_selected_action() {
         let mut modal = CloseupModal::new("s");
         modal.select_next(); // Focus agent
@@ -241,7 +234,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_fills_the_terminal() {
         let frame = render(24, 80, &CloseupModal::new("s"));
         assert_eq!(frame.len(), 24);
@@ -251,7 +243,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_keeps_the_workspace_background_visible() {
         let base: Vec<String> = (0..24)
             .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
@@ -270,7 +261,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
         let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 14];
         let frame = render_over(14, 9, &base, &CloseupModal::new("会話"));

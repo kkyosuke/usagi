@@ -922,14 +922,12 @@ mod tests {
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
 
-    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
-    #[coverage(off)]
     fn session(name: &str, display_name: Option<&str>, origin: SessionOrigin) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -944,7 +942,6 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn workspace() -> Workspace {
         let record = WorkspaceRecord::new("actual", "/tmp/actual");
         let state = WorkspaceState {
@@ -958,7 +955,6 @@ mod tests {
         Workspace::new(record, state)
     }
 
-    #[coverage(off)]
     fn workspace_with_sessions(count: usize) -> Workspace {
         let record = WorkspaceRecord::new("actual", "/tmp/actual");
         let state = WorkspaceState {
@@ -971,7 +967,6 @@ mod tests {
         Workspace::new(record, state)
     }
 
-    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -989,7 +984,6 @@ mod tests {
         out
     }
 
-    #[coverage(off)]
     fn joined(ws: &Workspace) -> String {
         render(30, 100, ws)
             .iter()
@@ -998,7 +992,6 @@ mod tests {
             .join("\n")
     }
 
-    #[coverage(off)]
     fn projected_session(id: SessionId, label: &str, cwd: &str) -> ProjectedSession {
         ProjectedSession {
             id,
@@ -1008,7 +1001,6 @@ mod tests {
         }
     }
 
-    #[coverage(off)]
     fn joined_home(home: &HomeProjection) -> String {
         render_home(30, 100, home)
             .iter()
@@ -1018,7 +1010,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_projection_keeps_root_sessions_and_new_in_identity_order() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
@@ -1047,7 +1038,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_projection_draws_selected_and_active_markers_on_different_rows() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
@@ -1076,7 +1066,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_projection_never_marks_new_as_active_and_refresh_falls_back_to_root_cwd() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -1107,7 +1096,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_projection_handles_tiny_geometry_and_an_unrelated_root_target_safely() {
         let workspace = WorkspaceId::new();
         let state = AppState::home(workspace, Vec::new());
@@ -1122,7 +1110,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_feedback_area_renders_safe_error_and_disconnect_without_raw_detail() {
         let workspace = WorkspaceId::new();
         let mut state = AppState::home(workspace, Vec::new());
@@ -1150,7 +1137,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn home_projection_renders_the_pane_reducer_tab_strip_and_selection() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -1184,7 +1170,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn workspace_is_built_from_domain_records() {
         let ws = workspace();
         assert_eq!(ws.name(), "actual");
@@ -1202,7 +1187,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn select_cycles_from_the_root_through_sessions() {
         let mut ws = workspace();
         ws.select_next();
@@ -1216,7 +1200,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn an_empty_workspace_selects_and_cycles_the_root_row() {
         let mut ws = Workspace::new(
             WorkspaceRecord::new("empty", "/tmp/empty"),
@@ -1232,7 +1215,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn tab_navigation_wraps() {
         let mut ws = workspace();
         ws.tab_prev();
@@ -1245,7 +1227,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn mode_transitions_preserve_the_session_and_tab_selection() {
         let mut ws = workspace();
         ws.select_next();
@@ -1266,7 +1247,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn controller_mode_adapter_preserves_existing_view_selection() {
         let mut ws = workspace();
         ws.select_next();
@@ -1280,7 +1260,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn focused_label_and_pull_requests_follow_the_selected_session() {
         let mut ws = workspace();
         ws.state.sessions[0]
@@ -1300,7 +1279,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn header_shows_both_modes_and_highlights_the_current_one() {
         let mut ws = workspace();
         let switch_header = &render(30, 100, &ws)[0];
@@ -1314,7 +1292,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_uses_mode_specific_footers_and_keeps_tabs_visible() {
         let mut ws = workspace();
         let switch = joined(&ws);
@@ -1347,7 +1324,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_real_workspace_and_session_records() {
         let text = joined(&workspace());
         assert!(text.contains("USAGI"));
@@ -1368,7 +1344,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_places_the_selected_root_before_every_session() {
         let text = joined(&workspace());
         let root = text
@@ -1381,7 +1356,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_reflects_selected_session_and_root() {
         let mut ws = workspace();
         let root_text = joined(&ws);
@@ -1400,7 +1374,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_marks_only_one_selected_row() {
         let frame = render(30, 100, &workspace());
         let cursor_rows = frame
@@ -1411,7 +1384,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn session_viewport_keeps_every_selection_and_the_root_visible() {
         let mut ws = workspace_with_sessions(12);
         let tiny_frame = render(3, 100, &ws);
@@ -1436,7 +1408,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_fills_the_terminal_and_fits_its_width() {
         let frame = render(30, 100, &workspace());
         assert_eq!(frame.len(), 30);
@@ -1444,7 +1415,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_falls_back_for_a_zero_size() {
         let frame = render(0, 0, &workspace());
         assert_eq!(frame.len(), 24);
@@ -1452,7 +1422,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_does_not_overflow_a_short_terminal() {
         assert_eq!(render(2, 80, &workspace()).len(), 2);
         assert_eq!(render(1, 80, &workspace()).len(), 1);

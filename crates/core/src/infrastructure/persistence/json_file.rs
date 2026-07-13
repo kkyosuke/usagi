@@ -244,7 +244,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[coverage(off)]
     fn write_text_atomic_writes_and_replaces_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note.md");
@@ -263,7 +262,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_atomic_round_trips_json_and_leaves_no_temp() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.json");
@@ -290,7 +288,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_removes_the_temp_file_when_the_rename_fails() {
         let dir = tempfile::tempdir().unwrap();
         // The target path is an existing, non-empty directory, so the final
@@ -312,7 +309,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_atomic_cache_round_trips_json_without_fsync() {
         // The cache variant skips the temp-file fsync and the parent-dir fsync
         // (the non-durable branch of `write_atomically`) but still writes atomically
@@ -340,7 +336,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn write_atomic_creates_missing_directory() {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("nested").join("data");
@@ -351,7 +346,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn read_versioned_round_trips_through_the_envelope() {
         #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug)]
         struct Payload {
@@ -377,7 +371,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fsync_parent_dir_succeeds_for_a_real_directory() {
         // The directory exists and opens, so the best-effort sync runs without
         // panicking and the function returns normally.
@@ -388,7 +381,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fsync_parent_dir_swallows_an_unopenable_parent() {
         // `Path::new("bare.md").parent()` is `Some("")`, and opening "" fails;
         // the error is swallowed rather than propagated, so this must not panic.
@@ -396,14 +388,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn fsync_parent_dir_is_a_noop_without_a_parent() {
         // `Path::new("").parent()` is `None`, exercising the early return.
         fsync_parent_dir(Path::new(""));
     }
 
     #[test]
-    #[coverage(off)]
     fn unique_tmp_path_differs_per_call_and_keeps_target_name() {
         let path = Path::new("/data/index.json");
         let a = unique_tmp_path(path);

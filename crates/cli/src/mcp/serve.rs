@@ -242,7 +242,6 @@ mod tests {
         requests: Vec<DaemonRequest>,
     }
     impl DaemonClient for RecordingClient {
-        #[coverage(off)]
         fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
             self.requests.push(request);
             self.reply.clone()
@@ -250,13 +249,11 @@ mod tests {
     }
 
     /// 1 行を処理して応答 `Value` を得る（通知は `None`）。
-    #[coverage(off)]
     fn call(line: &str) -> Option<Value> {
         handle_line(line, "9.9.9").map(|s| serde_json::from_str(&s).unwrap())
     }
 
     #[test]
-    #[coverage(off)]
     fn initialize_echoes_protocol_and_reports_server_version() {
         let v = call(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#).unwrap();
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
@@ -266,14 +263,12 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn initialize_falls_back_to_default_protocol() {
         let v = call(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).unwrap();
         assert_eq!(v["result"]["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
     }
 
     #[test]
-    #[coverage(off)]
     fn ping_returns_empty_result() {
         let v = call(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#).unwrap();
         assert!(v["result"].is_object());
@@ -281,7 +276,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
@@ -295,7 +289,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn tools_call_known_tool_reports_unimplemented() {
         let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_create","arguments":{"title":"x"}}}"#).unwrap();
         assert_eq!(v["error"]["code"], -32603);
@@ -308,7 +301,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn tools_call_unknown_tool_is_method_not_found() {
         let v = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#)
             .unwrap();
@@ -316,21 +308,18 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn tools_call_without_name_is_invalid_params() {
         let v = call(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{}}"#).unwrap();
         assert_eq!(v["error"]["code"], -32602);
     }
 
     #[test]
-    #[coverage(off)]
     fn unknown_method_is_method_not_found() {
         let v = call(r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#).unwrap();
         assert_eq!(v["error"]["code"], -32601);
     }
 
     #[test]
-    #[coverage(off)]
     fn invalid_json_is_parse_error_with_null_id() {
         let v = call("not json").unwrap();
         assert_eq!(v["error"]["code"], -32700);
@@ -338,26 +327,22 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn request_without_method_is_invalid_request() {
         let v = call(r#"{"jsonrpc":"2.0","id":8}"#).unwrap();
         assert_eq!(v["error"]["code"], -32600);
     }
 
     #[test]
-    #[coverage(off)]
     fn notification_without_id_has_no_response() {
         assert!(call(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
     }
 
     #[test]
-    #[coverage(off)]
     fn malformed_without_method_or_id_is_ignored() {
         assert!(call(r#"{"jsonrpc":"2.0"}"#).is_none());
     }
 
     #[test]
-    #[coverage(off)]
     fn serve_reads_lines_skips_blanks_and_writes_responses() {
         let input = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n";
         let mut out = Vec::new();
@@ -369,7 +354,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn serve_survives_non_utf8_line_and_keeps_serving() {
         // 非 UTF-8 の行 → パースエラーで返し、続く正常な ping にも応答する（サーバは落ちない）。
         let mut input: Vec<u8> = Vec::new();
@@ -390,7 +374,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn managed_session_tools_use_the_injected_daemon_client() {
         for (name, reply) in [
             (
@@ -439,7 +422,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn default_serve_returns_a_structured_unavailable_error_for_session_tools() {
         let input = b"\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_create\"}}\n";
         let mut out = Vec::new();

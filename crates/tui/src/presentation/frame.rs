@@ -320,13 +320,11 @@ fn ansi_sequence(chars: &[char]) -> (String, usize) {
 mod tests {
     use super::{Cell, Frame, FrameRenderer, Span};
 
-    #[coverage(off)]
     fn frame(width: usize, height: usize, lines: &[&str]) -> Frame {
         Frame::from_lines(width, height, lines)
     }
 
     #[test]
-    #[coverage(off)]
     fn golden_frame_uses_display_columns_and_never_splits_wide_glyphs() {
         let rendered = frame(5, 2, &["A\u{1b}[31mあ\u{1b}[0mB", "界x"]);
         assert_eq!(
@@ -356,7 +354,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn ansi_has_zero_width_and_ambiguous_characters_are_one_column() {
         let ansi = frame(2, 1, &["\u{1b}[1;31mab\u{1b}[0m"]);
         assert!(matches!(
@@ -380,7 +377,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn frame_handles_empty_geometry_combining_marks_and_malformed_ansi() {
         let empty = frame(0, 2, &["ignored"]);
         assert_eq!(empty.width(), 0);
@@ -407,7 +403,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn identical_frames_emit_no_content_writes() {
         let mut renderer = FrameRenderer::new();
         let first = frame(4, 1, &["same"]);
@@ -416,7 +411,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn one_changed_span_only_writes_its_row_and_columns() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(6, 2, &["abcdef", "second"]));
@@ -432,7 +426,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn shortening_writes_spaces_over_the_stale_suffix() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(6, 1, &["abcdef"]));
@@ -448,7 +441,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn a_diff_touching_wide_glyph_repaints_the_whole_glyph() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(4, 1, &["a界b"]));
@@ -464,7 +456,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn reset_and_resize_clear_then_repaint_every_row() {
         let mut renderer = FrameRenderer::new();
         let _ = renderer.render(frame(3, 2, &["one", "two"]));

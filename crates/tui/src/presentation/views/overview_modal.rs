@@ -344,7 +344,6 @@ mod tests {
     use super::{OverviewModal, PaletteResult, render, render_over};
     use crate::presentation::widgets::display_width;
 
-    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -362,7 +361,6 @@ mod tests {
         out
     }
 
-    #[coverage(off)]
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)
             .iter()
@@ -371,7 +369,6 @@ mod tests {
             .join("\n")
     }
 
-    #[coverage(off)]
     fn type_str(state: &mut OverviewModal, text: &str) {
         for c in text.chars() {
             state.insert_char(c);
@@ -379,7 +376,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn new_modal_is_empty_and_lists_every_command() {
         let modal = OverviewModal::new();
         assert_eq!(modal.input(), "");
@@ -395,7 +391,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn typing_filters_by_prefix_and_resets_the_selection() {
         let mut modal = OverviewModal::new();
         modal.select_next(); // selected = 1
@@ -414,7 +409,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn backspace_widens_the_matches_again() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "co");
@@ -433,7 +427,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
         modal.select_prev(); // wrap to last (3)
@@ -443,7 +436,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn completion_and_submission_use_the_registry_metadata() {
         let mut modal = OverviewModal::new();
         modal.select_next();
@@ -457,7 +449,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn history_recall_moves_between_submissions_without_duplicating_them() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "issue list");
@@ -491,7 +482,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_long_help_and_a_result_strip() {
         let mut modal = OverviewModal::new();
         modal.set_result("Settings saved");
@@ -514,7 +504,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn selection_is_a_noop_when_there_are_no_matches() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz"); // 何にも一致しない
@@ -525,7 +514,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn caret_moves_within_the_input() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "ab");
@@ -537,7 +525,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_the_prompt_commands_and_footer() {
         let text = joined(&OverviewModal::new());
         assert!(text.contains("Command")); // タイトル
@@ -549,7 +536,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_says_matches_when_filtering_and_marks_the_selection() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "is"); // issue のみ
@@ -560,7 +546,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_shows_a_no_match_notice() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz");
@@ -569,7 +554,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_draws_the_caret_mid_input() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "abc");
@@ -579,7 +563,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_fills_the_terminal() {
         let frame = render(24, 80, &OverviewModal::new());
         assert_eq!(frame.len(), 24);
@@ -589,7 +572,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_keeps_the_workspace_background_visible() {
         let base: Vec<String> = (0..24)
             .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
@@ -609,7 +591,6 @@ mod tests {
     }
 
     #[test]
-    #[coverage(off)]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
         let base = vec![format!("\u{1b}[32m{}\u{1b}[0m", "背景".repeat(8)); 16];
         let frame = render_over(16, 9, &base, &OverviewModal::new());
