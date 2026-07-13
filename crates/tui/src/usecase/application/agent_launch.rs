@@ -68,19 +68,16 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
             })
             .map_err(|_| "daemon unavailable".to_owned())?
         {
+            // Admission reserves daemon-owned work but does not prove that the
+            // Agent reached its fenced final state.  In particular, the
+            // admission body may already carry the future TerminalRef; using
+            // it here would make a pending tab live before the completion
+            // fence arrives.
             DaemonReply::Accepted {
                 operation_id,
                 revision: _,
-                body,
-            } if operation_id == expected => body
-                .get("terminal")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok())
-                .map(|terminal| AgentLaunchEvent::Succeeded {
-                    operation,
-                    terminal,
-                })
-                .ok_or_else(|| "daemon accepted agent launch without a terminal".to_owned()),
+                body: _,
+            } if operation_id == expected => Ok(AgentLaunchEvent::Accepted { operation }),
             DaemonReply::Accepted { .. } => {
                 Err("daemon returned a mismatched operation".to_owned())
             }
@@ -476,11 +473,13 @@ mod tests {
                 operation_id: usagi_core::infrastructure::ipc::OperationId(operation.as_str()),
                 operation_revision: 1,
             },
-            serde_json::json!({}),
+            // The daemon may reserve the eventual terminal at admission. The
+            // client must still retain a pending tab until the final outcome.
+            serde_json::json!({"terminal": terminal(workspace, session)}),
         );
         assert_eq!(
             accepted.launch(operation, intent.clone()),
-            Err("daemon accepted agent launch without a terminal".to_owned())
+            Ok(AgentLaunchEvent::Accepted { operation })
         );
 
         let mut mismatched = ipc_client(
