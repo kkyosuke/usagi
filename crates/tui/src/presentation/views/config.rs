@@ -1,13 +1,22 @@
 //! Config screen state and rendering.
 
-use usagi_core::domain::settings::{Settings, Theme};
+use usagi_core::domain::settings::{ModalSelectionMode, Settings, Theme};
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::Style;
+use crate::presentation::widgets::select;
 
 const TITLE: &str = "Config";
-const FOOTER: &str = "Tab: scope  ←→: theme  S: save  Esc: back";
+const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  Enter: confirm  Esc: back";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Field {
+    #[default]
+    Theme,
+    ModalSelectionMode,
+    Save,
+}
 
 #[derive(Debug, Clone)]
 struct ScopeSettings {
@@ -33,6 +42,7 @@ impl ScopeSettings {
 #[derive(Debug, Clone)]
 pub struct Config {
     scope: SettingsScope,
+    field: Field,
     global: ScopeSettings,
     workspace: ScopeSettings,
     notice: Option<String>,
@@ -47,6 +57,7 @@ impl Config {
         let (workspace, workspace_error) = read_scope(port, SettingsScope::Workspace);
         Self {
             scope: SettingsScope::Global,
+            field: Field::Theme,
             global: ScopeSettings::new(global),
             workspace: ScopeSettings::new(workspace),
             notice: global_error.or(workspace_error),
@@ -59,6 +70,32 @@ impl Config {
         self.scope
     }
 
+    /// Returns the selected editable setting.
+    #[must_use]
+    pub fn field(&self) -> Field {
+        self.field
+    }
+
+    /// Move to the next setting or Save action.
+    pub fn next_field(&mut self) {
+        self.field = match self.field {
+            Field::Theme => Field::ModalSelectionMode,
+            Field::ModalSelectionMode => Field::Save,
+            Field::Save => Field::Theme,
+        };
+        self.notice = None;
+    }
+
+    /// Move to the previous editable setting.
+    pub fn previous_field(&mut self) {
+        self.field = match self.field {
+            Field::Theme => Field::Save,
+            Field::ModalSelectionMode => Field::Theme,
+            Field::Save => Field::ModalSelectionMode,
+        };
+        self.notice = None;
+    }
+
     /// Returns whether the selected scope has an unsaved draft.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -69,6 +106,12 @@ impl Config {
     #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.current().draft
+    }
+
+    /// Returns the saved global modal interaction for newly opened workspaces.
+    #[must_use]
+    pub fn global_modal_selection_mode(&self) -> ModalSelectionMode {
+        self.global.saved.modal_selection_mode
     }
 
     /// Returns the latest save or load feedback, if any.
@@ -98,17 +141,50 @@ impl Config {
         self.notice = None;
     }
 
-    /// Explicitly save the selected scope. A failure preserves the draft and
-    /// dirty state so pressing `S` can safely retry it.
-    pub fn save(&mut self, port: &mut dyn SettingsPort) {
+    /// Toggle how Overview and Closeup accept a command.
+    pub fn cycle_modal_selection_mode(&mut self) {
+        let mode = &mut self.current_mut().draft.modal_selection_mode;
+        *mode = match *mode {
+            ModalSelectionMode::Action => ModalSelectionMode::Prompt,
+            ModalSelectionMode::Prompt => ModalSelectionMode::Action,
+        };
+        self.notice = None;
+    }
+
+    /// Change the focused select value. Returns false for the Save action.
+    pub fn cycle_selected(&mut self, forward: bool) -> bool {
+        match self.field {
+            Field::Theme => self.cycle_theme(forward),
+            Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
+            Field::Save => return false,
+        }
+        true
+    }
+
+    /// Returns whether the focused row is the enabled Save action.
+    #[must_use]
+    pub fn can_save(&self) -> bool {
+        self.field == Field::Save && self.is_dirty()
+    }
+
+    /// Save the selected scope when it is dirty. Returns true only after a
+    /// successful persistence, allowing the caller to close the screen.
+    pub fn save(&mut self, port: &mut dyn SettingsPort) -> bool {
+        if !self.is_dirty() {
+            return false;
+        }
         let scope = self.scope;
         let draft = self.current().draft.clone();
         match port.save(scope, &draft) {
             Ok(()) => {
                 self.current_mut().saved = draft;
-                self.notice = Some("Saved".to_string());
+                self.notice = Some("saved".to_string());
+                true
             }
-            Err(error) => self.notice = Some(format!("Save failed: {error}")),
+            Err(error) => {
+                self.notice = Some(format!("Save failed: {error}"));
+                false
+            }
         }
     }
 
@@ -142,16 +218,43 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             SettingsScope::Global => "Scope: [Global]   Workspace",
             SettingsScope::Workspace => "Scope: Global   [Workspace]",
         };
-        let theme = format!("Theme: {}", theme_name(config.settings().theme));
-        let status = if config.is_dirty() {
-            "Unsaved changes"
-        } else {
-            "Saved"
-        };
         let mut lines = vec![
             mascot_screen::centered_line(width, scope, Style::new()),
-            mascot_screen::centered_line(width, &theme, Style::new()),
-            mascot_screen::centered_line(width, status, Style::new().dim()),
+            mascot_screen::centered_line(
+                width,
+                &select::render(
+                    "Theme",
+                    theme_name(config.settings().theme),
+                    config.field() == Field::Theme,
+                    config.settings().theme != config.current().saved.theme,
+                ),
+                Style::new(),
+            ),
+            mascot_screen::centered_line(
+                width,
+                &select::render(
+                    "Modal mode",
+                    modal_selection_mode_name(config.settings().modal_selection_mode),
+                    config.field() == Field::ModalSelectionMode,
+                    config.settings().modal_selection_mode
+                        != config.current().saved.modal_selection_mode,
+                ),
+                Style::new(),
+            ),
+            String::new(),
+            mascot_screen::centered_line(
+                width,
+                &select::action(
+                    if config.notice() == Some("saved") {
+                        "saved"
+                    } else {
+                        "Save"
+                    },
+                    config.field() == Field::Save,
+                    config.is_dirty(),
+                ),
+                Style::new(),
+            ),
         ];
         if let Some(notice) = config.notice() {
             lines.push(mascot_screen::centered_line(
@@ -166,17 +269,24 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
 
 fn theme_name(theme: Theme) -> &'static str {
     match theme {
-        Theme::Light => "Light",
-        Theme::Dark => "Dark",
-        Theme::System => "System",
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::System => "system",
+    }
+}
+
+fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
+    match mode {
+        ModalSelectionMode::Action => "action",
+        ModalSelectionMode::Prompt => "prompt",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, render};
+    use super::{Config, Field, render};
     use std::io;
-    use usagi_core::domain::settings::{Settings, Theme};
+    use usagi_core::domain::settings::{ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     #[derive(Default)]
@@ -215,12 +325,17 @@ mod tests {
         let mut port = FakeSettingsPort {
             global: Settings {
                 theme: Theme::Light,
+                ..Settings::default()
             },
-            workspace: Settings { theme: Theme::Dark },
+            workspace: Settings {
+                theme: Theme::Dark,
+                ..Settings::default()
+            },
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
-        assert!(render(24, 80, &config).join("\n").contains("Theme: Light"));
+        let initial = render(24, 80, &config).join("\n");
+        assert!(initial.contains("Theme") && initial.contains("light"));
         config.cycle_theme(true);
         config.save(&mut port);
         config.toggle_scope();
@@ -230,7 +345,8 @@ mod tests {
         assert_eq!(port.global.theme, Theme::System);
         assert_eq!(port.workspace.theme, Theme::Dark);
 
-        assert!(render(24, 80, &config).join("\n").contains("Theme: Dark"));
+        let workspace = render(24, 80, &config).join("\n");
+        assert!(workspace.contains("Theme") && workspace.contains("dark"));
         config.cycle_theme(false);
         config.save(&mut port);
         assert_eq!(port.workspace.theme, Theme::System);
@@ -266,7 +382,9 @@ mod tests {
 
         assert!(frame.contains("Config"));
         assert!(frame.contains("Scope: [Global]"));
-        assert!(frame.contains("Theme: System"));
+        assert!(frame.contains("Theme") && frame.contains("system"));
+        assert!(frame.contains("Modal mode") && frame.contains("action"));
+        assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
     }
 
@@ -274,7 +392,10 @@ mod tests {
     fn load_error_and_workspace_draft_are_rendered_without_losing_the_form() {
         let mut port = FakeSettingsPort {
             fail_read: Some(SettingsScope::Global),
-            workspace: Settings { theme: Theme::Dark },
+            workspace: Settings {
+                theme: Theme::Dark,
+                ..Settings::default()
+            },
             ..FakeSettingsPort::default()
         };
         let mut config = Config::load(&mut port);
@@ -287,7 +408,51 @@ mod tests {
         let frame = render(24, 80, &config).join("\n");
 
         assert!(frame.contains("Scope: Global   [Workspace]"));
-        assert!(frame.contains("Theme: Light"));
-        assert!(frame.contains("Unsaved changes"));
+        assert!(frame.contains("Theme") && frame.contains("light"));
+        assert!(frame.contains('●'));
+    }
+
+    #[test]
+    fn save_is_selectable_only_with_an_unsaved_change() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(!config.can_save());
+
+        config.previous_field();
+        config.cycle_modal_selection_mode();
+        config.cycle_modal_selection_mode();
+        config.cycle_selected(true);
+        assert_eq!(
+            config.settings().modal_selection_mode,
+            ModalSelectionMode::Prompt
+        );
+        config.next_field();
+        assert!(config.can_save());
+        assert!(config.save(&mut port));
+        assert_eq!(config.notice(), Some("saved"));
+        assert!(!config.is_dirty());
+        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
+    }
+
+    #[test]
+    fn field_navigation_wraps_and_save_refuses_a_clean_draft() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Save);
+        assert!(!config.cycle_selected(true));
+        assert!(!config.save(&mut port));
+
+        config.previous_field();
+        assert_eq!(config.field(), Field::ModalSelectionMode);
+        config.previous_field();
+        assert_eq!(config.field(), Field::Theme);
+        config.next_field();
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Theme);
     }
 }

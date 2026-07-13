@@ -12,6 +12,7 @@
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, TextInput, modal};
 use crate::usecase::overview;
+use usagi_core::domain::settings::ModalSelectionMode;
 
 /// モーダルの枠の内側（内容）幅。
 const INNER_WIDTH: usize = 56;
@@ -23,6 +24,7 @@ const BODY_HEIGHT: usize = 16;
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
 #[derive(Debug, Clone, Default)]
 pub struct OverviewModal {
+    selection_mode: ModalSelectionMode,
     input: TextInput,
     selected: usize,
     history: Vec<String>,
@@ -45,6 +47,23 @@ impl OverviewModal {
     #[coverage(off)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Open a palette using the configured command-selection interaction.
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_selection_mode(selection_mode: ModalSelectionMode) -> Self {
+        Self {
+            selection_mode,
+            ..Self::default()
+        }
+    }
+
+    /// Returns whether candidates are chosen as actions or submitted as a prompt.
+    #[must_use]
+    #[coverage(off)]
+    pub fn selection_mode(&self) -> ModalSelectionMode {
+        self.selection_mode
     }
 
     /// 現在の入力文字列。
@@ -170,6 +189,9 @@ impl OverviewModal {
     #[must_use]
     #[coverage(off)]
     pub fn submission(&self) -> String {
+        if self.selection_mode == ModalSelectionMode::Prompt {
+            return self.input.value().to_owned();
+        }
         if self.input.value().trim().is_empty() {
             self.matches()
                 .get(self.selected)
@@ -347,6 +369,7 @@ pub fn render_over(
 mod tests {
     use super::{OverviewModal, PaletteResult, render, render_over};
     use crate::presentation::widgets::display_width;
+    use usagi_core::domain::settings::ModalSelectionMode;
 
     fn strip(line: &str) -> String {
         let mut out = String::new();
@@ -392,6 +415,15 @@ mod tests {
         let hint = modal.matches()[0];
         assert_eq!(hint, hint);
         assert!(format!("{hint:?}").contains("config"));
+    }
+
+    #[test]
+    fn prompt_mode_submits_only_the_typed_command() {
+        let mut modal = OverviewModal::with_selection_mode(ModalSelectionMode::Prompt);
+        modal.insert_char('s');
+        modal.insert_char('e');
+        assert_eq!(modal.selection_mode(), ModalSelectionMode::Prompt);
+        assert_eq!(modal.submission(), "se");
     }
 
     #[test]
