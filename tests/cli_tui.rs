@@ -3,6 +3,7 @@
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 fn short_home() -> tempfile::TempDir {
@@ -12,6 +13,14 @@ fn short_home() -> tempfile::TempDir {
         .prefix("usagi-")
         .tempdir_in("/tmp")
         .expect("short daemon data directory")
+}
+
+fn channel_data_dir(home: &Path) -> PathBuf {
+    if cfg!(debug_assertions) {
+        home.join("development")
+    } else {
+        home.to_path_buf()
+    }
 }
 
 fn run(args: &[&OsStr]) -> Output {
@@ -135,7 +144,12 @@ fn config_entry_renders_the_config_screen() {
     // 代わりに Config の 1 フレームを描いて返す。Config 自体は workspace registry を使わない
     // ため、registry が壊れていても起動できる。
     let home = short_home();
-    std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
+    std::fs::create_dir_all(channel_data_dir(home.path())).unwrap();
+    std::fs::write(
+        channel_data_dir(home.path()).join("workspaces.json"),
+        "{ broken",
+    )
+    .unwrap();
     let output = run_with_home(&[OsStr::new("config")], home.path());
     assert!(output.status.success());
     let out = stdout(&output);
@@ -173,7 +187,8 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(!out.contains("workspace TUI ("));
 
     // 非 tty でも open は registry へ登録し、続く hop の Recent に現れる。
-    let registry = std::fs::read_to_string(home.path().join("workspaces.json")).unwrap();
+    let registry =
+        std::fs::read_to_string(channel_data_dir(home.path()).join("workspaces.json")).unwrap();
     assert!(registry.contains("explicit-workspace"));
     let output = run_with_home(&[OsStr::new("hop")], home.path());
     assert!(output.status.success());
@@ -246,7 +261,11 @@ fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
     assert!(stdout(&output).contains("Sessions"));
     // JSON の path は UTF-8 string なので、非 UTF-8 path は一時 workspace として開き、
     // 壊れた registry を永続化しない。
-    assert!(!home.path().join("workspaces.json").exists());
+    assert!(
+        !channel_data_dir(home.path())
+            .join("workspaces.json")
+            .exists()
+    );
 }
 
 #[cfg(unix)]
@@ -298,5 +317,9 @@ fn open_validates_non_utf8_workspace_paths() {
     if relative_fixture_exists {
         assert!(absolute_relative.is_dir());
     }
-    assert!(!home.path().join("workspaces.json").exists());
+    assert!(
+        !channel_data_dir(home.path())
+            .join("workspaces.json")
+            .exists()
+    );
 }

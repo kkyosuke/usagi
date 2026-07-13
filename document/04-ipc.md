@@ -41,8 +41,10 @@ payload を確保する。
 
 最初の frame は必ず `ClientHello` である。hello は client ID、connection nonce、期待する
 daemon generation、対応 protocol range、capability、build diagnostics を含む。daemon は generation /
-revision の共通範囲と必須 capability を検証し、成功時に `ServerHello` を返す。build identity は
-診断情報であり、互換性の判定には使わない。通常 envelope は handshake の成功後だけ受理する。
+revision の共通範囲と必須 capability を検証し、成功時に `ServerHello` を返す。build identity は wire
+protocol の互換性判定には使わないが、client bootstrap は `ServerHello` の identity で同一 channel の
+daemon が現在 binary と同じ build かを確認し、異なる build を lifecycle rollover する。通常 envelope は
+handshake の成功後だけ受理する。
 
 ## envelope とエラー
 

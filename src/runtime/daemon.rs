@@ -16,6 +16,7 @@ use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
     Sleeper, Terminator,
 };
+use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
@@ -535,10 +536,10 @@ pub(crate) fn run<W: Write>(
     usagi_daemon::presentation::run(out, command, info, &env)
 }
 
-/// 管理 daemon へ接続し、endpoint がないときだけ lifecycle start を一度要求する。
-///
-/// locator が存在するが endpoint が利用不能な場合は replacement を起動しない。daemon
-/// lifecycle の lock と recovery policy が、その状態を唯一安全に判定できるためである。
+/// Connect to the daemon for this binary's isolated build channel. Debug
+/// binaries restart their development daemon once per bootstrap; release
+/// binaries reuse a matching production daemon and only roll over an older
+/// build.
 #[coverage(off)]
 pub(crate) fn client(
     policy: ClientPolicy,
@@ -547,29 +548,83 @@ pub(crate) fn client(
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let exe =
         std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let stream = bootstrap::connect_or_start(
-        || usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir),
-        || {
-            let status = std::process::Command::new(&exe)
-                .args(["daemon", "start"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()?;
-            if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other("daemon start failed"))
-            }
-        },
+    let _bootstrap_lock = acquire_bootstrap_lock(&data_dir)?;
+    let expected_build = current_build();
+    bootstrap::connect_or_start(
+        || connect_client(&data_dir, policy),
+        || run_lifecycle(&exe, "start"),
+        || run_lifecycle(&exe, "restart"),
+        &expected_build,
+        matches!(paths::build_channel(), paths::BuildChannel::Development),
+        IpcClient::server_build,
     )
-    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    .map_err(|error| ClientError::Lifecycle(error.to_string()))
+}
+
+#[coverage(off)]
+fn current_build() -> BuildIdentity {
+    BuildIdentity {
+        version: env!("CARGO_PKG_VERSION").into(),
+        commit: "unknown".into(),
+        target: std::env::consts::ARCH.into(),
+    }
+}
+
+#[coverage(off)]
+fn connect_client(
+    data_dir: &Path,
+    policy: ClientPolicy,
+) -> std::io::Result<IpcClient<std::os::unix::net::UnixStream>> {
+    let stream = usagi_daemon::infrastructure::unix_transport::connect_current(data_dir)?;
     IpcClient::connect(
         stream,
         format!("cli-{}", std::process::id()),
         format!("{}", std::process::id()),
         policy,
     )
+    .map_err(std::io::Error::other)
+}
+
+#[coverage(off)]
+fn run_lifecycle(exe: &Path, command: &str) -> std::io::Result<()> {
+    let status = std::process::Command::new(exe)
+        .args(["daemon", command])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other(format!("daemon {command} failed")))
+}
+
+#[coverage(off)]
+fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError> {
+    let daemon_dir = data_dir.join("daemon");
+    std::fs::create_dir_all(data_dir)
+        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    match std::fs::create_dir(&daemon_dir) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(ClientError::Unavailable(error.to_string())),
+    }
+    let lock = std::fs::File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(daemon_dir.join("bootstrap.lock"))
+        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    FileExt::lock_exclusive(&lock).map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    Ok(lock)
 }
 
 /// Ensures that an active daemon endpoint exists before an interactive TUI is

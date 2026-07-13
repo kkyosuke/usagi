@@ -160,9 +160,12 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // `1` は Welcome の予約 input で最初の Recent を開く。`x` は Workspace 上の
     // non-reserved input で、画面遷移や quit を起こさず次フレームだけを要求する。入力は
     // PTY の line discipline が raw mode へ切り替わる時間を確保してから送る。
-    thread::sleep(Duration::from_millis(150));
+    // A debug build deliberately rolls over its development daemon before the
+    // TUI enters raw mode. Leave enough time for that readiness handshake so
+    // the first key is not consumed by the PTY line discipline.
+    thread::sleep(Duration::from_millis(500));
     send(&mut master, b"1");
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(500));
     // Resize while Home is visible. The runtime must invalidate the diff base and repaint the
     // new surface instead of leaving cells from the former 100-column frame behind.
     resize_pty(&master, 80, 20).unwrap();
