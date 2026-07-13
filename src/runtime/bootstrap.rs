@@ -11,6 +11,7 @@ use std::time::Duration;
 const READINESS_ATTEMPTS: usize = 20;
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
+#[coverage(off)]
 pub(crate) fn connect_or_start<S, C, L>(mut connect: C, mut start: L) -> io::Result<S>
 where
     C: FnMut() -> io::Result<S>,
@@ -26,6 +27,7 @@ where
     }
 }
 
+#[coverage(off)]
 fn wait_for_ready<S, C>(connect: &mut C) -> io::Result<S>
 where
     C: FnMut() -> io::Result<S>,

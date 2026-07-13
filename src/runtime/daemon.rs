@@ -190,6 +190,7 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
 
 use super::bootstrap;
 
+#[allow(clippy::too_many_lines)] // IPC request routing remains in the composition adapter.
 #[coverage(off)]
 fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(

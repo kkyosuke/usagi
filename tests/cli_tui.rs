@@ -1,8 +1,9 @@
 //! 配布バイナリの CLI 解析から TUI 起動画面までを通す結合テスト。
 
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn short_home() -> tempfile::TempDir {
     // A Unix-domain socket includes the data directory, generation, and socket
@@ -31,6 +32,16 @@ fn stop_daemon(home: &Path) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn assert_daemon_running(home: &Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("daemon"), OsStr::new("status")])
+        .env("USAGI_HOME", home)
+        .output()
+        .expect("usagi daemon status を起動できる");
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("daemon running"));
 }
 
 fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
@@ -75,6 +86,47 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
         .expect("usagi バイナリを起動できる");
     assert!(output.status.success());
     assert!(stdout(&output).contains("daemon not running"));
+}
+
+#[test]
+fn cli_daemon_request_autostarts_without_manual_daemon_start() {
+    let home = short_home();
+    let output = run_with_home(
+        &[
+            OsStr::new("session"),
+            OsStr::new("remove"),
+            OsStr::new("missing"),
+        ],
+        home.path(),
+    );
+    assert!(output.status.success());
+    assert_eq!(stdout(&output).trim(), "null");
+    assert!(output.stderr.is_empty());
+    assert_daemon_running(home.path());
+    stop_daemon(home.path());
+}
+
+#[test]
+fn mcp_autostarts_without_manual_daemon_start() {
+    let home = short_home();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .arg("mcp")
+        .env("USAGI_HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("usagi mcp を起動できる");
+    child
+        .stdin
+        .take()
+        .expect("MCP stdin")
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+        .expect("MCP initialize を書き込める");
+    let output = child.wait_with_output().expect("MCP の終了を待てる");
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("\"serverInfo\""));
+    assert_daemon_running(home.path());
+    stop_daemon(home.path());
 }
 
 #[test]
