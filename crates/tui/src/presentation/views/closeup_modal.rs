@@ -232,7 +232,7 @@ mod tests {
         assert!(text.contains("Session")); // タイトル
         assert!(text.contains("session: daemon"));
         assert!(text.contains("terminal"));
-        assert!(text.contains("Open an agent"));
+        assert!(text.contains("Launch or attach"));
         assert!(text.contains("close"));
         assert!(text.contains("Esc: switch"));
         // 選択マーカーは 1 つ。
