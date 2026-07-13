@@ -666,14 +666,22 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
     };
     match key {
         Key::Up => {
-            if !modal.recall_previous() {
+            if modal.selection_mode() == ModalSelectionMode::Prompt && modal.recall_previous() {
+            } else {
                 modal.select_prev();
             }
         }
         Key::Down => {
-            if !modal.recall_next() {
+            if modal.selection_mode() == ModalSelectionMode::Prompt && modal.recall_next() {
+            } else {
                 modal.select_next();
             }
+        }
+        Key::Left if modal.selection_mode() == ModalSelectionMode::Action => {
+            modal.collapse();
+        }
+        Key::Right if modal.selection_mode() == ModalSelectionMode::Action => {
+            modal.expand_selected();
         }
         Key::Left => modal.cursor_left(),
         Key::Right => modal.cursor_right(),
@@ -1016,9 +1024,9 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             Key::Left => ui.closeup.cursor_left(),
             Key::Right => ui.closeup.cursor_right(),
             Key::Backspace => ui.closeup.backspace(),
+            Key::Char('q') | Key::Quit => return WorkspaceStep::Quit,
             Key::Char(ch) => ui.closeup.insert_char(ch),
             Key::Escape => close_closeup_modal(ui),
-            Key::Quit => return WorkspaceStep::Quit,
             Key::Enter => {
                 let input = ui.closeup.submission();
                 execute_closeup_command(ui, &input);
@@ -1035,23 +1043,23 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 #[coverage(off)]
 fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
-        Key::Up | Key::Char('k') => ui.closeup.select_prev(),
-        Key::Down | Key::Char('j') => ui.closeup.select_next(),
-        Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
-        Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Up => ui.closeup.select_prev(),
+        Key::Down => ui.closeup.select_next(),
+        Key::Left => {
+            ui.closeup.collapse();
+        }
+        Key::Right => ui.closeup.expand_selected(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
-        Key::Char('v') => ui.open_preview(),
-        Key::Char('d') => ui.open_diff(),
-        Key::Char('n') => ui.open_text(),
         Key::Escape => close_closeup_modal(ui),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         Key::Enter => {
             let input = ui.closeup.submission();
             execute_closeup_command(ui, &input);
         }
-        Key::Char('x') => ui.workspace.close_pane(),
-        Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
+        Key::Backspace => ui.closeup.backspace(),
+        Key::Char(ch) => ui.closeup.insert_char(ch),
+        Key::Tab | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
