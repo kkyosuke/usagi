@@ -80,7 +80,7 @@ Welcome の **New** を選ぶと新規 workspace 作成フォーム（New 画面
 Welcome の **Config**、または `usagi config` を選ぶと設定画面（Config 画面）へ進む。Tab で global /
 workspace scope を切り替え、`↑↓` で Theme / Modal mode / Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
-scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `Saved` を表示して
+scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して
 Welcome へ戻り、保存失敗時は draft を保って error を表示する。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。
 

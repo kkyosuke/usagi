@@ -178,7 +178,7 @@ impl Config {
         match port.save(scope, &draft) {
             Ok(()) => {
                 self.current_mut().saved = draft;
-                self.notice = Some("Saved".to_string());
+                self.notice = Some("saved".to_string());
                 true
             }
             Err(error) => {
@@ -244,7 +244,15 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             String::new(),
             mascot_screen::centered_line(
                 width,
-                &select::action("Save", config.field() == Field::Save, config.is_dirty()),
+                &select::action(
+                    if config.notice() == Some("saved") {
+                        "saved"
+                    } else {
+                        "Save"
+                    },
+                    config.field() == Field::Save,
+                    config.is_dirty(),
+                ),
                 Style::new(),
             ),
         ];
@@ -261,16 +269,16 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
 
 fn theme_name(theme: Theme) -> &'static str {
     match theme {
-        Theme::Light => "Light",
-        Theme::Dark => "Dark",
-        Theme::System => "System",
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::System => "system",
     }
 }
 
 fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
     match mode {
-        ModalSelectionMode::Action => "Action",
-        ModalSelectionMode::Prompt => "Prompt",
+        ModalSelectionMode::Action => "action",
+        ModalSelectionMode::Prompt => "prompt",
     }
 }
 
@@ -327,7 +335,7 @@ mod tests {
         };
         let mut config = Config::load(&mut port);
         let initial = render(24, 80, &config).join("\n");
-        assert!(initial.contains("Theme") && initial.contains("Light"));
+        assert!(initial.contains("Theme") && initial.contains("light"));
         config.cycle_theme(true);
         config.save(&mut port);
         config.toggle_scope();
@@ -338,7 +346,7 @@ mod tests {
         assert_eq!(port.workspace.theme, Theme::Dark);
 
         let workspace = render(24, 80, &config).join("\n");
-        assert!(workspace.contains("Theme") && workspace.contains("Dark"));
+        assert!(workspace.contains("Theme") && workspace.contains("dark"));
         config.cycle_theme(false);
         config.save(&mut port);
         assert_eq!(port.workspace.theme, Theme::System);
@@ -374,8 +382,8 @@ mod tests {
 
         assert!(frame.contains("Config"));
         assert!(frame.contains("Scope: [Global]"));
-        assert!(frame.contains("Theme") && frame.contains("System"));
-        assert!(frame.contains("Modal mode") && frame.contains("Action"));
+        assert!(frame.contains("Theme") && frame.contains("system"));
+        assert!(frame.contains("Modal mode") && frame.contains("action"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
     }
@@ -400,7 +408,7 @@ mod tests {
         let frame = render(24, 80, &config).join("\n");
 
         assert!(frame.contains("Scope: Global   [Workspace]"));
-        assert!(frame.contains("Theme") && frame.contains("Light"));
+        assert!(frame.contains("Theme") && frame.contains("light"));
         assert!(frame.contains('●'));
     }
 
@@ -418,7 +426,8 @@ mod tests {
         config.next_field();
         assert!(config.can_save());
         assert!(config.save(&mut port));
-        assert_eq!(config.notice(), Some("Saved"));
+        assert_eq!(config.notice(), Some("saved"));
         assert!(!config.is_dirty());
+        assert!(render(24, 80, &config).join("\n").contains("[ saved ]"));
     }
 }

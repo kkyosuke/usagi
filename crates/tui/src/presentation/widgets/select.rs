@@ -2,6 +2,9 @@
 
 use crate::presentation::theme::Style;
 
+/// Fixed label column used by Config selects so their value controls align.
+const LABEL_WIDTH: usize = 13;
+
 /// Render a labelled select row. The selected value is bracketed so a static
 /// frame remains understandable without colour, while focus adds emphasis.
 #[must_use]
@@ -13,8 +16,8 @@ pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String 
     } else {
         Style::new()
     };
-    let control = style.paint("‹›");
-    format!("{marker} {changed} {label}: {value}  {control}")
+    let control = style.paint(&format!("< {value} >"));
+    format!("{marker} {changed} {label:<LABEL_WIDTH$}{control}")
 }
 
 /// Render a form action. Disabled actions remain visible but dimmed.
@@ -39,9 +42,18 @@ mod tests {
 
     #[test]
     fn select_and_action_expose_focus_and_change_state_without_colour() {
-        assert!(render("Modal mode", "Action", true, true).contains("› ● Modal mode"));
-        assert!(render("Theme", "System", false, false).contains("Theme: System"));
+        assert!(render("Modal mode", "action", true, true).contains("› ● Modal mode"));
+        assert!(render("Theme", "system", false, false).contains("Theme"));
         assert!(action("Save", true, true).contains("[ Save ]"));
         assert!(action("Save", false, false).contains("[ Save ]"));
+    }
+
+    #[test]
+    fn values_start_in_the_same_column_for_different_label_widths() {
+        let theme = render("Theme", "dark", false, false);
+        let mode = render("Modal mode", "action", false, false);
+        assert_eq!(theme.find('<'), mode.find('<'));
+        assert!(theme.contains("< dark >"));
+        assert!(mode.contains("< action >"));
     }
 }
