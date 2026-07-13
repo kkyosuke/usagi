@@ -1028,9 +1028,9 @@ fn session_menu_rows_at(
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let wave = loading_wave(frame, name.chars().count().max(8));
+    let wave = widgets::shimmer_text(&"░".repeat(name.chars().count().max(8)), frame);
     let label = Role::Accent.style().bold().paint(name);
-    let loading = Style::new().dim().paint(&wave);
+    let loading = wave;
     let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
         "▓"
     } else {
@@ -1039,20 +1039,11 @@ fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
     widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
 }
 
-/// Shared by session creation and daemon readiness so both pending states use
-/// the same moving block rather than inventing another spinner.
-#[coverage(off)]
-fn loading_wave(frame: usize, width: usize) -> String {
-    (0..width)
-        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
-        .collect()
-}
-
 #[coverage(off)]
 fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
     vec![
         pending_session_row(width, name, frame),
-        widgets::pad_to_width(&Style::new().dim().paint("  creating…"), width),
+        widgets::pad_to_width(&widgets::shimmer_text("  creating…", frame), width),
     ]
 }
 
@@ -1071,14 +1062,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 #[coverage(off)]
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
-        || {
-            let shimmer = loading_wave(frame, 8);
-            vec![
-                Style::new()
-                    .dim()
-                    .paint(&format!("waiting daemon {shimmer}")),
-            ]
-        },
+        || vec![widgets::shimmer_text("waiting daemon", frame)],
         |metrics| {
             vec![format!(
                 "{} sub · {} dropped",

@@ -24,7 +24,7 @@ pub use text_input::TextInput;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthChar;
 
-use super::theme::Style;
+use super::theme::{Role, Style};
 
 /// エスケープシーケンスの先頭（ESC）。表示桁数を測るとき読み飛ばす。
 const ESC: char = '\u{1b}';
@@ -32,6 +32,23 @@ const ESC: char = '\u{1b}';
 /// 切り詰めがスタイルを開いたまま断ち切ったとき末尾に付ける SGR リセット
 /// (`ESC [ 0 m`)。開いた色が後続の内容に滲むのを防ぐ。
 const RESET: &str = "\u{1b}[0m";
+
+/// v1 の tab launch / session skeleton と同じ loading sweep。
+#[must_use]
+pub fn shimmer_text(text: &str, frame: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let head = frame % (chars.len() + 3);
+    let mut out = String::new();
+    for (index, character) in chars.into_iter().enumerate() {
+        let character = character.to_string();
+        if index == head || index + 1 == head {
+            out.push_str(&Role::Accent.style().bold().paint(&character));
+        } else {
+            out.push_str(&Style::new().dim().paint(&character));
+        }
+    }
+    out
+}
 
 /// `value` の byte-offset `cursor` に block cursor を描く。
 ///
