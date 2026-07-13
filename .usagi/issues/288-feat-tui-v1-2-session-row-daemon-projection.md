@@ -1,14 +1,14 @@
 ---
 number: 288
 title: feat(tui): v1 風の2行 session row を daemon projection へ接続する
-status: todo
+status: done
 priority: high
 labels: [tui, session, parity]
 dependson: [258]
 related: [276, 287, 243]
 parent: 227
 created_at: 2026-07-13T12:02:51.086273+00:00
-updated_at: 2026-07-13T12:02:51.086273+00:00
+updated_at: 2026-07-13T12:17:13.116680+00:00
 ---
 
 ## 背景

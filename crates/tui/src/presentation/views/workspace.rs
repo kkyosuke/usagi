@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session::SessionRecord;
 use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
@@ -51,6 +52,41 @@ pub struct ProjectedSession {
     pub detail: String,
     /// daemon snapshot が与えた session の cwd。
     pub cwd: PathBuf,
+    /// `last_active` がない旧 record では `created_at` を使う表示安全な更新時刻。
+    pub last_modified: DateTime<Utc>,
+    /// note scratchpad に表示できる内容があるか。icon の幅は常に予約する。
+    pub has_notes: bool,
+    /// dismissed を除いた PR の表示安全な要約。未解決 title は表示に要求しない。
+    pub pr_summary: Option<String>,
+}
+
+impl ProjectedSession {
+    /// daemon snapshot record を、stable identity を保った sidebar projection へ変換する。
+    #[must_use]
+    #[coverage(off)]
+    pub fn from_record(id: SessionId, record: &SessionRecord) -> Self {
+        Self {
+            id,
+            label: record.display_label().to_owned(),
+            detail: record.origin.as_str().to_owned(),
+            cwd: record.root.clone(),
+            last_modified: record.last_active_or_created(),
+            has_notes: !record.notes.is_empty(),
+            pr_summary: pr_summary(&record.prs),
+        }
+    }
+}
+
+#[coverage(off)]
+fn pr_summary(prs: &[PrLink]) -> Option<String> {
+    let visible = prs.iter().filter(|pr| pr.is_visible()).collect::<Vec<_>>();
+    let first = visible.first()?;
+    let suffix = visible.len().saturating_sub(1);
+    Some(if suffix == 0 {
+        format!("PR #{}", first.number)
+    } else {
+        format!("PR #{} +{}", first.number, suffix)
+    })
 }
 
 /// controller の Home state を描画可能な root / session / action row へ投影した値。
@@ -688,32 +724,30 @@ fn root_row(width: usize, ws: &Workspace) -> String {
 
 /// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
 #[coverage(off)]
-fn selectable_row(width: usize, ws: &Workspace, index: usize) -> String {
+fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     if index == 0 {
-        root_row(width, ws)
+        vec![root_row(width, ws)]
     } else {
         ws.sessions().get(index - 1).map_or_else(
-            || root_row(width, ws),
-            |session| {
-                menu_row(
-                    width,
-                    index == ws.selected,
-                    session.display_label(),
-                    session.origin.as_str(),
-                )
-            },
+            || vec![root_row(width, ws)],
+            |session| session_menu_rows(width, index == ws.selected, session),
         )
     }
 }
 
-/// `capacity` 行の viewport に選択行が必ず入るよう、先頭 index を決める。
 #[coverage(off)]
-fn viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
-    let visible = capacity.min(row_count);
-    let max_start = row_count.saturating_sub(visible);
-    selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(max_start)
+fn workspace_row_height(index: usize) -> usize {
+    usize::from(index != 0) + 1
+}
+
+#[coverage(off)]
+fn workspace_viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
+    let mut start = 0;
+    while start < selected && (start..=selected).map(workspace_row_height).sum::<usize>() > capacity
+    {
+        start += 1;
+    }
+    start.min(row_count.saturating_sub(1))
 }
 
 /// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
@@ -733,6 +767,44 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
     widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
 }
 
+/// A real daemon-backed `SessionRecord` has a fixed two-line sidebar footprint.
+/// The first line reserves the note glyph; the second projects only persisted
+/// metadata, never a synthetic diff/GIF state or an executable shortcut.
+#[coverage(off)]
+fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> Vec<String> {
+    let cursor = if selected {
+        Role::Danger.style().bold().paint(">")
+    } else {
+        " ".to_owned()
+    };
+    let label = widgets::clip_to_width(session.display_label(), width.saturating_sub(5));
+    let label = if selected {
+        Role::Accent.style().bold().paint(&label)
+    } else {
+        label
+    };
+    let note = if session.notes.is_empty() {
+        "·"
+    } else {
+        "✎"
+    };
+    let first = widgets::pad_to_width(
+        &format!("{cursor} {label}  {}", Style::new().dim().paint(note)),
+        width,
+    );
+    let modified = session
+        .last_active_or_created()
+        .format("%Y-%m-%d %H:%M UTC");
+    let metadata = pr_summary(&session.prs).map_or_else(
+        || format!("  {modified}"),
+        |pr| format!("  {modified} · {pr}"),
+    );
+    vec![
+        first,
+        widgets::pad_to_width(&Style::new().dim().paint(&metadata), width),
+    ]
+}
+
 /// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
@@ -748,6 +820,14 @@ fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
         "░"
     });
     widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
+}
+
+#[coverage(off)]
+fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
+    vec![
+        pending_session_row(width, name, frame),
+        widgets::pad_to_width(&Style::new().dim().paint("  creating…"), width),
+    ]
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
@@ -770,31 +850,37 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
         return Vec::new();
     }
     if height == 1 {
-        return vec![selectable_row(width, ws, ws.selected)];
+        return selectable_rows(width, ws, ws.selected)
+            .into_iter()
+            .take(1)
+            .collect();
     }
 
     let body_capacity = height - 1;
     // Keep the menu usable first.  Once it has a heading and at least one row,
     // reserve the three bottom rows for the v1-style usagi above the footer.
-    let show_mascot = body_capacity >= MASCOT_ROWS + 2;
+    let show_mascot = body_capacity >= MASCOT_ROWS + 3;
     let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
     let show_heading = content_capacity > 1;
-    let pending_rows = usize::from(ws.pending_session().is_some());
+    let pending_rows = 2 * usize::from(ws.pending_session().is_some());
     let viewport_capacity = content_capacity
         .saturating_sub(usize::from(show_heading))
         .saturating_sub(pending_rows);
-    let start = viewport_start(ws.selected, ws.row_count(), viewport_capacity);
-    let end = (start + viewport_capacity).min(ws.row_count());
+    let start = workspace_viewport_start(ws.selected, ws.row_count(), viewport_capacity);
 
     let mut rows = Vec::with_capacity(height);
     if show_heading {
         rows.push(Role::Success.style().bold().paint("Sessions"));
     }
-    for index in start..end {
-        rows.push(selectable_row(width, ws, index));
+    for index in start..ws.row_count() {
+        let entry = selectable_rows(width, ws, index);
+        if rows.len().saturating_sub(usize::from(show_heading)) + entry.len() > viewport_capacity {
+            break;
+        }
+        rows.extend(entry);
     }
     if let Some(name) = ws.pending_session() {
-        rows.push(pending_session_row(width, name, skeleton_frame));
+        rows.extend(pending_session_rows(width, name, skeleton_frame));
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
@@ -976,10 +1062,13 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
     }
     let rows = home.rows();
     if height == 1 {
-        return vec![home_row(width, home, rows[0])];
+        return home_row_lines(width, home, rows[0])
+            .into_iter()
+            .take(1)
+            .collect();
     }
     let body_capacity = height - 1;
-    let show_mascot = body_capacity >= MASCOT_ROWS + 2;
+    let show_mascot = body_capacity >= MASCOT_ROWS + 3;
     let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
     let show_heading = content_capacity > 1;
     let viewport_capacity = content_capacity - usize::from(show_heading);
@@ -987,17 +1076,20 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
         .iter()
         .position(|row| *row == home.selected)
         .unwrap_or(0);
-    let start = viewport_start(selected_index, rows.len(), viewport_capacity);
-    let end = (start + viewport_capacity).min(rows.len());
+    let start = home_viewport_start(&rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
     if show_heading {
         lines.push(Role::Success.style().bold().paint("Sessions"));
     }
-    lines.extend(
-        rows[start..end]
-            .iter()
-            .map(|row| home_row(width, home, *row)),
-    );
+    for row in &rows[start..] {
+        let row_lines = home_row_lines(width, home, *row);
+        if lines.len().saturating_sub(usize::from(show_heading)) + row_lines.len()
+            > viewport_capacity
+        {
+            break;
+        }
+        lines.extend(row_lines);
+    }
     lines.resize(content_capacity, String::new());
     if show_mascot {
         lines.extend(home_mascot(width, home.mascot_tick));
@@ -1012,6 +1104,26 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
             .paint(&widgets::clip_to_width(footer, width)),
     );
     lines
+}
+
+#[coverage(off)]
+fn home_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
+    let mut start = 0;
+    while start < selected
+        && rows[start..=selected]
+            .iter()
+            .map(|row| home_row_height(*row))
+            .sum::<usize>()
+            > capacity
+    {
+        start += 1;
+    }
+    start
+}
+
+#[coverage(off)]
+fn home_row_height(row: Selection) -> usize {
+    usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
 }
 
 /// The v1 sidebar mascot's resting browsing pose. It is deliberately a pure
@@ -1032,34 +1144,64 @@ fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
 }
 
 #[coverage(off)]
-fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
+fn home_row_lines(width: usize, home: &HomeProjection, row: Selection) -> Vec<String> {
     let target = match row {
         Selection::Target(target) => Some(target),
         Selection::NewSession => None,
     };
-    let (label, detail) = match row {
-        Selection::Target(Target::Root(_)) => ("root", "workspace root"),
+    let (label, detail, session) = match row {
+        Selection::Target(Target::Root(_)) => ("root", "workspace root", None),
         Selection::Target(Target::Session(id)) => home
             .sessions
             .iter()
             .find(|session| session.id == id)
-            .map_or(("root", "workspace root"), |session| {
-                (session.label.as_str(), session.detail.as_str())
+            .map_or(("root", "workspace root", None), |session| {
+                (
+                    session.label.as_str(),
+                    session.detail.as_str(),
+                    Some(session),
+                )
             }),
-        Selection::NewSession => ("+ new session", "action"),
+        Selection::NewSession => ("+ new session", "action", None),
     };
     let selected = home.mode == HomeMode::Switch && home.selected == row;
     let current = target == Some(home.active);
     let marker = home_row_marker(row, selected, current);
-    let label = if selected {
-        Role::Accent.style().bold().paint(label)
+    let label = if session.is_some() {
+        widgets::clip_to_width(label, width.saturating_sub(6))
     } else {
         label.to_string()
     };
-    widgets::pad_to_width(
-        &format!("{marker} {label}  {}", Style::new().dim().paint(detail)),
-        width,
-    )
+    let label = if selected {
+        Role::Accent.style().bold().paint(&label)
+    } else {
+        label
+    };
+    let first = if let Some(session) = session {
+        let note = if session.has_notes { "✎" } else { "·" };
+        widgets::pad_to_width(
+            &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
+            width,
+        )
+    } else {
+        widgets::pad_to_width(
+            &format!("{marker} {label}  {}", Style::new().dim().paint(detail)),
+            width,
+        )
+    };
+    if let Some(session) = session {
+        let modified = session.last_modified.format("%Y-%m-%d %H:%M UTC");
+        let metadata = session.pr_summary.as_deref().map_or_else(
+            || format!("  {modified}"),
+            |pr| format!("  {modified} · {pr}"),
+        );
+        vec![
+            first,
+            widgets::pad_to_width(&Style::new().dim().paint(&metadata), width),
+        ]
+    } else {
+        vec![first]
+    }
 }
 
 /// v1-compatible one-cell sidebar marker with explicit precedence.
@@ -1216,7 +1358,7 @@ mod tests {
     use std::path::PathBuf;
     use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
-    use usagi_core::domain::pullrequest::PrLink;
+    use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::workspace::Workspace as WorkspaceRecord;
     use usagi_core::domain::workspace_state::WorkspaceState;
@@ -1297,6 +1439,9 @@ mod tests {
             label: label.to_string(),
             detail: "snapshot".to_string(),
             cwd: PathBuf::from(cwd),
+            last_modified: now(),
+            has_notes: false,
+            pr_summary: None,
         }
     }
 
@@ -1331,7 +1476,7 @@ mod tests {
         );
         let text = joined_home(&home);
         assert!(text.contains("root  workspace root"));
-        assert_eq!(text.matches("same label  snapshot").count(), 2);
+        assert_eq!(text.matches("same label").count(), 2);
         assert!(text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
@@ -1888,14 +2033,47 @@ mod tests {
         assert!(text.contains("2 sessions"));
         assert!(text.contains("Sessions"));
         assert!(text.contains("UI work"));
-        assert!(text.contains("human"));
         assert!(text.contains("daemon"));
-        assert!(text.contains("mcp"));
+        assert!(text.contains("2026-06-25 12:00 UTC"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(!text.contains("/tmp/actual"));
         assert!(text.contains("root"));
         assert!(!text.contains("Esc back"));
         assert!(text.contains('│'));
+    }
+
+    #[test]
+    fn session_rows_project_legacy_time_note_and_visible_prs_without_false_affordances() {
+        let id = SessionId::new();
+        let mut record = session("日本語-session", None, SessionOrigin::Unknown);
+        record.last_active = Some(
+            DateTime::parse_from_rfc3339("2026-06-26T13:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        record.notes.note = Some("keep this visible".to_owned());
+        record
+            .prs
+            .push(PrLink::new(42, "https://example.test/pull/42"));
+        let mut dismissed = PrLink::new(99, "https://example.test/pull/99");
+        dismissed.state = PrState::Dismissed;
+        record.prs.push(dismissed);
+
+        let projection = ProjectedSession::from_record(id, &record);
+        assert_eq!(projection.id, id);
+        assert_eq!(projection.last_modified, record.last_active.unwrap());
+        assert!(projection.has_notes);
+        assert_eq!(projection.pr_summary.as_deref(), Some("PR #42"));
+
+        let rows = super::session_menu_rows(40, true, &record);
+        assert_eq!(rows.len(), 2);
+        assert!(strip(&rows[0]).contains("✎"));
+        assert!(strip(&rows[1]).contains("PR #42"));
+        assert!(!strip(&rows[1]).contains("diff"));
+        assert!(rows.iter().all(|row| display_width(row) == 40));
+        let narrow = super::session_menu_rows(18, true, &record);
+        assert!(strip(&narrow[0]).contains("✎"));
+        assert!(narrow.iter().all(|row| display_width(row) == 18));
     }
 
     #[test]
@@ -1968,8 +2146,8 @@ mod tests {
         let root = text
             .find("> root  workspace root")
             .expect("selected root row");
-        let first = text.find("UI work  human").expect("first session row");
-        let second = text.find("daemon  mcp").expect("second session row");
+        let first = text.find("UI work").expect("first session row");
+        let second = text.find("daemon").expect("second session row");
         assert!(root < first);
         assert!(first < second);
     }

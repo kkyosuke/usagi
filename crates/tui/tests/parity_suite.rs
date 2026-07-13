@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use usagi_core::domain::id::{
     AgentRuntimeId, AgentRuntimeRef, DaemonGeneration, OperationId, SessionId, TerminalId,
     TerminalRef, WorkspaceId, WorktreeId,
@@ -75,6 +76,11 @@ fn session_projection(id: SessionId, label: &str) -> ProjectedSession {
         label: label.into(),
         detail: "fixture".into(),
         cwd: PathBuf::from(format!("/work/{label}")),
+        last_modified: DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        has_notes: false,
+        pr_summary: None,
     }
 }
 
