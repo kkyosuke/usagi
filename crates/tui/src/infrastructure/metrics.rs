@@ -70,6 +70,13 @@ mod tests {
         }
     }
 
+    struct Failing;
+    impl DaemonClient for Failing {
+        fn request(&mut self, _: DaemonRequest) -> Result<DaemonReply, ClientError> {
+            Err(ClientError::Unavailable("socket closed".into()))
+        }
+    }
+
     #[test]
     fn registers_unregisters_and_registers_again_after_disconnect() {
         let mut hook = MetricsHook::default();
@@ -85,6 +92,31 @@ mod tests {
                 DaemonRequest::Metrics {
                     action: MetricsAction::Subscribe
                 },
+                DaemonRequest::Metrics {
+                    action: MetricsAction::Subscribe
+                },
+                DaemonRequest::Metrics {
+                    action: MetricsAction::Unsubscribe
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_registration_and_shutdown_are_retryable() {
+        let mut hook = MetricsHook::default();
+        let mut failing = Failing;
+        assert!(hook.connect(&mut failing).is_err());
+
+        let mut client = Fake::default();
+        hook.connect(&mut client).unwrap();
+        assert!(hook.shutdown(&mut failing).is_err());
+        hook.shutdown(&mut client).unwrap();
+        hook.shutdown(&mut client).unwrap();
+
+        assert_eq!(
+            client.requests,
+            vec![
                 DaemonRequest::Metrics {
                     action: MetricsAction::Subscribe
                 },
