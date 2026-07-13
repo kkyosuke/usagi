@@ -532,6 +532,11 @@ impl Workspace {
     }
 
     /// Pane state rendered by the right-hand Chrome strip.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the selected target has no local pane state. Constructors
+    /// and target selection maintain this invariant.
     #[must_use]
     #[coverage(off)]
     pub fn pane(&self) -> &PaneState {
