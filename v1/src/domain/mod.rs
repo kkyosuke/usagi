@@ -3,8 +3,6 @@ pub mod agent;
 pub mod agent_config;
 pub mod agent_feature;
 pub mod agent_phase;
-pub mod daemon;
-pub mod daemon_ipc;
 pub mod frontmatter;
 pub mod history;
 pub mod issue;

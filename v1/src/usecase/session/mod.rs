@@ -2579,7 +2579,6 @@ mod tests {
                 kind: open_panes_store::StoredPaneKind::Terminal,
                 cli: None,
                 label: None,
-                terminal: None,
             }],
         )
         .unwrap();

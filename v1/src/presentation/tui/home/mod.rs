@@ -32,7 +32,6 @@ use console::Term;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::{SessionAgent, SessionRecord};
 use crate::presentation::tui::io::term_reader::TermKeyReader;
-use crate::usecase::daemon_attach::{DaemonFailureFallback, UnattendedLaunchGuard};
 
 pub use event::Outcome;
 
@@ -263,7 +262,6 @@ struct LaunchRequest {
     cli: crate::domain::settings::AgentCli,
     session_model: Option<String>,
     stored_label: Option<String>,
-    attach: Option<u64>,
     fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt,
     active: Option<usize>,
     env: SharedEnv,
@@ -276,7 +274,6 @@ struct PreparedLaunch {
     pane_kind: terminal::tabs::PaneKind,
     cli: crate::domain::settings::AgentCli,
     stored_label: Option<String>,
-    attach: Option<u64>,
     fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt,
     active: Option<usize>,
     env: PaneEnv,
@@ -301,7 +298,6 @@ struct LaunchJobManager {
     env_by_root: Arc<Mutex<HashMap<PathBuf, SharedEnv>>>,
     in_flight: HashMap<u64, LaunchInFlight>,
     dirs_in_flight: HashMap<PathBuf, usize>,
-    unattended_guard: UnattendedLaunchGuard,
     persist_open_panes: bool,
 }
 
@@ -357,7 +353,7 @@ fn classify_launch_queue(
 
 /// Choose whether one queued target consumes a new agent slot. Keeping this
 /// independent of traversal is important: a zero fresh-spawn budget must not
-/// prevent a later daemon-surviving agent from receiving work.
+/// prevent a later live agent from receiving work.
 fn queued_prompt_action(has_live_agent: bool, slots_remaining: usize) -> QueuedPromptAction {
     if has_live_agent {
         QueuedPromptAction::DeliverToLiveAgent
@@ -385,21 +381,12 @@ impl LaunchJobManager {
             env_by_root: Arc::new(Mutex::new(HashMap::new())),
             in_flight: HashMap::new(),
             dirs_in_flight: HashMap::new(),
-            unattended_guard: UnattendedLaunchGuard::default(),
             persist_open_panes,
         }
     }
 
     fn in_flight_for(&self, dir: &Path) -> bool {
         self.dirs_in_flight.get(dir).copied().unwrap_or(0) > 0
-    }
-
-    fn unattended_blocked_for(&self, dir: &Path) -> bool {
-        self.unattended_guard.is_blocked(dir)
-    }
-
-    fn block_unattended_for(&mut self, dir: &Path) {
-        self.unattended_guard.block(dir);
     }
 
     fn persist_pool_snapshot(
@@ -530,9 +517,7 @@ impl LaunchJobManager {
                             cli: prepared.cli,
                             label: &prepared.label,
                             env: &prepared.env,
-                            attach: prepared.attach,
                             fresh_fallback_prompt: prepared.fresh_fallback_prompt,
-                            daemon_failure_fallback: DaemonFailureFallback::Unattended,
                         },
                     );
                     match spawn {
@@ -599,22 +584,12 @@ impl LaunchJobManager {
                                 lines.push(line);
                                 continue;
                             }
-                            let ownership_unverified =
-                                matches!(prepared.pane_kind, terminal::tabs::PaneKind::Agent)
-                                    && pane_error_requires_unattended_guard(&err);
-                            if ownership_unverified {
-                                self.unattended_guard.block(&prepared.dir);
-                            }
                             release_launch_source(pool, &prepared.dir, &prepared.source);
-                            if ownership_unverified {
-                                requeue_launch_source(&prepared.dir, &prepared.source);
-                            } else {
-                                requeue_launch_failure(
-                                    &prepared.dir,
-                                    &prepared.source,
-                                    &err.to_string(),
-                                );
-                            }
+                            requeue_launch_failure(
+                                &prepared.dir,
+                                &prepared.source,
+                                &err.to_string(),
+                            );
                             let line = format!(
                                 "failed to launch pane for {}: {err:#}",
                                 prepared.dir.display()
@@ -701,23 +676,6 @@ fn restore_taken_prompt(
             dir.display()
         ));
     }
-}
-
-fn pane_error_requires_unattended_guard(error: &anyhow::Error) -> bool {
-    #[cfg(unix)]
-    let daemon_ownership_unverified = error
-        .downcast_ref::<crate::infrastructure::daemon_client::DaemonBuildHandshakeError>()
-        .is_some();
-    #[cfg(not(unix))]
-    let daemon_ownership_unverified = false;
-
-    daemon_ownership_unverified
-        || error
-            .downcast_ref::<terminal::pool::UnconfirmedPaneCleanup>()
-            .is_some()
-        || error
-            .downcast_ref::<terminal::pool::UnverifiedDaemonOwnership>()
-            .is_some()
 }
 
 fn requeue_launch_failure(dir: &Path, source: &LaunchSource, error: &str) {
@@ -852,7 +810,6 @@ fn prepare_launch(
             pane_kind: request.pane_kind,
             cli: request.cli,
             stored_label: request.stored_label,
-            attach: request.attach,
             fresh_fallback_prompt: request.fresh_fallback_prompt,
             active: request.active,
             env,
@@ -1732,9 +1689,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         cli,
                         label: &label,
                         env: &pane_env,
-                        attach: None,
                         fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
-                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                     },
                 )?;
             } else {
@@ -1748,9 +1703,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         cli,
                         label: &label,
                         env: &pane_env,
-                        attach: None,
                         fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
-                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                     },
                 )?;
             }
@@ -1859,10 +1812,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                                     cli,
                                     label: &label,
                                     env: &add_env,
-                                    attach: None,
                                     fresh_fallback_prompt:
                                         terminal::pool::FreshFallbackPrompt::Ignore,
-                                    daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                                 },
                             )?;
                         }
@@ -1933,13 +1884,6 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         // re-attaches the moment the editor closes. Every other exit clears it.
         if !matches!(result, Ok(PaneExit::OpenNote)) {
             home.clear_terminal_surface();
-        }
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(pane_error_requires_unattended_guard)
-        {
-            launch_jobs.borrow_mut().block_unattended_for(dir);
         }
         if result.is_err() && !prompt_delivered {
             if let Some(taken) = queued_prompt.take() {
@@ -2175,9 +2119,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                         cli: ps.cli,
                         label: &ps.label,
                         env: &env,
-                        attach: None,
                         fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
-                        daemon_failure_fallback: DaemonFailureFallback::UserInitiated,
                     },
                 ) {
                     Ok(id) => {
@@ -2192,11 +2134,7 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
                     }
                     Err(err) => {
                         let label = ps.label.clone();
-                        let ownership_unverified = pane_error_requires_unattended_guard(&err);
-                        if ownership_unverified {
-                            launch_jobs.borrow_mut().block_unattended_for(&ps.dir);
-                        }
-                        let retryable = !ownership_unverified;
+                        let retryable = true;
                         if let Some(taken) = ps.queued_prompt.take() {
                             restore_taken_prompt(&ps.dir, taken, "pending pane launch failure");
                         }
@@ -2727,9 +2665,6 @@ fn dispatch_restore_open_panes(
         let ws_root = crate::usecase::session::workspace_root(&dir);
         let session_agent =
             persisted_session_agent_for(&dir).unwrap_or_else(|_| state.session_agent_for(&dir));
-        // Restore may reattach an existing daemon process, but an attach miss
-        // never claims queued work itself: the queue dispatcher owns claim →
-        // authoritative CLI/model reload → fresh spawn as one ordered path.
         for pane in &snapshot.panes {
             let (pane_kind, cli) = match pane.kind {
                 StoredPaneKind::Terminal => (PaneKind::Terminal, default_cli),
@@ -2755,7 +2690,6 @@ fn dispatch_restore_open_panes(
                     cli,
                     session_model: session_agent.model.clone(),
                     stored_label: pane.label.clone(),
-                    attach: pane.terminal,
                     fresh_fallback_prompt,
                     active: Some(snapshot.active),
                     env,
@@ -2862,16 +2796,9 @@ fn autostart_queued_prompts(
 
     let mut logs = Vec::new();
     for (dir, label) in dirs {
-        if launch_jobs.borrow().in_flight_for(&dir)
-            || launch_jobs.borrow().unattended_blocked_for(&dir)
-        {
+        if launch_jobs.borrow().in_flight_for(&dir) {
             continue;
         }
-        // A daemon-owned agent can outlive the TUI. Prompts queued while no TUI
-        // was present land in the launch channel, so a later re-attach must hand
-        // them to that existing agent instead of waiting forever for a fresh pane
-        // or spawning a duplicate. The watcher owns the actual take/write/requeue
-        // transaction; repeated UI passes collapse into one in-memory request.
         let has_live_agent = pool.borrow().has_live_agent_pane(&dir);
         if has_live_agent && !pool.borrow().live_agent_accepts_launch_prompt(&dir) {
             continue;
@@ -2962,7 +2889,6 @@ fn autostart_queued_prompts(
             }
             terminal::pool::ExitedPaneRetirement::Ambiguous => {
                 restore_autostart_prompts(&dir, &prompts, "ambiguous exited panes");
-                launch_jobs.borrow_mut().block_unattended_for(&dir);
                 crate::infrastructure::error_log::ErrorLog::record(&format!(
                     "queued prompt launch blocked for {} because worktree-scoped exited phase \
                      cannot identify one of multiple Agent panes; resolve or close the stale \
@@ -2973,7 +2899,6 @@ fn autostart_queued_prompts(
             }
             terminal::pool::ExitedPaneRetirement::Unconfirmed => {
                 restore_autostart_prompts(&dir, &prompts, "unconfirmed exited-pane teardown");
-                launch_jobs.borrow_mut().block_unattended_for(&dir);
                 crate::infrastructure::error_log::ErrorLog::record(&format!(
                     "queued prompt launch blocked for {} because teardown of an exited daemon \
                      pane was not acknowledged",
@@ -3027,7 +2952,6 @@ fn autostart_queued_prompts(
                 cli,
                 session_model: session_agent.model,
                 stored_label: None,
-                attach: None,
                 fresh_fallback_prompt: terminal::pool::FreshFallbackPrompt::Ignore,
                 active: None,
                 env,
