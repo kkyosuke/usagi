@@ -65,12 +65,12 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
 }
 
 /// Two fixed-width buttons shared by destructive and dismiss-only modals.
-/// Selection uses role colour, bold weight, and reverse video; focus never
-/// changes the bracket geometry.
+/// Selection uses role-coloured text and bold weight; focus never changes the
+/// bracket geometry.
 #[must_use]
 #[coverage(off)]
 pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
-    let selected = |role: Role| role.style().bold().reverse();
+    let selected = |role: Role| role.style().bold();
     let idle = Style::new().dim();
     let (ok, cancel) = if confirm_selected {
         (
@@ -253,7 +253,10 @@ pub fn render_over(
         let prefix = columns(background, 0, left);
         let suffix_start = left + box_width;
         let suffix = columns(background, suffix_start, width.saturating_sub(suffix_start));
-        frame[row] = format!("{prefix}{box_line}{suffix}");
+        // A modal line may contain coloured title, copy, or button text. Close
+        // every style before restoring the background suffix so no SGR state
+        // leaks into the rest of the row or subsequent redraws.
+        frame[row] = format!("{prefix}{box_line}{RESET}{suffix}");
     }
 
     frame
@@ -275,8 +278,8 @@ mod tests {
         assert_eq!(display_width(&ok_selected), 20);
         assert!(ok_selected.contains("[  ok  ]"));
         assert!(cancel_selected.contains("[cancel]"));
-        assert!(ok_selected.contains("\u{1b}[1;7;32m"));
-        assert!(cancel_selected.contains("\u{1b}[1;7;36m"));
+        assert!(ok_selected.contains("\u{1b}[1;32m"));
+        assert!(cancel_selected.contains("\u{1b}[1;36m"));
     }
     use crate::presentation::widgets::display_width;
 

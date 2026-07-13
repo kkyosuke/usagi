@@ -25,7 +25,7 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
 
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::config::{self, Config};
 use crate::presentation::views::new::{self, Field, New};
@@ -1413,14 +1413,20 @@ fn render_quit_confirmation(
 ) -> Vec<String> {
     let (title, heading, message, confirm_role) = match modal_state.action {
         QuitAction::CloseTui => (
-            Role::Accent.style().bold().paint("Close TUI"),
-            Role::Accent.style().bold().paint("Close this TUI?"),
+            Style::new().fg(Color::White).bold().paint("Close TUI"),
+            Style::new()
+                .fg(Color::White)
+                .bold()
+                .paint("Close this TUI?"),
             "Daemon sessions keep running.",
             Role::Success,
         ),
         QuitAction::EndWorkspace => (
-            Role::Danger.style().bold().paint("End workspace"),
-            Role::Danger.style().bold().paint("End this workspace?"),
+            Style::new().fg(Color::White).bold().paint("End workspace"),
+            Style::new()
+                .fg(Color::White)
+                .bold()
+                .paint("End this workspace?"),
             "All live sessions will be stopped.",
             Role::Danger,
         ),
@@ -1433,7 +1439,7 @@ fn render_quit_confirmation(
         52,
         &[
             heading,
-            Style::new().dim().paint(message),
+            Style::new().fg(Color::White).paint(message),
             String::new(),
             modal::confirmation_buttons(modal_state.confirm_selected, confirm_role),
             Style::new()
@@ -3092,7 +3098,7 @@ mod tests {
         assert!(confirmation.contains("All live sessions will be stopped."));
         assert!(confirmation.contains("[  ok  ]"));
         assert!(confirmation.contains("[cancel]"));
-        assert!(confirmation.contains("\u{1b}[1;7;31m"));
+        assert!(confirmation.contains("\u{1b}[1;31m"));
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[(
