@@ -26,6 +26,8 @@ session incarnation で fence する。IPC の create/remove は daemon が rese
 effect を実行し、同じ daemon generation・operation・session attempt・revision の completion だけを反映する。
 失敗した effect は safe failure として残り、client が local worktree 操作へ fallback しない。
 
+各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
+
 ## daemon process lifecycle
 
 `usagi daemon` は daemon 面の process lifecycle を操作する入口である。通常の client は、接続先が
@@ -68,6 +70,8 @@ operation journal は operation ID、owner daemon generation、execution attempt
 durable store は、受理される create / remove operation の owner generation が daemon と一致することを
 検証する。completion は `CompletionFence` と reducer transition の両方を満たす場合だけ反映される。
 このため ACK loss や late worker で effect の結果を推測して二重実行しない。
+
+daemon 起動時には未完了の create / initialize / delete journal を reconcile する。physical effect の完了を証明できない record は再実行せず safe failure にして明示 recovery を待つ。
 
 ## terminal ownership
 

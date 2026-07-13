@@ -1,14 +1,14 @@
 ---
 number: 268
 title: feat(daemon): durable session lifecycle runtime を IPC server に接続する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, session, lifecycle, ipc]
 dependson: [217, 219, 220]
 related: [257, 263, 264, 265]
 parent: 213
 created_at: 2026-07-13T00:30:00.000000+00:00
-updated_at: 2026-07-13T00:30:00.000000+00:00
+updated_at: 2026-07-13T01:35:47.126081+00:00
 ---
 
 ## 背景・根拠
@@ -55,4 +55,3 @@ daemon を managed session lifecycle の唯一の実行時書き手にする。s
 2. daemon session runtime に durable admission、worker、worktree adapter、reconcile、scope resolver を実装する。
 3. shared runtime を IPC server と composition root へ接続し、socket-level integration test を追加する。
 4. 実装済み契約を `document/04-ipc.md` と `document/05-daemon.md` に更新し、#257/#263 の fake client を real snapshot contract に切り替える。
-

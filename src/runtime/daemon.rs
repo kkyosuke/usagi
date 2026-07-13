@@ -73,10 +73,22 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                                         let Some((action, operation_id, payload)) = request else {
                                             return usagi_daemon::presentation::ipc::dispatch(request_id, body, hello);
                                         };
-                                            let result = runtime.lock().map_err(|_| ()).and_then(|mut runtime| runtime.handle(action, &operation_id, &payload).map_err(|_| ()));
+                                            let result = runtime.lock().map_err(|_| usagi_daemon::usecase::session_runtime::SessionRuntimeError::Storage).and_then(|mut runtime| runtime.handle(action, &operation_id, &payload));
                                             match result {
-                                                Ok(reply) => usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Ok, body: reply.body } },
-                                                Err(()) => usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument, "session request was rejected")), body: serde_json::json!(null) } },
+                                                Ok(reply) => {
+                                                    let outcome = match action {
+                                                        usagi_core::usecase::client::SessionAction::Create | usagi_core::usecase::client::SessionAction::Remove => usagi_core::infrastructure::ipc::ResponseOutcome::Accepted {
+                                                            operation_id: usagi_core::infrastructure::ipc::OperationId(reply.operation_id),
+                                                            operation_revision: reply.revision,
+                                                        },
+                                                        _ => usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+                                                    };
+                                                    usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome, body: reply.body } }
+                                                }
+                                                Err(error) => {
+                                                    let code = if error == usagi_daemon::usecase::session_runtime::SessionRuntimeError::IdempotencyConflict { usagi_core::infrastructure::ipc::ErrorCode::IdempotencyConflict } else { usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument };
+                                                    usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(code, error.safe_message())), body: serde_json::json!(null) } }
+                                                }
                                             }
                                     }
                                     ,
