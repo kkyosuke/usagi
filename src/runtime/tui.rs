@@ -391,6 +391,14 @@ fn passthrough_key(input: &LiveInput) -> Key {
     if !matches!(key.kind, KeyEventKind::Press) {
         return Key::Other;
     }
+    // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
+    // action.  Keep the presentation vocabulary small by translating it to the
+    // same shortcut as `c`; Ctrl-O remains the only live-pane leader.
+    if (key.modifiers.control && key.code == KeyCode::Char('a'))
+        || key.code == KeyCode::Char('\u{1}')
+    {
+        return Key::Char('c');
+    }
     match key.code {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
@@ -667,10 +675,27 @@ pub(crate) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistentSettingsPort, Start, load_screen_graph_data};
+    use super::{PersistentSettingsPort, Start, load_screen_graph_data, passthrough_key};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
+    use usagi_tui::usecase::application::Key;
+    use usagi_tui::usecase::terminal_input::{
+        KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
+    };
+
+    #[test]
+    fn ctrl_a_maps_to_the_new_session_shortcut() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&key), Key::Char('c'));
+    }
 
     #[test]
     #[coverage(off)]
