@@ -1,6 +1,6 @@
 //! A compact selectable value row shared by form-like views.
 
-use crate::presentation::theme::Style;
+use crate::presentation::theme::{Role, Style};
 
 /// Fixed label column used by Config selects so their value controls align.
 const LABEL_WIDTH: usize = 13;
@@ -8,30 +8,42 @@ const LABEL_WIDTH: usize = 13;
 const VALUE_WIDTH: usize = 6;
 
 /// Render a labelled select row. The selected value is bracketed so a static
-/// frame remains understandable without colour, while focus adds emphasis.
+/// frame remains understandable without colour. Focus uses the accent colour,
+/// while an unsaved value uses the warning colour across its whole row.
 #[must_use]
 pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String {
-    let marker = if focused { "›" } else { " " };
-    let changed = if changed { "●" } else { " " };
-    let style = if focused {
-        Style::new().bold()
+    let marker = if focused {
+        Role::Danger.style().bold().paint("›")
+    } else {
+        " ".to_string()
+    };
+    let changed_marker = if changed {
+        Role::Warning.style().bold().paint("●")
+    } else {
+        " ".to_string()
+    };
+    let style = if changed {
+        Role::Warning.style().bold()
+    } else if focused {
+        Role::Accent.style().bold()
     } else {
         Style::new()
     };
+    let label = style.paint(&format!("{label:<LABEL_WIDTH$}"));
     let control = style.paint(&format!("< {value:<VALUE_WIDTH$} >"));
-    format!("{marker} {changed} {label:<LABEL_WIDTH$}{control}")
+    format!("{marker} {changed_marker} {label}{control}")
 }
 
 /// Render a form action. Disabled actions remain visible but dimmed.
 #[must_use]
 pub fn action(label: &str, focused: bool, enabled: bool) -> String {
-    let marker = if focused { "›" } else { " " };
+    let marker = if focused {
+        Role::Danger.style().bold().paint("›")
+    } else {
+        " ".to_string()
+    };
     let style = if enabled {
-        if focused {
-            Style::new().bold()
-        } else {
-            Style::new()
-        }
+        Role::Success.style().bold()
     } else {
         Style::new().dim()
     };
@@ -43,10 +55,12 @@ mod tests {
     use super::{action, render};
 
     #[test]
-    fn select_and_action_expose_focus_and_change_state_without_colour() {
-        assert!(render("Modal mode", "action", true, true).contains("› ● Modal mode"));
+    fn select_and_action_expose_focus_change_and_enabled_state() {
+        let changed = render("Modal mode", "action", true, true);
+        assert!(changed.contains("›") && changed.contains("●") && changed.contains("Modal mode"));
+        assert!(changed.contains("\u{1b}[1;33m"));
         assert!(render("Theme", "system", false, false).contains("Theme"));
-        assert!(action("Save", true, true).contains("[ Save ]"));
+        assert!(action("Save", true, true).contains("\u{1b}[1;32m[ Save ]"));
         assert!(action("Save", false, false).contains("[ Save ]"));
     }
 

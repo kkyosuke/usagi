@@ -8,7 +8,7 @@ use crate::presentation::theme::Style;
 use crate::presentation::widgets::select;
 
 const TITLE: &str = "Config";
-const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  Enter: confirm  Esc: back";
+const FOOTER: &str = "Tab: scope  ↑↓: select  ←→: change  ●: unsaved  Enter: save  Esc: back";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Field {
