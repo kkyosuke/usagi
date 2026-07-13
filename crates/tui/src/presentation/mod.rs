@@ -447,15 +447,6 @@ impl WorkspaceUi {
         ));
     }
 
-    /// Open the focused `+ new session` affordance as a name prompt.  Creation
-    /// still travels through the normal `session create` parser and daemon port.
-    #[coverage(off)]
-    fn open_new_session_prompt(&mut self) {
-        self.modal = Some(WorkspaceModal::Overview(OverviewModal::with_prompt(
-            "session create ",
-        )));
-    }
-
     /// Open the v1-compatible checklist over the current daemon snapshot.
     /// The modal captures records, not row indexes; dispatch performs another
     /// incarnation check before it asks the daemon to remove anything.
@@ -831,11 +822,14 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                 if let Some(sessions) = result.sessions {
                     ui.workspace.replace_sessions(sessions);
                 }
+                ui.workspace.finish_inline_session_create();
                 ui.modal = None;
             }
             Err(error) => {
                 if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
                     modal.set_error(error);
+                } else {
+                    ui.workspace.fail_inline_session_create(error);
                 }
             }
         }
@@ -1030,16 +1024,43 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
 /// Esc はここから抜けず no-op とする。
 #[coverage(off)]
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if ui.workspace.creating_session_inline() {
+        match key {
+            Key::Escape => ui.workspace.cancel_inline_session_create(),
+            Key::Enter => {
+                if let Some(name) = ui.workspace.inline_create_name() {
+                    begin_session_create(ui, SessionCommand::Create { name });
+                }
+            }
+            Key::Backspace => ui.workspace.inline_create_backspace(),
+            Key::Left => ui.workspace.inline_create_move(false),
+            Key::Right => ui.workspace.inline_create_move(true),
+            Key::Char(character) if !character.is_control() => {
+                ui.workspace.inline_create_insert(character);
+            }
+            Key::Up
+            | Key::Down
+            | Key::Tab
+            | Key::Quit
+            | Key::Char(_)
+            | Key::Live(_)
+            | Key::Other => {}
+        }
+        return WorkspaceStep::Stay;
+    }
     match key {
         Key::Up | Key::Char('k') => ui.workspace.select_prev(),
         Key::Down | Key::Char('j') => ui.workspace.select_next(),
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
         Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Char(character) if ui.workspace.new_session_selected() && !character.is_control() => {
+            ui.workspace.begin_inline_session_create(Some(character));
+        }
         Key::Enter | Key::Char('t') if ui.workspace.new_session_selected() => {
-            ui.open_new_session_prompt();
+            ui.workspace.begin_inline_session_create(None);
         }
         Key::Enter | Key::Char('t') => ui.enter_closeup(),
-        Key::Char('c') => ui.open_new_session_prompt(),
+        Key::Char('\u{1}' | 'c') => ui.workspace.begin_inline_session_create(None),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Char('v') => ui.open_preview(),
@@ -3176,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn new_session_row_opens_a_prefilled_create_prompt_and_dispatches_the_same_command() {
+    fn new_session_row_edits_inline_and_dispatches_the_create_command() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
         let mut ui = WorkspaceUi::with_ports_and_selection_mode(
@@ -3190,10 +3211,9 @@ mod tests {
         }
 
         assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
-        let Some(WorkspaceModal::Overview(prompt)) = ui.modal.as_ref() else {
-            panic!("the action row opens a create prompt");
-        };
-        assert_eq!(prompt.input(), "session create ");
+        assert!(ui.workspace.creating_session_inline());
+        assert!(ui.modal.is_none());
+        assert!(render_workspace(40, 80, &ui).join("\n").contains("+ new:"));
 
         for character in "review".chars() {
             assert_eq!(
@@ -3216,6 +3236,24 @@ mod tests {
                 }
             )]
         );
+    }
+
+    #[test]
+    fn typing_on_the_new_session_row_starts_inline_input_with_that_character() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        while !ui.workspace.new_session_selected() {
+            let _ = step_workspace(&mut ui, Key::Down);
+        }
+
+        assert_eq!(step_workspace(&mut ui, Key::Char('f')), WorkspaceStep::Stay);
+        assert!(ui.workspace.creating_session_inline());
+        assert_eq!(ui.workspace.inline_create_value(), Some("f"));
     }
 
     #[test]

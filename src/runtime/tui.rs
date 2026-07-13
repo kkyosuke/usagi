@@ -392,12 +392,12 @@ fn passthrough_key(input: &LiveInput) -> Key {
         return Key::Other;
     }
     // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
-    // action.  Keep the presentation vocabulary small by translating it to the
-    // same shortcut as `c`; Ctrl-O remains the only live-pane leader.
+    // action. Preserve it as a control byte so typing `c` directly on the
+    // action row can still start a session name with that character.
     if (key.modifiers.control && key.code == KeyCode::Char('a'))
         || key.code == KeyCode::Char('\u{1}')
     {
-        return Key::Char('c');
+        return Key::Char('\u{1}');
     }
     match key.code {
         KeyCode::Up => Key::Up,
@@ -694,7 +694,7 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key), Key::Char('c'));
+        assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
     }
 
     #[test]
