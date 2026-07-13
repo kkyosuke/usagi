@@ -33,18 +33,51 @@ const ESC: char = '\u{1b}';
 /// (`ESC [ 0 m`)。開いた色が後続の内容に滲むのを防ぐ。
 const RESET: &str = "\u{1b}[0m";
 
+/// Configures a [`shimmer_text_with`] sweep. `speed` advances the two-cell band
+/// once per this many frames; `replacement` overwrites only the highlighted
+/// cells, leaving the dim background text intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shimmer {
+    pub style: Style,
+    pub speed: usize,
+    pub replacement: Option<char>,
+}
+
+impl Default for Shimmer {
+    fn default() -> Self {
+        Self {
+            style: Role::Accent.style().bold(),
+            speed: 1,
+            replacement: None,
+        }
+    }
+}
+
 /// v1 の tab launch / session skeleton と同じ loading sweep。
 #[must_use]
 pub fn shimmer_text(text: &str, frame: usize) -> String {
+    shimmer_text_with(text, frame, Shimmer::default())
+}
+
+/// A configurable version of [`shimmer_text`].
+///
+/// `speed == 0` is treated as one frame per step. A replacement character is
+/// painted only inside the two-cell bright band, which makes it suitable for
+/// progress glyphs without losing the surrounding label.
+#[must_use]
+pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     let chars = text.chars().collect::<Vec<_>>();
-    let head = frame % (chars.len() + 3);
+    let head = (frame / shimmer.speed.max(1)) % (chars.len() + 3);
     let mut out = String::new();
     for (index, character) in chars.into_iter().enumerate() {
-        let character = character.to_string();
         if index == head || index + 1 == head {
-            out.push_str(&Role::Accent.style().bold().paint(&character));
+            out.push_str(
+                &shimmer
+                    .style
+                    .paint(&shimmer.replacement.unwrap_or(character).to_string()),
+            );
         } else {
-            out.push_str(&Style::new().dim().paint(&character));
+            out.push_str(&Style::new().dim().paint(&character.to_string()));
         }
     }
     out
@@ -258,8 +291,8 @@ pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        block_caret, centered_padding, clip_to_width, display_width, normalize_size,
-        relative_session_time, relative_time, wrap_to_width,
+        Shimmer, block_caret, centered_padding, clip_to_width, display_width, normalize_size,
+        relative_session_time, relative_time, shimmer_text, shimmer_text_with, wrap_to_width,
     };
     use crate::presentation::theme::Role;
     use chrono::{DateTime, Duration, Utc};
@@ -427,5 +460,22 @@ mod tests {
         let now = at("2026-06-25T12:00:00Z");
         // 1 か月を超えると絶対日付になる。
         assert_eq!(relative_time(at("2026-05-01T00:00:00Z"), now), "2026-05-01");
+    }
+
+    #[test]
+    fn shimmer_allows_colour_speed_and_glyph_replacement() {
+        let options = Shimmer {
+            style: Role::Success.style().bold(),
+            speed: 2,
+            replacement: Some('\u{f907}'),
+        };
+        let first = shimmer_text_with("waiting", 0, options);
+        let held = shimmer_text_with("waiting", 1, options);
+        let advanced = shimmer_text_with("waiting", 2, options);
+        assert!(first.contains('\u{f907}'));
+        assert_eq!(first, held, "speed holds a frame for two ticks");
+        assert_ne!(first, advanced);
+        assert!(first.contains("\u{1b}["), "configured style is applied");
+        assert_ne!(shimmer_text("waiting", 0), first);
     }
 }
