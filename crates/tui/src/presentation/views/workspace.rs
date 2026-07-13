@@ -272,8 +272,6 @@ impl Mode {
     #[coverage(off)]
     fn icon(self) -> char {
         match self {
-            // Keep the v1 Font Awesome/Nerd Font glyphs so the mode affordance
-            // is recognizable across the two TUI generations.
             Self::Switch => '\u{f0ec}',
             Self::Closeup => '\u{f00e}',
         }
@@ -707,25 +705,22 @@ impl Workspace {
 /// 全幅の header: workspace 名のパンくずは左、mode toggle は右上に固定する。
 #[coverage(off)]
 fn header_line(width: usize, ws: &Workspace) -> String {
-    let count = ws.sessions().len();
-    let sep = Style::new().dim().paint(" › ");
-    let dot = Style::new().dim().paint(" · ");
+    let sep = Style::new().dim().paint(" > ");
     let left = format!(
-        " {}{sep}{}{dot}{}",
+        " {}{sep}{}",
         Role::Success.style().bold().paint("USAGI"),
         Role::Success.style().bold().paint(ws.name()),
-        Style::new().dim().paint(&format!("{count} sessions")),
     );
     header_with_mode_toggle(width, &left, ws.mode())
 }
 
-/// v1 と同じアイコン付きの mode 表示。現在の mode だけを accent で強調する。
+/// v1 の chrome と同じアイコン付き mode 表示。現在の mode だけを accent で強調する。
 #[coverage(off)]
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
         .iter()
         .map(|mode| {
-            let label = format!("{} {}", mode.icon(), mode.label());
+            let label = format!("{} {}", mode.icon(), mode.label().to_ascii_lowercase());
             if *mode == current {
                 Role::Accent.style().bold().paint(&label)
             } else {
@@ -749,10 +744,10 @@ fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
     format!("{left}{}{toggle}", " ".repeat(gap))
 }
 
-/// header と本文を分ける全幅の水平罫線（dim）。
+/// Header の下に呼吸できる余白を作る全幅の空行。
 #[coverage(off)]
-fn rule_line(width: usize) -> String {
-    Style::new().dim().paint(&"─".repeat(width))
+fn header_spacer(width: usize) -> String {
+    " ".repeat(width)
 }
 
 // ── left pane: session menu ─────────────────────────────────────────────────
@@ -783,7 +778,13 @@ fn workspace_row_height(_index: usize) -> usize {
 
 #[coverage(off)]
 fn sidebar_divider(width: usize) -> String {
-    widgets::pad_to_width(&Style::new().dim().paint(&"─".repeat(width)), width)
+    // Indenting the rule gives the root row and the session group distinct
+    // breathing room without moving the pane boundary itself.
+    let indent = "  ".repeat(usize::from(width >= 2));
+    let rule = Style::new()
+        .dim()
+        .paint(&"─".repeat(width.saturating_sub(widgets::display_width(&indent))));
+    widgets::pad_to_width(&format!("{indent}{rule}"), width)
 }
 
 #[coverage(off)]
@@ -890,8 +891,8 @@ fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
 #[coverage(off)]
 fn left_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "[switch] ↑↓ target",
-        Mode::Closeup => "[closeup] target selected",
+        Mode::Switch => "[switch] ↑↓ select / Enter closeup",
+        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
     };
     Style::new()
         .dim()
@@ -1082,7 +1083,7 @@ pub fn render_with_skeleton_frame(
 
     let mut frame = Vec::with_capacity(height);
     frame.push(header_line(width, ws));
-    frame.push(rule_line(width));
+    frame.push(header_spacer(width));
 
     let body_height = height.saturating_sub(CHROME_ROWS);
     let split = panes::split(width, LEFT_WIDTH);
@@ -1107,7 +1108,7 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     let body_height = height.saturating_sub(CHROME_ROWS);
     let mut frame = Vec::with_capacity(height);
     frame.push(home_header_line(width, home));
-    frame.push(rule_line(width));
+    frame.push(header_spacer(width));
     let now = Utc::now();
     frame.extend(panes::join(
         body_height,
@@ -1135,14 +1136,10 @@ fn home_header_line(width: usize, home: &HomeProjection) -> String {
         HomeMode::Closeup => Mode::Closeup,
     };
     let left = format!(
-        " {}{}{}{}{}",
+        " {}{}{}",
         Role::Success.style().bold().paint("USAGI"),
-        Style::new().dim().paint(" › "),
+        Style::new().dim().paint(" > "),
         Role::Success.style().bold().paint(&home.workspace_name),
-        Style::new().dim().paint(" · "),
-        Style::new()
-            .dim()
-            .paint(&format!("{} sessions", home.sessions.len())),
     );
     header_with_mode_toggle(width, &left, mode)
 }
@@ -1201,8 +1198,8 @@ fn home_left_pane(
         lines.push(String::new());
     }
     let footer = match home.mode {
-        HomeMode::Switch => "[switch] ↑↓ cursor · Enter target",
-        HomeMode::Closeup => "[closeup] current target",
+        HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
+        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
     };
     lines.push(
         Style::new()
@@ -1289,8 +1286,18 @@ fn home_row_lines_at(
     if let Some(session) = session {
         let modified = widgets::relative_session_time(session.last_modified, now);
         let metadata = session.pr_summary.as_deref().map_or_else(
-            || format!("  {modified}"),
-            |pr| format!("  {modified} · {pr}"),
+            || {
+                format!(
+                    "{} {modified}",
+                    home_session_continuation_marker(selected, current)
+                )
+            },
+            |pr| {
+                format!(
+                    "{} {modified} · {pr}",
+                    home_session_continuation_marker(selected, current)
+                )
+            },
         );
         vec![
             first,
@@ -1301,26 +1308,37 @@ fn home_row_lines_at(
     }
 }
 
-/// v1-compatible one-cell sidebar marker with explicit precedence.
+/// v1-compatible sidebar marker with explicit precedence.
 ///
-/// The selected session glyph remains readable in a terminal that lacks the Nerd Font glyph
-/// because the selected name is also emphasized.  Root and action rows keep `>` as their
-/// cursor marker.  A current target uses the green bar only when no cursor already owns the
-/// row, so a single row never carries two competing meanings.
+/// A selected session starts with v1's usagi glyph and uses a red `|` continuation;
+/// in Closeup its active two-line stack is green. Root and action rows retain the compact
+/// red `>` cursor in Switch.
 #[coverage(off)]
 fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
     if selected {
         return match row {
-            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("󰤇"),
+            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("\u{f0907}"),
             Selection::Target(Target::Root(_)) | Selection::NewSession => {
                 Role::Danger.style().bold().paint(">")
             }
         };
     }
     if current {
-        return Role::Success.style().bold().paint("▎");
+        return Role::Success.style().bold().paint("|");
     }
     " ".to_string()
+}
+
+/// The second row of a session carries the same coloured rail as its identity row.
+#[coverage(off)]
+fn home_session_continuation_marker(selected: bool, current: bool) -> String {
+    if selected {
+        Role::Danger.style().bold().paint("|")
+    } else if current {
+        Role::Success.style().bold().paint("|")
+    } else {
+        " ".to_string()
+    }
 }
 
 #[coverage(off)]
@@ -1605,8 +1623,8 @@ mod tests {
             .iter()
             .map(|line| strip(line))
             .collect::<Vec<_>>();
-        assert!(lines.iter().any(|line| line.contains("▎ first")));
-        assert!(!lines.iter().any(|line| line.contains("󰤇 second")));
+        assert!(lines.iter().any(|line| line.contains("| first")));
+        assert!(!lines.iter().any(|line| line.contains("\u{f0907} second")));
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
@@ -1628,7 +1646,7 @@ mod tests {
         );
         let text = joined_home(&home);
         assert!(!text.contains("> + new session"));
-        assert!(!text.contains("▎ + new session"));
+        assert!(!text.contains("| + new session"));
 
         let _ = update(
             &mut state,
@@ -1660,17 +1678,17 @@ mod tests {
 
         let closeup = HomeProjection::from_state(&state, "work", "/work", &snapshot);
         let closeup_text = joined_home(&closeup);
-        assert!(closeup_text.contains("▎ 同じ名前"));
-        assert!(!closeup_text.contains("󰤇 同じ名前"));
-        assert!(closeup_text.contains("[closeup] current target"));
+        assert!(closeup_text.contains("| 同じ名前"));
+        assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
+        assert!(closeup_text.contains("[closeup] Ctrl-O then"));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
         let switch = HomeProjection::from_state(&state, "work", "/work", &snapshot);
         let switch_text = joined_home(&switch);
-        assert!(switch_text.contains("▎ 同じ名前"));
-        assert!(switch_text.contains("󰤇 同じ名前"));
-        assert!(switch_text.contains("[switch] ↑↓ cursor"));
+        assert!(switch_text.contains("| 同じ名前"));
+        assert!(switch_text.contains("\u{f0907} 同じ名前"));
+        assert!(switch_text.contains("[switch] ↑↓ select"));
 
         for line in render_home(8, 7, &switch) {
             assert!(display_width(&line) <= 7);
@@ -2011,7 +2029,7 @@ mod tests {
         ws.select_prev();
         assert_eq!(ws.selected(), 0);
         let text = joined(&ws);
-        assert!(text.contains("0 sessions"));
+        assert!(text.contains("USAGI > empty"));
         assert!(!text.contains("/tmp/empty"));
     }
 
@@ -2104,23 +2122,25 @@ mod tests {
     #[test]
     fn header_shows_both_modes_and_highlights_the_current_one() {
         let mut ws = workspace();
-        let switch_header = &render(30, 100, &ws)[0];
-        assert!(switch_header.contains("\u{1b}[1;36m\u{f0ec} Switch\u{1b}[0m"));
-        assert!(switch_header.contains("\u{1b}[2m\u{f00e} Closeup\u{1b}[0m"));
+        let switch_frame = render(30, 100, &ws);
+        let switch_header = &switch_frame[0];
+        assert!(switch_header.contains("\u{1b}[1;36m\u{f0ec} switch\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[2m\u{f00e} closeup\u{1b}[0m"));
         assert!(
             strip(switch_header)
                 .trim_end()
-                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+                .ends_with("\u{f0ec} switch  \u{f00e} closeup")
         );
+        assert!(strip(&switch_frame[1]).trim().is_empty());
 
         ws.enter_closeup();
         let closeup_header = &render(30, 100, &ws)[0];
-        assert!(closeup_header.contains("\u{1b}[2m\u{f0ec} Switch\u{1b}[0m"));
-        assert!(closeup_header.contains("\u{1b}[1;36m\u{f00e} Closeup\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[2m\u{f0ec} switch\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[1;36m\u{f00e} closeup\u{1b}[0m"));
         assert!(
             strip(closeup_header)
                 .trim_end()
-                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+                .ends_with("\u{f0ec} switch  \u{f00e} closeup")
         );
     }
 
@@ -2128,7 +2148,7 @@ mod tests {
     fn render_uses_mode_specific_footers_and_renders_chrome_tabs_from_pane_state() {
         let mut ws = workspace();
         let switch = joined(&ws);
-        assert!(switch.contains("[switch] ↑↓ target"));
+        assert!(switch.contains("[switch] ↑↓ select"));
         assert!(switch.contains("←→/hl tab"));
         assert!(switch.contains("Enter/t closeup"));
         assert!(switch.contains("p PR"));
@@ -2142,7 +2162,7 @@ mod tests {
             .map(|line| strip(line))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(closeup.contains("[closeup] target selected"));
+        assert!(closeup.contains("[closeup] Ctrl-O then"));
         assert!(closeup.contains("←→/hl tab"));
         assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
@@ -2155,7 +2175,7 @@ mod tests {
         let text = joined(&workspace());
         assert!(text.contains("USAGI"));
         assert!(text.contains("actual"));
-        assert!(text.contains("2 sessions"));
+        assert!(text.contains("USAGI > actual"));
         assert!(!text.contains("Sessions"));
         assert!(text.contains("UI work"));
         assert!(text.contains("daemon"));
