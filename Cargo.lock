@@ -930,6 +930,7 @@ dependencies = [
  "crossterm",
  "fs2",
  "libc",
+ "serde_json",
  "tempfile",
  "usagi-cli",
  "usagi-core",

@@ -288,6 +288,20 @@ impl Workspace {
         &self.state.sessions
     }
 
+    /// The workspace record passed to the daemon lifecycle command port.
+    #[must_use]
+    #[coverage(off)]
+    pub fn record(&self) -> &WorkspaceRecord {
+        &self.record
+    }
+
+    /// The selected session record, if the root row is not selected.
+    #[must_use]
+    #[coverage(off)]
+    pub fn selected_session(&self) -> Option<&SessionRecord> {
+        self.focused_session()
+    }
+
     /// 現在の操作 mode。
     #[must_use]
     #[coverage(off)]

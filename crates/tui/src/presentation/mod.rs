@@ -31,6 +31,7 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
+use crate::usecase::overview::{self, SessionCommand};
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
@@ -154,6 +155,43 @@ pub trait OverlayDataPort {
     ) -> Result<Vec<usagi_core::domain::pullrequest::PrLink>, String>;
 }
 
+/// Overview の session command を daemon 所有の lifecycle runner へ渡す境界。
+///
+/// TUI は session store や git worktree を直接操作しない。実行時の合成ルートが
+/// daemon IPC client をこの port として注入し、テストは fake port で command と
+/// target の対応だけを検証する。
+pub trait SessionCommandPort {
+    /// Execute one parsed Overview session command for this workspace and its
+    /// currently selected session, when the command requires one.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe message when the daemon cannot accept the request.
+    #[coverage(off)]
+    fn execute(
+        &mut self,
+        _workspace: &usagi_core::domain::workspace::Workspace,
+        _selected: Option<&usagi_core::domain::session::SessionRecord>,
+        _command: SessionCommand,
+    ) -> Result<String, String> {
+        Err("session command port is not implemented".to_owned())
+    }
+}
+
+struct UnavailableSessionCommandPort;
+
+impl SessionCommandPort for UnavailableSessionCommandPort {
+    #[coverage(off)]
+    fn execute(
+        &mut self,
+        _workspace: &usagi_core::domain::workspace::Workspace,
+        _selected: Option<&usagi_core::domain::session::SessionRecord>,
+        _command: SessionCommand,
+    ) -> Result<String, String> {
+        Err("session commands are unavailable".to_owned())
+    }
+}
+
 /// 永続化済み snapshot を読む既定の overlay data port。
 struct SnapshotOverlayData;
 
@@ -198,17 +236,33 @@ struct WorkspaceUi {
     closeup: CloseupModal,
     modal: Option<WorkspaceModal>,
     overlay_data: Box<dyn OverlayDataPort>,
+    session_commands: Box<dyn SessionCommandPort>,
 }
 
 impl WorkspaceUi {
+    #[cfg(test)]
     #[coverage(off)]
     fn with_overlay_data(workspace: WorkspaceView, overlay_data: Box<dyn OverlayDataPort>) -> Self {
+        Self::with_ports(
+            workspace,
+            overlay_data,
+            Box::new(UnavailableSessionCommandPort),
+        )
+    }
+
+    #[coverage(off)]
+    fn with_ports(
+        workspace: WorkspaceView,
+        overlay_data: Box<dyn OverlayDataPort>,
+        session_commands: Box<dyn SessionCommandPort>,
+    ) -> Self {
         let closeup = CloseupModal::new(workspace.focused_label());
         Self {
             workspace,
             closeup,
             modal: None,
             overlay_data,
+            session_commands,
         }
     }
 
@@ -446,7 +500,58 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 }
 
 /// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
-/// Enter の command 実行は command handler が接続されるまで no-op とする。
+#[coverage(off)]
+fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
+    let WorkspaceModal::Overview(modal) = ui.modal.as_mut().expect("overview modal is active")
+    else {
+        return false;
+    };
+    match key {
+        Key::Up => {
+            if !modal.recall_previous() {
+                modal.select_prev();
+            }
+        }
+        Key::Down => {
+            if !modal.recall_next() {
+                modal.select_next();
+            }
+        }
+        Key::Left => modal.cursor_left(),
+        Key::Right => modal.cursor_right(),
+        Key::Backspace => modal.backspace(),
+        Key::Tab => modal.complete_selected(),
+        Key::Char(ch) => modal.insert_char(ch),
+        Key::Escape => return true,
+        Key::Enter => {
+            let input = modal.submission();
+            modal.record_submission();
+            match overview::interpret(&input) {
+                Ok(overview::Command::Session { arguments }) => {
+                    match overview::parse_session(&arguments) {
+                        Ok(command) => match ui.session_commands.execute(
+                            ui.workspace.record(),
+                            ui.workspace.selected_session(),
+                            command,
+                        ) {
+                            Ok(result) => modal.set_result(result),
+                            Err(error) => modal.set_error(error),
+                        },
+                        Err(error) => modal.set_error(error),
+                    }
+                }
+                Ok(_) => modal.set_result("command is not connected"),
+                Err(error) => modal.set_error(error.to_string()),
+            }
+        }
+        Key::Quit | Key::Other => {}
+    }
+    false
+}
+
+/// Input-only Overview reducer retained for modal rendering scenarios. Runtime
+/// execution uses [`step_overview_command`] so session commands reach its port.
+#[cfg(test)]
 #[coverage(off)]
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
@@ -564,7 +669,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 
     if let Some(modal) = &mut ui.modal {
         let close = match modal {
-            WorkspaceModal::Overview(modal) => step_overview(modal, key),
+            WorkspaceModal::Overview(_) => step_overview_command(ui, key),
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
             WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
         };
@@ -612,7 +717,12 @@ fn drive_workspace(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
 ) -> io::Result<WorkspaceStep> {
-    drive_workspace_with_overlay_data(term, snapshot, Box::new(SnapshotOverlayData))
+    drive_workspace_with_ports(
+        term,
+        snapshot,
+        Box::new(SnapshotOverlayData),
+        Box::new(UnavailableSessionCommandPort),
+    )
 }
 
 /// `overlay_data` を注入して 1 つの Workspace snapshot を駆動する。
@@ -638,8 +748,22 @@ fn drive_workspace_with_overlay_data(
     snapshot: WorkspaceSnapshot,
     overlay_data: Box<dyn OverlayDataPort>,
 ) -> io::Result<WorkspaceStep> {
+    drive_workspace_with_ports(
+        term,
+        snapshot,
+        overlay_data,
+        Box::new(UnavailableSessionCommandPort),
+    )
+}
+
+fn drive_workspace_with_ports(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    overlay_data: Box<dyn OverlayDataPort>,
+    session_commands: Box<dyn SessionCommandPort>,
+) -> io::Result<WorkspaceStep> {
     let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
-    let mut ui = WorkspaceUi::with_overlay_data(workspace, overlay_data);
+    let mut ui = WorkspaceUi::with_ports(workspace, overlay_data, session_commands);
     loop {
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
@@ -659,6 +783,27 @@ fn drive_workspace_with_overlay_data(
 #[coverage(off)]
 pub fn run_workspace(term: &mut dyn Terminal, snapshot: WorkspaceSnapshot) -> io::Result<Exit> {
     drive_workspace(term, snapshot).map(|_| Exit::Quit)
+}
+
+/// Run a Workspace UI whose Overview session commands use the injected daemon
+/// lifecycle port.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+pub fn run_workspace_with_session_port(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+) -> io::Result<Exit> {
+    drive_workspace_with_ports(
+        term,
+        snapshot,
+        Box::new(SnapshotOverlayData),
+        session_commands,
+    )
+    .map(|_| Exit::Quit)
 }
 
 /// `start` で選んだ画面を起点にした対話 runtime。
@@ -847,11 +992,11 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
-        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SnapshotOverlayData, Start,
-        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, run as run_from_start, run_workspace, run_workspace_with_overlay_data,
-        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
-        write_banner,
+        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
+        SnapshotOverlayData, Start, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start, run_workspace,
+        run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
+        step_overview, step_pr, step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -860,10 +1005,12 @@ mod tests {
     };
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
+    use crate::usecase::overview::SessionCommand;
     use chrono::{DateTime, Duration, Utc};
     use std::collections::VecDeque;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
@@ -908,6 +1055,28 @@ mod tests {
 
     fn snapshot(name: &str) -> WorkspaceSnapshot {
         WorkspaceSnapshot::new(ws(name), state(name))
+    }
+
+    type SessionCommandCall = (String, Option<String>, SessionCommand);
+
+    #[derive(Clone)]
+    struct RecordingSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
+
+    impl SessionCommandPort for RecordingSessionPort {
+        #[coverage(off)]
+        fn execute(
+            &mut self,
+            workspace: &Workspace,
+            selected: Option<&SessionRecord>,
+            command: SessionCommand,
+        ) -> Result<String, String> {
+            self.0.lock().unwrap().push((
+                workspace.name.clone(),
+                selected.map(|session| session.name.clone()),
+                command,
+            ));
+            Ok("daemon accepted".to_owned())
+        }
     }
 
     fn snapshot_with_pr(name: &str) -> WorkspaceSnapshot {
@@ -1672,6 +1841,32 @@ mod tests {
         // 次の Esc は Closeup -> Switch。最後の Esc が direct runtime を閉じる。
         assert!(frame(13).contains("Switch"));
         assert!(!frame(13).contains("Open terminal"));
+    }
+
+    #[test]
+    fn overview_session_command_uses_the_injected_daemon_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let port = RecordingSessionPort(calls.clone());
+        let mut keys = vec![Key::Char(':')];
+        keys.extend("session list".chars().map(Key::Char));
+        keys.extend([Key::Enter, Key::Quit]);
+        let mut term = FakeTerminal::with_keys(&keys);
+
+        assert_eq!(
+            run_workspace_with_session_port(&mut term, snapshot("runner"), Box::new(port)).unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("runner".to_owned(), None, SessionCommand::List)]
+        );
+        assert!(
+            term.frames
+                .last()
+                .unwrap()
+                .join("\n")
+                .contains("daemon accepted")
+        );
     }
 
     #[test]

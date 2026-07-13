@@ -60,6 +60,8 @@ pub struct AgentLaunchIntent {
 pub enum SessionAction {
     Create,
     Remove,
+    List,
+    Overview,
     Setup,
     Prompt,
 }
