@@ -456,6 +456,7 @@ pub struct AppState {
     mascot_tick: u64,
     size: Option<(u16, u16)>,
     has_live_pane: bool,
+    closeup_action_forced: bool,
     ctrl_c_grace: bool,
 }
 
@@ -484,6 +485,7 @@ impl AppState {
             mascot_tick: 0,
             size: None,
             has_live_pane: false,
+            closeup_action_forced: false,
             ctrl_c_grace: false,
         }
     }
@@ -672,6 +674,10 @@ pub enum AppKey {
     CtrlA,
     /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
     CtrlO,
+    /// Ctrl-O n / Ctrl-N selects the next Closeup tab when a live pane owns input.
+    CtrlN,
+    /// Ctrl-O p / Ctrl-P selects the previous Closeup tab when a live pane owns input.
+    CtrlP,
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
     Home,
@@ -735,6 +741,20 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
             Some(AppKey::CtrlO)
+        }
+        KeyCode::Char('\u{e}') if !key.modifiers.shift && !key.modifiers.alt => Some(AppKey::CtrlN),
+        KeyCode::Char('n')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::CtrlN)
+        }
+        KeyCode::Char('\u{10}') if !key.modifiers.shift && !key.modifiers.alt => {
+            Some(AppKey::CtrlP)
+        }
+        KeyCode::Char('p')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::CtrlP)
         }
         KeyCode::Char('\u{1}') if !key.modifiers.shift && !key.modifiers.alt => Some(AppKey::CtrlA),
         KeyCode::Char('a')
@@ -830,9 +850,19 @@ pub struct OperationResult {
     pub notice: Option<Notice>,
 }
 
+/// Pane owner に委譲する tab selection の方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabDirection {
+    Next,
+    Previous,
+}
+
 /// reducer が要求する外部操作。daemon wire 型への変換は adapter 側の責務。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// Ask the pane owner to move its stable tab selection without exposing tab
+    /// identities to this controller.
+    SelectTab { direction: TabDirection },
     /// session create を backend に依頼する。
     CreateSession {
         workspace: WorkspaceId,
@@ -1522,6 +1552,15 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         AppEvent::LivePaneAvailability(has_live_pane) => {
             state.ctrl_c_grace = state.has_live_pane && !has_live_pane;
             state.has_live_pane = has_live_pane;
+            if matches!(state.route, Route::Home(HomeMode::Closeup)) {
+                if has_live_pane {
+                    if !state.closeup_action_forced {
+                        state.overlay = None;
+                    }
+                } else {
+                    state.overlay = Some(Overlay::Closeup);
+                }
+            }
             Vec::new()
         }
         AppEvent::Resize { width, height } => {
@@ -1708,8 +1747,13 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
         }
         Overlay::CreateSession => update_create_session_form(state, &key),
-        Overlay::Overview | Overlay::Closeup if matches!(key, AppKey::Escape) => {
+        Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
+            Vec::new()
+        }
+        Overlay::Closeup if matches!(key, AppKey::Escape) => {
+            state.closeup_action_forced = false;
+            state.overlay = (!state.has_live_pane).then_some(Overlay::Closeup);
             Vec::new()
         }
         Overlay::Overview | Overlay::Closeup => update_management_key(state, key),
@@ -1733,25 +1777,45 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::OpenCloseupOverlay => {
             state.overlay = Some(Overlay::Closeup);
+            state.closeup_action_forced = state.has_live_pane;
             Vec::new()
         }
         AppKey::CtrlA => match state.route {
             Route::Home(HomeMode::Switch) => open_create_session(state),
             Route::Home(HomeMode::Closeup) => {
                 state.overlay = Some(Overlay::Closeup);
+                state.closeup_action_forced = state.has_live_pane;
                 Vec::new()
             }
         },
         AppKey::CtrlO => {
             if matches!(state.route, Route::Home(HomeMode::Closeup)) {
                 state.route = Route::Home(HomeMode::Switch);
+                state.closeup_action_forced = false;
+                state.overlay = None;
             }
             Vec::new()
+        }
+        AppKey::CtrlN
+            if state.has_live_pane && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
+        {
+            vec![Effect::SelectTab {
+                direction: TabDirection::Next,
+            }]
+        }
+        AppKey::CtrlP
+            if state.has_live_pane && matches!(state.route, Route::Home(HomeMode::Closeup)) =>
+        {
+            vec![Effect::SelectTab {
+                direction: TabDirection::Previous,
+            }]
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
-        AppKey::Escape
+        AppKey::CtrlN
+        | AppKey::CtrlP
+        | AppKey::Escape
         | AppKey::Tab
         | AppKey::Backspace
         | AppKey::Home
@@ -2050,6 +2114,8 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
         Selection::Target(target) => {
             state.active = target;
             state.route = Route::Home(HomeMode::Closeup);
+            state.closeup_action_forced = false;
+            state.overlay = (!state.has_live_pane).then_some(Overlay::Closeup);
             Vec::new()
         }
         Selection::NewSession => open_create_session(state),
@@ -2184,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn management_classifier_preserves_ctrl_a_and_ctrl_o_management_chords() {
+    fn management_classifier_preserves_closeup_control_chords() {
         let ctrl_a = |code| {
             LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
                 code,
@@ -2225,6 +2291,12 @@ mod tests {
         );
         for code in [KeyCode::Char('\u{f}'), KeyCode::Char('o')] {
             assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlO));
+        }
+        for code in [KeyCode::Char('\u{e}'), KeyCode::Char('n')] {
+            assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlN));
+        }
+        for code in [KeyCode::Char('\u{10}'), KeyCode::Char('p')] {
+            assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlP));
         }
     }
 
@@ -2452,6 +2524,7 @@ mod tests {
             Case {
                 name: "closeup overlay returns to closeup origin",
                 events: vec![
+                    AppEvent::LivePaneAvailability(true),
                     AppEvent::Key(AppKey::Enter),
                     AppEvent::Key(AppKey::OpenCloseupOverlay),
                     AppEvent::Key(AppKey::Escape),
@@ -2461,7 +2534,11 @@ mod tests {
             },
             Case {
                 name: "closeup escape is no-op",
-                events: vec![AppEvent::Key(AppKey::Enter), AppEvent::Key(AppKey::Escape)],
+                events: vec![
+                    AppEvent::LivePaneAvailability(true),
+                    AppEvent::Key(AppKey::Enter),
+                    AppEvent::Key(AppKey::Escape),
+                ],
                 route: Route::Home(HomeMode::Closeup),
                 overlay: None,
             },
@@ -3273,6 +3350,7 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let mut backend = FakeBackend::default();
 
         let effects = update(&mut state, AppEvent::Key(AppKey::OpenNotes));

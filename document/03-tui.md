@@ -52,6 +52,11 @@ Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup 
 prefix の打鍵は live terminal への passthrough として扱う（`Ctrl-O`・`Ctrl-^` 以外は予約しない）。prefix の
 follow-up は下表のアクションに解決する。
 
+controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
+自動で開き、pane が到着すると通常の tab surface へ戻る。adapter は prefix の next / previous 結果を
+`CtrlN` / `CtrlP` として reducer に渡し、reducer は pane 所有者へ tab selection effect を要求するだけで、tab
+identity は保持しない。
+
 | prefix | アクション | 効果 |
 |---|---|---|
 | `Ctrl-O` `o`（または `Ctrl-O`） | Switch | Closeup から Switch へ戻る |

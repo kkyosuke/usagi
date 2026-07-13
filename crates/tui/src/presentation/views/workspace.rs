@@ -17,6 +17,7 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
+use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::widgets;
 use crate::usecase::application::controller::{
     AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
@@ -68,6 +69,7 @@ pub struct HomeProjection {
     mascot_tick: u64,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
+    closeup_action_visible: bool,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -114,6 +116,12 @@ impl HomeProjection {
             mascot_tick: state.mascot_tick(),
             pane_tabs: Vec::new(),
             pane_error: None,
+            closeup_action_visible: matches!(
+                state.route(),
+                crate::usecase::application::controller::Route::Home(HomeMode::Closeup)
+            ) && (!state.has_live_pane()
+                || state.overlay()
+                    == Some(crate::usecase::application::controller::Overlay::Closeup)),
         }
     }
 
@@ -880,7 +888,16 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         split,
     ));
     frame.truncate(height);
-    frame
+    if home.closeup_action_visible {
+        crate::presentation::views::closeup_modal::render_over(
+            height,
+            width,
+            &frame,
+            &CloseupModal::new(home.active_label()),
+        )
+    } else {
+        frame
+    }
 }
 
 #[coverage(off)]
@@ -1260,6 +1277,7 @@ mod tests {
         let mut state = AppState::home(workspace, vec![first, second]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let home = HomeProjection::from_state(
             &state,
@@ -1288,6 +1306,7 @@ mod tests {
         let mut state = AppState::home(workspace, vec![session]);
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         let home = HomeProjection::from_state(
             &state,
