@@ -1062,15 +1062,23 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 }
 
 #[coverage(off)]
-fn mascot_metrics(metrics: Option<&DaemonMetrics>) -> Vec<String> {
+fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
-        || vec!["daemon: waiting".to_owned()],
-        |metrics| {
+        || {
+            let shimmer = (0..6)
+                .map(|index| if index == frame % 6 { '▓' } else { '░' })
+                .collect::<String>();
             vec![
-                "daemon metrics".to_owned(),
-                format!("{} subscribers", metrics.active_subscribers),
-                format!("{} dropped", metrics.dropped_updates),
+                Style::new()
+                    .dim()
+                    .paint(&format!("waiting daemon {shimmer}")),
             ]
+        },
+        |metrics| {
+            vec![format!(
+                "{} sub · {} dropped",
+                metrics.active_subscribers, metrics.dropped_updates
+            )]
         },
     )
 }
@@ -1092,8 +1100,13 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let body_capacity = height - 1;
     // Keep the menu usable first. The mascot block includes its always-reserved
     // blank row, so the viewport and footer cannot drift when speech adds rows.
-    let metric_labels = mascot_metrics(ws.metrics.as_ref());
-    let mascot = widgets::mascot::sidebar_block_with_sidecar(width, 0, None, &metric_labels);
+    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(
+        width,
+        skeleton_frame as u64,
+        None,
+        &metric_labels,
+    );
     let show_mascot = mascot
         .as_ref()
         .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
@@ -2480,11 +2493,10 @@ mod tests {
             .iter()
             .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
             .collect::<Vec<_>>();
-        let metrics = left_rows
+        let _metrics = left_rows
             .iter()
-            .find(|line| line.contains("3 subscribers"))
+            .position(|line| line.contains("3 sub · 5 dropped"))
             .expect("metrics beside usagi");
-        assert!(metrics.contains("(o.o)?"));
     }
 
     #[test]

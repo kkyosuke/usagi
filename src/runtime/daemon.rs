@@ -676,6 +676,7 @@ fn start_ipc_accept_loop(
                                     {
                                         Some("session") => dispatch_session(&session, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("metrics") => dispatch_metrics(request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -689,6 +690,29 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+fn dispatch_metrics(
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    _body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    let sampled_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        });
+    envelope(
+        hello,
+        request_id,
+        usagi_core::infrastructure::ipc::ResponseOutcome::Ok,
+        serde_json::json!({
+            "schema_version": 1,
+            "sampled_at_ms": sampled_at_ms,
+            "active_subscribers": 0,
+            "dropped_updates": 0,
+        }),
+    )
 }
 
 fn dispatch_session(

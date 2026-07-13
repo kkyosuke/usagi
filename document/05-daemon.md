@@ -150,7 +150,7 @@ non-blocking に fan-out する。observer が遅い場合は中間 snapshot を
 Agent runtime の進行を block しない。登録、解除、再接続時の protocol は
 [4. daemon IPC](04-ipc.md#daemon-metrics-subscription) を正本とする。
 
-TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の右へ表示する。
+TUI は最新 snapshot を workspace の左ペイン下部にある v1 互換の usagi mascot の足元の右へ表示する。
 この観測値は操作対象ではないため、狭い terminal では session 一覧と footer を優先して mascot ごと省略される。
 
 ## generation と orphan safety

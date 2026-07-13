@@ -22,7 +22,8 @@ use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply, DaemonRequest,
+    MetricsAction, SessionAction,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -32,8 +33,9 @@ use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
-    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, SessionCommandPort,
-    SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
+    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader,
+    WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -47,6 +49,22 @@ use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 #[derive(Default)]
 struct DaemonSessionCommandPort {
     last_revision: u64,
+}
+
+struct DaemonMetricsPort;
+impl MetricsPort for DaemonMetricsPort {
+    fn latest(&mut self) -> Option<DaemonMetrics> {
+        let mut client = crate::runtime::daemon::client(ClientPolicy::tui()).ok()?;
+        match client
+            .request(DaemonRequest::Metrics {
+                action: MetricsAction::Snapshot,
+            })
+            .ok()?
+        {
+            DaemonReply::Ok(value) => serde_json::from_value(value).ok(),
+            DaemonReply::Accepted { .. } => None,
+        }
+    }
 }
 
 /// Root composition adapter for the only Agent launch authority: the daemon.
@@ -640,6 +658,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     modal_selection_mode,
                     Box::new(DaemonAgentCommandPort),
+                    Box::new(DaemonMetricsPort),
                 )
             })
         })?;

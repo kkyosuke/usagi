@@ -24,6 +24,7 @@ use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
+use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
 use crate::presentation::views::config::{self, Config};
@@ -56,6 +57,18 @@ pub trait AgentCommandPort {
         session: SessionId,
         profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String>;
+}
+
+/// Pulls the latest safe daemon observation at a TUI redraw boundary.
+pub trait MetricsPort {
+    fn latest(&mut self) -> Option<DaemonMetrics>;
+}
+
+struct NoMetrics;
+impl MetricsPort for NoMetrics {
+    fn latest(&mut self) -> Option<DaemonMetrics> {
+        None
+    }
 }
 
 /// Workspace entry ごとに fresh daemon Agent launch port を作る factory。
@@ -322,6 +335,7 @@ struct WorkspaceUi {
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     skeleton_frame: usize,
+    metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
 }
 
@@ -369,8 +383,14 @@ impl WorkspaceUi {
             session_completions,
             session_completion_sender,
             skeleton_frame: 0,
+            metrics_port: Box::new(NoMetrics),
             agent: None,
         }
+    }
+
+    fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
+        self.metrics_port = metrics_port;
+        self
     }
 
     fn with_agent_context(
@@ -1418,6 +1438,9 @@ fn drive_workspace_with_ports_and_selection_mode(
     );
     loop {
         drain_session_completions(&mut ui);
+        if let Some(metrics) = ui.metrics_port.latest() {
+            ui.workspace.set_metrics(Some(metrics));
+        }
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1499,6 +1522,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
     agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<Exit> {
     drive_workspace_with_agent_port_and_selection_mode(
         term,
@@ -1506,6 +1530,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
         session_commands,
         modal_selection_mode,
         agent_port,
+        metrics_port,
     )
     .map(|_| Exit::Quit)
 }
@@ -1520,6 +1545,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
     agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -1530,9 +1556,13 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         session_commands,
         modal_selection_mode,
     )
-    .with_agent_context(workspace_id, session_ids, agent_port);
+    .with_agent_context(workspace_id, session_ids, agent_port)
+    .with_metrics_port(metrics_port);
     loop {
         drain_session_completions(&mut ui);
+        if let Some(metrics) = ui.metrics_port.latest() {
+            ui.workspace.set_metrics(Some(metrics));
+        }
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1691,6 +1721,7 @@ fn run_with_settings_inner(
                             session_commands.create(),
                             config_form.global_modal_selection_mode(),
                             factory.create(),
+                            Box::new(NoMetrics),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -1722,6 +1753,7 @@ fn run_with_settings_inner(
                                 session_commands.create(),
                                 config_form.global_modal_selection_mode(),
                                 factory.create(),
+                                Box::new(NoMetrics),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(
