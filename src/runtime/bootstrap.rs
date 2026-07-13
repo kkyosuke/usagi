@@ -91,6 +91,7 @@ impl fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {}
 
+#[coverage(off)]
 fn require_expected_build<S, B>(
     stream: &S,
     expected_build: &BuildIdentity,
@@ -106,6 +107,7 @@ where
     }
 }
 
+#[coverage(off)]
 fn build_status(actual: &BuildIdentity, expected: &BuildIdentity) -> Result<bool, BootstrapError> {
     if actual.version.is_empty() || actual.target.is_empty() {
         return Err(BootstrapError::UnknownBuildIdentity);
@@ -345,6 +347,52 @@ mod tests {
         .unwrap_err();
         assert!(matches!(unknown, BootstrapError::UnknownBuildIdentity));
 
+        let missing_target = connect_or_start(
+            || {
+                Ok(Endpoint {
+                    name: "unknown-target",
+                    build: BuildIdentity {
+                        version: "current".into(),
+                        commit: "unknown".into(),
+                        target: String::new(),
+                    },
+                })
+            },
+            || Ok(()),
+            || Ok(()),
+            &expected,
+            false,
+            |stream| &stream.build,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            missing_target,
+            BootstrapError::UnknownBuildIdentity
+        ));
+
+        let calls = Cell::new(0);
+        let unknown_after_start = connect_or_start(
+            || {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 0 {
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                } else {
+                    Ok(endpoint("unknown-after-start", ""))
+                }
+            },
+            || Ok(()),
+            || Ok(()),
+            &expected,
+            false,
+            |stream| &stream.build,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            unknown_after_start,
+            BootstrapError::UnknownBuildIdentity
+        ));
+
         let mismatch = connect_or_start(
             || Ok(endpoint("old", "old")),
             || Ok(()),
@@ -362,5 +410,38 @@ mod tests {
         assert!(super::should_force_restart(true, true));
         assert!(!super::should_force_restart(true, false));
         assert!(!super::should_force_restart(false, true));
+    }
+
+    #[test]
+    fn bootstrap_errors_render_only_safe_messages() {
+        let errors = [
+            (
+                BootstrapError::Connect(io::Error::from(io::ErrorKind::ConnectionRefused)),
+                "daemon endpoint is unavailable",
+            ),
+            (
+                BootstrapError::Start(io::Error::other("private start detail")),
+                "daemon could not be started",
+            ),
+            (
+                BootstrapError::Restart(io::Error::other("private restart detail")),
+                "daemon generation could not be restarted",
+            ),
+            (
+                BootstrapError::Readiness(io::Error::from(io::ErrorKind::TimedOut)),
+                "daemon did not become ready",
+            ),
+            (
+                BootstrapError::UnknownBuildIdentity,
+                "daemon build identity is unavailable",
+            ),
+            (
+                BootstrapError::ReplacementBuildMismatch,
+                "replacement daemon build does not match this client",
+            ),
+        ];
+        for (error, expected) in errors {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }
