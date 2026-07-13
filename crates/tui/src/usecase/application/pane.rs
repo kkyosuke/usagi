@@ -115,6 +115,247 @@ impl PaneState {
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
+
+    /// tab を一つでも所有しているか。
+    #[must_use]
+    pub fn has_tabs(&self) -> bool {
+        !self.tabs.is_empty()
+    }
+}
+
+/// Closeup tab state の target-scoped registry。
+///
+/// target を切り替えても entry を破棄しないため、session ごとの pending、selected
+/// tab、explicit action modal state は互いに混ざらない。表示中でない target の
+/// completion や exit も、その entry だけを還元する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRegistry {
+    active: Target,
+    entries: Vec<PaneRegistryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneRegistryEntry {
+    target: Target,
+    pane: PaneState,
+    action_modal_forced: bool,
+}
+
+/// Closeup の現在の input owner。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneInputOwner {
+    /// action modal が management input を所有する。
+    ActionModal,
+    /// selected tab が terminal input を所有する。
+    Tab,
+}
+
+/// registry へ dispatch する target-scoped event。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneRegistryEvent {
+    /// 表示 target を切り替える。既存 target の tab state は保持する。
+    SelectTarget(Target),
+    /// `target` が所有する pane reducer だけへ event を渡す。
+    Pane { target: Target, event: PaneEvent },
+    /// tab があっても action modal を明示的に開く。
+    OpenActionModal { target: Target },
+    /// forced modal を閉じる。tab が無い target の modal は閉じない。
+    CloseActionModal { target: Target },
+}
+
+/// tab owner にだけ届く Closeup command。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneTabCommand {
+    /// stable tab identity で選択を変更する。
+    Select(TabSelection),
+    /// selected tab を client-side から外す。
+    Close,
+    /// terminal input を runtime へ渡す。
+    Passthrough,
+}
+
+/// registry reducer が返す effect。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneRegistryEffect {
+    /// target-scoped pane effect。terminal lifecycle の所有権は移さない。
+    Pane { target: Target, effect: PaneEffect },
+    /// tab owner が terminal runtime へ入力を渡す。
+    Passthrough { target: Target },
+}
+
+impl PaneRegistry {
+    /// `active` target を持つ空の registry を作る。
+    #[must_use]
+    pub fn new(active: Target) -> Self {
+        Self {
+            active,
+            entries: vec![PaneRegistryEntry::empty(active)],
+        }
+    }
+
+    /// 現在表示する target。
+    #[must_use]
+    pub const fn active(&self) -> Target {
+        self.active
+    }
+
+    /// `target` 固有の pane state。未訪問 target は空 state として投影する。
+    #[must_use]
+    pub fn pane(&self, target: Target) -> Option<&PaneState> {
+        self.entries
+            .iter()
+            .find(|entry| entry.target == target)
+            .map(|entry| &entry.pane)
+    }
+
+    /// 現在表示中 target の pane state。
+    ///
+    /// # Panics
+    ///
+    /// Panics if the registry invariant that every active target has an entry
+    /// is broken internally.
+    #[must_use]
+    pub fn active_pane(&self) -> &PaneState {
+        // `new` and `entry_mut` always create the active entry.
+        &self
+            .entries
+            .iter()
+            .find(|entry| entry.target == self.active)
+            .expect("active target always has a pane registry entry")
+            .pane
+    }
+
+    /// action modal の表示 predicate。空 pane は常に modal が所有する。
+    #[must_use]
+    pub fn action_modal_visible(&self, target: Target) -> bool {
+        self.entries
+            .iter()
+            .find(|entry| entry.target == target)
+            .is_none_or(|entry| !entry.pane.has_tabs() || entry.action_modal_forced)
+    }
+
+    /// active target の input owner。
+    #[must_use]
+    pub fn input_owner(&self) -> PaneInputOwner {
+        if self.action_modal_visible(self.active) {
+            PaneInputOwner::ActionModal
+        } else {
+            PaneInputOwner::Tab
+        }
+    }
+
+    fn entry_mut(&mut self, target: Target) -> &mut PaneRegistryEntry {
+        if let Some(index) = self.entries.iter().position(|entry| entry.target == target) {
+            return &mut self.entries[index];
+        }
+        self.entries.push(PaneRegistryEntry::empty(target));
+        self.entries
+            .last_mut()
+            .expect("pushing a registry entry leaves one entry")
+    }
+}
+
+impl PaneRegistryEntry {
+    fn empty(target: Target) -> Self {
+        Self {
+            target,
+            pane: PaneState::new(PaneSelection::Target(target)),
+            action_modal_forced: false,
+        }
+    }
+}
+
+/// `event` を一つの target entry へ還元する。
+#[must_use]
+pub fn reduce_registry(
+    registry: &mut PaneRegistry,
+    event: PaneRegistryEvent,
+) -> Vec<PaneRegistryEffect> {
+    match event {
+        PaneRegistryEvent::SelectTarget(target) => {
+            registry.active = target;
+            registry.entry_mut(target);
+            Vec::new()
+        }
+        PaneRegistryEvent::OpenActionModal { target } => {
+            registry.entry_mut(target).action_modal_forced = true;
+            Vec::new()
+        }
+        PaneRegistryEvent::CloseActionModal { target } => {
+            let entry = registry.entry_mut(target);
+            if entry.pane.has_tabs() {
+                entry.action_modal_forced = false;
+            }
+            Vec::new()
+        }
+        PaneRegistryEvent::Pane { target, event } => {
+            if !event_belongs_to_target(&event, target) {
+                return Vec::new();
+            }
+            let active = registry.active == target;
+            let entry = registry.entry_mut(target);
+            if matches!(event, PaneEvent::Request { .. }) {
+                entry.action_modal_forced = false;
+            }
+            reduce(&mut entry.pane, event)
+                .into_iter()
+                // A background target keeps its own state, but cannot attach a
+                // stream or change the visible Closeup projection.
+                .filter(|_| active)
+                .map(|effect| PaneRegistryEffect::Pane { target, effect })
+                .collect()
+        }
+    }
+}
+
+/// Route a tab command only when the active target's tab owns input.
+#[must_use]
+pub fn route_tab_command(
+    registry: &mut PaneRegistry,
+    command: PaneTabCommand,
+) -> Vec<PaneRegistryEffect> {
+    if registry.input_owner() != PaneInputOwner::Tab {
+        return Vec::new();
+    }
+    let target = registry.active;
+    match command {
+        PaneTabCommand::Select(selection) => reduce_registry(
+            registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::Select(PaneSelection::Tab(selection)),
+            },
+        ),
+        PaneTabCommand::Close => reduce_registry(
+            registry,
+            PaneRegistryEvent::Pane {
+                target,
+                event: PaneEvent::CloseSelected,
+            },
+        ),
+        PaneTabCommand::Passthrough => vec![PaneRegistryEffect::Passthrough { target }],
+    }
+}
+
+fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
+    match event {
+        PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
+        PaneEvent::Select(PaneSelection::Tab(_))
+        | PaneEvent::Succeeded { .. }
+        | PaneEvent::Failed { .. }
+        | PaneEvent::CloseSelected => true,
+        PaneEvent::Request {
+            target: requested, ..
+        } => *requested == target,
+        PaneEvent::Exited(terminal) => target_for_terminal(terminal) == target,
+        PaneEvent::Restore(pane) => target_for_terminal(&pane.terminal) == target,
+    }
+}
+
+fn target_for_terminal(terminal: &TerminalRef) -> Target {
+    terminal
+        .session_id
+        .map_or(Target::Root(terminal.workspace_id), Target::Session)
 }
 
 /// pane reducer が受ける TUI-local event。
@@ -341,6 +582,7 @@ fn exit(state: &mut PaneState, terminal: &TerminalRef) -> Vec<PaneEffect> {
     );
     state.tabs.remove(index);
     if state.tabs.is_empty() {
+        state.selected = PaneSelection::Target(target_for_terminal(terminal));
         return vec![PaneEffect::ReturnToCloseup];
     }
     if was_selected {
@@ -739,5 +981,194 @@ mod tests {
             state.selected(),
             &PaneSelection::Tab(TabSelection::Pending(next_pending))
         );
+    }
+
+    fn registry_request(
+        registry: &mut PaneRegistry,
+        target: Target,
+        kind: PaneKind,
+    ) -> OperationId {
+        let operation = OperationId::new();
+        assert!(
+            reduce_registry(
+                registry,
+                PaneRegistryEvent::Pane {
+                    target,
+                    event: PaneEvent::Request {
+                        operation,
+                        target,
+                        kind,
+                    },
+                },
+            )
+            .is_empty()
+        );
+        operation
+    }
+
+    #[test]
+    fn registry_keeps_sessions_pending_tabs_selection_and_modal_state_isolated() {
+        let session_a = target();
+        let session_b = target();
+        let mut registry = PaneRegistry::new(session_a);
+        let pending_a = registry_request(&mut registry, session_a, PaneKind::Terminal);
+        let terminal_a = terminal(session_a);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target: session_a,
+                event: PaneEvent::Succeeded {
+                    operation: pending_a,
+                    terminal: terminal_a.clone(),
+                },
+            },
+        );
+        let _ = reduce_registry(&mut registry, PaneRegistryEvent::SelectTarget(session_b));
+        let pending_b = registry_request(&mut registry, session_b, PaneKind::Agent);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::OpenActionModal { target: session_b },
+        );
+
+        // Background exit changes A only; B's pending tab and forced modal stay put.
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: session_a,
+                    event: PaneEvent::Exited(terminal_a.clone()),
+                },
+            )
+            .is_empty()
+        );
+        assert_eq!(registry.active(), session_b);
+        assert!(registry.action_modal_visible(session_b));
+        assert!(
+            registry.pane(session_b).unwrap().tabs().iter().any(
+                |tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == pending_b)
+            )
+        );
+
+        let _ = reduce_registry(&mut registry, PaneRegistryEvent::SelectTarget(session_a));
+        assert!(!registry.pane(session_a).unwrap().has_tabs());
+        assert!(registry.action_modal_visible(session_a));
+        let _ = reduce_registry(&mut registry, PaneRegistryEvent::SelectTarget(session_b));
+        assert_eq!(
+            registry.pane(session_b).unwrap().selected(),
+            &PaneSelection::Target(session_b)
+        );
+    }
+
+    #[test]
+    fn registry_background_completion_and_close_do_not_change_visible_target() {
+        let visible = target();
+        let background = target();
+        let mut registry = PaneRegistry::new(visible);
+        let visible_operation = registry_request(&mut registry, visible, PaneKind::Terminal);
+        let visible_terminal = terminal(visible);
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::Pane {
+                target: visible,
+                event: PaneEvent::Succeeded {
+                    operation: visible_operation,
+                    terminal: visible_terminal.clone(),
+                },
+            },
+        );
+        let background_operation = registry_request(&mut registry, background, PaneKind::Agent);
+        let background_terminal = terminal(background);
+
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: background,
+                    event: PaneEvent::Succeeded {
+                        operation: background_operation,
+                        terminal: background_terminal.clone(),
+                    },
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: background,
+                    event: PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(
+                        background_terminal,
+                    ))),
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce_registry(
+                &mut registry,
+                PaneRegistryEvent::Pane {
+                    target: background,
+                    event: PaneEvent::CloseSelected,
+                },
+            )
+            .is_empty()
+        );
+
+        assert_eq!(registry.active(), visible);
+        assert_eq!(registry.input_owner(), PaneInputOwner::Tab);
+        assert_eq!(
+            registry.active_pane().selected(),
+            &PaneSelection::Target(visible)
+        );
+        assert_eq!(
+            registry.active_pane().tabs(),
+            &[PaneTab::Live(LivePane {
+                terminal: visible_terminal,
+                kind: PaneKind::Terminal,
+            })]
+        );
+    }
+
+    #[test]
+    fn modal_visibility_and_tab_input_ownership_follow_the_reducer_table() {
+        let target = target();
+        let mut registry = PaneRegistry::new(target);
+        assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
+        assert!(route_tab_command(&mut registry, PaneTabCommand::Passthrough).is_empty());
+
+        let operation = registry_request(&mut registry, target, PaneKind::Terminal);
+        assert_eq!(registry.input_owner(), PaneInputOwner::Tab);
+        assert!(
+            route_tab_command(
+                &mut registry,
+                PaneTabCommand::Select(TabSelection::Pending(operation)),
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Passthrough),
+            vec![PaneRegistryEffect::Passthrough { target }]
+        );
+
+        let _ = reduce_registry(&mut registry, PaneRegistryEvent::OpenActionModal { target });
+        assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
+        assert!(route_tab_command(&mut registry, PaneTabCommand::Close).is_empty());
+        assert!(registry.pane(target).unwrap().has_tabs());
+
+        let _ = reduce_registry(
+            &mut registry,
+            PaneRegistryEvent::CloseActionModal { target },
+        );
+        assert_eq!(registry.input_owner(), PaneInputOwner::Tab);
+        assert_eq!(
+            route_tab_command(&mut registry, PaneTabCommand::Close),
+            vec![PaneRegistryEffect::Pane {
+                target,
+                effect: PaneEffect::ReturnToCloseup,
+            }]
+        );
+        assert!(!registry.pane(target).unwrap().has_tabs());
+        assert_eq!(registry.input_owner(), PaneInputOwner::ActionModal);
     }
 }

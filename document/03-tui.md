@@ -90,9 +90,15 @@ Home の左 sidebar は footer の直上に 3 行の usagi を表示する。fra
 
 ## Closeup pane
 
+Closeup pane の tab state は target-scoped registry が正本である。workspace root と各 session は同じ
+registry API の別 entry を持ち、entry は pending、live tab、stable selection、forced action modal state を
+所有する。session の切替は entry を破棄しないため、session A の create / completion / exit / close は session B
+の tab、選択、modal state を変えない。background target の event はその entry だけを還元し、表示中 target の
+attach や Closeup 遷移を発生させない。
+
 Closeup tab は pending operation または live `TerminalRef` を持つ。pending completion は同じ
-`OperationId` にだけ対応し、live tab は完全な `TerminalRef` で識別する。選択中の live tab だけを
-attach し、選択外の tab は background のまま保持する。
+`OperationId` にだけ対応し、live tab は完全な `TerminalRef` で識別する。表示中 target の選択中 live tab だけを
+attach し、選択外または background target の tab は background のまま保持する。
 
 右ペインは session 名の右に tab を Chrome 風の chip として描き、その直下に active marker を置く。path は
 右ペインには表示しない。chip の表示順・label は表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
@@ -103,15 +109,17 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
-Closeup action modal の表示は tab の有無で決まる。tab が無い Closeup では action modal を前面に出し、
-Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上ある Closeup では tab strip を前面にし、action
-modal は隠す。tab があるときに action modal を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて
-tab に戻る（Closeup から Switch へは抜けない）。
+Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。tab が無い
+Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
+forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
+を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
+modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent` または `terminal` を確定すると、その pending tab を即座に選択して右ペインへ
 表示し、action modal を隠す。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
-選択 tab を閉じる。最後の tab を閉じると Closeup action と空状態へ戻る。close は client-side selection を外す
-だけであり、daemon-owned terminal を停止しない。
+選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
+target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
+terminal を停止しない。
 
 Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
 workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
