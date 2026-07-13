@@ -140,6 +140,7 @@ impl<P: TerminalLaunchPort + TerminalPort> TerminalLaunchAdapter<P> {
 }
 
 #[cfg(test)]
+#[coverage(off)] // Fake transport plumbing is exercised through adapter outcomes.
 mod tests {
     use super::*;
     use crate::usecase::application::{
@@ -156,10 +157,13 @@ mod tests {
         inventory: Vec<TerminalRef>,
         launched: usize,
         attached: Vec<TerminalRef>,
+        scope_error: Option<String>,
     }
     impl TerminalScopePort for Fake {
         fn terminal_scope(&mut self, _: Target) -> Result<TerminalLaunchRequest, String> {
-            Ok(self.scope.clone())
+            self.scope_error
+                .clone()
+                .map_or_else(|| Ok(self.scope.clone()), Err)
         }
     }
     impl TerminalLaunchPort for Fake {
@@ -255,6 +259,7 @@ mod tests {
             inventory: vec![terminal.clone()],
             launched: 0,
             attached: vec![],
+            scope_error: None,
         };
         let mut adapter = TerminalLaunchAdapter::new(fake, Geometry { cols: 80, rows: 24 });
         let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
@@ -279,6 +284,7 @@ mod tests {
             inventory: vec![terminal.clone()],
             launched: 0,
             attached: vec![],
+            scope_error: None,
         };
         let mut adapter = TerminalLaunchAdapter::new(fake, Geometry { cols: 80, rows: 24 });
         let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
@@ -294,5 +300,36 @@ mod tests {
         );
         assert_eq!(adapter.port().launched, 1);
         assert_eq!(adapter.port().attached, vec![terminal]);
+    }
+
+    #[test]
+    fn ignores_other_effects_and_projects_safe_scope_failures() {
+        let (target, terminal, scope) = setup();
+        let fake = Fake {
+            scope,
+            inventory: vec![terminal],
+            launched: 0,
+            attached: vec![],
+            scope_error: Some("terminal scope is unavailable".to_owned()),
+        };
+        let mut adapter = TerminalLaunchAdapter::new(fake, Geometry { cols: 80, rows: 24 });
+        let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
+            PaneSelection::Target(target),
+        ));
+        let workspace = adapter.port().scope.scope.workspace_id;
+        adapter.dispatch(&mut runtime, Effect::RefreshSessions { workspace });
+        assert_eq!(adapter.port_mut().launched, 0);
+        adapter.dispatch(
+            &mut runtime,
+            Effect::OpenTerminal {
+                target,
+                operation_id: OperationId::new(),
+                arguments: "open".into(),
+            },
+        );
+        assert_eq!(
+            runtime.pane().error(),
+            Some("terminal scope is unavailable")
+        );
     }
 }
