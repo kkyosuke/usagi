@@ -82,7 +82,7 @@ Welcome の **Config**、または `usagi config` を選ぶと設定画面（Con
 workspace scope を切り替え、`↑↓` で Theme / Modal mode / Save を選ぶ。Theme と Modal mode は `←→` で編集し、
 Modal mode は Overview / Closeup で action を選択する **Action** と command を入力する **Prompt** を切り替える。
 scope ごとに独立した draft と dirty state を持ち、変更があるときだけ Save を有効にする。保存成功時は `saved` を表示して
-Welcome へ戻り、保存失敗時は draft を保って error を表示する。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
+Welcome へ戻り、保存失敗時は draft を保って error を表示する。Modal mode は global 設定として `settings.json` に保存され、次に開く Workspace の Overview / Closeup に適用される。Esc で Welcome へ戻る（`usagi config` から直接開いた場合も Welcome が home）。合成ルートは対話ループの
 開始画面を Welcome か Config かで選び、どちらも同じループを回す。
 
 Workspace 画面は、`state.json` から読んだ session 一覧と root 行を左ペイン、選択中 session の

@@ -12,12 +12,14 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::settings::Settings;
 use crate::domain::workspace::Workspace;
 use crate::infrastructure::paths::data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const WORKSPACES_FILE: &str = "workspaces.json";
+const SETTINGS_FILE: &str = "settings.json";
 
 /// The `workspaces.json` payload, borrowed for writes so the list need not be
 /// cloned into an owned wrapper just to stamp the version envelope.
@@ -110,6 +112,28 @@ impl Storage {
         )
     }
 
+    /// Load the per-user settings used by the TUI Config screen. Missing files
+    /// are the default settings, so an upgrade never prevents the TUI from
+    /// opening.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `settings.json` cannot be read or parsed.
+    pub fn load_settings(&self) -> Result<Settings> {
+        Ok(json_file::read(&self.dir.join(SETTINGS_FILE))?.unwrap_or_default())
+    }
+
+    /// Persist per-user settings atomically. Callers that edit a draft must
+    /// hold [`lock`](Self::lock) across their read-modify-write sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the settings directory cannot be created or the
+    /// new file cannot be atomically written.
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        json_file::write_atomic(&self.dir, &self.dir.join(SETTINGS_FILE), settings)
+    }
+
     /// Stamp `updated_at` onto the workspace named `name` and persist the change,
     /// returning the touched workspace, or `None` when no workspace has that name.
     ///
@@ -156,6 +180,19 @@ mod tests {
         let loaded = storage.load_workspaces().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "alpha");
+    }
+
+    #[test]
+    fn settings_round_trip_through_disk() {
+        let (_dir, storage) = temp_storage();
+        let settings = crate::domain::settings::Settings {
+            theme: crate::domain::settings::Theme::Dark,
+            modal_selection_mode: crate::domain::settings::ModalSelectionMode::Prompt,
+        };
+        assert_eq!(storage.load_settings().unwrap(), Settings::default());
+        storage.save_settings(&settings).unwrap();
+        assert_eq!(storage.load_settings().unwrap(), settings);
+        assert!(storage.dir().join(SETTINGS_FILE).is_file());
     }
 
     #[test]

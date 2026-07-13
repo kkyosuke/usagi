@@ -1320,11 +1320,36 @@ pub fn run_workspace_with_session_port(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
 ) -> io::Result<Exit> {
-    drive_workspace_with_ports(
+    run_workspace_with_session_port_and_selection_mode(
+        term,
+        snapshot,
+        session_commands,
+        ModalSelectionMode::Action,
+    )
+}
+
+/// Run a Workspace UI using the saved global modal interaction mode.
+///
+/// The composition root reads the setting once before opening a workspace, so
+/// a Config save affects the next workspace entry without changing the active
+/// modal or selection of an already-running workspace.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+pub fn run_workspace_with_session_port_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+) -> io::Result<Exit> {
+    drive_workspace_with_ports_and_selection_mode(
         term,
         snapshot,
         Box::new(SnapshotOverlayData),
         session_commands,
+        modal_selection_mode,
     )
     .map(|_| Exit::Quit)
 }
