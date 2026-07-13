@@ -315,7 +315,7 @@ fn filter_line(open: &Open) -> String {
         format!(
             "{}{}",
             caret.paint(" "),
-            Style::new().dim().paint("type to filter")
+            Role::Accent.style().dim().paint("type to filter")
         )
     } else {
         let rest = input.after();
@@ -330,7 +330,7 @@ fn filter_line(open: &Open) -> String {
             accent.paint(after)
         )
     };
-    format!("{} {value}", Style::new().dim().paint("Filter:"))
+    format!("{} {value}", accent.paint("Filter:"))
 }
 
 /// 一覧ブロック（見出し＋各 workspace 行＋選択中パス）を組み、端末幅 `width` に中央寄せする。
