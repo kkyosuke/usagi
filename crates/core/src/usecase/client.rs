@@ -39,6 +39,8 @@ pub enum DaemonRequest {
 pub enum SessionAction {
     Create,
     Remove,
+    List,
+    Overview,
     Setup,
     Prompt,
 }

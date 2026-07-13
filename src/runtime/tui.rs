@@ -17,6 +17,7 @@ use usagi_core::domain::settings::Settings;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
+use usagi_core::usecase::client::{DaemonClient, DaemonReply, DaemonRequest, SessionAction};
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
@@ -24,12 +25,69 @@ use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
-    self, BannerScreenRunner, Exit, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, BannerScreenRunner, Exit, SessionCommandPort, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{KeyCode, LiveInput, RuntimeEvent};
 
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
+
+/// Composition adapter for Overview's daemon-owned session lifecycle commands.
+struct DaemonSessionCommandPort;
+
+impl SessionCommandPort for DaemonSessionCommandPort {
+    #[coverage(off)]
+    fn execute(
+        &mut self,
+        workspace: &Workspace,
+        selected: Option<&usagi_core::domain::session::SessionRecord>,
+        command: SessionCommand,
+    ) -> Result<String, String> {
+        let (action, payload) = match command {
+            SessionCommand::Create { name } => (
+                SessionAction::Create,
+                serde_json::json!({"workspace": workspace.path, "name": name}),
+            ),
+            SessionCommand::List => (
+                SessionAction::List,
+                serde_json::json!({"workspace": workspace.path}),
+            ),
+            SessionCommand::Overview => (
+                SessionAction::Overview,
+                serde_json::json!({"workspace": workspace.path}),
+            ),
+            SessionCommand::Remove { force } => {
+                let selected =
+                    selected.ok_or_else(|| "workspace root cannot be removed".to_owned())?;
+                (
+                    SessionAction::Remove,
+                    serde_json::json!({"workspace": workspace.path, "name": selected.name, "force": force}),
+                )
+            }
+        };
+        let operation_id = usagi_core::domain::id::OperationId::new().to_string();
+        let mut client =
+            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|error| format!("daemon unavailable: {error}"))?;
+        match client
+            .request(DaemonRequest::Session {
+                action,
+                operation_id,
+                payload,
+            })
+            .map_err(|error| format!("daemon request failed: {error}"))?
+        {
+            DaemonReply::Accepted {
+                operation_id,
+                revision,
+            } => Ok(format!(
+                "accepted operation {operation_id} (revision {revision})"
+            )),
+            DaemonReply::Ok(value) => Ok(value.to_string()),
+        }
+    }
+}
 
 struct CrosstermTerminal {
     out: std::io::Stdout,
@@ -309,7 +367,13 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        run_in_terminal(|terminal| presentation::run_workspace(terminal, snapshot))?;
+        run_in_terminal(|terminal| {
+            presentation::run_workspace_with_session_port(
+                terminal,
+                snapshot,
+                Box::new(DaemonSessionCommandPort),
+            )
+        })?;
     } else {
         let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
         for line in workspace::render(0, 0, &workspace) {

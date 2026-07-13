@@ -1,13 +1,13 @@
 ---
 number: 268
 title: fix(tui): Overview session effect を daemon lifecycle runner へ接続する
-status: todo
+status: done
 priority: high
 labels: [tui, overview, session, lifecycle, daemon]
 dependson: []
 related: [260]
 created_at: 2026-07-13T00:48:33.719911+00:00
-updated_at: 2026-07-13T00:49:48.128755+00:00
+updated_at: 2026-07-13T01:02:10.888833+00:00
 ---
 
 ## 背景
