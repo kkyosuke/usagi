@@ -20,9 +20,12 @@ use usagi_core::domain::settings::Settings;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
-use usagi_core::usecase::client::{DaemonClient, DaemonReply, DaemonRequest, SessionAction};
+use usagi_core::usecase::client::{
+    ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+};
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
+use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
@@ -472,6 +475,25 @@ fn run_in_terminal(
     result
 }
 
+/// Keeps the daemon metrics observer alive for exactly one interactive TUI
+/// lifetime.  A fresh connection-local subscription is created on every TUI
+/// launch; orderly teardown explicitly unregisters it.
+#[coverage(off)]
+fn run_with_metrics_hook(run: impl FnOnce() -> std::io::Result<Exit>) -> std::io::Result<Exit> {
+    let mut hook = MetricsHook::default();
+    let mut client = crate::runtime::daemon::client(ClientPolicy::tui()).map_err(io_error)?;
+    hook.connect(&mut client).map_err(io_error)?;
+    let result = run();
+    let cleanup = hook.shutdown(&mut client).map_err(io_error);
+    match result {
+        Ok(exit) => cleanup.map(|()| exit),
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
 #[coverage(off)]
 fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
     let now = Utc::now();
@@ -481,20 +503,22 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = PersistentSettingsPort::open()?;
         let mut session_commands = DaemonSessionCommandPortFactory;
-        run_in_terminal(|terminal| {
-            if start == Start::Welcome {
-                presentation::play_startup_splash(terminal)?;
-            }
-            presentation::run_with_settings(
-                terminal,
-                workspaces,
-                recent,
-                now,
-                start,
-                &mut loader,
-                &mut settings,
-                &mut session_commands,
-            )
+        run_with_metrics_hook(|| {
+            run_in_terminal(|terminal| {
+                if start == Start::Welcome {
+                    presentation::play_startup_splash(terminal)?;
+                }
+                presentation::run_with_settings(
+                    terminal,
+                    workspaces,
+                    recent,
+                    now,
+                    start,
+                    &mut loader,
+                    &mut settings,
+                    &mut session_commands,
+                )
+            })
         })?;
     } else {
         let frame = match start {
@@ -526,13 +550,15 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut settings = PersistentSettingsPort::open()?;
         let modal_selection_mode = settings.read(SettingsScope::Global)?.modal_selection_mode;
-        run_in_terminal(|terminal| {
-            presentation::run_workspace_with_session_port_and_selection_mode(
-                terminal,
-                snapshot,
-                Box::new(DaemonSessionCommandPort::default()),
-                modal_selection_mode,
-            )
+        run_with_metrics_hook(|| {
+            run_in_terminal(|terminal| {
+                presentation::run_workspace_with_session_port_and_selection_mode(
+                    terminal,
+                    snapshot,
+                    Box::new(DaemonSessionCommandPort::default()),
+                    modal_selection_mode,
+                )
+            })
         })?;
     } else {
         let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
