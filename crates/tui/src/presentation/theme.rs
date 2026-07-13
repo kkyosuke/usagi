@@ -21,6 +21,8 @@ const FEATURE_PINK_256: u8 = 211;
 /// 端末色。ANSI 16 色の名前付き色と、256 色キューブのインデックスを表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
+    /// ANSI white（前景 SGR `37`）。dim と組み合わせた中立グレーの基色。
+    White,
     /// ANSI cyan（前景 SGR `36`）。
     Cyan,
     /// ANSI green（前景 SGR `32`）。
@@ -40,6 +42,7 @@ impl Color {
     #[must_use]
     fn fg_params(self) -> String {
         match self {
+            Color::White => "37".to_string(),
             Color::Cyan => "36".to_string(),
             Color::Green => "32".to_string(),
             Color::Red => "31".to_string(),

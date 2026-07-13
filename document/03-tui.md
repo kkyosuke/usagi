@@ -74,9 +74,11 @@ attach し、選択外の tab は background のまま保持する。
 
 右ペインは tab を Chrome 風の chip と、その直下の active marker で描く。chip の表示順・label は
 表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
-幅が狭い場合も ANSI を閉じた上で chip を clipping する。tab が無い target は、静的うさぎと
-`No tabs stirring yet. Enter starts one.` の案内を中央に表示する。この空状態は tick や runtime 接続に
-依存しない。overlay はこの Home frame を背景のまま合成する。
+幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は v1 の選択 session
+gutter と同じ一桁の Nerd Font うさぎ（`󰤇`）だけを frame ごとに色替えし、ラベル全体を着色しない。
+tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. Enter starts one.` の案内を、それぞれ
+右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
+画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
 Closeup action で `agent` または `terminal` を確定すると、その pending tab を即座に選択して右ペインへ
 表示する。`←` / `→`（または `h` / `l`）は tab を巡回し、`x` は選択 tab を閉じる。最後の tab を閉じると

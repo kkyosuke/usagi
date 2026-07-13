@@ -79,6 +79,7 @@ pub struct HomeProjection {
 struct HomePaneTab {
     label: String,
     selected: bool,
+    pending: bool,
 }
 
 impl HomeProjection {
@@ -131,6 +132,7 @@ impl HomeProjection {
             .map(|tab| HomePaneTab {
                 label: pane_tab_label(tab),
                 selected: pane_tab_selected(tab, pane.selected()),
+                pending: matches!(tab, PaneTab::Pending(_)),
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
@@ -988,12 +990,22 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         return with_footer(rows, height, footer);
     }
 
+    let indicators = home
+        .pane_tabs
+        .iter()
+        .map(|tab| {
+            tab.pending
+                .then(|| widgets::session_tab::pending_indicator(home.mascot_tick))
+        })
+        .collect::<Vec<_>>();
     let tabs = home
         .pane_tabs
         .iter()
-        .map(|tab| widgets::session_tab::Tab {
+        .zip(&indicators)
+        .map(|(tab, indicator)| widgets::session_tab::Tab {
             label: &tab.label,
             selected: tab.selected,
+            pending_indicator: indicator.as_deref(),
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render(width, &tabs);
@@ -1074,7 +1086,7 @@ mod tests {
         Selection, Target, update,
     };
     use crate::usecase::application::pane::{
-        PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
+        PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
@@ -1352,9 +1364,54 @@ mod tests {
         .with_pane(&pane);
 
         let text = joined_home(&home);
-        assert!(text.contains(" Agent (starting) "));
+        assert!(text.contains("Agent (starting)"));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
+    }
+
+    #[test]
+    fn pending_tab_chip_animates_on_home_tick_without_changing_the_pending_transition() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let mut state = AppState::home(workspace, vec![session]);
+        let before = render_home(
+            18,
+            100,
+            &HomeProjection::from_state(
+                &state,
+                "work",
+                "/work",
+                &[projected_session(session, "session", "/work/session")],
+            )
+            .with_pane(&pane),
+        )
+        .join("\n");
+        let _ = update(&mut state, AppEvent::Tick);
+        let after = render_home(
+            18,
+            100,
+            &HomeProjection::from_state(
+                &state,
+                "work",
+                "/work",
+                &[projected_session(session, "session", "/work/session")],
+            )
+            .with_pane(&pane),
+        )
+        .join("\n");
+        assert_ne!(before, after);
+        assert!(matches!(pane.tabs(), [PaneTab::Pending(_)]));
     }
 
     #[test]
