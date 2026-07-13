@@ -1,0 +1,83 @@
+name: TUI E2E
+
+# The shipped binary is still v1. Run its expensive real-PTY test only for a
+# release candidate: a PR whose distributable version changes, its merge-queue
+# validation, or an explicitly requested manual verification.
+on:
+  pull_request:
+    branches: [ "main" ]
+  merge_group:
+    types: [ checks_requested ]
+  workflow_dispatch:
+    inputs:
+      run_tui_e2e:
+        description: 'Run the release-candidate TUI E2E test explicitly'
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: tui-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Compare the PR head, not GitHub's temporary merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          RUN_TUI_E2E: ${{ inputs.run_tui_e2e }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              changed=$(scripts/ci/v1-version-changed.sh "$PR_BASE_SHA" "$PR_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
+              ;;
+            merge_group)
+              changed=$(scripts/ci/v1-version-changed.sh "$MERGE_GROUP_BASE_SHA" "$MERGE_GROUP_HEAD_SHA" | awk -F= '/^changed=/{print $2}')
+              ;;
+            workflow_dispatch)
+              changed="$RUN_TUI_E2E"
+              ;;
+            *)
+              echo "unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          printf 'run=%s\n' "$changed" >> "$GITHUB_OUTPUT"
+
+  tui-e2e:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: rust-v1-tui-e2e
+          workspaces: v1
+
+      - name: Run real-PTY TUI E2E tests
+        run: cargo test --manifest-path v1/Cargo.toml --test tui_e2e --quiet

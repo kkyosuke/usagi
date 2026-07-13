@@ -216,6 +216,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 | `.github/workflows/test.yml` | `main` への push / PR | fmt / clippy と full test（`--workspace`）を独立 job で並列実行（`ubuntu-latest`） |
 | `.github/workflows/v1-test.yml` | `v1/**` を変更する push / PR | 退避された v1（リリースの出荷物）を `v1/Cargo.toml` を対象に fmt / clippy / full test で検証 |
 | `.github/workflows/test-metrics.yml` | 毎週 / 手動 | nextest で full suite を retry なしで 3 回実行し、test ごとの JUnit、slow 上位、run-to-run variance を artifact 化（required gate ではない） |
+| `.github/workflows/tui-e2e.yml` | `main` 向け PR / merge queue / 明示的手動実行 | 出荷物 v1 の実 PTY TUI E2E。PR / merge queue では `v1/Cargo.toml` の `[package].version` が base と異なる場合だけ実行し、通常 PR の重い test を回避する |
 | `.github/workflows/release-build-check.yml` | `v1/Cargo.toml` / `v1/Cargo.lock` を変更する PR | リリースと同じ 4 プラットフォーム（Linux / macOS amd64・arm64 / Windows）で v1 を `cargo build --release` し、version 変更（＝タグが変わる PR）でリリースビルドが成功することをマージ前に検証 |
 | `.github/workflows/coverage.yml` | PR | カバレッジ計測・PR コメント・100% 未満で失敗 |
 | `.github/workflows/markdown-link-check.yml` | `.md` 変更を含む push / PR | Markdown のリンク切れ（相対リンク・アンカー・外部 URL）を [lychee](https://github.com/lycheeverse/lychee) で検証 |
@@ -223,6 +224,7 @@ pre-commit は、**リポジトリルートのチェックアウト（`.usagi/se
 
 - リンクチェックの設定（リトライ・除外・アンカー検証）は `lychee.toml` に集約する。ファイル内の見出しアンカー（`#見出し`）も検証するため、目次リンク等が見出しと一致していないと失敗する。
 - Rust の test / coverage workflow は PR または branch ごとに最新の実行だけを継続し、古い commit の実行をキャンセルする。
+- TUI E2E の version 判定は checkout 済みの HEAD ではなく、イベントが渡す base SHA と head SHA のそれぞれから `[package].version` を読む。したがって、同じ `v1/Cargo.toml` を編集しても version が不変なら job は skip され、fork PR でも secrets や書き込み権限を必要としない。merge queue では合成 head と queue base を同じ方法で比較する。手動実行は input を明示して release candidate を再検証するときだけ実行する。
 
 ## リリース
 
