@@ -1,14 +1,14 @@
 ---
 number: 284
 title: feat(tui): Closeup Agent tab を daemon live runtime へ接続する
-status: todo
+status: done
 priority: high
 labels: [tui, agent, terminal, ipc, pty, integration]
 dependson: [265, 279, 282, 283]
 related: [263, 278]
 parent: 227
-created_at: 2026-07-13T12:00:00.000000+00:00
-updated_at: 2026-07-13T12:00:00.000000+00:00
+created_at: 2026-07-13T12:00:00+00:00
+updated_at: 2026-07-13T11:51:34.944303+00:00
 ---
 
 ## 背景・根拠
