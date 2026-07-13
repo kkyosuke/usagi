@@ -214,6 +214,16 @@ impl Mode {
             Self::Closeup => "Closeup",
         }
     }
+
+    #[coverage(off)]
+    fn icon(self) -> char {
+        match self {
+            // Keep the v1 Font Awesome/Nerd Font glyphs so the mode affordance
+            // is recognizable across the two TUI generations.
+            Self::Switch => '\u{f0ec}',
+            Self::Closeup => '\u{f00e}',
+        }
+    }
 }
 
 /// 右ペインの 1 タブ。
@@ -538,30 +548,49 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// 全幅の header: workspace 名のパンくずとセッション数。左寄せ・dim の区切り。
+/// 全幅の header: workspace 名のパンくずは左、mode toggle は右上に固定する。
 #[coverage(off)]
 fn header_line(width: usize, ws: &Workspace) -> String {
     let count = ws.sessions().len();
     let sep = Style::new().dim().paint(" › ");
     let dot = Style::new().dim().paint(" · ");
-    let modes = Mode::ALL
-        .iter()
-        .map(|mode| {
-            if *mode == ws.mode() {
-                Role::Accent.style().bold().paint(mode.label())
-            } else {
-                Style::new().dim().paint(mode.label())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    let line = format!(
-        " {}{sep}{}{dot}{}{dot}{modes}",
+    let left = format!(
+        " {}{sep}{}{dot}{}",
         Role::Success.style().bold().paint("USAGI"),
         Role::Success.style().bold().paint(ws.name()),
         Style::new().dim().paint(&format!("{count} sessions")),
     );
-    widgets::pad_to_width(&line, width)
+    header_with_mode_toggle(width, &left, ws.mode())
+}
+
+/// v1 と同じアイコン付きの mode 表示。現在の mode だけを accent で強調する。
+#[coverage(off)]
+fn mode_toggle(current: Mode) -> String {
+    Mode::ALL
+        .iter()
+        .map(|mode| {
+            let label = format!("{} {}", mode.icon(), mode.label());
+            if *mode == current {
+                Role::Accent.style().bold().paint(&label)
+            } else {
+                Style::new().dim().paint(&label)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// 左の breadcrumb を必要な分だけ切り、mode toggle の右端位置を常に保つ。
+#[coverage(off)]
+fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
+    let toggle = mode_toggle(mode);
+    let toggle = widgets::clip_to_width(&toggle, width);
+    let left_width = width.saturating_sub(widgets::display_width(&toggle));
+    let left = widgets::clip_to_width(left, left_width);
+    let gap = width
+        .saturating_sub(widgets::display_width(&left))
+        .saturating_sub(widgets::display_width(&toggle));
+    format!("{left}{}{toggle}", " ".repeat(gap))
 }
 
 /// header と本文を分ける全幅の水平罫線（dim）。
@@ -710,8 +739,8 @@ fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
 #[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / Esc back / q quit",
-        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / Esc switch / q quit",
+        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q quit",
+        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q quit",
     };
     Style::new()
         .dim()
@@ -800,23 +829,20 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
 #[coverage(off)]
 fn home_header_line(width: usize, home: &HomeProjection) -> String {
     let mode = match home.mode {
-        HomeMode::Switch => "Switch",
-        HomeMode::Closeup => "Closeup",
+        HomeMode::Switch => Mode::Switch,
+        HomeMode::Closeup => Mode::Closeup,
     };
-    widgets::pad_to_width(
-        &format!(
-            " {}{}{}{}{}{}",
-            Role::Success.style().bold().paint("USAGI"),
-            Style::new().dim().paint(" › "),
-            Role::Success.style().bold().paint(&home.workspace_name),
-            Style::new().dim().paint(" · "),
-            Style::new()
-                .dim()
-                .paint(&format!("{} sessions", home.sessions.len())),
-            Style::new().dim().paint(&format!(" · {mode}")),
-        ),
-        width,
-    )
+    let left = format!(
+        " {}{}{}{}{}",
+        Role::Success.style().bold().paint("USAGI"),
+        Style::new().dim().paint(" › "),
+        Role::Success.style().bold().paint(&home.workspace_name),
+        Style::new().dim().paint(" · "),
+        Style::new()
+            .dim()
+            .paint(&format!("{} sessions", home.sessions.len())),
+    );
+    header_with_mode_toggle(width, &left, mode)
 }
 
 #[coverage(off)]
@@ -1574,13 +1600,23 @@ mod tests {
     fn header_shows_both_modes_and_highlights_the_current_one() {
         let mut ws = workspace();
         let switch_header = &render(30, 100, &ws)[0];
-        assert!(switch_header.contains("\u{1b}[1;36mSwitch\u{1b}[0m"));
-        assert!(switch_header.contains("\u{1b}[2mCloseup\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[1;36m\u{f0ec} Switch\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[2m\u{f00e} Closeup\u{1b}[0m"));
+        assert!(
+            strip(switch_header)
+                .trim_end()
+                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+        );
 
         ws.enter_closeup();
         let closeup_header = &render(30, 100, &ws)[0];
-        assert!(closeup_header.contains("\u{1b}[2mSwitch\u{1b}[0m"));
-        assert!(closeup_header.contains("\u{1b}[1;36mCloseup\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[2m\u{f0ec} Switch\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[1;36m\u{f00e} Closeup\u{1b}[0m"));
+        assert!(
+            strip(closeup_header)
+                .trim_end()
+                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+        );
     }
 
     #[test]
@@ -1603,7 +1639,7 @@ mod tests {
             .join("\n");
         assert!(closeup.contains("[closeup] target selected"));
         assert!(closeup.contains("←→/hl tab"));
-        assert!(closeup.contains("Esc switch"));
+        assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal (resolving)"));
         assert!(closeup.contains('▔'));
@@ -1623,7 +1659,7 @@ mod tests {
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(!text.contains("/tmp/actual"));
         assert!(text.contains("root"));
-        assert!(text.contains("Esc back"));
+        assert!(!text.contains("Esc back"));
         assert!(text.contains('│'));
     }
 

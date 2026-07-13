@@ -675,7 +675,7 @@ pub enum AppKey {
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
     Home,
-    /// overlay を閉じるか Closeup から Switch へ戻る。
+    /// 最前面の overlay を閉じる。Home の mode は変えない。
     Escape,
     /// Management-screen Ctrl-C. Live Ctrl-C is classified before it reaches
     /// this reducer and is passed through to the PTY.
@@ -1727,13 +1727,6 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.move_selection(1);
             Vec::new()
         }
-        AppKey::Escape => match state.route {
-            Route::Home(HomeMode::Switch) => Vec::new(),
-            Route::Home(HomeMode::Closeup) => {
-                state.route = Route::Home(HomeMode::Switch);
-                Vec::new()
-            }
-        },
         AppKey::OpenOverview | AppKey::Char(':') => {
             state.overlay = Some(Overlay::Overview);
             Vec::new()
@@ -1758,7 +1751,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
-        AppKey::Tab
+        AppKey::Escape
+        | AppKey::Tab
         | AppKey::Backspace
         | AppKey::Home
         | AppKey::Char(_)
@@ -2466,9 +2460,9 @@ mod tests {
                 overlay: None,
             },
             Case {
-                name: "closeup escape returns switch",
+                name: "closeup escape is no-op",
                 events: vec![AppEvent::Key(AppKey::Enter), AppEvent::Key(AppKey::Escape)],
-                route: Route::Home(HomeMode::Switch),
+                route: Route::Home(HomeMode::Closeup),
                 overlay: None,
             },
         ];
