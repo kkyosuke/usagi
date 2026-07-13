@@ -29,8 +29,8 @@ use usagi_core::domain::{
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
     terminal::{
-        Geometry, RegistryError, Snapshot, SpawnFailure, TerminalReconcileState, TerminalRegistry,
-        TerminalRuntimeState,
+        Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
+        SpawnFailure, TerminalReconcileState, TerminalRegistry, TerminalRuntimeState,
     },
 };
 
@@ -180,6 +180,72 @@ impl GenericTerminalCoordinator {
             .snapshot(terminal)
             .map_err(|_| GenericTerminalError::TerminalGenerationMismatch)
     }
+    /// Atomically takes a snapshot and assigns a connection-owned subscription.
+    pub fn attach(
+        &mut self,
+        terminal: &TerminalRef,
+        connection: ConnectionId,
+    ) -> Result<Attached, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .attach(terminal, connection)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    /// Removes only the named attachment, never the daemon-owned process.
+    pub fn detach(
+        &mut self,
+        terminal: &TerminalRef,
+        subscription: u64,
+        connection: ConnectionId,
+    ) -> Result<(), GenericTerminalError> {
+        self.record(terminal)?;
+        self.terminals
+            .detach(terminal, subscription, connection)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    /// Applies PTY output to the daemon journal and returns its fenced cursor.
+    pub fn output(
+        &mut self,
+        terminal: &TerminalRef,
+        bytes: Vec<u8>,
+    ) -> Result<Output, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .append_output(terminal, bytes)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    pub fn resize(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<Snapshot, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .resize(terminal, geometry)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    pub fn input<W: PtyWriter>(
+        &mut self,
+        terminal: &TerminalRef,
+        input: InputRequest,
+        bytes: &[u8],
+        writer: &mut W,
+    ) -> Result<InputAck, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .write_input(terminal, input, bytes, writer)
+            .map_err(GenericTerminalError::Terminal)
+    }
+    pub fn replay_from(
+        &self,
+        terminal: &TerminalRef,
+        offset: u64,
+    ) -> Result<Vec<Output>, GenericTerminalError> {
+        self.running(terminal)?;
+        self.terminals
+            .replay_from(terminal, offset)
+            .map_err(GenericTerminalError::Terminal)
+    }
     pub fn exit<S: TerminalStore>(
         &mut self,
         terminal: &TerminalRef,
@@ -217,6 +283,22 @@ impl GenericTerminalCoordinator {
         TerminalStoreSnapshot {
             records: self.records.values().cloned().collect(),
         }
+    }
+    /// Lists only terminals in the exact requested durable scope.
+    #[must_use]
+    pub fn inventory(
+        &self,
+        scope: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Vec<TerminalRef> {
+        self.records
+            .values()
+            .filter(|record| {
+                record.terminal.workspace_id == scope.workspace_id
+                    && record.terminal.session_id == scope.session_id
+                    && record.terminal.worktree_id == scope.worktree_id
+            })
+            .map(|record| record.terminal.clone())
+            .collect()
     }
     #[must_use]
     pub fn occupied_slots(&self) -> usize {

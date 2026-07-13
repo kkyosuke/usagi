@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+use serde::Serialize;
 use usagi_core::domain::id::{ClientId, ConnectionId, RequestId, TerminalRef};
 
 /// The durable process state shared by every daemon-owned terminal.
@@ -42,14 +43,14 @@ pub enum SpawnFailure {
 }
 
 /// The effective terminal dimensions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Geometry {
     pub cols: u16,
     pub rows: u16,
 }
 
 /// A point-in-time terminal view returned by attach and resync.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
     pub terminal: TerminalRef,
     pub revision: u64,
@@ -60,7 +61,7 @@ pub struct Snapshot {
 }
 
 /// A retained contiguous output segment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Output {
     pub terminal: TerminalRef,
     pub start_offset: u64,
@@ -84,14 +85,14 @@ pub enum Event {
 }
 
 /// Result of atomically registering an attachment and taking its initial view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Attached {
     pub subscription: u64,
     pub snapshot: Snapshot,
 }
 
 /// Result of an input write.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum InputAck {
     Written,
     Failed,

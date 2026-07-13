@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::agent::AgentProfileId;
-use crate::domain::id::{SessionId, WorkspaceId};
+use crate::domain::id::{SessionId, TerminalRef, WorkspaceId};
+use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalProfileId};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
     ErrorCode, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, RetryMode,
@@ -67,12 +68,75 @@ pub enum SessionAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalAction {
+    /// Reserve and spawn a daemon-owned generic terminal.  The payload is a
+    /// [`TerminalLaunchIntent`], never a command line or environment.
+    Launch,
+    Inventory,
     Attach,
     Resume,
     Resync,
     Input,
     Resize,
+    Detach,
 }
+
+/// Product-neutral generic terminal launch vocabulary.  It deliberately
+/// serializes only a stable profile selector, a fully fenced scope and screen
+/// geometry; process provision remains daemon-private.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalLaunchIntent {
+    pub request: TerminalLaunchRequest,
+    pub geometry: TerminalGeometry,
+}
+
+/// Geometry supplied by a terminal client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalGeometry {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Typed terminal command payloads.  Keeping these vocabulary types next to
+/// the shared daemon client prevents UI/CLI adapters from inventing local PTY
+/// fallback fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum TerminalRequest {
+    Launch {
+        intent: TerminalLaunchIntent,
+    },
+    Inventory {
+        scope: TerminalLaunchRequest,
+    },
+    Attach {
+        terminal: TerminalRef,
+    },
+    Resume {
+        terminal: TerminalRef,
+        after_offset: u64,
+    },
+    Resync {
+        terminal: TerminalRef,
+    },
+    Input {
+        terminal: TerminalRef,
+        subscription: u64,
+        input_seq: u64,
+        bytes: Vec<u8>,
+    },
+    Resize {
+        terminal: TerminalRef,
+        geometry: TerminalGeometry,
+    },
+    Detach {
+        terminal: TerminalRef,
+        subscription: u64,
+    },
+}
+
+/// Re-exported selection type makes callers name the only accepted launch
+/// selector, rather than constructing an untyped JSON payload.
+pub type TerminalProfileSelection = TerminalProfileId;
 
 /// The result exposed to CLI and MCP adapters.
 #[derive(Debug, Clone, PartialEq)]

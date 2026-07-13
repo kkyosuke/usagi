@@ -12,6 +12,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [envelope とエラー](#envelope-とエラー)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
+- [generic terminal request](#generic-terminal-request)
 
 ## identity と fence
 
@@ -59,6 +60,19 @@ revision の共通範囲と必須 capability を検証し、成功時に `Server
 `ProtocolError` は machine-readable な code、safe message、retry mode、side-effect classification、
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
 場合は `resync_required` を使う。OS error、secret、raw launch provision は error detail に含めない。
+
+## generic terminal request
+
+generic terminal の request vocabulary は `terminal` kind の `launch`、`inventory`、`attach`、
+`resume`、`resync`、`input`、`resize`、`detach` である。launch は stable profile ID、
+`WorkspaceId` / optional `SessionId` / `WorktreeId` の scope、geometry だけを送る。command、argv、
+working directory、environment、secret は wire field ではなく、daemon が trusted profile から解決する。
+
+launch の response は完全な `TerminalRef` を返す。attach は snapshot と connection-owned
+subscription を同時に返す。input、resize、detach はその `TerminalRef` と subscription を必ず含める。
+output は `(start_offset, end_offset)` の連続範囲で表し、resume の cursor が journal 外なら
+`resync_required` を返す。`stale_target`、`ownership_unknown`、partial write を含む安全に証明
+できない結果は typed error であり、client は local PTY を生成しない。
 
 ## Unix transport
 

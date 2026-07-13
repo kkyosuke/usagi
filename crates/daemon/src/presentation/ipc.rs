@@ -10,6 +10,23 @@ use usagi_core::infrastructure::ipc::{
     ResponseOutcome, ServerHello, ServerProtocol, negotiate, read_json_frame, write_json_frame,
 };
 
+/// Daemon-owned terminal actor port.  The transport never interprets a
+/// terminal payload itself and therefore cannot accidentally echo it or turn a
+/// failed request into a local fallback.  Implementations are serialized by
+/// the composition root and may own a generic coordinator, profile resolver,
+/// durable store and PTY adapter.
+pub trait TerminalOwner {
+    fn request(
+        &mut self,
+        connection: usagi_core::domain::id::ConnectionId,
+        client: usagi_core::domain::id::ClientId,
+        request_id: usagi_core::domain::id::RequestId,
+        action: usagi_core::usecase::client::TerminalAction,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, ProtocolError>;
+    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId);
+}
+
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
 #[coverage(off)]
 pub fn handshake<R: Read, W: Write>(
@@ -127,6 +144,91 @@ pub fn handle_connection<R: Read, W: Write>(
         write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
     }
     Ok(())
+}
+
+/// Serve one client through the daemon's sole terminal owner.  Connection
+/// teardown is deliberately reported to the owner even after a framing error:
+/// that drops subscriptions only and leaves the PTY/process alive.
+#[coverage(off)]
+pub fn handle_connection_with_terminal<R: Read, W: Write, T: TerminalOwner>(
+    reader: &mut R,
+    writer: &mut W,
+    server: &ServerProtocol,
+    terminal: &mut T,
+) -> io::Result<()> {
+    let Some(hello) = handshake(reader, writer, server)? else {
+        return Ok(());
+    };
+    let connection = usagi_core::domain::id::ConnectionId::new();
+    let client = usagi_core::domain::id::ClientId::new();
+    let result = (|| {
+        while let Some(envelope) =
+            read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
+        {
+            let EnvelopeKind::Request {
+                request_id, body, ..
+            } = envelope.kind
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "client may only send request envelopes",
+                ));
+            };
+            let outcome_body = if envelope.protocol != hello.protocol
+                || envelope.daemon_generation != hello.daemon_generation
+            {
+                Err(ProtocolError::new(
+                    ErrorCode::GenerationMismatch,
+                    "request targets a different daemon generation",
+                ))
+            } else if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
+                action,
+                payload,
+            }) = serde_json::from_value(body.clone())
+            {
+                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
+                    Ok(owner_request_id) => {
+                        terminal.request(connection, client, owner_request_id, action, payload)
+                    }
+                    Err(_) => Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal request_id must be a canonical resource ID",
+                    )),
+                }
+            } else {
+                Ok(dispatch(request_id.clone(), body, &hello).kind_response_body())
+            };
+            let (outcome, body) = match outcome_body {
+                Ok(body) => (ResponseOutcome::Ok, body),
+                Err(error) => (ResponseOutcome::Error(error), json!(null)),
+            };
+            let reply = Envelope {
+                protocol: hello.protocol,
+                daemon_generation: hello.daemon_generation.clone(),
+                kind: EnvelopeKind::Response {
+                    request_id,
+                    outcome,
+                    body,
+                },
+            };
+            write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
+        }
+        Ok(())
+    })();
+    terminal.disconnect(connection);
+    result
+}
+
+trait ResponseBody {
+    fn kind_response_body(self) -> serde_json::Value;
+}
+impl ResponseBody for Envelope {
+    fn kind_response_body(self) -> serde_json::Value {
+        match self.kind {
+            EnvelopeKind::Response { body, .. } => body,
+            _ => json!(null),
+        }
+    }
 }
 
 /// Build a server protocol policy from daemon-owned identity/configuration.
