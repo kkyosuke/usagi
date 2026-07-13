@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Handshake-gated server adapter for the transport-independent IPC protocol.
 
 #![allow(clippy::missing_errors_doc)] // Errors are directly forwarded transport/protocol failures.
@@ -13,6 +11,7 @@ use usagi_core::infrastructure::ipc::{
 };
 
 /// Complete a bootstrap handshake. No ordinary envelope is accepted before this succeeds.
+#[coverage(off)]
 pub fn handshake<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -53,6 +52,7 @@ pub fn handshake<R: Read, W: Write>(
 /// operation id; terminal requests retain their typed body for the terminal
 /// owner to process.
 #[must_use]
+#[coverage(off)]
 pub fn dispatch(
     request_id: usagi_core::infrastructure::ipc::RequestId,
     body: serde_json::Value,
@@ -83,6 +83,7 @@ pub fn dispatch(
 
 /// Serve one client. A target generation mismatch and pre-handshake normal
 /// request are rejected before request dispatch.
+#[coverage(off)]
 pub fn handle_connection<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -130,6 +131,7 @@ pub fn handle_connection<R: Read, W: Write>(
 
 /// Build a server protocol policy from daemon-owned identity/configuration.
 #[must_use]
+#[coverage(off)]
 pub fn server_protocol(
     daemon_generation: DaemonGeneration,
     connection_id: String,
@@ -161,14 +163,17 @@ mod tests {
 
     struct BrokenWriter;
     impl Write for BrokenWriter {
+        #[coverage(off)]
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("broken"))
         }
+        #[coverage(off)]
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
 
+    #[coverage(off)]
     fn server() -> ServerProtocol {
         server_protocol(
             DaemonGeneration("current".into()),
@@ -180,6 +185,7 @@ mod tests {
             },
         )
     }
+    #[coverage(off)]
     fn hello() -> Bootstrap {
         Bootstrap::ClientHello(ClientHello {
             client_id: ClientId("client".into()),
@@ -199,6 +205,7 @@ mod tests {
             },
         })
     }
+    #[coverage(off)]
     fn request() -> Envelope {
         Envelope {
             protocol: ProtocolVersion {
@@ -214,6 +221,7 @@ mod tests {
         }
     }
     #[test]
+    #[coverage(off)]
     fn handshake_returns_hello_and_preserves_build_as_diagnostic() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -228,6 +236,7 @@ mod tests {
         ));
     }
     #[test]
+    #[coverage(off)]
     fn connection_requires_hello_then_correlates_response() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -242,6 +251,7 @@ mod tests {
         assert!(matches!(response.kind, EnvelopeKind::Response { .. }));
     }
     #[test]
+    #[coverage(off)]
     fn connection_rejects_normal_message_before_handshake() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &request(), 1024).unwrap();
@@ -253,6 +263,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn connection_returns_generation_error_with_request_id() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -276,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn handshake_handles_close_wrong_first_message_and_negotiation_error() {
         assert!(
             handshake(
@@ -318,6 +330,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn connection_rejects_client_event_after_handshake() {
         let mut input = Vec::new();
         write_json_frame(&mut input, &hello(), 1024).unwrap();
@@ -347,6 +360,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn connection_accepts_clean_close_and_propagates_handshake_write_errors() {
         assert!(
             handle_connection(
@@ -370,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn dispatch_preserves_the_request_correlation_and_body() {
         let hello = handshake(
             &mut Cursor::new({

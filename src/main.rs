@@ -1,5 +1,4 @@
 #![feature(coverage_attribute)]
-#![coverage(off)]
 
 //! 合成ルート。実 IO（標準出力・プロセス引数）をここで束ね、ロジックはすべて
 //! crates/ 配下のライブラリクレート（テスト可能な層）に置く。
@@ -77,6 +76,7 @@ struct VolatileSettingsPort {
 }
 
 impl SettingsPort for VolatileSettingsPort {
+    #[coverage(off)]
     fn read(&mut self, scope: SettingsScope) -> std::io::Result<Settings> {
         Ok(match scope {
             SettingsScope::Global => self.global.clone(),
@@ -84,6 +84,7 @@ impl SettingsPort for VolatileSettingsPort {
         })
     }
 
+    #[coverage(off)]
     fn save(&mut self, scope: SettingsScope, settings: &Settings) -> std::io::Result<()> {
         match scope {
             SettingsScope::Global => self.global = settings.clone(),
@@ -94,11 +95,13 @@ impl SettingsPort for VolatileSettingsPort {
 }
 
 impl Terminal for CrosstermTerminal {
+    #[coverage(off)]
     fn size(&mut self) -> std::io::Result<(usize, usize)> {
         let (cols, rows) = terminal::size()?;
         Ok((rows as usize, cols as usize))
     }
 
+    #[coverage(off)]
     fn draw(&mut self, frame: &[String]) -> std::io::Result<()> {
         let (height, width) = self.size()?;
         let diff = self
@@ -124,6 +127,7 @@ impl Terminal for CrosstermTerminal {
         self.out.flush()
     }
 
+    #[coverage(off)]
     fn read_key(&mut self) -> std::io::Result<Key> {
         loop {
             match self.input.next(self.input_started.elapsed())? {
@@ -171,6 +175,7 @@ impl Terminal for CrosstermTerminal {
 }
 
 /// core の `anyhow` error を合成ルートの `io::Result` 境界へ写す。
+#[coverage(off)]
 fn io_error(error: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
@@ -178,6 +183,7 @@ fn io_error(error: impl std::fmt::Display) -> std::io::Error {
 /// `path` が実在するディレクトリか検証する。非 UTF-8 path も filesystem が扱える場合は
 /// bytes のまま lookup し、Darwin の標準 filesystem などが `EILSEQ` 等で拒否した場合は
 /// その失敗を伝播する。
+#[coverage(off)]
 fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     let metadata = std::fs::metadata(path)?;
     if !metadata.is_dir() {
@@ -191,6 +197,7 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
 
 /// CLI から受け取った workspace path を、実在する絶対ディレクトリへ解決する。
 /// 検証できない path を実在扱いするフォールバックは行わない。
+#[coverage(off)]
 fn resolve_workspace_path(path: &Path) -> std::io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     validate_workspace_directory(&resolved)?;
@@ -203,6 +210,7 @@ struct FsWorkspaceLoader {
 }
 
 impl FsWorkspaceLoader {
+    #[coverage(off)]
     fn open_default() -> std::io::Result<Self> {
         Ok(Self {
             storage: Storage::open_default().map_err(io_error)?,
@@ -211,6 +219,7 @@ impl FsWorkspaceLoader {
 }
 
 impl WorkspaceLoader for FsWorkspaceLoader {
+    #[coverage(off)]
     fn open(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
         // Open / Recent が渡す registry path は identity を保ったまま検証する。ここで再度
         // canonicalize すると、登録済みの absolute symlink path が別 workspace として
@@ -228,6 +237,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         Ok(WorkspaceSnapshot::new(workspace, state))
     }
 
+    #[coverage(off)]
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
         let missing: Vec<PathBuf> = workspaces
             .iter()
@@ -246,6 +256,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
 ///
 /// Config は単独で成立するため、直接起動時の registry 読み込み失敗は空一覧へ縮退する。正常な
 /// registry は先に読んでおき、Esc で戻った Welcome の Open / Recent 導線を保持する。
+#[coverage(off)]
 fn load_screen_graph_data(
     storage: &Storage,
     start: Start,
@@ -264,6 +275,7 @@ fn load_screen_graph_data(
 
 /// raw mode + 代替スクリーンの lifetime を 1 回だけ所有し、その中で `run` が Welcome / Open /
 /// Workspace を遷移する。結果がエラーでも端末状態は必ず復元する。
+#[coverage(off)]
 fn run_in_terminal(
     run: impl FnOnce(&mut CrosstermTerminal) -> std::io::Result<Exit>,
 ) -> std::io::Result<Exit> {
@@ -318,6 +330,7 @@ fn run_in_terminal(
 
 /// `start` から Welcome / New / Config / Open / Workspace の画面グラフを起動する。対話端末では
 /// すべてを同じ raw mode + 代替スクリーン上で回し、非対話環境では開始画面を 1 フレーム描く。
+#[coverage(off)]
 fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()> {
     let now = Utc::now();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
@@ -359,6 +372,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
 
 /// `path` の Workspace 画面を直接起動する。登録・touch・state 読み込みは対話 / 非対話の
 /// どちらでも同じ loader を通す。
+#[coverage(off)]
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
@@ -377,6 +391,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
 /// protocol handler remains in `usagi-daemon`, while this root owns threads and
 /// the real socket.  Each accepted peer is credential-checked by the listener
 /// before a frame is decoded.
+#[coverage(off)]
 fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
         usagi_core::domain::id::DaemonGeneration::new()
@@ -436,6 +451,7 @@ struct FsRecordFile {
 }
 
 impl RecordFile for FsRecordFile {
+    #[coverage(off)]
     fn read(&self) -> std::io::Result<Option<String>> {
         match std::fs::read_to_string(&self.path) {
             Ok(contents) => Ok(Some(contents)),
@@ -444,6 +460,7 @@ impl RecordFile for FsRecordFile {
         }
     }
 
+    #[coverage(off)]
     fn write(&self, contents: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -451,6 +468,7 @@ impl RecordFile for FsRecordFile {
         std::fs::write(&self.path, contents)
     }
 
+    #[coverage(off)]
     fn remove(&self) -> std::io::Result<()> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
@@ -466,11 +484,13 @@ struct KillProbe;
 
 impl LivenessProbe for KillProbe {
     #[cfg(unix)]
+    #[coverage(off)]
     fn is_alive(&self, pid: u32) -> bool {
         libc::pid_t::try_from(pid).is_ok_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
     }
 
     #[cfg(not(unix))]
+    #[coverage(off)]
     fn is_alive(&self, _pid: u32) -> bool {
         false
     }
@@ -481,6 +501,7 @@ struct SigtermTerminator;
 
 impl Terminator for SigtermTerminator {
     #[cfg(unix)]
+    #[coverage(off)]
     fn terminate(&self, pid: u32) -> std::io::Result<()> {
         let pid =
             libc::pid_t::try_from(pid).map_err(|_| std::io::Error::other("pid out of range"))?;
@@ -492,6 +513,7 @@ impl Terminator for SigtermTerminator {
     }
 
     #[cfg(not(unix))]
+    #[coverage(off)]
     fn terminate(&self, _pid: u32) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "terminating a daemon is only supported on Unix",
@@ -504,6 +526,7 @@ struct SignalShutdown;
 
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
+    #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
         // Block SIGINT / SIGTERM so they are delivered synchronously to sigwait
         // instead of taking their default terminate action; then wait for one.
@@ -524,6 +547,7 @@ impl ShutdownSignal for SignalShutdown {
     }
 
     #[cfg(not(unix))]
+    #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
         Err(std::io::Error::other(
             "running the daemon is only supported on Unix",
@@ -539,6 +563,7 @@ struct ServeLauncher {
 }
 
 impl DaemonLauncher for ServeLauncher {
+    #[coverage(off)]
     fn launch(&self) -> std::io::Result<()> {
         let mut command = std::process::Command::new(&self.exe);
         command
@@ -557,6 +582,7 @@ impl DaemonLauncher for ServeLauncher {
 struct RealSleeper;
 
 impl Sleeper for RealSleeper {
+    #[coverage(off)]
     fn sleep(&self) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -571,6 +597,7 @@ struct FileInstanceLock {
 }
 
 impl InstanceLock for FileInstanceLock {
+    #[coverage(off)]
     fn acquire(&self) -> std::io::Result<bool> {
         // How long to wait for a departing holder (a restart hands off in
         // milliseconds) before concluding another daemon genuinely holds it.
@@ -602,6 +629,7 @@ impl InstanceLock for FileInstanceLock {
     }
 }
 
+#[coverage(off)]
 fn launch_tui(
     out: &mut dyn std::io::Write,
     info: &AppInfo,
@@ -625,6 +653,7 @@ fn launch_tui(
 struct SystemGit;
 
 impl GitRunner for SystemGit {
+    #[coverage(off)]
     fn run(&self, repo: &std::path::Path, args: &[&str]) -> anyhow::Result<GitOutput> {
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -639,6 +668,7 @@ impl GitRunner for SystemGit {
     }
 }
 
+#[coverage(off)]
 fn dispatch_cli(
     args: Vec<std::ffi::OsString>,
     out: &mut dyn std::io::Write,
@@ -691,6 +721,7 @@ fn dispatch_cli(
 /// Connect to the managed daemon, starting it once when no endpoint exists.
 /// Any incompatible, unsafe, or unknown-ownership endpoint is returned as a
 /// typed error: this boundary never creates a local managed PTY fallback.
+#[coverage(off)]
 fn daemon_client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
@@ -733,6 +764,7 @@ fn daemon_client(
     )
 }
 
+#[coverage(off)]
 fn main() -> std::io::Result<()> {
     let info = AppInfo {
         name: env!("CARGO_PKG_NAME"),
@@ -815,6 +847,7 @@ mod tests {
     use usagi_core::infrastructure::store::workspace::Storage;
 
     #[test]
+    #[coverage(off)]
     fn config_start_degrades_a_broken_workspace_registry() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();

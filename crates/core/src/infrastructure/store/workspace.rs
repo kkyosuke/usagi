@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The workspace registry: the list of workspaces the user has opened.
 //!
 //! It lives in the global per-user data directory (see
@@ -48,17 +46,20 @@ impl Storage {
     ///
     /// Returns an error when the data directory cannot be determined
     /// (see [`data_dir`]).
+    #[coverage(off)]
     pub fn open_default() -> Result<Self> {
         Ok(Self::new(data_dir()?))
     }
 
     /// Open storage rooted at an explicit directory (mainly for tests).
     #[must_use]
+    #[coverage(off)]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -77,6 +78,7 @@ impl Storage {
     ///
     /// Returns an error when the lock cannot be acquired (see
     /// [`StoreLock::acquire`]).
+    #[coverage(off)]
     pub fn lock(&self) -> Result<StoreLock> {
         StoreLock::acquire(&self.dir)
     }
@@ -86,6 +88,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when `workspaces.json` exists but cannot be read or parsed.
+    #[coverage(off)]
     pub fn load_workspaces(&self) -> Result<Vec<Workspace>> {
         let file: Option<WorkspacesOwned> =
             json_file::read_versioned(&self.dir.join(WORKSPACES_FILE))?;
@@ -98,6 +101,7 @@ impl Storage {
     ///
     /// Returns an error when the data directory cannot be created or the file
     /// cannot be written.
+    #[coverage(off)]
     pub fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
         json_file::write_versioned(
             &self.dir,
@@ -112,6 +116,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error when the registry cannot be read or written.
+    #[coverage(off)]
     pub fn touch_workspace(
         &self,
         name: &str,
@@ -133,6 +138,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[coverage(off)]
     fn temp_storage() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let storage = Storage::new(dir.path().join("usagi"));
@@ -140,6 +146,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn workspaces_round_trip_through_disk() {
         let (_dir, storage) = temp_storage();
         assert!(storage.load_workspaces().unwrap().is_empty());
@@ -154,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn touch_workspace_stamps_the_named_entry_and_ignores_others() {
         let (_dir, storage) = temp_storage();
         let base = Workspace::new("alpha", "/tmp/alpha");
@@ -171,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_default_roots_storage_under_the_data_directory() {
         let _guard = crate::test_support::process_env_guard();
         unsafe {
@@ -189,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_json_reports_a_parse_error() {
         let (_dir, storage) = temp_storage();
         fs::create_dir_all(storage.dir()).unwrap();
@@ -197,6 +207,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_json_reports_a_non_not_found_error() {
         let (_dir, storage) = temp_storage();
         // A directory where the file is expected fails to read with an error
@@ -206,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_json_reports_an_error_when_dir_cannot_be_created() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         // Place a *file* where the storage directory's parent should be, so
@@ -217,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn lock_is_a_dotfile_and_does_not_block_save() {
         let (_dir, storage) = temp_storage();
         // Holding the lock places a `.lock` dotfile in the data dir and still lets
@@ -231,6 +244,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn lock_errors_when_the_dir_path_is_a_file() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         // A file where the data directory should be makes acquiring the lock fail.

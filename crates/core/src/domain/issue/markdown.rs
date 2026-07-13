@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! On-disk markdown (frontmatter) serialisation and parsing for [`Issue`].
 //!
 //! The frontmatter *format* (the `---` block, list escaping, timestamps, line
@@ -25,6 +23,7 @@ impl FrontmatterDoc for Issue {
     /// [`frontmatter::to_markdown`]; this closure only lists the issue's fields,
     /// appending straight into `out` rather than allocating a throwaway `String`
     /// per field as `push_str(&format!(…))` would (cf. `format_number_list`).
+    #[coverage(off)]
     fn to_markdown(&self) -> String {
         frontmatter::to_markdown(&self.body, |out| {
             let _ = writeln!(out, "number: {}", self.number);
@@ -58,6 +57,7 @@ impl FrontmatterDoc for Issue {
     /// Returns [`ParseIssueError`] when the frontmatter envelope is malformed, a
     /// field value fails to parse (number, enum token, timestamp, list entry), or
     /// a required field (`number`, `title`, `created_at`, `updated_at`) is absent.
+    #[coverage(off)]
     fn from_markdown(text: &str) -> Result<Issue, ParseIssueError> {
         let mut number: Option<u32> = None;
         let mut title: Option<String> = None;
@@ -135,6 +135,7 @@ impl FrontmatterDoc for Issue {
 /// Writes the comma-separated numbers straight into the output string, avoiding
 /// the intermediate `Vec<String>` an `iter().map(to_string).collect().join()`
 /// would allocate on every `to_markdown`.
+#[coverage(off)]
 fn format_number_list(items: &[u32]) -> String {
     let mut out = String::from("[");
     for (i, n) in items.iter().enumerate() {
@@ -150,6 +151,7 @@ fn format_number_list(items: &[u32]) -> String {
 
 /// Parse `[1, 2, 3]` into issue numbers. Used for both `dependson` and
 /// `related`, so the error stays field-agnostic rather than naming one field.
+#[coverage(off)]
 fn parse_number_list(value: &str) -> Result<Vec<u32>, ParseIssueError> {
     parse_string_list(value)
         .iter()

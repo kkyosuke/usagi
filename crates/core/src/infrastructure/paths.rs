@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Where usagi keeps its data on disk, in one place.
 //!
 //! Two independent locations, kept here so no layer re-spells them as literals:
@@ -38,6 +36,7 @@ const DATA_DIR_NAME: &str = ".usagi";
 ///
 /// Returns an error when `$USAGI_HOME` is unset and the home directory cannot be
 /// determined.
+#[coverage(off)]
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(dir));
@@ -51,6 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[coverage(off)]
     fn data_dir_prefers_env_override_then_falls_back() {
         // Serialize $USAGI_HOME mutation against other globals-mutating tests.
         let _guard = crate::test_support::process_env_guard();

@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The `PrLink` entity: a pull request discovered for a session, with the
 //! bookkeeping the background `gh` enrichment needs.
 //!
@@ -18,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// `true` when a boolean is its `false` default, so an unpinned PR omits the
 /// `pinned` key from persisted files.
 #[allow(clippy::trivially_copy_pass_by_ref)]
+#[coverage(off)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -25,6 +24,7 @@ fn is_false(value: &bool) -> bool {
 /// `true` when a counter is its zero default, so a never-failed PR omits the
 /// `attempts` key.
 #[allow(clippy::trivially_copy_pass_by_ref)]
+#[coverage(off)]
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }
@@ -76,6 +76,7 @@ impl PrLink {
     /// A PR link with no title yet resolved — the shape freshly parsed from a
     /// pull-request URL. The title is filled in later by the enrichment worker.
     #[must_use]
+    #[coverage(off)]
     pub fn new(number: u32, url: impl Into<String>) -> Self {
         Self {
             number,
@@ -94,6 +95,7 @@ impl PrLink {
     /// Whether this PR is dismissed (hidden). A dismissed PR is kept as a
     /// tombstone but excluded from the badge count and the popup's default view.
     #[must_use]
+    #[coverage(off)]
     pub fn is_dismissed(&self) -> bool {
         self.state == PrState::Dismissed
     }
@@ -101,6 +103,7 @@ impl PrLink {
     /// Whether this PR shows in the badge and the popup's default view — every
     /// state except [`PrState::Dismissed`].
     #[must_use]
+    #[coverage(off)]
     pub fn is_visible(&self) -> bool {
         !self.is_dismissed()
     }
@@ -108,6 +111,7 @@ impl PrLink {
     /// How many of `prs` are visible (not dismissed) — the number the sidebar's
     /// `#<count>` badge shows.
     #[must_use]
+    #[coverage(off)]
     pub fn visible_count(prs: &[PrLink]) -> usize {
         prs.iter().filter(|p| p.is_visible()).count()
     }
@@ -118,6 +122,7 @@ impl PrLink {
     /// `.../pull/412/files` count as **one** PR. A URL with no recognisable
     /// `/pull/<N>` is its own key (returned whole).
     #[must_use]
+    #[coverage(off)]
     pub fn pr_key(&self) -> &str {
         match pull_number_end(&self.url) {
             Some(end) => &self.url[..end],
@@ -132,6 +137,7 @@ impl PrLink {
     /// different titles the first sighting keeps its URL but adopts a title if it
     /// still lacks one. Dismissal and a user pin are sticky across the fold.
     #[must_use]
+    #[coverage(off)]
     pub fn aggregate(prs: impl IntoIterator<Item = PrLink>) -> Vec<PrLink> {
         let mut out: Vec<PrLink> = Vec::new();
         for pr in prs {
@@ -181,6 +187,7 @@ impl PrState {
     /// `skip_serializing_if` predicate that keeps `open` out of persisted files.
     /// Takes `&self` because serde's `skip_serializing_if` requires it.
     #[allow(clippy::trivially_copy_pass_by_ref)]
+    #[coverage(off)]
     fn is_open(&self) -> bool {
         matches!(self, PrState::Open)
     }
@@ -189,6 +196,7 @@ impl PrState {
 /// The byte offset just past the pull-request number in a `/pull/<N>` URL, or
 /// `None` when the URL carries no `/pull/<digits>` segment. Used by
 /// [`PrLink::pr_key`] to truncate a URL to its canonical PR identity.
+#[coverage(off)]
 fn pull_number_end(url: &str) -> Option<usize> {
     let marker = "/pull/";
     let after = url.find(marker)? + marker.len();

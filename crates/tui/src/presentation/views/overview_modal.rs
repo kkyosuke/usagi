@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Overview modal（コマンドパレット `:`）。
 //!
 //! workspace 画面で `:` を押すと開く、workspace 全体に効くコマンドの入力パレット。入力欄に
@@ -42,47 +40,55 @@ pub enum PaletteResult {
 impl OverviewModal {
     /// 空の入力で開いたパレット。
     #[must_use]
+    #[coverage(off)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// 現在の入力文字列。
     #[must_use]
+    #[coverage(off)]
     pub fn input(&self) -> &str {
         self.input.value()
     }
 
     /// 入力欄のキャレット位置（バイトオフセット）。
     #[must_use]
+    #[coverage(off)]
     pub fn cursor(&self) -> usize {
         self.input.cursor()
     }
 
     /// 選択中候補の添字（[`OverviewModal::matches`] 内）。
     #[must_use]
+    #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
     }
 
     /// この palette を開いてから実行した command history。
     #[must_use]
+    #[coverage(off)]
     pub fn history(&self) -> &[String] {
         &self.history
     }
 
     /// 直前の command 実行結果。
     #[must_use]
+    #[coverage(off)]
     pub fn result(&self) -> Option<&PaletteResult> {
         self.result.as_ref()
     }
 
     /// 入力の前方一致で絞り込んだコマンド候補。入力が空なら全件。
     #[must_use]
+    #[coverage(off)]
     pub fn matches(&self) -> Vec<overview::CommandInfo> {
         overview::complete(&overview::DefaultRegistry, self.input.value())
     }
 
     /// 選択中候補の command 名を入力欄へ補完する。候補が無ければ no-op。
+    #[coverage(off)]
     pub fn complete_selected(&mut self) {
         if let Some(command) = self.matches().get(self.selected) {
             self.input = TextInput::with_value(command.name);
@@ -91,6 +97,7 @@ impl OverviewModal {
 
     /// 直近の history を入力欄へ呼び戻す。空の入力欄でのみ有効なので、候補選択の ↑ と
     /// 衝突しない。呼び戻せたかを返す。
+    #[coverage(off)]
     pub fn recall_previous(&mut self) -> bool {
         if (!self.input.value().trim().is_empty() && self.history_index.is_none())
             || self.history.is_empty()
@@ -107,6 +114,7 @@ impl OverviewModal {
     }
 
     /// history を新しい方へ進める。最後の次では空の新規入力に戻る。呼び戻せたかを返す。
+    #[coverage(off)]
     pub fn recall_next(&mut self) -> bool {
         let Some(index) = self.history_index else {
             return false;
@@ -124,6 +132,7 @@ impl OverviewModal {
     }
 
     /// 現在の submission を history に記録する。同じ command が連続した場合は重複させない。
+    #[coverage(off)]
     pub fn record_submission(&mut self) {
         let submission = self.submission();
         if !submission.is_empty() && self.history.last() != Some(&submission) {
@@ -133,22 +142,26 @@ impl OverviewModal {
     }
 
     /// command 実行の通常結果を結果帯へ表示する。
+    #[coverage(off)]
     pub fn set_result(&mut self, result: impl Into<String>) {
         self.result = Some(PaletteResult::Notice(result.into()));
     }
 
     /// command 実行の安全なエラーを結果帯へ表示する。
+    #[coverage(off)]
     pub fn set_error(&mut self, error: impl Into<String>) {
         self.result = Some(PaletteResult::Error(error.into()));
     }
 
     /// 結果帯を消す。
+    #[coverage(off)]
     pub fn clear_result(&mut self) {
         self.result = None;
     }
 
     /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
     #[must_use]
+    #[coverage(off)]
     pub fn submission(&self) -> String {
         if self.input.value().trim().is_empty() {
             self.matches()
@@ -160,6 +173,7 @@ impl OverviewModal {
     }
 
     /// キャレット位置に 1 文字挿入し、選択を先頭に戻す（候補集合が変わるため）。
+    #[coverage(off)]
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
         self.selected = 0;
@@ -167,6 +181,7 @@ impl OverviewModal {
     }
 
     /// キャレット手前の 1 文字を削除し、選択を先頭に戻す。
+    #[coverage(off)]
     pub fn backspace(&mut self) {
         self.input.backspace();
         self.selected = 0;
@@ -174,16 +189,19 @@ impl OverviewModal {
     }
 
     /// キャレットを 1 文字左へ。
+    #[coverage(off)]
     pub fn cursor_left(&mut self) {
         self.input.move_left();
     }
 
     /// キャレットを 1 文字右へ。
+    #[coverage(off)]
     pub fn cursor_right(&mut self) {
         self.input.move_right();
     }
 
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
+    #[coverage(off)]
     pub fn select_next(&mut self) {
         let len = self.matches().len();
         if len > 0 {
@@ -192,6 +210,7 @@ impl OverviewModal {
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
+    #[coverage(off)]
     pub fn select_prev(&mut self) {
         let len = self.matches().len();
         if len > 0 {
@@ -202,6 +221,7 @@ impl OverviewModal {
 
 /// `❯ <input>` の入力行。キャレット位置の 1 文字を下線で示す（文字を横にずらさない）。空なら
 /// 下線の空白 1 つ。行末では末尾の空白に下線を敷く。
+#[coverage(off)]
 fn input_line(value: &str, cursor: usize) -> String {
     let prompt = Role::Danger.style().bold().paint("❯");
     let accent = Role::Accent.style();
@@ -226,6 +246,7 @@ fn input_line(value: &str, cursor: usize) -> String {
 }
 
 /// 1 候補行: 選択中は `›` マーカー、コマンド名（accent）、説明（dim）。幅に切り詰める。
+#[coverage(off)]
 fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
@@ -242,6 +263,7 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 }
 
 /// コマンドパレットのボディ（枠の内側の行）。入力行・候補一覧・フッタからなる。
+#[coverage(off)]
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![input_line(state.input(), state.cursor()), String::new()];
@@ -292,6 +314,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
 /// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
 /// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
+#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
     modal::render_modal(raw_height, raw_width, "Command", INNER_WIDTH, &body(state))
 }
@@ -299,6 +322,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
 /// サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
+#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -320,6 +344,7 @@ mod tests {
     use super::{OverviewModal, PaletteResult, render, render_over};
     use crate::presentation::widgets::display_width;
 
+    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -337,6 +362,7 @@ mod tests {
         out
     }
 
+    #[coverage(off)]
     fn joined(state: &OverviewModal) -> String {
         render(24, 80, state)
             .iter()
@@ -345,6 +371,7 @@ mod tests {
             .join("\n")
     }
 
+    #[coverage(off)]
     fn type_str(state: &mut OverviewModal, text: &str) {
         for c in text.chars() {
             state.insert_char(c);
@@ -352,6 +379,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_modal_is_empty_and_lists_every_command() {
         let modal = OverviewModal::new();
         assert_eq!(modal.input(), "");
@@ -367,6 +395,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn typing_filters_by_prefix_and_resets_the_selection() {
         let mut modal = OverviewModal::new();
         modal.select_next(); // selected = 1
@@ -385,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn backspace_widens_the_matches_again() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "co");
@@ -403,6 +433,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
         modal.select_prev(); // wrap to last (3)
@@ -412,6 +443,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn completion_and_submission_use_the_registry_metadata() {
         let mut modal = OverviewModal::new();
         modal.select_next();
@@ -425,6 +457,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn history_recall_moves_between_submissions_without_duplicating_them() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "issue list");
@@ -458,6 +491,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_long_help_and_a_result_strip() {
         let mut modal = OverviewModal::new();
         modal.set_result("Settings saved");
@@ -480,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selection_is_a_noop_when_there_are_no_matches() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz"); // 何にも一致しない
@@ -490,6 +525,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn caret_moves_within_the_input() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "ab");
@@ -501,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_the_prompt_commands_and_footer() {
         let text = joined(&OverviewModal::new());
         assert!(text.contains("Command")); // タイトル
@@ -512,6 +549,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_says_matches_when_filtering_and_marks_the_selection() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "is"); // issue のみ
@@ -522,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_a_no_match_notice() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "zzz");
@@ -530,6 +569,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_draws_the_caret_mid_input() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "abc");
@@ -539,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_fills_the_terminal() {
         let frame = render(24, 80, &OverviewModal::new());
         assert_eq!(frame.len(), 24);
@@ -548,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_over_keeps_the_workspace_background_visible() {
         let base: Vec<String> = (0..24)
             .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
@@ -567,6 +609,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
         let base = vec![format!("\u{1b}[32m{}\u{1b}[0m", "背景".repeat(8)); 16];
         let frame = render_over(16, 9, &base, &OverviewModal::new());

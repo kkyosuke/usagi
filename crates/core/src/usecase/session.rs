@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Session lifecycle operations.
 //!
 //! Two layers live here. The **state primitives** — [`list`], [`get`], [`touch`],
@@ -30,6 +28,7 @@ use crate::infrastructure::store::state::WorkspaceStateStore;
 /// # Errors
 ///
 /// Returns an error when `state.json` exists but cannot be read or parsed.
+#[coverage(off)]
 pub fn list(store: &WorkspaceStateStore) -> Result<Vec<SessionRecord>> {
     Ok(store
         .load()?
@@ -42,6 +41,7 @@ pub fn list(store: &WorkspaceStateStore) -> Result<Vec<SessionRecord>> {
 /// # Errors
 ///
 /// Returns an error when `state.json` exists but cannot be read or parsed.
+#[coverage(off)]
 pub fn get(store: &WorkspaceStateStore, name: &str) -> Result<Option<SessionRecord>> {
     Ok(list(store)?.into_iter().find(|s| s.name == name))
 }
@@ -53,6 +53,7 @@ pub fn get(store: &WorkspaceStateStore, name: &str) -> Result<Option<SessionReco
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
+#[coverage(off)]
 pub fn touch(
     store: &WorkspaceStateStore,
     name: &str,
@@ -81,6 +82,7 @@ pub fn touch(
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
+#[coverage(off)]
 pub fn record(
     store: &WorkspaceStateStore,
     session: SessionRecord,
@@ -104,6 +106,7 @@ pub fn record(
 ///
 /// Returns an error when the lock cannot be taken or the state cannot be read or
 /// written.
+#[coverage(off)]
 pub fn remove_record(store: &WorkspaceStateStore, name: &str, now: DateTime<Utc>) -> Result<bool> {
     let _lock = store.lock()?;
     let Some(mut state) = store.load()? else {
@@ -141,6 +144,7 @@ pub struct NewSession {
 /// # Errors
 ///
 /// Returns an error when `git worktree add` fails or the state cannot be written.
+#[coverage(off)]
 pub fn create(
     runner: &dyn GitRunner,
     store: &WorkspaceStateStore,
@@ -185,6 +189,7 @@ pub fn create(
 ///
 /// Returns an error when `git worktree remove` fails, or the state cannot be read
 /// or written.
+#[coverage(off)]
 pub fn remove(
     runner: &dyn GitRunner,
     store: &WorkspaceStateStore,
@@ -208,10 +213,12 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use std::fs;
 
+    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
     }
 
+    #[coverage(off)]
     fn session(name: &str) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -226,6 +233,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn store() -> (tempfile::TempDir, WorkspaceStateStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = WorkspaceStateStore::new(tmp.path());
@@ -233,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn list_and_get_are_empty_without_a_state_file() {
         let (_tmp, store) = store();
         assert!(list(&store).unwrap().is_empty());
@@ -240,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn record_creates_state_then_lists_and_gets_the_session() {
         let (_tmp, store) = store();
         record(&store, session("alpha"), ts(20)).unwrap();
@@ -252,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn record_upserts_by_name_and_appends_new_ones() {
         let (_tmp, store) = store();
         record(&store, session("alpha"), ts(20)).unwrap();
@@ -269,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn touch_sets_last_active_and_returns_the_session() {
         let (_tmp, store) = store();
         record(&store, session("alpha"), ts(20)).unwrap();
@@ -283,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn touch_is_none_for_an_unknown_name_or_missing_state() {
         let (_tmp, store) = store();
         // No state file yet.
@@ -293,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_record_deletes_a_recorded_session_and_reports_success() {
         let (_tmp, store) = store();
         record(&store, session("alpha"), ts(20)).unwrap();
@@ -304,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_record_is_false_for_an_unknown_name_or_missing_state() {
         let (_tmp, store) = store();
         // No state file yet.
@@ -314,6 +329,7 @@ mod tests {
         assert_eq!(list(&store).unwrap().len(), 1);
     }
 
+    #[coverage(off)]
     fn spec(name: &str) -> NewSession {
         NewSession {
             name: name.to_string(),
@@ -323,6 +339,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn create_adds_the_worktree_then_records_the_session() {
         let (tmp, store) = store();
         let repo = tmp.path();
@@ -351,6 +368,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn create_propagates_a_worktree_add_failure_without_recording() {
         let (tmp, store) = store();
         let git = FakeGit::new(vec![fail("fatal: branch 'usagi/alpha' already exists")]);
@@ -364,6 +382,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn create_rolls_back_the_worktree_when_recording_fails() {
         // Force the state record to fail by making `.usagi` a file, so the store's
         // `create_dir_all` cannot make the directory.
@@ -393,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_tears_down_the_worktree_then_forgets_the_record() {
         let (tmp, store) = store();
         let repo = tmp.path();
@@ -414,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_propagates_a_dirty_worktree_failure_and_keeps_the_record() {
         let (tmp, store) = store();
         let repo = tmp.path();
@@ -433,6 +454,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_of_an_unrecorded_session_is_a_noop_returning_false() {
         let (tmp, store) = store();
         // The worktree remove is a no-op (git reports not a working tree), and

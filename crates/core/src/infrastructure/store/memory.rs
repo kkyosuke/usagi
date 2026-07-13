@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Persistence for a repository's agent memories.
 //!
 //! Memories live as `<name>.md` files under `<repo>/.usagi/memory/`, each a
@@ -51,48 +49,59 @@ impl MarkdownEntry for MemoryEntry {
 
     const NAME: &'static str = "memory";
 
+    #[coverage(off)]
     fn is_entry_file(path: &Path) -> bool {
         is_memory_file(path)
     }
 
+    #[coverage(off)]
     fn parse_markdown(text: &str) -> Result<Memory> {
         Ok(Memory::from_markdown(text)?)
     }
 
+    #[coverage(off)]
     fn to_markdown(entry: &Memory) -> String {
         entry.to_markdown()
     }
 
+    #[coverage(off)]
     fn file_name(entry: &Memory) -> Result<String> {
         memory_file_name(&entry.name)
     }
 
+    #[coverage(off)]
     fn key(entry: &Memory) -> String {
         entry.name.clone()
     }
 
+    #[coverage(off)]
     fn key_from_summary(summary: &MemorySummary) -> String {
         summary.name.clone()
     }
 
+    #[coverage(off)]
     fn key_from_path(path: &Path) -> Option<String> {
         path.file_stem()
             .and_then(|stem| stem.to_str())
             .map(ToOwned::to_owned)
     }
 
+    #[coverage(off)]
     fn summary(entry: &Memory) -> MemorySummary {
         entry.summary()
     }
 
+    #[coverage(off)]
     fn sort_entries(entries: &mut Vec<Memory>) {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
+    #[coverage(off)]
     fn summaries_from_index(index: IndexFile) -> Vec<MemorySummary> {
         index.memories
     }
 
+    #[coverage(off)]
     fn index_file_ref(summaries: &[MemorySummary]) -> IndexFileRef<'_> {
         IndexFileRef {
             version: crate::infrastructure::persistence::json_file::FILE_FORMAT_VERSION,
@@ -100,6 +109,7 @@ impl MarkdownEntry for MemoryEntry {
         }
     }
 
+    #[coverage(off)]
     fn write_extra_derived(dir: &Path, summaries: &[MemorySummary]) -> Result<()> {
         crate::infrastructure::persistence::json_file::write_text_atomic(
             &dir.join(TOC_FILE),
@@ -110,6 +120,7 @@ impl MarkdownEntry for MemoryEntry {
 
 /// The on-disk filename for a memory `name`, rejecting anything that is not a
 /// single safe path component so a name can never escape the memory directory.
+#[coverage(off)]
 fn memory_file_name(name: &str) -> Result<String> {
     let mut components = Path::new(name).components();
     let single_component =
@@ -131,6 +142,7 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Open the memory store for the repository at `repo_root`.
     #[must_use]
+    #[coverage(off)]
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
             inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME)),
@@ -138,16 +150,19 @@ impl MemoryStore {
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         self.inner.dir()
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn index_path(&self) -> PathBuf {
         self.inner.index_path()
     }
 
     #[must_use]
+    #[coverage(off)]
     pub fn toc_path(&self) -> PathBuf {
         self.dir().join(TOC_FILE)
     }
@@ -158,6 +173,7 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the lock cannot be acquired.
+    #[coverage(off)]
     pub fn lock(&self) -> Result<StoreLock> {
         StoreLock::acquire(self.dir())
     }
@@ -168,6 +184,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the directory cannot be read or any file fails to
     /// parse.
+    #[coverage(off)]
     pub fn scan(&self) -> Result<Vec<Memory>> {
         self.inner.scan()
     }
@@ -178,6 +195,7 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the directory itself cannot be read.
+    #[coverage(off)]
     pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
         self.inner.scan_lenient()
     }
@@ -188,6 +206,7 @@ impl MemoryStore {
     ///
     /// Returns an error when `name` is not a single safe path component, or the
     /// backing file exists but cannot be read or parsed.
+    #[coverage(off)]
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
         let path = self.dir().join(memory_file_name(name)?);
         match self.inner.read_existing_path(&path) {
@@ -204,6 +223,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired, the name is unsafe, or
     /// the write / reindex fails.
+    #[coverage(off)]
     pub fn write(&self, memory: &Memory) -> Result<()> {
         let lock = self.lock()?;
         self.write_locked(&lock, memory)
@@ -215,6 +235,7 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the name is unsafe or the write / reindex fails.
+    #[coverage(off)]
     pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
         self.inner.write_markdown(memory)?;
         self.inner.reindex_after_write(memory)
@@ -227,6 +248,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired, the name is unsafe, the
     /// file cannot be removed, or the reindex fails.
+    #[coverage(off)]
     pub fn remove(&self, name: &str) -> Result<bool> {
         let _lock = self.lock()?;
         let path = self.dir().join(memory_file_name(name)?);
@@ -245,11 +267,13 @@ impl MemoryStore {
     ///
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
+    #[coverage(off)]
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
         self.inner.summaries()
     }
 }
 
+#[coverage(off)]
 fn path_missing(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -259,6 +283,7 @@ fn path_missing(error: &anyhow::Error) -> bool {
 
 /// Render the `MEMORY.md` table of contents: a heading and one bullet per memory
 /// (newest first), each linking to its file with the type as a one-word hook.
+#[coverage(off)]
 fn render_toc(summaries: &[MemorySummary]) -> String {
     let mut sorted: Vec<&MemorySummary> = summaries.iter().collect();
     sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.name.cmp(&b.name)));
@@ -277,6 +302,7 @@ fn render_toc(summaries: &[MemorySummary]) -> String {
 
 /// Whether `path` is a memory markdown file (a `*.md` that is not the table of
 /// contents).
+#[coverage(off)]
 fn is_memory_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
         && path.file_name().and_then(|n| n.to_str()) != Some(TOC_FILE)
@@ -288,6 +314,7 @@ mod tests {
     use crate::domain::memory::MemoryType;
     use chrono::{TimeZone, Utc};
 
+    #[coverage(off)]
     fn memory(name: &str, title: &str) -> Memory {
         let ts = Utc.with_ymd_and_hms(2026, 6, 17, 0, 0, 0).unwrap();
         Memory {
@@ -303,6 +330,7 @@ mod tests {
 
     /// Pin a file's modification time so freshness tests are independent of the
     /// filesystem's timestamp granularity.
+    #[coverage(off)]
     fn set_mtime(path: &Path, secs_from_epoch: u64) {
         let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs_from_epoch);
         fs::OpenOptions::new()
@@ -314,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn scan_is_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -321,6 +350,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn dir_and_paths_point_under_usagi_memory() {
         let store = MemoryStore::new("/repo");
         assert_eq!(store.dir(), Path::new("/repo/.usagi/memory"));
@@ -335,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_then_read_round_trips_and_writes_derived_files() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -349,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_returns_none_for_a_missing_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -356,6 +388,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_and_remove_reject_a_path_traversing_name() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -377,6 +410,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn index_records_version_and_toc_lists_the_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -392,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_same_name_overwrites_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -406,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn toc_orders_newest_first() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -423,6 +459,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_deletes_the_file_and_reports_success() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -434,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_rebuilds_the_derived_files_when_the_cache_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -454,6 +492,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_leaves_the_cache_untouched_when_the_name_is_absent_from_it() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -475,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn summaries_rebuild_when_index_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -490,6 +530,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn summaries_rebuild_when_index_is_corrupt() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -524,6 +565,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn summaries_are_empty_without_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -532,6 +574,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn scan_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -543,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn write_tolerates_a_corrupt_sibling_and_indexes_the_parseable_files() {
         let _guard = crate::test_support::process_env_guard();
         let home = tempfile::tempdir().unwrap();
@@ -591,6 +635,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn scan_errors_when_the_memory_path_is_not_a_directory() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
@@ -607,6 +652,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn summaries_error_when_the_index_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -624,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_propagates_parse_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -635,6 +682,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn read_errors_when_the_backing_file_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -651,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_errors_when_the_path_is_not_a_file() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -667,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn the_lock_file_is_not_picked_up_as_a_memory() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -677,6 +727,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn toc_and_index_are_ignored_by_scan() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -687,6 +738,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn memory_entry_key_from_path_uses_the_file_stem() {
         assert_eq!(
             MemoryEntry::key_from_path(Path::new("/repo/.usagi/memory/one.md")),
@@ -695,6 +747,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn scan_lenient_returns_the_parseable_memories() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
@@ -703,6 +756,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn summaries_rebuild_when_a_memory_file_is_newer_than_the_index() {
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());

@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! crossterm を TUI の統一 runtime input stream へ接続する合成ルート adapter。
 //!
 //! crossterm 依存はこの binary crate に閉じ、TUI crate へ渡す値は terminal 非依存の
@@ -29,10 +27,12 @@ pub trait CrosstermEventSource {
 pub struct CrosstermSource;
 
 impl CrosstermEventSource for CrosstermSource {
+    #[coverage(off)]
     fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
         event::poll(timeout)
     }
 
+    #[coverage(off)]
     fn read(&mut self) -> io::Result<Event> {
         event::read()
     }
@@ -54,6 +54,7 @@ pub struct NoBackend<B>(std::marker::PhantomData<B>);
 impl<B> BackendReceiver for NoBackend<B> {
     type Event = B;
 
+    #[coverage(off)]
     fn try_recv(&mut self) -> Option<Self::Event> {
         None
     }
@@ -73,6 +74,7 @@ where
     R: BackendReceiver,
 {
     /// `now` を基準に tick schedule を開始する。
+    #[coverage(off)]
     pub fn new(source: S, backend: R, tick_interval: Duration, now: Duration) -> Self {
         assert!(!tick_interval.is_zero(), "tick interval must not be zero");
         Self {
@@ -88,6 +90,7 @@ where
     /// 先に ready 済みの terminal event を drain せず 1 件だけ返し、その後 backend、期限に
     /// 達した tick を観測する。いずれも ready でなければ、次の tick まで terminal を poll
     /// して terminal event のみを返す。backend はこの待機後の次 cycle で観測する。
+    #[coverage(off)]
     pub fn next(&mut self, now: Duration) -> io::Result<RuntimeEvent<R::Event>> {
         while self.source.poll(Duration::ZERO)? {
             if let Some(event) = adapt_event(self.source.read()?) {
@@ -115,6 +118,7 @@ where
         }
     }
 
+    #[coverage(off)]
     fn advance_tick(&mut self, now: Duration) {
         while self.next_tick_at <= now {
             self.next_tick_at = self.next_tick_at.saturating_add(self.tick_interval);
@@ -124,6 +128,7 @@ where
 
 /// crossterm event を、保持可能な TUI runtime 語彙へ変換する。
 #[must_use]
+#[coverage(off)]
 pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
     match event {
         Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),
@@ -135,6 +140,7 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
 
 /// crossterm の key kind、modifier、code を TUI の terminal 非依存語彙へ写す。
 #[must_use]
+#[coverage(off)]
 pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
     InputKeyEvent::new(
         match key.code {
@@ -188,6 +194,7 @@ mod tests {
     }
 
     impl FakeSource {
+        #[coverage(off)]
         fn with(events: impl IntoIterator<Item = Event>) -> Self {
             Self {
                 events: events.into_iter().collect(),
@@ -197,11 +204,13 @@ mod tests {
     }
 
     impl CrosstermEventSource for FakeSource {
+        #[coverage(off)]
         fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
             self.timeouts.push(timeout);
             Ok(!self.events.is_empty())
         }
 
+        #[coverage(off)]
         fn read(&mut self) -> io::Result<Event> {
             Ok(self.events.pop_front().expect("read after ready poll"))
         }
@@ -210,10 +219,12 @@ mod tests {
     struct DelayedSource(Option<Event>);
 
     impl CrosstermEventSource for DelayedSource {
+        #[coverage(off)]
         fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
             Ok(!timeout.is_zero() && self.0.is_some())
         }
 
+        #[coverage(off)]
         fn read(&mut self) -> io::Result<Event> {
             Ok(self.0.take().expect("read after ready poll"))
         }
@@ -225,6 +236,7 @@ mod tests {
     impl BackendReceiver for FakeBackend {
         type Event = &'static str;
 
+        #[coverage(off)]
         fn try_recv(&mut self) -> Option<Self::Event> {
             self.0.pop_front()
         }
@@ -234,6 +246,7 @@ mod tests {
     const TICK: Duration = Duration::from_millis(100);
 
     #[test]
+    #[coverage(off)]
     fn adapter_preserves_key_kind_modifiers_text_paste_and_resize() {
         let key = KeyEvent::new_with_kind(
             KeyCode::Char('う'),
@@ -269,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn fake_crossterm_sequence_keeps_each_relevant_event_in_order() {
         let source = FakeSource::with([
             Event::FocusGained,
@@ -300,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn multiplexes_terminal_backend_and_tick_in_a_deterministic_order() {
         let source = FakeSource::with([Event::Key(KeyEvent::new(
             KeyCode::Enter,
@@ -314,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn waits_only_until_the_next_tick_when_no_source_is_ready() {
         let mut pump = EventPump::new(FakeSource::default(), FakeBackend::default(), TICK, T0);
 
@@ -322,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn ignores_non_input_events_received_while_waiting_for_a_tick() {
         let source = DelayedSource(Some(Event::FocusLost));
         let mut pump = EventPump::new(source, FakeBackend::default(), TICK, T0);
@@ -330,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn adapter_maps_every_portable_crossterm_key_code_and_kind() {
         let cases = [
             (

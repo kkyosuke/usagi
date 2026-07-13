@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Closeup modal（セッションのアクションメニュー）。
 //!
 //! workspace 画面でフォーカス中のセッションに対する操作を選ぶ小さな中央メニュー。↑↓ で選ぶ。
@@ -27,6 +25,7 @@ pub struct CloseupModal {
 impl CloseupModal {
     /// セッション `session` を対象に、先頭アクションを選んだメニューを開く。
     #[must_use]
+    #[coverage(off)]
     pub fn new(session: impl Into<String>) -> Self {
         Self {
             session: session.into(),
@@ -36,24 +35,28 @@ impl CloseupModal {
 
     /// 対象セッション名。
     #[must_use]
+    #[coverage(off)]
     pub fn session(&self) -> &str {
         &self.session
     }
 
     /// 選択中アクションの添字。
     #[must_use]
+    #[coverage(off)]
     pub fn selected(&self) -> usize {
         self.selected
     }
 
     /// アクション一覧。
     #[must_use]
+    #[coverage(off)]
     pub fn actions(&self) -> Vec<closeup::CommandInfo> {
         closeup::commands().collect()
     }
 
     /// 選択中のアクション。
     #[must_use]
+    #[coverage(off)]
     pub fn selected_action(&self) -> closeup::CommandInfo {
         self.actions()[self.selected]
     }
@@ -61,16 +64,19 @@ impl CloseupModal {
     /// Enter で controller へ渡す registry command。Closeup は入力欄を持たないため、
     /// 選択行の command 名そのものが completion になる。
     #[must_use]
+    #[coverage(off)]
     pub fn submission(&self) -> String {
         self.selected_action().name.to_owned()
     }
 
     /// 選択を次へ（末尾で先頭へ回り込む）。
+    #[coverage(off)]
     pub fn select_next(&mut self) {
         self.selected = (self.selected + 1) % self.actions().len();
     }
 
     /// 選択を前へ（先頭で末尾へ回り込む）。
+    #[coverage(off)]
     pub fn select_prev(&mut self) {
         let len = self.actions().len();
         self.selected = (self.selected + len - 1) % len;
@@ -78,6 +84,7 @@ impl CloseupModal {
 }
 
 /// 1 アクション行: 選択中は `›` マーカー、`key` バッジ（warning）、ラベル（accent）、説明（dim）。
+#[coverage(off)]
 fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
@@ -94,6 +101,7 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
 }
 
 /// アクションメニューのボディ（枠の内側の行）: 対象セッションの見出し・アクション一覧・フッタ。
+#[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
     let mut lines = vec![
         Style::new()
@@ -112,6 +120,7 @@ fn body(state: &CloseupModal) -> Vec<String> {
 /// 生の端末サイズに対する closeup modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
 /// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
+#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<String> {
     modal::render_modal(raw_height, raw_width, "Session", INNER_WIDTH, &body(state))
 }
@@ -119,6 +128,7 @@ pub fn render(raw_height: usize, raw_width: usize, state: &CloseupModal) -> Vec<
 /// `base` の workspace フレームを背景に残し、closeup modal を中央に合成する。
 /// サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
+#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -140,6 +150,7 @@ mod tests {
     use super::{CloseupModal, render, render_over};
     use crate::presentation::widgets::display_width;
 
+    #[coverage(off)]
     fn strip(line: &str) -> String {
         let mut out = String::new();
         let mut chars = line.chars();
@@ -157,6 +168,7 @@ mod tests {
         out
     }
 
+    #[coverage(off)]
     fn joined(state: &CloseupModal) -> String {
         render(24, 80, state)
             .iter()
@@ -166,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_modal_targets_the_session_and_lists_actions() {
         let modal = CloseupModal::new("tui");
         assert_eq!(modal.session(), "tui");
@@ -180,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selection_wraps_both_ways() {
         let mut modal = CloseupModal::new("s");
         modal.select_prev(); // wrap to last (terminal)
@@ -192,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selected_action_submission_comes_from_the_registry() {
         let mut modal = CloseupModal::new("s");
         assert_eq!(modal.submission(), "agent");
@@ -200,6 +215,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_the_session_actions_and_footer() {
         let text = joined(&CloseupModal::new("daemon"));
         assert!(text.contains("Session")); // タイトル
@@ -213,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_marks_the_selected_action() {
         let mut modal = CloseupModal::new("s");
         modal.select_next(); // Focus agent
@@ -224,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_fills_the_terminal() {
         let frame = render(24, 80, &CloseupModal::new("s"));
         assert_eq!(frame.len(), 24);
@@ -233,6 +251,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_over_keeps_the_workspace_background_visible() {
         let base: Vec<String> = (0..24)
             .map(|row| format!("workspace-row-{row}-{}", ".".repeat(80)))
@@ -251,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_over_fits_ansi_cjk_background_on_a_narrow_terminal() {
         let base = vec![format!("\u{1b}[35m{}\u{1b}[0m", "背景".repeat(8)); 14];
         let frame = render_over(14, 9, &base, &CloseupModal::new("会話"));

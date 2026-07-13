@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Durable persistence boundary for daemon-owned lifecycle state.
 //!
 //! Clients never receive this store: they submit commands to the daemon, which
@@ -24,17 +22,20 @@ pub struct DaemonLifecycleStore {
 
 impl DaemonLifecycleStore {
     #[must_use]
+    #[coverage(off)]
     pub fn new(repo_root: &Path) -> Self {
         Self {
             dir: repo_root.join(STATE_DIR),
         }
     }
     #[must_use]
+    #[coverage(off)]
     pub fn state_path(&self) -> PathBuf {
         self.dir.join(FILE)
     }
     /// # Errors
     /// Returns an error when the durable state cannot be read.
+    #[coverage(off)]
     pub fn load(&self) -> Result<Option<WorkspaceLifecycleState>> {
         json_file::read(&self.state_path())
     }
@@ -42,6 +43,7 @@ impl DaemonLifecycleStore {
     ///
     /// # Errors
     /// Returns an error for an ownership mismatch, reducer rejection, lock failure, or failed write.
+    #[coverage(off)]
     pub fn apply(
         &self,
         daemon: DaemonGeneration,
@@ -64,6 +66,7 @@ impl DaemonLifecycleStore {
     }
     /// # Errors
     /// Returns an error when the state cannot be durably initialized.
+    #[coverage(off)]
     pub fn initialize(&self, state: &WorkspaceLifecycleState) -> Result<()> {
         state.validate().map_err(anyhow::Error::msg)?;
         json_file::write_atomic(&self.dir, &self.state_path(), state)
@@ -76,10 +79,12 @@ mod tests {
     use crate::domain::id::{OperationId, WorkspaceId};
     use crate::domain::session_lifecycle::{OperationJournal, OperationStatus};
     use chrono::TimeZone;
+    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap()
     }
     #[test]
+    #[coverage(off)]
     fn daemon_owner_and_revisions_are_persisted() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());
@@ -108,6 +113,7 @@ mod tests {
         assert_eq!(store.load().unwrap().unwrap(), saved);
     }
     #[test]
+    #[coverage(off)]
     fn another_daemon_cannot_accept_an_operation() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());
@@ -137,6 +143,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn apply_rejects_an_uninitialized_store() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DaemonLifecycleStore::new(tmp.path());

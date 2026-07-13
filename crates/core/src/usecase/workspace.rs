@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Workspace operations shared by the CLI and TUI entry paths.
 //!
 //! [`open`] resolves a path against the global workspace registry. It reuses and
@@ -51,6 +49,7 @@ use crate::infrastructure::store::workspace::Storage;
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
+#[coverage(off)]
 pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Workspace> {
     let _lock = storage.lock()?;
     let mut workspaces = storage.load_workspaces()?;
@@ -72,6 +71,7 @@ pub fn open(storage: &Storage, path: &Path, now: DateTime<Utc>) -> Result<Worksp
 ///
 /// Returns an error when the registry lock cannot be acquired or the registry
 /// cannot be read or written.
+#[coverage(off)]
 pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Workspace>> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -104,6 +104,7 @@ pub fn remove(storage: &Storage, paths: &[std::path::PathBuf]) -> Result<Vec<Wor
 ///
 /// Returns an error when the global workspace registry cannot be read. Errors
 /// confined to an individual registered workspace are degraded to zero counts.
+#[coverage(off)]
 pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
     let mut workspaces = storage.load_workspaces()?;
     workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
@@ -114,6 +115,7 @@ pub fn recent(storage: &Storage) -> Result<Vec<Recent>> {
         .collect())
 }
 
+#[coverage(off)]
 fn resolve_or_register(
     workspaces: &mut Vec<Workspace>,
     path: &Path,
@@ -146,6 +148,7 @@ fn resolve_or_register(
     (workspace, persist)
 }
 
+#[coverage(off)]
 fn available_name(workspaces: &[Workspace], base: &str) -> String {
     let is_taken = |candidate: &str| {
         workspaces
@@ -166,6 +169,7 @@ fn available_name(workspaces: &[Workspace], base: &str) -> String {
     }
 }
 
+#[coverage(off)]
 fn overview_for(workspace: Workspace) -> WorkspaceOverview {
     let state = WorkspaceStateStore::new(&workspace.path)
         .load()
@@ -212,10 +216,12 @@ mod tests {
     use crate::infrastructure::store::state::WorkspaceStateStore;
     use crate::infrastructure::store::workspace::Storage;
 
+    #[coverage(off)]
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, day, 0, 0, 0).unwrap()
     }
 
+    #[coverage(off)]
     fn workspace(name: &str, path: impl Into<PathBuf>, updated_at: DateTime<Utc>) -> Workspace {
         Workspace {
             name: name.to_string(),
@@ -225,12 +231,14 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn storage() -> (tempfile::TempDir, Storage) {
         let tmp = tempfile::tempdir().unwrap();
         let storage = Storage::new(tmp.path().join("home"));
         (tmp, storage)
     }
 
+    #[coverage(off)]
     fn session(name: &str, root: &Path, prs: Vec<PrLink>) -> SessionRecord {
         SessionRecord {
             name: name.to_string(),
@@ -245,6 +253,7 @@ mod tests {
         }
     }
 
+    #[coverage(off)]
     fn issue(number: u32, status: IssueStatus) -> Issue {
         Issue {
             number,
@@ -263,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_registers_a_new_path_with_injected_timestamps() {
         let (tmp, storage) = storage();
         let path = tmp.path().join("alpha");
@@ -277,6 +287,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_reuses_the_same_path_and_touches_it_without_duplicating() {
         let (tmp, storage) = storage();
         let path = tmp.path().join("alpha");
@@ -294,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_avoids_names_owned_by_different_paths() {
         let (tmp, storage) = storage();
         let first = workspace("project", "/first/project", ts(3));
@@ -308,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_uses_a_fallback_name_when_the_path_has_no_final_component() {
         let (_tmp, storage) = storage();
 
@@ -318,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn open_reports_an_unreadable_registry() {
         let (tmp, storage) = storage();
         fs::create_dir_all(storage.dir()).unwrap();
@@ -327,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_deletes_only_the_requested_registered_paths() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::new(dir.path());
@@ -350,6 +365,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[coverage(off)]
     fn open_keeps_a_new_non_utf8_path_transient_and_intact() {
         use std::ffi::OsString;
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -368,12 +384,14 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_is_empty_for_an_empty_registry() {
         let (_tmp, storage) = storage();
         assert!(recent(&storage).unwrap().is_empty());
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_sorts_and_counts_sessions_open_issues_and_unique_prs() {
         let (tmp, storage) = storage();
         let alpha_root = tmp.path().join("alpha");
@@ -427,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_degrades_a_broken_workspace_without_hiding_siblings() {
         let (tmp, storage) = storage();
         let healthy_root = tmp.path().join("healthy");
@@ -463,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_reports_a_broken_global_registry() {
         let (_tmp, storage) = storage();
         fs::create_dir_all(storage.dir()).unwrap();

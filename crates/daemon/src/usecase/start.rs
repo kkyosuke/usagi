@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The `usagi daemon start` usecase: launch the daemon in the background.
 //!
 //! Unlike [`serve`](crate::usecase::serve), which *is* the daemon and runs in
@@ -40,6 +38,7 @@ pub(crate) const MAX_POLLS: usize = 40;
 ///
 /// Never in practice: the guard unwraps the record only after `classify`
 /// reports `Alive`, which happens only when a record is present.
+#[coverage(off)]
 pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,
@@ -75,6 +74,7 @@ pub fn start<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
 ///
 /// Returns the launcher's spawn error, the store's load error, or a timeout
 /// error when the launched daemon does not register within [`MAX_POLLS`] polls.
+#[coverage(off)]
 pub(crate) fn launch_and_confirm<F: RecordFile, P: LivenessProbe, L: DaemonLauncher, K: Sleeper>(
     store: &DaemonRecordStore<F>,
     probe: &P,
@@ -105,6 +105,7 @@ mod tests {
     use usagi_core::domain::daemon::DaemonRecord;
     use usagi_core::infrastructure::daemon::DaemonRecordStore;
 
+    #[coverage(off)]
     fn info() -> AppInfo {
         AppInfo {
             name: "usagi",
@@ -113,6 +114,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn launches_and_reports_the_registered_pid() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // The launcher mimics the spawned serve registering pid 5555.
@@ -124,6 +126,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn refuses_when_a_live_daemon_already_runs() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         let existing = DaemonRecord::new(1111);
@@ -139,6 +142,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn times_out_when_the_daemon_never_registers() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::default());
         // An idle launcher spawns nothing, so no record ever appears.
@@ -147,6 +151,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn propagates_load_error() {
         let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
         let launcher = TestLauncher::idle(&store);

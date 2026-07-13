@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Welcome 画面（最初のトップメニュー）。
 //!
 //! 起動直後に出るメニュー画面。左に Open / New / Config / Quit のメニュー、右に最近使った
@@ -77,6 +75,7 @@ pub struct Welcome {
 }
 
 /// メニューの固定項目。ラベルと確定ショートカット文字の対応の単一情報源。
+#[coverage(off)]
 fn default_items() -> Vec<MenuItem> {
     vec![
         MenuItem {
@@ -99,6 +98,7 @@ fn default_items() -> Vec<MenuItem> {
 }
 
 /// recent 一覧の `index` 番目に割り当てる番号キー（`1` 始まり）。範囲外は `?`。
+#[coverage(off)]
 fn recent_key(index: usize) -> char {
     u32::try_from(index + 1)
         .ok()
@@ -108,6 +108,7 @@ fn recent_key(index: usize) -> char {
 
 /// ショートカット文字 `key` に対応する [`MenuItem`] の操作。メニュー項目のキーはすべて
 /// 実在の操作へ写るので `Option` にせず、確定に使える。
+#[coverage(off)]
 fn activate(key: char) -> MenuAction {
     match key {
         'o' => MenuAction::Open,
@@ -122,6 +123,7 @@ impl Welcome {
     /// recent 項目（最近使った順）を添えてメニューを組む。表示と番号キーの対象は
     /// 先頭 [`RECENT_SLOTS`] 件だけだが、後で touch された項目を再整列できるよう全件を保持する。
     #[must_use]
+    #[coverage(off)]
     pub fn new(recent: Vec<Recent>) -> Self {
         Self {
             items: default_items(),
@@ -133,24 +135,28 @@ impl Welcome {
 
     /// recent 項目を持たないメニュー。
     #[must_use]
+    #[coverage(off)]
     pub fn empty() -> Self {
         Self::new(Vec::new())
     }
 
     /// メニュー項目。
     #[must_use]
+    #[coverage(off)]
     pub fn items(&self) -> &[MenuItem] {
         &self.items
     }
 
     /// recent 項目（単体 workspace / unite が混在する）。
     #[must_use]
+    #[coverage(off)]
     pub fn recent(&self) -> &[Recent] {
         &self.recent[..self.recent.len().min(RECENT_SLOTS)]
     }
 
     /// `workspace` と同じ path の単体 recent に touch 後の identity / timestamp を反映し、
     /// 最終利用時刻の降順へ戻す。overview の集計値は既存 model の値を保つ。
+    #[coverage(off)]
     pub(crate) fn record_opened(&mut self, workspace: &Workspace) {
         let Some(overview) = self.recent.iter_mut().find_map(|recent| match recent {
             Recent::Workspace(overview) if overview.workspace.path == workspace.path => {
@@ -167,23 +173,27 @@ impl Welcome {
 
     /// 選択中の項目の添字。
     #[must_use]
+    #[coverage(off)]
     pub fn selected_index(&self) -> usize {
         self.selected_index
     }
 
     /// 一時的な通知（サブ画面から戻ったときのメッセージなど）。
     #[must_use]
+    #[coverage(off)]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
 
     /// 選択を 1 つ下へ（末尾から先頭へ回り込む）。移動で通知は消える。
+    #[coverage(off)]
     pub fn select_next(&mut self) {
         self.selected_index = (self.selected_index + 1) % self.items.len();
         self.notice = None;
     }
 
     /// 選択を 1 つ上へ（先頭から末尾へ回り込む）。移動で通知は消える。
+    #[coverage(off)]
     pub fn select_prev(&mut self) {
         self.selected_index = self
             .selected_index
@@ -193,12 +203,14 @@ impl Welcome {
     }
 
     /// 通知を差し替える（サブ画面から戻ったときに使う）。
+    #[coverage(off)]
     pub fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
     }
 
     /// 選択中の項目を確定したときの操作。
     #[must_use]
+    #[coverage(off)]
     pub fn selected_action(&self) -> MenuAction {
         activate(self.items[self.selected_index].key)
     }
@@ -206,6 +218,7 @@ impl Welcome {
     /// ショートカット文字 `key` に対応する操作。メニュー項目のキー（`o`/`e`/`c`/`q`）か、
     /// recent の番号キー（`1`〜`3`）に一致すればその操作、どれでもなければ `None`。
     #[must_use]
+    #[coverage(off)]
     pub fn action_for(&self, key: char) -> Option<MenuAction> {
         if let Some(item) = self.items.iter().find(|item| item.key == key) {
             return Some(activate(item.key));
@@ -214,6 +227,7 @@ impl Welcome {
     }
 
     /// 番号キー `key` に対応する recent 項目を開く操作。空スロットや範囲外は `None`。
+    #[coverage(off)]
     fn recent_action(&self, key: char) -> Option<MenuAction> {
         let digit = usize::try_from(key.to_digit(10)?).ok()?;
         if (1..=self.recent().len()).contains(&digit) {
@@ -225,12 +239,14 @@ impl Welcome {
 }
 
 impl Default for Welcome {
+    #[coverage(off)]
     fn default() -> Self {
         Self::empty()
     }
 }
 
 /// 左のメニュー列。選択中の項目を強調する。
+#[coverage(off)]
 fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label...... key" — カーソル + 10 桁ラベル + 右寄せキー。
     let mut lines = vec![Role::Success.style().bold().paint("Menu"), String::new()];
@@ -260,16 +276,19 @@ fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
 }
 
 /// recent カードのタイトルに置く番号キー（Warning 太字）。
+#[coverage(off)]
 fn card_key(key: char) -> String {
     Role::Warning.style().bold().paint(&key.to_string())
 }
 
 /// recent カードの本文行（dim）。
+#[coverage(off)]
 fn card_body_line(text: &str) -> String {
     Style::new().dim().paint(text)
 }
 
 /// カウント行 `◷ 相対時刻  ⎇ セッション  #PR  ● 未 done issue`。単体・unite 共通の書式。
+#[coverage(off)]
 fn counts_line(relative: &str, sessions: usize, prs: usize, open_issues: usize) -> String {
     card_body_line(&format!(
         "◷ {relative}  ⎇ {sessions}  #{prs}  ● {open_issues}"
@@ -281,6 +300,7 @@ fn counts_line(relative: &str, sessions: usize, prs: usize, open_issues: usize) 
 ///
 /// - 単体 workspace: タイトル `key name`、本文はカウント 1 行。
 /// - unite（合併）: タイトル `key primary +追加数`、本文はメンバー名（`∪`）＋合計カウントの 2 行。
+#[coverage(off)]
 fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<String> {
     let key = recent_key(index);
     match item {
@@ -331,6 +351,7 @@ fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<S
 
 /// 右カラムの recent 群。見出し＋常に [`RECENT_SLOTS`] 枚のカードを出し、読み込みや空でも
 /// 列の見出し位置がずれないようにする。
+#[coverage(off)]
 fn recent_lines(items: &[Recent], now: DateTime<Utc>) -> Vec<String> {
     let mut lines = vec![Role::Success.style().bold().paint("Recent")];
     for i in 0..RECENT_SLOTS {
@@ -341,6 +362,7 @@ fn recent_lines(items: &[Recent], now: DateTime<Utc>) -> Vec<String> {
 
 /// ANSI 付きの断片を表示幅 `width` に詰める（広ければ切り、狭ければ空白で右を埋める）ので、
 /// 次のカラムが安定した位置から始まる。
+#[coverage(off)]
 fn pad_segment(segment: &str, width: usize) -> String {
     let clipped = widgets::clip_to_width(segment, width);
     let visible = widgets::display_width(&clipped);
@@ -349,6 +371,7 @@ fn pad_segment(segment: &str, width: usize) -> String {
 
 /// メニュー列（左）と recent 群（右）を区切り線で結んだ 2 カラムブロック。ブロック全体を
 /// 端末に中央寄せする。unite カードは行数が多いので、片方の列が尽きた行は空白で埋める。
+#[coverage(off)]
 fn menu_lines(
     width: usize,
     items: &[MenuItem],
@@ -375,6 +398,7 @@ fn menu_lines(
 
 /// メニュー下の一時通知行。通知が無くても必ず 1 行（空行）返し、出現・消滅でレイアウトが
 /// ずれないようにする。
+#[coverage(off)]
 fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     match notice {
         None => vec![String::new()],
@@ -391,6 +415,7 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 /// ボディ（2 カラムメニュー＋通知）だけを組む。`now` は recent の相対時刻に使うので呼び出し側が
 /// 渡す（この層は実時計を読まない）。
 #[must_use]
+#[coverage(off)]
 pub fn render(
     raw_height: usize,
     raw_width: usize,
@@ -418,12 +443,14 @@ mod tests {
     use usagi_core::domain::recent::{Recent, UniteOverview};
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
+    #[coverage(off)]
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
     }
 
+    #[coverage(off)]
     fn overview(name: &str, minutes_ago: i64) -> WorkspaceOverview {
         let mut workspace = Workspace::new(name, format!("/tmp/{name}"));
         workspace.updated_at = now() - Duration::minutes(minutes_ago);
@@ -431,11 +458,13 @@ mod tests {
     }
 
     /// 単体 workspace の recent 項目。
+    #[coverage(off)]
     fn workspace(name: &str, minutes_ago: i64) -> Recent {
         Recent::Workspace(overview(name, minutes_ago))
     }
 
     /// 与えた (名前, 何分前) のメンバーからなる unite の recent 項目。
+    #[coverage(off)]
     fn unite(members: &[(&str, i64)]) -> Recent {
         Recent::Unite(UniteOverview::new(
             members
@@ -445,6 +474,7 @@ mod tests {
         ))
     }
 
+    #[coverage(off)]
     fn strip(line: &str) -> String {
         // ANSI SGR を落として素のテキストにする（表示内容の検証用）。
         let mut out = String::new();
@@ -463,6 +493,7 @@ mod tests {
         out
     }
 
+    #[coverage(off)]
     fn rendered(welcome: &Welcome) -> String {
         render(24, 80, welcome, now())
             .iter()
@@ -472,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn new_welcome_starts_at_the_first_item_without_a_notice() {
         let welcome = Welcome::empty();
         assert_eq!(welcome.selected_index(), 0);
@@ -483,12 +515,14 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn default_matches_empty() {
         assert_eq!(Welcome::default().selected_index(), 0);
         assert!(Welcome::default().recent().is_empty());
     }
 
     #[test]
+    #[coverage(off)]
     fn select_next_advances_and_wraps() {
         let mut welcome = Welcome::empty();
         welcome.select_next();
@@ -501,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn select_prev_wraps_to_the_last_item() {
         let mut welcome = Welcome::empty();
         welcome.select_prev();
@@ -510,6 +545,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn movement_clears_an_existing_notice() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("saved".to_string()));
@@ -521,6 +557,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn set_notice_replaces_the_notice() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("done".to_string()));
@@ -530,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn selected_action_reports_the_current_item() {
         let mut welcome = Welcome::empty();
         assert_eq!(welcome.selected_action(), MenuAction::Open);
@@ -542,6 +580,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn action_for_maps_menu_shortcuts() {
         let welcome = Welcome::empty();
         assert_eq!(welcome.action_for('o'), Some(MenuAction::Open));
@@ -553,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn action_for_maps_recent_number_keys() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 11),
@@ -566,6 +606,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn recent_is_limited_to_three() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 1),
@@ -583,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn record_opened_promotes_a_hidden_recent_and_preserves_its_counts() {
         let mut welcome = Welcome::new(vec![
             workspace("alpha", 1),
@@ -613,6 +655,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_combines_every_section() {
         let welcome = Welcome::new(vec![workspace("alpha", 11)]);
         let joined = rendered(&welcome);
@@ -632,6 +675,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_distinguishes_unite_cards_from_workspace_cards() {
         let welcome = Welcome::new(vec![
             workspace("solo", 30),
@@ -649,6 +693,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_handles_an_empty_unite() {
         // 退化した空 unite でも落ちず、相対時刻を "—" で表す。
         let welcome = Welcome::new(vec![unite(&[])]);
@@ -658,6 +703,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_marks_only_the_selected_row() {
         let mut welcome = Welcome::empty();
         welcome.select_next(); // New を選択
@@ -667,6 +713,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_shows_a_placeholder_when_there_are_no_recents() {
         let joined = rendered(&Welcome::empty());
         assert!(joined.contains("No recent workspace"));
@@ -674,6 +721,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_renders_the_notice_line() {
         let mut welcome = Welcome::empty();
         welcome.set_notice(Some("welcome back".to_string()));
@@ -682,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_centers_the_body_and_pins_the_footer() {
         let welcome = Welcome::empty();
         let height = 40;
@@ -697,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_keeps_the_notice_slot_stable_across_toggling() {
         let mut welcome = Welcome::empty();
         let without = render(24, 80, &welcome, now());
@@ -707,6 +757,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_does_not_lose_content_on_a_short_terminal() {
         let welcome = Welcome::empty();
         let frame = render(3, 80, &welcome, now());
@@ -721,6 +772,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn render_rows_fit_the_terminal_width() {
         let welcome = Welcome::new(vec![
             workspace("alpha", 11),

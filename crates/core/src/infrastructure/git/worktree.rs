@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! The worktree lifecycle: add, remove, and list a repository's worktrees.
 //!
 //! A session's parallel working tree is a git worktree on its own branch. These
@@ -32,6 +30,7 @@ pub struct WorktreeInfo {
 ///
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree add` exits non-zero.
+#[coverage(off)]
 pub fn add_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -64,6 +63,7 @@ pub fn add_worktree(
 /// Returns an error when the path is not valid UTF-8, the `git` process cannot be
 /// spawned, or `git worktree remove` fails for any reason other than the path not
 /// being a worktree.
+#[coverage(off)]
 pub fn remove_worktree(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -91,6 +91,7 @@ pub fn remove_worktree(
 ///
 /// Returns an error when the `git` process cannot be spawned or
 /// `git worktree list` exits non-zero.
+#[coverage(off)]
 pub fn list_worktrees(runner: &dyn GitRunner, repo: &Path) -> Result<Vec<WorktreeInfo>> {
     let output = runner.run(repo, &["worktree", "list", "--porcelain"])?;
     if !output.success {
@@ -102,6 +103,7 @@ pub fn list_worktrees(runner: &dyn GitRunner, repo: &Path) -> Result<Vec<Worktre
 /// Parse the `git worktree list --porcelain` output: a blank-line-separated block
 /// per worktree, each with a `worktree <path>` line and optional `HEAD <sha>` /
 /// `branch <ref>` (absent when the worktree is on a detached HEAD).
+#[coverage(off)]
 fn parse_porcelain(text: &str) -> Vec<WorktreeInfo> {
     let mut out = Vec::new();
     let mut current: Option<WorktreeInfo> = None;
@@ -143,6 +145,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    #[coverage(off)]
     fn add_worktree_builds_the_expected_command_with_a_base() {
         let git = FakeGit::new(vec![ok("")]);
         add_worktree(
@@ -168,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn add_worktree_omits_the_base_when_none_and_reports_failure() {
         let git = FakeGit::new(vec![ok("")]);
         add_worktree(&git, Path::new("/repo"), Path::new("/dest"), "b", None).unwrap();
@@ -185,6 +189,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_worktree_passes_force_and_succeeds() {
         let git = FakeGit::new(vec![ok("")]);
         remove_worktree(&git, Path::new("/repo"), Path::new("/dest"), true).unwrap();
@@ -195,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_worktree_treats_a_missing_worktree_as_a_noop() {
         let git = FakeGit::new(vec![fail("fatal: '/dest' is not a working tree")]);
         // No `--force` when false, and the "not a working tree" error is swallowed.
@@ -206,6 +212,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn remove_worktree_surfaces_other_failures() {
         let git = FakeGit::new(vec![fail(
             "fatal: '/dest' contains modified or untracked files",
@@ -218,6 +225,7 @@ mod tests {
     }
 
     #[test]
+    #[coverage(off)]
     fn list_worktrees_parses_porcelain_including_a_detached_head() {
         let porcelain = "\
 worktree /repo
@@ -257,6 +265,7 @@ detached
     }
 
     #[test]
+    #[coverage(off)]
     fn list_worktrees_reports_failure() {
         let git = FakeGit::new(vec![fail("fatal: not a git repository")]);
         assert!(list_worktrees(&git, Path::new("/repo")).is_err());

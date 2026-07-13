@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! `usagi version` — 配布 version を表示する（入口から注入される）。
 
 use std::io::{self, Write};
@@ -13,6 +11,7 @@ pub struct Version {
 }
 
 impl Run for Version {
+    #[coverage(off)]
     fn run(&self, out: &mut dyn Write) -> io::Result<RunOutcome> {
         writeln!(out, "usagi {}", self.version)?;
         Ok(RunOutcome::Exit(0))
@@ -25,6 +24,7 @@ mod tests {
     use crate::cli::{Command, RunOutcome};
 
     #[test]
+    #[coverage(off)]
     fn prints_injected_value() {
         let (outcome, output) = execute(Command::Version);
         assert_eq!(outcome, RunOutcome::Exit(0));

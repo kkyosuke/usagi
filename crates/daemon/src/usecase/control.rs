@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! Typed, pure session/control state transitions owned by the daemon.
 
 #![allow(clippy::missing_errors_doc)]
@@ -86,6 +84,7 @@ pub struct Prompt {
 }
 
 /// Apply a phase report only for the exact capability and a newer source sequence.
+#[coverage(off)]
 pub fn report_phase(
     runtime: &mut RuntimeSnapshot,
     token: &str,
@@ -104,6 +103,7 @@ pub fn report_phase(
     Ok(true)
 }
 /// Resolve an omitted prompt target only where one eligible agent pane exists.
+#[coverage(off)]
 pub fn resolve_target(
     session: &SessionSnapshot,
     target: Option<AgentRuntimeId>,
@@ -124,6 +124,7 @@ pub fn resolve_target(
     }
 }
 /// Advance the durable input transaction. ACK loss is intentionally ambiguous.
+#[coverage(off)]
 pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), ControlError> {
     if prompt.state == PromptState::InputAcknowledged && next == PromptState::RetryWait {
         prompt.state = PromptState::Ambiguous;
@@ -145,6 +146,7 @@ pub fn advance_prompt(prompt: &mut Prompt, next: PromptState) -> Result<(), Cont
     Err(ControlError::InvalidTransition)
 }
 /// Begin removal by fencing all ordinary prompt/spawn delivery.
+#[coverage(off)]
 pub fn begin_remove(
     session: &mut SessionSnapshot,
     expected_revision: u64,
@@ -164,6 +166,7 @@ pub fn begin_remove(
 mod tests {
     #![allow(clippy::many_single_char_names)]
     use super::*;
+    #[coverage(off)]
     fn session() -> SessionSnapshot {
         SessionSnapshot {
             workspace_id: WorkspaceId::new(),
@@ -181,6 +184,7 @@ mod tests {
         }
     }
     #[test]
+    #[coverage(off)]
     fn phase_requires_token_and_new_sequence() {
         let mut s = session();
         assert!(report_phase(&mut s.runtimes[0], "t", 1, AgentPhase::Running).unwrap());
@@ -196,6 +200,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn target_is_never_guessed() {
         let mut s = session();
         let id = s.runtimes[0].id;
@@ -216,6 +221,7 @@ mod tests {
         assert_eq!(resolve_target(&s, Some(id)), Err(ControlError::Unavailable));
     }
     #[test]
+    #[coverage(off)]
     fn prompt_ack_loss_is_not_retried() {
         let mut p = Prompt {
             operation_id: OperationId::new(),
@@ -238,6 +244,7 @@ mod tests {
         );
     }
     #[test]
+    #[coverage(off)]
     fn remove_fences_future_delivery() {
         let mut s = session();
         let rev = s.state_revision;

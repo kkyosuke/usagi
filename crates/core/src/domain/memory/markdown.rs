@@ -1,5 +1,3 @@
-#![coverage(off)]
-
 //! On-disk markdown (frontmatter) serialisation and parsing for [`Memory`].
 //!
 //! The frontmatter *format* (the `---` block, list escaping, timestamps, line
@@ -21,6 +19,7 @@ impl FrontmatterDoc for Memory {
     ///
     /// The `---` envelope and body normalisation live in
     /// [`frontmatter::to_markdown`]; this closure only lists the memory's fields.
+    #[coverage(off)]
     fn to_markdown(&self) -> String {
         frontmatter::to_markdown(&self.body, |out| {
             let _ = writeln!(out, "name: {}", inline(&self.name));
@@ -45,6 +44,7 @@ impl FrontmatterDoc for Memory {
     /// Returns [`ParseMemoryError`] when the frontmatter envelope is malformed, a
     /// field value fails to parse (enum token, timestamp), or a required field
     /// (`name`, `title`, `created_at`, `updated_at`) is absent.
+    #[coverage(off)]
     fn from_markdown(text: &str) -> Result<Memory, ParseMemoryError> {
         let mut name: Option<String> = None;
         let mut title: Option<String> = None;
