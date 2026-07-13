@@ -470,21 +470,23 @@ mod tests {
 
     #[test]
     fn tab_without_a_closeup_candidate_preserves_the_entire_input_state() {
-        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
-        for character in "terminal ".chars() {
-            modal.insert_char(character);
+        for input in ["terminal ", "agent x", "terminal new extra"] {
+            let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+            for character in input.chars() {
+                modal.insert_char(character);
+            }
+            modal.selected = 3;
+            modal.cursor_left();
+            let input = modal.input.value().to_owned();
+            let cursor = modal.input.cursor();
+            let selected = modal.selected;
+
+            modal.complete_selected();
+
+            assert_eq!(modal.input.value(), input);
+            assert_eq!(modal.input.cursor(), cursor);
+            assert_eq!(modal.selected, selected);
         }
-        modal.selected = 3;
-        modal.cursor_left();
-        let input = modal.input.value().to_owned();
-        let cursor = modal.input.cursor();
-        let selected = modal.selected;
-
-        modal.complete_selected();
-
-        assert_eq!(modal.input.value(), input);
-        assert_eq!(modal.input.cursor(), cursor);
-        assert_eq!(modal.selected, selected);
     }
 
     #[test]
