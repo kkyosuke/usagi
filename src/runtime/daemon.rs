@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -119,12 +120,16 @@ impl OutputJournal for DiscardJournal {
 /// session writer, so agents never receive a client supplied path.
 struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
+    readiness: Arc<dyn AgentReadinessProbe>,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
         &mut self,
         context: &ProvisionContext,
     ) -> Result<CodexProvision, CodexProvisionFailure> {
+        self.readiness
+            .ready("codex")
+            .map_err(|()| CodexProvisionFailure::ExecutableUnavailable)?;
         let working_directory = working_directory(&self.sessions, context)
             .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         Ok(CodexProvision {
@@ -136,12 +141,16 @@ impl CodexProvisioner for RootCodexProvisioner {
 }
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
+    readiness: Arc<dyn AgentReadinessProbe>,
 }
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
         &mut self,
         context: &ProvisionContext,
     ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
+        self.readiness
+            .ready("claude")
+            .map_err(|()| ClaudeProvisionFailure::ExecutableUnavailable)?;
         let working_directory = working_directory(&self.sessions, context)
             .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         Ok(ClaudeProvision {
@@ -149,6 +158,33 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
             spawn: SpawnProvision::new([], Vec::new()),
         })
+    }
+}
+
+/// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
+/// may discover an executable and invoke its public status command, but never
+/// read, persist, or return credentials, configuration paths, argv, or raw OS
+/// failures.  Keeping it injected makes the root composable with fixture
+/// executables without installing or authenticating a real CLI.
+trait AgentReadinessProbe: Send + Sync {
+    fn ready(&self, product: &str) -> Result<(), ()>;
+}
+
+struct SystemAgentReadiness;
+impl AgentReadinessProbe for SystemAgentReadiness {
+    fn ready(&self, product: &str) -> Result<(), ()> {
+        let (command, args) = match product {
+            "codex" => ("codex", ["login", "status"]),
+            "claude" => ("claude", ["auth", "status"]),
+            _ => return Err(()),
+        };
+        Command::new(command)
+            .args(args)
+            .status()
+            .ok()
+            .filter(std::process::ExitStatus::success)
+            .map(|_| ())
+            .ok_or(())
     }
 }
 fn working_directory(
@@ -503,14 +539,19 @@ fn open_agent_runtime(
     pty: AgentPty,
 ) -> SharedAgentRuntime {
     let mut registry = AdapterRegistry::new();
+    let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
     // Duplicate registration cannot happen for the two literal profiles; a
     // failure here would only drop an adapter, so the launch would surface a
     // safe unknown-profile error rather than crash the daemon.
     let _ = registry.register_supported(
         CodexAdapter::new(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
+            readiness: Arc::clone(&readiness),
         }),
-        ClaudeAdapter::new(RootClaudeProvisioner { sessions }),
+        ClaudeAdapter::new(RootClaudeProvisioner {
+            sessions,
+            readiness,
+        }),
     );
     Arc::new(Mutex::new(AgentRuntime::new(
         generation,
@@ -518,7 +559,7 @@ fn open_agent_runtime(
         FileRuntimeStore(data_dir.join("daemon").join("agents.json")),
         DiscardJournal,
         pty,
-        AgentProfileId::new("claude").expect("literal profile id is canonical"),
+        AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
     )))
 }
@@ -732,15 +773,27 @@ fn dispatch_agent(
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
         .and_then(|mut agent| agent.launch(&operation_id, &intent, &scope));
     match result {
-        Ok(admission) => envelope(
-            hello,
-            request_id,
-            ResponseOutcome::Accepted {
-                operation_id: usagi_core::infrastructure::ipc::OperationId(admission.operation_id),
-                operation_revision: admission.revision,
-            },
-            serde_json::json!({ "terminal": admission.terminal }),
-        ),
+        Ok(admission) => {
+            let outcome = if admission.completed {
+                ResponseOutcome::Ok
+            } else {
+                ResponseOutcome::Accepted {
+                    operation_id: usagi_core::infrastructure::ipc::OperationId(
+                        admission.operation_id,
+                    ),
+                    operation_revision: admission.revision,
+                }
+            };
+            envelope(
+                hello,
+                request_id,
+                outcome,
+                serde_json::json!({
+                    "terminal": admission.terminal,
+                    "completed": admission.completed,
+                }),
+            )
+        }
         Err(error) => envelope(
             hello,
             request_id,

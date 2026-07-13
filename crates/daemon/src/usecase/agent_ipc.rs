@@ -86,6 +86,11 @@ pub struct AgentAdmission {
     pub operation_id: String,
     pub revision: u64,
     pub terminal: TerminalRef,
+    /// Present only after the daemon has observed and durably committed a
+    /// successful process exit.  A replay therefore distinguishes an accepted
+    /// running operation from its single final success without guessing a
+    /// replacement terminal.
+    pub completed: bool,
 }
 
 /// One durable Agent operation, replayed identically on resend/reconnect.
@@ -281,6 +286,7 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
             operation_id: operation_id.to_owned(),
             revision: 1,
             terminal,
+            completed: false,
         })
     }
 
@@ -305,7 +311,36 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
             .ok_or_else(stale_terminal)?;
         self.coordinator
             .exit(&runtime, status, &mut self.store)
-            .map_err(map_runtime_error)
+            .map_err(map_runtime_error)?;
+
+        // The operation ledger is the only authority for replay.  Update it
+        // after the terminal registry and durable runtime record have accepted
+        // the exit, so duplicate observer notifications cannot create a second
+        // completion.  Non-zero exits deliberately replay a safe failure;
+        // neither status text nor private CLI output crosses this boundary.
+        let operation = self
+            .coordinator
+            .record_for(&runtime)
+            .map_err(map_runtime_error)?
+            .operation
+            .operation_id
+            .as_str()
+            .clone();
+        if let Some(record) = self.operations.get_mut(&operation) {
+            record.outcome = match &record.outcome {
+                Ok(admission) if status == 0 => {
+                    let mut final_admission = admission.clone();
+                    final_admission.completed = true;
+                    Ok(final_admission)
+                }
+                Ok(_) => Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "agent process ended unsuccessfully; inspect the attached terminal output",
+                )),
+                Err(error) => Err(error.clone()),
+            };
+        }
+        Ok(())
     }
 
     fn dispatch_terminal(
@@ -520,9 +555,13 @@ fn map_orchestration_error(error: OrchestrationError) -> ProtocolError {
 
 fn map_runtime_error(error: RuntimeError) -> ProtocolError {
     let (code, message) = match error {
+        RuntimeError::Adapter(super::runtime::AdapterError::ExecutableUnavailable) => (
+            ErrorCode::Unavailable,
+            "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
+        ),
         RuntimeError::Adapter(_) => (
             ErrorCode::Unavailable,
-            "agent could not be provisioned safely",
+            "agent pre-spawn setup is unavailable; retry after checking agent readiness",
         ),
         RuntimeError::RuntimeAlreadyExists => (
             ErrorCode::RevisionConflict,
@@ -787,6 +826,11 @@ mod tests {
         assert_eq!(reattached["snapshot"]["output_offset"], 6);
 
         runtime.exit(&terminal, 0).unwrap();
+        let final_replay = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap();
+        assert_eq!(final_replay.terminal, terminal);
+        assert!(final_replay.completed);
         let resync = handled(runtime.handle_terminal(
             connection,
             client,
@@ -799,6 +843,33 @@ mod tests {
         assert_eq!(resync["exited"], 0);
         assert_eq!(runtime.pty.selected.as_ref(), Some(&terminal));
         assert_eq!(runtime.pty.writes, b"go\n");
+    }
+
+    #[test]
+    fn unsuccessful_exit_replays_one_safe_final_failure() {
+        let mut runtime = runtime();
+        let fake_scope = FakeScope(Ok(scope()));
+        let operation = OperationId::new().to_string();
+        let launch_intent = intent(None);
+        let terminal = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap()
+            .terminal;
+
+        runtime.exit(&terminal, 23).unwrap();
+        let failure = runtime
+            .launch(&operation, &launch_intent, &fake_scope)
+            .unwrap_err();
+        assert_eq!(failure.code, ErrorCode::Unavailable);
+        assert_eq!(
+            failure.message,
+            "agent process ended unsuccessfully; inspect the attached terminal output"
+        );
+        assert!(
+            runtime
+                .launch(&operation, &launch_intent, &fake_scope)
+                .is_err()
+        );
     }
 
     #[test]

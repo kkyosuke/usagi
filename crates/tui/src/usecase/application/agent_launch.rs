@@ -74,7 +74,22 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
             DaemonReply::Accepted { .. } => {
                 Err("daemon returned a mismatched operation".to_owned())
             }
-            DaemonReply::Ok(_) => Err("daemon did not accept agent launch".to_owned()),
+            DaemonReply::Ok(value) => {
+                let terminal = value
+                    .get("terminal")
+                    .cloned()
+                    .ok_or_else(|| "daemon did not accept agent launch".to_owned())
+                    .and_then(|terminal| {
+                        serde_json::from_value(terminal)
+                            .map_err(|_| "daemon final had an invalid terminal".to_owned())
+                    })?;
+                (value.get("completed").and_then(serde_json::Value::as_bool) == Some(true))
+                    .then_some(AgentLaunchEvent::Succeeded {
+                        operation,
+                        terminal,
+                    })
+                    .ok_or_else(|| "daemon did not complete agent launch".to_owned())
+            }
         }
     }
 }
