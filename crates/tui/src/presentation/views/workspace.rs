@@ -1061,17 +1061,18 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
         .paint(&widgets::clip_to_width(hint, width))
 }
 
-/// daemon observation is deliberately placed immediately above the v1-style
-/// sidebar footer: it is useful ambient state, not navigable content.
 #[coverage(off)]
-fn metrics_line(width: usize, metrics: &DaemonMetrics) -> String {
-    let text = format!(
-        "daemon · {} sub · {} dropped",
-        metrics.active_subscribers, metrics.dropped_updates
-    );
-    Style::new()
-        .dim()
-        .paint(&widgets::clip_to_width(&text, width))
+fn mascot_metrics(metrics: Option<&DaemonMetrics>) -> Vec<String> {
+    metrics.map_or_else(
+        || vec!["daemon: waiting".to_owned()],
+        |metrics| {
+            vec![
+                "daemon metrics".to_owned(),
+                format!("{} subscribers", metrics.active_subscribers),
+                format!("{} dropped", metrics.dropped_updates),
+            ]
+        },
+    )
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -1091,7 +1092,8 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let body_capacity = height - 1;
     // Keep the menu usable first. The mascot block includes its always-reserved
     // blank row, so the viewport and footer cannot drift when speech adds rows.
-    let mascot = widgets::mascot::sidebar_block(width, 0, None);
+    let metric_labels = mascot_metrics(ws.metrics.as_ref());
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(width, 0, None, &metric_labels);
     let show_mascot = mascot
         .as_ref()
         .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
@@ -1102,10 +1104,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     } else {
         0
     };
-    let metrics_rows = usize::from(ws.metrics.is_some());
-    let content_capacity = body_capacity
-        .saturating_sub(mascot_rows)
-        .saturating_sub(metrics_rows);
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
     let viewport_capacity = content_capacity;
     let start = workspace_viewport_start(ws.selected, ws, viewport_capacity);
 
@@ -1143,9 +1142,6 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     if show_mascot {
         rows.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
         rows.push(String::new());
-    }
-    if let Some(metrics) = &ws.metrics {
-        rows.push(metrics_line(width, metrics));
     }
     rows.push(left_footer(width, ws));
     rows
@@ -2471,7 +2467,7 @@ mod tests {
     }
 
     #[test]
-    fn render_places_daemon_metrics_directly_above_the_left_footer() {
+    fn render_places_daemon_metrics_to_the_right_of_usagi() {
         let mut ws = workspace();
         ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
@@ -2486,9 +2482,9 @@ mod tests {
             .collect::<Vec<_>>();
         let metrics = left_rows
             .iter()
-            .position(|line| line.contains("3 sub · 5 dropped"))
-            .expect("metrics line");
-        assert!(left_rows[metrics + 1].contains("[switch]"));
+            .find(|line| line.contains("3 subscribers"))
+            .expect("metrics beside usagi");
+        assert!(metrics.contains("(o.o)?"));
     }
 
     #[test]

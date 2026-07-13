@@ -66,6 +66,19 @@ pub fn sidebar_block(
     tick: u64,
     speech: Option<&MascotSpeech>,
 ) -> Option<MascotBlock> {
+    sidebar_block_with_sidecar(width, tick, speech, &[])
+}
+
+/// Builds a sidebar mascot with up to three ambient-status lines placed to the
+/// right of the rabbit.  The sidecar is observational and never changes the
+/// mascot's navigation footprint.
+#[must_use]
+pub fn sidebar_block_with_sidecar(
+    width: usize,
+    tick: u64,
+    speech: Option<&MascotSpeech>,
+    sidecar: &[String],
+) -> Option<MascotBlock> {
     let rabbit_width = RABBIT
         .iter()
         .map(|row| display_width(row))
@@ -83,7 +96,12 @@ pub fn sidebar_block(
         .map(|speech| bubble_rows(speech, inner_width))
         .unwrap_or_default();
     let bubble_rows = plain_rows.len();
+    let rabbit_start = plain_rows.len();
     plain_rows.extend(rabbit_rows(tick));
+    for (index, status) in sidecar.iter().take(3).enumerate() {
+        plain_rows[rabbit_start + index].push(' ');
+        plain_rows[rabbit_start + index].push_str(status);
+    }
     let block_width = plain_rows
         .iter()
         .map(|row| display_width(row))
