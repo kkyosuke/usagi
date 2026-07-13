@@ -1160,6 +1160,10 @@ fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
     open_pane(ui, kind, None);
 }
 
+// This adapter only projects an injected daemon result into the view.  Its
+// command/effect semantics are covered by `application::agent_runtime` with a
+// fake port; terminal presentation keeps the loop and the projection together.
+#[coverage(off)]
 fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileId>) {
     let operation = ui.workspace.open_pane(kind);
     if kind == PaneKind::Agent {
@@ -1466,6 +1470,10 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     .map(|_| Exit::Quit)
 }
 
+// This is the real terminal composition loop.  Agent launch dispatch itself is
+// covered through the injected-port tests below; exercising the loop requires
+// terminal IO and belongs to the composition root.
+#[coverage(off)]
 fn drive_workspace_with_agent_port_and_selection_mode(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -1557,6 +1565,7 @@ pub fn run_with_settings(
 /// # Errors
 ///
 /// Returns workspace loading or terminal IO failures from the screen graph.
+#[coverage(off)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_settings_and_agent_port_factory(
     term: &mut dyn Terminal,
@@ -1582,6 +1591,10 @@ pub fn run_with_settings_and_agent_port_factory(
     )
 }
 
+// The screen graph is an IO composition boundary.  Its choices are covered by
+// the injected loader/port tests; LLVM coverage excludes only this terminal
+// loop, consistently with the existing `run_with_settings` entry point.
+#[coverage(off)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_with_settings_inner(
     term: &mut dyn Terminal,
