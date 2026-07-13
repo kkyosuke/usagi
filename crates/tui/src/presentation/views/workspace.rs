@@ -47,7 +47,7 @@ pub struct ProjectedSession {
     pub label: String,
     /// sidebar に表示する起源などの補足。
     pub detail: String,
-    /// session pane の cwd。
+    /// daemon snapshot が与えた session の cwd。
     pub cwd: PathBuf,
 }
 
@@ -59,7 +59,6 @@ pub struct ProjectedSession {
 pub struct HomeProjection {
     workspace: WorkspaceId,
     workspace_name: String,
-    root_cwd: PathBuf,
     sessions: Vec<ProjectedSession>,
     selected: Selection,
     active: Target,
@@ -79,6 +78,7 @@ pub struct HomeProjection {
 struct HomePaneTab {
     label: String,
     selected: bool,
+    pending: bool,
 }
 
 impl HomeProjection {
@@ -91,7 +91,7 @@ impl HomeProjection {
     pub fn from_state(
         state: &AppState,
         workspace_name: impl Into<String>,
-        root_cwd: impl Into<PathBuf>,
+        _root_cwd: impl Into<PathBuf>,
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
         let sessions = state
@@ -103,7 +103,6 @@ impl HomeProjection {
         Self {
             workspace: state.workspace(),
             workspace_name: workspace_name.into(),
-            root_cwd: root_cwd.into(),
             sessions,
             selected: state.selected(),
             active: state.active(),
@@ -131,6 +130,7 @@ impl HomeProjection {
             .map(|tab| HomePaneTab {
                 label: pane_tab_label(tab),
                 selected: pane_tab_selected(tab, pane.selected()),
+                pending: matches!(tab, PaneTab::Pending(_)),
             })
             .collect();
         self.pane_error = pane.error().map(str::to_owned);
@@ -150,19 +150,6 @@ impl HomeProjection {
         );
         rows.push(Selection::NewSession);
         rows
-    }
-
-    #[coverage(off)]
-    fn active_cwd(&self) -> &Path {
-        match self.active {
-            Target::Root(id) if id == self.workspace => &self.root_cwd,
-            Target::Session(id) => self
-                .sessions
-                .iter()
-                .find(|session| session.id == id)
-                .map_or(self.root_cwd.as_path(), |session| session.cwd.as_path()),
-            Target::Root(_) => &self.root_cwd,
-        }
     }
 
     #[coverage(off)]
@@ -688,21 +675,15 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
-/// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
+/// closeup の header: フォーカス中 session の identity。
 #[coverage(off)]
-fn closeup_header(width: usize, ws: &Workspace) -> String {
-    let name = Role::Accent.style().bold().paint(ws.focused_label());
-    let detail = ws.focused_session().map_or_else(
-        || ws.path().display().to_string(),
-        |session| format!("{} · {}", session.name, session.origin),
-    );
-    let detail = Style::new().dim().paint(&detail);
-    widgets::pad_to_width(&format!(" {name}  {detail}"), width)
+fn closeup_header(ws: &Workspace) -> String {
+    format!(" {}", Role::Accent.style().bold().paint(ws.focused_label()))
 }
 
-/// tabmenu: pane reducer の stable selection を Chrome 風タブへ投影する。
+/// tabmenu: pane reducer の stable selection を session 名の右の Chrome 風タブへ投影する。
 #[coverage(off)]
-fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
+fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
     let labels = ws
         .pane()
         .tabs()
@@ -717,26 +698,12 @@ fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
         .map(|(tab, label)| widgets::session_tab::Tab {
             label,
             selected: pane_tab_selected(tab, ws.pane().selected()),
+            // The legacy Workspace loop has no frame clock; HomeProjection
+            // supplies the animated pending glyph in the runtime-backed path.
+            pending_indicator: None,
         })
         .collect::<Vec<_>>();
-    widgets::session_tab::render(width, &tabs)
-}
-
-/// content: アクティブなタブと、フォーカス中の実 workspace / session path。
-#[coverage(off)]
-fn content_lines(ws: &Workspace) -> Vec<String> {
-    let (kind, path) = ws.focused_session().map_or_else(
-        || ("workspace", ws.path()),
-        |session| ("session", session.root.as_path()),
-    );
-    vec![
-        String::new(),
-        Style::new()
-            .dim()
-            .paint(&format!("  {kind} '{}'", ws.focused_label())),
-        String::new(),
-        Style::new().dim().paint(&format!("  {}", path.display())),
-    ]
+    widgets::session_tab::render_with_prefix(width, header, &tabs)
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
@@ -754,19 +721,20 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
 #[coverage(off)]
 fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = vec![closeup_header(width, ws)];
+    let header = closeup_header(ws);
+    let mut rows = Vec::new();
     if ws.has_panes() {
-        let chrome = tab_menu(width, ws);
+        let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
     } else {
+        rows.push(widgets::pad_to_width(&header, width));
         rows.extend(widgets::session_tab::empty_pane(
             width,
             height.saturating_sub(2),
             "No tabs stirring yet. Enter starts one.",
         ));
     }
-    rows.extend(content_lines(ws));
     with_footer(rows, height, right_footer(width, ws))
 }
 
@@ -955,13 +923,9 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
     };
-    let header = widgets::pad_to_width(
-        &format!(
-            " {}  {}",
-            Role::Accent.style().bold().paint(home.active_label()),
-            Style::new().dim().paint("active target"),
-        ),
-        width,
+    let header = format!(
+        " {}",
+        Role::Accent.style().bold().paint(home.active_label())
     );
     let footer = Style::new().dim().paint(&widgets::clip_to_width(
         &format!("[{mode}] active pane"),
@@ -988,24 +952,29 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         return with_footer(rows, height, footer);
     }
 
+    let indicators = home
+        .pane_tabs
+        .iter()
+        .map(|tab| {
+            tab.pending
+                .then(|| widgets::session_tab::pending_indicator(home.mascot_tick))
+        })
+        .collect::<Vec<_>>();
     let tabs = home
         .pane_tabs
         .iter()
-        .map(|tab| widgets::session_tab::Tab {
+        .zip(&indicators)
+        .map(|(tab, indicator)| widgets::session_tab::Tab {
             label: &tab.label,
             selected: tab.selected,
+            pending_indicator: indicator.as_deref(),
         })
         .collect::<Vec<_>>();
-    let chrome = widgets::session_tab::render(width, &tabs);
+    let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
     with_footer(
         vec![
-            header,
             chrome[0].clone(),
             chrome[1].clone(),
-            String::new(),
-            Style::new()
-                .dim()
-                .paint(&format!("  cwd: {}", home.active_cwd().display())),
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
                 &format!("  agent: {}", phase_label(home.active_phase)),
@@ -1074,7 +1043,7 @@ mod tests {
         Selection, Target, update,
     };
     use crate::usecase::application::pane::{
-        PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
+        PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
@@ -1342,7 +1311,9 @@ mod tests {
             &mut pane,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
-        let state = AppState::home(workspace, vec![session]);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -1352,9 +1323,61 @@ mod tests {
         .with_pane(&pane);
 
         let text = joined_home(&home);
-        assert!(text.contains(" Agent (starting) "));
+        assert!(text.contains("Agent (starting)"));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
+        assert!(!text.contains("/work/session"));
+
+        let frame = render_home(30, 100, &home);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("session").expect("session name");
+        let tab = right_header.find("Agent (starting)").expect("agent tab");
+        assert!(name < tab);
+    }
+
+    #[test]
+    fn pending_tab_chip_animates_on_home_tick_without_changing_the_pending_transition() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let mut state = AppState::home(workspace, vec![session]);
+        let before = render_home(
+            18,
+            100,
+            &HomeProjection::from_state(
+                &state,
+                "work",
+                "/work",
+                &[projected_session(session, "session", "/work/session")],
+            )
+            .with_pane(&pane),
+        )
+        .join("\n");
+        let _ = update(&mut state, AppEvent::Tick);
+        let after = render_home(
+            18,
+            100,
+            &HomeProjection::from_state(
+                &state,
+                "work",
+                "/work",
+                &[projected_session(session, "session", "/work/session")],
+            )
+            .with_pane(&pane),
+        )
+        .join("\n");
+        assert_ne!(before, after);
+        assert!(matches!(pane.tabs(), [PaneTab::Pending(_)]));
     }
 
     #[test]
@@ -1418,8 +1441,8 @@ mod tests {
         let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
 
         let plain = over.iter().map(|line| strip(line)).collect::<Vec<_>>();
-        assert!(plain[3].contains("Agent (starting)"));
-        assert!(plain[4].contains('▔'));
+        assert!(plain[2].contains("Agent (starting)"));
+        assert!(plain[3].contains('▔'));
         assert!(plain.iter().any(|line| line.contains("┌─ Action")));
         assert!(over.iter().all(|line| display_width(line) == 100));
     }
@@ -1477,7 +1500,7 @@ mod tests {
         assert_eq!(ws.selected(), 0);
         let text = joined(&ws);
         assert!(text.contains("0 sessions"));
-        assert!(text.contains("/tmp/empty"));
+        assert!(!text.contains("/tmp/empty"));
     }
 
     #[test]
@@ -1598,7 +1621,7 @@ mod tests {
         assert!(text.contains("daemon"));
         assert!(text.contains("mcp"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(text.contains("/tmp/actual"));
+        assert!(!text.contains("/tmp/actual"));
         assert!(text.contains("root"));
         assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
@@ -1655,16 +1678,27 @@ mod tests {
         let mut ws = workspace();
         let root_text = joined(&ws);
         assert!(root_text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(root_text.contains("/tmp/actual"));
+        assert!(!root_text.contains("/tmp/actual"));
 
         ws.select_next();
         let session_text = joined(&ws);
-        assert!(session_text.contains("tui · human"));
+        assert!(session_text.contains("UI work"));
         assert!(session_text.contains("No tabs stirring yet. Enter starts one."));
+
+        ws.open_pane(PaneKind::Terminal);
+        let frame = render(30, 100, &ws);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("UI work").expect("session name");
+        let tab = right_header
+            .find("Terminal (resolving)")
+            .expect("terminal tab");
+        assert!(name < tab);
+        assert!(!frame.iter().any(|line| strip(line).contains("/tmp/actual")));
+        ws.close_pane();
 
         ws.select_next();
         let second_session_text = joined(&ws);
-        assert!(second_session_text.contains("daemon · mcp"));
+        assert!(second_session_text.contains("daemon"));
         assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
     }
 

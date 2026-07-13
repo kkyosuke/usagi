@@ -30,6 +30,24 @@ impl PtyTerminal {
     /// Returns an error when the operating system cannot allocate the PTY or
     /// start the selected trusted program.
     pub fn spawn(program: &str, directory: &Path, geometry: Geometry) -> std::io::Result<Self> {
+        Self::spawn_with(program, &[], &[], directory, geometry)
+    }
+
+    /// Opens a pseudo-terminal running `program` with a rendered argument vector
+    /// and environment allowlist values in `directory`. Agent adapters render
+    /// the argv/environment once; this adapter never parses a shell command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system cannot allocate the PTY or
+    /// start the selected trusted program.
+    pub fn spawn_with(
+        program: &str,
+        args: &[String],
+        environment: &[(String, String)],
+        directory: &Path,
+        geometry: Geometry,
+    ) -> std::io::Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: geometry.rows,
@@ -38,11 +56,21 @@ impl PtyTerminal {
                 pixel_height: 0,
             })
             .map_err(io_error)?;
-        Self::spawn_pair(pair, program, directory)
+        Self::spawn_pair(pair, program, args, environment, directory)
     }
 
-    fn spawn_pair(pair: PtyPair, program: &str, directory: &Path) -> std::io::Result<Self> {
+    fn spawn_pair(
+        pair: PtyPair,
+        program: &str,
+        args: &[String],
+        environment: &[(String, String)],
+        directory: &Path,
+    ) -> std::io::Result<Self> {
         let mut command = CommandBuilder::new(program);
+        command.args(args);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
         command.cwd(directory);
         let child = pair.slave.spawn_command(command).map_err(io_error)?;
         drop(pair.slave);
@@ -133,5 +161,18 @@ mod tests {
         .unwrap();
         terminal.write_all(b"exit\n").unwrap();
         assert_eq!(terminal.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn spawn_with_applies_rendered_argv_and_reaps_the_status() {
+        let terminal = PtyTerminal::spawn_with(
+            "/bin/sh",
+            &["-c".to_owned(), "exit 7".to_owned()],
+            &[("USAGI_AGENT".to_owned(), "1".to_owned())],
+            std::path::Path::new("/"),
+            Geometry { cols: 80, rows: 24 },
+        )
+        .unwrap();
+        assert_eq!(terminal.wait().unwrap(), 7);
     }
 }

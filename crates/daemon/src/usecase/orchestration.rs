@@ -33,8 +33,11 @@ use super::{
 };
 
 /// A single product adapter registered with the daemon orchestration port.
-pub trait RegisteredAdapter: AgentAdapter + AgentProfileCatalog {}
-impl<T: AgentAdapter + AgentProfileCatalog> RegisteredAdapter for T {}
+///
+/// `Send` is required because the composition root shares one registry (behind
+/// the Agent owner) across every IPC connection thread.
+pub trait RegisteredAdapter: AgentAdapter + AgentProfileCatalog + Send {}
+impl<T: AgentAdapter + AgentProfileCatalog + Send> RegisteredAdapter for T {}
 
 /// Code-defined adapter registry.  Lookup is by profile descriptor, never by
 /// a daemon-owned product-name switch.
@@ -52,7 +55,10 @@ impl AdapterRegistry {
     /// Registers the supported product adapters with the same orchestration
     /// port. Product-specific behavior remains behind each adapter; callers
     /// select it solely by the typed profile ID in a launch request.
-    pub fn register_supported<C: CodexProvisioner + 'static, L: ClaudeProvisioner + 'static>(
+    pub fn register_supported<
+        C: CodexProvisioner + Send + 'static,
+        L: ClaudeProvisioner + Send + 'static,
+    >(
         &mut self,
         codex: CodexAdapter<C>,
         claude: ClaudeAdapter<L>,

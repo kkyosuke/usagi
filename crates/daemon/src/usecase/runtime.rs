@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use usagi_core::domain::{
     agent::{DurableLaunchSnapshot, LaunchRequest, LaunchValidationError},
-    id::{AgentRuntimeRef, CompletionFence, TerminalRef},
+    id::{AgentRuntimeRef, CompletionFence, ConnectionId, TerminalRef},
 };
 
 pub use super::terminal::{
@@ -20,11 +20,14 @@ pub use super::terminal::{
 };
 use super::{
     generation::{ProcessIdentity, ProcessObservation},
-    terminal::{Geometry, Output, RegistryError, Snapshot, TerminalRegistry},
+    terminal::{
+        Attached, Geometry, InputAck, InputRequest, Output, PtyWriter, RegistryError, Snapshot,
+        TerminalRegistry,
+    },
 };
 
 /// Durable association; `launch` is never re-resolved during reconciliation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DurableRuntimeRecord {
     pub runtime: AgentRuntimeRef,
     pub operation: CompletionFence,
@@ -33,7 +36,7 @@ pub struct DurableRuntimeRecord {
     pub process: Option<ProcessIdentity>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeStoreSnapshot {
     pub records: Vec<DurableRuntimeRecord>,
 }
@@ -323,6 +326,95 @@ impl RuntimeCoordinator {
             .snapshot(&runtime.terminal)
             .map_err(|_| RuntimeError::TerminalGenerationMismatch)
     }
+
+    /// Atomically snapshots the runtime terminal and assigns a connection-owned
+    /// subscription.  Only a running, fenced runtime is attachable.
+    #[coverage(off)]
+    pub fn attach(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        connection: ConnectionId,
+    ) -> Result<Attached, RuntimeError> {
+        self.running(runtime)?;
+        self.terminals
+            .attach(&runtime.terminal, connection)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Removes only the named attachment; the daemon-owned Agent process and its
+    /// PTY intentionally stay alive.
+    #[coverage(off)]
+    pub fn detach(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        subscription: u64,
+        connection: ConnectionId,
+    ) -> Result<(), RuntimeError> {
+        self.record(runtime)?;
+        self.terminals
+            .detach(&runtime.terminal, subscription, connection)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Updates the fenced runtime terminal geometry.
+    #[coverage(off)]
+    pub fn resize(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        geometry: Geometry,
+    ) -> Result<Snapshot, RuntimeError> {
+        self.running(runtime)?;
+        self.terminals
+            .resize(&runtime.terminal, geometry)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Writes fenced, de-duplicated terminal input to the daemon-owned PTY.
+    #[coverage(off)]
+    pub fn input<W: PtyWriter>(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        input: InputRequest,
+        bytes: &[u8],
+        writer: &mut W,
+    ) -> Result<InputAck, RuntimeError> {
+        self.running(runtime)?;
+        self.terminals
+            .write_input(&runtime.terminal, input, bytes, writer)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Replays retained output after `offset` for a reconnecting attachment.
+    #[coverage(off)]
+    pub fn replay_from(
+        &self,
+        runtime: &AgentRuntimeRef,
+        offset: u64,
+    ) -> Result<Vec<Output>, RuntimeError> {
+        self.record(runtime)?;
+        self.terminals
+            .replay_from(&runtime.terminal, offset)
+            .map_err(RuntimeError::Terminal)
+    }
+
+    /// Drops only this connection's subscriptions across every runtime terminal.
+    /// It never kills an Agent process, its PTY, or the completion worker.
+    #[coverage(off)]
+    pub fn disconnect(&mut self, connection: ConnectionId) {
+        self.terminals.disconnect(connection);
+    }
+
+    /// Resolves the fenced runtime that currently owns `terminal`.  IPC terminal
+    /// requests address a terminal only by its `TerminalRef`; this maps that ref
+    /// back to the owning runtime without a name or PID fallback.
+    #[must_use]
+    #[coverage(off)]
+    pub fn runtime_for_terminal(&self, terminal: &TerminalRef) -> Option<AgentRuntimeRef> {
+        self.records
+            .values()
+            .find(|record| record.runtime.terminal.fences(terminal))
+            .map(|record| record.runtime.clone())
+    }
     /// Returns the immutable record only when the complete runtime reference
     /// fences it.  This exposes no ephemeral provision or terminal output.
     #[coverage(off)]
@@ -405,8 +497,8 @@ mod tests {
     use usagi_core::domain::{
         agent::{AgentProfileId, LaunchMode, LaunchPlan, LaunchScope},
         id::{
-            AgentRuntimeId, DaemonGeneration, OperationId, SessionId, TerminalId, WorkspaceId,
-            WorktreeId,
+            AgentRuntimeId, ClientId, DaemonGeneration, OperationId, RequestId, SessionId,
+            TerminalId, WorkspaceId, WorktreeId,
         },
     };
     #[derive(Default)]
@@ -563,6 +655,83 @@ mod tests {
         c.terminals.disconnect(connection);
         assert_eq!(attached.snapshot.replay, b"hello");
         assert_eq!(c.occupied_slots(), 1);
+    }
+    #[derive(Default)]
+    struct Writer(Vec<u8>);
+    impl PtyWriter for Writer {
+        fn write_all(&mut self, bytes: &[u8]) -> Result<(), super::super::terminal::PtyWriteError> {
+            self.0.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+    #[test]
+    fn public_terminal_stream_attaches_inputs_detaches_reattaches_and_resizes() {
+        let request = request();
+        let (runtime, fence) = refs(&request);
+        let mut c = RuntimeCoordinator::new(1, 1024, 4);
+        let mut store = Store::default();
+        let mut spawner = Spawner(Ok(process()));
+        launch(
+            &mut c,
+            &request,
+            runtime.clone(),
+            fence,
+            &mut spawner,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(
+            c.runtime_for_terminal(&runtime.terminal).unwrap(),
+            runtime.clone()
+        );
+        let mut stale = runtime.terminal.clone();
+        stale.terminal_id = TerminalId::new();
+        assert_eq!(c.runtime_for_terminal(&stale), None);
+
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let attached = c.attach(&runtime, connection).unwrap();
+        let mut journal = Journal::default();
+        c.append_output(&runtime, b"boot\n".to_vec(), &mut journal)
+            .unwrap();
+        let mut writer = Writer::default();
+        assert_eq!(
+            c.input(
+                &runtime,
+                InputRequest {
+                    subscription: attached.subscription,
+                    connection,
+                    client,
+                    request: RequestId::new(),
+                    input_seq: 0,
+                },
+                b"go\n",
+                &mut writer,
+            )
+            .unwrap(),
+            InputAck::Written
+        );
+        assert_eq!(writer.0, b"go\n");
+        c.detach(&runtime, attached.subscription, connection)
+            .unwrap();
+        let reattached = c.attach(&runtime, connection).unwrap();
+        assert_eq!(reattached.snapshot.replay, b"boot\n");
+        assert_eq!(c.replay_from(&runtime, 0).unwrap()[0].data, b"boot\n");
+        assert_eq!(
+            c.resize(
+                &runtime,
+                Geometry {
+                    cols: 120,
+                    rows: 40
+                }
+            )
+            .unwrap()
+            .geometry
+            .cols,
+            120
+        );
+        c.disconnect(connection);
+        assert!(c.terminal_snapshot(&runtime).is_ok());
     }
     #[test]
     fn ambiguous_spawn_and_unknown_identity_block_replacement() {

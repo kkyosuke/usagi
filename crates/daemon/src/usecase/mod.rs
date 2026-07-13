@@ -11,6 +11,7 @@
 
 use usagi_core::domain::AppInfo;
 
+pub mod agent_ipc;
 pub mod claude;
 pub mod codex;
 pub mod control;

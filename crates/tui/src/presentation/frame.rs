@@ -6,6 +6,9 @@
 
 use unicode_width::UnicodeWidthChar;
 
+const ESC: char = '\u{1b}';
+const RESET: &str = "\u{1b}[0m";
+
 /// One terminal cell in a [`Frame`].
 ///
 /// A double-width glyph occupies a `Glyph` cell followed by a `Continuation`.
@@ -166,12 +169,28 @@ impl Frame {
     #[coverage(off)]
     fn span_text(&self, row: usize, start: usize, end: usize) -> String {
         let mut text = String::new();
+        // 差分 span は色付き run の途中から始まることがある。その glyph 自身には
+        // SGR 開始列がなくても `style` には現在の属性が残っているので、span の先頭で
+        // 再出力する。これをしないと、後から追記された入力文字だけが terminal の
+        // reset 後に白く描画される。
+        let reopened_style = match self.cell(row, start) {
+            Some(Cell::Glyph {
+                text: glyph, style, ..
+            }) if !style.is_empty() && !glyph.starts_with(ESC) => {
+                text.push_str(style);
+                true
+            }
+            _ => false,
+        };
         for column in start..end {
             match self.cell(row, column).expect("span is inside frame") {
                 Cell::Empty => text.push(' '),
                 Cell::Glyph { text: glyph, .. } => text.push_str(glyph),
                 Cell::Continuation => {}
             }
+        }
+        if reopened_style && !text.ends_with(RESET) {
+            text.push_str(RESET);
         }
         text
     }
@@ -495,6 +514,23 @@ mod tests {
                 row: 0,
                 column: 2,
                 text: "\u{1b}[1;36mOpen\u{1b}[0m".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn extending_a_styled_run_reopens_its_style_for_the_new_glyph() {
+        let mut renderer = FrameRenderer::new();
+        let _ = renderer.render(frame(6, 1, &["\u{1b}[1;36mab\u{1b}[0m"]));
+
+        let diff = renderer.render(frame(6, 1, &["\u{1b}[1;36mabc\u{1b}[0m"]));
+
+        assert_eq!(
+            diff.spans,
+            vec![Span {
+                row: 0,
+                column: 1,
+                text: "\u{1b}[1;36mbc\u{1b}[0m".into(),
             }]
         );
     }

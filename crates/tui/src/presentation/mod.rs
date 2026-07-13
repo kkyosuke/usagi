@@ -33,6 +33,7 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
+use crate::usecase::closeup;
 use crate::usecase::overview::{self, SessionCommand};
 use crate::usecase::terminal_input::LiveTerminalAction;
 use usagi_core::usecase::settings::SettingsPort;
@@ -502,37 +503,29 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             _ => OpenStep::Stay,
         };
     }
-    if open.filtering() {
-        return match key {
-            Key::Char(ch) => {
-                open.push_filter(ch);
-                OpenStep::Stay
-            }
-            Key::Backspace => {
-                open.pop_filter();
-                OpenStep::Stay
-            }
-            Key::Enter | Key::Escape => {
-                open.end_filter();
-                OpenStep::Stay
-            }
-            Key::Quit => OpenStep::Quit,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::Live(_) | Key::Other => {
-                OpenStep::Stay
-            }
-        };
-    }
     match key {
-        Key::Up | Key::Char('k') => {
+        Key::Up => {
             open.select_prev();
             OpenStep::Stay
         }
-        Key::Down | Key::Char('j') => {
+        Key::Down => {
             open.select_next();
             OpenStep::Stay
         }
+        Key::Backspace => {
+            open.pop_filter();
+            OpenStep::Stay
+        }
+        Key::Left => {
+            open.filter_left();
+            OpenStep::Stay
+        }
+        Key::Right => {
+            open.filter_right();
+            OpenStep::Stay
+        }
         Key::Escape => OpenStep::Back,
-        Key::Quit | Key::Char('q') => OpenStep::Quit,
+        Key::Quit => OpenStep::Quit,
         Key::Enter => {
             let paths = if open.is_unite() {
                 open.unite_paths()
@@ -547,11 +540,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 OpenStep::Choose(paths)
             }
         }
-        Key::Char('/') => {
-            open.begin_filter();
-            OpenStep::Stay
-        }
-        Key::Char('u') => {
+        Key::Tab => {
             open.toggle_unite();
             OpenStep::Stay
         }
@@ -559,17 +548,15 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.toggle_unite_member();
             OpenStep::Stay
         }
-        Key::Char('c') => {
+        Key::Char('C') => {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char(_)
-        | Key::Left
-        | Key::Right
-        | Key::Backspace
-        | Key::Tab
-        | Key::Live(_)
-        | Key::Other => OpenStep::Stay,
+        Key::Char(ch) => {
+            open.push_filter(ch);
+            OpenStep::Stay
+        }
+        Key::Live(_) | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -724,7 +711,8 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// - live-terminal prefix（`Ctrl-O` leader）で解決した [`Key::Live`] は、modal の表示に
 ///   かかわらず [`LiveInputClassifier`] 契約として [`apply_live_action`] が処理する。
 /// - action modal が前面のとき（tab 無し、または `Ctrl-O a` で forced）は action menu を
-///   操作する。
+///   操作する。Action mode は上下で選んだ command、Prompt mode は入力した command を
+///   Enter で registry 経由に実行する。
 /// - tab が前面のとき（tab あり・非 forced）は tab を操作し、menu には触れない。
 ///
 /// Esc は Workspace 自体を閉じず、forced modal を閉じるか Switch へ一段戻す。
@@ -746,7 +734,11 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             Key::Char(ch) => ui.closeup.insert_char(ch),
             Key::Escape => close_closeup_modal(ui),
             Key::Quit => return WorkspaceStep::Quit,
-            Key::Up | Key::Down | Key::Tab | Key::Enter | Key::Live(_) | Key::Other => {}
+            Key::Enter => {
+                let input = ui.closeup.submission();
+                execute_closeup_command(ui, &input);
+            }
+            Key::Up | Key::Down | Key::Tab | Key::Live(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -769,11 +761,10 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('n') => ui.open_text(),
         Key::Escape => close_closeup_modal(ui),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Enter => match ui.closeup.selected_action().name {
-            "agent" => open_pane_from_menu(ui, PaneKind::Agent),
-            "terminal" => open_pane_from_menu(ui, PaneKind::Terminal),
-            _ => {}
-        },
+        Key::Enter => {
+            let input = ui.closeup.submission();
+            execute_closeup_command(ui, &input);
+        }
         Key::Char('x') => ui.workspace.close_pane(),
         Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
     }
@@ -850,6 +841,21 @@ fn close_closeup_modal(ui: &mut WorkspaceUi) {
         ui.closeup_action_forced = false;
     } else {
         ui.workspace.enter_switch();
+    }
+}
+
+/// Execute the Closeup command shared by Action and Prompt interaction modes.
+///
+/// The closeup registry remains the single source of command names; commands
+/// without a connected runtime effect intentionally keep the existing no-op
+/// behaviour in both modes. Opening a pane also drops the forced action modal so
+/// the freshly opened tab is front (see [`open_pane_from_menu`]).
+#[coverage(off)]
+fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
+    match closeup::interpret(input) {
+        Ok(closeup::Command::Agent { .. }) => open_pane_from_menu(ui, PaneKind::Agent),
+        Ok(closeup::Command::Terminal { .. }) => open_pane_from_menu(ui, PaneKind::Terminal),
+        Ok(closeup::Command::Close { .. } | closeup::Command::Diff { .. }) | Err(_) => {}
     }
 }
 
@@ -1022,6 +1028,26 @@ pub fn run_workspace_with_session_port(
     .map(|_| Exit::Quit)
 }
 
+/// Open list 用に、registry の生値と recent projection を結び付ける。
+///
+/// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
+/// projection が無いときだけ、生値から 0 件の overview を組み立てる。
+#[coverage(off)]
+fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
+    let open_overviews = recent
+        .iter()
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => Some(overview.clone()),
+            Recent::Unite(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if open_overviews.is_empty() && !workspaces.is_empty() {
+        Open::new(workspaces)
+    } else {
+        Open::with_overviews(open_overviews)
+    }
+}
+
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
@@ -1045,7 +1071,7 @@ pub fn run_with_settings(
     settings: &mut dyn SettingsPort,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
-    let mut open = Open::new(workspaces);
+    let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
     let mut config_form = Config::load(settings);
     let mut screen = match start {
@@ -1115,7 +1141,7 @@ pub fn run_with_settings(
                     }
                 }
                 OpenStep::ConfirmCleanup => {
-                    let removed = loader.cleanup_missing(open.workspaces())?;
+                    let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
                 }
             },
@@ -1605,6 +1631,40 @@ mod tests {
     }
 
     #[test]
+    fn closeup_prompt_executes_the_typed_action() {
+        use crate::usecase::terminal_input::LiveTerminalAction;
+
+        let workspace = WorkspaceView::new(ws("prompt"), state("prompt"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Prompt,
+        );
+
+        // With no tabs the prompt modal is front, so a typed command runs directly.
+        ui.enter_closeup();
+        for character in "agent".chars() {
+            step_workspace(&mut ui, Key::Char(character));
+        }
+        step_workspace(&mut ui, Key::Enter);
+        assert_eq!(ui.workspace.pane().tabs().len(), 1);
+
+        // A tab is now present, so the prompt is hidden until `Ctrl-O a` forces it
+        // back over the tabs; only then does the typed command run.
+        ui.enter_closeup();
+        assert!(!ui.closeup_modal_visible(), "prompt is hidden behind tabs");
+
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert!(ui.closeup_modal_visible());
+        for character in "terminal".chars() {
+            step_workspace(&mut ui, Key::Char(character));
+        }
+        step_workspace(&mut ui, Key::Enter);
+        assert_eq!(ui.workspace.pane().tabs().len(), 2);
+    }
+
+    #[test]
     fn modal_reducers_capture_edit_selection_and_close_keys() {
         let mut overview = OverviewModal::new();
         assert!(!step_overview(&mut overview, Key::Tab));
@@ -1758,13 +1818,8 @@ mod tests {
         let alpha = ws("alpha");
         let beta = ws("beta");
 
-        let mut filter = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('/'),
-            Key::Char('b'),
-            Key::Enter,
-            Key::Char('q'),
-        ]);
+        let mut filter =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('b'), Key::Enter, Key::Char('q')]);
         run(
             &mut filter,
             vec![alpha.clone(), beta.clone()],
@@ -1773,14 +1828,10 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert!(filter.frames[3].join("\n").contains("↳ /tmp/beta"));
+        assert!(filter.frames[2].join("\n").contains("↳ /tmp/beta"));
 
-        let mut cancel = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('n'),
-            Key::Char('q'),
-        ]);
+        let mut cancel =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('n'), Key::Quit]);
         let mut cancel_loader = FakeLoader::default();
         run(
             &mut cancel,
@@ -1792,12 +1843,8 @@ mod tests {
         .unwrap();
         assert_eq!(cancel_loader.cleanup_calls, 0);
 
-        let mut confirm = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('y'),
-            Key::Char('q'),
-        ]);
+        let mut confirm =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('y'), Key::Quit]);
         let mut confirm_loader = FakeLoader {
             cleanup_removed: vec![alpha.path.clone()],
             ..FakeLoader::default()
@@ -1815,13 +1862,13 @@ mod tests {
 
         let mut unite = FakeTerminal::with_keys(&[
             Key::Char('o'),
-            Key::Char('u'),
+            Key::Tab,
             Key::Char(' '),
             Key::Down,
             Key::Char(' '),
             Key::Enter,
             Key::Escape,
-            Key::Char('q'),
+            Key::Quit,
         ]);
         let mut unite_loader = FakeLoader::default();
         run(
