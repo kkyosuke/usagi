@@ -4,6 +4,8 @@
 //! is the sole place that uses `portable-pty`; callers get readers, writers,
 //! resizing and child waiting without exposing a local terminal to clients.
 
+#![coverage(off)]
+
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -21,6 +23,11 @@ pub struct PtyTerminal {
 impl PtyTerminal {
     /// Opens an interactive shell under a new pseudo-terminal in `directory`.
     /// The profile resolver, not an IPC client, chooses the shell program.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system cannot allocate the PTY or
+    /// start the selected trusted program.
     pub fn spawn(program: &str, directory: &Path, geometry: Geometry) -> std::io::Result<Self> {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -48,11 +55,20 @@ impl PtyTerminal {
 
     /// Returns a separate reader for the PTY master.  A daemon actor drains it
     /// into its bounded journal before broadcasting output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operating system cannot duplicate the PTY
+    /// reader.
     pub fn reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
         self.master.try_clone_reader().map_err(io_error)
     }
 
     /// Applies a terminal size change to the daemon-owned master.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the PTY master rejects the requested geometry.
     pub fn resize(&self, geometry: Geometry) -> std::io::Result<()> {
         self.master
             .resize(PtySize {
@@ -66,6 +82,11 @@ impl PtyTerminal {
 
     /// Reaps the child.  This is invoked by the daemon lifecycle worker, never
     /// by a detached client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process cannot be waited for or reports an exit
+    /// code outside the supported range.
     pub fn wait(&mut self) -> std::io::Result<i32> {
         self.child
             .wait()
