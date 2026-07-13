@@ -183,7 +183,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("explicit-workspace"));
-    assert!(out.contains("Sessions"));
+    assert!(out.contains("main"));
     assert!(!out.contains("workspace TUI ("));
 
     // 非 tty でも open は registry へ登録し、続く hop の Recent に現れる。
@@ -207,7 +207,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     assert!(output.status.success());
     let out = stdout(&output);
     assert!(out.contains("current-workspace"));
-    assert!(out.contains("Sessions"));
+    assert!(out.contains("main"));
     stop_daemon(home.path());
 }
 
@@ -258,7 +258,7 @@ fn open_accepts_an_existing_non_utf8_workspace_path_when_supported() {
     let output = run_with_home(&[OsStr::new("open"), path.as_os_str()], home.path());
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("Sessions"));
+    assert!(stdout(&output).contains("main"));
     // JSON の path は UTF-8 string なので、非 UTF-8 path は一時 workspace として開き、
     // 壊れた registry を永続化しない。
     assert!(
@@ -294,7 +294,7 @@ fn open_validates_non_utf8_workspace_paths() {
         .expect("usagi バイナリを起動できる");
     if relative_fixture_exists {
         assert!(output.status.success());
-        assert!(stdout(&output).contains("Sessions"));
+        assert!(stdout(&output).contains("main"));
     } else {
         assert!(!output.status.success());
         assert!(!output.stderr.is_empty());

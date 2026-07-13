@@ -213,7 +213,7 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert!(reattached_status.success(), "PTY output: {output}");
     assert!(output.contains("Recent"), "PTY output: {output}");
     assert!(output.contains("pty-workspace"), "PTY output: {output}");
-    assert!(output.contains("Sessions"), "PTY output: {output}");
+    assert!(output.contains("main"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?1049h"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?1049l"), "PTY output: {output}");
     assert!(output.contains("\u{1b}[?25l"), "PTY output: {output}");

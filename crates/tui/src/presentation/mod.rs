@@ -2771,8 +2771,8 @@ mod tests {
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousSession));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
-        assert_eq!(ui.workspace.focused_label(), "root");
-        assert_eq!(ui.closeup.session(), "root");
+        assert_eq!(ui.workspace.focused_label(), "main");
+        assert_eq!(ui.closeup.session(), "main");
         assert!(ui.closeup_modal_visible());
     }
 
