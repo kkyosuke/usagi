@@ -34,8 +34,8 @@ const ESC: char = '\u{1b}';
 const RESET: &str = "\u{1b}[0m";
 
 /// Configures a [`shimmer_text_with`] sweep. `speed` advances the two-cell band
-/// once per this many frames; `replacement` overwrites only the highlighted
-/// cells, leaving the dim background text intact.
+/// once per this many frames; `replacement` overwrites only the sweep head,
+/// leaving the trailing bright cell as its original text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shimmer {
     pub style: Style,
@@ -62,8 +62,8 @@ pub fn shimmer_text(text: &str, frame: usize) -> String {
 /// A configurable version of [`shimmer_text`].
 ///
 /// `speed == 0` is treated as one frame per step. A replacement character is
-/// painted only inside the two-cell bright band, which makes it suitable for
-/// progress glyphs without losing the surrounding label.
+/// painted only at the two-cell band's head, which makes it suitable for
+/// progress glyphs without duplicating them.
 #[must_use]
 pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     let chars = text.chars().collect::<Vec<_>>();
@@ -71,11 +71,12 @@ pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     let mut out = String::new();
     for (index, character) in chars.into_iter().enumerate() {
         if index == head || index + 1 == head {
-            out.push_str(
-                &shimmer
-                    .style
-                    .paint(&shimmer.replacement.unwrap_or(character).to_string()),
-            );
+            let visible = if index == head {
+                shimmer.replacement.unwrap_or(character)
+            } else {
+                character
+            };
+            out.push_str(&shimmer.style.paint(&visible.to_string()));
         } else {
             out.push_str(&Style::new().dim().paint(&character.to_string()));
         }

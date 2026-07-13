@@ -1063,15 +1063,17 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
         || {
-            vec![widgets::shimmer_text_with(
-                "waiting daemon",
+            let label = Style::new().dim().paint("waiting daemon");
+            let rail = widgets::shimmer_text_with(
+                "░░░░░░░░",
                 frame,
                 widgets::Shimmer {
                     style: Role::Feature.style().bold(),
-                    speed: 2,
+                    speed: 3,
                     replacement: Some('\u{f907}'),
                 },
-            )]
+            );
+            vec![format!("{label} {rail}")]
         },
         |metrics| {
             vec![format!(
