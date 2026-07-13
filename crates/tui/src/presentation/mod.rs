@@ -15,6 +15,7 @@ pub mod widgets;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
@@ -164,7 +165,7 @@ pub trait OverlayDataPort {
 /// TUI は session store や git worktree を直接操作しない。実行時の合成ルートが
 /// daemon IPC client をこの port として注入し、テストは fake port で command と
 /// target の対応だけを検証する。
-pub trait SessionCommandPort {
+pub trait SessionCommandPort: Send {
     /// Execute one parsed Overview session command for this workspace and its
     /// currently selected session, when the command requires one.
     ///
@@ -264,7 +265,17 @@ struct WorkspaceUi {
     modal_selection_mode: ModalSelectionMode,
     modal: Option<WorkspaceModal>,
     overlay_data: Box<dyn OverlayDataPort>,
-    session_commands: Box<dyn SessionCommandPort>,
+    /// A create owns the port in its worker until completion, preventing a
+    /// second lifecycle request while its sidebar skeleton is visible.
+    session_commands: Option<Box<dyn SessionCommandPort>>,
+    session_completions: Receiver<SessionCommandCompletion>,
+    session_completion_sender: Sender<SessionCommandCompletion>,
+    skeleton_frame: usize,
+}
+
+struct SessionCommandCompletion {
+    port: Box<dyn SessionCommandPort>,
+    result: Result<SessionCommandResult, String>,
 }
 
 impl WorkspaceUi {
@@ -288,13 +299,17 @@ impl WorkspaceUi {
     ) -> Self {
         let closeup =
             CloseupModal::with_selection_mode(workspace.focused_label(), modal_selection_mode);
+        let (session_completion_sender, session_completions) = mpsc::channel();
         Self {
             workspace,
             closeup,
             modal_selection_mode,
             modal: None,
             overlay_data,
-            session_commands,
+            session_commands: Some(session_commands),
+            session_completions,
+            session_completion_sender,
+            skeleton_frame: 0,
         }
     }
 
@@ -542,6 +557,9 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
 /// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
 #[coverage(off)]
 fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
+    if ui.session_commands.is_none() {
+        return key == Key::Escape;
+    }
     let WorkspaceModal::Overview(modal) = ui.modal.as_mut().expect("overview modal is active")
     else {
         return false;
@@ -569,17 +587,19 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
             match overview::interpret(&input) {
                 Ok(overview::Command::Session { arguments }) => {
                     match overview::parse_session(&arguments) {
-                        Ok(command) => match ui.session_commands.execute(
-                            ui.workspace.record(),
-                            ui.workspace.selected_session(),
-                            command,
-                        ) {
-                            Ok(result) => {
-                                if let Some(sessions) = result.sessions {
-                                    ui.workspace.replace_sessions(sessions);
-                                }
-                                modal.set_result(result.message);
-                            }
+                        Ok(command @ SessionCommand::Create { .. }) => {
+                            begin_session_create(ui, command);
+                        }
+                        Ok(command) => match ui
+                            .session_commands
+                            .as_mut()
+                            .expect("session port is available")
+                            .execute(
+                                ui.workspace.record(),
+                                ui.workspace.selected_session(),
+                                command,
+                            ) {
+                            Ok(result) => apply_session_result(ui, result),
                             Err(error) => modal.set_error(error),
                         },
                         Err(error) => modal.set_error(error),
@@ -592,6 +612,72 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
         Key::Quit | Key::Other => {}
     }
     false
+}
+
+/// Start a create without blocking the terminal event loop. The sidebar gains a
+/// v1-style skeleton immediately; the worker returns the port with its result
+/// so later commands still share the same daemon client state.
+#[coverage(off)]
+fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
+    let SessionCommand::Create { name } = command else {
+        return;
+    };
+    let Some(mut port) = ui.session_commands.take() else {
+        if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
+            modal.set_error("a session command is already running");
+        }
+        return;
+    };
+    let workspace = ui.workspace.record().clone();
+    let selected = ui.workspace.selected_session().cloned();
+    ui.workspace.begin_pending_session(name.clone());
+    if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
+        modal.set_result(format!("Creating session {name}…"));
+    }
+    let sender = ui.session_completion_sender.clone();
+    std::thread::spawn(move || {
+        let result = port.execute(
+            &workspace,
+            selected.as_ref(),
+            SessionCommand::Create { name },
+        );
+        let _ = sender.send(SessionCommandCompletion { port, result });
+    });
+}
+
+/// Apply a completed daemon result to the sidebar and the palette result band.
+#[coverage(off)]
+fn apply_session_result(ui: &mut WorkspaceUi, result: SessionCommandResult) {
+    if let Some(sessions) = result.sessions {
+        ui.workspace.replace_sessions(sessions);
+    }
+    if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
+        modal.set_result(result.message);
+    }
+}
+
+/// Receive completed create workers before drawing the next frame. On success,
+/// replace the skeleton with the daemon snapshot and dismiss the palette; on
+/// failure, retain the palette so its safe error can be corrected or retried.
+#[coverage(off)]
+fn drain_session_completions(ui: &mut WorkspaceUi) {
+    while let Ok(completion) = ui.session_completions.try_recv() {
+        ui.session_commands = Some(completion.port);
+        ui.workspace.clear_pending_session();
+        match completion.result {
+            Ok(result) => {
+                if let Some(sessions) = result.sessions {
+                    ui.workspace.replace_sessions(sessions);
+                }
+                ui.modal = None;
+            }
+            Err(error) => {
+                if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
+                    modal.set_error(error);
+                }
+            }
+        }
+    }
 }
 
 /// Input-only Overview reducer retained for modal rendering scenarios. Runtime
@@ -767,7 +853,8 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// Workspace と、その時点で最前面にある modal を 1 フレームへ合成する。
 #[coverage(off)]
 fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String> {
-    let base = workspace::render(height, width, &ui.workspace);
+    let base =
+        workspace::render_with_skeleton_frame(height, width, &ui.workspace, ui.skeleton_frame);
     match &ui.modal {
         Some(WorkspaceModal::Overview(modal)) => {
             overview_modal::render_over(height, width, &base, modal)
@@ -865,9 +952,14 @@ fn drive_workspace_with_ports_and_selection_mode(
         modal_selection_mode,
     );
     loop {
+        drain_session_completions(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
-        match step_workspace(&mut ui, term.read_key()?) {
+        let key = term.read_key()?;
+        if key == Key::Other && ui.workspace.pending_session().is_some() {
+            ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        }
+        match step_workspace(&mut ui, key) {
             WorkspaceStep::Stay => {}
             WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),
         }

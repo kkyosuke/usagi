@@ -249,6 +249,8 @@ pub struct Workspace {
     selected: usize,
     pane_owner: WorkspaceId,
     pane: PaneState,
+    /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
+    pending_session: Option<String>,
 }
 
 impl Workspace {
@@ -264,6 +266,7 @@ impl Workspace {
             selected: 0,
             pane_owner,
             pane: PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
+            pending_session: None,
         }
     }
 
@@ -304,6 +307,25 @@ impl Workspace {
                     .position(|session| session.name == name)
             })
             .map_or(0, |index| index + 1);
+    }
+
+    /// 新しい session を作成する間、sidebar に非選択の skeleton 行を表示する。
+    #[coverage(off)]
+    pub fn begin_pending_session(&mut self, name: String) {
+        self.pending_session = Some(name);
+    }
+
+    /// session 作成の skeleton を取り除く。
+    #[coverage(off)]
+    pub fn clear_pending_session(&mut self) {
+        self.pending_session = None;
+    }
+
+    /// 作成中の session 名。skeleton の描画だけが利用する。
+    #[must_use]
+    #[coverage(off)]
+    pub fn pending_session(&self) -> Option<&str> {
+        self.pending_session.as_deref()
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -640,6 +662,23 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
     widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
 }
 
+/// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
+/// skeleton 自体は navigation target ではないため、cursor を持たない。
+#[coverage(off)]
+fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
+    let wave = (0..name.chars().count().max(8))
+        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
+        .collect::<String>();
+    let label = Role::Accent.style().bold().paint(name);
+    let loading = Style::new().dim().paint(&wave);
+    let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
+        "▓"
+    } else {
+        "░"
+    });
+    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}",), width)
+}
+
 /// 左ペインの footer（キー操作ヒント、dim）。
 #[coverage(off)]
 fn left_footer(width: usize, ws: &Workspace) -> String {
@@ -655,7 +694,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
 /// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
 #[coverage(off)]
-fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
+fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize) -> Vec<String> {
     if height == 0 {
         return Vec::new();
     }
@@ -669,7 +708,10 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     let show_mascot = body_capacity >= MASCOT_ROWS + 2;
     let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
     let show_heading = content_capacity > 1;
-    let viewport_capacity = content_capacity - usize::from(show_heading);
+    let pending_rows = usize::from(ws.pending_session().is_some());
+    let viewport_capacity = content_capacity
+        .saturating_sub(usize::from(show_heading))
+        .saturating_sub(pending_rows);
     let start = viewport_start(ws.selected, ws.row_count(), viewport_capacity);
     let end = (start + viewport_capacity).min(ws.row_count());
 
@@ -679,6 +721,9 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     }
     for index in start..end {
         rows.push(selectable_row(width, ws, index));
+    }
+    if let Some(name) = ws.pending_session() {
+        rows.push(pending_session_row(width, name, skeleton_frame));
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
@@ -795,6 +840,18 @@ fn with_footer(mut rows: Vec<String>, height: usize, footer: String) -> Vec<Stri
 #[must_use]
 #[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String> {
+    render_with_skeleton_frame(raw_height, raw_width, ws, 0)
+}
+
+/// [`render`] と同じ frame を描くが、pending session skeleton の shimmer 位相を指定する。
+#[must_use]
+#[coverage(off)]
+pub fn render_with_skeleton_frame(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    skeleton_frame: usize,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
     let mut frame = Vec::with_capacity(height);
@@ -803,7 +860,7 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 
     let body_height = height.saturating_sub(CHROME_ROWS);
     let split = panes::split(width, LEFT_WIDTH);
-    let left = left_pane(body_height, split.left, ws);
+    let left = left_pane(body_height, split.left, ws, skeleton_frame);
     let right = right_pane(body_height, split.right, ws);
     frame.extend(panes::join(body_height, &left, &right, split));
 
@@ -1081,7 +1138,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, HomeProjection, LEFT_WIDTH, MASCOT_INDENT, Mode, ProjectedSession, Workspace,
-        render, render_home,
+        render, render_home, render_with_skeleton_frame,
     };
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
@@ -1662,6 +1719,36 @@ mod tests {
         assert!(text.contains("root"));
         assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
+    }
+
+    #[test]
+    fn pending_session_is_rendered_as_a_non_selectable_shimmer_skeleton() {
+        let mut ws = workspace();
+        ws.begin_pending_session("feature-x".to_owned());
+
+        let frame = render_with_skeleton_frame(30, 100, &ws, 4);
+        let text = frame
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("feature-x"));
+        assert!(text.contains("creating"));
+        assert!(text.contains('▓'));
+        assert_eq!(
+            text.matches("> feature-x").count(),
+            0,
+            "a skeleton must not become a navigation target"
+        );
+
+        ws.clear_pending_session();
+        let cleared = render(30, 100, &ws)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!cleared.contains("feature-x"));
     }
 
     #[test]

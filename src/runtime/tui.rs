@@ -279,7 +279,10 @@ impl Terminal for CrosstermTerminal {
                     LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_),
                 )
                 | RuntimeEvent::Backend(()) => return Ok(Key::Other),
-                RuntimeEvent::Tick => {}
+                // Keep the presentation loop alive while a background session
+                // lifecycle command owns the daemon port. `Other` is a safe
+                // redraw-only key for all screens and advances its skeleton.
+                RuntimeEvent::Tick => return Ok(Key::Other),
             }
         }
     }
