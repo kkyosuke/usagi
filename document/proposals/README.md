@@ -10,20 +10,12 @@
 挙動が確定したら、その内容を正本（`02-architecture.md` など）へ畳み込み、提案は撤去またはリンクだけ残す。
 ロードマップ（実装タスク）は issue ストア（`.usagi/issues/`）で追跡する。
 
-v1 時点の設計提案（daemon 化・durable orchestrator など）は退避版
-[v1/document/proposals/](../../v1/document/proposals/README.md) にあり、更新しない。そこにある
-[daemon 化提案](../../v1/document/04-orchestration.md)の実装済み部分は、[TUI](../03-tui.md)、
-[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md)へ畳み込んだ。退避版を変更して stub にせず、
-v1 の仕様スナップショットとして保存する。
-
 ## 一覧
 
 | # | ドキュメント | 内容 | 状態 |
 |---|---|---|---|
-| 1 | [01-entry-surfaces.md](01-entry-surfaces.md) | 入口面（CLI / MCP）の配置と、daemon を実行の権威とする反映フロー | 提案（クレート構成・dispatch は [02-architecture.md](../02-architecture.md) へ畳み込み済み） |
 | 2 | [02-ipc-id.md](02-ipc-id.md) | v2 daemon IPC の目標・権威・typed ID・fencing invariant | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 3 | [03-ipc-protocol.md](03-ipc-protocol.md) | envelope、handshake、stream、idempotency、bounded transport、error | [04-ipc.md](../04-ipc.md) へ畳み込み済み |
 | 4 | [04-daemon-api.md](04-daemon-api.md) | terminal/session command・event と socket/workspace/launch security | [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み済み |
 | 5 | [05-daemon-lifecycle.md](05-daemon-lifecycle.md) | active/draining restart、crash orphan、配置、実装 issue、test strategy | [05-daemon.md](../05-daemon.md) へ畳み込み済み |
-| 6 | [06-tui-v1-parity.md](06-tui-v1-parity.md) | v2 TUI の parity scope・優先度・受け入れ契約 | 提案 |
 | 7 | [07-pty-crash-continuation.md](07-pty-crash-continuation.md) | PTY broker／FD handoff による daemon crash 後の terminal 継続 | 提案（MVP 非依存） |

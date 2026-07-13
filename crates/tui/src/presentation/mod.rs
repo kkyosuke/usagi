@@ -1,5 +1,5 @@
 //! TUI 面の presentation 層。画面描画（各画面の view・共通 widget）と
-//! キー入力のマッピングを置く。描画は v1 と同じく自前の差分レンダリングで行い、
+//! キー入力のマッピングを置く。描画は自前の差分レンダリングで行い、
 //! UI フレームワーク（ratatui 等）には依存しない方針を引き継ぐ。
 //! 実 IO は持たず、出力先は呼び出し側（合成ルート）から注入する。
 //!
@@ -405,7 +405,7 @@ impl WorkspaceUi {
         ));
     }
 
-    /// Open the v1-compatible checklist over the current daemon snapshot.
+    /// Open the checklist over the current daemon snapshot.
     /// The modal captures records, not row indexes; dispatch performs another
     /// incarnation check before it asks the daemon to remove anything.
     #[coverage(off)]
@@ -726,7 +726,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
 }
 
 /// Start a create without blocking the terminal event loop. The sidebar gains a
-/// v1-style skeleton immediately; the worker returns the port with its result
+/// Display a skeleton immediately; the worker returns the port with its result
 /// so later commands still share the same daemon client state.
 #[coverage(off)]
 fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
@@ -859,7 +859,7 @@ fn submit_remove_selector(
 
 /// The selector captures all normal and live input while open. Esc simply
 /// restores the underlying Switch / Closeup surface; Enter adds no confirmation
-/// step, matching v1.
+/// step.
 #[coverage(off)]
 fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
     let submit = {
@@ -1500,7 +1500,7 @@ pub fn run_with_settings(
     }
 }
 
-/// v1 と同じ Welcome 起動エフェクトを再生する。入力は読まないため、スプラッシュ中の
+/// Welcome 起動エフェクトを再生する。入力は読まないため、スプラッシュ中の
 /// type-ahead はそのまま Welcome の最初のキー入力へ渡る。
 ///
 /// # Errors

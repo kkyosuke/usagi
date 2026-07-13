@@ -355,7 +355,7 @@ pub fn server_protocol(
             min_revision: 0,
             max_revision: 1,
         }],
-        capabilities: vec!["request.correlation.v1".into()],
+        capabilities: vec!["request.correlation".into()],
         build,
         limits: usagi_core::infrastructure::ipc::ProtocolLimits::default(),
     }
@@ -402,7 +402,7 @@ mod tests {
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec!["request.correlation.v1".into()],
+            required_capabilities: vec!["request.correlation".into()],
             build: BuildIdentity {
                 version: "other".into(),
                 commit: "y".into(),

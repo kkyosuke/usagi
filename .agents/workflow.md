@@ -2,7 +2,7 @@
 
 AI エージェントが `usagi` で作業する際の標準手順。**新規作業**と**追加修正**で手順が異なる。
 コーディング・コミット・PR の規約は [document/06-conventions.md](../document/06-conventions.md) を参照。
-ドキュメント全体の目次は [document/README.md](../document/README.md)（v1 時点の仕様は [v1/document/README.md](../v1/document/README.md)）。
+ドキュメント全体の目次は [document/README.md](../document/README.md)。
 
 ## 新規作業（新しいタスクを始めるとき）
 
@@ -35,7 +35,6 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 - **usagi セッション内で起動している場合**（`usagi agent` / `terminal` が起動する worktree。
   カレントが `.usagi/sessions/<name>/` 配下）: **すでに隔離された worktree 内にいるので、新しく
   worktree を作成しない。そのまま作業を進める**。作業ブランチは `usagi/<name>`（セッション名 `<name>` を `usagi/` 名前空間に収めたもの）。
-  セッションと worktree の構築は [04-orchestration.md](../v1/document/04-orchestration.md) が正本。
 - **リポジトリのルート（`main` のチェックアウト）で直接作業している場合**: 自分で worktree を切って隔離する。
 
   ```bash
@@ -65,15 +64,13 @@ AI エージェントが `usagi` で作業する際の標準手順。**新規作
 
 ### 3. ドキュメントを更新する
 
-実装内容に合わせて `document/` 配下（v2 の正本）を更新する。仕様・構成に変更があれば対応するファイルを更新する。目次は [document/README.md](../document/README.md)。
+実装内容に合わせて `document/` 配下を更新する。仕様・構成に変更があれば対応するファイルを更新する。目次は [document/README.md](../document/README.md)。
 
 **書き方のルールは [document/06-conventions.md#ドキュメント規約](../document/06-conventions.md#ドキュメント規約) に従う**（記載＝実装済み・SSoT・1 ファイル 1 トピック・表と図の活用・相対リンクとアンカーの整合）。
 
-- `document/01-overview.md` — プロジェクト概要（v2 の位置づけ・v1 との関係）
+- `document/01-overview.md` — プロジェクト概要
 - `document/02-architecture.md` — workspace 構成・クレート責務・依存ルール
 - `document/06-conventions.md` — 開発規約
-
-v1 時点の仕様（コマンド・画面・データ構造・orchestration）は `v1/document/`（退避版）にあり、更新しない。
 
 ユーザー向けの変更があれば `README.md` も更新する。
 

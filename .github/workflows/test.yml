@@ -66,6 +66,3 @@ jobs:
 
     - name: Test nextest JUnit summarizer
       run: bash scripts/tests/summarize-nextest-junit.sh
-
-    - name: Test v1 release-version detector
-      run: bash scripts/tests/v1-version-changed.sh

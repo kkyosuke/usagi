@@ -13,7 +13,7 @@ fn sample() -> Issue {
         dependson: vec![1, 2],
         related: vec![3],
         parent: Some(4),
-        milestone: Some("v1".to_string()),
+        milestone: Some("legacy".to_string()),
         created_at: ts,
         updated_at: ts,
         body: "## Summary\n\nDo the thing.".to_string(),
@@ -106,7 +106,7 @@ fn summary_mirrors_the_issue_without_body() {
     assert_eq!(summary.dependson, vec![1, 2]);
     assert_eq!(summary.related, vec![3]);
     assert_eq!(summary.parent, Some(4));
-    assert_eq!(summary.milestone, Some("v1".to_string()));
+    assert_eq!(summary.milestone, Some("legacy".to_string()));
     assert_eq!(summary.file, "007-add-doctor-command.md");
 }
 
@@ -128,7 +128,7 @@ fn markdown_renders_expected_shape() {
     assert!(text.contains("dependson: [1, 2]\n"));
     assert!(text.contains("related: [3]\n"));
     assert!(text.contains("parent: 4\n"));
-    assert!(text.contains("milestone: v1\n"));
+    assert!(text.contains("milestone: legacy\n"));
     assert!(text.ends_with("## Summary\n\nDo the thing.\n"));
 }
 
@@ -426,18 +426,18 @@ fn to_markdown_neutralises_newlines_so_values_cannot_inject_frontmatter() {
     // Newline-bearing values that, written verbatim, would each forge a second
     // frontmatter line (a status / parent override and a split label).
     issue.title = "Fix\nstatus: done".to_string();
-    issue.milestone = Some("v1\nparent: 9".to_string());
+    issue.milestone = Some("legacy\nparent: 9".to_string());
     issue.labels = vec!["a\nb".to_string()];
 
     let md = issue.to_markdown();
     assert!(md.contains("title: Fix status: done"));
-    assert!(md.contains("milestone: v1 parent: 9"));
+    assert!(md.contains("milestone: legacy parent: 9"));
 
     // Reloads cleanly and the forged fields never took effect.
     let parsed = Issue::from_markdown(&md).unwrap();
     assert_eq!(parsed.status, issue.status); // not overwritten to `done`
     assert_eq!(parsed.parent, issue.parent); // not overwritten to 9
     assert_eq!(parsed.title, "Fix status: done");
-    assert_eq!(parsed.milestone.as_deref(), Some("v1 parent: 9"));
+    assert_eq!(parsed.milestone.as_deref(), Some("legacy parent: 9"));
     assert_eq!(parsed.labels, vec!["a b".to_string()]);
 }

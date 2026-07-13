@@ -276,7 +276,7 @@ impl<S: Read + Write> IpcClient<S> {
                 max_revision: 1,
             }],
             capabilities: vec![],
-            required_capabilities: vec!["request.correlation.v1".into()],
+            required_capabilities: vec!["request.correlation".into()],
             build: BuildIdentity {
                 version: env!("CARGO_PKG_VERSION").into(),
                 commit: "unknown".into(),

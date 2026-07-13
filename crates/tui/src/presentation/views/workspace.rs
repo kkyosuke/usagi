@@ -272,7 +272,7 @@ impl Mode {
     #[coverage(off)]
     fn icon(self) -> char {
         match self {
-            // Keep the v1 Font Awesome/Nerd Font glyphs so the mode affordance
+            // Keep the Font Awesome/Nerd Font glyphs so the mode affordance
             // is recognizable across the two TUI generations.
             Self::Switch => '\u{f0ec}',
             Self::Closeup => '\u{f00e}',
@@ -696,7 +696,7 @@ fn header_line(width: usize, ws: &Workspace) -> String {
     header_with_mode_toggle(width, &left, ws.mode())
 }
 
-/// v1 と同じアイコン付きの mode 表示。現在の mode だけを accent で強調する。
+/// アイコン付きの mode 表示。現在の mode だけを accent で強調する。
 #[coverage(off)]
 fn mode_toggle(current: Mode) -> String {
     Mode::ALL
@@ -838,7 +838,7 @@ fn session_menu_rows_at(
     ]
 }
 
-/// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
+/// 作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
@@ -875,7 +875,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
         .paint(&widgets::clip_to_width(hint, width))
 }
 
-/// daemon observation is deliberately placed immediately above the v1-style
+/// daemon observation is deliberately placed immediately above the
 /// sidebar footer: it is useful ambient state, not navigable content.
 #[coverage(off)]
 fn metrics_line(width: usize, metrics: &DaemonMetrics) -> String {
@@ -1278,7 +1278,7 @@ fn home_row_lines_at(
     }
 }
 
-/// v1-compatible one-cell sidebar marker with explicit precedence.
+/// One-cell sidebar marker with explicit precedence.
 ///
 /// The selected session glyph remains readable in a terminal that lacks the Nerd Font glyph
 /// because the selected name is also emphasized.  Root and action rows keep `>` as their

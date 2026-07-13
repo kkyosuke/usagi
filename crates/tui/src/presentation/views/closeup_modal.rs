@@ -214,7 +214,7 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
     widgets::clip_to_width(&format!("  {marker} {label}{desc}"), inner)
 }
 
-/// アクションメニューのボディ（枠の内側の行）。対象セッションは v1 と同様に title にのみ載せる。
+/// アクションメニューのボディ（枠の内側の行）。対象セッションは title にのみ載せる。
 #[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
     if state.selection_mode == ModalSelectionMode::Prompt {

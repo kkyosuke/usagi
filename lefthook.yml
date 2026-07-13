@@ -14,9 +14,6 @@
 #   - push 時に clippy とテストカバレッジ100%を確認 (Coverage CI と同条件)
 #     ※ カバレッジ計測 (cargo llvm-cov) はテストも実行するため、push 時のテスト実行を兼ねる
 #     ※ *.rs 差分が無い push では clippy / coverage を skip する。
-#     ※ v1/ は退避された旧実装 (独立した Cargo プロジェクトでルートのビルド対象外) のため、
-#       v1/ 配下の差分は Rust 差分として数えない。v1/ だけの push は clippy / coverage を skip し、
-#       v1 のテスト実行もカバレッジ強制も行わない。
 
 pre-commit:
   parallel: true
@@ -63,16 +60,8 @@ pre-commit:
         fi
     fmt:
       glob: "*.rs"
-      # v1/ は退避された旧実装（edition 2021 の独立プロジェクト）のため、
-      # ルート（edition 2024）の rustfmt にかけない（edition 2024 では `gen` が
-      # 予約語になるなど、パース自体が成立しない）。
-      exclude: '^v1/'
       run: |
-        files=$(printf '%s\n' {staged_files} | grep -v '^v1/' || true)
-        if [ -n "$files" ]; then
-          # shellcheck disable=SC2086
-          cargo fmt -- $files
-        fi
+        cargo fmt -- {staged_files}
       stage_fixed: true
 
 commit-msg:
@@ -106,9 +95,8 @@ pre-push:
             true
         }
         base=$(rust_diff_base)
-        # v1/ は退避された旧実装でルートのビルド対象外のため、差分判定から除外する。
-        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' ':(exclude)v1/**' | grep -q .; then
-          echo "No Rust (*.rs) changes to push (v1/ excluded); skipping clippy."
+        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' | grep -q .; then
+          echo "No Rust (*.rs) changes to push; skipping clippy."
           exit 0
         fi
         cargo clippy --workspace --all-targets -- -D warnings
@@ -122,10 +110,8 @@ pre-push:
             true
         }
         base=$(rust_diff_base)
-        # v1/ は退避された旧実装でルートのビルド対象外のため、差分判定から除外する。
-        # v1/ だけの push には v2 のカバレッジ 100% を強制しない。
-        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' ':(exclude)v1/**' | grep -q .; then
-          echo "No Rust (*.rs) changes to push (v1/ excluded); skipping coverage."
+        if [ -n "$base" ] && ! git diff --name-only "$base"..HEAD -- '*.rs' | grep -q .; then
+          echo "No Rust (*.rs) changes to push; skipping coverage."
           exit 0
         fi
         . ./scripts/coverage.sh

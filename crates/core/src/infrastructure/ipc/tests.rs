@@ -37,7 +37,7 @@ fn hello() -> ClientHello {
             max_revision: 2,
         }],
         capabilities: vec![],
-        required_capabilities: vec!["request.correlation.v1".into()],
+        required_capabilities: vec!["request.correlation".into()],
         build: build(),
     }
 }
@@ -51,7 +51,7 @@ fn server() -> ServerProtocol {
             min_revision: 1,
             max_revision: 3,
         }],
-        capabilities: vec!["request.correlation.v1".into()],
+        capabilities: vec!["request.correlation".into()],
         build: build(),
         limits: ProtocolLimits::default(),
     }

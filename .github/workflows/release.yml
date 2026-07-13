@@ -1,7 +1,6 @@
 name: Release
 
-# リリース成果物はまだ v1（v1/ に退避された旧実装）のバイナリ。
-# ルートの v2 パッケージではなく v1/Cargo.toml を対象にビルドする。
+# リリース成果物はルート package のバイナリ。
 
 on:
   push:
@@ -144,16 +143,16 @@ jobs:
         with:
           key: ${{ matrix.target }}
           cache-on-failure: true
-          workspaces: v1
+          workspaces: .
 
       - name: Build binary
-        run: cargo +stable build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
+        run: cargo +stable build --release --target ${{ matrix.target }}
 
       - name: Prepare artifact
         shell: bash
         run: |
           mkdir -p dist
-          cp "v1/target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" dist/
           cp scripts/install.sh dist/
           chmod +x dist/install.sh
           cd dist

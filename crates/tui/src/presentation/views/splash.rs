@@ -7,7 +7,7 @@ use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style, TITLE_FADE};
 use crate::presentation::widgets::{self, icon};
 
-/// 1 フレームの表示間隔。v1 と同じ 110ms。
+/// 1 フレームの表示間隔は 110ms。
 pub const ANIM_TICK: std::time::Duration = std::time::Duration::from_millis(110);
 
 /// タイトルを隠したまま、うさぎだけを表示するフレーム数。

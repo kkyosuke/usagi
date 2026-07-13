@@ -10,8 +10,7 @@
 #   coverage_enforce          # ローカルで計測して 100% を強制する (lefthook pre-push 用)
 #                             # --no-clean で前回のビルド成果物を再利用する
 
-# 計測対象は v2 workspace（ルートの bin パッケージ + crates/ 配下の 3 クレート）。
-# v1/ は退避された旧実装で、workspace から exclude されているため計測に含まれない。
+# 計測対象は workspace（ルートの bin パッケージ + crates/ 配下のクレート）。
 #
 # 計測から外す item は、ソースコードの `#[coverage(off)]` を正本とする。
 # ファイル名ベースの除外は使わず、理由と使用条件は document/06-conventions.md に従う。
