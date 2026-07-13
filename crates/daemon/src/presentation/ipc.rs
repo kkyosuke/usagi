@@ -107,6 +107,22 @@ pub fn handle_connection<R: Read, W: Write>(
     writer: &mut W,
     server: &ServerProtocol,
 ) -> io::Result<()> {
+    handle_connection_with(reader, writer, server, dispatch)
+}
+
+/// As [`handle_connection`], but routes accepted requests to the daemon-owned
+/// runtime supplied by the composition root.  Keeping the runtime outside the
+/// connection makes durable state shared by every client connection.
+#[coverage(off)]
+pub fn handle_connection_with<R: Read, W: Write, D>(
+    reader: &mut R,
+    writer: &mut W,
+    server: &ServerProtocol,
+    dispatch_request: D,
+) -> io::Result<()>
+where
+    D: Fn(usagi_core::infrastructure::ipc::RequestId, serde_json::Value, &ServerHello) -> Envelope,
+{
     let Some(hello) = handshake(reader, writer, server)? else {
         return Ok(());
     };
@@ -141,7 +157,7 @@ pub fn handle_connection<R: Read, W: Write>(
             write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
             continue;
         }
-        let reply = dispatch(request_id, body, &hello);
+        let reply = dispatch_request(request_id, body, &hello);
         write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
     }
     Ok(())
