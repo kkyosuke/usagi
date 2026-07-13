@@ -132,6 +132,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             DaemonReply::Accepted {
                 operation_id,
                 revision,
+                ..
             } => format!("accepted operation {operation_id} (revision {revision})"),
             DaemonReply::Ok(value) => {
                 let snapshot = lifecycle_snapshot(&value)?;

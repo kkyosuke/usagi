@@ -634,6 +634,7 @@ mod tests {
             DaemonReply::Accepted {
                 operation_id: operation.to_string(),
                 revision: 1,
+                body: serde_json::json!(null),
             }
         );
     }

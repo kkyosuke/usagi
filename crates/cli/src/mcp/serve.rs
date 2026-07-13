@@ -194,6 +194,7 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
             Ok(DaemonReply::Accepted {
                 operation_id,
                 revision,
+                ..
             }) => protocol::success(
                 id,
                 json!({"content":[{"type":"text","text":format!("accepted operation {operation_id} (revision {revision})")}]}),
@@ -381,6 +382,7 @@ mod tests {
                 Ok(DaemonReply::Accepted {
                     operation_id: "op".into(),
                     revision: 3,
+                    body: serde_json::json!(null),
                 }),
             ),
             (
@@ -396,6 +398,7 @@ mod tests {
                 Ok(DaemonReply::Accepted {
                     operation_id: "op".into(),
                     revision: 3,
+                    body: serde_json::json!(null),
                 }),
             ),
         ] {
