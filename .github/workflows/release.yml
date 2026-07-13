@@ -147,7 +147,7 @@ jobs:
           workspaces: v1
 
       - name: Build binary
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
+        run: cargo +stable build --release --target ${{ matrix.target }} --manifest-path v1/Cargo.toml
 
       - name: Prepare artifact
         shell: bash
