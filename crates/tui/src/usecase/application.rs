@@ -117,6 +117,12 @@ pub trait ScreenRunner {
 /// 合成ルートがこの語彙へ翻訳して渡すため、TUI 面は特定の端末ライブラリに依存しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
+    /// live terminal prefix（`Ctrl-O` leader）から [`LiveInputClassifier`] が解決した
+    /// 予約アクション。合成ルートが classifier を保持し、leader の follow-up を
+    /// このバリアントへ翻訳して渡す。非 prefix キーは従来どおり具体的な `Key` になる。
+    ///
+    /// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
+    Live(crate::usecase::terminal_input::LiveTerminalAction),
     /// 選択を 1 つ上へ移す。
     Up,
     /// 選択を 1 つ下へ移す。
@@ -274,6 +280,7 @@ mod tests {
     #[test]
     fn key_derives_are_exercised() {
         use super::Key;
+        use crate::usecase::terminal_input::LiveTerminalAction;
         // derive された Debug / Clone / Copy / PartialEq を全バリアントで実行する。
         let keys = [
             Key::Up,
@@ -286,6 +293,7 @@ mod tests {
             Key::Escape,
             Key::Quit,
             Key::Char('o'),
+            Key::Live(LiveTerminalAction::Switch),
             Key::Other,
         ];
         for key in keys {
@@ -293,6 +301,10 @@ mod tests {
             assert!(!format!("{key:?}").is_empty());
         }
         assert_ne!(Key::Char('a'), Key::Char('b'));
+        assert_ne!(
+            Key::Live(LiveTerminalAction::Switch),
+            Key::Live(LiveTerminalAction::NextTab)
+        );
     }
 
     #[test]
