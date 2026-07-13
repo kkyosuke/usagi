@@ -236,6 +236,83 @@ pub fn handle_connection_with_terminal<R: Read, W: Write, T: TerminalOwner>(
     result
 }
 
+/// Serve one client with a shared terminal owner while preserving the caller's
+/// non-terminal dispatch.  The composition root uses this to keep session
+/// lifecycle routing independent from daemon-owned PTY ownership.
+#[coverage(off)]
+pub fn handle_connection_with_terminal_and<R: Read, W: Write, T: TerminalOwner, D>(
+    reader: &mut R,
+    writer: &mut W,
+    server: &ServerProtocol,
+    terminal: &mut T,
+    dispatch_request: D,
+) -> io::Result<()>
+where
+    D: Fn(usagi_core::infrastructure::ipc::RequestId, serde_json::Value, &ServerHello) -> Envelope,
+{
+    let Some(hello) = handshake(reader, writer, server)? else {
+        return Ok(());
+    };
+    let connection = usagi_core::domain::id::ConnectionId::new();
+    let client = usagi_core::domain::id::ClientId::new();
+    let result = (|| {
+        while let Some(envelope) =
+            read_json_frame::<Envelope>(reader, hello.limits.max_frame_bytes as usize)?
+        {
+            let EnvelopeKind::Request {
+                request_id, body, ..
+            } = envelope.kind
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "client may only send request envelopes",
+                ));
+            };
+            let outcome_body = if envelope.protocol != hello.protocol
+                || envelope.daemon_generation != hello.daemon_generation
+            {
+                Err(ProtocolError::new(
+                    ErrorCode::GenerationMismatch,
+                    "request targets a different daemon generation",
+                ))
+            } else if let Ok(usagi_core::usecase::client::DaemonRequest::Terminal {
+                action,
+                payload,
+            }) = serde_json::from_value(body.clone())
+            {
+                match usagi_core::domain::id::RequestId::parse(&request_id.0) {
+                    Ok(owner_request_id) => {
+                        terminal.request(connection, client, owner_request_id, action, payload)
+                    }
+                    Err(_) => Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "terminal request_id must be a canonical resource ID",
+                    )),
+                }
+            } else {
+                Ok(dispatch_request(request_id.clone(), body, &hello).kind_response_body())
+            };
+            let (outcome, body) = match outcome_body {
+                Ok(body) => (ResponseOutcome::Ok, body),
+                Err(error) => (ResponseOutcome::Error(error), json!(null)),
+            };
+            let reply = Envelope {
+                protocol: hello.protocol,
+                daemon_generation: hello.daemon_generation.clone(),
+                kind: EnvelopeKind::Response {
+                    request_id,
+                    outcome,
+                    body,
+                },
+            };
+            write_json_frame(writer, &reply, hello.limits.max_frame_bytes as usize)?;
+        }
+        Ok(())
+    })();
+    terminal.disconnect(connection);
+    result
+}
+
 trait ResponseBody {
     fn kind_response_body(self) -> serde_json::Value;
 }

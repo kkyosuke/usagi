@@ -1,8 +1,12 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
+#![coverage(off)] // Unix socket / process / PTY wiring; fake-PTY owner contracts live in usagi-daemon tests.
+
 use std::cell::RefCell;
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,9 +18,175 @@ use usagi_core::infrastructure::daemon::{
 };
 use usagi_core::infrastructure::paths;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
+use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
+use usagi_daemon::usecase::generation::ProcessIdentity;
+use usagi_daemon::usecase::generic_terminal::{
+    GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
+};
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SystemGit};
+use usagi_daemon::usecase::terminal::{Geometry, PtyWriteError, PtyWriter, SpawnFailure};
+use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
+
+struct TrustedLoginShell {
+    repository_root: PathBuf,
+}
+
+impl TerminalProfileResolver for TrustedLoginShell {
+    fn resolve(
+        &mut self,
+        request: &usagi_core::domain::terminal_launch::TerminalLaunchRequest,
+    ) -> Result<
+        usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
+        usagi_core::domain::terminal_launch::TerminalLaunchValidationError,
+    > {
+        use usagi_core::domain::terminal_launch::{
+            DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchValidationError,
+            TerminalProfileId,
+        };
+        let login_shell = TerminalProfileId::new("login-shell").expect("static profile is valid");
+        if request.profile_id != login_shell {
+            return Err(TerminalLaunchValidationError::UnknownProfile {
+                profile_id: request.profile_id.clone(),
+            });
+        }
+        ResolvedTerminalLaunch::new(
+            DurableTerminalLaunchSnapshot::new(
+                request.clone(),
+                1,
+                "/bin/sh",
+                self.repository_root.clone(),
+                BTreeSet::new(),
+            )?,
+            BTreeMap::new(),
+        )
+    }
+}
+
+struct FileTerminalStore(PathBuf);
+impl TerminalStore for FileTerminalStore {
+    type Error = std::io::Error;
+    fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), Self::Error> {
+        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
+        let temporary = self.0.with_extension("json.tmp");
+        std::fs::write(&temporary, encoded)?;
+        std::fs::rename(temporary, &self.0)
+    }
+}
+
+enum PtyObservation {
+    Output(usagi_core::domain::id::TerminalRef, Vec<u8>),
+}
+
+struct DaemonPty {
+    terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
+    selected: Option<String>,
+    observations: Sender<PtyObservation>,
+}
+impl DaemonPty {
+    fn new() -> (Self, Receiver<PtyObservation>) {
+        let (observations, receiver) = mpsc::channel();
+        (
+            Self {
+                terminals: BTreeMap::new(),
+                selected: None,
+                observations,
+            },
+            receiver,
+        )
+    }
+}
+impl GenericPtySpawner for DaemonPty {
+    fn spawn(
+        &mut self,
+        launch: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
+        terminal: &usagi_core::domain::id::TerminalRef,
+    ) -> Result<ProcessIdentity, SpawnFailure> {
+        let pty = PtyTerminal::spawn(
+            &launch.snapshot.program,
+            &launch.snapshot.working_directory,
+            Geometry { cols: 80, rows: 24 },
+        )
+        .map_err(|_| SpawnFailure::Definite)?;
+        let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
+        let reader = pty.reader().map_err(|_| SpawnFailure::Ambiguous)?;
+        let pty = Arc::new(Mutex::new(pty));
+        self.terminals
+            .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
+        let output_sender = self.observations.clone();
+        let output_terminal = terminal.clone();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut bytes = [0_u8; 4096];
+            while let Ok(count) = reader.read(&mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                if output_sender
+                    .send(PtyObservation::Output(
+                        output_terminal.clone(),
+                        bytes[..count].to_vec(),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(ProcessIdentity {
+            pid,
+            start_identity: "daemon-owned-pty".to_owned(),
+            process_group: pid,
+        })
+    }
+}
+impl PtyWriter for DaemonPty {
+    fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
+        self.selected = Some(terminal.terminal_id.as_str().clone());
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
+        let Some(key) = self.selected.as_ref() else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        let Some(terminal) = self.terminals.get(key) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        terminal
+            .lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .write_all(bytes)
+    }
+}
+
+struct SharedTerminal(
+    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>,
+);
+impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
+    fn request(
+        &mut self,
+        connection: usagi_core::domain::id::ConnectionId,
+        client: usagi_core::domain::id::ClientId,
+        request_id: usagi_core::domain::id::RequestId,
+        action: usagi_core::usecase::client::TerminalAction,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, usagi_core::infrastructure::ipc::ProtocolError> {
+        self.0
+            .lock()
+            .map_err(|_| {
+                usagi_core::infrastructure::ipc::ProtocolError::new(
+                    usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
+                    "terminal owner is unavailable",
+                )
+            })?
+            .request(connection, client, request_id, action, payload)
+    }
+    fn disconnect(&mut self, connection: usagi_core::domain::id::ConnectionId) {
+        if let Ok(mut terminal) = self.0.lock() {
+            terminal.disconnect(connection);
+        }
+    }
+}
 
 #[coverage(off)]
 fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
@@ -38,13 +208,38 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let repo_root = std::env::current_dir()?;
     let runtime = Arc::new(Mutex::new(
         SessionRuntime::open(
-            repo_root,
+            repo_root.clone(),
             usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
                 .map_err(|error| std::io::Error::other(error.to_string()))?,
             SystemGit,
         )
         .map_err(|error| std::io::Error::other(error.safe_message()))?,
     ));
+    let (pty, observations) = DaemonPty::new();
+    let terminal = Arc::new(Mutex::new(GenericTerminalRuntime::new(
+        usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
+            .map_err(|error| std::io::Error::other(error.to_string()))?,
+        TrustedLoginShell {
+            repository_root: repo_root,
+        },
+        FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
+        pty,
+    )));
+    let observed_terminal = Arc::clone(&terminal);
+    std::thread::Builder::new()
+        .name("usagi-terminal-observer".to_string())
+        .spawn(move || {
+            while let Ok(observation) = observations.recv() {
+                let Ok(mut terminal) = observed_terminal.lock() else {
+                    break;
+                };
+                match observation {
+                    PtyObservation::Output(reference, bytes) => {
+                        let _ = terminal.output(&reference, bytes);
+                    }
+                }
+            }
+        })?;
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
@@ -53,6 +248,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                     Ok(stream) => {
                         let server = server.clone();
                         let runtime = Arc::clone(&runtime);
+                        let terminal = Arc::clone(&terminal);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -61,10 +257,12 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                                     return;
                                 };
                                 let mut reader = stream;
-                                let _ = usagi_daemon::presentation::ipc::handle_connection_with(
+                                let mut terminal = SharedTerminal(terminal);
+                                let _ = usagi_daemon::presentation::ipc::handle_connection_with_terminal_and(
                                     &mut reader,
                                     &mut writer,
                                     &server,
+                                    &mut terminal,
                                     |request_id, body, hello| {
                                         let request = body.get("kind").and_then(serde_json::Value::as_str).filter(|kind| *kind == "session").and_then(|_| serde_json::from_value::<usagi_core::usecase::client::DaemonRequest>(body.clone()).ok()).and_then(|request| match request {
                                             usagi_core::usecase::client::DaemonRequest::Session { action, operation_id, payload } => Some((action, operation_id, payload)),

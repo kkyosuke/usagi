@@ -184,7 +184,6 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty> TerminalOwner
                     bytes,
                 },
             ) => self
-                .coordinator
                 .input(
                     &terminal,
                     InputRequest {
@@ -195,7 +194,6 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty> TerminalOwner
                         input_seq,
                     },
                     &bytes,
-                    &mut self.pty,
                 )
                 .map(|ack| json!({"ack": ack}))
                 .map_err(map_error),
@@ -207,6 +205,19 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty> TerminalOwner
     }
     fn disconnect(&mut self, connection: ConnectionId) {
         self.coordinator.disconnect(connection);
+    }
+}
+
+impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty> GenericTerminalRuntime<R, S, P> {
+    fn input(
+        &mut self,
+        terminal: &TerminalRef,
+        input: InputRequest,
+        bytes: &[u8],
+    ) -> Result<super::terminal::InputAck, GenericTerminalError> {
+        self.pty.select_terminal(terminal);
+        self.coordinator
+            .input(terminal, input, bytes, &mut self.pty)
     }
 }
 
