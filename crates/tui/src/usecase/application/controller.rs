@@ -2028,20 +2028,12 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
             ));
             Vec::new()
         }
-        overview::SessionCommand::Remove { force } => match state.active {
-            Target::Session(session) => {
-                state.overlay = None;
-                vec![Effect::RemoveSession {
-                    workspace: state.workspace,
-                    session,
-                    force,
-                }]
-            }
-            Target::Root(_) => {
-                state.notice = Some(Notice::new("workspace root cannot be removed"));
-                Vec::new()
-            }
-        },
+        overview::SessionCommand::Remove { .. } => {
+            state.notice = Some(Notice::new(
+                "named session removal is available in the live TUI",
+            ));
+            Vec::new()
+        }
     }
 }
 
@@ -3147,13 +3139,15 @@ mod tests {
         assert_eq!(
             update(
                 &mut state,
-                AppEvent::Key(AppKey::SubmitOverview("session remove --force".into())),
+                AppEvent::Key(AppKey::SubmitOverview(
+                    "session remove feature-x --force".into(),
+                )),
             ),
-            vec![Effect::RemoveSession {
-                workspace,
-                session,
-                force: true,
-            }]
+            Vec::new()
+        );
+        assert_eq!(
+            state.notice().map(|notice| notice.message.as_str()),
+            Some("named session removal is available in the live TUI")
         );
     }
 
