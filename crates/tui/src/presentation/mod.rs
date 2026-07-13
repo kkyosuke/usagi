@@ -135,8 +135,8 @@ enum WorkspaceStep {
 /// Overview / PR を一時的に最前面へ出すときだけこの値を使う。
 enum WorkspaceModal {
     Overview(OverviewModal),
-    Pr(PrModal),
     Remove(RemoveModal),
+    Pr(PrModal),
     Text(TextOverlay),
 }
 
@@ -1139,8 +1139,25 @@ fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
     match closeup::interpret(input) {
         Ok(closeup::Command::Agent { .. }) => open_pane_from_menu(ui, PaneKind::Agent),
         Ok(closeup::Command::Terminal { .. }) => open_pane_from_menu(ui, PaneKind::Terminal),
-        Ok(closeup::Command::Close { .. } | closeup::Command::Diff { .. }) | Err(_) => {}
+        Ok(closeup::Command::Close { arguments }) => {
+            if let Ok(force) = parse_close_force(&arguments) {
+                ui.open_remove_selector(force);
+            }
+        }
+        Ok(closeup::Command::Diff { .. }) | Err(_) => {}
     }
+}
+
+/// Closeup shares the remove selector and accepts only its force option; a
+/// target would bypass the snapshot-backed checklist.
+#[coverage(off)]
+fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
+    let request = crate::usecase::session_remove::parse(arguments)?;
+    request
+        .target
+        .is_none()
+        .then_some(request.force)
+        .ok_or("close does not accept a session target")
 }
 
 /// Workspace 画面のキー処理。Ctrl-C は常に終了し、それ以外は最前面 modal、現在 mode の
@@ -1311,11 +1328,36 @@ pub fn run_workspace_with_session_port(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
 ) -> io::Result<Exit> {
-    drive_workspace_with_ports(
+    run_workspace_with_session_port_and_selection_mode(
+        term,
+        snapshot,
+        session_commands,
+        ModalSelectionMode::Action,
+    )
+}
+
+/// Run a Workspace UI using the saved global modal interaction mode.
+///
+/// The composition root reads the setting once before opening a workspace, so
+/// a Config save affects the next workspace entry without changing the active
+/// modal or selection of an already-running workspace.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+pub fn run_workspace_with_session_port_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+) -> io::Result<Exit> {
+    drive_workspace_with_ports_and_selection_mode(
         term,
         snapshot,
         Box::new(SnapshotOverlayData),
         session_commands,
+        modal_selection_mode,
     )
     .map(|_| Exit::Quit)
 }
@@ -1577,10 +1619,10 @@ mod tests {
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
-        play_startup_splash, render_workspace, run as run_from_start, run_with_settings,
-        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
-        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
-        write_banner,
+        execute_closeup_command, play_startup_splash, render_workspace, run as run_from_start,
+        run_with_settings, run_workspace, run_workspace_with_overlay_data,
+        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
+        step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -2595,6 +2637,50 @@ mod tests {
     }
 
     #[test]
+    fn closeup_close_opens_the_shared_selector_and_dispatches_selected_session() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let keys = [
+            Key::Down,
+            Key::Enter,
+            Key::Down,
+            Key::Enter,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Quit,
+        ];
+        let mut term = FakeTerminal::with_keys(&keys);
+
+        assert_eq!(
+            run_workspace_with_session_port(
+                &mut term,
+                snapshot("remove-selector"),
+                Box::new(RecordingSessionPort(calls.clone())),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert!(
+            term.frames
+                .iter()
+                .map(|frame| frame.join("\n"))
+                .any(|frame| frame.contains("Remove sessions")
+                    && frame.contains("remove-selector-session"))
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [(
+                "remove-selector".to_owned(),
+                Some("remove-selector-session".to_owned()),
+                SessionCommand::Remove {
+                    name: "remove-selector-session".to_owned(),
+                    force: false,
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn closeup_action_modal_appears_without_tabs_and_hides_once_a_tab_opens() {
         // Req 1/3/4: Enter enters Closeup; with no tabs the action modal is the
         // front surface, and opening a tab hides it so the tab strip is front.
@@ -2944,6 +3030,37 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Escape), WorkspaceStep::Stay);
         assert!(ui.modal.is_none());
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+    }
+
+    #[test]
+    fn closeup_close_uses_the_shared_selector_and_accepts_each_force_flag_once() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        ui.enter_closeup();
+
+        execute_closeup_command(&mut ui, "close -f");
+        assert!(matches!(
+            ui.modal,
+            Some(WorkspaceModal::Remove(ref modal)) if modal.force()
+        ));
+
+        ui.modal = None;
+        execute_closeup_command(&mut ui, "close --force");
+        assert!(matches!(
+            ui.modal,
+            Some(WorkspaceModal::Remove(ref modal)) if modal.force()
+        ));
+
+        ui.modal = None;
+        execute_closeup_command(&mut ui, "close alpha -f");
+        assert!(ui.modal.is_none());
+        execute_closeup_command(&mut ui, "close -f --force");
+        assert!(ui.modal.is_none());
     }
 
     #[test]
