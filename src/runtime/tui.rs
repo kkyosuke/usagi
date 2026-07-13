@@ -389,6 +389,10 @@ pub(crate) fn launch(
     info: &AppInfo,
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
+    if let Err(error) = crate::runtime::daemon::ensure_ready() {
+        writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
+        return Ok(());
+    }
     match entry {
         EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome),
         EntryScreen::Config => launch_screen_graph(out, Start::Config),

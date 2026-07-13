@@ -30,9 +30,11 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 
 ## daemon process lifecycle
 
-`usagi daemon` は daemon 面の process lifecycle を操作する入口である。通常の client は、接続先が
-無いときに `start` を一度だけ起動して endpoint の公開を待つ。client が daemon-owned terminal や
-managed session をローカルに代替実行することはない。
+`usagi daemon` は daemon 面の process lifecycle を操作する入口である。すべての TUI 起動、daemon-owned
+CLI operation、MCP server は共有 bootstrap を通り、まず active endpoint を再利用する。locator が無いとき
+だけ `start` を一度要求して endpoint の公開を待つ。locator はあるが接続不能・draining・不正な場合は
+replacement を起動せず、安全な unavailable error を表示する。client が daemon-owned terminal や managed
+session をローカルに代替実行することはない。
 
 | コマンド | 動作 |
 |---|---|
