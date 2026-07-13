@@ -98,6 +98,10 @@ Home sidebar は `main → session* → + new session` の順序と target ident
 のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。PR title の解決はこの行の前提にしない。snapshot に無い
 session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。
 
+Switch で `+ new session` を選び Enter（または `t`）を押すと、`session create ` が入力済みの
+Prompt palette を開く。名前を続けて入力して Enter を押すと通常の `session create <name>` と同じ
+daemon request を非同期に開始し、完了まで action 行の直前に skeleton を表示する。`c` も同じ prompt を開く。
+
 diff と GIF はこの projection に含めない。実行可能な daemon command と対応する snapshot data が無い限り、
 sidebar は状態・進捗・shortcut を表示しない。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 

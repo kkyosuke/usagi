@@ -292,7 +292,7 @@ pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
     mode: Mode,
-    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行。
+    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行、末尾は作成 action 行。
     selected: usize,
     pane_owner: WorkspaceId,
     /// Pane state belongs to a selected target, never to the whole workspace.
@@ -484,6 +484,13 @@ impl Workspace {
     #[coverage(off)]
     pub fn root_selected(&self) -> bool {
         self.selected == 0
+    }
+
+    /// `+ new session` action row が選択されているか。
+    #[must_use]
+    #[coverage(off)]
+    pub fn new_session_selected(&self) -> bool {
+        self.selected == self.state.sessions.len() + 1
     }
 
     /// フォーカス中 session の表示ラベル。main 行では `"main"`。
@@ -685,10 +692,10 @@ impl Workspace {
             .or_insert_with(|| PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner))))
     }
 
-    /// 選択できる行数（root 行 1＋セッション数）。
+    /// 選択できる行数（root 行 1＋セッション数＋作成 action 行）。
     #[coverage(off)]
     fn row_count(&self) -> usize {
-        self.state.sessions.len() + 1
+        self.state.sessions.len() + 2
     }
 
     /// フォーカス中のセッション（root 選択なら `None`）。
@@ -758,11 +765,18 @@ fn root_row(width: usize, ws: &Workspace) -> String {
     menu_row(width, ws.root_selected(), "main", "workspace main")
 }
 
-/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
+/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session、末尾は作成 action。
 #[coverage(off)]
 fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     if index == 0 {
         vec![root_row(width, ws)]
+    } else if index == ws.sessions().len() + 1 {
+        vec![menu_row(
+            width,
+            index == ws.selected,
+            "+ new session",
+            "action",
+        )]
     } else {
         ws.sessions().get(index - 1).map_or_else(
             || vec![root_row(width, ws)],
@@ -772,8 +786,8 @@ fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
 }
 
 #[coverage(off)]
-fn workspace_row_height(_index: usize) -> usize {
-    2
+fn workspace_row_height(index: usize, session_count: usize) -> usize {
+    if index == session_count + 1 { 1 } else { 2 }
 }
 
 #[coverage(off)]
@@ -790,7 +804,11 @@ fn sidebar_divider(width: usize) -> String {
 #[coverage(off)]
 fn workspace_viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
     let mut start = 0;
-    while start < selected && (start..=selected).map(workspace_row_height).sum::<usize>() > capacity
+    while start < selected
+        && (start..=selected)
+            .map(|index| workspace_row_height(index, row_count.saturating_sub(2)))
+            .sum::<usize>()
+            > capacity
     {
         start += 1;
     }
@@ -953,6 +971,13 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     for index in start..ws.row_count() {
         let entry = if index == 0 {
             vec![root_row(width, ws)]
+        } else if index == ws.sessions().len() + 1 {
+            vec![menu_row(
+                width,
+                index == ws.selected,
+                "+ new session",
+                "action",
+            )]
         } else {
             ws.sessions().get(index - 1).map_or_else(
                 || vec![root_row(width, ws)],
@@ -2013,9 +2038,12 @@ mod tests {
         ws.select_next();
         assert_eq!(ws.selected(), 2);
         ws.select_next();
+        assert!(ws.new_session_selected());
+        assert!(joined(&ws).contains("+ new session  action"));
+        ws.select_next();
         assert!(ws.root_selected());
         ws.select_prev();
-        assert_eq!(ws.selected(), 2);
+        assert!(ws.new_session_selected());
     }
 
     #[test]

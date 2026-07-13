@@ -447,6 +447,15 @@ impl WorkspaceUi {
         ));
     }
 
+    /// Open the focused `+ new session` affordance as a name prompt.  Creation
+    /// still travels through the normal `session create` parser and daemon port.
+    #[coverage(off)]
+    fn open_new_session_prompt(&mut self) {
+        self.modal = Some(WorkspaceModal::Overview(OverviewModal::with_prompt(
+            "session create ",
+        )));
+    }
+
     /// Open the v1-compatible checklist over the current daemon snapshot.
     /// The modal captures records, not row indexes; dispatch performs another
     /// incarnation check before it asks the daemon to remove anything.
@@ -1026,7 +1035,11 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Down | Key::Char('j') => ui.workspace.select_next(),
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
         Key::Right | Key::Char('l') => ui.workspace.tab_next(),
+        Key::Enter | Key::Char('t') if ui.workspace.new_session_selected() => {
+            ui.open_new_session_prompt();
+        }
         Key::Enter | Key::Char('t') => ui.enter_closeup(),
+        Key::Char('c') => ui.open_new_session_prompt(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Char('v') => ui.open_preview(),
@@ -3160,6 +3173,49 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+    }
+
+    #[test]
+    fn new_session_row_opens_a_prefilled_create_prompt_and_dispatches_the_same_command() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(SnapshotSessionPort(calls.clone())),
+            ModalSelectionMode::Action,
+        );
+        while !ui.workspace.new_session_selected() {
+            assert_eq!(step_workspace(&mut ui, Key::Down), WorkspaceStep::Stay);
+        }
+
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        let Some(WorkspaceModal::Overview(prompt)) = ui.modal.as_ref() else {
+            panic!("the action row opens a create prompt");
+        };
+        assert_eq!(prompt.input(), "session create ");
+
+        for character in "review".chars() {
+            assert_eq!(
+                step_workspace(&mut ui, Key::Char(character)),
+                WorkspaceStep::Stay
+            );
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        while ui.workspace.pending_session().is_some() {
+            drain_session_completions(&mut ui);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                "alpha".to_owned(),
+                None,
+                SessionCommand::Create {
+                    name: "review".to_owned()
+                }
+            )]
+        );
     }
 
     #[test]

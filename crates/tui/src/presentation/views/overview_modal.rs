@@ -61,6 +61,19 @@ impl OverviewModal {
         }
     }
 
+    /// Open a prompt palette with an initial command.  This lets a focused UI
+    /// affordance lead directly into the command's argument without giving the
+    /// command parser a second, special path.
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_prompt(input: impl Into<String>) -> Self {
+        Self {
+            selection_mode: ModalSelectionMode::Prompt,
+            input: TextInput::with_value(input.into()),
+            ..Self::default()
+        }
+    }
+
     /// Returns whether candidates are chosen as actions or submitted as a prompt.
     #[must_use]
     #[coverage(off)]
