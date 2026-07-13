@@ -78,6 +78,11 @@ attach し、選択外の tab は background のまま保持する。
 `No tabs stirring yet. Enter starts one.` の案内を中央に表示する。この空状態は tick や runtime 接続に
 依存しない。overlay はこの Home frame を背景のまま合成する。
 
+Closeup action で `agent` または `terminal` を確定すると、その pending tab を即座に選択して右ペインへ
+表示する。`←` / `→`（または `h` / `l`）は tab を巡回し、`x` は選択 tab を閉じる。最後の tab を閉じると
+Closeup action と空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned terminal を
+停止しない。
+
 Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
 workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
 TUI は daemon の accepted response 後に Agent pending tab を置き、同じ operation の成功 final が返す

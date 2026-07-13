@@ -22,7 +22,7 @@ use crate::usecase::application::controller::{
     AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
-    PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
+    self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
@@ -245,8 +245,8 @@ pub struct Workspace {
     mode: Mode,
     /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行。
     selected: usize,
-    tabs: Vec<Tab>,
-    active_tab: usize,
+    pane_owner: WorkspaceId,
+    pane: PaneState,
 }
 
 impl Workspace {
@@ -254,18 +254,14 @@ impl Workspace {
     #[must_use]
     #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
+        let pane_owner = WorkspaceId::new();
         Self {
             record: workspace,
             state,
             mode: Mode::Switch,
             selected: 0,
-            tabs: vec![
-                Tab { label: "Preview" },
-                Tab { label: "Terminal" },
-                Tab { label: "Diff" },
-                Tab { label: "Notes" },
-            ],
-            active_tab: 0,
+            pane_owner,
+            pane: PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
         }
     }
 
@@ -361,7 +357,7 @@ impl Workspace {
     #[must_use]
     #[coverage(off)]
     pub fn tabs(&self) -> &[Tab] {
-        &self.tabs
+        &[]
     }
 
     /// 選択行の添字（`0` は root 行）。
@@ -375,7 +371,7 @@ impl Workspace {
     #[must_use]
     #[coverage(off)]
     pub fn active_tab(&self) -> usize {
-        self.active_tab
+        0
     }
 
     /// root 行を選択しているか。
@@ -460,14 +456,82 @@ impl Workspace {
     /// 右ペインのタブを次へ（末尾で先頭へ回り込む）。
     #[coverage(off)]
     pub fn tab_next(&mut self) {
-        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        self.select_pane_tab(1);
     }
 
     /// 右ペインのタブを前へ（先頭で末尾へ回り込む）。
     #[coverage(off)]
     pub fn tab_prev(&mut self) {
-        let len = self.tabs.len();
-        self.active_tab = (self.active_tab + len - 1) % len;
+        self.select_pane_tab(-1);
+    }
+
+    /// Request a visible daemon-owned pane placeholder and focus it immediately.
+    /// The pane reducer keeps the durable operation identity until the runtime
+    /// replaces it with its fenced terminal reference.
+    #[coverage(off)]
+    pub fn open_pane(&mut self, kind: PaneKind) {
+        let operation = usagi_core::domain::id::OperationId::new();
+        let target = self.pane_target();
+        let _ = pane::reduce(
+            &mut self.pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind,
+            },
+        );
+        let _ = pane::reduce(
+            &mut self.pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+    }
+
+    /// Close the selected right-pane tab without affecting daemon ownership.
+    #[coverage(off)]
+    pub fn close_pane(&mut self) {
+        let _ = pane::reduce(&mut self.pane, PaneEvent::CloseSelected);
+    }
+
+    #[coverage(off)]
+    fn pane_target(&self) -> Target {
+        Target::Root(self.pane_owner)
+    }
+
+    /// Pane state rendered by the right-hand Chrome strip.
+    #[must_use]
+    #[coverage(off)]
+    pub fn pane(&self) -> &PaneState {
+        &self.pane
+    }
+
+    #[must_use]
+    #[coverage(off)]
+    pub fn has_panes(&self) -> bool {
+        !self.pane.tabs().is_empty()
+    }
+
+    #[coverage(off)]
+    fn select_pane_tab(&mut self, direction: i8) {
+        let tabs = self.pane.tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        let current = tabs
+            .iter()
+            .position(|tab| pane_tab_selected(tab, self.pane.selected()))
+            .unwrap_or(0);
+        let next = if direction > 0 {
+            (current + 1) % tabs.len()
+        } else {
+            (current + tabs.len() - 1) % tabs.len()
+        };
+        let selection = match &tabs[next] {
+            PaneTab::Pending(pending) => {
+                PaneSelection::Tab(TabSelection::Pending(pending.operation))
+            }
+            PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
+        };
+        let _ = pane::reduce(&mut self.pane, PaneEvent::Select(selection));
     }
 
     /// 選択できる行数（root 行 1＋セッション数）。
@@ -636,29 +700,31 @@ fn closeup_header(width: usize, ws: &Workspace) -> String {
     widgets::pad_to_width(&format!(" {name}  {detail}"), width)
 }
 
-/// tabmenu: タブを並べ、アクティブを `[Label]` accent、他を dim で描く。
+/// tabmenu: pane reducer の stable selection を Chrome 風タブへ投影する。
 #[coverage(off)]
-fn tab_menu(width: usize, ws: &Workspace) -> String {
-    let tabs = ws
-        .tabs
+fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
+    let labels = ws
+        .pane()
+        .tabs()
         .iter()
-        .enumerate()
-        .map(|(i, tab)| {
-            if i == ws.active_tab {
-                format!("[{}]", Role::Accent.style().bold().paint(tab.label))
-            } else {
-                format!(" {} ", Style::new().dim().paint(tab.label))
-            }
+        .map(pane_tab_label)
+        .collect::<Vec<_>>();
+    let tabs = ws
+        .pane()
+        .tabs()
+        .iter()
+        .zip(&labels)
+        .map(|(tab, label)| widgets::session_tab::Tab {
+            label,
+            selected: pane_tab_selected(tab, ws.pane().selected()),
         })
-        .collect::<Vec<_>>()
-        .join(" ");
-    widgets::pad_to_width(&format!(" {tabs}"), width)
+        .collect::<Vec<_>>();
+    widgets::session_tab::render(width, &tabs)
 }
 
 /// content: アクティブなタブと、フォーカス中の実 workspace / session path。
 #[coverage(off)]
 fn content_lines(ws: &Workspace) -> Vec<String> {
-    let tab = ws.tabs[ws.active_tab].label;
     let (kind, path) = ws.focused_session().map_or_else(
         || ("workspace", ws.path()),
         |session| ("session", session.root.as_path()),
@@ -667,7 +733,7 @@ fn content_lines(ws: &Workspace) -> Vec<String> {
         String::new(),
         Style::new()
             .dim()
-            .paint(&format!("  {tab} — {kind} '{}'", ws.focused_label())),
+            .paint(&format!("  {kind} '{}'", ws.focused_label())),
         String::new(),
         Style::new().dim().paint(&format!("  {}", path.display())),
     ]
@@ -688,11 +754,18 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
 #[coverage(off)]
 fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = vec![
-        closeup_header(width, ws),
-        tab_menu(width, ws),
-        String::new(),
-    ];
+    let mut rows = vec![closeup_header(width, ws)];
+    if ws.has_panes() {
+        let chrome = tab_menu(width, ws);
+        rows.extend(chrome);
+        rows.push(String::new());
+    } else {
+        rows.extend(widgets::session_tab::empty_pane(
+            width,
+            height.saturating_sub(2),
+            "No tabs stirring yet. Enter starts one.",
+        ));
+    }
     rows.extend(content_lines(ws));
     with_footer(rows, height, right_footer(width, ws))
 }
@@ -1358,14 +1431,13 @@ mod tests {
         assert_eq!(ws.path(), PathBuf::from("/tmp/actual"));
         assert_eq!(ws.sessions().len(), 2);
         assert_eq!(ws.sessions()[0].display_label(), "UI work");
-        assert_eq!(ws.tabs().len(), 4);
+        assert!(!ws.has_panes());
         assert_eq!(ws.mode(), Mode::Switch);
         assert_eq!(ws.selected(), 0);
         assert_eq!(ws.active_tab(), 0);
         assert!(ws.root_selected());
         assert!(format!("{:?}", ws.clone()).contains("actual"));
-        assert!(format!("{:?}", ws.tabs()[0]).contains("Preview"));
-        assert_eq!(ws.tabs()[0], ws.tabs()[0]);
+        assert!(format!("{:?}", ws.pane()).contains("PaneState"));
     }
 
     #[test]
@@ -1409,15 +1481,18 @@ mod tests {
     }
 
     #[test]
-    fn tab_navigation_wraps() {
+    fn pane_tab_navigation_wraps_and_close_returns_to_empty_state() {
         let mut ws = workspace();
+        ws.open_pane(PaneKind::Terminal);
+        ws.open_pane(PaneKind::Agent);
         ws.tab_prev();
-        assert_eq!(ws.active_tab(), 3);
+        assert!(matches!(ws.pane().selected(), PaneSelection::Tab(_)));
         ws.tab_next();
-        assert_eq!(ws.active_tab(), 0);
-        ws.tab_next();
-        assert_eq!(ws.active_tab(), 1);
-        assert!(joined(&ws).contains("Terminal — workspace 'root'"));
+        assert!(joined(&ws).contains("Terminal (resolving)"));
+        assert!(joined(&ws).contains("Agent (starting)"));
+        ws.close_pane();
+        ws.close_pane();
+        assert!(!ws.has_panes());
     }
 
     #[test]
@@ -1448,7 +1523,7 @@ mod tests {
         ws.apply_home_mode(HomeMode::Closeup);
         assert_eq!(ws.mode(), Mode::Closeup);
         assert_eq!(ws.selected(), 1);
-        assert_eq!(ws.active_tab(), 1);
+        assert_eq!(ws.active_tab(), 0);
         ws.apply_home_mode(HomeMode::Switch);
         assert_eq!(ws.mode(), Mode::Switch);
     }
@@ -1486,18 +1561,16 @@ mod tests {
     }
 
     #[test]
-    fn render_uses_mode_specific_footers_and_keeps_tabs_visible() {
+    fn render_uses_mode_specific_footers_and_renders_chrome_tabs_from_pane_state() {
         let mut ws = workspace();
         let switch = joined(&ws);
         assert!(switch.contains("[switch] ↑↓ target"));
         assert!(switch.contains("←→/hl tab"));
         assert!(switch.contains("Enter/t closeup"));
         assert!(switch.contains("p PR"));
-        for label in ["Preview", "Terminal", "Diff", "Notes"] {
-            assert!(switch.contains(label));
-        }
+        assert!(switch.contains("No tabs stirring yet. Enter starts one."));
 
-        ws.tab_next();
+        ws.open_pane(PaneKind::Terminal);
         ws.enter_closeup();
         let closeup_frame = render(30, 100, &ws);
         let closeup = closeup_frame
@@ -1509,12 +1582,8 @@ mod tests {
         assert!(closeup.contains("←→/hl tab"));
         assert!(closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
-        assert!(closeup.contains("Terminal — workspace 'root'"));
-        assert!(
-            closeup_frame
-                .iter()
-                .any(|line| line.contains("[\u{1b}[1;36mTerminal\u{1b}[0m]"))
-        );
+        assert!(closeup.contains("Terminal (resolving)"));
+        assert!(closeup.contains('▔'));
     }
 
     #[test]
@@ -1528,11 +1597,9 @@ mod tests {
         assert!(text.contains("human"));
         assert!(text.contains("daemon"));
         assert!(text.contains("mcp"));
-        assert!(text.contains("Preview — workspace 'root'"));
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
         assert!(text.contains("/tmp/actual"));
         assert!(text.contains("root"));
-        assert!(text.contains("Preview"));
-        assert!(text.contains("Terminal"));
         assert!(text.contains("Esc back"));
         assert!(text.contains('│'));
     }
@@ -1587,18 +1654,18 @@ mod tests {
     fn render_reflects_selected_session_and_root() {
         let mut ws = workspace();
         let root_text = joined(&ws);
-        assert!(root_text.contains("Preview — workspace 'root'"));
+        assert!(root_text.contains("No tabs stirring yet. Enter starts one."));
         assert!(root_text.contains("/tmp/actual"));
 
         ws.select_next();
         let session_text = joined(&ws);
         assert!(session_text.contains("tui · human"));
-        assert!(session_text.contains("/tmp/actual/.usagi/sessions/tui"));
+        assert!(session_text.contains("No tabs stirring yet. Enter starts one."));
 
         ws.select_next();
         let second_session_text = joined(&ws);
         assert!(second_session_text.contains("daemon · mcp"));
-        assert!(second_session_text.contains("/tmp/actual/.usagi/sessions/daemon"));
+        assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
