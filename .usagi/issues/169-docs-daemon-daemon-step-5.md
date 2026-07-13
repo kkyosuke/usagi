@@ -1,14 +1,14 @@
 ---
 number: 169
 title: docs(daemon): daemon 化を正本ドキュメントへ畳み込む（Step 5）
-status: todo
+status: done
 priority: low
 labels: [daemon, docs]
 dependson: [168]
 related: []
 parent: 159
 created_at: 2026-07-10T13:36:24.033055+00:00
-updated_at: 2026-07-10T13:36:24.033055+00:00
+updated_at: 2026-07-13T00:13:46.532453+00:00
 ---
 
 Epic #159 の Step 5。Step 3b-4 / Step 4 まで挙動が確定した後、提案 [document/proposals/02-daemon.md](../../document/proposals/02-daemon.md) の内容を正本ドキュメントへ畳み込み、proposal はリンクスタブ化する（[proposals 運用](README.md) の方針）。

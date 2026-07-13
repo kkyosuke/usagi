@@ -11,7 +11,10 @@
 ロードマップ（実装タスク）は issue ストア（`.usagi/issues/`）で追跡する。
 
 v1 時点の設計提案（daemon 化・durable orchestrator など）は退避版
-[v1/document/proposals/](../../v1/document/proposals/README.md) にあり、更新しない。
+[v1/document/proposals/](../../v1/document/proposals/README.md) にあり、更新しない。そこにある
+[daemon 化提案](../../v1/document/proposals/02-daemon.md)の実装済み部分は、[TUI](../03-tui.md)、
+[daemon IPC](../04-ipc.md)、[daemon](../05-daemon.md)へ畳み込んだ。退避版を変更して stub にせず、
+v1 の仕様スナップショットとして保存する。
 
 ## 一覧
 
