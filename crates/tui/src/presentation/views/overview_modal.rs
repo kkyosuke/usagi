@@ -538,6 +538,25 @@ mod tests {
     }
 
     #[test]
+    fn action_mode_expands_and_cycles_session_subcommands() {
+        let mut modal = OverviewModal::new();
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "config");
+
+        modal.select_prev(); // session
+        modal.expand_selected();
+        assert_eq!(modal.submission(), "session list");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session overview");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session remove");
+        modal.select_next();
+        assert_eq!(modal.submission(), "session list");
+        assert!(modal.collapse());
+        assert!(!modal.collapse());
+    }
+
+    #[test]
     fn completion_and_submission_use_the_registry_metadata() {
         let mut modal = OverviewModal::new();
         modal.select_next();
