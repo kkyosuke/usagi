@@ -1378,10 +1378,10 @@ mod tests {
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start, run_with_settings,
-        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
-        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
-        write_banner,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions, render_workspace,
+        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
+        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
+        step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -2544,20 +2544,33 @@ mod tests {
     }
 
     /// Overview の `session create` が注入 port へ届き、返された daemon snapshot が
-    /// sidebar の session 行へ反映されることを固定する。
+    /// sidebar の session 行へ反映されることを固定する。create は worker thread で走る
+    /// ため、submit 直後の pending skeleton を同期的に確認し、その後 completion を drain して
+    /// 反映を検証する（thread の完了を待つので競合しない）。
     #[test]
     fn session_create_reaches_the_port_and_snapshot_reflects_in_the_sidebar() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let port = SnapshotSessionPort(calls.clone());
-        let mut keys = vec![Key::Char(':')];
-        keys.extend("session create review".chars().map(Key::Char));
-        keys.extend([Key::Enter, Key::Escape, Key::Char('q')]);
-        let mut term = FakeTerminal::with_keys(&keys);
-
-        assert_eq!(
-            run_workspace_with_session_port(&mut term, snapshot("alpha"), Box::new(port)).unwrap(),
-            Exit::Quit
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(SnapshotSessionPort(calls.clone())),
+            ModalSelectionMode::Action,
         );
+        ui.open_overview();
+        for ch in "session create review".chars() {
+            assert_eq!(step_workspace(&mut ui, Key::Char(ch)), WorkspaceStep::Stay);
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+
+        // The create runs on a worker thread; the skeleton appears synchronously.
+        assert_eq!(ui.workspace.pending_session(), Some("review"));
+
+        // Wait for the worker to finish, then drain its completion.
+        while ui.workspace.pending_session().is_some() {
+            drain_session_completions(&mut ui);
+            std::thread::yield_now();
+        }
 
         assert_eq!(
             *calls.lock().unwrap(),
@@ -2570,7 +2583,7 @@ mod tests {
             )]
         );
         // The daemon snapshot returned by the port replaces the sidebar rows.
-        assert!(term.frames.last().unwrap().join("\n").contains("review"));
+        assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
     }
 
     #[test]
