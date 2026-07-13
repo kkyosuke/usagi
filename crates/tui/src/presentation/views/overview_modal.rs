@@ -254,29 +254,13 @@ impl OverviewModal {
     }
 }
 
-/// `❯ <input>` の入力行。キャレット位置の 1 文字を下線で示す（文字を横にずらさない）。空なら
-/// 下線の空白 1 つ。行末では末尾の空白に下線を敷く。
+/// `❯ <input>` の入力行。共通 block cursor が編集位置の 1 文字を反転し、空・行末では
+/// 反転空白 1 つを置く。
 #[coverage(off)]
 fn input_line(value: &str, cursor: usize) -> String {
     let prompt = Role::Danger.style().bold().paint("❯");
     let accent = Role::Accent.style();
-    let caret = Role::Accent.style().underline();
-    let body = if value.is_empty() {
-        caret.paint(" ")
-    } else {
-        let cursor = cursor.min(value.len());
-        let (before, rest) = value.split_at(cursor);
-        let (caret_char, after) = match rest.chars().next() {
-            Some(c) => (&rest[..c.len_utf8()], &rest[c.len_utf8()..]),
-            None => (" ", ""),
-        };
-        format!(
-            "{}{}{}",
-            accent.paint(before),
-            caret.paint(caret_char),
-            accent.paint(after)
-        )
-    };
+    let body = widgets::block_caret(value, cursor, &accent);
     format!("{prompt} {body}")
 }
 
@@ -644,6 +628,11 @@ mod tests {
         modal.cursor_left(); // キャレットは 'c' の手前
         let text = joined(&modal);
         assert!(text.contains("abc"));
+        assert!(
+            render(24, 80, &modal)
+                .join("\n")
+                .contains("\u{1b}[7;36mc\u{1b}[0m")
+        );
     }
 
     #[test]

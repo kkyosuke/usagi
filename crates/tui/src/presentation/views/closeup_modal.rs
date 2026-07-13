@@ -161,11 +161,11 @@ fn action_row(action: closeup::CommandInfo, selected: bool, inner: usize) -> Str
 #[coverage(off)]
 fn body(state: &CloseupModal) -> Vec<String> {
     if state.selection_mode == ModalSelectionMode::Prompt {
-        let prompt = if state.input.value().is_empty() {
-            "_".to_string()
-        } else {
-            state.input.value().to_owned()
-        };
+        let prompt = widgets::block_caret(
+            state.input.value(),
+            state.input.cursor(),
+            &Role::Accent.style(),
+        );
         return modal::fixed_body(
             vec![
                 Style::new().dim().paint("Type a command:"),
@@ -315,6 +315,12 @@ mod tests {
         assert_eq!(modal.selection_mode(), ModalSelectionMode::Prompt);
         assert_eq!(modal.submission(), "cl");
         assert!(joined(&modal).contains("Type a command:"));
+        // Closeup prompt uses the same block-caret renderer as other TextInput views.
+        assert!(
+            render(24, 80, &modal)
+                .join("\n")
+                .contains("\u{1b}[7;36m \u{1b}[0m")
+        );
     }
 
     #[test]
