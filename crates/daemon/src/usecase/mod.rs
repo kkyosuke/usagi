@@ -16,6 +16,7 @@ pub mod codex;
 pub mod control;
 pub mod generation;
 pub mod generic_terminal;
+pub mod orchestration;
 pub mod restart;
 pub mod runtime;
 pub mod serve;

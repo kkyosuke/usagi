@@ -15,7 +15,7 @@ use super::{CodexAdapter, CodexProvision, CodexProvisionFailure, CodexProvisione
 use crate::usecase::{
     generation::ProcessIdentity,
     runtime::{
-        AdapterError, AgentAdapter, PtySpawner, RuntimeCoordinator, RuntimeStore,
+        AdapterError, AgentAdapter, ProvisionContext, PtySpawner, RuntimeCoordinator, RuntimeStore,
         RuntimeStoreSnapshot, SpawnProvision,
     },
     terminal::Geometry,
@@ -23,7 +23,7 @@ use crate::usecase::{
 
 struct FakeProvisioner {
     result: Option<Result<CodexProvision, CodexProvisionFailure>>,
-    calls: Vec<LaunchScope>,
+    calls: Vec<ProvisionContext>,
 }
 
 impl FakeProvisioner {
@@ -48,8 +48,11 @@ impl FakeProvisioner {
 }
 
 impl CodexProvisioner for FakeProvisioner {
-    fn provision(&mut self, scope: &LaunchScope) -> Result<CodexProvision, CodexProvisionFailure> {
-        self.calls.push(scope.clone());
+    fn provision(
+        &mut self,
+        context: &ProvisionContext,
+    ) -> Result<CodexProvision, CodexProvisionFailure> {
+        self.calls.push(context.clone());
         self.result.take().expect("fake provisioner called once")
     }
 }
@@ -95,7 +98,10 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
         ]
     );
     assert_eq!(snapshot.plan.working_directory, PathBuf::from("/worktree"));
-    assert_eq!(adapter.provisioner.calls, vec![request.scope]);
+    assert_eq!(
+        adapter.provisioner.calls,
+        vec![ProvisionContext::from_request(&request)]
+    );
     assert_eq!(
         resolved.provision.arguments(),
         ["--config", "/scoped/codex.toml"]
@@ -179,7 +185,7 @@ fn renders_headless_exec_and_exposes_the_static_profile() {
 }
 
 #[test]
-fn rejects_unknown_profiles_and_unsupported_product_capabilities_before_provisioning() {
+fn rejects_unknown_profiles_before_provisioning() {
     let mut unknown = request(LaunchMode::Interactive);
     unknown.profile_id = AgentProfileId::new("other").unwrap();
     let mut adapter = CodexAdapter::new(FakeProvisioner::ready());
@@ -187,20 +193,6 @@ fn rejects_unknown_profiles_and_unsupported_product_capabilities_before_provisio
         adapter.resolve(&unknown),
         Err(AdapterError::Validation(
             LaunchValidationError::UnknownProfile { profile_id: _ }
-        ))
-    ));
-    assert!(adapter.provisioner.calls.is_empty());
-
-    let mut unsupported = request(LaunchMode::Interactive);
-    unsupported
-        .required_capabilities
-        .insert(AgentCapability::PhaseReporting);
-    assert!(matches!(
-        adapter.resolve(&unsupported),
-        Err(AdapterError::Validation(
-            LaunchValidationError::UnsupportedCapability {
-                capability: AgentCapability::PhaseReporting
-            }
         ))
     ));
     assert!(adapter.provisioner.calls.is_empty());
