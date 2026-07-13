@@ -226,7 +226,6 @@ mod tests {
             modal.selected_entries(),
             vec![session("a", 1), session("b", 2)]
         );
-
         let mut empty = RemoveModal::new(Vec::new(), false);
         empty.move_down();
         empty.toggle();

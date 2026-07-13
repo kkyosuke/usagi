@@ -105,6 +105,8 @@ launch を依頼する。その他の引数は安全な feedback で拒否し、
 Overview の `session create <name>`、`session list`、`session overview`、
 `session remove <name> [--force]` は daemon IPC へ request を送る。remove は command に明示した
 session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
+Closeup の `close [-f|--force]` は同じ session checklist を開く。文法、force、keyboard 操作は
+[TUI の Overview と modal](03-tui.md#overview-と-modal) が正本である。
 
 `session remove -s [--force]` は削除対象を複数選ぶ checklist modal を開く。選択 modal の入力、snapshot
 reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-modal) が正本である。
