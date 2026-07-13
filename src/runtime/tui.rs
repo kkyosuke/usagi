@@ -12,7 +12,10 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
+use usagi_core::domain::session::{SessionOrigin, SessionRecord};
+use usagi_core::domain::session_lifecycle::ManagedSession;
 use usagi_core::domain::settings::Settings;
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
@@ -25,7 +28,8 @@ use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
-    self, BannerScreenRunner, Exit, SessionCommandPort, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, BannerScreenRunner, Exit, SessionCommandPort, SessionCommandResult, Start,
+    WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -34,7 +38,59 @@ use usagi_tui::usecase::terminal_input::{KeyCode, LiveInput, RuntimeEvent};
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
-struct DaemonSessionCommandPort;
+#[derive(Default)]
+struct DaemonSessionCommandPort {
+    last_revision: u64,
+}
+
+struct LifecycleSnapshot {
+    revision: u64,
+    sessions: Vec<ManagedSession>,
+}
+
+impl LifecycleSnapshot {
+    #[coverage(off)]
+    fn project(self, workspace: &Workspace) -> Vec<SessionRecord> {
+        self.sessions
+            .into_iter()
+            .map(|session| SessionRecord {
+                name: session.name.clone(),
+                display_name: None,
+                origin: SessionOrigin::Unknown,
+                started_from: None,
+                root: workspace
+                    .path
+                    .join(".usagi")
+                    .join("sessions")
+                    .join(session.name),
+                created_at: session.changed_at,
+                last_active: None,
+                notes: Scratchpad::default(),
+                prs: Vec::new(),
+            })
+            .collect()
+    }
+}
+
+#[coverage(off)]
+fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "invalid daemon session snapshot".to_owned())?;
+    let revision = object
+        .get("revision")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
+    let sessions = object
+        .get("sessions")
+        .cloned()
+        .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())
+        .and_then(|sessions| {
+            serde_json::from_value(sessions)
+                .map_err(|error| format!("invalid daemon session snapshot: {error}"))
+        })?;
+    Ok(LifecycleSnapshot { revision, sessions })
+}
 
 impl SessionCommandPort for DaemonSessionCommandPort {
     #[coverage(off)]
@@ -43,26 +99,19 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         workspace: &Workspace,
         selected: Option<&usagi_core::domain::session::SessionRecord>,
         command: SessionCommand,
-    ) -> Result<String, String> {
+    ) -> Result<SessionCommandResult, String> {
         let (action, payload) = match command {
-            SessionCommand::Create { name } => (
-                SessionAction::Create,
-                serde_json::json!({"workspace": workspace.path, "name": name}),
-            ),
-            SessionCommand::List => (
-                SessionAction::List,
-                serde_json::json!({"workspace": workspace.path}),
-            ),
-            SessionCommand::Overview => (
-                SessionAction::Overview,
-                serde_json::json!({"workspace": workspace.path}),
-            ),
+            SessionCommand::Create { name } => {
+                (SessionAction::Create, serde_json::json!({"name": name}))
+            }
+            SessionCommand::List => (SessionAction::List, serde_json::json!({})),
+            SessionCommand::Overview => (SessionAction::Overview, serde_json::json!({})),
             SessionCommand::Remove { force } => {
                 let selected =
                     selected.ok_or_else(|| "workspace root cannot be removed".to_owned())?;
                 (
                     SessionAction::Remove,
-                    serde_json::json!({"workspace": workspace.path, "name": selected.name, "force": force}),
+                    serde_json::json!({"name": selected.name, "force": force}),
                 )
             }
         };
@@ -70,21 +119,62 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         let mut client =
             crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
                 .map_err(|error| format!("daemon unavailable: {error}"))?;
-        match client
+        let reply = client
             .request(DaemonRequest::Session {
                 action,
                 operation_id,
                 payload,
             })
-            .map_err(|error| format!("daemon request failed: {error}"))?
-        {
+            .map_err(|error| format!("daemon request failed: {error}"))?;
+        let message = match reply {
             DaemonReply::Accepted {
                 operation_id,
                 revision,
-            } => Ok(format!(
-                "accepted operation {operation_id} (revision {revision})"
-            )),
-            DaemonReply::Ok(value) => Ok(value.to_string()),
+            } => format!("accepted operation {operation_id} (revision {revision})"),
+            DaemonReply::Ok(value) => {
+                let snapshot = lifecycle_snapshot(&value)?;
+                if snapshot.revision < self.last_revision {
+                    return Ok(SessionCommandResult::message(
+                        "ignored stale daemon snapshot",
+                    ));
+                }
+                self.last_revision = snapshot.revision;
+                return Ok(SessionCommandResult {
+                    message: "daemon snapshot refreshed".to_owned(),
+                    sessions: Some(snapshot.project(workspace)),
+                });
+            }
+        };
+        let snapshot = request_lifecycle_snapshot()?;
+        if snapshot.revision < self.last_revision {
+            return Ok(SessionCommandResult::message(
+                "ignored stale daemon snapshot",
+            ));
+        }
+        self.last_revision = snapshot.revision;
+        Ok(SessionCommandResult {
+            message,
+            sessions: Some(snapshot.project(workspace)),
+        })
+    }
+}
+
+#[coverage(off)]
+fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
+    let mut client =
+        crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+            .map_err(|error| format!("daemon unavailable: {error}"))?;
+    match client
+        .request(DaemonRequest::Session {
+            action: SessionAction::List,
+            operation_id: usagi_core::domain::id::OperationId::new().to_string(),
+            payload: serde_json::json!({}),
+        })
+        .map_err(|error| format!("daemon request failed: {error}"))?
+    {
+        DaemonReply::Ok(value) => lifecycle_snapshot(&value),
+        DaemonReply::Accepted { .. } => {
+            Err("daemon returned an invalid lifecycle snapshot response".to_owned())
         }
     }
 }
@@ -237,10 +327,12 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         validate_workspace_directory(path)?;
         let workspace =
             workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        let state = WorkspaceStateStore::new(&workspace.path)
+        let mut state = WorkspaceStateStore::new(&workspace.path)
             .load()
             .unwrap_or_default()
             .unwrap_or_default();
+        let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
+        state.sessions = lifecycle.project(&workspace);
         Ok(WorkspaceSnapshot::new(workspace, state))
     }
 
@@ -374,7 +466,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             presentation::run_workspace_with_session_port(
                 terminal,
                 snapshot,
-                Box::new(DaemonSessionCommandPort),
+                Box::new(DaemonSessionCommandPort::default()),
             )
         })?;
     } else {

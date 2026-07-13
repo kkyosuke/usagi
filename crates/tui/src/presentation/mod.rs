@@ -175,8 +175,31 @@ pub trait SessionCommandPort {
         _workspace: &usagi_core::domain::workspace::Workspace,
         _selected: Option<&usagi_core::domain::session::SessionRecord>,
         _command: SessionCommand,
-    ) -> Result<String, String> {
+    ) -> Result<SessionCommandResult, String> {
         Err("session command port is not implemented".to_owned())
+    }
+}
+
+/// Safe result of a daemon-owned session command.
+///
+/// `sessions` is a read-only projection of the daemon lifecycle snapshot.  It
+/// is intentionally returned to the UI instead of being persisted through the
+/// legacy workspace state store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCommandResult {
+    /// Message for the Overview modal.
+    pub message: String,
+    /// Authoritative sidebar rows when the daemon supplied a fresh snapshot.
+    pub sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
+}
+
+impl SessionCommandResult {
+    #[must_use]
+    pub fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            sessions: None,
+        }
     }
 }
 
@@ -189,7 +212,7 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
         _workspace: &usagi_core::domain::workspace::Workspace,
         _selected: Option<&usagi_core::domain::session::SessionRecord>,
         _command: SessionCommand,
-    ) -> Result<String, String> {
+    ) -> Result<SessionCommandResult, String> {
         Err("session commands are unavailable".to_owned())
     }
 }
@@ -557,7 +580,12 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                             ui.workspace.selected_session(),
                             command,
                         ) {
-                            Ok(result) => modal.set_result(result),
+                            Ok(result) => {
+                                if let Some(sessions) = result.sessions {
+                                    ui.workspace.replace_sessions(sessions);
+                                }
+                                modal.set_result(result.message);
+                            }
                             Err(error) => modal.set_error(error),
                         },
                         Err(error) => modal.set_error(error),
@@ -1069,11 +1097,11 @@ mod tests {
     use super::{
         BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SnapshotOverlayData, Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
-        WorkspaceModal, WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, run as run_from_start,
-        run_workspace, run_workspace_with_overlay_data, run_workspace_with_session_port,
-        step_config, step_new, step_overview, step_pr, step_workspace, welcome_action,
-        write_banner,
+        SessionCommandResult, SnapshotOverlayData, Start, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, run as run_from_start, run_workspace, run_workspace_with_overlay_data,
+        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
+        step_workspace, welcome_action, write_banner,
     };
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
@@ -1147,13 +1175,13 @@ mod tests {
             workspace: &Workspace,
             selected: Option<&SessionRecord>,
             command: SessionCommand,
-        ) -> Result<String, String> {
+        ) -> Result<SessionCommandResult, String> {
             self.0.lock().unwrap().push((
                 workspace.name.clone(),
                 selected.map(|session| session.name.clone()),
                 command,
             ));
-            Ok("daemon accepted".to_owned())
+            Ok(SessionCommandResult::message("daemon accepted"))
         }
     }
 
