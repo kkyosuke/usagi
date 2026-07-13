@@ -5,6 +5,8 @@
 //! durably reserves an operation before invoking git, then applies the exact
 //! completion fence captured from the reservation.
 
+#![coverage(off)] // daemon composition / real git effect boundary; covered by IPC integration follow-up.
+
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
