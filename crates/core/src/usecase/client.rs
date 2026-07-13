@@ -155,6 +155,9 @@ pub enum DaemonReply {
 pub enum ClientError {
     Protocol(ProtocolError),
     Unavailable(String),
+    /// A daemon lifecycle transition could not safely establish a verified
+    /// endpoint. Callers must not replace it with a local implementation.
+    Lifecycle(String),
 }
 
 impl ClientError {
@@ -163,7 +166,7 @@ impl ClientError {
     pub fn retry_mode(&self) -> RetryMode {
         match self {
             Self::Protocol(error) => error.retry_mode,
-            Self::Unavailable(_) => RetryMode::Reconnect,
+            Self::Unavailable(_) | Self::Lifecycle(_) => RetryMode::Reconnect,
         }
     }
 
@@ -172,7 +175,7 @@ impl ClientError {
     pub fn side_effect(&self) -> SideEffect {
         match self {
             Self::Protocol(error) => error.side_effect,
-            Self::Unavailable(_) => SideEffect::PartialOrUnknown,
+            Self::Unavailable(_) | Self::Lifecycle(_) => SideEffect::PartialOrUnknown,
         }
     }
 
@@ -181,7 +184,7 @@ impl ClientError {
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Protocol(error) => error.code,
-            Self::Unavailable(_) => ErrorCode::Unavailable,
+            Self::Unavailable(_) | Self::Lifecycle(_) => ErrorCode::Unavailable,
         }
     }
 }
@@ -192,6 +195,7 @@ impl fmt::Display for ClientError {
         match self {
             Self::Protocol(error) => write!(f, "{:?}: {}", error.code, error.message),
             Self::Unavailable(message) => write!(f, "Unavailable: {message}"),
+            Self::Lifecycle(message) => write!(f, "Lifecycle: {message}"),
         }
     }
 }
@@ -216,6 +220,7 @@ pub struct IpcClient<S> {
     stream: S,
     protocol: ProtocolVersion,
     daemon_generation: DaemonGeneration,
+    server_build: BuildIdentity,
     next_request: u64,
     policy: ClientPolicy,
 }
@@ -260,6 +265,7 @@ impl<S: Read + Write> IpcClient<S> {
                 stream,
                 protocol: hello.protocol,
                 daemon_generation: hello.daemon_generation,
+                server_build: hello.build,
                 next_request: 0,
                 policy,
             }),
@@ -268,6 +274,16 @@ impl<S: Read + Write> IpcClient<S> {
                 "daemon closed before a server hello".into(),
             )),
         }
+    }
+
+    /// Returns the build identity advertised by the daemon during the mandatory
+    /// handshake. Composition roots use this only to decide whether their
+    /// running binary must replace an older daemon; it is not protocol
+    /// compatibility negotiation.
+    #[must_use]
+    #[coverage(off)]
+    pub fn server_build(&self) -> &BuildIdentity {
+        &self.server_build
     }
 }
 
@@ -602,10 +618,16 @@ mod tests {
             action: TerminalAction::Attach,
             payload: serde_json::json!({}),
         };
+        let server_build = BuildIdentity {
+            version: "test".into(),
+            commit: "unknown".into(),
+            target: "test".into(),
+        };
         let mut broken = IpcClient {
             stream: Broken,
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
+            server_build: server_build.clone(),
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -620,6 +642,7 @@ mod tests {
             },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
+            server_build: server_build.clone(),
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -631,6 +654,7 @@ mod tests {
             stream: ReadFails { output: vec![] },
             protocol,
             daemon_generation: DaemonGeneration("d".into()),
+            server_build,
             next_request: 0,
             policy: ClientPolicy::tui(),
         };

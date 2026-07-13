@@ -301,7 +301,9 @@ mod tests {
 
         ErrorLog::record("session create \"c\" failed: boom");
 
-        let logs = home.path().join("logs");
+        let logs = crate::infrastructure::paths::data_dir()
+            .unwrap()
+            .join("logs");
         let entry = fs::read_dir(&logs)
             .expect("logs dir exists")
             .next()
@@ -325,7 +327,12 @@ mod tests {
             );
         }
         let log = ErrorLog::open_default().unwrap();
-        assert_eq!(log.dir(), Path::new("/tmp/usagi-log-home/logs"));
+        assert_eq!(
+            log.dir(),
+            crate::infrastructure::paths::data_dir()
+                .unwrap()
+                .join("logs")
+        );
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
         }

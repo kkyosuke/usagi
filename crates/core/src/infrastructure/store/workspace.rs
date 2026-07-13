@@ -186,7 +186,7 @@ mod tests {
         }
         assert_eq!(
             Storage::open_default().unwrap().dir(),
-            Path::new("/tmp/usagi-ws-home")
+            crate::infrastructure::paths::data_dir().unwrap()
         );
         unsafe {
             std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
