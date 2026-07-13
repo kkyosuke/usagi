@@ -264,6 +264,12 @@ impl Terminal for CrosstermTerminal {
     }
 
     #[coverage(off)]
+    fn wait(&mut self, duration: Duration) -> std::io::Result<()> {
+        std::thread::sleep(duration);
+        Ok(())
+    }
+
+    #[coverage(off)]
     fn read_key(&mut self) -> std::io::Result<Key> {
         loop {
             match self.input.next(self.input_started.elapsed())? {
@@ -465,6 +471,9 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut settings = VolatileSettingsPort::default();
         let mut session_commands = DaemonSessionCommandPortFactory;
         run_in_terminal(|terminal| {
+            if start == Start::Welcome {
+                presentation::play_startup_splash(terminal)?;
+            }
             presentation::run_with_settings(
                 terminal,
                 workspaces,
