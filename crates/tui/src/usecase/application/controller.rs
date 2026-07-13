@@ -670,6 +670,8 @@ pub enum AppKey {
     Backspace,
     /// Ctrl-A / terminals that decode it as Home while Home is in Switch mode.
     CtrlA,
+    /// Ctrl-O returns Closeup to Switch. It has no effect while already in Switch.
+    CtrlO,
     /// Home navigation. Inside a create form it is deliberately inert: this
     /// string-only reducer has no byte cursor, and must never reopen the form.
     Home,
@@ -715,9 +717,9 @@ pub enum AppKey {
 /// Converts a non-live terminal input into Home management input.
 ///
 /// This function is deliberately not used for a daemon-owned live pane: callers
-/// must route those events through `LiveInputClassifier`, where Ctrl-A remains a
-/// PTY byte. Some terminals expose Ctrl-A as byte U+0001 while others report a
-/// modified `a` or `Home`; all three map to the same Home action here.
+/// must route those events through `LiveInputClassifier`, where Ctrl-A and Ctrl-O
+/// remain PTY bytes. Some terminals expose Ctrl-A as byte U+0001 while others
+/// report a modified `a` or `Home`; all three map to the same Home action here.
 #[must_use]
 #[coverage(off)]
 pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
@@ -728,7 +730,14 @@ pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
         return None;
     }
     match key.code {
-        KeyCode::Char('\u{1}' | 'a')
+        KeyCode::Char('\u{f}') if !key.modifiers.shift && !key.modifiers.alt => Some(AppKey::CtrlO),
+        KeyCode::Char('o')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::CtrlO)
+        }
+        KeyCode::Char('\u{1}') if !key.modifiers.shift && !key.modifiers.alt => Some(AppKey::CtrlA),
+        KeyCode::Char('a')
             if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
         {
             Some(AppKey::CtrlA)
@@ -1733,7 +1742,19 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.overlay = Some(Overlay::Closeup);
             Vec::new()
         }
-        AppKey::CtrlA => open_create_session(state),
+        AppKey::CtrlA => match state.route {
+            Route::Home(HomeMode::Switch) => open_create_session(state),
+            Route::Home(HomeMode::Closeup) => {
+                state.overlay = Some(Overlay::Closeup);
+                Vec::new()
+            }
+        },
+        AppKey::CtrlO => {
+            if matches!(state.route, Route::Home(HomeMode::Closeup)) {
+                state.route = Route::Home(HomeMode::Switch);
+            }
+            Vec::new()
+        }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
@@ -2169,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn management_classifier_treats_ctrl_a_byte_modified_key_and_home_equally() {
+    fn management_classifier_preserves_ctrl_a_and_ctrl_o_management_chords() {
         let ctrl_a = |code| {
             LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
                 code,
@@ -2198,6 +2219,19 @@ mod tests {
             )),
             Some(AppKey::CtrlA)
         );
+        assert_eq!(
+            classify_management_input(LiveInput::Key(
+                crate::usecase::terminal_input::KeyEvent::new(
+                    KeyCode::Char('\u{f}'),
+                    crate::usecase::terminal_input::Modifiers::default(),
+                    KeyEventKind::Press,
+                ),
+            )),
+            Some(AppKey::CtrlO)
+        );
+        for code in [KeyCode::Char('\u{f}'), KeyCode::Char('o')] {
+            assert_eq!(classify_management_input(ctrl_a(code)), Some(AppKey::CtrlO));
+        }
     }
 
     fn clone_form() -> NewForm {
@@ -2625,6 +2659,34 @@ mod tests {
             state.notice().map(|notice| notice.message.as_str()),
             Some("safe failure")
         );
+    }
+
+    #[test]
+    fn closeup_pane_navigation_chords_keep_create_and_action_scopes_separate() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // Switch keeps Ctrl-A as the IME-safe create shortcut and ignores Ctrl-O.
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        assert_eq!(state.overlay(), Some(Overlay::CreateSession));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+
+        // On an active session in Closeup, Ctrl-A owns the target action surface,
+        // and must not resurrect the workspace-level create form.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert_eq!(state.route(), Route::Home(HomeMode::Closeup));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        assert_eq!(state.overlay(), Some(Overlay::Closeup));
+        assert!(state.create_session_form().is_none());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+
+        // Ctrl-O is the Closeup-to-Switch pane-navigation transition.
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(state.overlay(), None);
     }
 
     #[test]
