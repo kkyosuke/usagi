@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -15,6 +16,7 @@ use usagi_core::infrastructure::paths;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
 use usagi_daemon::presentation::DaemonEnv;
+use usagi_daemon::usecase::session_runtime::{SessionRuntime, SystemGit};
 
 #[coverage(off)]
 fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
@@ -33,6 +35,16 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
             target: std::env::consts::ARCH.to_owned(),
         },
     );
+    let repo_root = std::env::current_dir()?;
+    let runtime = Arc::new(Mutex::new(
+        SessionRuntime::open(
+            repo_root,
+            usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
+                .map_err(|error| std::io::Error::other(error.to_string()))?,
+            SystemGit,
+        )
+        .map_err(|error| std::io::Error::other(error.safe_message()))?,
+    ));
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
         .spawn(move || {
@@ -40,6 +52,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                 match listener.accept() {
                     Ok(stream) => {
                         let server = server.clone();
+                        let runtime = Arc::clone(&runtime);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -48,10 +61,25 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
                                     return;
                                 };
                                 let mut reader = stream;
-                                let _ = usagi_daemon::presentation::ipc::handle_connection(
+                                let _ = usagi_daemon::presentation::ipc::handle_connection_with(
                                     &mut reader,
                                     &mut writer,
                                     &server,
+                                    |request_id, body, hello| {
+                                        let request = body.get("kind").and_then(serde_json::Value::as_str).filter(|kind| *kind == "session").and_then(|_| serde_json::from_value::<usagi_core::usecase::client::DaemonRequest>(body.clone()).ok()).and_then(|request| match request {
+                                            usagi_core::usecase::client::DaemonRequest::Session { action, operation_id, payload } => Some((action, operation_id, payload)),
+                                            _ => None,
+                                        });
+                                        let Some((action, operation_id, payload)) = request else {
+                                            return usagi_daemon::presentation::ipc::dispatch(request_id, body, hello);
+                                        };
+                                            let result = runtime.lock().map_err(|_| ()).and_then(|mut runtime| runtime.handle(action, &operation_id, &payload).map_err(|_| ()));
+                                            match result {
+                                                Ok(reply) => usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Accepted { operation_id: usagi_core::infrastructure::ipc::OperationId(reply.operation_id), operation_revision: reply.revision }, body: reply.body } },
+                                                Err(()) => usagi_core::infrastructure::ipc::Envelope { protocol: hello.protocol, daemon_generation: hello.daemon_generation.clone(), kind: usagi_core::infrastructure::ipc::EnvelopeKind::Response { request_id, outcome: usagi_core::infrastructure::ipc::ResponseOutcome::Error(usagi_core::infrastructure::ipc::ProtocolError::new(usagi_core::infrastructure::ipc::ErrorCode::InvalidArgument, "session request was rejected")), body: serde_json::json!(null) } },
+                                            }
+                                    }
+                                    ,
                                 );
                             });
                     }

@@ -18,6 +18,8 @@ serde.workspace = true
 # the daemon boundary, never part of the protocol core.
 libc.workspace = true
 portable-pty.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

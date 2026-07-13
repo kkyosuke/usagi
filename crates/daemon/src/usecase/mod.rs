@@ -20,6 +20,7 @@ pub mod orchestration;
 pub mod restart;
 pub mod runtime;
 pub mod serve;
+pub mod session_runtime;
 pub mod start;
 pub mod status;
 pub mod stop;
