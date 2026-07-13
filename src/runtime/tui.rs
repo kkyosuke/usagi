@@ -209,17 +209,25 @@ struct CrosstermTerminal {
     live_input: LiveInputClassifier,
 }
 
-#[derive(Default)]
-struct VolatileSettingsPort {
-    global: Settings,
+struct PersistentSettingsPort {
+    storage: Storage,
     workspace: Settings,
 }
 
-impl SettingsPort for VolatileSettingsPort {
+impl PersistentSettingsPort {
+    fn open() -> std::io::Result<Self> {
+        Ok(Self {
+            storage: Storage::open_default().map_err(io_error)?,
+            workspace: Settings::default(),
+        })
+    }
+}
+
+impl SettingsPort for PersistentSettingsPort {
     #[coverage(off)]
     fn read(&mut self, scope: SettingsScope) -> std::io::Result<Settings> {
         Ok(match scope {
-            SettingsScope::Global => self.global.clone(),
+            SettingsScope::Global => self.storage.load_settings().map_err(io_error)?,
             SettingsScope::Workspace => self.workspace.clone(),
         })
     }
@@ -227,7 +235,10 @@ impl SettingsPort for VolatileSettingsPort {
     #[coverage(off)]
     fn save(&mut self, scope: SettingsScope, settings: &Settings) -> std::io::Result<()> {
         match scope {
-            SettingsScope::Global => self.global = settings.clone(),
+            SettingsScope::Global => {
+                let _lock = self.storage.lock().map_err(io_error)?;
+                self.storage.save_settings(settings).map_err(io_error)?;
+            }
             SettingsScope::Workspace => self.workspace = settings.clone(),
         }
         Ok(())
@@ -472,7 +483,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let storage = Storage::open_default().map_err(io_error)?;
         let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader { storage };
-        let mut settings = VolatileSettingsPort::default();
+        let mut settings = PersistentSettingsPort::open()?;
         let mut session_commands = DaemonSessionCommandPortFactory;
         run_in_terminal(|terminal| {
             if start == Start::Welcome {
@@ -501,7 +512,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 )
             }
             Start::Config => {
-                let mut settings = VolatileSettingsPort::default();
+                let mut settings = PersistentSettingsPort::open()?;
                 config::render(0, 0, &Config::load(&mut settings))
             }
         };
@@ -517,11 +528,14 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let mut settings = PersistentSettingsPort::open()?;
+        let modal_selection_mode = settings.read(SettingsScope::Global)?.modal_selection_mode;
         run_in_terminal(|terminal| {
-            presentation::run_workspace_with_session_port(
+            presentation::run_workspace_with_session_port_and_selection_mode(
                 terminal,
                 snapshot,
                 Box::new(DaemonSessionCommandPort::default()),
+                modal_selection_mode,
             )
         })?;
     } else {
@@ -556,8 +570,10 @@ pub(crate) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::{Start, load_screen_graph_data};
+    use super::{PersistentSettingsPort, Start, load_screen_graph_data};
+    use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
+    use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     #[test]
     #[coverage(off)]
@@ -569,5 +585,31 @@ mod tests {
         assert!(workspaces.is_empty());
         assert!(recent.is_empty());
         assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
+    }
+
+    #[test]
+    fn global_modal_mode_survives_a_new_tui_settings_port() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temporary.path());
+        let mut first = PersistentSettingsPort {
+            storage: Storage::new(temporary.path()),
+            workspace: Settings::default(),
+        };
+        let settings = Settings {
+            modal_selection_mode: ModalSelectionMode::Prompt,
+            ..Settings::default()
+        };
+        first.save(SettingsScope::Global, &settings).unwrap();
+        let mut restarted = PersistentSettingsPort {
+            storage,
+            workspace: Settings::default(),
+        };
+        assert_eq!(
+            restarted
+                .read(SettingsScope::Global)
+                .unwrap()
+                .modal_selection_mode,
+            ModalSelectionMode::Prompt
+        );
     }
 }
