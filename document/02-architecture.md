@@ -320,6 +320,21 @@ attach / detach / replay / verified exit / reclaim は既存 `TerminalRegistry` 
 使う。disconnect は attachment だけを外して PTY を生存させる。spawn 応答の欠落、identity unknown、orphan
 は replacement spawn と slot release を block し、verified exit または `Gone` の reclaim だけが slot を解放する。
 
+### Agent orchestration の fence
+
+`usecase::orchestration::AdapterRegistry` は Claude と Codex を同じ typed orchestration port に登録する。
+daemon は profile ID によって registry を引くだけで、product 名による lifecycle・authorization 分岐を持たない。
+MCP wiring は profile の `McpWiring` capability と、別個の workspace/session authorization の両方が通った launch
+だけで adapter の scoped provisioner に要求する。provision failure は spawn 前に typed error として止まり、secret・
+raw config・rendered argv は durable record、IPC、terminal annotation、log に渡さない。
+
+phase hook は daemon が生成した一 runtime 限定 token、完全な `AgentRuntimeRef`、`CompletionFence`、単調 source
+sequence を照合してから in-memory projection に反映する。token と hook payload は永続化しないため、restart 後や
+foreign / duplicate / exited runtime の report は fail-closed で無視または拒否される。resume は immutable snapshot の
+schema、request/plan provenance、profile revision と capability を再検証するだけで再 renderer / spawn しない。reclaim は
+verified process identity の disappearance または orphan だけを記録し、unknown identity、ambiguous spawn、secret loss は
+明示 action を必要とし replacement spawn をしない。
+
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙

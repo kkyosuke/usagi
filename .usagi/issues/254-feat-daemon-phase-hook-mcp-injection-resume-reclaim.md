@@ -1,13 +1,13 @@
 ---
 number: 254
 title: feat(daemon): phase hook・MCP injection・resume/reclaim を接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, orchestration, mcp, lifecycle]
 dependson: [251, 252, 253]
 related: [219, 248]
 created_at: 2026-07-12T22:34:02.359082+00:00
-updated_at: 2026-07-12T22:34:02.359082+00:00
+updated_at: 2026-07-13T00:05:49.201076+00:00
 ---
 
 ## 目的

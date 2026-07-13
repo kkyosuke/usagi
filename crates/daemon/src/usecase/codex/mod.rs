@@ -10,13 +10,14 @@ use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::{
     domain::agent::{
         AgentCapability, AgentProfile, AgentProfileId, DurableLaunchSnapshot,
-        EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
-        LaunchValidationError,
+        EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchValidationError,
     },
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
-use super::runtime::{AdapterError, AgentAdapter, ResolvedLaunch, SpawnProvision};
+use super::runtime::{
+    AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
+};
 
 #[cfg(test)]
 mod fixture;
@@ -53,7 +54,10 @@ pub trait CodexProvisioner {
     ///
     /// Returns [`CodexProvisionFailure`] when the Codex executable cannot be
     /// used or its scoped artifacts cannot be materialized.
-    fn provision(&mut self, scope: &LaunchScope) -> Result<CodexProvision, CodexProvisionFailure>;
+    fn provision(
+        &mut self,
+        context: &ProvisionContext,
+    ) -> Result<CodexProvision, CodexProvisionFailure>;
 }
 
 /// An [`AgentAdapter`] for the code-defined `codex` profile.
@@ -85,6 +89,7 @@ impl<P> CodexAdapter<P> {
                     AgentCapability::Resume,
                     AgentCapability::InitialPrompt,
                     AgentCapability::Headless,
+                    AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
@@ -131,15 +136,13 @@ impl<P: CodexProvisioner> AgentAdapter for CodexAdapter<P> {
                 },
             ));
         }
-        let provision =
-            self.provisioner
-                .provision(&request.scope)
-                .map_err(|failure| match failure {
-                    CodexProvisionFailure::ExecutableUnavailable => {
-                        AdapterError::ExecutableUnavailable
-                    }
-                    CodexProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
-                })?;
+        let provision = self
+            .provisioner
+            .provision(&ProvisionContext::from_request(request))
+            .map_err(|failure| match failure {
+                CodexProvisionFailure::ExecutableUnavailable => AdapterError::ExecutableUnavailable,
+                CodexProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
+            })?;
         let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
         Ok(ResolvedLaunch {
             snapshot: DurableLaunchSnapshot::new(request.clone(), plan),

@@ -52,6 +52,28 @@ pub struct SpawnProvision {
     arguments: Vec<String>,
 }
 
+/// The product-neutral inputs an adapter may use while materializing scoped
+/// launch artifacts.  It deliberately contains no rendered product payload or
+/// credential.  MCP wiring is opt-in: an adapter must not create it unless the
+/// validated request asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionContext {
+    pub scope: usagi_core::domain::agent::LaunchScope,
+    pub inject_mcp: bool,
+}
+
+impl ProvisionContext {
+    #[must_use]
+    pub fn from_request(request: &LaunchRequest) -> Self {
+        Self {
+            scope: request.scope.clone(),
+            inject_mcp: request
+                .required_capabilities()
+                .contains(&usagi_core::domain::agent::AgentCapability::McpWiring),
+        }
+    }
+}
+
 impl SpawnProvision {
     #[must_use]
     pub fn new(
@@ -143,7 +165,7 @@ impl RuntimeCoordinator {
         }
     }
 
-    pub fn launch<A: AgentAdapter, S: RuntimeStore, P: PtySpawner>(
+    pub fn launch<A: AgentAdapter + ?Sized, S: RuntimeStore, P: PtySpawner>(
         &mut self,
         request: &LaunchRequest,
         runtime: AgentRuntimeRef,
@@ -292,6 +314,14 @@ impl RuntimeCoordinator {
         self.terminals
             .snapshot(&runtime.terminal)
             .map_err(|_| RuntimeError::TerminalGenerationMismatch)
+    }
+    /// Returns the immutable record only when the complete runtime reference
+    /// fences it.  This exposes no ephemeral provision or terminal output.
+    pub fn record_for(
+        &self,
+        runtime: &AgentRuntimeRef,
+    ) -> Result<&DurableRuntimeRecord, RuntimeError> {
+        self.record(runtime)
     }
     #[must_use]
     pub fn snapshot(&self) -> RuntimeStoreSnapshot {

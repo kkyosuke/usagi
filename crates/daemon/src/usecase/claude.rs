@@ -8,13 +8,14 @@ use std::{collections::BTreeSet, path::PathBuf};
 use usagi_core::{
     domain::agent::{
         AgentCapability, AgentProfile, AgentProfileId, DurableLaunchSnapshot,
-        EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchScope,
-        LaunchValidationError,
+        EnvironmentVariableName, LaunchMode, LaunchPlan, LaunchRequest, LaunchValidationError,
     },
     usecase::agent::{AgentProfileCatalog, validate_request, validate_snapshot},
 };
 
-use super::runtime::{AdapterError, AgentAdapter, ResolvedLaunch, SpawnProvision};
+use super::runtime::{
+    AdapterError, AgentAdapter, ProvisionContext, ResolvedLaunch, SpawnProvision,
+};
 
 const PROFILE_NAME: &str = "claude";
 const PROFILE_REVISION: u32 = 1;
@@ -42,8 +43,10 @@ pub trait ClaudeProvisioner {
     /// # Errors
     ///
     /// Returns a typed failure before the common runtime reserves a terminal.
-    fn provision(&mut self, scope: &LaunchScope)
-    -> Result<ClaudeProvision, ClaudeProvisionFailure>;
+    fn provision(
+        &mut self,
+        context: &ProvisionContext,
+    ) -> Result<ClaudeProvision, ClaudeProvisionFailure>;
 }
 
 /// An [`AgentAdapter`] for the code-defined `claude` profile.
@@ -75,6 +78,7 @@ impl<P> ClaudeAdapter<P> {
                     AgentCapability::Resume,
                     AgentCapability::InitialPrompt,
                     AgentCapability::Headless,
+                    AgentCapability::PhaseReporting,
                     AgentCapability::McpWiring,
                 ],
                 [LaunchMode::Interactive, LaunchMode::Headless],
@@ -111,15 +115,15 @@ impl<P: ClaudeProvisioner> AgentAdapter for ClaudeAdapter<P> {
         if request.mode == LaunchMode::Headless && request.initial_prompt.is_none() {
             return Err(AdapterError::Validation(LaunchValidationError::EmptyPrompt));
         }
-        let provision =
-            self.provisioner
-                .provision(&request.scope)
-                .map_err(|failure| match failure {
-                    ClaudeProvisionFailure::ExecutableUnavailable => {
-                        AdapterError::ExecutableUnavailable
-                    }
-                    ClaudeProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
-                })?;
+        let provision = self
+            .provisioner
+            .provision(&ProvisionContext::from_request(request))
+            .map_err(|failure| match failure {
+                ClaudeProvisionFailure::ExecutableUnavailable => {
+                    AdapterError::ExecutableUnavailable
+                }
+                ClaudeProvisionFailure::MaterializationFailed => AdapterError::ProvisionFailed,
+            })?;
         let plan = render_plan(request, &profile, &provision).map_err(AdapterError::Validation)?;
         Ok(ResolvedLaunch {
             snapshot: DurableLaunchSnapshot::new(request.clone(), plan),
@@ -169,7 +173,7 @@ mod tests {
     impl ClaudeProvisioner for FakeProvisioner {
         fn provision(
             &mut self,
-            _: &LaunchScope,
+            _: &ProvisionContext,
         ) -> Result<ClaudeProvision, ClaudeProvisionFailure> {
             self.0.take().expect("fake provisioner called once")
         }
