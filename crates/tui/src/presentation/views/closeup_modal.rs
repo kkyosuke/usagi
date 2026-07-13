@@ -135,6 +135,25 @@ impl CloseupModal {
         self.input.move_right();
     }
 
+    /// Complete the selected command or an unambiguous supported subcommand.
+    /// Inputs outside the completion grammar are left untouched.
+    #[coverage(off)]
+    pub fn complete_selected(&mut self) {
+        if let Some(input) = self.subcommand_completion() {
+            self.input = TextInput::with_value(input);
+            self.selected = 0;
+            self.expanded = false;
+            return;
+        }
+        if !self.input.value().contains(char::is_whitespace)
+            && let Some(command) = self.matches().get(self.selected)
+        {
+            self.input = TextInput::with_value(command.name);
+            self.selected = 0;
+            self.expanded = false;
+        }
+    }
+
     /// 選択を次へ（末尾で先頭へ回り込む）。
     #[coverage(off)]
     pub fn select_next(&mut self) {
@@ -188,6 +207,33 @@ impl CloseupModal {
             "terminal" => &["open", "new"],
             _ => &[],
         }
+    }
+
+    fn subcommand_completion(&self) -> Option<String> {
+        let input = self.input.value();
+        if input.ends_with(char::is_whitespace) {
+            return None;
+        }
+        let mut tokens = input.split_whitespace();
+        let command = tokens.next()?;
+        let prefix = tokens.next()?;
+        if tokens.next().is_some() {
+            return None;
+        }
+        let candidates = match command {
+            "close" => &["--force"][..],
+            "terminal" => &["open", "new"][..],
+            _ => return None,
+        };
+        let mut matches = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.starts_with(prefix));
+        let candidate = matches.next()?;
+        matches
+            .next()
+            .is_none()
+            .then(|| format!("{command} {candidate}"))
     }
 
     fn matches(&self) -> Vec<closeup::CommandInfo> {
@@ -403,6 +449,42 @@ mod tests {
                 .join("\n")
                 .contains("\u{1b}[7;36m \u{1b}[0m")
         );
+    }
+
+    #[test]
+    fn tab_completes_closeup_commands_and_unambiguous_subcommands() {
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        for character in "ter".chars() {
+            modal.insert_char(character);
+        }
+        modal.complete_selected();
+        assert_eq!(modal.input.value(), "terminal");
+
+        modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        for character in "terminal n".chars() {
+            modal.insert_char(character);
+        }
+        modal.complete_selected();
+        assert_eq!(modal.input.value(), "terminal new");
+    }
+
+    #[test]
+    fn tab_without_a_closeup_candidate_preserves_the_entire_input_state() {
+        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
+        for character in "terminal ".chars() {
+            modal.insert_char(character);
+        }
+        modal.selected = 3;
+        modal.cursor_left();
+        let input = modal.input.value().to_owned();
+        let cursor = modal.input.cursor();
+        let selected = modal.selected;
+
+        modal.complete_selected();
+
+        assert_eq!(modal.input.value(), input);
+        assert_eq!(modal.input.cursor(), cursor);
+        assert_eq!(modal.selected, selected);
     }
 
     #[test]
