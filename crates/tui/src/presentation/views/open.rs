@@ -307,29 +307,17 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
 #[coverage(off)]
 fn filter_line(open: &Open) -> String {
     let input = &open.filter;
-    // New 画面と同じく、入力全体を accent で描き、編集位置の 1 文字だけを
-    // underline にする。前後を別 style にしても入力全体の色感が途切れない。
+    // 共通 widget が input 全体を accent で描き、編集位置だけを block cursor にする。
     let accent = Role::Accent.style().bold();
-    let caret = Role::Accent.style().bold().underline();
-    let value = if input.is_empty() {
-        format!(
-            "{}{}",
-            caret.paint(" "),
+    let value = format!(
+        "{}{}",
+        widgets::block_caret(input.value(), input.cursor(), &accent),
+        if input.is_empty() {
             Role::Accent.style().dim().paint("type to filter")
-        )
-    } else {
-        let rest = input.after();
-        let (caret_char, after) = match rest.chars().next() {
-            Some(ch) => (&rest[..ch.len_utf8()], &rest[ch.len_utf8()..]),
-            None => (" ", ""),
-        };
-        format!(
-            "{}{}{}",
-            accent.paint(input.before()),
-            caret.paint(caret_char),
-            accent.paint(after)
-        )
-    };
+        } else {
+            String::new()
+        },
+    );
     format!("{} {value}", accent.paint("Filter:"))
 }
 
@@ -587,9 +575,9 @@ mod tests {
         let frame = render(24, 80, &open, now()).join("\n");
         assert!(rendered(&open).contains("Filter: axb"));
         assert!(frame.contains("\u{1b}[1;36max\u{1b}[0m"));
-        // The character at the edit position is underlined in the same accent
-        // colour as the rest of the input, matching New's shared input style.
-        assert!(frame.contains("\u{1b}[1;4;36mb\u{1b}[0m"));
+        // The shared block cursor reverses the character at the edit position
+        // without shifting the remaining input.
+        assert!(frame.contains("\u{1b}[1;7;36mb\u{1b}[0m"));
     }
 
     #[test]

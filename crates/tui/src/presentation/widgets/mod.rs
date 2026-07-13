@@ -24,12 +24,47 @@ pub use text_input::TextInput;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthChar;
 
+use super::theme::Style;
+
 /// エスケープシーケンスの先頭（ESC）。表示桁数を測るとき読み飛ばす。
 const ESC: char = '\u{1b}';
 
 /// 切り詰めがスタイルを開いたまま断ち切ったとき末尾に付ける SGR リセット
 /// (`ESC [ 0 m`)。開いた色が後続の内容に滲むのを防ぐ。
 const RESET: &str = "\u{1b}[0m";
+
+/// `value` の byte-offset `cursor` に block cursor を描く。
+///
+/// キャレット直後の Unicode scalar を base style の reverse-video で反転し、文字を
+/// 横へ押し出さない。空文字列・行末では反転空白を 1 セル描く。`cursor` は
+/// [`TextInput`] が保証する char 境界を受け取るが、外部 caller にも安全なよう
+/// value の範囲へ飽和する。
+#[must_use]
+pub fn block_caret(value: &str, cursor: usize, base: &Style) -> String {
+    let mut cursor = cursor.min(value.len());
+    while !value.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let (before, after) = value.split_at(cursor);
+    let (caret, rest) = match after.chars().next() {
+        Some(character) => after.split_at(character.len_utf8()),
+        None => (" ", ""),
+    };
+    format!(
+        "{}{}{}",
+        if before.is_empty() {
+            String::new()
+        } else {
+            base.paint(before)
+        },
+        base.reverse().paint(caret),
+        if rest.is_empty() {
+            String::new()
+        } else {
+            base.paint(rest)
+        },
+    )
+}
 
 /// `text` の表示桁数（端末に描かれる列数）を返す。全角（CJK など）は 2 桁、
 /// ANSI エスケープシーケンス（SGR カラー）は 0 桁として数えるので、色付き行でも
@@ -181,9 +216,10 @@ pub fn relative_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        centered_padding, clip_to_width, display_width, normalize_size, relative_time,
+        block_caret, centered_padding, clip_to_width, display_width, normalize_size, relative_time,
         wrap_to_width,
     };
+    use crate::presentation::theme::Role;
     use chrono::{DateTime, Duration, Utc};
 
     fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -198,6 +234,33 @@ mod tests {
         assert_eq!(display_width("あい"), 4); // 全角 2 文字 = 4 桁
         // SGR カラー（赤）は 0 桁。見た目の "hi" は 2 桁。
         assert_eq!(display_width("\u{1b}[31mhi\u{1b}[0m"), 2);
+    }
+
+    #[test]
+    fn block_caret_reverses_the_edit_cell_without_shifting_ascii_or_cjk_text() {
+        let accent = Role::Accent.style().bold();
+        let ascii = block_caret("abcd", 2, &accent);
+        assert_eq!(display_width(&ascii), 4);
+        assert!(ascii.contains("\u{1b}[1;7;36mc\u{1b}[0m"));
+
+        let cjk = block_caret("あいう", "あ".len(), &accent);
+        assert_eq!(display_width(&cjk), 6);
+        assert!(cjk.contains("\u{1b}[1;7;36mい\u{1b}[0m"));
+
+        // Public callers cannot split a scalar even if they pass a non-boundary byte offset.
+        let clamped = block_caret("あ", 2, &accent);
+        assert_eq!(display_width(&clamped), 2);
+        assert!(clamped.contains("\u{1b}[1;7;36mあ\u{1b}[0m"));
+    }
+
+    #[test]
+    fn block_caret_draws_a_reversed_space_for_empty_and_end_positions() {
+        let accent = Role::Accent.style();
+        assert_eq!(block_caret("", 0, &accent), "\u{1b}[7;36m \u{1b}[0m");
+        assert_eq!(
+            block_caret("ab", usize::MAX, &accent),
+            "\u{1b}[36mab\u{1b}[0m\u{1b}[7;36m \u{1b}[0m"
+        );
     }
 
     #[test]

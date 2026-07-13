@@ -47,10 +47,18 @@ pub enum Command {
 /// `session` command の daemon-authoritative 操作意図。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionCommand {
-    Create { name: String },
+    Create {
+        name: String,
+    },
     List,
     Overview,
-    Remove { force: bool },
+    /// Open the session checklist instead of removing the currently selected row.
+    SelectRemove {
+        force: bool,
+    },
+    Remove {
+        force: bool,
+    },
 }
 
 type CommandFactory = fn(String) -> Command;
@@ -193,6 +201,17 @@ pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
         "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
         "remove" if rest.is_empty() => Ok(SessionCommand::Remove { force: false }),
         "remove" if rest == "--force" => Ok(SessionCommand::Remove { force: true }),
+        "remove" if matches!(rest, "-s" | "--select") => {
+            Ok(SessionCommand::SelectRemove { force: false })
+        }
+        "remove"
+            if matches!(
+                rest,
+                "-s --force" | "--force -s" | "--select --force" | "--force --select"
+            ) =>
+        {
+            Ok(SessionCommand::SelectRemove { force: true })
+        }
         "remove" => Err("invalid session remove arguments"),
         _ => Err("unknown session command"),
     }
@@ -390,6 +409,14 @@ mod tests {
             parse_session("remove"),
             Ok(SessionCommand::Remove { force: false })
         );
+        assert_eq!(
+            parse_session("remove -s"),
+            Ok(SessionCommand::SelectRemove { force: false })
+        );
+        assert_eq!(
+            parse_session("remove --force --select"),
+            Ok(SessionCommand::SelectRemove { force: true })
+        );
         assert_eq!(parse_session("create"), Err("session name is required"));
         assert_eq!(parse_session("list extra"), Err("unknown session command"));
         assert_eq!(
@@ -398,6 +425,14 @@ mod tests {
         );
         assert_eq!(
             parse_session("remove old-name"),
+            Err("invalid session remove arguments")
+        );
+        assert_eq!(
+            parse_session("remove -s -s"),
+            Err("invalid session remove arguments")
+        );
+        assert_eq!(
+            parse_session("remove old-name -s"),
             Err("invalid session remove arguments")
         );
         assert_eq!(parse_session("rename x"), Err("unknown session command"));

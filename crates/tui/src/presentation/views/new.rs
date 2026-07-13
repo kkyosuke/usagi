@@ -326,26 +326,11 @@ fn suggest_name(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// フォーカス中の入力欄のテキスト。value を accent で描き、キャレット位置の 1 文字を下線で
-/// 示す（文字を横にずらさない）。空なら下線を敷いた空白 1 つ。行末では末尾の空白に下線を敷く。
+/// フォーカス中の入力欄のテキスト。共通 block cursor を使い、編集位置の 1 文字を
+/// reverse-video で示す。空・行末は反転空白 1 つになる。
 fn caret_text(value: &str, cursor: usize) -> String {
     let accent = Role::Accent.style().bold();
-    let caret = Role::Accent.style().bold().underline();
-    if value.is_empty() {
-        return caret.paint(" ");
-    }
-    let cursor = cursor.min(value.len());
-    let (before, rest) = value.split_at(cursor);
-    let (caret_char, after) = match rest.chars().next() {
-        Some(c) => (&rest[..c.len_utf8()], &rest[c.len_utf8()..]),
-        None => (" ", ""),
-    };
-    format!(
-        "{}{}{}",
-        accent.paint(before),
-        caret.paint(caret_char),
-        accent.paint(after)
-    )
+    widgets::block_caret(value, cursor, &accent)
 }
 
 /// 1 入力行: フォーカス中は `>` カーソル、値（空なら dim のプレースホルダ）、フォーカス中は
@@ -858,5 +843,10 @@ mod tests {
         state.cursor_left(); // キャレットは 'c' の手前
         let text = joined(&state);
         assert!(text.contains("abc"));
+        assert!(
+            render(24, 80, &state)
+                .join("\n")
+                .contains("\u{1b}[1;7;36mc\u{1b}[0m")
+        );
     }
 }
