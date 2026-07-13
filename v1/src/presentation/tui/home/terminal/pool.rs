@@ -1923,9 +1923,7 @@ impl TerminalPool {
             if let Some(prompt) = opening_prompt.as_deref() {
                 let input = pty.input_handle();
                 let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
-                if let Err(error) = input.write(&bytes) {
-                    return Err(error);
-                }
+                input.write(&bytes)?;
             }
         }
         let id = self.allocate_pane_id();
