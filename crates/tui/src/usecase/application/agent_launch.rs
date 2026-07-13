@@ -5,6 +5,8 @@
 //! applies only a fenced daemon completion to [`PaneRuntime`].  It owns no PTY
 //! or process-spawn capability.
 
+use std::collections::HashMap;
+
 use usagi_core::{
     domain::id::{OperationId, TerminalRef},
     usecase::client::{AgentLaunchIntent, DaemonClient, DaemonReply, DaemonRequest, IpcClient},
@@ -82,12 +84,19 @@ impl<S: std::io::Read + std::io::Write> AgentLaunchPort for IpcClient<S> {
 /// attach daemon-authoritative through the same injected client boundary.
 pub struct AgentLaunchAdapter<P> {
     port: P,
+    /// An accepted operation is durable daemon-owned work.  Re-sending it on
+    /// duplicate controller delivery could create ambiguous ownership, so the
+    /// TUI records the producer-issued ID and waits for replay instead.
+    submitted: HashMap<OperationId, AgentLaunchIntent>,
 }
 
 impl<P> AgentLaunchAdapter<P> {
     #[must_use]
     pub fn new(port: P) -> Self {
-        Self { port }
+        Self {
+            port,
+            submitted: HashMap::new(),
+        }
     }
 
     #[must_use]
@@ -113,6 +122,15 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
         else {
             return;
         };
+        let intent = AgentLaunchIntent {
+            workspace,
+            session,
+            profile,
+        };
+        if self.submitted.contains_key(&operation_id) {
+            return;
+        }
+        self.submitted.insert(operation_id, intent.clone());
         runtime.dispatch(
             &mut self.port,
             PaneEvent::Request {
@@ -121,11 +139,6 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
                 kind: PaneKind::Agent,
             },
         );
-        let intent = AgentLaunchIntent {
-            workspace,
-            session,
-            profile,
-        };
         match self.port.launch(operation_id, intent) {
             Ok(event) => self.apply(runtime, event),
             Err(_) => runtime.dispatch(
@@ -147,15 +160,26 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
             AgentLaunchEvent::Succeeded {
                 operation,
                 terminal,
-            } => runtime.dispatch(
-                &mut self.port,
-                PaneEvent::Succeeded {
-                    operation,
-                    terminal,
-                },
-            ),
+            } => {
+                let valid = self.submitted.get(&operation).is_some_and(|intent| {
+                    terminal.workspace_id == intent.workspace
+                        && terminal.session_id == Some(intent.session)
+                });
+                if valid {
+                    runtime.dispatch(
+                        &mut self.port,
+                        PaneEvent::Succeeded {
+                            operation,
+                            terminal,
+                        },
+                    );
+                    self.submitted.remove(&operation);
+                }
+            }
             AgentLaunchEvent::Failed { operation, message } => {
-                runtime.dispatch(&mut self.port, PaneEvent::Failed { operation, message });
+                if self.submitted.remove(&operation).is_some() {
+                    runtime.dispatch(&mut self.port, PaneEvent::Failed { operation, message });
+                }
             }
         }
     }
@@ -347,6 +371,69 @@ mod tests {
         assert!(
             matches!(&runtime.pane().tabs()[0], PaneTab::Live(live) if live.kind == PaneKind::Agent)
         );
+    }
+
+    #[test]
+    fn duplicate_effect_never_resends_a_durable_operation() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let port = FakePort {
+            events: VecDeque::from([Ok(AgentLaunchEvent::Accepted { operation })]),
+            ..FakePort::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(port);
+        let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
+            PaneSelection::Target(Target::Session(session)),
+        ));
+        let effect = Effect::LaunchAgent {
+            workspace,
+            session,
+            operation_id: operation,
+            profile: None,
+        };
+
+        adapter.dispatch(&mut runtime, effect.clone());
+        adapter.dispatch(&mut runtime, effect);
+
+        assert_eq!(adapter.port().launches.len(), 1);
+        assert_eq!(runtime.pane().tabs().len(), 1);
+        assert!(matches!(runtime.pane().tabs()[0], PaneTab::Pending(_)));
+    }
+
+    #[test]
+    fn final_for_another_session_never_attaches_the_pending_agent_tab() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let port = FakePort {
+            events: VecDeque::from([Ok(AgentLaunchEvent::Accepted { operation })]),
+            ..FakePort::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(port);
+        let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
+            PaneSelection::Target(Target::Session(session)),
+        ));
+        adapter.dispatch(
+            &mut runtime,
+            Effect::LaunchAgent {
+                workspace,
+                session,
+                operation_id: operation,
+                profile: None,
+            },
+        );
+
+        adapter.apply(
+            &mut runtime,
+            AgentLaunchEvent::Succeeded {
+                operation,
+                terminal: terminal(workspace, SessionId::new()),
+            },
+        );
+
+        assert!(adapter.port().attachments.is_empty());
+        assert!(matches!(runtime.pane().tabs()[0], PaneTab::Pending(_)));
     }
 
     #[test]
