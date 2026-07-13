@@ -865,7 +865,7 @@ fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
 #[coverage(off)]
 fn workspace_row_height(index: usize, ws: &Workspace) -> usize {
     if index == ws.sessions().len() + 1 {
-        1 + usize::from(ws.create_error.is_some())
+        1 + usize::from(ws.create_error.is_some()) + 2 * usize::from(ws.pending_session.is_some())
     } else {
         2
     }
@@ -1071,14 +1071,13 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let content_capacity = body_capacity
         .saturating_sub(mascot_rows)
         .saturating_sub(metrics_rows);
-    let pending_rows = 2 * usize::from(ws.pending_session().is_some());
-    let viewport_capacity = content_capacity.saturating_sub(pending_rows);
+    let viewport_capacity = content_capacity;
     let start = workspace_viewport_start(ws.selected, ws, viewport_capacity);
 
     let mut rows = Vec::with_capacity(height);
     let now = Utc::now();
     for index in start..ws.row_count() {
-        let entry = if index == 0 {
+        let mut entry = if index == 0 {
             vec![root_row(width, ws)]
         } else if index == ws.sessions().len() + 1 {
             create_session_rows(width, index == ws.selected, ws)
@@ -1088,16 +1087,20 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
                 |session| session_menu_rows_at(width, index == ws.selected, session, now),
             )
         };
+        if index == ws.sessions().len() + 1
+            && let Some(name) = ws.pending_session()
+        {
+            let mut pending = pending_session_rows(width, name, skeleton_frame);
+            pending.append(&mut entry);
+            entry = pending;
+        }
         if rows.len() + entry.len() > viewport_capacity {
             break;
         }
         rows.extend(entry);
-        if index == 0 && !ws.sessions().is_empty() && rows.len() < viewport_capacity {
+        if index == 0 && rows.len() < viewport_capacity {
             rows.push(sidebar_divider(width));
         }
-    }
-    if let Some(name) = ws.pending_session() {
-        rows.extend(pending_session_rows(width, name, skeleton_frame));
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
@@ -2170,6 +2173,8 @@ mod tests {
         let text = joined(&ws);
         assert!(text.contains("USAGI > empty"));
         assert!(!text.contains("/tmp/empty"));
+        assert!(text.contains("─"));
+        assert!(text.contains("+ new session"));
     }
 
     #[test]
@@ -2379,6 +2384,12 @@ mod tests {
         assert!(text.contains("feature-x"));
         assert!(text.contains("creating"));
         assert!(text.contains('▓'));
+        let skeleton = text.find("feature-x").unwrap();
+        let create = text.find("+ new session").unwrap();
+        assert!(
+            skeleton < create,
+            "skeleton is immediately above new session"
+        );
         assert_eq!(
             text.matches("> feature-x").count(),
             0,
