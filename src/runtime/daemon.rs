@@ -1,5 +1,7 @@
 //! daemon 面へ Unix process / socket / signal を接続する composition adapter。
 
+#![coverage(off)] // Unix socket / process / PTY wiring; fake-PTY owner contracts live in usagi-daemon tests.
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
