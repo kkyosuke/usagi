@@ -428,10 +428,9 @@ impl<G: TerminalOwner, A: AgentTerminalActor> TerminalOwner for SharedTerminalOw
         payload: Value,
     ) -> Result<Value, ProtocolError> {
         let routed = match serde_json::from_value::<TerminalRequest>(payload.clone()) {
-            Ok(request) => {
-                self.agent
-                    .handle_terminal(connection, client, request_id, action, request)
-            }
+            Ok(request) => self
+                .agent
+                .handle_terminal(connection, client, request_id, action, request),
             Err(_) => TerminalOutcome::NotOwned,
         };
         match routed {
