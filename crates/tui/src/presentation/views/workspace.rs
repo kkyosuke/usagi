@@ -23,6 +23,9 @@ use crate::presentation::widgets;
 use crate::usecase::application::controller::{
     AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
 };
+use crate::usecase::application::pane::{
+    PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
+};
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
@@ -61,6 +64,17 @@ pub struct HomeProjection {
     mode: HomeMode,
     active_phase: TargetPhase,
     feedback: Option<Feedback>,
+    pane_tabs: Vec<HomePaneTab>,
+}
+
+/// Home の右ペインに投影する tab strip の 1 項目。
+///
+/// tab の identity / 選択は pane reducer が所有する。この型はその state を描画向けの安全な
+/// label と選択フラグへ変換しただけの値である。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HomePaneTab {
+    label: String,
+    selected: bool,
 }
 
 impl HomeProjection {
@@ -93,7 +107,25 @@ impl HomeProjection {
             },
             active_phase: state.phase_for(state.active()),
             feedback: state.feedback().cloned(),
+            pane_tabs: Vec::new(),
         }
+    }
+
+    /// pane reducer の tab と stable selection を右ペインへ投影する。
+    ///
+    /// pending/live の identity は reducer に残し、表示層は identity を文字列や index に
+    /// 置換して操作しない。同名 tab も選択状態は `TabSelection` で区別される。
+    #[must_use]
+    pub fn with_pane(mut self, pane: &PaneState) -> Self {
+        self.pane_tabs = pane
+            .tabs()
+            .iter()
+            .map(|tab| HomePaneTab {
+                label: pane_tab_label(tab),
+                selected: pane_tab_selected(tab, pane.selected()),
+            })
+            .collect();
+        self
     }
 
     /// 左 sidebar の rows。root と `+ new session` は session 数にかかわらず常設する。
@@ -132,6 +164,33 @@ impl HomeProjection {
                 .map_or("root", |session| session.label.as_str()),
             Target::Root(_) => "root",
         }
+    }
+}
+
+fn pane_tab_label(tab: &PaneTab) -> String {
+    match tab {
+        PaneTab::Pending(pending) => match pending.kind {
+            PaneKind::Terminal => "Terminal (resolving)".to_owned(),
+            PaneKind::Agent => "Agent (starting)".to_owned(),
+        },
+        PaneTab::Live(live) => match live.kind {
+            PaneKind::Terminal => "Terminal".to_owned(),
+            PaneKind::Agent => "Agent".to_owned(),
+        },
+    }
+}
+
+fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
+    match (tab, selection) {
+        (PaneTab::Pending(pending), PaneSelection::Tab(TabSelection::Pending(selected))) => {
+            pending.operation == *selected
+        }
+        (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
+            live.terminal == *selected
+        }
+        (PaneTab::Pending(_) | PaneTab::Live(_), PaneSelection::Target(_))
+        | (PaneTab::Pending(_), PaneSelection::Tab(TabSelection::Live(_)))
+        | (PaneTab::Live(_), PaneSelection::Tab(TabSelection::Pending(_))) => false,
     }
 }
 
@@ -717,6 +776,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
                 ),
                 width,
             ),
+            home_tab_menu(width, &home.pane_tabs),
             String::new(),
             Style::new()
                 .dim()
@@ -737,6 +797,26 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             width,
         )),
     )
+}
+
+/// controller Home の pane reducer tab を並べる。選択中だけを accent にし、tab が無い
+/// target 選択中も strip の位置を保ってレイアウトを安定させる。
+fn home_tab_menu(width: usize, tabs: &[HomePaneTab]) -> String {
+    let tabs = if tabs.is_empty() {
+        Style::new().dim().paint(" no panes")
+    } else {
+        tabs.iter()
+            .map(|tab| {
+                if tab.selected {
+                    format!("[{}]", Role::Accent.style().bold().paint(&tab.label))
+                } else {
+                    format!(" {} ", Style::new().dim().paint(&tab.label))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    widgets::pad_to_width(&format!(" {tabs}"), width)
 }
 
 fn phase_label(phase: TargetPhase) -> &'static str {
@@ -781,9 +861,12 @@ mod tests {
         AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, SafeError, SafeMessage,
         Selection, Target, update,
     };
+    use crate::usecase::application::pane::{
+        PaneEvent, PaneKind, PaneSelection, PaneState, TabSelection, reduce,
+    };
     use chrono::{DateTime, Utc};
     use std::path::PathBuf;
-    use usagi_core::domain::id::{SessionId, WorkspaceId};
+    use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -1002,6 +1085,39 @@ mod tests {
         );
         let home = HomeProjection::from_state(&state, "work", "/work", &[]);
         assert!(joined_home(&home).contains("feedback: disconnected; reconnect to continue"));
+    }
+
+    #[test]
+    fn home_projection_renders_the_pane_reducer_tab_strip_and_selection() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_pane(&pane);
+
+        let text = joined_home(&home);
+        assert!(text.contains("[Agent (starting)]"));
+        assert!(!text.contains("no panes"));
     }
 
     #[test]
