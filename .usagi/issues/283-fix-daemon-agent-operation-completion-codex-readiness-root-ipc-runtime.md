@@ -1,14 +1,14 @@
 ---
 number: 283
 title: fix(daemon): Agent operation completion と Codex readiness を root IPC runtime に接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, agent, ipc, pty, codex, integration]
 dependson: [271]
 related: [252, 253, 263, 265, 270]
 parent: 227
-created_at: 2026-07-13T12:00:00.000000+00:00
-updated_at: 2026-07-13T12:00:00.000000+00:00
+created_at: 2026-07-13T12:00:00+00:00
+updated_at: 2026-07-13T11:59:29.040030+00:00
 ---
 
 ## 背景・根拠
