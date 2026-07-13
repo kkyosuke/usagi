@@ -164,6 +164,7 @@ impl<P: AgentLaunchPort + TerminalPort> AgentLaunchAdapter<P> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::io::{self, Cursor, Read, Write};
 
     use super::*;
     use crate::usecase::application::{
@@ -174,6 +175,77 @@ mod tests {
     use usagi_core::domain::id::{
         DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId,
     };
+    use usagi_core::infrastructure::ipc::{
+        Bootstrap, BuildIdentity, ConnectionId, Envelope, EnvelopeKind, ErrorCode, GenerationRole,
+        ProtocolError, ProtocolLimits, ProtocolVersion, RequestId, ResponseOutcome, ServerHello,
+        write_json_frame,
+    };
+
+    struct Scripted {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for Scripted {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ipc_client(outcome: ResponseOutcome) -> IpcClient<Scripted> {
+        let protocol = ProtocolVersion {
+            generation: 1,
+            revision: 1,
+        };
+        let generation = usagi_core::infrastructure::ipc::DaemonGeneration("daemon".into());
+        let hello = Bootstrap::ServerHello(ServerHello {
+            connection_nonce: "nonce".into(),
+            connection_id: ConnectionId("connection".into()),
+            daemon_generation: generation.clone(),
+            generation_role: GenerationRole::Active,
+            protocol,
+            capabilities: vec![],
+            build: BuildIdentity {
+                version: "test".into(),
+                commit: "test".into(),
+                target: "test".into(),
+            },
+            limits: ProtocolLimits::default(),
+        });
+        let reply = Envelope {
+            protocol,
+            daemon_generation: generation,
+            kind: EnvelopeKind::Response {
+                request_id: RequestId("1".into()),
+                outcome,
+                body: serde_json::json!({}),
+            },
+        };
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello, 1_048_576).unwrap();
+        write_json_frame(&mut input, &reply, 1_048_576).unwrap();
+        IpcClient::connect(
+            Scripted {
+                input: Cursor::new(input),
+                output: vec![],
+            },
+            "client".into(),
+            "nonce".into(),
+            usagi_core::usecase::client::ClientPolicy::tui(),
+        )
+        .unwrap()
+    }
 
     #[derive(Default)]
     struct FakePort {
@@ -212,7 +284,7 @@ mod tests {
             })
         }
         fn resync(&mut self, _: &TerminalRef) -> Result<TerminalSnapshot, TerminalError> {
-            unreachable!()
+            Err(TerminalError::Unavailable)
         }
         fn input(&mut self, _: &TerminalRef, _: &[u8]) -> Result<(), TerminalError> {
             Ok(())
@@ -275,5 +347,118 @@ mod tests {
         assert!(
             matches!(&runtime.pane().tabs()[0], PaneTab::Live(live) if live.kind == PaneKind::Agent)
         );
+    }
+
+    #[test]
+    fn ipc_port_accepts_only_the_matching_operation_and_safe_errors() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let intent = AgentLaunchIntent {
+            workspace,
+            session,
+            profile: None,
+        };
+        let mut accepted = ipc_client(ResponseOutcome::Accepted {
+            operation_id: usagi_core::infrastructure::ipc::OperationId(operation.as_str()),
+            operation_revision: 1,
+        });
+        assert_eq!(
+            accepted.launch(operation, intent.clone()),
+            Ok(AgentLaunchEvent::Accepted { operation })
+        );
+
+        let mut mismatched = ipc_client(ResponseOutcome::Accepted {
+            operation_id: usagi_core::infrastructure::ipc::OperationId("other".into()),
+            operation_revision: 1,
+        });
+        assert_eq!(
+            mismatched.launch(operation, intent.clone()),
+            Err("daemon returned a mismatched operation".to_owned())
+        );
+        let mut not_accepted = ipc_client(ResponseOutcome::Ok);
+        assert_eq!(
+            not_accepted.launch(operation, intent.clone()),
+            Err("daemon did not accept agent launch".to_owned())
+        );
+        let mut unavailable = ipc_client(ResponseOutcome::Error(ProtocolError::new(
+            ErrorCode::Unavailable,
+            "private detail",
+        )));
+        assert_eq!(
+            unavailable.launch(operation, intent),
+            Err("daemon unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn scripted_transport_records_client_bytes() {
+        let mut transport = Scripted {
+            input: Cursor::new(vec![]),
+            output: vec![],
+        };
+        transport.write_all(b"request").unwrap();
+        transport.flush().unwrap();
+        assert_eq!(transport.output, b"request");
+    }
+
+    #[test]
+    fn adapter_ignores_other_effects_and_projects_safe_failures() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let operation = OperationId::new();
+        let port = FakePort {
+            events: VecDeque::from([Err("private daemon detail".to_owned())]),
+            ..FakePort::default()
+        };
+        let mut adapter = AgentLaunchAdapter::new(port);
+        let mut runtime = PaneRuntime::new(super::super::pane::PaneState::new(
+            PaneSelection::Target(Target::Session(session)),
+        ));
+        adapter.dispatch(
+            &mut runtime,
+            Effect::OpenTerminal {
+                target: Target::Session(session),
+                arguments: "open".to_owned(),
+            },
+        );
+        assert!(adapter.port().launches.is_empty());
+        adapter.dispatch(
+            &mut runtime,
+            Effect::LaunchAgent {
+                workspace,
+                session,
+                operation_id: operation,
+                profile: None,
+            },
+        );
+        assert_eq!(
+            runtime.pane().error(),
+            Some("daemon unavailable; reconnect to continue")
+        );
+        adapter.apply(
+            &mut runtime,
+            AgentLaunchEvent::Failed {
+                operation,
+                message: "safe failure".to_owned(),
+            },
+        );
+        assert_eq!(
+            runtime.pane().error(),
+            Some("daemon unavailable; reconnect to continue")
+        );
+
+        let terminal = terminal(workspace, session);
+        assert!(adapter.port_mut().inventory().unwrap().is_empty());
+        assert_eq!(
+            adapter.port_mut().resync(&terminal),
+            Err(TerminalError::Unavailable)
+        );
+        adapter.port_mut().input(&terminal, b"x").unwrap();
+        adapter
+            .port_mut()
+            .resize(&terminal, Geometry { cols: 80, rows: 24 })
+            .unwrap();
+        adapter.port_mut().detach(&terminal);
     }
 }
