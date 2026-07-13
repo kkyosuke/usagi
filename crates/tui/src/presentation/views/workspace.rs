@@ -32,6 +32,8 @@ const LEFT_WIDTH: usize = 28;
 const CHROME_ROWS: usize = 2;
 /// The v1 sidebar rabbit occupies three stable rows above the footer.
 const MASCOT_ROWS: usize = 3;
+/// v1's fixed inset from the sidebar's left edge.
+const MASCOT_INDENT: usize = 1;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -818,16 +820,16 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
 
 /// The v1 sidebar mascot's resting browsing pose. It is deliberately a pure
 /// function of the reducer-owned tick: the eyes blink and one ear twitches,
-/// while every frame keeps the same three-row rectangle.
+/// while every frame keeps the same three-row rectangle. The shared fixed inset
+/// keeps the ears, face, and feet aligned as one left-bottom sidebar block.
 fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
     let phase = tick % 6;
     let ears = if phase == 5 { " (\\(/" } else { " (\\(\\" };
     let face = if phase == 4 { " (-.-)?" } else { " (o.o)?" };
     let feet = "o(_(\")(\")";
     [ears, face, feet].map(|line| {
-        let left = width.saturating_sub(widgets::display_width(line)) / 2;
         Role::Feature.style().bold().paint(&widgets::pad_to_width(
-            &format!("{}{}", " ".repeat(left), line),
+            &format!("{}{}", " ".repeat(MASCOT_INDENT), line),
             width,
         ))
     })
@@ -990,8 +992,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace, render,
-        render_home,
+        CHROME_ROWS, HomeProjection, LEFT_WIDTH, MASCOT_INDENT, Mode, ProjectedSession, Workspace,
+        render, render_home,
     };
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
@@ -1551,6 +1553,9 @@ mod tests {
         assert!(left_rows[ears + 1].contains("(o.o)?"));
         assert!(left_rows[ears + 2].contains("o(_(\")(\")"));
         assert!(left_rows[ears + 3].contains("[switch]"));
+        assert_eq!(left_rows[ears].find('('), Some(MASCOT_INDENT + 1));
+        assert_eq!(left_rows[ears + 1].find('('), Some(MASCOT_INDENT + 1));
+        assert_eq!(left_rows[ears + 2].find('o'), Some(MASCOT_INDENT));
     }
 
     #[test]
