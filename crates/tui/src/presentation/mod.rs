@@ -481,35 +481,21 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             _ => OpenStep::Stay,
         };
     }
-    if open.filtering() {
-        return match key {
-            Key::Char(ch) => {
-                open.push_filter(ch);
-                OpenStep::Stay
-            }
-            Key::Backspace => {
-                open.pop_filter();
-                OpenStep::Stay
-            }
-            Key::Enter | Key::Escape => {
-                open.end_filter();
-                OpenStep::Stay
-            }
-            Key::Quit => OpenStep::Quit,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::Other => OpenStep::Stay,
-        };
-    }
     match key {
-        Key::Up | Key::Char('k') => {
+        Key::Up => {
             open.select_prev();
             OpenStep::Stay
         }
-        Key::Down | Key::Char('j') => {
+        Key::Down => {
             open.select_next();
             OpenStep::Stay
         }
+        Key::Backspace => {
+            open.pop_filter();
+            OpenStep::Stay
+        }
         Key::Escape => OpenStep::Back,
-        Key::Quit | Key::Char('q') => OpenStep::Quit,
+        Key::Quit => OpenStep::Quit,
         Key::Enter => {
             let paths = if open.is_unite() {
                 open.unite_paths()
@@ -524,11 +510,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 OpenStep::Choose(paths)
             }
         }
-        Key::Char('/') => {
-            open.begin_filter();
-            OpenStep::Stay
-        }
-        Key::Char('u') => {
+        Key::Tab => {
             open.toggle_unite();
             OpenStep::Stay
         }
@@ -536,13 +518,15 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.toggle_unite_member();
             OpenStep::Stay
         }
-        Key::Char('c') => {
+        Key::Char('C') => {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Other => {
+        Key::Char(ch) => {
+            open.push_filter(ch);
             OpenStep::Stay
         }
+        Key::Left | Key::Right | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -1653,13 +1637,8 @@ mod tests {
         let alpha = ws("alpha");
         let beta = ws("beta");
 
-        let mut filter = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('/'),
-            Key::Char('b'),
-            Key::Enter,
-            Key::Char('q'),
-        ]);
+        let mut filter =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('b'), Key::Enter, Key::Char('q')]);
         run(
             &mut filter,
             vec![alpha.clone(), beta.clone()],
@@ -1668,14 +1647,10 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert!(filter.frames[3].join("\n").contains("↳ /tmp/beta"));
+        assert!(filter.frames[2].join("\n").contains("↳ /tmp/beta"));
 
-        let mut cancel = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('n'),
-            Key::Char('q'),
-        ]);
+        let mut cancel =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('n'), Key::Quit]);
         let mut cancel_loader = FakeLoader::default();
         run(
             &mut cancel,
@@ -1687,12 +1662,8 @@ mod tests {
         .unwrap();
         assert_eq!(cancel_loader.cleanup_calls, 0);
 
-        let mut confirm = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('y'),
-            Key::Char('q'),
-        ]);
+        let mut confirm =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('y'), Key::Quit]);
         let mut confirm_loader = FakeLoader {
             cleanup_removed: vec![alpha.path.clone()],
             ..FakeLoader::default()
@@ -1710,13 +1681,13 @@ mod tests {
 
         let mut unite = FakeTerminal::with_keys(&[
             Key::Char('o'),
-            Key::Char('u'),
+            Key::Tab,
             Key::Char(' '),
             Key::Down,
             Key::Char(' '),
             Key::Enter,
             Key::Escape,
-            Key::Char('q'),
+            Key::Quit,
         ]);
         let mut unite_loader = FakeLoader::default();
         run(

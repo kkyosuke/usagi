@@ -24,7 +24,8 @@ use crate::presentation::widgets;
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
-const FOOTER: &str = "↑↓/jk move / / filter / u Unite / c cleanup / Enter open / Esc back / q quit";
+const FOOTER: &str =
+    "↑↓ select / type filter / Tab Unite / C cleanup / Enter open / Esc back / Ctrl-C quit";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -36,7 +37,6 @@ pub struct Open {
     workspaces: Vec<WorkspaceOverview>,
     selected_index: usize,
     filter: String,
-    filtering: bool,
     unite: bool,
     unite_paths: HashSet<std::path::PathBuf>,
     cleanup_confirming: bool,
@@ -70,7 +70,6 @@ impl Open {
             workspaces,
             selected_index: 0,
             filter: String::new(),
-            filtering: false,
             unite: false,
             unite_paths: HashSet::new(),
             cleanup_confirming: false,
@@ -110,14 +109,7 @@ impl Open {
             .map(|overview| &overview.workspace)
     }
 
-    /// Whether filter text input owns printable keys.
-    #[must_use]
-    #[coverage(off)]
-    pub const fn filtering(&self) -> bool {
-        self.filtering
-    }
-
-    /// The current case-insensitive workspace-name filter.
+    /// 常時表示する、大文字・小文字を区別しない workspace 名フィルタ。
     #[must_use]
     #[coverage(off)]
     pub fn filter(&self) -> &str {
@@ -136,18 +128,6 @@ impl Open {
     #[coverage(off)]
     pub const fn cleanup_confirming(&self) -> bool {
         self.cleanup_confirming
-    }
-
-    /// Start accepting filter text.
-    #[coverage(off)]
-    pub fn begin_filter(&mut self) {
-        self.filtering = true;
-    }
-
-    /// Stop accepting filter text without discarding the filter.
-    #[coverage(off)]
-    pub fn end_filter(&mut self) {
-        self.filtering = false;
     }
 
     /// Append one character to the filter and return selection to its first hit.
@@ -322,15 +302,6 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
         String::new(),
     ];
 
-    if open.filtered().is_empty() {
-        lines.push(indent(
-            &Style::new()
-                .dim()
-                .paint("No workspaces yet — create one from New."),
-        ));
-        return lines;
-    }
-
     let mode = if open.is_unite() { "Unite" } else { "Single" };
     lines[0] = indent(
         &Role::Success
@@ -338,13 +309,30 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
             .bold()
             .paint(&format!("Workspaces · A–Z · {mode}")),
     );
-    if open.filtering() || !open.filter().is_empty() {
-        lines.push(indent(&format!(
-            "⌕ {}{}",
-            open.filter(),
-            if open.filtering() { "▌" } else { "" }
-        )));
-        lines.push(String::new());
+    let filter = if open.filter().is_empty() {
+        Style::new().dim().paint("type to filter")
+    } else {
+        Role::Accent.style().paint(open.filter())
+    };
+    lines.push(indent(&format!(
+        "{} {filter}",
+        Style::new().dim().paint("Filter:")
+    )));
+    lines.push(String::new());
+
+    if open.is_empty() {
+        lines.push(indent(
+            &Style::new()
+                .dim()
+                .paint("No workspaces yet — create one from New."),
+        ));
+        return lines;
+    }
+    if open.filtered().is_empty() {
+        lines.push(indent(
+            &Style::new().dim().paint("No workspaces match the filter."),
+        ));
+        return lines;
     }
     for (i, overview) in open.filtered().into_iter().enumerate() {
         let marker = if open.is_unite() && open.unite_paths.contains(&overview.workspace.path) {
@@ -526,6 +514,7 @@ mod tests {
     fn render_shows_a_placeholder_when_there_are_no_workspaces() {
         let joined = rendered(&Open::new(Vec::new()));
         assert!(joined.contains("No workspaces yet"));
+        assert!(joined.contains("Filter: type to filter"));
     }
 
     #[test]
@@ -539,14 +528,23 @@ mod tests {
     #[test]
     fn filter_matches_names_case_insensitively_and_keeps_selection_in_hits() {
         let mut open = Open::new(vec![workspace("alpha", 1), workspace("Beta", 2)]);
-        open.begin_filter();
         open.push_filter('b');
         open.push_filter('E');
 
         assert_eq!(open.filter(), "bE");
         assert_eq!(open.selected().unwrap().name, "Beta");
-        assert!(rendered(&open).contains("⌕ bE▌"));
+        assert!(rendered(&open).contains("Filter: bE"));
         assert!(!rendered(&open).contains("↳ /tmp/alpha"));
+    }
+
+    #[test]
+    fn filter_stays_visible_when_it_has_no_matches() {
+        let mut open = Open::new(vec![workspace("alpha", 1)]);
+        open.push_filter('z');
+
+        let joined = rendered(&open);
+        assert!(joined.contains("Filter: z"));
+        assert!(joined.contains("No workspaces match the filter."));
     }
 
     #[test]
