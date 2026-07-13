@@ -1,14 +1,14 @@
 ---
 number: 263
 title: feat(tui): daemon-authoritative agent launch/attach を Closeup に接続する
-status: in-progress
+status: done
 priority: high
 labels: [tui, agent, daemon, pty]
 dependson: [220, 232, 235, 250, 251, 252, 253, 254, 255, 256]
 related: [257, 246]
 parent: 227
 created_at: 2026-07-13T00:15:13.466360+00:00
-updated_at: 2026-07-13T00:24:45.708796+00:00
+updated_at: 2026-07-13T01:14:52.094406+00:00
 ---
 
 ## 背景

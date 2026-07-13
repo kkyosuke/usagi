@@ -66,6 +66,7 @@ pub struct HomeProjection {
     feedback: Option<Feedback>,
     mascot_tick: u64,
     pane_tabs: Vec<HomePaneTab>,
+    pane_error: Option<String>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -111,6 +112,7 @@ impl HomeProjection {
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             pane_tabs: Vec::new(),
+            pane_error: None,
         }
     }
 
@@ -129,6 +131,7 @@ impl HomeProjection {
                 selected: pane_tab_selected(tab, pane.selected()),
             })
             .collect();
+        self.pane_error = pane.error().map(str::to_owned);
         self
     }
 
@@ -866,9 +869,14 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     ));
     if home.pane_tabs.is_empty() {
         let feedback = home
-            .feedback
-            .as_ref()
-            .map(|feedback| feedback_label(Some(feedback)))
+            .pane_error
+            .as_deref()
+            .map(str::to_owned)
+            .or_else(|| {
+                home.feedback
+                    .as_ref()
+                    .map(|feedback| feedback_label(Some(feedback)))
+            })
             .map(|message| format!("feedback: {message}"));
         let mut rows = vec![header];
         rows.extend(widgets::session_tab::empty_pane_with_detail(
@@ -904,7 +912,12 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
                 width,
             )),
             Style::new().dim().paint(&widgets::pad_to_width(
-                &format!("  feedback: {}", feedback_label(home.feedback.as_ref())),
+                &format!(
+                    "  feedback: {}",
+                    home.pane_error
+                        .as_deref()
+                        .map_or_else(|| feedback_label(home.feedback.as_ref()), str::to_owned)
+                ),
                 width,
             )),
         ],
@@ -1239,6 +1252,42 @@ mod tests {
         assert!(text.contains(" Agent (starting) "));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
+    }
+
+    #[test]
+    fn home_projection_renders_safe_agent_launch_failure_from_the_pane() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Failed {
+                operation,
+                message: "agent launch is unavailable".to_owned(),
+            },
+        );
+        let state = AppState::home(workspace, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_pane(&pane);
+
+        let text = joined_home(&home);
+        assert!(text.contains("feedback: agent launch is unavailable"));
+        assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
 
     #[test]
