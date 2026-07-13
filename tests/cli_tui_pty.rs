@@ -113,9 +113,31 @@ fn send(master: &mut File, input: &[u8]) {
     master.flush().unwrap();
 }
 
+fn short_home() -> tempfile::TempDir {
+    // The daemon's generation socket is nested under USAGI_HOME. Keep this
+    // real-PTY fixture within the Unix sockaddr path-length limit.
+    tempfile::Builder::new()
+        .prefix("usagi-")
+        .tempdir_in("/tmp")
+        .expect("short daemon data directory")
+}
+
+fn stop_daemon(home: &std::path::Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args(["daemon", "stop"])
+        .env("USAGI_HOME", home)
+        .output()
+        .expect("usagi daemon stop を起動できる");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let workspace = roots.path().join("pty-workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -216,4 +238,5 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     assert_eq!(attributes_reattached.c_cflag, attributes_before.c_cflag);
     assert_eq!(attributes_reattached.c_lflag, attributes_before.c_lflag);
     assert_eq!(attributes_reattached.c_cc, attributes_before.c_cc);
+    stop_daemon(home.path());
 }

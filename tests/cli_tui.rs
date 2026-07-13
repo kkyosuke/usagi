@@ -4,11 +4,33 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
 
+fn short_home() -> tempfile::TempDir {
+    // A Unix-domain socket includes the data directory, generation, and socket
+    // name. Keep the integration fixture below the platform sockaddr limit.
+    tempfile::Builder::new()
+        .prefix("usagi-")
+        .tempdir_in("/tmp")
+        .expect("short daemon data directory")
+}
+
 fn run(args: &[&OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_usagi"))
         .args(args)
         .output()
         .expect("usagi バイナリを起動できる")
+}
+
+fn stop_daemon(home: &Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("daemon"), OsStr::new("stop")])
+        .env("USAGI_HOME", home)
+        .output()
+        .expect("usagi daemon stop を起動できる");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn run_with_home(args: &[&OsStr], home: &Path) -> Output {
@@ -27,7 +49,7 @@ fn stdout(output: &Output) -> String {
 fn welcome_entry_renders_the_welcome_screen() {
     // 引数なしと `hop` はどちらも welcome 画面を選ぶ。テストでは stdout が tty でないため、
     // 合成ルートは対話ループの代わりに welcome の 1 フレームを描いて返す。
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     for args in [&[][..], &[OsStr::new("hop")][..]] {
         let output = run_with_home(args, home.path());
         assert!(output.status.success(), "args={args:?}");
@@ -37,6 +59,7 @@ fn welcome_entry_renders_the_welcome_screen() {
         assert!(out.contains("q: quit"), "args={args:?}");
         assert!(output.stderr.is_empty(), "args={args:?}");
     }
+    stop_daemon(home.path());
 }
 
 #[test]
@@ -44,7 +67,7 @@ fn daemon_status_reports_not_running_with_a_fresh_data_dir() {
     // `usagi daemon status` を実バイナリで走らせ、合成ルートが束ねる実ストア
     // （`FsRecordFile` を backing にした `DaemonRecordStore`）を通す。データディレクトリを
     // 空の一時パスへ向けるので、レコードは無く「daemon not running」を報告する。
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let output = Command::new(env!("CARGO_BIN_EXE_usagi"))
         .args([OsStr::new("daemon"), OsStr::new("status")])
         .env("USAGI_HOME", home.path())
@@ -59,7 +82,7 @@ fn config_entry_renders_the_config_screen() {
     // `usagi config` は Config 画面を選ぶ。stdout が tty でないため、合成ルートは対話ループの
     // 代わりに Config の 1 フレームを描いて返す。Config 自体は workspace registry を使わない
     // ため、registry が壊れていても起動できる。
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
     let output = run_with_home(&[OsStr::new("config")], home.path());
     assert!(output.status.success());
@@ -69,20 +92,23 @@ fn config_entry_renders_the_config_screen() {
     assert!(out.contains("Theme: System"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
+    stop_daemon(home.path());
 }
 
 #[test]
 fn other_entries_route_to_their_banner_screens() {
     // 対話ループ未接続の画面（Doctor）は暫定バナー。
-    let output = run(&[OsStr::new("doctor")]);
+    let home = short_home();
+    let output = run_with_home(&[OsStr::new("doctor")], home.path());
     assert!(output.status.success());
     assert!(stdout(&output).contains("doctor TUI"));
     assert!(output.stderr.is_empty());
+    stop_daemon(home.path());
 }
 
 #[test]
 fn open_registers_and_renders_an_explicit_or_current_workspace() {
-    let home = tempfile::tempdir().unwrap();
+    let home = short_home();
     let roots = tempfile::tempdir().unwrap();
     let explicit = roots.path().join("explicit-workspace");
     std::fs::create_dir(&explicit).unwrap();
@@ -115,6 +141,7 @@ fn open_registers_and_renders_an_explicit_or_current_workspace() {
     let out = stdout(&output);
     assert!(out.contains("current-workspace"));
     assert!(out.contains("Sessions"));
+    stop_daemon(home.path());
 }
 
 #[test]

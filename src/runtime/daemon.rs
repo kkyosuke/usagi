@@ -188,6 +188,8 @@ impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
     }
 }
 
+use super::bootstrap;
+
 #[coverage(off)]
 fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let generation = usagi_core::infrastructure::ipc::DaemonGeneration(
@@ -502,46 +504,46 @@ pub(crate) fn run<W: Write>(
     usagi_daemon::presentation::run(out, command, info, &env)
 }
 
-/// 管理 daemon へ接続し、endpoint がないときだけ一度起動を要求する。
+/// 管理 daemon へ接続し、endpoint がないときだけ lifecycle start を一度要求する。
+///
+/// locator が存在するが endpoint が利用不能な場合は replacement を起動しない。daemon
+/// lifecycle の lock と recovery policy が、その状態を唯一安全に判定できるためである。
 #[coverage(off)]
 pub(crate) fn client(
     policy: ClientPolicy,
 ) -> Result<IpcClient<std::os::unix::net::UnixStream>, ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
-    let connect = || usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir);
-    let stream = match connect() {
-        Ok(stream) => stream,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::process::Command::new(
-                std::env::current_exe().map_err(|e| ClientError::Unavailable(e.to_string()))?,
-            )
-            .args(["daemon", "start"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| ClientError::Unavailable(e.to_string()))?;
-            let mut connected = None;
-            for _ in 0..20 {
-                match connect() {
-                    Ok(stream) => {
-                        connected = Some(stream);
-                        break;
-                    }
-                    Err(_) => std::thread::sleep(Duration::from_millis(50)),
-                }
+    let exe =
+        std::env::current_exe().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let stream = bootstrap::connect_or_start(
+        || usagi_daemon::infrastructure::unix_transport::connect_current(&data_dir),
+        || {
+            let status = std::process::Command::new(&exe)
+                .args(["daemon", "start"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("daemon start failed"))
             }
-            connected.ok_or_else(|| {
-                ClientError::Unavailable("daemon did not publish an endpoint".into())
-            })?
-        }
-        Err(error) => return Err(ClientError::Unavailable(error.to_string())),
-    };
+        },
+    )
+    .map_err(|error| ClientError::Unavailable(error.to_string()))?;
     IpcClient::connect(
         stream,
         format!("cli-{}", std::process::id()),
         format!("{}", std::process::id()),
         policy,
     )
+}
+
+/// Ensures that an active daemon endpoint exists before an interactive TUI is
+/// shown. TUI operations still acquire their own client connection.
+#[coverage(off)]
+pub(crate) fn ensure_ready() -> Result<(), ClientError> {
+    client(ClientPolicy::tui()).map(|_| ())
 }
