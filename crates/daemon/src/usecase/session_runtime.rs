@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use usagi_core::domain::id::{CompletionFence, DaemonGeneration, OperationId, WorkspaceId};
+use usagi_core::domain::id::{
+    CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+};
 use usagi_core::domain::session_lifecycle::{
     DeletePlan, Failure, FailureStage, LifecycleEvent, OperationJournal, OperationStatus,
     WorkspaceLifecycleState,
@@ -33,7 +35,9 @@ pub enum SessionRuntimeError {
     InvalidRequest,
     InvalidOperation,
     DuplicateOperation,
+    IdempotencyConflict,
     UnknownSession,
+    ScopeUnavailable,
     Rejected,
     Storage,
 }
@@ -45,11 +49,23 @@ impl SessionRuntimeError {
             Self::InvalidRequest => "invalid session request",
             Self::InvalidOperation => "invalid operation identity",
             Self::DuplicateOperation => "operation identity conflicts with an existing request",
+            Self::IdempotencyConflict => "operation id was reused with a different request",
             Self::UnknownSession => "session was not found",
+            Self::ScopeUnavailable => "session scope is not available",
             Self::Rejected => "session lifecycle rejected the request",
             Self::Storage => "daemon could not persist session lifecycle state",
         }
     }
+}
+
+/// A daemon-resolved checkout scope.  Consumers must retain this full stable
+/// identity; the daemon never resolves a client supplied name or path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionScope {
+    pub workspace_id: WorkspaceId,
+    pub session_id: SessionId,
+    pub worktree_id: WorktreeId,
+    pub path: PathBuf,
 }
 
 /// Real git seam kept here so the daemon crate owns the worktree effect while
@@ -102,12 +118,14 @@ impl<G: GitRunner> SessionRuntime<G> {
                 ))
                 .map_err(|_| SessionRuntimeError::Storage)?;
         }
-        Ok(Self {
+        let mut runtime = Self {
             repo_root,
             generation,
             store,
             git,
-        })
+        };
+        runtime.reconcile()?;
+        Ok(runtime)
     }
 
     /// # Errors
@@ -147,6 +165,45 @@ impl<G: GitRunner> SessionRuntime<G> {
         )
     }
 
+    /// Resolves only an available, fully fenced managed session to a path.
+    /// Name-only and path-only lookup deliberately do not exist at this port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionRuntimeError::ScopeUnavailable`] when the supplied
+    /// stable identity is not the current available managed session.
+    pub fn resolve_scope(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        worktree_id: WorktreeId,
+    ) -> Result<SessionScope, SessionRuntimeError> {
+        let state = self.state()?;
+        if state.workspace_id != workspace_id {
+            return Err(SessionRuntimeError::ScopeUnavailable);
+        }
+        let session = state
+            .sessions
+            .iter()
+            .find(|candidate| {
+                candidate.session_id == session_id
+                    && candidate.worktree_id == worktree_id
+                    && candidate.lifecycle
+                        == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+            })
+            .ok_or(SessionRuntimeError::ScopeUnavailable)?;
+        Ok(SessionScope {
+            workspace_id,
+            session_id,
+            worktree_id,
+            path: self
+                .repo_root
+                .join(STATE_DIR)
+                .join(SESSIONS_DIR)
+                .join(&session.name),
+        })
+    }
+
     #[allow(clippy::single_match_else)]
     fn create(
         &mut self,
@@ -157,18 +214,22 @@ impl<G: GitRunner> SessionRuntime<G> {
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
+        let semantic_key = semantic_key(SessionAction::Create, &name);
         if let Some(existing) = before
             .operations
             .iter()
             .find(|op| op.operation_id == operation_id)
         {
+            if existing.semantic_key != semantic_key {
+                return Err(SessionRuntimeError::IdempotencyConflict);
+            }
             return Ok(SessionReply {
                 operation_id: operation_id.to_string(),
                 revision: existing.progress_revision,
                 body: self.snapshot()?,
             });
         }
-        let operation = journal(operation_id, self.generation);
+        let operation = journal(operation_id, self.generation, semantic_key);
         let reserved = self
             .store
             .apply(
@@ -242,12 +303,20 @@ impl<G: GitRunner> SessionRuntime<G> {
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
-        if before
+        let semantic_key = semantic_key(SessionAction::Remove, &name);
+        if let Some(existing) = before
             .operations
             .iter()
-            .any(|op| op.operation_id == operation_id)
+            .find(|op| op.operation_id == operation_id)
         {
-            return Err(SessionRuntimeError::DuplicateOperation);
+            if existing.semantic_key != semantic_key {
+                return Err(SessionRuntimeError::IdempotencyConflict);
+            }
+            return Ok(SessionReply {
+                operation_id: operation_id.to_string(),
+                revision: existing.progress_revision,
+                body: snapshot(&before),
+            });
         }
         let session = before
             .sessions
@@ -255,7 +324,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             .find(|session| session.name == name)
             .ok_or(SessionRuntimeError::UnknownSession)?;
         let session_id = session.session_id;
-        let operation = journal(operation_id, self.generation);
+        let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
             .store
             .apply(
@@ -321,6 +390,41 @@ impl<G: GitRunner> SessionRuntime<G> {
             .map_err(|_| SessionRuntimeError::Storage)?
             .ok_or(SessionRuntimeError::Storage)
     }
+
+    fn reconcile(&mut self) -> Result<(), SessionRuntimeError> {
+        let state = self.state()?;
+        for session in state.sessions.into_iter().filter(|session| {
+            matches!(
+                session.lifecycle,
+                usagi_core::domain::session_lifecycle::SessionLifecycle::Creating
+                    | usagi_core::domain::session_lifecycle::SessionLifecycle::Initializing
+                    | usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+            )
+        }) {
+            let Some(operation_id) = session.operation_id else {
+                continue;
+            };
+            let failure_stage = if session.lifecycle
+                == usagi_core::domain::session_lifecycle::SessionLifecycle::Deleting
+            {
+                FailureStage::Delete
+            } else {
+                FailureStage::Create
+            };
+            self.store
+                .apply(
+                    self.generation,
+                    LifecycleEvent::ReconcileInterrupted {
+                        session_id: session.session_id,
+                        operation_id,
+                        stage: failure_stage,
+                    },
+                    Utc::now(),
+                )
+                .map_err(|_| SessionRuntimeError::Storage)?;
+        }
+        Ok(())
+    }
 }
 
 fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
@@ -340,14 +444,23 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
     Ok(name.to_owned())
 }
 
-fn journal(operation_id: OperationId, generation: DaemonGeneration) -> OperationJournal {
+fn journal(
+    operation_id: OperationId,
+    generation: DaemonGeneration,
+    semantic_key: String,
+) -> OperationJournal {
     OperationJournal {
         operation_id,
         owner_daemon_generation: generation,
         status: OperationStatus::Accepted,
         execution_attempt: 1,
         progress_revision: 0,
+        semantic_key,
     }
+}
+
+fn semantic_key(action: SessionAction, name: &str) -> String {
+    format!("{action:?}:{name}").to_ascii_lowercase()
 }
 
 fn fence(
@@ -466,7 +579,7 @@ mod tests {
         );
     }
     #[test]
-    fn same_create_operation_returns_its_existing_snapshot() {
+    fn operation_id_is_idempotent_only_for_the_same_semantic_request() {
         let (_tmp, mut runtime) = runtime(FakeGit::ok());
         let operation = operation();
         runtime
@@ -477,10 +590,63 @@ mod tests {
                 .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
                 .is_ok()
         );
-        assert!(
+        assert_eq!(
             runtime
                 .handle(SessionAction::Create, &operation, &json!({"name":"two"}))
+                .unwrap_err(),
+            SessionRuntimeError::IdempotencyConflict
+        );
+    }
+
+    #[test]
+    fn resolver_requires_complete_available_scope_and_restart_reconciles_interrupted_work() {
+        let (tmp, mut runtime) = runtime(FakeGit::ok());
+        let created = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        let session = created.body["sessions"][0].clone();
+        let workspace = serde_json::from_value(created.body["workspace_id"].clone()).unwrap();
+        let session_id = serde_json::from_value(session["session_id"].clone()).unwrap();
+        let worktree_id = serde_json::from_value(session["worktree_id"].clone()).unwrap();
+        assert!(
+            runtime
+                .resolve_scope(workspace, session_id, worktree_id)
                 .is_ok()
+        );
+        assert_eq!(
+            runtime
+                .resolve_scope(WorkspaceId::new(), session_id, worktree_id)
+                .unwrap_err(),
+            SessionRuntimeError::ScopeUnavailable
+        );
+
+        let operation = OperationId::new();
+        runtime
+            .store
+            .apply(
+                runtime.generation,
+                LifecycleEvent::ReserveCreate {
+                    name: "interrupted".into(),
+                    operation: journal(
+                        operation,
+                        runtime.generation,
+                        semantic_key(SessionAction::Create, "interrupted"),
+                    ),
+                },
+                Utc::now(),
+            )
+            .unwrap();
+        let restarted = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        let snapshot = restarted.snapshot().unwrap();
+        assert_eq!(snapshot["sessions"][1]["lifecycle"], "failed");
+        assert_eq!(
+            snapshot["sessions"][1]["failure"]["summary"],
+            "interrupted; explicit recovery required"
         );
     }
 }

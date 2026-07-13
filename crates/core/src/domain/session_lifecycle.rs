@@ -8,7 +8,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::id::{CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId};
+use crate::domain::id::{
+    CompletionFence, DaemonGeneration, OperationId, SessionId, WorkspaceId, WorktreeId,
+};
 
 /// The physical availability of a managed session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +118,9 @@ pub struct Failure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedSession {
     pub session_id: SessionId,
+    /// Physical checkout incarnation.  It is minted with the session reservation
+    /// and survives daemon restart; a display name is never used as its key.
+    pub worktree_id: WorktreeId,
     pub name: String,
     pub lifecycle: SessionLifecycle,
     pub attempt: u64,
@@ -136,6 +141,7 @@ impl ManagedSession {
     pub fn new_creating(name: String, operation_id: OperationId, now: DateTime<Utc>) -> Self {
         Self {
             session_id: SessionId::new(),
+            worktree_id: WorktreeId::new(),
             name,
             lifecycle: SessionLifecycle::Creating,
             attempt: 1,
@@ -179,6 +185,10 @@ pub struct OperationJournal {
     pub status: OperationStatus,
     pub execution_attempt: u64,
     pub progress_revision: u64,
+    /// Canonical action and target captured at admission for durable
+    /// operation-id idempotency across connection and daemon restart.
+    #[serde(default)]
+    pub semantic_key: String,
 }
 
 /// All v2 lifecycle state for a workspace. `state_revision` increases on every accepted reducer event.
@@ -489,6 +499,7 @@ mod tests {
             status: OperationStatus::Running,
             execution_attempt: 1,
             progress_revision: 0,
+            semantic_key: "test".into(),
         }
     }
     fn fence(
@@ -804,6 +815,7 @@ mod tests {
             status: OperationStatus::Running,
             execution_attempt: 1,
             progress_revision: 0,
+            semantic_key: "test".into(),
         };
         available.sessions[0].operation_id = Some(create_again.operation_id);
         available.operations.push(create_again.clone());

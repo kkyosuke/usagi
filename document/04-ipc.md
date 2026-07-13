@@ -12,6 +12,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [envelope とエラー](#envelope-とエラー)
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
+- [managed session request](#managed-session-request)
 - [generic terminal request](#generic-terminal-request)
 
 ## identity と fence
@@ -60,6 +61,12 @@ revision の共通範囲と必須 capability を検証し、成功時に `Server
 `ProtocolError` は machine-readable な code、safe message、retry mode、side-effect classification、
 error ID を返す。resource/ownership を証明できない場合は `ownership_unknown`、resume が成立しない
 場合は `resync_required` を使う。OS error、secret、raw launch provision は error detail に含めない。
+
+## managed session request
+
+`session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
+
+snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle を含む。agent / terminal 起動用の checkout path は、daemon が available の完全一致 scope からだけ解決する。client が name または path を渡して scope を再探索する wire contract はない。
 
 ## generic terminal request
 

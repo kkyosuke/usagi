@@ -96,6 +96,7 @@ mod tests {
             status: OperationStatus::Accepted,
             execution_attempt: 1,
             progress_revision: 0,
+            semantic_key: "create:one".into(),
         };
         let saved = store
             .apply(
@@ -124,6 +125,7 @@ mod tests {
             status: OperationStatus::Accepted,
             execution_attempt: 1,
             progress_revision: 0,
+            semantic_key: "create:one".into(),
         };
         assert!(
             store
@@ -150,6 +152,7 @@ mod tests {
             status: OperationStatus::Accepted,
             execution_attempt: 1,
             progress_revision: 0,
+            semantic_key: "create:one".into(),
         };
         assert!(
             store
