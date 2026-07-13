@@ -17,6 +17,7 @@ serde.workspace = true
 # Unix peer credentials and socket ownership checks are transport concerns of
 # the daemon boundary, never part of the protocol core.
 libc.workspace = true
+portable-pty.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
