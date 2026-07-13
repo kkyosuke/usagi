@@ -481,35 +481,29 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             _ => OpenStep::Stay,
         };
     }
-    if open.filtering() {
-        return match key {
-            Key::Char(ch) => {
-                open.push_filter(ch);
-                OpenStep::Stay
-            }
-            Key::Backspace => {
-                open.pop_filter();
-                OpenStep::Stay
-            }
-            Key::Enter | Key::Escape => {
-                open.end_filter();
-                OpenStep::Stay
-            }
-            Key::Quit => OpenStep::Quit,
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Tab | Key::Other => OpenStep::Stay,
-        };
-    }
     match key {
-        Key::Up | Key::Char('k') => {
+        Key::Up => {
             open.select_prev();
             OpenStep::Stay
         }
-        Key::Down | Key::Char('j') => {
+        Key::Down => {
             open.select_next();
             OpenStep::Stay
         }
+        Key::Backspace => {
+            open.pop_filter();
+            OpenStep::Stay
+        }
+        Key::Left => {
+            open.filter_left();
+            OpenStep::Stay
+        }
+        Key::Right => {
+            open.filter_right();
+            OpenStep::Stay
+        }
         Key::Escape => OpenStep::Back,
-        Key::Quit | Key::Char('q') => OpenStep::Quit,
+        Key::Quit => OpenStep::Quit,
         Key::Enter => {
             let paths = if open.is_unite() {
                 open.unite_paths()
@@ -524,11 +518,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 OpenStep::Choose(paths)
             }
         }
-        Key::Char('/') => {
-            open.begin_filter();
-            OpenStep::Stay
-        }
-        Key::Char('u') => {
+        Key::Tab => {
             open.toggle_unite();
             OpenStep::Stay
         }
@@ -536,13 +526,15 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.toggle_unite_member();
             OpenStep::Stay
         }
-        Key::Char('c') => {
+        Key::Char('C') => {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char(_) | Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Other => {
+        Key::Char(ch) => {
+            open.push_filter(ch);
             OpenStep::Stay
         }
+        Key::Other => OpenStep::Stay,
     }
 }
 
@@ -897,6 +889,26 @@ pub fn run_workspace_with_session_port(
     .map(|_| Exit::Quit)
 }
 
+/// Open list 用に、registry の生値と recent projection を結び付ける。
+///
+/// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
+/// projection が無いときだけ、生値から 0 件の overview を組み立てる。
+#[coverage(off)]
+fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
+    let open_overviews = recent
+        .iter()
+        .filter_map(|recent| match recent {
+            Recent::Workspace(overview) => Some(overview.clone()),
+            Recent::Unite(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if open_overviews.is_empty() && !workspaces.is_empty() {
+        Open::new(workspaces)
+    } else {
+        Open::with_overviews(open_overviews)
+    }
+}
+
 /// `start` で選んだ画面を起点にした対話 runtime。
 ///
 /// Welcome→Open→Workspace と Welcome→Recent→Workspace は選択 path を同じ [`WorkspaceLoader`]
@@ -920,7 +932,7 @@ pub fn run_with_settings(
     settings: &mut dyn SettingsPort,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
-    let mut open = Open::new(workspaces);
+    let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
     let mut config_form = Config::load(settings);
     let mut screen = match start {
@@ -990,7 +1002,7 @@ pub fn run_with_settings(
                     }
                 }
                 OpenStep::ConfirmCleanup => {
-                    let removed = loader.cleanup_missing(open.workspaces())?;
+                    let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
                 }
             },
@@ -1633,13 +1645,8 @@ mod tests {
         let alpha = ws("alpha");
         let beta = ws("beta");
 
-        let mut filter = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('/'),
-            Key::Char('b'),
-            Key::Enter,
-            Key::Char('q'),
-        ]);
+        let mut filter =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('b'), Key::Enter, Key::Char('q')]);
         run(
             &mut filter,
             vec![alpha.clone(), beta.clone()],
@@ -1648,14 +1655,10 @@ mod tests {
             &mut FakeLoader::default(),
         )
         .unwrap();
-        assert!(filter.frames[3].join("\n").contains("↳ /tmp/beta"));
+        assert!(filter.frames[2].join("\n").contains("↳ /tmp/beta"));
 
-        let mut cancel = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('n'),
-            Key::Char('q'),
-        ]);
+        let mut cancel =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('n'), Key::Quit]);
         let mut cancel_loader = FakeLoader::default();
         run(
             &mut cancel,
@@ -1667,12 +1670,8 @@ mod tests {
         .unwrap();
         assert_eq!(cancel_loader.cleanup_calls, 0);
 
-        let mut confirm = FakeTerminal::with_keys(&[
-            Key::Char('o'),
-            Key::Char('c'),
-            Key::Char('y'),
-            Key::Char('q'),
-        ]);
+        let mut confirm =
+            FakeTerminal::with_keys(&[Key::Char('o'), Key::Char('C'), Key::Char('y'), Key::Quit]);
         let mut confirm_loader = FakeLoader {
             cleanup_removed: vec![alpha.path.clone()],
             ..FakeLoader::default()
@@ -1690,13 +1689,13 @@ mod tests {
 
         let mut unite = FakeTerminal::with_keys(&[
             Key::Char('o'),
-            Key::Char('u'),
+            Key::Tab,
             Key::Char(' '),
             Key::Down,
             Key::Char(' '),
             Key::Enter,
             Key::Escape,
-            Key::Char('q'),
+            Key::Quit,
         ]);
         let mut unite_loader = FakeLoader::default();
         run(
