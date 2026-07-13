@@ -430,11 +430,9 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
   （`clap_complete::Shell`）の補完スクリプトを生成して標準出力へ出す。定義が唯一の真実なので
   補完候補は CLI の実態と一致する。ただし静的ジェネレータの仕様上、`hide = true` の内部コマンド
   （`hop` / `agent-phase` / `guard-workspace`）も補完候補には含まれる（`--help` には出ない）。
-- **`update`** は実装済み: usagi 自体の新版確認。リリースは GitHub の `v<semver>` タグなので、
-  `usagi-core` の git seam（`infrastructure::git::GitRunner`）で `git ls-remote --tags <repo>` を
-  実行し、その出力から最大 semver を取り出して配布 version と比較して 1 行報告する。出力パースと
-  比較は `commands::update` の純粋関数（ユニットテスト）、git の実 IO（`GitRunner` の本実装）は
-  合成ルートに閉じる（新規クレート依存は無く git を再利用）。
+- **`update`** は実装済み: GitHub Releases の最新バイナリを、配布済みの `scripts/install.sh` 経由で
+  download して `~/.usagi/bin/` へ導入する。CLI は trusted な installer command の要求だけを返し、
+  network / subprocess の実 IO は合成ルートが実行する。更新後のバイナリは次回の `usagi` 起動から使われる。
 - **内部フックコマンド**: usagi はエージェント起動時に、Claude の `PreToolUse` フックへ
   `usagi guard-workspace`（worktree 外へのツール呼び出しを拒否）を、Stop フックへ
   `usagi agent-phase <phase>`（ライフサイクル phase 報告）を配線する。この 2 つは人間向けでは
