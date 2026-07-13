@@ -44,6 +44,15 @@ pub enum Command {
     Session { arguments: String },
 }
 
+/// `session` command の daemon-authoritative 操作意図。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCommand {
+    Create { name: String },
+    List,
+    Overview,
+    Remove { force: bool },
+}
+
 type CommandFactory = fn(String) -> Command;
 
 #[derive(Clone, Copy)]
@@ -160,6 +169,32 @@ pub fn completion(input: &str) -> Option<String> {
                 .then(|| format!("session {candidate}"))
         }
         _ => None,
+    }
+}
+
+/// `session` の引数を typed intent へ解釈する。
+///
+/// Remove は表示名を identity に使わず、controller が現在 active な stable
+/// `SessionId` へ解決する。`list` と `overview` は daemon snapshot を refresh する。
+///
+/// # Errors
+///
+/// 未知の subcommand、必須 name の欠落、または許可しない引数を返す。
+pub fn parse_session(arguments: &str) -> Result<SessionCommand, &'static str> {
+    let (verb, rest) = arguments
+        .split_once(char::is_whitespace)
+        .map_or((arguments, ""), |(verb, rest)| (verb, rest.trim()));
+    match verb {
+        "create" if !rest.is_empty() => Ok(SessionCommand::Create {
+            name: rest.to_owned(),
+        }),
+        "create" => Err("session name is required"),
+        "list" if rest.is_empty() => Ok(SessionCommand::List),
+        "overview" if rest.is_empty() => Ok(SessionCommand::Overview),
+        "remove" if rest.is_empty() => Ok(SessionCommand::Remove { force: false }),
+        "remove" if rest == "--force" => Ok(SessionCommand::Remove { force: true }),
+        "remove" => Err("invalid session remove arguments"),
+        _ => Err("unknown session command"),
     }
 }
 
@@ -282,7 +317,7 @@ pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
 mod tests {
     use super::{
         Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
-        commands, complete, completion, dispatch, help, interpret,
+        SessionCommand, commands, complete, completion, dispatch, help, interpret, parse_session,
     };
 
     struct FakeRegistry(Vec<CommandInfo>);
@@ -334,6 +369,38 @@ mod tests {
         assert_eq!(completion("session o"), Some("session overview".to_owned()));
         assert_eq!(completion("session z"), None);
         assert_eq!(completion("session create extra"), None);
+        assert_eq!(completion("issue list"), None);
+    }
+
+    #[test]
+    fn parses_session_commands_without_a_name_based_remove_target() {
+        assert_eq!(
+            parse_session("create feature-x"),
+            Ok(SessionCommand::Create {
+                name: "feature-x".into()
+            })
+        );
+        assert_eq!(parse_session("list"), Ok(SessionCommand::List));
+        assert_eq!(parse_session("overview"), Ok(SessionCommand::Overview));
+        assert_eq!(
+            parse_session("remove --force"),
+            Ok(SessionCommand::Remove { force: true })
+        );
+        assert_eq!(
+            parse_session("remove"),
+            Ok(SessionCommand::Remove { force: false })
+        );
+        assert_eq!(parse_session("create"), Err("session name is required"));
+        assert_eq!(parse_session("list extra"), Err("unknown session command"));
+        assert_eq!(
+            parse_session("overview extra"),
+            Err("unknown session command")
+        );
+        assert_eq!(
+            parse_session("remove old-name"),
+            Err("invalid session remove arguments")
+        );
+        assert_eq!(parse_session("rename x"), Err("unknown session command"));
     }
 
     #[test]

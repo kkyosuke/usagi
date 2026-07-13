@@ -1,13 +1,13 @@
 ---
 number: 260
 title: feat(tui): Overview から daemon 管理 session を操作する
-status: todo
+status: done
 priority: high
 labels: [tui, overview, session, lifecycle]
 dependson: [217, 219, 220, 231, 234, 257]
 related: [226]
 created_at: 2026-07-13T00:09:23.746382+00:00
-updated_at: 2026-07-13T00:09:23.746382+00:00
+updated_at: 2026-07-13T00:38:55.000000+00:00
 ---
 
 ## 背景

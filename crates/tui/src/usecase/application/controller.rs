@@ -1900,6 +1900,7 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
     }
     match overview::interpret(input) {
         Ok(overview::Command::Env { .. }) => open_environment(state),
+        Ok(overview::Command::Session { arguments }) => submit_overview_session(state, &arguments),
         Ok(command) => {
             state.overlay = None;
             state.notice = Some(Notice::new(format!("Requested {}", command.name())));
@@ -1912,6 +1913,51 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             state.notice = Some(Notice::new(error.to_string()));
             Vec::new()
         }
+    }
+}
+
+#[coverage(off)]
+fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect> {
+    let command = match overview::parse_session(arguments) {
+        Ok(command) => command,
+        Err(message) => {
+            state.notice = Some(Notice::new(message));
+            return Vec::new();
+        }
+    };
+    match command {
+        overview::SessionCommand::Create { name } => {
+            state.overlay = None;
+            request_create_session(
+                state,
+                SessionCreateIntent {
+                    name,
+                    profile: None,
+                    model: None,
+                },
+            )
+        }
+        overview::SessionCommand::List | overview::SessionCommand::Overview => {
+            state.overlay = None;
+            state.notice = Some(Notice::new("Refreshing sessions"));
+            vec![Effect::RefreshSessions {
+                workspace: state.workspace,
+            }]
+        }
+        overview::SessionCommand::Remove { force } => match state.active {
+            Target::Session(session) => {
+                state.overlay = None;
+                vec![Effect::RemoveSession {
+                    workspace: state.workspace,
+                    session,
+                    force,
+                }]
+            }
+            Target::Root(_) => {
+                state.notice = Some(Notice::new("workspace root cannot be removed"));
+                Vec::new()
+            }
+        },
     }
 }
 
@@ -2021,23 +2067,9 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         }
         AppKey::Enter => match form.request() {
             Ok(intent) => {
-                let token = PendingToken(state.next_pending_token);
-                state.next_pending_token += 1;
-                let operation_id = OperationId::new();
-                state.pending.push(PendingOperation {
-                    token,
-                    kind: PendingKind::CreateSession,
-                    operation_id,
-                    interaction_at_accept: state.interaction_count,
-                });
                 state.create_session = None;
                 state.overlay = None;
-                vec![Effect::CreateSession {
-                    workspace: state.workspace,
-                    token,
-                    operation_id,
-                    intent,
-                }]
+                request_create_session(state, intent)
             }
             Err(error) => {
                 form.error = Some(error);
@@ -2048,6 +2080,25 @@ fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect>
         // this form owns input.
         _ => Vec::new(),
     }
+}
+
+#[coverage(off)]
+fn request_create_session(state: &mut AppState, intent: SessionCreateIntent) -> Vec<Effect> {
+    let token = PendingToken(state.next_pending_token);
+    state.next_pending_token += 1;
+    let operation_id = OperationId::new();
+    state.pending.push(PendingOperation {
+        token,
+        kind: PendingKind::CreateSession,
+        operation_id,
+        interaction_at_accept: state.interaction_count,
+    });
+    vec![Effect::CreateSession {
+        workspace: state.workspace,
+        token,
+        operation_id,
+        intent,
+    }]
 }
 
 /// effect を dispatch し、queue 済みの backend event を reducer へ戻すテスト helper。
@@ -2848,6 +2899,49 @@ mod tests {
     }
 
     #[test]
+    fn overview_session_commands_use_typed_lifecycle_effects() {
+        let (workspace, session, _) = ids();
+        let mut state = AppState::home(workspace, vec![session]);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        let create = update(
+            &mut state,
+            AppEvent::Key(AppKey::SubmitOverview("session create feature-x".into())),
+        );
+        assert!(matches!(
+            &create[..],
+            [Effect::CreateSession { workspace: actual, intent, .. }]
+                if *actual == workspace && intent.name == "feature-x" && intent.profile.is_none() && intent.model.is_none()
+        ));
+        assert_eq!(state.overlay(), None);
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session list".into())),
+            ),
+            vec![Effect::RefreshSessions { workspace }]
+        );
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
+        assert_eq!(
+            update(
+                &mut state,
+                AppEvent::Key(AppKey::SubmitOverview("session remove --force".into())),
+            ),
+            vec![Effect::RemoveSession {
+                workspace,
+                session,
+                force: true,
+            }]
+        );
+    }
+
+    #[test]
+    #[coverage(off)]
     fn closeup_registry_dispatches_agent_and_validated_session_remove() {
         let (workspace, session, _) = ids();
         let mut state = AppState::home(workspace, vec![session]);
