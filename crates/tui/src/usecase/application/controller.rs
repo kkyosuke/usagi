@@ -10,11 +10,12 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use usagi_core::domain::id::{AgentRuntimeRef, SessionId, WorkspaceId};
+use usagi_core::domain::agent::{AgentProfileId, ModelSelector};
+use usagi_core::domain::id::{AgentRuntimeRef, OperationId, SessionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::session_lifecycle::AgentPhase;
 
-use crate::usecase::terminal_input::{LiveInput, RuntimeEvent};
+use crate::usecase::terminal_input::{KeyCode, KeyEventKind, LiveInput, RuntimeEvent};
 use crate::usecase::{closeup, overview};
 
 /// Home の常駐 route。これ以外の常駐 mode は作らない。
@@ -47,6 +48,127 @@ pub enum Overlay {
     Notes,
     /// workspace または session の environment editor。
     Environment,
+    /// Home 左ペインの `+ new session` に対する入力。常駐 route ではない。
+    CreateSession,
+}
+
+/// 新規 session 入力で編集する項目。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CreateSessionField {
+    #[default]
+    Name,
+    Profile,
+    Model,
+}
+
+/// daemon へ送る前の、TUI-local な新規 session 入力。
+///
+/// profile/model は空なら未指定であり、daemon の workspace default policy に委ねる。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreateSessionForm {
+    name: String,
+    profile: String,
+    model: String,
+    field: CreateSessionField,
+    error: Option<Notice>,
+}
+
+impl CreateSessionForm {
+    #[must_use]
+    pub const fn field(&self) -> CreateSessionField {
+        self.field
+    }
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    #[must_use]
+    pub fn error(&self) -> Option<&Notice> {
+        self.error.as_ref()
+    }
+
+    fn selected_mut(&mut self) -> &mut String {
+        match self.field {
+            CreateSessionField::Name => &mut self.name,
+            CreateSessionField::Profile => &mut self.profile,
+            CreateSessionField::Model => &mut self.model,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.field = match self.field {
+            CreateSessionField::Name => CreateSessionField::Profile,
+            CreateSessionField::Profile => CreateSessionField::Model,
+            CreateSessionField::Model => CreateSessionField::Name,
+        };
+    }
+
+    fn push(&mut self, character: char) {
+        self.selected_mut().push(character);
+        self.error = None;
+    }
+
+    fn backspace(&mut self) {
+        self.selected_mut().pop();
+        self.error = None;
+    }
+
+    fn request(&mut self) -> Result<SessionCreateIntent, Notice> {
+        let name = required_create_value(&self.name, "session name is required")?;
+        let profile = optional_profile(&self.profile)?;
+        let model = optional_model(&self.model)?;
+        Ok(SessionCreateIntent {
+            name,
+            profile,
+            model,
+        })
+    }
+}
+
+/// Validated new-session request. This is intentionally product-neutral: adapter
+/// specific CLI flags and model allowlists remain daemon adapter concerns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCreateIntent {
+    pub name: String,
+    pub profile: Option<AgentProfileId>,
+    pub model: Option<ModelSelector>,
+}
+
+fn required_create_value(value: &str, message: &str) -> Result<String, Notice> {
+    let value = value.trim();
+    (!value.is_empty())
+        .then(|| value.to_owned())
+        .ok_or_else(|| Notice::new(message))
+}
+
+fn optional_profile(value: &str) -> Result<Option<AgentProfileId>, Notice> {
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        AgentProfileId::new(value)
+            .map(Some)
+            .map_err(|_| Notice::new("invalid agent profile"))
+    }
+}
+
+fn optional_model(value: &str) -> Result<Option<ModelSelector>, Notice> {
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        ModelSelector::new(value)
+            .map(Some)
+            .map_err(|_| Notice::new("invalid model selector"))
+    }
 }
 
 /// Note editor で現在表示・編集している section。
@@ -191,6 +313,10 @@ pub struct PendingOperation {
     pub token: PendingToken,
     /// 実行中の操作。
     pub kind: PendingKind,
+    /// daemon-authoritative durable operation identity.
+    pub operation_id: OperationId,
+    /// User interaction count at acceptance. Landing is safe only when unchanged.
+    pub interaction_at_accept: u64,
 }
 
 /// 画面に安全に表示できる通知。
@@ -302,6 +428,7 @@ pub struct AppState {
     overlay: Option<Overlay>,
     note_editor: Option<NoteEditor>,
     environment_editor: Option<EnvironmentEditor>,
+    create_session: Option<CreateSessionForm>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     selected: Selection,
@@ -311,6 +438,7 @@ pub struct AppState {
     feedback: Option<Feedback>,
     pending: Vec<PendingOperation>,
     next_pending_token: u64,
+    interaction_count: u64,
     size: Option<(u16, u16)>,
     has_live_pane: bool,
     ctrl_c_grace: bool,
@@ -326,6 +454,7 @@ impl AppState {
             overlay: None,
             note_editor: None,
             environment_editor: None,
+            create_session: None,
             workspace,
             sessions,
             selected: Selection::Target(root),
@@ -335,6 +464,7 @@ impl AppState {
             feedback: None,
             pending: Vec::new(),
             next_pending_token: 1,
+            interaction_count: 0,
             size: None,
             has_live_pane: false,
             ctrl_c_grace: false,
@@ -355,6 +485,11 @@ impl AppState {
     #[must_use]
     pub fn note_editor(&self) -> Option<&NoteEditor> {
         self.note_editor.as_ref()
+    }
+    /// Open new-session form, including values retained after validation failure.
+    #[must_use]
+    pub fn create_session_form(&self) -> Option<&CreateSessionForm> {
+        self.create_session.as_ref()
     }
     /// Open environment editor, including unsaved values after a save failure.
     #[must_use]
@@ -486,6 +621,15 @@ pub enum AppKey {
     Down,
     /// selected target を active にし Closeup を開く。
     Enter,
+    /// Move to the next field in a local form.
+    Tab,
+    /// Delete the final character in the selected local form field.
+    Backspace,
+    /// Ctrl-A / terminals that decode it as Home while Home is in Switch mode.
+    CtrlA,
+    /// Home navigation. Inside a create form it is deliberately inert: this
+    /// string-only reducer has no byte cursor, and must never reopen the form.
+    Home,
     /// overlay を閉じるか Closeup から Switch へ戻る。
     Escape,
     /// Management-screen Ctrl-C. Live Ctrl-C is classified before it reaches
@@ -523,6 +667,38 @@ pub enum AppKey {
     SubmitOverview(String),
     /// Closeup modal の現在の入力を registry 経由で実行する。
     SubmitCloseup(String),
+}
+
+/// Converts a non-live terminal input into Home management input.
+///
+/// This function is deliberately not used for a daemon-owned live pane: callers
+/// must route those events through `LiveInputClassifier`, where Ctrl-A remains a
+/// PTY byte. Some terminals expose Ctrl-A as byte U+0001 while others report a
+/// modified `a` or `Home`; all three map to the same Home action here.
+#[must_use]
+pub fn classify_management_input(input: LiveInput) -> Option<AppKey> {
+    let LiveInput::Key(key) = input else {
+        return None;
+    };
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('\u{1}' | 'a')
+            if key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt =>
+        {
+            Some(AppKey::CtrlA)
+        }
+        KeyCode::Home => Some(AppKey::CtrlA),
+        KeyCode::Enter => Some(AppKey::Enter),
+        KeyCode::Tab => Some(AppKey::Tab),
+        KeyCode::Backspace => Some(AppKey::Backspace),
+        KeyCode::Escape => Some(AppKey::Escape),
+        KeyCode::Up => Some(AppKey::Up),
+        KeyCode::Down => Some(AppKey::Down),
+        KeyCode::Char(character) if !key.modifiers.control => Some(AppKey::Char(character)),
+        _ => None,
+    }
 }
 
 /// reducer の入力。実 terminal adapter はこの語彙へ変換するだけでよい。
@@ -594,6 +770,8 @@ pub struct OperationResult {
     pub token: PendingToken,
     /// 成功したか。
     pub succeeded: bool,
+    /// Created stable identity, supplied only by a successful daemon lifecycle final.
+    pub created: Option<SessionId>,
     /// 画面へ表示してよい補足。失敗時は safe message だけを渡す。
     pub notice: Option<Notice>,
 }
@@ -605,6 +783,8 @@ pub enum Effect {
     CreateSession {
         workspace: WorkspaceId,
         token: PendingToken,
+        operation_id: OperationId,
+        intent: SessionCreateIntent,
     },
     /// 次の snapshot を要求する。
     RefreshSessions { workspace: WorkspaceId },
@@ -1256,6 +1436,7 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
         // event-based one-shot rather than a timeout.
         AppEvent::Input(_) => {
             state.ctrl_c_grace = false;
+            state.interaction_count = state.interaction_count.saturating_add(1);
             Vec::new()
         }
         AppEvent::Tick
@@ -1301,17 +1482,22 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::OperationResult(result) => {
-            state
+            let pending = state
                 .pending
-                .retain(|pending| pending.token != result.token);
+                .iter()
+                .position(|pending| pending.token == result.token)
+                .map(|index| state.pending.remove(index));
             state.notice = result.notice;
-            if result.succeeded {
-                vec![Effect::RefreshSessions {
-                    workspace: state.workspace,
-                }]
-            } else {
-                Vec::new()
+            if result.succeeded
+                && let (Some(pending), Some(created)) = (pending, result.created)
+                && pending.interaction_at_accept == state.interaction_count
+            {
+                state.sessions.push(created);
+                state.selected = Selection::Target(Target::Session(created));
+                state.active = Target::Session(created);
+                state.route = Route::Home(HomeMode::Closeup);
             }
+            Vec::new()
         }
     }
 }
@@ -1362,6 +1548,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
 }
 
 fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
+    state.interaction_count = state.interaction_count.saturating_add(1);
     if let Some(overlay) = state.overlay {
         return update_overlay(state, overlay, key);
     }
@@ -1417,6 +1604,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
                 update_editor_key(state, &key).unwrap_or_default()
             }
         }
+        Overlay::CreateSession => update_create_session_form(state, &key),
         Overlay::Overview | Overlay::Closeup if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
@@ -1450,10 +1638,14 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
             state.overlay = Some(Overlay::Closeup);
             Vec::new()
         }
+        AppKey::CtrlA => open_create_session(state),
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
-        AppKey::Char(_)
+        AppKey::Tab
+        | AppKey::Backspace
+        | AppKey::Home
+        | AppKey::Char(_)
         | AppKey::CtrlC
         | AppKey::CtrlQ
         | AppKey::OpenQuitConfirmation
@@ -1682,18 +1874,67 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
             state.route = Route::Home(HomeMode::Closeup);
             Vec::new()
         }
-        Selection::NewSession => {
-            let token = PendingToken(state.next_pending_token);
-            state.next_pending_token += 1;
-            state.pending.push(PendingOperation {
-                token,
-                kind: PendingKind::CreateSession,
-            });
-            vec![Effect::CreateSession {
-                workspace: state.workspace,
-                token,
-            }]
+        Selection::NewSession => open_create_session(state),
+    }
+}
+
+fn open_create_session(state: &mut AppState) -> Vec<Effect> {
+    state.create_session = Some(CreateSessionForm::default());
+    state.overlay = Some(Overlay::CreateSession);
+    Vec::new()
+}
+
+fn update_create_session_form(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(form) = state.create_session.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.create_session = None;
+            state.overlay = None;
+            Vec::new()
         }
+        AppKey::Tab => {
+            form.next_field();
+            Vec::new()
+        }
+        AppKey::Backspace => {
+            form.backspace();
+            Vec::new()
+        }
+        AppKey::Char(character) if !character.is_control() => {
+            form.push(*character);
+            Vec::new()
+        }
+        AppKey::Enter => match form.request() {
+            Ok(intent) => {
+                let token = PendingToken(state.next_pending_token);
+                state.next_pending_token += 1;
+                let operation_id = OperationId::new();
+                state.pending.push(PendingOperation {
+                    token,
+                    kind: PendingKind::CreateSession,
+                    operation_id,
+                    interaction_at_accept: state.interaction_count,
+                });
+                state.create_session = None;
+                state.overlay = None;
+                vec![Effect::CreateSession {
+                    workspace: state.workspace,
+                    token,
+                    operation_id,
+                    intent,
+                }]
+            }
+            Err(error) => {
+                form.error = Some(error);
+                Vec::new()
+            }
+        },
+        // Ctrl-A/Home and unsupported keys must never retrigger create while
+        // this form owns input.
+        _ => Vec::new(),
     }
 }
 
@@ -1716,6 +1957,38 @@ mod tests {
 
     fn ids() -> (WorkspaceId, SessionId, SessionId) {
         (WorkspaceId::new(), SessionId::new(), SessionId::new())
+    }
+
+    #[test]
+    fn management_classifier_treats_ctrl_a_byte_modified_key_and_home_equally() {
+        let ctrl_a = |code| {
+            LiveInput::Key(crate::usecase::terminal_input::KeyEvent::new(
+                code,
+                crate::usecase::terminal_input::Modifiers {
+                    control: true,
+                    ..crate::usecase::terminal_input::Modifiers::default()
+                },
+                KeyEventKind::Press,
+            ))
+        };
+        assert_eq!(
+            classify_management_input(ctrl_a(KeyCode::Char('\u{1}'))),
+            Some(AppKey::CtrlA)
+        );
+        assert_eq!(
+            classify_management_input(ctrl_a(KeyCode::Char('a'))),
+            Some(AppKey::CtrlA)
+        );
+        assert_eq!(
+            classify_management_input(LiveInput::Key(
+                crate::usecase::terminal_input::KeyEvent::new(
+                    KeyCode::Home,
+                    crate::usecase::terminal_input::Modifiers::default(),
+                    KeyEventKind::Press,
+                )
+            )),
+            Some(AppKey::CtrlA)
+        );
     }
 
     fn clone_form() -> NewForm {
@@ -2050,49 +2323,80 @@ mod tests {
     }
 
     #[test]
-    fn new_session_is_selectable_but_never_active_and_requests_backend_once() {
+    fn ctrl_a_opens_a_typed_create_form_and_lands_only_without_later_interaction() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
-        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
-        assert_eq!(state.selected(), Selection::NewSession);
-        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
         assert_eq!(state.active(), Target::Root(workspace));
+        assert_eq!(state.overlay(), Some(Overlay::CreateSession));
         assert_eq!(
-            effects,
-            vec![Effect::CreateSession {
-                workspace,
-                token: PendingToken(1)
-            }]
+            state.create_session_form().unwrap().field(),
+            CreateSessionField::Name
         );
-        assert_eq!(
-            state.pending(),
-            &[PendingOperation {
-                token: PendingToken(1),
-                kind: PendingKind::CreateSession
-            }]
-        );
-        assert_eq!(state.pending()[0].token.get(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Home));
+        assert_eq!(state.overlay(), Some(Overlay::CreateSession));
+        for key in [
+            AppKey::Char('w'),
+            AppKey::Char('o'),
+            AppKey::Char('r'),
+            AppKey::Char('k'),
+            AppKey::Tab,
+            AppKey::Char('c'),
+            AppKey::Char('o'),
+            AppKey::Char('d'),
+            AppKey::Char('e'),
+            AppKey::Char('x'),
+            AppKey::Tab,
+            AppKey::Char('g'),
+            AppKey::Char('p'),
+            AppKey::Char('t'),
+            AppKey::Char('-'),
+            AppKey::Char('5'),
+        ] {
+            let _ = update(&mut state, AppEvent::Key(key));
+        }
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        assert!(matches!(
+            &effects[..],
+            [Effect::CreateSession { workspace: actual_workspace, token: PendingToken(1), intent, .. }]
+                if *actual_workspace == workspace
+                    && intent.name == "work"
+                    && intent.profile.as_ref().is_some_and(|profile| profile.as_str() == "codex")
+                    && intent.model.as_ref().is_some_and(|model| model.as_str() == "gpt-5")
+        ));
+        assert_eq!(state.pending().len(), 1);
+        let token = state.pending()[0].token;
 
-        let effects = update(
-            &mut state,
-            AppEvent::OperationResult(OperationResult {
-                token: PendingToken(1),
-                succeeded: true,
-                notice: Some(Notice::new("created")),
-            }),
+        let created = SessionId::new();
+        assert!(
+            update(
+                &mut state,
+                AppEvent::OperationResult(OperationResult {
+                    token,
+                    succeeded: true,
+                    created: Some(created),
+                    notice: Some(Notice::new("created")),
+                }),
+            )
+            .is_empty()
         );
         assert!(state.pending().is_empty());
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("created")
         );
-        assert_eq!(effects, vec![Effect::RefreshSessions { workspace }]);
+        assert_eq!(state.active(), Target::Session(created));
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(created))
+        );
 
         let effects = update(
             &mut state,
             AppEvent::OperationResult(OperationResult {
                 token: PendingToken(99),
                 succeeded: false,
+                created: None,
                 notice: Some(Notice::new("safe failure")),
             }),
         );
@@ -2100,6 +2404,44 @@ mod tests {
         assert_eq!(
             state.notice().map(|notice| notice.message.as_str()),
             Some("safe failure")
+        );
+    }
+
+    #[test]
+    fn invalid_create_stays_open_and_late_success_does_not_move_after_interaction() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::CreateSession));
+        assert_eq!(
+            state
+                .create_session_form()
+                .and_then(CreateSessionForm::error)
+                .map(|error| error.message.as_str()),
+            Some("session name is required")
+        );
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('a')));
+        let effects = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let token = match &effects[..] {
+            [Effect::CreateSession { token, .. }] => *token,
+            _ => panic!("expected create effect"),
+        };
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let created = SessionId::new();
+        let _ = update(
+            &mut state,
+            AppEvent::OperationResult(OperationResult {
+                token,
+                succeeded: true,
+                created: Some(created),
+                notice: None,
+            }),
+        );
+        assert_eq!(state.active(), Target::Root(workspace));
+        assert_ne!(
+            state.selected(),
+            Selection::Target(Target::Session(created))
         );
     }
 
