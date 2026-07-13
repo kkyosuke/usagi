@@ -121,6 +121,14 @@ impl<G: GitRunner> SessionRuntime<G> {
         match action {
             SessionAction::Create => self.create(operation_id, payload),
             SessionAction::Remove => self.remove(operation_id, payload),
+            SessionAction::List | SessionAction::Overview => {
+                let state = self.state()?;
+                Ok(SessionReply {
+                    operation_id: operation_id.to_owned(),
+                    revision: state.state_revision,
+                    body: snapshot(&state),
+                })
+            }
             SessionAction::Setup | SessionAction::Prompt => {
                 Err(SessionRuntimeError::InvalidRequest)
             }
