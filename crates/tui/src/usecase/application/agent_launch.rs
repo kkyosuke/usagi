@@ -522,6 +522,7 @@ mod tests {
             &mut runtime,
             Effect::OpenTerminal {
                 target: Target::Session(session),
+                operation_id: OperationId::new(),
                 arguments: "open".to_owned(),
             },
         );

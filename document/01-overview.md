@@ -97,16 +97,19 @@ Diff / Notes のタブを循環する。Enter または `t` で選択行の Clos
 preview、`d` は diff、`n` は scratchpad の Notes を長文 overlay として開く。`↑↓`（`j` / `k`）で
 長文を scroll し、データを提供できない diff や空の Notes は安全な fallback を表示する。いずれも
 Home 背景を保ったまま合成し、モーダル表示中はその入力が背面より優先されるため、Overview に入力した
-`q` は終了キーにならない。Overview、Closeup action、Pull Request の実行はまだ接続せず、今回は表示と
-選択だけを行う。Overview の `session create <name>`、`session list`、`session overview`、
+`q` は終了キーにならない。Closeup の `terminal` は空引数または `open` で選択 target の既存 terminal を
+完全な identity で再利用し、存在しない場合は daemon に launch を依頼する。`terminal new` は常に daemon
+launch を依頼する。その他の引数は安全な feedback で拒否し、local PTY や name/path lookup には fallback
+しない。terminal stream の IPC 境界は [daemon IPC](04-ipc.md#generic-terminal-request) が正本である。
+Overview の `session create <name>`、`session list`、`session overview`、
 `session remove [--force]` は daemon IPC へ request を送る。remove は現在選択中 session にだけ作用し、
 root を対象にした remove は実行しない。
 
 Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
 `q` は基底の Switch / Closeup で TUI を終了し、最前面モーダルではそのモーダルが受け取る。
-Ctrl-C は表示状態にかかわらず TUI を終了する。タブ本文はプレースホルダで、daemon が所有する
-端末への attach はまだ行わない。
+Ctrl-C は表示状態にかかわらず TUI を終了する。terminal tab は daemon が所有する terminal だけを表示し、
+client の detach は tab の subscription を外すだけで process を停止しない。
 
 `usagi open [path]` も同じ Workspace 画面を直接起動する。相対 path と省略時のカレントディレクトリは
 実在する絶対 path へ解決し、未登録ならディレクトリ名を workspace 名として登録する。同名が既に別
