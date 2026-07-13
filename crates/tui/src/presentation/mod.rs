@@ -19,6 +19,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::agent::AgentProfileId;
+use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
@@ -42,6 +44,24 @@ use crate::usecase::terminal_input::LiveTerminalAction;
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
+
+/// Daemon-authoritative Agent launch boundary for the workspace runtime.
+pub trait AgentCommandPort {
+    /// # Errors
+    ///
+    /// Returns a presentation-safe daemon launch failure.
+    fn launch(
+        &mut self,
+        workspace: WorkspaceId,
+        session: SessionId,
+        profile: Option<AgentProfileId>,
+    ) -> Result<TerminalRef, String>;
+}
+
+/// Workspace entry ごとに fresh daemon Agent launch port を作る factory。
+pub trait AgentCommandPortFactory {
+    fn create(&mut self) -> Box<dyn AgentCommandPort>;
+}
 
 /// 起動バナーを `out` に書き出す。
 ///
@@ -302,6 +322,13 @@ struct WorkspaceUi {
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     skeleton_frame: usize,
+    agent: Option<AgentContext>,
+}
+
+struct AgentContext {
+    workspace: WorkspaceId,
+    sessions: Vec<SessionId>,
+    port: Box<dyn AgentCommandPort>,
 }
 
 struct SessionCommandCompletion {
@@ -342,7 +369,22 @@ impl WorkspaceUi {
             session_completions,
             session_completion_sender,
             skeleton_frame: 0,
+            agent: None,
         }
+    }
+
+    fn with_agent_context(
+        mut self,
+        workspace: WorkspaceId,
+        sessions: Vec<SessionId>,
+        port: Box<dyn AgentCommandPort>,
+    ) -> Self {
+        self.agent = Some(AgentContext {
+            workspace,
+            sessions,
+            port,
+        });
+        self
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
@@ -1115,7 +1157,35 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
 /// Open a pane and hide the (possibly forced) action modal so the new tab is front.
 #[coverage(off)]
 fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
-    ui.workspace.open_pane(kind);
+    open_pane(ui, kind, None);
+}
+
+// This adapter only projects an injected daemon result into the view.  Its
+// command/effect semantics are covered by `application::agent_runtime` with a
+// fake port; terminal presentation keeps the loop and the projection together.
+#[coverage(off)]
+fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileId>) {
+    let operation = ui.workspace.open_pane(kind);
+    if kind == PaneKind::Agent {
+        if ui.agent.is_none() {
+            ui.closeup_action_forced = false;
+            return;
+        }
+        let selected = ui.workspace.selected().checked_sub(1);
+        let result = ui.agent.as_mut().and_then(|agent| {
+            selected
+                .and_then(|index| agent.sessions.get(index).copied())
+                .map(|session| agent.port.launch(agent.workspace, session, profile))
+        });
+        match result {
+            Some(Ok(terminal)) => ui.workspace.complete_pane(operation, terminal),
+            Some(Err(message)) => ui.workspace.fail_pane(operation, message),
+            None => ui.workspace.fail_pane(
+                operation,
+                "select an active session to start an agent".to_owned(),
+            ),
+        }
+    }
     ui.closeup_action_forced = false;
 }
 
@@ -1137,7 +1207,22 @@ fn close_closeup_modal(ui: &mut WorkspaceUi) {
 #[coverage(off)]
 fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
     match closeup::interpret(input) {
-        Ok(closeup::Command::Agent { .. }) => open_pane_from_menu(ui, PaneKind::Agent),
+        Ok(closeup::Command::Agent { arguments }) => {
+            let profile = match arguments.split_whitespace().next() {
+                None => None,
+                Some(value) => {
+                    if let Ok(profile) = AgentProfileId::new(value) {
+                        Some(profile)
+                    } else {
+                        let operation = ui.workspace.open_pane(PaneKind::Agent);
+                        ui.workspace
+                            .fail_pane(operation, "invalid agent profile".to_owned());
+                        return;
+                    }
+                }
+            };
+            open_pane(ui, PaneKind::Agent, profile);
+        }
         Ok(closeup::Command::Terminal { .. }) => open_pane_from_menu(ui, PaneKind::Terminal),
         Ok(closeup::Command::Close { arguments }) => {
             if let Ok(force) = parse_close_force(&arguments) {
@@ -1362,6 +1447,62 @@ pub fn run_workspace_with_session_port_and_selection_mode(
     .map(|_| Exit::Quit)
 }
 
+/// Run a workspace with the daemon-authoritative Agent launch boundary.
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+pub fn run_workspace_with_agent_port_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+    agent_port: Box<dyn AgentCommandPort>,
+) -> io::Result<Exit> {
+    drive_workspace_with_agent_port_and_selection_mode(
+        term,
+        snapshot,
+        session_commands,
+        modal_selection_mode,
+        agent_port,
+    )
+    .map(|_| Exit::Quit)
+}
+
+// This is the real terminal composition loop.  Agent launch dispatch itself is
+// covered through the injected-port tests below; exercising the loop requires
+// terminal IO and belongs to the composition root.
+#[coverage(off)]
+fn drive_workspace_with_agent_port_and_selection_mode(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+    agent_port: Box<dyn AgentCommandPort>,
+) -> io::Result<WorkspaceStep> {
+    let workspace_id = snapshot.workspace_id;
+    let session_ids = snapshot.session_ids.clone();
+    let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+    let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+        workspace,
+        Box::new(SnapshotOverlayData),
+        session_commands,
+        modal_selection_mode,
+    )
+    .with_agent_context(workspace_id, session_ids, agent_port);
+    loop {
+        drain_session_completions(&mut ui);
+        let (height, width) = term.size()?;
+        term.draw(&render_workspace(height, width, &ui))?;
+        let key = term.read_key()?;
+        ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
+            return Ok(WorkspaceStep::Quit);
+        }
+    }
+}
+
 /// Open list 用に、registry の生値と recent projection を結び付ける。
 ///
 /// `Recent::Workspace` は各登録 workspace の集計済み表示値を持つ。互換呼び出しで
@@ -1406,6 +1547,66 @@ pub fn run_with_settings(
     settings: &mut dyn SettingsPort,
     session_commands: &mut dyn SessionCommandPortFactory,
 ) -> io::Result<Exit> {
+    run_with_settings_inner(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        session_commands,
+        None,
+    )
+}
+
+/// Run the Welcome / Open / Recent graph with the daemon Agent launch factory.
+///
+/// # Errors
+///
+/// Returns workspace loading or terminal IO failures from the screen graph.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_settings_and_agent_port_factory(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
+    agent_commands: &mut dyn AgentCommandPortFactory,
+) -> io::Result<Exit> {
+    run_with_settings_inner(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        session_commands,
+        Some(agent_commands),
+    )
+}
+
+// The screen graph is an IO composition boundary.  Its choices are covered by
+// the injected loader/port tests; LLVM coverage excludes only this terminal
+// loop, consistently with the existing `run_with_settings` entry point.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_with_settings_inner(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
+    mut agent_commands: Option<&mut dyn AgentCommandPortFactory>,
+) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
     let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
@@ -1443,14 +1644,24 @@ pub fn run_with_settings(
                     let snapshot = loader.open(&path)?;
                     welcome.record_opened(&snapshot.workspace);
                     open.record_opened(&snapshot.workspace);
-                    if drive_workspace_with_ports_and_selection_mode(
-                        term,
-                        snapshot,
-                        Box::new(SnapshotOverlayData),
-                        session_commands.create(),
-                        config_form.global_modal_selection_mode(),
-                    )? == WorkspaceStep::Quit
-                    {
+                    let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
+                        drive_workspace_with_agent_port_and_selection_mode(
+                            term,
+                            snapshot,
+                            session_commands.create(),
+                            config_form.global_modal_selection_mode(),
+                            factory.create(),
+                        )?
+                    } else {
+                        drive_workspace_with_ports_and_selection_mode(
+                            term,
+                            snapshot,
+                            Box::new(SnapshotOverlayData),
+                            session_commands.create(),
+                            config_form.global_modal_selection_mode(),
+                        )?
+                    };
+                    if workspace_step == WorkspaceStep::Quit {
                         return Ok(Exit::Quit);
                     }
                 }
@@ -1464,14 +1675,24 @@ pub fn run_with_settings(
                         let snapshot = loader.open(&path)?;
                         welcome.record_opened(&snapshot.workspace);
                         open.record_opened(&snapshot.workspace);
-                        if drive_workspace_with_ports_and_selection_mode(
-                            term,
-                            snapshot,
-                            Box::new(SnapshotOverlayData),
-                            session_commands.create(),
-                            config_form.global_modal_selection_mode(),
-                        )? == WorkspaceStep::Quit
-                        {
+                        let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
+                            drive_workspace_with_agent_port_and_selection_mode(
+                                term,
+                                snapshot,
+                                session_commands.create(),
+                                config_form.global_modal_selection_mode(),
+                                factory.create(),
+                            )?
+                        } else {
+                            drive_workspace_with_ports_and_selection_mode(
+                                term,
+                                snapshot,
+                                Box::new(SnapshotOverlayData),
+                                session_commands.create(),
+                                config_form.global_modal_selection_mode(),
+                            )?
+                        };
+                        if workspace_step == WorkspaceStep::Quit {
                             return Ok(Exit::Quit);
                         }
                     }

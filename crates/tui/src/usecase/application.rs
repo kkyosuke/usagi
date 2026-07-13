@@ -8,6 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use usagi_core::domain::id::{SessionId, WorkspaceId};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::domain::workspace_state::WorkspaceState;
 
@@ -37,13 +38,42 @@ pub struct WorkspaceSnapshot {
     pub workspace: Workspace,
     /// workspace 配下のセッション状態。
     pub state: WorkspaceState,
+    /// Daemon-authoritative identity used by the Home controller.  The display
+    /// [`Workspace`] remains a registry projection and is never used as an IPC
+    /// target.
+    pub workspace_id: WorkspaceId,
+    /// Session identities in the same order as the display state projection.
+    pub session_ids: Vec<SessionId>,
 }
 
 impl WorkspaceSnapshot {
     /// workspace と state を組にする。
     #[must_use]
     pub fn new(workspace: Workspace, state: WorkspaceState) -> Self {
-        Self { workspace, state }
+        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
+        Self {
+            workspace,
+            state,
+            workspace_id: WorkspaceId::new(),
+            session_ids,
+        }
+    }
+
+    /// Build a snapshot whose identities came from the daemon lifecycle
+    /// snapshot.  No name/path-to-ID inference is performed by the TUI.
+    #[must_use]
+    pub fn with_runtime_ids(
+        workspace: Workspace,
+        state: WorkspaceState,
+        workspace_id: WorkspaceId,
+        session_ids: Vec<SessionId>,
+    ) -> Self {
+        Self {
+            workspace,
+            state,
+            workspace_id,
+            session_ids,
+        }
     }
 }
 

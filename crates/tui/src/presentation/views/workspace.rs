@@ -576,7 +576,7 @@ impl Workspace {
     /// The pane reducer keeps the durable operation identity until the runtime
     /// replaces it with its fenced terminal reference.
     #[coverage(off)]
-    pub fn open_pane(&mut self, kind: PaneKind) {
+    pub fn open_pane(&mut self, kind: PaneKind) -> usagi_core::domain::id::OperationId {
         let operation = usagi_core::domain::id::OperationId::new();
         let target = self.pane_target();
         let pane = self.pane_mut();
@@ -592,6 +592,29 @@ impl Workspace {
             pane,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
+        operation
+    }
+
+    /// Apply a daemon-owned terminal completion to the currently selected pane.
+    #[coverage(off)]
+    pub fn complete_pane(
+        &mut self,
+        operation: usagi_core::domain::id::OperationId,
+        terminal: usagi_core::domain::id::TerminalRef,
+    ) {
+        let _ = pane::reduce(
+            self.pane_mut(),
+            PaneEvent::Succeeded {
+                operation,
+                terminal,
+            },
+        );
+    }
+
+    /// Remove a pending pane after a presentation-safe daemon error.
+    #[coverage(off)]
+    pub fn fail_pane(&mut self, operation: usagi_core::domain::id::OperationId, message: String) {
+        let _ = pane::reduce(self.pane_mut(), PaneEvent::Failed { operation, message });
     }
 
     /// Close the selected right-pane tab without affecting daemon ownership.

@@ -12,6 +12,7 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, queue};
 use usagi_core::domain::AppInfo;
+use usagi_core::domain::id::WorkspaceId;
 use usagi_core::domain::note::Scratchpad;
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -21,7 +22,7 @@ use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
-    ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -31,8 +32,8 @@ use usagi_tui::presentation::views::config::{self, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
-    self, BannerScreenRunner, Exit, SessionCommandPort, SessionCommandPortFactory,
-    SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
+    self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, SessionCommandPort,
+    SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -48,7 +49,55 @@ struct DaemonSessionCommandPort {
     last_revision: u64,
 }
 
+/// Root composition adapter for the only Agent launch authority: the daemon.
+struct DaemonAgentCommandPort;
+
+struct DaemonAgentCommandPortFactory;
+
+impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
+    #[coverage(off)]
+    fn create(&mut self) -> Box<dyn AgentCommandPort> {
+        Box::new(DaemonAgentCommandPort)
+    }
+}
+
+impl AgentCommandPort for DaemonAgentCommandPort {
+    #[coverage(off)]
+    fn launch(
+        &mut self,
+        workspace: WorkspaceId,
+        session: usagi_core::domain::id::SessionId,
+        profile: Option<usagi_core::domain::agent::AgentProfileId>,
+    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+        let mut client =
+            crate::runtime::daemon::client(usagi_core::usecase::client::ClientPolicy::tui())
+                .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let operation_id = usagi_core::domain::id::OperationId::new().to_string();
+        match client
+            .request(DaemonRequest::Agent {
+                operation_id,
+                intent: AgentLaunchIntent {
+                    workspace,
+                    session,
+                    profile,
+                },
+            })
+            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
+        {
+            DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body
+                .get("terminal")
+                .cloned()
+                .ok_or_else(|| "agent launch was not accepted".to_owned())
+                .and_then(|terminal| {
+                    serde_json::from_value(terminal)
+                        .map_err(|_| "agent launch returned an invalid terminal".to_owned())
+                }),
+        }
+    }
+}
+
 struct LifecycleSnapshot {
+    workspace_id: WorkspaceId,
     revision: u64,
     sessions: Vec<ManagedSession>,
 }
@@ -86,6 +135,14 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
         .get("revision")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
+    let workspace_id = object
+        .get("workspace_id")
+        .cloned()
+        .ok_or_else(|| "daemon session snapshot has no workspace ID".to_owned())
+        .and_then(|id| {
+            serde_json::from_value(id)
+                .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
+        })?;
     let sessions = object
         .get("sessions")
         .cloned()
@@ -94,7 +151,11 @@ fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, St
             serde_json::from_value(sessions)
                 .map_err(|error| format!("invalid daemon session snapshot: {error}"))
         })?;
-    Ok(LifecycleSnapshot { revision, sessions })
+    Ok(LifecycleSnapshot {
+        workspace_id,
+        revision,
+        sessions,
+    })
 }
 
 impl SessionCommandPort for DaemonSessionCommandPort {
@@ -391,8 +452,19 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .unwrap_or_default()
             .unwrap_or_default();
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
+        let workspace_id = lifecycle.workspace_id;
+        let session_ids = lifecycle
+            .sessions
+            .iter()
+            .map(|session| session.session_id)
+            .collect();
         state.sessions = lifecycle.project(&workspace);
-        Ok(WorkspaceSnapshot::new(workspace, state))
+        Ok(WorkspaceSnapshot::with_runtime_ids(
+            workspace,
+            state,
+            workspace_id,
+            session_ids,
+        ))
     }
 
     #[coverage(off)]
@@ -503,12 +575,13 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut loader = FsWorkspaceLoader { storage };
         let mut settings = PersistentSettingsPort::open()?;
         let mut session_commands = DaemonSessionCommandPortFactory;
+        let mut agent_commands = DaemonAgentCommandPortFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 if start == Start::Welcome {
                     presentation::play_startup_splash(terminal)?;
                 }
-                presentation::run_with_settings(
+                presentation::run_with_settings_and_agent_port_factory(
                     terminal,
                     workspaces,
                     recent,
@@ -517,6 +590,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                     &mut loader,
                     &mut settings,
                     &mut session_commands,
+                    &mut agent_commands,
                 )
             })
         })?;
@@ -552,11 +626,12 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
         let modal_selection_mode = settings.read(SettingsScope::Global)?.modal_selection_mode;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
-                presentation::run_workspace_with_session_port_and_selection_mode(
+                presentation::run_workspace_with_agent_port_and_selection_mode(
                     terminal,
                     snapshot,
                     Box::new(DaemonSessionCommandPort::default()),
                     modal_selection_mode,
+                    Box::new(DaemonAgentCommandPort),
                 )
             })
         })?;
