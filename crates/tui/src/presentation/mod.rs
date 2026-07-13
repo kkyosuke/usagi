@@ -956,9 +956,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
-        if key == Key::Other && ui.workspace.pending_session().is_some() {
-            ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
-        }
+        ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
         match step_workspace(&mut ui, key) {
             WorkspaceStep::Stay => {}
             WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),

@@ -676,7 +676,7 @@ fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
     } else {
         "░"
     });
-    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}",), width)
+    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。

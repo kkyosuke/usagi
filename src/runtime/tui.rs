@@ -246,44 +246,39 @@ impl Terminal for CrosstermTerminal {
 
     #[coverage(off)]
     fn read_key(&mut self) -> std::io::Result<Key> {
-        loop {
-            match self.input.next(self.input_started.elapsed())? {
-                RuntimeEvent::Input(LiveInput::Key(key)) => {
-                    if key.modifiers.control && key.code == KeyCode::Char('c') {
-                        return Ok(Key::Quit);
-                    }
-                    if !matches!(
-                        key.kind,
-                        usagi_tui::usecase::terminal_input::KeyEventKind::Press
-                    ) {
-                        return Ok(Key::Other);
-                    }
-                    return Ok(match key.code {
-                        KeyCode::Up => Key::Up,
-                        KeyCode::Down => Key::Down,
-                        KeyCode::Left => Key::Left,
-                        KeyCode::Right => Key::Right,
-                        KeyCode::Enter => Key::Enter,
-                        KeyCode::Tab => Key::Tab,
-                        KeyCode::Backspace => Key::Backspace,
-                        KeyCode::Escape => Key::Escape,
-                        KeyCode::Char(ch) => Key::Char(ch),
-                        _ => Key::Other,
-                    });
+        match self.input.next(self.input_started.elapsed())? {
+            RuntimeEvent::Input(LiveInput::Key(key)) => {
+                if key.modifiers.control && key.code == KeyCode::Char('c') {
+                    return Ok(Key::Quit);
                 }
-                RuntimeEvent::Resize { .. } => {
-                    self.renderer.reset_surface();
+                if !matches!(
+                    key.kind,
+                    usagi_tui::usecase::terminal_input::KeyEventKind::Press
+                ) {
                     return Ok(Key::Other);
                 }
-                RuntimeEvent::Input(
-                    LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_),
-                )
-                | RuntimeEvent::Backend(()) => return Ok(Key::Other),
-                // Keep the presentation loop alive while a background session
-                // lifecycle command owns the daemon port. `Other` is a safe
-                // redraw-only key for all screens and advances its skeleton.
-                RuntimeEvent::Tick => return Ok(Key::Other),
+                Ok(match key.code {
+                    KeyCode::Up => Key::Up,
+                    KeyCode::Down => Key::Down,
+                    KeyCode::Left => Key::Left,
+                    KeyCode::Right => Key::Right,
+                    KeyCode::Enter => Key::Enter,
+                    KeyCode::Tab => Key::Tab,
+                    KeyCode::Backspace => Key::Backspace,
+                    KeyCode::Escape => Key::Escape,
+                    KeyCode::Char(ch) => Key::Char(ch),
+                    _ => Key::Other,
+                })
             }
+            RuntimeEvent::Resize { .. } => {
+                self.renderer.reset_surface();
+                Ok(Key::Other)
+            }
+            // Tick wakes the TUI while a background session command owns the
+            // daemon port, so the pending skeleton can redraw.
+            RuntimeEvent::Input(LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Raw(_))
+            | RuntimeEvent::Backend(())
+            | RuntimeEvent::Tick => Ok(Key::Other),
         }
     }
 }
