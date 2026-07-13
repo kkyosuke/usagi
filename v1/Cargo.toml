@@ -5,6 +5,12 @@ edition = "2021"
 repository = "https://github.com/KKyosuke/usagi"
 license = "MIT"
 
+# v1 is shipped and tested as an independent application even though its source
+# lives below the v2 workspace. Declaring its own workspace keeps `cargo run`
+# usable from a session worktree, where Cargo would otherwise discover the
+# parent repository workspace and reject this manifest as an unlisted member.
+[workspace]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

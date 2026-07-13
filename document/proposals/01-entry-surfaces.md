@@ -34,7 +34,7 @@ v2 の**実行面**は TUI / daemon の 2 つ（[02-architecture.md](../02-archi
 ## 背景
 
 v1 では MCP はすでに「委譲＝ファイル queue に書く／実行＝TUI が拾う」で実行側と分離されていた
-（[v1/document/proposals/02-daemon.md](../../v1/document/proposals/02-daemon.md#現状のプロセス境界)）。
+（[v1/document/04-orchestration.md](../../v1/document/04-orchestration.md)）。
 v2 はその「実行」側を daemon に移すことが決定済みで、TUI は attach クライアントになる。
 このとき未確定なのは次の 2 点である。
 
@@ -149,7 +149,7 @@ TUI から起動した agent（daemon 所有 PTY 内で動作）が MCP tool で
 
 | 観点 | 問題 |
 |---|---|
-| TUI 非依存 | TUI を実行経路に含めると「TUI が開いている間しか反映されない」という v1 の弱点が戻り、daemon 化の目的（[v1/document/proposals/02-daemon.md](../../v1/document/proposals/02-daemon.md#要旨)）に反する |
+| TUI 非依存 | TUI を実行経路に含めると「TUI が開いている間しか反映されない」という v1 の実行モデルへ戻る。 |
 | インターフェース | MCP が CLI を子プロセスとして呼ぶと、型付きの usecase 呼び出しが argv / stdout の文字列越しになり、エラー伝播・テスト・スキーマ整合が劣化する。両者は同じ usecase を呼ぶ兄弟にする |
 | 書き手の一本化 | CLI / MCP が `state.json` を直接書くと daemon と書き手が並立し、v1 のファイルロック・watcher 競合が復活する |
 

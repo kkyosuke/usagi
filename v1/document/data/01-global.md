@@ -18,7 +18,6 @@
 - [`pr-links/`](#pr-links)
 - [`open-panes/`（ペイン復旧スナップショット）](#open-panesペイン復旧スナップショット)
 - [`resume-closeup/`（復帰フォーカススナップショット）](#resume-closeup復帰フォーカススナップショット)
-- [`daemon/`（常駐 daemon の状態）](#daemon常駐-daemon-の状態)
 - [`unite-set.json`（直近の統合セット）](#unite-setjson直近の統合セット)
 - [`skills/`（Agent へ配布するスキル）](#skillsagent-へ配布するスキル)
 - [`logs/`（エラーログ）](#logsエラーログ)
@@ -37,13 +36,12 @@
 ├── settings.json     # アプリ設定
 ├── agent-state/      # 起動中 Agent の ready/running/waiting/ended/exited phase（worktree 別の一時キャッシュ）
 ├── agent-prompts/    # session_prompt がキューした、次回起動時に Agent へ渡すプロンプト（worktree 別）
-├── agent-start-requests/ # daemon/TUI が claim する Agent 起動トランザクション（worktree 別）
+├── agent-start-requests/ # TUI が claim する Agent 起動トランザクション（worktree 別）
 ├── agent-live-prompts/ # session_prompt(live) がキューした、起動中 Agent pane へ送るプロンプト（worktree 別）
 ├── agent-live-panes/ # 起動中 TUI が発行する live agent pane 在のマーカー（session_prompt の auto/live 判定用。worktree 別）
 ├── pr-links/         # セッションのターミナル出力から拾った PR の URL（サイドバーの #N バッジの元。worktree 別）
 ├── open-panes/       # 各セッションの開いていたペイン構成（次回起動時に復旧する。worktree 別）
 ├── resume-closeup/     # 終了時にいたセッションとエンゲージメント段階（次回起動時に復帰する。ワークスペース別）
-├── daemon/           # 常駐 daemon の記録（daemon.json・stop・sock・sessions.json・terminals.json・serve.log）
 ├── unite-set.json    # 直近に統合(unite)モードでまとめて開いたワークスペースの集合（Open 画面が次回プリチェックする）
 ├── skills/           # usagi がバイナリに同梱し Agent へ配布するスキル（起動時に展開。セッション worktree から symlink）
 └── logs/             # 日次のエラーログ（error-YYYY-MM-DD.log）と操作トレース（trace-YYYY-MM-DD.jsonl）
@@ -264,13 +262,11 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 
 - ファイル名は worktree の正規化パスのハッシュ（16 桁 hex）。内容にも worktree パスを持ち、ハッシュ衝突や
   別マシン由来の古いファイルは読み捨てます（`agent-state/` と同じ方式）。
-- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null, "label": "任意名" | null, "terminal": <id> | null }, … ] }`。
+- `{ "worktree": "<path>", "active": <usize>, "panes": [ { "kind": "agent" | "terminal", "cli": "claude" | null, "label": "任意名" | null }, … ] }`。
   `panes` はタブ順、`active` は最後にアクティブだったタブの添字。`cli` は agent ペインのみ値を持ち（どの Agent CLI で
   復旧するか）、terminal ペインは `null`。`label` はタブメニューの名前変更で設定した表示名で、`null` なら `agent` /
-  `terminal 2` などの自動ラベルを使います。`terminal` はそのペインを支えていた daemon 所有端末の id で、復旧は
-  まずこの id へ再 attach し（走り続けている端末を画面ごと引き継ぐ）、daemon が `Missing` を明示したときだけ
-  再 spawn します。`Adopted` / transport error は元 process が生存し得るため fresh spawn しません（TUI ローカル PTY のペインは `null`）。永続的な状態ではないため `version` は持ちません。
-- 書き込みはペインを開閉して制御が戻るたびに加え、復旧・queued prompt autostart が background で pane を追加した直後にも行います。これにより人が一度も attach せず TUI を閉じても、新しい daemon terminal id を次回起動で再発見できます。ペインが 1 つも無くなると消去され、`session remove` でも
+  `terminal 2` などの自動ラベルを使います。永続的な状態ではないため `version` は持ちません。
+- 書き込みはペインを開閉して制御が戻るたびに加え、復旧・queued prompt autostart が background で pane を追加した直後にも行います。ペインが 1 つも無くなると消去され、`session remove` でも
   当該 worktree 分が消えます。`infrastructure/open_panes_store.rs` が save/load/clear を担います。
 
 ## `resume-closeup/`（復帰フォーカススナップショット）
@@ -289,60 +285,6 @@ usagi は GitHub に問い合わせず、ターミナル出力から `/pull/<N>`
 - 書き込みは終了が確定した時（quit 確認モーダルの承認 / 即時 Ctrl-C / `:quit`）。`restore_panes_enabled` が
   OFF のときは書き込まれません。起動時に読み出してカーソル移動（選択）/ 集中 / 自動 attach（没入）を復元し、
   `session` が既に消えている場合は何も復元しません。`infrastructure/resume_closeup_store.rs` が save/load を担います。
-
-## `daemon/`（常駐 daemon の状態）
-
-常駐 daemon の制御プレーン、IPC、監視スナップショット、daemon 所有端末の復旧情報を保持します。daemon の移行設計は
-[../proposals/02-daemon.md](../proposals/02-daemon.md) を参照してください。
-
-| パス | 形式 | 意味 |
-|---|---|---|
-| `daemon/daemon.json` | versioned JSON | 起動中 daemon の pid。`usagi daemon status` / `stop` が生存確認に使う |
-| `daemon/stop` | 空ファイル | `usagi daemon stop` が置く停止要求。daemon が次の制御 tick で消費する |
-| `daemon/sock` | Unix domain socket | TUI attach クライアントが接続する IPC ソケット。Unix では owner 限定 `0600` |
-| `daemon/sessions.json` | versioned JSON | daemon が監視している session activity の最新スナップショット |
-| `daemon/terminals.json` | versioned JSON | daemon 所有端末の terminal id / worktree / pid。異常終了後の orphan adopt と stop 時回収に使う |
-| `daemon/serve.log` | text | detached daemon の標準出力・標準エラー |
-
-`daemon/sessions.json` は `usagi daemon status` と IPC `Sessions` push の元になる再生成可能な view です。
-
-```jsonc
-{
-  "version": 1,
-  "sessions": [
-    {
-      "workspace": "/repo",
-      "name": "issue-168",
-      "worktree": "/repo/.usagi/sessions/issue-168",
-      "activity": "waiting" // ready | running | waiting | done | null
-    }
-  ]
-}
-```
-
-`worktree` は通知調停で「その session を attach 中の TUI が見ているか」を判定するための代表 worktree です。古い
-ファイルで省略されている場合は `null` として扱います。
-
-`daemon/terminals.json` は daemon が spawn した端末を保存する復旧用 registry です。
-
-```jsonc
-{
-  "version": 1,
-  "terminals": [
-    {
-      "terminal": 1,
-      "worktree": "/repo/.usagi/sessions/issue-168",
-      "pid": 12345,
-      "adopted": false
-    }
-  ]
-}
-```
-
-daemon が異常終了すると PTY の master fd は復元できないため、再起動後に `adopted: true` として復元した端末は画面
-stream へ再 attach できません。ただし pid と process group は回収対象として保持され、明示的な `daemon stop` や
-`Kill` で終了できます。通常の daemon 稼働中に spawn された端末は `adopted: false` で、attach / input / resize /
-screen streaming の対象です。
 
 ## `unite-set.json`（直近の統合セット）
 

@@ -26,18 +26,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 
-use crate::domain::daemon_ipc::OutputBacklog;
 use crate::infrastructure::error_log::ErrorLog;
 use crate::infrastructure::{pty_exit, terminal};
-
-/// A daemon-terminal viewport snapshot paired with the bookkeeping needed to
-/// resume raw deltas or keep a scrolled-back client pinned.
-pub struct ScreenSnapshot {
-    pub contents: Vec<u8>,
-    pub backlog_offset: u64,
-    pub scrollback: usize,
-    pub primary_high_water: u64,
-}
 
 /// Side-channel signals the parser pulls out of the shell's output stream as it
 /// processes it — sequences `vt100` does not fold into the screen grid but the
@@ -61,10 +51,8 @@ pub struct ScreenCallbacks {
     cursor_shape: Arc<AtomicU16>,
 }
 
+#[cfg(test)]
 impl ScreenCallbacks {
-    /// Wire the callbacks to the shared counters their readers poll. Also used
-    /// by the daemon attach client, whose bounded local parser replays the live
-    /// viewport stream.
     pub(crate) fn new(count: Arc<AtomicU64>, cursor_shape: Arc<AtomicU16>) -> Self {
         Self {
             count,
@@ -160,11 +148,6 @@ pub struct PtySession {
     /// pane's shape cheaply. `0` until the program picks one (the terminal
     /// default). See [`ScreenCallbacks`].
     cursor_shape: Arc<AtomicU16>,
-    /// The raw output bytes teed off by the reader thread for the daemon's IPC
-    /// screen streaming, when this session was spawned with
-    /// [`spawn_streamed`](Self::spawn_streamed). `None` for a TUI-local pane,
-    /// which reads the parser directly and needs no byte-level replay.
-    output_backlog: Option<Arc<Mutex<OutputBacklog>>>,
     child: Box<dyn Child + Send + Sync>,
     exit_status: Option<ExitStatus>,
     /// The worktree this shell runs in and whether it was launched into an agent
@@ -241,32 +224,7 @@ impl PtySession {
         scrollback: usize,
         env: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        Self::spawn_inner(dir, rows, cols, command, scrollback, env, None)
-    }
-
-    /// [`spawn`](Self::spawn), additionally teeing the raw output bytes into an
-    /// [`OutputBacklog`] capped at `backlog_bytes`. The daemon spawns its
-    /// terminals this way: the backlog is what lets it stream exact output
-    /// deltas to attach clients (see [`screen_snapshot`](Self::screen_snapshot)
-    /// and [`output_backlog`](Self::output_backlog)).
-    pub fn spawn_streamed(
-        dir: &Path,
-        rows: u16,
-        cols: u16,
-        command: Option<&str>,
-        scrollback: usize,
-        env: &BTreeMap<String, String>,
-        backlog_bytes: usize,
-    ) -> Result<Self> {
-        Self::spawn_inner(
-            dir,
-            rows,
-            cols,
-            command,
-            scrollback,
-            env,
-            Some(backlog_bytes),
-        )
+        Self::spawn_inner(dir, rows, cols, command, scrollback, env)
     }
 
     fn spawn_inner(
@@ -276,7 +234,6 @@ impl PtySession {
         command: Option<&str>,
         scrollback: usize,
         env: &BTreeMap<String, String>,
-        backlog_bytes: Option<usize>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -328,8 +285,6 @@ impl PtySession {
         )));
         let alive = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(0));
-        let output_backlog =
-            backlog_bytes.map(|capacity| Arc::new(Mutex::new(OutputBacklog::new(capacity))));
 
         let reader_thread = {
             // A *weak* handle, so this thread never keeps the parser (a large
@@ -341,9 +296,6 @@ impl PtySession {
             // as long as the orphaned thread stays blocked (a memory leak that
             // grew with every closed session).
             let parser = Arc::downgrade(&parser);
-            // Weak for the same reason as the parser: the tee must not keep the
-            // backlog alive past the session.
-            let backlog = output_backlog.as_ref().map(Arc::downgrade);
             let alive = Arc::clone(&alive);
             let generation = Arc::clone(&generation);
             std::thread::Builder::new()
@@ -387,19 +339,6 @@ impl PtySession {
                                 Some(parser) => {
                                     if let Ok(mut parser) = parser.lock() {
                                         parser.process(&buf[..n]);
-                                        // Tee the raw bytes for IPC streaming while
-                                        // still holding the parser lock, so a screen
-                                        // snapshot paired with a backlog offset (see
-                                        // `screen_snapshot`) can never observe the
-                                        // parse without the append or vice versa —
-                                        // which would replay or lose a chunk.
-                                        if let Some(backlog) =
-                                            backlog.as_ref().and_then(std::sync::Weak::upgrade)
-                                        {
-                                            if let Ok(mut backlog) = backlog.lock() {
-                                                backlog.append(&buf[..n]);
-                                            }
-                                        }
                                     }
                                     // Announce the new output so a waiting render
                                     // loop redraws it without waiting out its idle
@@ -425,7 +364,6 @@ impl PtySession {
             generation,
             bell,
             cursor_shape,
-            output_backlog,
             child,
             exit_status: None,
             // A launch command means this pane runs an agent CLI; its absence a
@@ -570,57 +508,6 @@ impl PtySession {
         self.parser().screen().scrollback()
     }
 
-    /// The output backlog this session tees its raw bytes into, when it was
-    /// spawned with [`spawn_streamed`](Self::spawn_streamed). The daemon's IPC
-    /// loop reads it to plan per-client output deltas.
-    pub fn output_backlog(&self) -> Option<Arc<Mutex<OutputBacklog>>> {
-        self.output_backlog.as_ref().map(Arc::clone)
-    }
-
-    /// The full screen as replayable bytes (contents plus input modes), paired
-    /// with the output-backlog offset it corresponds to. An attach client that
-    /// replays these bytes and then folds in every backlog byte from the
-    /// returned offset reproduces this screen exactly — both are read under the
-    /// parser lock (the same lock the reader tees under), so the pair is
-    /// consistent even while output is streaming in. The offset is `0` for a
-    /// session spawned without a backlog.
-    pub fn screen_snapshot(&self) -> ScreenSnapshot {
-        self.screen_snapshot_at(0)
-    }
-
-    /// Build a replayable viewport snapshot `scrollback` lines into the
-    /// daemon-owned history, clamped by vt100. The parser's own viewport is
-    /// restored before returning so one client's scroll position never becomes
-    /// global daemon state.
-    pub fn screen_snapshot_at(&self, scrollback: usize) -> ScreenSnapshot {
-        let mut parser = self.parser();
-        let previous = parser.screen().scrollback();
-        parser.screen_mut().set_scrollback(scrollback);
-        let actual_scrollback = parser.screen().scrollback();
-        let contents = parser.screen().state_formatted();
-        let primary_high_water = parser.screen().scrollback_high_water().primary();
-        if previous != actual_scrollback {
-            parser.screen_mut().set_scrollback(previous);
-        }
-        let backlog_offset = self
-            .output_backlog
-            .as_ref()
-            .and_then(|backlog| backlog.lock().ok().map(|backlog| backlog.end()))
-            .unwrap_or(0);
-        ScreenSnapshot {
-            contents,
-            backlog_offset,
-            scrollback: actual_scrollback,
-            primary_high_water,
-        }
-    }
-
-    /// The primary-screen scrollback high-water mark. The daemon uses this to
-    /// keep attached clients' historical viewports pinned while output streams.
-    pub fn primary_scrollback_high_water(&self) -> u64 {
-        self.parser().screen().scrollback_high_water().primary()
-    }
-
     /// Whether the shell is still running (the reader has not hit EOF).
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
@@ -631,8 +518,7 @@ impl PtySession {
     /// The reader thread normally clears [`alive`](Self::alive) when it observes
     /// EOF from the PTY, but EOF is not the only reliable child-death signal: a
     /// shell can be reaped before the reader gets scheduled to observe the
-    /// closed slave side. Daemon-owned terminals need a timely `Exited` event for
-    /// attached clients, so they call this in their poll loop.
+    /// closed slave side.
     pub fn poll_exit(&mut self) -> bool {
         if !self.is_alive() {
             return true;

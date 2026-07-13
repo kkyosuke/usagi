@@ -19,7 +19,7 @@ issue の委譲から PR の作成・マージまでのループを回す。
 
 v2 は usagi のフルリライトである。v1 で決定した「PTY 所有を daemon に移し、TUI は
 daemon が所有する端末に attach するクライアントになる」設計
-（[v1/document/proposals/02-daemon.md](../v1/document/proposals/02-daemon.md)）を
+（[v1/document/proposals/02-daemon.md](../v1/document/04-orchestration.md)）を
 最初から前提にした構造で作り直す。コードの構成は
 [2. アーキテクチャ](02-architecture.md) を正本とする。
 

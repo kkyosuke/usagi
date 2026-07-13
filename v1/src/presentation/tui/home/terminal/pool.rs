@@ -39,20 +39,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use anyhow::Context;
 use anyhow::Result;
 use console::Term;
 
 use crate::domain::resource::{aggregate_by_root, ResourceUsage};
 use crate::domain::settings::{AgentCli, Sidebar};
 use crate::domain::workspace_state::PrLink;
-#[cfg(unix)]
-use crate::infrastructure::daemon_client::{
-    DaemonBuildHandshakeError, DaemonInputHandle, DaemonTerminal, DaemonTerminalMissingError,
-};
-#[cfg(unix)]
-use crate::infrastructure::daemon_store;
 use crate::infrastructure::open_panes_store::{StoredPane, StoredPaneKind};
 use crate::infrastructure::pty::{PtyInputHandle, PtySession, ScreenCallbacks};
 use crate::infrastructure::resource::{ResourceSampler, SysinfoSampler};
@@ -60,11 +52,6 @@ use crate::infrastructure::session_monitor::SessionMonitor;
 use crate::infrastructure::{
     agent_live_pane_store, agent_live_prompt_store, agent_prompt_store, agent_state_store,
     error_log, session_monitor,
-};
-use crate::usecase::daemon_attach::DaemonFailureFallback;
-#[cfg(unix)]
-use crate::usecase::daemon_attach::{
-    should_fallback_to_local, DaemonFailureKind, DaemonWorktreeOwnership,
 };
 
 use super::super::pane_input;
@@ -74,97 +61,6 @@ use super::view::TerminalView;
 
 /// How often the watcher thread samples every session's bell count.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-/// A freshly spawned pane rejected its opening prompt and could not confirm
-/// teardown. The daemon terminal may still be alive, so unattended retry must
-/// stop instead of creating another agent in the same worktree.
-#[derive(Debug)]
-pub(crate) struct UnconfirmedPaneCleanup {
-    detail: String,
-}
-
-impl UnconfirmedPaneCleanup {
-    fn after(error: &anyhow::Error) -> Self {
-        Self {
-            detail: format!(
-                "opening prompt failed ({error:#}) and pane teardown was not acknowledged"
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for UnconfirmedPaneCleanup {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.detail)
-    }
-}
-
-impl std::error::Error for UnconfirmedPaneCleanup {}
-
-/// A persisted daemon terminal could not be proven absent. It may still own a
-/// live process (for example after daemon adoption or a transient IPC failure),
-/// so unattended prompt launches for this worktree must pause.
-#[derive(Debug)]
-pub(crate) struct UnverifiedDaemonOwnership {
-    detail: String,
-}
-
-impl UnverifiedDaemonOwnership {
-    fn after(terminal: u64, dir: &Path, error: &anyhow::Error) -> Self {
-        Self {
-            detail: format!(
-                "cannot verify ownership of daemon terminal {terminal} for {}: {error:#}",
-                dir.display()
-            ),
-        }
-    }
-
-    fn for_worktree(dir: &Path, detail: impl std::fmt::Display) -> Self {
-        Self {
-            detail: format!(
-                "cannot safely spawn another daemon terminal for {}: {detail}",
-                dir.display()
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for UnverifiedDaemonOwnership {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.detail)
-    }
-}
-
-impl std::error::Error for UnverifiedDaemonOwnership {}
-
-/// The durable registry currently contains another terminal for a worktree
-/// whose pool has no known pane. This is retryable: daemon startup may still be
-/// pruning a dead persisted pid. Rechecking under bounded backoff is safe because
-/// a genuinely live owner keeps the registry entry and eventually dead-letters
-/// the start instead of spawning a duplicate.
-#[derive(Debug)]
-pub(crate) struct DaemonRegistryOwnershipConflict {
-    detail: String,
-}
-
-impl DaemonRegistryOwnershipConflict {
-    fn for_worktree(dir: &Path) -> Self {
-        Self {
-            detail: format!(
-                "daemon registry does not yet prove {} is terminal-free",
-                dir.display()
-            ),
-        }
-    }
-}
-
-impl std::fmt::Display for DaemonRegistryOwnershipConflict {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.detail)
-    }
-}
-
-impl std::error::Error for DaemonRegistryOwnershipConflict {}
 
 /// A restored agent pane could not reattach and deliberately yielded its fresh
 /// fallback to a durable queued prompt. The queue dispatcher owns the next
@@ -955,9 +851,6 @@ fn apply_pr_results(
 pub enum PaneBackend {
     /// A TUI-owned PTY; dies with this process.
     Local(PtySession),
-    /// A daemon-owned terminal this TUI is attached to.
-    #[cfg(unix)]
-    Remote(DaemonTerminal),
     #[cfg(test)]
     Spy(TestPaneBackend),
 }
@@ -1005,8 +898,6 @@ impl PaneBackend {
     pub fn parser(&self) -> MutexGuard<'_, vt100::Parser<ScreenCallbacks>> {
         match self {
             PaneBackend::Local(pty) => pty.parser(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.parser(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => spy.parser.lock().unwrap_or_else(|p| p.into_inner()),
         }
@@ -1016,8 +907,6 @@ impl PaneBackend {
     pub fn bracketed_paste(&self) -> bool {
         match self {
             PaneBackend::Local(pty) => pty.bracketed_paste(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.bracketed_paste(),
             #[cfg(test)]
             PaneBackend::Spy(_) => false,
         }
@@ -1027,8 +916,6 @@ impl PaneBackend {
     fn bell_handle(&self) -> Arc<AtomicU64> {
         match self {
             PaneBackend::Local(pty) => pty.bell_handle(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.bell_handle(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => Arc::clone(&spy.bell),
         }
@@ -1038,8 +925,6 @@ impl PaneBackend {
     fn parser_handle(&self) -> Arc<Mutex<vt100::Parser<ScreenCallbacks>>> {
         match self {
             PaneBackend::Local(pty) => pty.parser_handle(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.parser_handle(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => Arc::clone(&spy.parser),
         }
@@ -1049,8 +934,6 @@ impl PaneBackend {
     fn generation_handle(&self) -> Arc<AtomicU64> {
         match self {
             PaneBackend::Local(pty) => pty.generation_handle(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.generation_handle(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => Arc::clone(&spy.generation),
         }
@@ -1060,8 +943,6 @@ impl PaneBackend {
     fn process_id(&self) -> Option<u32> {
         match self {
             PaneBackend::Local(pty) => pty.process_id(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.process_id(),
             #[cfg(test)]
             PaneBackend::Spy(_) => None,
         }
@@ -1071,8 +952,6 @@ impl PaneBackend {
     pub fn cursor_shape(&self) -> u16 {
         match self {
             PaneBackend::Local(pty) => pty.cursor_shape(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.cursor_shape(),
             #[cfg(test)]
             PaneBackend::Spy(_) => 0,
         }
@@ -1082,8 +961,6 @@ impl PaneBackend {
     fn alive_handle(&self) -> Arc<AtomicBool> {
         match self {
             PaneBackend::Local(pty) => pty.alive_handle(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.alive_handle(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => Arc::clone(&spy.alive),
         }
@@ -1093,8 +970,6 @@ impl PaneBackend {
     fn input_handle(&self) -> PaneInputHandle {
         match self {
             PaneBackend::Local(pty) => PaneInputHandle::Local(pty.input_handle()),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => PaneInputHandle::Remote(remote.input_handle()),
             #[cfg(test)]
             PaneBackend::Spy(_) => unreachable!("spy backend is not used for input"),
         }
@@ -1104,8 +979,6 @@ impl PaneBackend {
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         match self {
             PaneBackend::Local(pty) => pty.write(bytes),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.write(bytes),
             #[cfg(test)]
             PaneBackend::Spy(_) => Ok(()),
         }
@@ -1115,8 +988,6 @@ impl PaneBackend {
     pub fn resize(&mut self, rows: u16, cols: u16) {
         match self {
             PaneBackend::Local(pty) => pty.resize(rows, cols),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.resize(rows, cols),
             #[cfg(test)]
             PaneBackend::Spy(_) => {}
         }
@@ -1127,8 +998,6 @@ impl PaneBackend {
     pub fn set_scrollback(&mut self, offset: usize) -> usize {
         match self {
             PaneBackend::Local(pty) => pty.set_scrollback(offset),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.set_scrollback(offset),
             #[cfg(test)]
             PaneBackend::Spy(_) => offset,
         }
@@ -1138,8 +1007,6 @@ impl PaneBackend {
     pub fn scrollback(&self) -> usize {
         match self {
             PaneBackend::Local(pty) => pty.scrollback(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.scrollback(),
             #[cfg(test)]
             PaneBackend::Spy(_) => 0,
         }
@@ -1149,8 +1016,6 @@ impl PaneBackend {
     pub fn is_alive(&self) -> bool {
         match self {
             PaneBackend::Local(pty) => pty.is_alive(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.is_alive(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => spy.alive.load(Ordering::SeqCst),
         }
@@ -1160,8 +1025,6 @@ impl PaneBackend {
     pub fn generation(&self) -> u64 {
         match self {
             PaneBackend::Local(pty) => pty.generation(),
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.generation(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => spy.generation.load(Ordering::SeqCst),
         }
@@ -1173,34 +1036,17 @@ impl PaneBackend {
     fn kill(&mut self) -> bool {
         match self {
             PaneBackend::Local(_) => true,
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => remote.kill(),
             #[cfg(test)]
             PaneBackend::Spy(spy) => spy.kill(),
         }
     }
-
-    /// The daemon's id for this terminal (`None` for a local pane) — persisted
-    /// in the open-panes snapshot so the next TUI run re-attaches to the still
-    /// running terminal instead of respawning it.
-    fn terminal_id(&self) -> Option<u64> {
-        match self {
-            PaneBackend::Local(_) => None,
-            #[cfg(unix)]
-            PaneBackend::Remote(remote) => Some(remote.terminal_id()),
-            #[cfg(test)]
-            PaneBackend::Spy(_) => None,
-        }
-    }
 }
 
-/// Cloneable input handle over either backend, for the watcher's prompt
+/// Cloneable input handle for the watcher's prompt
 /// injection into a (possibly detached) agent pane.
 #[derive(Clone)]
 pub enum PaneInputHandle {
     Local(PtyInputHandle),
-    #[cfg(unix)]
-    Remote(DaemonInputHandle),
     #[cfg(test)]
     Spy(TestPaneInputHandle),
 }
@@ -1218,8 +1064,6 @@ impl PaneInputHandle {
     fn bracketed_paste(&self) -> bool {
         match self {
             PaneInputHandle::Local(handle) => handle.bracketed_paste(),
-            #[cfg(unix)]
-            PaneInputHandle::Remote(handle) => handle.bracketed_paste(),
             #[cfg(test)]
             PaneInputHandle::Spy(handle) => handle.bracketed_paste,
         }
@@ -1229,8 +1073,6 @@ impl PaneInputHandle {
     fn write(&self, bytes: &[u8]) -> Result<()> {
         match self {
             PaneInputHandle::Local(handle) => handle.write(bytes),
-            #[cfg(unix)]
-            PaneInputHandle::Remote(handle) => handle.write(bytes),
             #[cfg(test)]
             PaneInputHandle::Spy(handle) => {
                 if handle.fail {
@@ -1248,8 +1090,7 @@ impl PaneInputHandle {
     }
 }
 
-/// One embedded pane: its live backend (a daemon-owned terminal, or a local
-/// [`PtySession`]) and what it runs (so the tab strip can label it and the
+/// One embedded pane: its live local [`PtySession`] and what it runs (so the tab strip can label it and the
 /// agent pane can be told apart for the badge heuristic).
 struct Pane {
     /// Stable creation id used to number duplicate tab labels independently of
@@ -1352,22 +1193,9 @@ pub struct PaneLaunch<'a> {
     pub cli: AgentCli,
     pub label: &'a str,
     pub env: &'a BTreeMap<String, String>,
-    /// The daemon terminal id a persisted pane snapshot recorded for this pane,
-    /// when restoring one. The pool then re-attaches to that still-running
-    /// terminal — adopting the live agent mid-run — and only spawns afresh
-    /// (with `agent_command`) if the daemon no longer knows the id. `None` for
-    /// a brand-new pane.
-    pub attach: Option<u64>,
     /// Prompt ownership policy used only when `attach` misses and this restore
     /// is about to spawn a new agent process.
     pub fresh_fallback_prompt: FreshFallbackPrompt,
-    /// Whether a build-unverified daemon spawn may use a TUI-local PTY.
-    /// User-initiated launches allow this so `cargo run` remains usable with an
-    /// older daemon. Restore and queued-prompt launches reject it because that
-    /// daemon may already own an agent for the same worktree. Daemon
-    /// unavailability also keeps unattended work queued instead of starting a
-    /// TUI-owned worker that would die when the TUI closes.
-    pub daemon_failure_fallback: DaemonFailureFallback,
 }
 
 /// The live shells embedded in the workspace screen, keyed by worktree path —
@@ -2059,29 +1887,6 @@ impl TerminalPool {
             PaneKind::Terminal => (None, None),
         };
 
-        // A restored pane whose snapshot recorded a daemon terminal id first
-        // tries to re-attach to that still-running terminal: the agent (and its
-        // recorded phase) is adopted mid-run, so nothing is cleared or resumed.
-        // Only when the compatible daemon no longer knows the id (the terminal
-        // exited, or the daemon restarted) does this fall through to a fresh
-        // spawn. A build-handshake failure is propagated instead: the recorded
-        // agent may still be running in the older daemon, so resuming it locally
-        // would start a duplicate in the same worktree.
-        #[cfg(unix)]
-        if let Some(terminal) = launch.attach {
-            if let Some(pty) = attach_daemon_terminal(dir, terminal, &geo, self.scrollback_lines)? {
-                let id = self.allocate_pane_id();
-                return Ok(Pane {
-                    id,
-                    pty: Some(pty),
-                    ended_view: None,
-                    kind,
-                    label_override: None,
-                    cli,
-                });
-            }
-        }
-
         let fresh_agent = matches!(kind, PaneKind::Agent);
         // Reaching this point means any persisted daemon attach definitively
         // fell through toward a fresh process. A restore yields when durable
@@ -2094,10 +1899,7 @@ impl TerminalPool {
                     return Err(anyhow::Error::new(QueuedPromptOwnsFreshFallback));
                 }
                 FreshFallbackDecision::InspectionFailed(error) => {
-                    return Err(anyhow::Error::new(UnverifiedDaemonOwnership::for_worktree(
-                        dir,
-                        format!("queued prompt ownership could not be inspected: {error}"),
-                    )));
+                    return Err(anyhow::anyhow!(error))
                 }
             }
         }
@@ -2107,44 +1909,21 @@ impl TerminalPool {
                 agent_state_store::clear(dir);
             }
         };
-        let known_daemon_terminals = self
-            .sessions
-            .get(dir)
-            .into_iter()
-            .flat_map(|session| &session.panes)
-            .filter(|pane| pane.is_alive())
-            .filter_map(|pane| pane.pty.as_ref().and_then(PaneBackend::terminal_id))
-            .collect();
         let spawned = spawn_backend(
             dir,
             &geo,
             initial,
             self.scrollback_lines,
             launch.env,
-            SpawnBackendPolicy {
-                daemon_failure_fallback: launch.daemon_failure_fallback,
-                known_daemon_terminals,
-                guard_agent_ownership: fresh_agent,
-            },
             &mut before_spawn,
         );
-        let mut pty = spawned?;
+        let pty = spawned?;
         if fresh_agent {
             self.lock().monitor.forget(dir);
             if let Some(prompt) = opening_prompt.as_deref() {
                 let input = pty.input_handle();
                 let bytes = pane_input::encode_prompt_submit(prompt, input.bracketed_paste());
-                if let Err(error) = input.write(&bytes) {
-                    // The pane has not been inserted into the pool yet. Do not
-                    // leave a daemon-owned agent detached and untracked. The
-                    // owning caller restores a supplied prompt; its retry
-                    // would otherwise start a duplicate beside this orphan.
-                    let cleaned = pty.kill();
-                    if !cleaned {
-                        return Err(anyhow::Error::new(UnconfirmedPaneCleanup::after(&error)));
-                    }
-                    return Err(error);
-                }
+                input.write(&bytes)?;
             }
         }
         let id = self.allocate_pane_id();
@@ -2382,10 +2161,6 @@ impl TerminalPool {
                 },
                 cli: p.cli,
                 label: p.label_override.clone(),
-                // The daemon terminal id (None for a local pane): the next TUI
-                // run re-attaches to the still-running terminal instead of
-                // respawning it.
-                terminal: p.pty.as_ref().and_then(PaneBackend::terminal_id),
             })
             .collect();
         let active = sp.active.min(sp.panes.len().saturating_sub(1));
@@ -2506,194 +2281,19 @@ impl Drop for TerminalPool {
     }
 }
 
-/// Spawn the backend for a new pane. The normal path asks the daemon (spawned
-/// alongside the TUI) for a terminal it owns, so the shell — and any agent CLI
-/// inside it — survives this TUI process. A user-initiated daemon failure falls
-/// back to a TUI-local PTY. Unattended restore/autostart stays durable instead;
-/// only a build mismatch with a registry-proven empty worktree may fall back,
-/// because every other failure could leave an unobservable owner or a worker that
-/// dies with the TUI. `before_spawn` resets fresh agent state only after a remote
-/// build handshake succeeds, or immediately before a local spawn. Non-Unix
-/// platforms always take the local path.
-struct SpawnBackendPolicy {
-    daemon_failure_fallback: DaemonFailureFallback,
-    /// Live remote terminal ids this pool already represents for the worktree.
-    /// The durable registry must match this set exactly before an unattended
-    /// additional Agent may be spawned beside known terminal-only panes.
-    known_daemon_terminals: HashSet<u64>,
-    guard_agent_ownership: bool,
-}
-
-#[cfg(unix)]
-fn registry_ownership_against_known(
-    dir: &Path,
-    records: Option<&[crate::infrastructure::daemon_terminals_store::DaemonTerminalRecord]>,
-    known: &HashSet<u64>,
-    alive: impl Fn(u32) -> bool,
-) -> DaemonWorktreeOwnership {
-    let Some(records) = records else {
-        return if known.is_empty() {
-            DaemonWorktreeOwnership::Absent
-        } else {
-            DaemonWorktreeOwnership::Unknown
-        };
-    };
-    let worktree = crate::infrastructure::worktree_keyed_store::key(dir);
-    let registered: HashSet<u64> = records
-        .iter()
-        .filter(|terminal| {
-            crate::infrastructure::worktree_keyed_store::key(&terminal.worktree) == worktree
-                && alive(terminal.pid)
-        })
-        .map(|terminal| terminal.terminal)
-        .collect();
-    if registered == *known {
-        DaemonWorktreeOwnership::Absent
-    } else {
-        DaemonWorktreeOwnership::Present
-    }
-}
-
+/// Spawn a TUI-local backend for a new pane.
 fn spawn_backend(
     dir: &Path,
     geo: &ui::TerminalGeometry,
     initial: Option<&str>,
     scrollback: usize,
     env: &BTreeMap<String, String>,
-    policy: SpawnBackendPolicy,
     before_spawn: &mut dyn FnMut(),
 ) -> Result<PaneBackend> {
-    #[cfg(not(unix))]
-    let _ = policy;
-    let mut prepared = false;
-    let mut prepare_once = || {
-        if !prepared {
-            before_spawn();
-            prepared = true;
-        }
-    };
-    #[cfg(unix)]
-    {
-        let daemon_dir = daemon_store::default_dir();
-        if matches!(
-            policy.daemon_failure_fallback,
-            DaemonFailureFallback::Unattended
-        ) && policy.guard_agent_ownership
-        {
-            let ownership = match daemon_dir.as_ref() {
-                Ok(daemon_dir) => {
-                    match crate::infrastructure::daemon_terminals_store::read_if_present(daemon_dir)
-                    {
-                        Ok(terminals) => registry_ownership_against_known(
-                            dir,
-                            terminals.as_deref(),
-                            &policy.known_daemon_terminals,
-                            crate::infrastructure::resource::process_alive,
-                        ),
-                        Err(_) => DaemonWorktreeOwnership::Unknown,
-                    }
-                }
-                Err(_) => DaemonWorktreeOwnership::Unknown,
-            };
-            if !matches!(ownership, DaemonWorktreeOwnership::Absent) {
-                return Err(anyhow::Error::new(
-                    DaemonRegistryOwnershipConflict::for_worktree(dir),
-                ));
-            }
-        }
-        let remote = match daemon_dir.as_ref() {
-            Ok(daemon_dir) => DaemonTerminal::spawn_after_build_check(
-                daemon_dir,
-                dir,
-                geo.rows,
-                geo.cols,
-                initial,
-                scrollback,
-                env,
-                &mut prepare_once,
-            ),
-            Err(error) => Err(anyhow::Error::msg(error.to_string())),
-        };
-        match remote {
-            Ok(remote) => return Ok(PaneBackend::Remote(remote)),
-            Err(error) => {
-                let failure = if error.downcast_ref::<DaemonBuildHandshakeError>().is_some() {
-                    DaemonFailureKind::BuildUnverified
-                } else {
-                    DaemonFailureKind::Unavailable
-                };
-                let ownership = if matches!(failure, DaemonFailureKind::BuildUnverified) {
-                    daemon_dir
-                        .as_ref()
-                        .ok()
-                        .and_then(|daemon_dir| {
-                            crate::infrastructure::daemon_terminals_store::read_if_present(
-                                daemon_dir,
-                            )
-                            .ok()
-                            .flatten()
-                        })
-                        .map_or(DaemonWorktreeOwnership::Unknown, |terminals| {
-                            let worktree = crate::infrastructure::worktree_keyed_store::key(dir);
-                            if terminals.iter().any(|terminal| {
-                                crate::infrastructure::worktree_keyed_store::key(&terminal.worktree)
-                                    == worktree
-                                    && crate::infrastructure::resource::process_alive(terminal.pid)
-                            }) {
-                                DaemonWorktreeOwnership::Present
-                            } else {
-                                DaemonWorktreeOwnership::Absent
-                            }
-                        })
-                } else {
-                    DaemonWorktreeOwnership::Unknown
-                };
-                if !should_fallback_to_local(policy.daemon_failure_fallback, failure, ownership) {
-                    return Err(error).context(
-                        "refusing an unattended local pane launch because durable daemon \
-                         ownership is unavailable or unverified",
-                    );
-                }
-                error_log::ErrorLog::record(&format!(
-                    "daemon terminal unavailable for {}; falling back to a TUI-local PTY \
-                     (this pane will close with the TUI): {error:#}",
-                    dir.display()
-                ));
-            }
-        }
-    }
-    prepare_once();
+    before_spawn();
     Ok(PaneBackend::Local(PtySession::spawn(
         dir, geo.rows, geo.cols, initial, scrollback, env,
     )?))
-}
-
-/// Re-attach to the daemon terminal a persisted pane snapshot recorded, or
-/// `None` only when the compatible daemon explicitly reports the id missing —
-/// the caller may then spawn afresh. Every transport/build/adoption error keeps
-/// ownership unverified and is returned, because the recorded process may still
-/// be alive and automatically replacing it would create a duplicate agent.
-#[cfg(unix)]
-fn attach_daemon_terminal(
-    dir: &Path,
-    terminal: u64,
-    geo: &ui::TerminalGeometry,
-    scrollback: usize,
-) -> Result<Option<PaneBackend>> {
-    let daemon_dir = daemon_store::default_dir().map_err(|error| {
-        anyhow::Error::new(UnverifiedDaemonOwnership::after(
-            terminal,
-            dir,
-            &anyhow::Error::msg(error.to_string()),
-        ))
-    })?;
-    match DaemonTerminal::attach(&daemon_dir, dir, terminal, geo.rows, geo.cols, scrollback) {
-        Ok(terminal) => Ok(Some(PaneBackend::Remote(terminal))),
-        Err(error) if error.downcast_ref::<DaemonTerminalMissingError>().is_some() => Ok(None),
-        Err(error) => Err(anyhow::Error::new(UnverifiedDaemonOwnership::after(
-            terminal, dir, &error,
-        ))),
-    }
 }
 
 /// Spawn the watcher thread: every [`POLL_INTERVAL`] it prunes exited sessions,
@@ -3529,46 +3129,6 @@ mod tests {
             assert!(pool.lock().autostart_reservations.contains_key(&dir));
             assert_eq!(agent_state_store::read(&dir), Some(AgentPhase::Ready));
         });
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn unattended_registry_allows_only_the_exact_known_remote_terminal_set() {
-        use crate::infrastructure::daemon_terminals_store::DaemonTerminalRecord;
-
-        let dir = path("registry-owner");
-        let record = |terminal| DaemonTerminalRecord {
-            terminal,
-            worktree: dir.clone(),
-            pid: terminal as u32 + 100,
-            adopted: false,
-        };
-        let known = HashSet::from([1]);
-
-        assert_eq!(
-            registry_ownership_against_known(&dir, Some(&[record(1)]), &known, |_| true),
-            DaemonWorktreeOwnership::Absent,
-            "the only registered remote terminal is represented by the pool",
-        );
-        assert_eq!(
-            registry_ownership_against_known(&dir, Some(&[record(1), record(2)]), &known, |_| true,),
-            DaemonWorktreeOwnership::Present,
-            "a hidden daemon terminal blocks a duplicate Agent",
-        );
-        assert_eq!(
-            registry_ownership_against_known(&dir, Some(&[record(2)]), &HashSet::new(), |_| true,),
-            DaemonWorktreeOwnership::Present,
-            "a local terminal contributes no daemon id and cannot hide registry ownership",
-        );
-        assert_eq!(
-            registry_ownership_against_known(&dir, None, &known, |_| true),
-            DaemonWorktreeOwnership::Unknown,
-            "a missing registry cannot account for a known remote terminal",
-        );
-        assert_eq!(
-            registry_ownership_against_known(&dir, None, &HashSet::new(), |_| true),
-            DaemonWorktreeOwnership::Absent,
-        );
     }
 
     #[test]
