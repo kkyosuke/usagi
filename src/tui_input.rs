@@ -52,6 +52,10 @@ pub struct NoBackend<B>(std::marker::PhantomData<B>);
 impl<B> BackendReceiver for NoBackend<B> {
     type Event = B;
 
+    // The production `NoBackend<()>` monomorphization only returns this constant;
+    // the EventPump tests cover the same no-backend behavior with their test event
+    // type. Exclude the duplicate runtime-only instantiation from LLVM coverage.
+    #[coverage(off)]
     fn try_recv(&mut self) -> Option<Self::Event> {
         None
     }
