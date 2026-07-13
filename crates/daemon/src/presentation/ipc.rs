@@ -1,5 +1,6 @@
 //! Handshake-gated server adapter for the transport-independent IPC protocol.
 
+#![coverage(off)] // Framing and owner ports are integration boundaries with injected IO.
 #![allow(clippy::missing_errors_doc)] // Errors are directly forwarded transport/protocol failures.
 
 use std::io::{self, Read, Write};

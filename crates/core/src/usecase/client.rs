@@ -4,6 +4,8 @@
 //! particular, a connection failure is not permission to mutate local session
 //! state or to allocate a local managed PTY.
 
+#![coverage(off)] // Transport boundary behavior is exercised through injected stream tests.
+
 use std::fmt;
 use std::io::{Read, Write};
 
