@@ -1,13 +1,13 @@
 ---
 number: 279
 title: feat(tui): controller reducer path に Closeup prefix / tab-gating を投影する
-status: todo
+status: done
 priority: medium
 labels: [tui, closeup, input, controller]
 dependson: [278, 282]
 related: [265, 267, 269, 282]
 created_at: 2026-07-13T02:58:46.925715+00:00
-updated_at: 2026-07-13T11:20:30.762474+00:00
+updated_at: 2026-07-13T11:30:10.397500+00:00
 ---
 
 ## 目的

@@ -15,8 +15,8 @@ use usagi_tui::presentation::frame::{Frame, FrameRenderer, Span};
 use usagi_tui::presentation::views::workspace::{HomeProjection, ProjectedSession, render_home};
 use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Feedback, Overlay, SafeError, SafeMessage, Target,
-    TargetPhase, update,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
+    TabDirection, Target, TargetPhase, update,
 };
 use usagi_tui::usecase::application::lifecycle::{
     DaemonEvent, Effect as LifecycleEffect, Event, Interaction, LifecycleState, Mode, PendingRow,
@@ -322,6 +322,7 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     let projection = HomeProjection::from_state(
         &state,
         "東京",
@@ -352,6 +353,80 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
             text: "語".into()
         }]
     );
+}
+
+#[test]
+fn controller_closeup_prefix_and_tab_gating_match_live_model() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut state = AppState::home(workspace, vec![session]);
+
+    // 1/3: Enter reaches Closeup and a tab-less Closeup owns the action modal.
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    assert_eq!(
+        state.route(),
+        usagi_tui::usecase::application::controller::Route::Home(
+            usagi_tui::usecase::application::controller::HomeMode::Closeup
+        )
+    );
+    assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    let projection = HomeProjection::from_state(
+        &state,
+        "fixture",
+        "/work/root",
+        &[session_projection(session, "alpha")],
+    );
+    assert!(
+        render_home(24, 80, &projection)
+            .join("\n")
+            .contains("Closeup: alpha")
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(state.overlay(), Some(Overlay::Closeup));
+
+    // 4: once a pane is available the tab surface is frontmost.
+    let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+    assert_eq!(state.overlay(), None);
+    let projection = HomeProjection::from_state(
+        &state,
+        "fixture",
+        "/work/root",
+        &[session_projection(session, "alpha")],
+    );
+    assert!(
+        !render_home(24, 80, &projection)
+            .join("\n")
+            .contains("Closeup: alpha")
+    );
+
+    // 5/6: the forced action surface and prefix tab selection are independent.
+    let _ = update(&mut state, AppEvent::Key(AppKey::CtrlA));
+    assert_eq!(state.overlay(), Some(Overlay::Closeup));
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlN)),
+        vec![Effect::SelectTab {
+            direction: TabDirection::Next,
+        }]
+    );
+    assert_eq!(
+        update(&mut state, AppEvent::Key(AppKey::CtrlP)),
+        vec![Effect::SelectTab {
+            direction: TabDirection::Previous,
+        }]
+    );
+    let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+    assert_eq!(state.overlay(), None);
+
+    // 2: the Switch action clears a forced overlay as well as changing mode.
+    assert!(update(&mut state, AppEvent::Key(AppKey::CtrlO)).is_empty());
+    assert_eq!(
+        state.route(),
+        usagi_tui::usecase::application::controller::Route::Home(
+            usagi_tui::usecase::application::controller::HomeMode::Switch
+        )
+    );
+    assert_eq!(state.overlay(), None);
 }
 
 #[derive(Default)]
