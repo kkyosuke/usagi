@@ -48,6 +48,13 @@ workspace の root へ戻す。これにより、削除済み session を target
 Home の mode は Switch と Closeup である。Overview、Closeup action、PR、preview、diff、text、notes、
 environment は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。
 
+左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor と current
+target を別々に stable identity から照合し、同じ行なら cursor を優先する。Closeup では cursor を
+描かず、current marker だけを残す。session cursor はうさぎ `󰤇` と太字の名前、root と `+ new session`
+の cursor は `>`、cursor ではない current target は緑の `▎` で示す。`+ new session` と pending
+skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
+CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を壊さない。
+
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。Closeup
 の `Ctrl-A` は active target の Closeup action overlay を開き、作成フォームを開かない。Closeup の `Ctrl-O`
 は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は

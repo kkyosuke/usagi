@@ -1,13 +1,14 @@
 ---
-number: 288
-title: "fix(tui): session の current/cursor 表示を v1 parity にする"
-status: todo
+number: 293
+title: fix(tui): session の current/cursor 表示を v1 parity にする
+status: done
 priority: high
 labels: [tui, bug, parity, sidebar, switch, closeup]
 dependson: [258]
 related: [225, 257, 269, 278, 279, 281, 282, 287]
-created_at: 2026-07-13T00:00:00+00:00
-updated_at: 2026-07-13T00:00:00+00:00
+parent: 227
+created_at: 2026-07-13T12:12:45.736961+00:00
+updated_at: 2026-07-13T12:17:25.868891+00:00
 ---
 
 ## 目的

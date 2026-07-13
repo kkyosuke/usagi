@@ -919,8 +919,9 @@ pub fn render_with_skeleton_frame(
 
 /// controller projection の Home frame を描く。
 ///
-/// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の `>` は
-/// navigation cursor、`*` は command target であり、異なる行でも同時に残る。
+/// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は
+/// navigation cursor と command target を stable [`Selection`] / [`Target`] identity から別々に
+/// 投影する。Switch では cursor が優先し、Closeup では cursor を抑止して current marker を残す。
 #[must_use]
 #[coverage(off)]
 pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -> Vec<String> {
@@ -1001,10 +1002,15 @@ fn home_left_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<Str
     if show_mascot {
         lines.extend(home_mascot(width, home.mascot_tick));
     }
-    lines.push(Style::new().dim().paint(&widgets::clip_to_width(
-        "[switch] ↑↓ cursor · Enter target",
-        width,
-    )));
+    let footer = match home.mode {
+        HomeMode::Switch => "[switch] ↑↓ cursor · Enter target",
+        HomeMode::Closeup => "[closeup] current target",
+    };
+    lines.push(
+        Style::new()
+            .dim()
+            .paint(&widgets::clip_to_width(footer, width)),
+    );
     lines
 }
 
@@ -1027,19 +1033,9 @@ fn home_mascot(width: usize, tick: u64) -> [String; MASCOT_ROWS] {
 
 #[coverage(off)]
 fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
-    let cursor = if home.selected == row {
-        Role::Danger.style().bold().paint(">")
-    } else {
-        " ".to_string()
-    };
     let target = match row {
         Selection::Target(target) => Some(target),
         Selection::NewSession => None,
-    };
-    let active = if target == Some(home.active) {
-        Role::Accent.style().bold().paint("*")
-    } else {
-        " ".to_string()
     };
     let (label, detail) = match row {
         Selection::Target(Target::Root(_)) => ("root", "workspace root"),
@@ -1052,18 +1048,40 @@ fn home_row(width: usize, home: &HomeProjection, row: Selection) -> String {
             }),
         Selection::NewSession => ("+ new session", "action"),
     };
-    let label = if home.selected == row {
+    let selected = home.mode == HomeMode::Switch && home.selected == row;
+    let current = target == Some(home.active);
+    let marker = home_row_marker(row, selected, current);
+    let label = if selected {
         Role::Accent.style().bold().paint(label)
     } else {
         label.to_string()
     };
     widgets::pad_to_width(
-        &format!(
-            "{cursor}{active} {label}  {}",
-            Style::new().dim().paint(detail)
-        ),
+        &format!("{marker} {label}  {}", Style::new().dim().paint(detail)),
         width,
     )
+}
+
+/// v1-compatible one-cell sidebar marker with explicit precedence.
+///
+/// The selected session glyph remains readable in a terminal that lacks the Nerd Font glyph
+/// because the selected name is also emphasized.  Root and action rows keep `>` as their
+/// cursor marker.  A current target uses the green bar only when no cursor already owns the
+/// row, so a single row never carries two competing meanings.
+#[coverage(off)]
+fn home_row_marker(row: Selection, selected: bool, current: bool) -> String {
+    if selected {
+        return match row {
+            Selection::Target(Target::Session(_)) => Role::Danger.style().bold().paint("󰤇"),
+            Selection::Target(Target::Root(_)) | Selection::NewSession => {
+                Role::Danger.style().bold().paint(">")
+            }
+        };
+    }
+    if current {
+        return Role::Success.style().bold().paint("▎");
+    }
+    " ".to_string()
 }
 
 #[coverage(off)]
@@ -1188,8 +1206,8 @@ mod tests {
     };
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
-        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, SafeError, SafeMessage,
-        Selection, Target, update,
+        AppEvent, AppKey, AppState, BackendEvent, Feedback, HomeMode, Route, SafeError,
+        SafeMessage, Selection, Target, update,
     };
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
@@ -1342,8 +1360,8 @@ mod tests {
             .iter()
             .map(|line| strip(line))
             .collect::<Vec<_>>();
-        assert!(lines.iter().any(|line| line.contains(" * first")));
-        assert!(lines.iter().any(|line| line.contains(">  second")));
+        assert!(lines.iter().any(|line| line.contains("▎ first")));
+        assert!(!lines.iter().any(|line| line.contains("󰤇 second")));
         let text = joined_home(&home);
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
@@ -1364,8 +1382,8 @@ mod tests {
             &[projected_session(session, "session", "/work/session")],
         );
         let text = joined_home(&home);
-        assert!(text.contains(">  + new session"));
-        assert!(!text.contains("*> + new session"));
+        assert!(!text.contains("> + new session"));
+        assert!(!text.contains("▎ + new session"));
 
         let _ = update(
             &mut state,
@@ -1377,6 +1395,41 @@ mod tests {
         assert_eq!(state.selected(), Selection::NewSession);
         assert_eq!(state.active(), Target::Root(workspace));
         assert!(joined_home(&refreshed).contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    #[test]
+    fn home_projection_uses_v1_marker_precedence_and_hides_cursor_in_closeup() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        // Activate first, then move the cursor to second without changing the current target.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let snapshot = [
+            projected_session(first, "同じ名前", "/work/first"),
+            projected_session(second, "同じ名前", "/work/second"),
+        ];
+
+        let closeup = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        let closeup_text = joined_home(&closeup);
+        assert!(closeup_text.contains("▎ 同じ名前"));
+        assert!(!closeup_text.contains("󰤇 同じ名前"));
+        assert!(closeup_text.contains("[closeup] current target"));
+
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        assert_eq!(state.route(), Route::Home(HomeMode::Switch));
+        let switch = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        let switch_text = joined_home(&switch);
+        assert!(switch_text.contains("▎ 同じ名前"));
+        assert!(switch_text.contains("󰤇 同じ名前"));
+        assert!(switch_text.contains("[switch] ↑↓ cursor"));
+
+        for line in render_home(8, 7, &switch) {
+            assert!(display_width(&line) <= 7);
+        }
     }
 
     #[test]
