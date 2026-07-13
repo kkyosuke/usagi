@@ -349,13 +349,42 @@ impl WorkspaceUi {
     /// では tab を前面にするため、`closeup_action_forced` は倒したまま入る。
     #[coverage(off)]
     fn enter_closeup(&mut self) {
+        self.open_closeup(false);
+    }
+
+    /// 選択中の target の Closeup action modal を前面にして開く。
+    ///
+    /// Switch からの live prefix でも Closeup 内からの再オープンでも同じ遷移を
+    /// 使う。前の target の action selection や forced state を残さない。
+    #[coverage(off)]
+    fn open_closeup_action(&mut self) {
+        self.open_closeup(true);
+    }
+
+    #[coverage(off)]
+    fn open_closeup(&mut self, force_action: bool) {
         self.workspace.enter_closeup();
         self.closeup = CloseupModal::with_selection_mode(
             self.workspace.focused_label(),
             self.modal_selection_mode,
         );
         self.modal = None;
+        self.closeup_action_forced = force_action;
+    }
+
+    /// Switch へ戻り、Closeup の前面状態を残さない。
+    #[coverage(off)]
+    fn enter_switch(&mut self) {
+        self.workspace.enter_switch();
+        self.modal = None;
         self.closeup_action_forced = false;
+    }
+
+    /// Closeup の session 移動後に、表示・入力 target を選択行へ同期する。
+    #[coverage(off)]
+    fn select_previous_session(&mut self) {
+        self.workspace.select_prev();
+        self.open_closeup(false);
     }
 
     /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
@@ -809,7 +838,9 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        // Live-terminal prefix actions are Closeup-scoped; Switch ignores them.
+        // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
+        // ほかの live prefix は Closeup-scoped なので Switch では no-op。
+        Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
         Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -915,22 +946,15 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> WorkspaceStep {
     match action {
         LiveTerminalAction::Switch => {
-            ui.closeup_action_forced = false;
-            ui.workspace.enter_switch();
+            ui.enter_switch();
         }
-        LiveTerminalAction::OpenCloseupModal => {
-            ui.closeup = CloseupModal::with_selection_mode(
-                ui.workspace.focused_label(),
-                ui.modal_selection_mode,
-            );
-            ui.closeup_action_forced = true;
-        }
+        LiveTerminalAction::OpenCloseupModal => ui.open_closeup_action(),
         LiveTerminalAction::NextTab => ui.workspace.tab_next(),
         LiveTerminalAction::PreviousTab => ui.workspace.tab_prev(),
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
         LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
         LiveTerminalAction::QuitConfirmation => return WorkspaceStep::Quit,
-        LiveTerminalAction::PreviousSession => ui.workspace.select_prev(),
+        LiveTerminalAction::PreviousSession => ui.select_previous_session(),
     }
     WorkspaceStep::Stay
 }
@@ -2476,6 +2500,38 @@ mod tests {
         // Ctrl-O o returns Closeup to Switch.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+    }
+
+    #[test]
+    fn live_mode_actions_replace_stale_closeup_state_across_switch_and_sessions() {
+        use crate::usecase::terminal_input::LiveTerminalAction;
+
+        let workspace = WorkspaceView::new(ws("mode-actions"), state("mode-actions"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+        ui.workspace.select_next();
+
+        // `Ctrl-O a` from Switch opens the selected target's Closeup and gives
+        // its action modal the input surface immediately.
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert!(ui.closeup_modal_visible());
+        assert_eq!(ui.closeup.session(), "mode-actions-session");
+
+        // Switching back removes the forced action state instead of leaving a
+        // Closeup surface over Switch.
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+        assert!(!ui.closeup_modal_visible());
+
+        // Moving the target in Closeup rebuilds its modal for the new session;
+        // the old target's label/action state cannot receive input.
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousSession));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert_eq!(ui.workspace.focused_label(), "root");
+        assert_eq!(ui.closeup.session(), "root");
+        assert!(ui.closeup_modal_visible());
     }
 
     #[test]

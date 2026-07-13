@@ -66,7 +66,7 @@ identity は保持しない。
 | prefix | アクション | 効果 |
 |---|---|---|
 | `Ctrl-O` `o`（または `Ctrl-O`） | Switch | Closeup から Switch へ戻る |
-| `Ctrl-O` `a` | OpenCloseupModal | tab がある Closeup でも action modal を前面に出す |
+| `Ctrl-O` `a` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
 | `Ctrl-O` `n` / `→` | NextTab | 次の tab を選ぶ |
 | `Ctrl-O` `p` / `←` | PreviousTab | 前の tab を選ぶ |
 | `Ctrl-O` `g` | Agent | agent pane を開く／再接続する |
@@ -120,7 +120,8 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
-Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。tab が無い
+Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。Switch で
+`Ctrl-O a` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
 を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
