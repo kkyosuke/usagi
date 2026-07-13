@@ -167,12 +167,15 @@ pub trait SessionCommandPort {
     /// # Errors
     ///
     /// Returns a safe message when the daemon cannot accept the request.
+    #[coverage(off)]
     fn execute(
         &mut self,
-        workspace: &usagi_core::domain::workspace::Workspace,
-        selected: Option<&usagi_core::domain::session::SessionRecord>,
-        command: SessionCommand,
-    ) -> Result<String, String>;
+        _workspace: &usagi_core::domain::workspace::Workspace,
+        _selected: Option<&usagi_core::domain::session::SessionRecord>,
+        _command: SessionCommand,
+    ) -> Result<String, String> {
+        Err("session command port is not implemented".to_owned())
+    }
 }
 
 struct UnavailableSessionCommandPort;
