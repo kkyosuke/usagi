@@ -13,6 +13,8 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 
 /// Daemon-authoritative Agent launch adapter for Closeup panes.
 pub mod agent_launch;
+/// v2 controller effect と daemon-owned Agent pane runtime を結合する host。
+pub mod agent_runtime;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
