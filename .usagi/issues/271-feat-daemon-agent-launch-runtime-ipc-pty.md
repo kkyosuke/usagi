@@ -1,14 +1,14 @@
 ---
 number: 271
 title: feat(daemon): Agent launch runtime を IPC・実 PTY へ接続する
-status: todo
+status: done
 priority: high
 labels: [daemon, agent, ipc, pty]
 dependson: [268]
 related: [263, 264, 250, 251, 252, 253, 254]
 parent: 227
 created_at: 2026-07-13T01:33:06.174236+00:00
-updated_at: 2026-07-13T01:46:57.750757+00:00
+updated_at: 2026-07-13T03:27:29.103002+00:00
 ---
 
 ## 背景・根拠

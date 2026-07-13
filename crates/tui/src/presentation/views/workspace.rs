@@ -47,7 +47,7 @@ pub struct ProjectedSession {
     pub label: String,
     /// sidebar に表示する起源などの補足。
     pub detail: String,
-    /// session pane の cwd。
+    /// daemon snapshot が与えた session の cwd。
     pub cwd: PathBuf,
 }
 
@@ -59,7 +59,6 @@ pub struct ProjectedSession {
 pub struct HomeProjection {
     workspace: WorkspaceId,
     workspace_name: String,
-    root_cwd: PathBuf,
     sessions: Vec<ProjectedSession>,
     selected: Selection,
     active: Target,
@@ -92,7 +91,7 @@ impl HomeProjection {
     pub fn from_state(
         state: &AppState,
         workspace_name: impl Into<String>,
-        root_cwd: impl Into<PathBuf>,
+        _root_cwd: impl Into<PathBuf>,
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
         let sessions = state
@@ -104,7 +103,6 @@ impl HomeProjection {
         Self {
             workspace: state.workspace(),
             workspace_name: workspace_name.into(),
-            root_cwd: root_cwd.into(),
             sessions,
             selected: state.selected(),
             active: state.active(),
@@ -152,19 +150,6 @@ impl HomeProjection {
         );
         rows.push(Selection::NewSession);
         rows
-    }
-
-    #[coverage(off)]
-    fn active_cwd(&self) -> &Path {
-        match self.active {
-            Target::Root(id) if id == self.workspace => &self.root_cwd,
-            Target::Session(id) => self
-                .sessions
-                .iter()
-                .find(|session| session.id == id)
-                .map_or(self.root_cwd.as_path(), |session| session.cwd.as_path()),
-            Target::Root(_) => &self.root_cwd,
-        }
     }
 
     #[coverage(off)]
@@ -229,6 +214,16 @@ impl Mode {
             Self::Closeup => "Closeup",
         }
     }
+
+    #[coverage(off)]
+    fn icon(self) -> char {
+        match self {
+            // Keep the v1 Font Awesome/Nerd Font glyphs so the mode affordance
+            // is recognizable across the two TUI generations.
+            Self::Switch => '\u{f0ec}',
+            Self::Closeup => '\u{f00e}',
+        }
+    }
 }
 
 /// 右ペインの 1 タブ。
@@ -249,6 +244,8 @@ pub struct Workspace {
     selected: usize,
     pane_owner: WorkspaceId,
     pane: PaneState,
+    /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
+    pending_session: Option<String>,
 }
 
 impl Workspace {
@@ -264,6 +261,7 @@ impl Workspace {
             selected: 0,
             pane_owner,
             pane: PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
+            pending_session: None,
         }
     }
 
@@ -304,6 +302,25 @@ impl Workspace {
                     .position(|session| session.name == name)
             })
             .map_or(0, |index| index + 1);
+    }
+
+    /// 新しい session を作成する間、sidebar に非選択の skeleton 行を表示する。
+    #[coverage(off)]
+    pub fn begin_pending_session(&mut self, name: String) {
+        self.pending_session = Some(name);
+    }
+
+    /// session 作成の skeleton を取り除く。
+    #[coverage(off)]
+    pub fn clear_pending_session(&mut self) {
+        self.pending_session = None;
+    }
+
+    /// 作成中の session 名。skeleton の描画だけが利用する。
+    #[must_use]
+    #[coverage(off)]
+    pub fn pending_session(&self) -> Option<&str> {
+        self.pending_session.as_deref()
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -553,30 +570,49 @@ impl Workspace {
 
 // ── header ──────────────────────────────────────────────────────────────────
 
-/// 全幅の header: workspace 名のパンくずとセッション数。左寄せ・dim の区切り。
+/// 全幅の header: workspace 名のパンくずは左、mode toggle は右上に固定する。
 #[coverage(off)]
 fn header_line(width: usize, ws: &Workspace) -> String {
     let count = ws.sessions().len();
     let sep = Style::new().dim().paint(" › ");
     let dot = Style::new().dim().paint(" · ");
-    let modes = Mode::ALL
-        .iter()
-        .map(|mode| {
-            if *mode == ws.mode() {
-                Role::Accent.style().bold().paint(mode.label())
-            } else {
-                Style::new().dim().paint(mode.label())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-    let line = format!(
-        " {}{sep}{}{dot}{}{dot}{modes}",
+    let left = format!(
+        " {}{sep}{}{dot}{}",
         Role::Success.style().bold().paint("USAGI"),
         Role::Success.style().bold().paint(ws.name()),
         Style::new().dim().paint(&format!("{count} sessions")),
     );
-    widgets::pad_to_width(&line, width)
+    header_with_mode_toggle(width, &left, ws.mode())
+}
+
+/// v1 と同じアイコン付きの mode 表示。現在の mode だけを accent で強調する。
+#[coverage(off)]
+fn mode_toggle(current: Mode) -> String {
+    Mode::ALL
+        .iter()
+        .map(|mode| {
+            let label = format!("{} {}", mode.icon(), mode.label());
+            if *mode == current {
+                Role::Accent.style().bold().paint(&label)
+            } else {
+                Style::new().dim().paint(&label)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// 左の breadcrumb を必要な分だけ切り、mode toggle の右端位置を常に保つ。
+#[coverage(off)]
+fn header_with_mode_toggle(width: usize, left: &str, mode: Mode) -> String {
+    let toggle = mode_toggle(mode);
+    let toggle = widgets::clip_to_width(&toggle, width);
+    let left_width = width.saturating_sub(widgets::display_width(&toggle));
+    let left = widgets::clip_to_width(left, left_width);
+    let gap = width
+        .saturating_sub(widgets::display_width(&left))
+        .saturating_sub(widgets::display_width(&toggle));
+    format!("{left}{}{toggle}", " ".repeat(gap))
 }
 
 /// header と本文を分ける全幅の水平罫線（dim）。
@@ -640,6 +676,23 @@ fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
     widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
 }
 
+/// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
+/// skeleton 自体は navigation target ではないため、cursor を持たない。
+#[coverage(off)]
+fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
+    let wave = (0..name.chars().count().max(8))
+        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
+        .collect::<String>();
+    let label = Role::Accent.style().bold().paint(name);
+    let loading = Style::new().dim().paint(&wave);
+    let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
+        "▓"
+    } else {
+        "░"
+    });
+    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
+}
+
 /// 左ペインの footer（キー操作ヒント、dim）。
 #[coverage(off)]
 fn left_footer(width: usize, ws: &Workspace) -> String {
@@ -655,7 +708,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
 /// 固定し、残りを viewport として選択中の session / root 行を常に表示する。
 #[coverage(off)]
-fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
+fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize) -> Vec<String> {
     if height == 0 {
         return Vec::new();
     }
@@ -669,7 +722,10 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     let show_mascot = body_capacity >= MASCOT_ROWS + 2;
     let content_capacity = body_capacity - if show_mascot { MASCOT_ROWS } else { 0 };
     let show_heading = content_capacity > 1;
-    let viewport_capacity = content_capacity - usize::from(show_heading);
+    let pending_rows = usize::from(ws.pending_session().is_some());
+    let viewport_capacity = content_capacity
+        .saturating_sub(usize::from(show_heading))
+        .saturating_sub(pending_rows);
     let start = viewport_start(ws.selected, ws.row_count(), viewport_capacity);
     let end = (start + viewport_capacity).min(ws.row_count());
 
@@ -679,6 +735,9 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
     }
     for index in start..end {
         rows.push(selectable_row(width, ws, index));
+    }
+    if let Some(name) = ws.pending_session() {
+        rows.push(pending_session_row(width, name, skeleton_frame));
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
@@ -690,21 +749,15 @@ fn left_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
 
 // ── right pane: closeup ─────────────────────────────────────────────────────
 
-/// closeup の header: フォーカス中セッションの identity と origin。root では workspace path。
+/// closeup の header: フォーカス中 session の identity。
 #[coverage(off)]
-fn closeup_header(width: usize, ws: &Workspace) -> String {
-    let name = Role::Accent.style().bold().paint(ws.focused_label());
-    let detail = ws.focused_session().map_or_else(
-        || ws.path().display().to_string(),
-        |session| format!("{} · {}", session.name, session.origin),
-    );
-    let detail = Style::new().dim().paint(&detail);
-    widgets::pad_to_width(&format!(" {name}  {detail}"), width)
+fn closeup_header(ws: &Workspace) -> String {
+    format!(" {}", Role::Accent.style().bold().paint(ws.focused_label()))
 }
 
-/// tabmenu: pane reducer の stable selection を Chrome 風タブへ投影する。
+/// tabmenu: pane reducer の stable selection を session 名の右の Chrome 風タブへ投影する。
 #[coverage(off)]
-fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
+fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
     let labels = ws
         .pane()
         .tabs()
@@ -724,32 +777,15 @@ fn tab_menu(width: usize, ws: &Workspace) -> [String; 2] {
             pending_indicator: None,
         })
         .collect::<Vec<_>>();
-    widgets::session_tab::render(width, &tabs)
-}
-
-/// content: アクティブなタブと、フォーカス中の実 workspace / session path。
-#[coverage(off)]
-fn content_lines(ws: &Workspace) -> Vec<String> {
-    let (kind, path) = ws.focused_session().map_or_else(
-        || ("workspace", ws.path()),
-        |session| ("session", session.root.as_path()),
-    );
-    vec![
-        String::new(),
-        Style::new()
-            .dim()
-            .paint(&format!("  {kind} '{}'", ws.focused_label())),
-        String::new(),
-        Style::new().dim().paint(&format!("  {}", path.display())),
-    ]
+    widgets::session_tab::render_with_prefix(width, header, &tabs)
 }
 
 /// 右ペインの footer（キー操作ヒント、dim）。
 #[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
-        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / Esc back / q quit",
-        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / Esc switch / q quit",
+        Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q quit",
+        Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q quit",
     };
     Style::new()
         .dim()
@@ -759,19 +795,20 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
 #[coverage(off)]
 fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
-    let mut rows = vec![closeup_header(width, ws)];
+    let header = closeup_header(ws);
+    let mut rows = Vec::new();
     if ws.has_panes() {
-        let chrome = tab_menu(width, ws);
+        let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
     } else {
+        rows.push(widgets::pad_to_width(&header, width));
         rows.extend(widgets::session_tab::empty_pane(
             width,
             height.saturating_sub(2),
             "No tabs stirring yet. Enter starts one.",
         ));
     }
-    rows.extend(content_lines(ws));
     with_footer(rows, height, right_footer(width, ws))
 }
 
@@ -795,6 +832,18 @@ fn with_footer(mut rows: Vec<String>, height: usize, footer: String) -> Vec<Stri
 #[must_use]
 #[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String> {
+    render_with_skeleton_frame(raw_height, raw_width, ws, 0)
+}
+
+/// [`render`] と同じ frame を描くが、pending session skeleton の shimmer 位相を指定する。
+#[must_use]
+#[coverage(off)]
+pub fn render_with_skeleton_frame(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    skeleton_frame: usize,
+) -> Vec<String> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
 
     let mut frame = Vec::with_capacity(height);
@@ -803,7 +852,7 @@ pub fn render(raw_height: usize, raw_width: usize, ws: &Workspace) -> Vec<String
 
     let body_height = height.saturating_sub(CHROME_ROWS);
     let split = panes::split(width, LEFT_WIDTH);
-    let left = left_pane(body_height, split.left, ws);
+    let left = left_pane(body_height, split.left, ws, skeleton_frame);
     let right = right_pane(body_height, split.right, ws);
     frame.extend(panes::join(body_height, &left, &right, split));
 
@@ -837,23 +886,20 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
 #[coverage(off)]
 fn home_header_line(width: usize, home: &HomeProjection) -> String {
     let mode = match home.mode {
-        HomeMode::Switch => "Switch",
-        HomeMode::Closeup => "Closeup",
+        HomeMode::Switch => Mode::Switch,
+        HomeMode::Closeup => Mode::Closeup,
     };
-    widgets::pad_to_width(
-        &format!(
-            " {}{}{}{}{}{}",
-            Role::Success.style().bold().paint("USAGI"),
-            Style::new().dim().paint(" › "),
-            Role::Success.style().bold().paint(&home.workspace_name),
-            Style::new().dim().paint(" · "),
-            Style::new()
-                .dim()
-                .paint(&format!("{} sessions", home.sessions.len())),
-            Style::new().dim().paint(&format!(" · {mode}")),
-        ),
-        width,
-    )
+    let left = format!(
+        " {}{}{}{}{}",
+        Role::Success.style().bold().paint("USAGI"),
+        Style::new().dim().paint(" › "),
+        Role::Success.style().bold().paint(&home.workspace_name),
+        Style::new().dim().paint(" · "),
+        Style::new()
+            .dim()
+            .paint(&format!("{} sessions", home.sessions.len())),
+    );
+    header_with_mode_toggle(width, &left, mode)
 }
 
 #[coverage(off)]
@@ -960,13 +1006,9 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         HomeMode::Switch => "Switch",
         HomeMode::Closeup => "Closeup",
     };
-    let header = widgets::pad_to_width(
-        &format!(
-            " {}  {}",
-            Role::Accent.style().bold().paint(home.active_label()),
-            Style::new().dim().paint("active target"),
-        ),
-        width,
+    let header = format!(
+        " {}",
+        Role::Accent.style().bold().paint(home.active_label())
     );
     let footer = Style::new().dim().paint(&widgets::clip_to_width(
         &format!("[{mode}] active pane"),
@@ -1011,16 +1053,11 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
             pending_indicator: indicator.as_deref(),
         })
         .collect::<Vec<_>>();
-    let chrome = widgets::session_tab::render(width, &tabs);
+    let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
     with_footer(
         vec![
-            header,
             chrome[0].clone(),
             chrome[1].clone(),
-            String::new(),
-            Style::new()
-                .dim()
-                .paint(&format!("  cwd: {}", home.active_cwd().display())),
             String::new(),
             Style::new().dim().paint(&widgets::pad_to_width(
                 &format!("  agent: {}", phase_label(home.active_phase)),
@@ -1081,7 +1118,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, HomeProjection, LEFT_WIDTH, MASCOT_INDENT, Mode, ProjectedSession, Workspace,
-        render, render_home,
+        render, render_home, render_with_skeleton_frame,
     };
     use crate::presentation::widgets::{display_width, modal};
     use crate::usecase::application::controller::{
@@ -1357,7 +1394,9 @@ mod tests {
             &mut pane,
             PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
         );
-        let state = AppState::home(workspace, vec![session]);
+        let mut state = AppState::home(workspace, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
         let home = HomeProjection::from_state(
             &state,
             "work",
@@ -1370,6 +1409,13 @@ mod tests {
         assert!(text.contains("Agent (starting)"));
         assert!(text.contains('▔'));
         assert!(!text.contains("No tabs stirring yet"));
+        assert!(!text.contains("/work/session"));
+
+        let frame = render_home(30, 100, &home);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("session").expect("session name");
+        let tab = right_header.find("Agent (starting)").expect("agent tab");
+        assert!(name < tab);
     }
 
     #[test]
@@ -1478,8 +1524,8 @@ mod tests {
         let over = modal::render_over(18, 100, &base, "Action", 20, &["modal".to_string()]);
 
         let plain = over.iter().map(|line| strip(line)).collect::<Vec<_>>();
-        assert!(plain[3].contains("Agent (starting)"));
-        assert!(plain[4].contains('▔'));
+        assert!(plain[2].contains("Agent (starting)"));
+        assert!(plain[3].contains('▔'));
         assert!(plain.iter().any(|line| line.contains("┌─ Action")));
         assert!(over.iter().all(|line| display_width(line) == 100));
     }
@@ -1537,7 +1583,7 @@ mod tests {
         assert_eq!(ws.selected(), 0);
         let text = joined(&ws);
         assert!(text.contains("0 sessions"));
-        assert!(text.contains("/tmp/empty"));
+        assert!(!text.contains("/tmp/empty"));
     }
 
     #[test]
@@ -1611,13 +1657,23 @@ mod tests {
     fn header_shows_both_modes_and_highlights_the_current_one() {
         let mut ws = workspace();
         let switch_header = &render(30, 100, &ws)[0];
-        assert!(switch_header.contains("\u{1b}[1;36mSwitch\u{1b}[0m"));
-        assert!(switch_header.contains("\u{1b}[2mCloseup\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[1;36m\u{f0ec} Switch\u{1b}[0m"));
+        assert!(switch_header.contains("\u{1b}[2m\u{f00e} Closeup\u{1b}[0m"));
+        assert!(
+            strip(switch_header)
+                .trim_end()
+                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+        );
 
         ws.enter_closeup();
         let closeup_header = &render(30, 100, &ws)[0];
-        assert!(closeup_header.contains("\u{1b}[2mSwitch\u{1b}[0m"));
-        assert!(closeup_header.contains("\u{1b}[1;36mCloseup\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[2m\u{f0ec} Switch\u{1b}[0m"));
+        assert!(closeup_header.contains("\u{1b}[1;36m\u{f00e} Closeup\u{1b}[0m"));
+        assert!(
+            strip(closeup_header)
+                .trim_end()
+                .ends_with("\u{f0ec} Switch  \u{f00e} Closeup")
+        );
     }
 
     #[test]
@@ -1640,7 +1696,7 @@ mod tests {
             .join("\n");
         assert!(closeup.contains("[closeup] target selected"));
         assert!(closeup.contains("←→/hl tab"));
-        assert!(closeup.contains("Esc switch"));
+        assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal (resolving)"));
         assert!(closeup.contains('▔'));
@@ -1658,10 +1714,40 @@ mod tests {
         assert!(text.contains("daemon"));
         assert!(text.contains("mcp"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(text.contains("/tmp/actual"));
+        assert!(!text.contains("/tmp/actual"));
         assert!(text.contains("root"));
-        assert!(text.contains("Esc back"));
+        assert!(!text.contains("Esc back"));
         assert!(text.contains('│'));
+    }
+
+    #[test]
+    fn pending_session_is_rendered_as_a_non_selectable_shimmer_skeleton() {
+        let mut ws = workspace();
+        ws.begin_pending_session("feature-x".to_owned());
+
+        let frame = render_with_skeleton_frame(30, 100, &ws, 4);
+        let text = frame
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("feature-x"));
+        assert!(text.contains("creating"));
+        assert!(text.contains('▓'));
+        assert_eq!(
+            text.matches("> feature-x").count(),
+            0,
+            "a skeleton must not become a navigation target"
+        );
+
+        ws.clear_pending_session();
+        let cleared = render(30, 100, &ws)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!cleared.contains("feature-x"));
     }
 
     #[test]
@@ -1715,16 +1801,27 @@ mod tests {
         let mut ws = workspace();
         let root_text = joined(&ws);
         assert!(root_text.contains("No tabs stirring yet. Enter starts one."));
-        assert!(root_text.contains("/tmp/actual"));
+        assert!(!root_text.contains("/tmp/actual"));
 
         ws.select_next();
         let session_text = joined(&ws);
-        assert!(session_text.contains("tui · human"));
+        assert!(session_text.contains("UI work"));
         assert!(session_text.contains("No tabs stirring yet. Enter starts one."));
+
+        ws.open_pane(PaneKind::Terminal);
+        let frame = render(30, 100, &ws);
+        let right_header = strip(&frame[CHROME_ROWS]);
+        let name = right_header.find("UI work").expect("session name");
+        let tab = right_header
+            .find("Terminal (resolving)")
+            .expect("terminal tab");
+        assert!(name < tab);
+        assert!(!frame.iter().any(|line| strip(line).contains("/tmp/actual")));
+        ws.close_pane();
 
         ws.select_next();
         let second_session_text = joined(&ws);
-        assert!(second_session_text.contains("daemon · mcp"));
+        assert!(second_session_text.contains("daemon"));
         assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
     }
 

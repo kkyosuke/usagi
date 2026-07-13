@@ -13,6 +13,7 @@ daemon と各 client 面が共有する IPC の現在の契約である。クレ
 - [Unix transport](#unix-transport)
 - [client の失敗処理](#client-の失敗処理)
 - [managed session request](#managed-session-request)
+- [agent launch request](#agent-launch-request)
 - [generic terminal request](#generic-terminal-request)
 
 ## identity と fence
@@ -69,6 +70,16 @@ error ID を返す。resource/ownership を証明できない場合は `ownershi
 `session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
 
 snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle を含む。agent / terminal 起動用の checkout path は、daemon が available の完全一致 scope からだけ解決する。client が name または path を渡して scope を再探索する wire contract はない。
+
+## agent launch request
+
+`agent` kind は daemon 所有の Agent runtime に届く。client は producer-issued `OperationId` と、`WorkspaceId` / `SessionId` / optional profile ID だけの launch intent を送る。worktree、checkout path、profile 既定値、argv、environment、secret は wire field ではなく、daemon が [managed session scope](05-daemon.md#authority-と-lifecycle) と code-defined adapter registry から解決する。profile を省略すると daemon の既定 policy が選ぶ。
+
+daemon は intent の `(WorkspaceId, SessionId)` を [available managed session](05-daemon.md#authority-と-lifecycle) の完全一致 scope に解決し、その worktree だけを launch に使う。creating / deleting / failed / stale / mismatch の scope、未知 profile、canonical でない `OperationId` は PTY を spawn せず typed safe error になる。
+
+成功した launch は accepted response に producer `OperationId` と durable revision を返し、body に完全な `TerminalRef` を載せる。この `TerminalRef` は operation・workspace・session・worktree・daemon generation・terminal incarnation を fence する。同じ semantic intent の `OperationId` 再送は同じ accepted / final を返し、二重 spawn しない。同じ `OperationId` を異なる intent で送ると `idempotency_conflict` になる。spawn failure・ambiguous・persist-after-spawn は fenced safe failure（`unavailable` / `ownership_unknown`）として durable に記録され、resend は同じ安全な失敗を replay する。replacement spawn や terminal の推測は行わない。
+
+Agent の pending pane は、同じ `OperationId` の成功 final が返した `TerminalRef` にだけ attach する。attach 以降の stream（`attach` / `resume` / `resync` / `input` / `resize` / `detach`）は [generic terminal request](#generic-terminal-request) と同じ vocabulary を共有し、daemon は `TerminalRef` の所有元（agent または generic）へ透過的に routing する。この pending pane の attach policy は [3. TUI](03-tui.md) を正本とする。
 
 ## generic terminal request
 

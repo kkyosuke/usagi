@@ -47,6 +47,23 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は
 `LiveInputClassifier` が pane navigation として予約するため、この management transition に渡さない。
 
+Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
+前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
+prefix の打鍵は live terminal への passthrough として扱う（`Ctrl-O`・`Ctrl-^` 以外は予約しない）。prefix の
+follow-up は下表のアクションに解決する。
+
+| prefix | アクション | 効果 |
+|---|---|---|
+| `Ctrl-O` `o`（または `Ctrl-O`） | Switch | Closeup から Switch へ戻る |
+| `Ctrl-O` `a` | OpenCloseupModal | tab がある Closeup でも action modal を前面に出す |
+| `Ctrl-O` `n` / `→` | NextTab | 次の tab を選ぶ |
+| `Ctrl-O` `p` / `←` | PreviousTab | 前の tab を選ぶ |
+| `Ctrl-O` `g` | Agent | agent pane を開く／再接続する |
+| `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
+| `Ctrl-O` `q` | QuitConfirmation | 終了確認を開く |
+
+leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。`Ctrl-C` は prefix より先に終了として扱う。
+
 ## Overview と modal
 
 Overview palette の Tab は選択中のトップレベル command を補完する。`session` の第 1 引数は
@@ -77,8 +94,8 @@ Closeup tab は pending operation または live `TerminalRef` を持つ。pendi
 `OperationId` にだけ対応し、live tab は完全な `TerminalRef` で識別する。選択中の live tab だけを
 attach し、選択外の tab は background のまま保持する。
 
-右ペインは tab を Chrome 風の chip と、その直下の active marker で描く。chip の表示順・label は
-表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
+右ペインは session 名の右に tab を Chrome 風の chip として描き、その直下に active marker を置く。path は
+右ペインには表示しない。chip の表示順・label は表示専用であり、選択は pending の `OperationId` または live の完全な `TerminalRef` から投影する。
 幅が狭い場合も ANSI を閉じた上で chip を clipping する。pending chip は v1 の選択 session と同じ
 Nerd Font うさぎ `󰤇`（U+F0907）だけを
 frame ごとに chip 内で進め、ラベル全体を着色しない。
@@ -86,10 +103,15 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 右ペイン幅の中央に表示する。描画前に clip して各灰色 SGR を reset で閉じるため、狭幅でも後続の
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
+Closeup action modal の表示は tab の有無で決まる。tab が無い Closeup では action modal を前面に出し、
+Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上ある Closeup では tab strip を前面にし、action
+modal は隠す。tab があるときに action modal を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて
+tab に戻る（Closeup から Switch へは抜けない）。
+
 Closeup action で `agent` または `terminal` を確定すると、その pending tab を即座に選択して右ペインへ
-表示する。`←` / `→`（または `h` / `l`）は tab を巡回し、`x` は選択 tab を閉じる。最後の tab を閉じると
-Closeup action と空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned terminal を
-停止しない。
+表示し、action modal を隠す。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
+選択 tab を閉じる。最後の tab を閉じると Closeup action と空状態へ戻る。close は client-side selection を外す
+だけであり、daemon-owned terminal を停止しない。
 
 Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
 workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
