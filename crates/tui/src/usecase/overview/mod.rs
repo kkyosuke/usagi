@@ -93,6 +93,10 @@ const DEFINITIONS: &[CommandDefinition] = &[
     },
 ];
 
+/// `session` が受け付ける workspace-level subcommand。実行の解釈は session
+/// handler が所有し、ここは palette の補完候補だけを一元化する。
+const SESSION_SUBCOMMANDS: &[&str] = &["create", "list", "overview", "remove"];
+
 /// Overview 固有コマンドの metadata を名前順に返す。
 #[must_use]
 #[coverage(off)]
@@ -130,6 +134,33 @@ pub fn complete(registry: &impl CommandRegistry, input: &str) -> Vec<CommandInfo
         .into_iter()
         .filter(|command| command.name.starts_with(typed))
         .collect()
+}
+
+/// Tab 補完後の入力。トップレベル command は選択候補の名前へ、`session` の第 1
+/// 引数は一意な prefix に対応する subcommand へ補完する。曖昧または未知の入力は
+/// 破壊せず `None` を返す。
+#[must_use]
+pub fn completion(input: &str) -> Option<String> {
+    let mut tokens = input.split_whitespace();
+    let command = tokens.next()?;
+    let subcommand = tokens.next();
+    if tokens.next().is_some() {
+        return None;
+    }
+    match (command, subcommand) {
+        ("session", Some(prefix)) => {
+            let mut matches = SESSION_SUBCOMMANDS
+                .iter()
+                .copied()
+                .filter(|candidate| candidate.starts_with(prefix));
+            let candidate = matches.next()?;
+            matches
+                .next()
+                .is_none()
+                .then(|| format!("session {candidate}"))
+        }
+        _ => None,
+    }
 }
 
 /// `input` の先頭 token と一致する command の help metadata。
@@ -251,7 +282,7 @@ pub fn dispatch(input: &str) -> Result<CommandResult, ParseError> {
 mod tests {
     use super::{
         Command, CommandInfo, CommandRegistry, CommandResult, DefaultRegistry, ParseError,
-        commands, complete, dispatch, help, interpret,
+        commands, complete, completion, dispatch, help, interpret,
     };
 
     struct FakeRegistry(Vec<CommandInfo>);
@@ -298,6 +329,15 @@ mod tests {
     }
 
     #[test]
+    fn completes_a_unique_session_subcommand_prefix() {
+        assert_eq!(completion("session c"), Some("session create".to_owned()));
+        assert_eq!(completion("session o"), Some("session overview".to_owned()));
+        assert_eq!(completion("session z"), None);
+        assert_eq!(completion("session create extra"), None);
+    }
+
+    #[test]
+    #[coverage(off)]
     fn interprets_every_registered_command_and_trims_arguments() {
         let cases = [
             (

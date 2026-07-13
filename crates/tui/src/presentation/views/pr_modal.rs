@@ -17,6 +17,7 @@ use crate::presentation::widgets::{self, modal};
 const INNER_WIDTH: usize = 58;
 /// 一度に表示する Pull Request の最大数。
 const MAX_VISIBLE: usize = 6;
+const BODY_HEIGHT: usize = 14;
 
 /// PR ポップアップの状態。workspace で見つかった PR 一覧と、その上のカーソルを持つ。
 #[derive(Debug, Clone)]
@@ -178,7 +179,7 @@ fn body(state: &PrModal) -> Vec<String> {
     }
     lines.push(String::new());
     lines.push(Style::new().dim().paint("  ↑↓ select   Esc: close"));
-    lines
+    modal::fixed_body(lines, BODY_HEIGHT)
 }
 
 /// 生の端末サイズに対する pull request modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
@@ -203,13 +204,17 @@ pub fn render_over(
     base: &[String],
     state: &PrModal,
 ) -> Vec<String> {
+    let (height, _) = widgets::normalize_size(raw_height, raw_width);
+    // Preserve a sliver of the workspace behind this fixed-height overlay on
+    // small terminals; normal terminals retain the complete reserved body.
+    let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
     modal::render_over(
         raw_height,
         raw_width,
         base,
         "Pull Request",
         INNER_WIDTH,
-        &body(state),
+        &body,
     )
 }
 
@@ -218,6 +223,19 @@ mod tests {
     use super::{PrModal, render, render_over};
     use crate::presentation::widgets::display_width;
     use usagi_core::domain::pullrequest::PrLink;
+
+    #[test]
+    fn empty_and_populated_lists_keep_the_pr_box_height_stable() {
+        let empty = render(40, 80, &PrModal::new(Vec::new()))
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        let populated = render(40, 80, &PrModal::dummy())
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        assert_eq!(empty, populated);
+    }
 
     fn strip(line: &str) -> String {
         let mut out = String::new();

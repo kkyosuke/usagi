@@ -466,6 +466,7 @@ pub struct AppState {
     pending: Vec<PendingOperation>,
     next_pending_token: u64,
     interaction_count: u64,
+    mascot_tick: u64,
     size: Option<(u16, u16)>,
     has_live_pane: bool,
     ctrl_c_grace: bool,
@@ -493,6 +494,7 @@ impl AppState {
             pending: Vec::new(),
             next_pending_token: 1,
             interaction_count: 0,
+            mascot_tick: 0,
             size: None,
             has_live_pane: false,
             ctrl_c_grace: false,
@@ -510,6 +512,11 @@ impl AppState {
     #[coverage(off)]
     pub const fn overlay(&self) -> Option<Overlay> {
         self.overlay
+    }
+    /// Home sidebar mascot animation frame. Only [`AppEvent::Tick`] advances it.
+    #[must_use]
+    pub const fn mascot_tick(&self) -> u64 {
+        self.mascot_tick
     }
     /// Open note editor, including unsaved values after a save failure.
     #[must_use]
@@ -1527,8 +1534,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             state.interaction_count = state.interaction_count.saturating_add(1);
             Vec::new()
         }
-        AppEvent::Tick
-        | AppEvent::Backend(
+        AppEvent::Tick => {
+            state.mascot_tick = state.mascot_tick.saturating_add(1);
+            Vec::new()
+        }
+        AppEvent::Backend(
             BackendEvent::NotesLoaded { .. }
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
@@ -2138,6 +2148,17 @@ mod tests {
     }
 
     #[test]
+    fn tick_advances_only_the_mascot_animation_frame() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.mascot_tick(), 0);
+        let _ = update(&mut state, AppEvent::Tick);
+        assert_eq!(state.mascot_tick(), 1);
+    }
+
+    #[test]
+    #[coverage(off)]
     fn new_clone_validates_dispatches_progress_and_attaches_home_on_success() {
         let (workspace, session, _) = ids();
         let mut state = NewState::new(NewMode::Clone, clone_form());

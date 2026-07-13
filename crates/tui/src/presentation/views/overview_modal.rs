@@ -17,6 +17,8 @@ use crate::usecase::overview;
 const INNER_WIDTH: usize = 56;
 /// 一度に出す候補の最大数。
 const MAX_MATCHES: usize = 8;
+/// input, heading, candidates, help, result, and footer.
+const BODY_HEIGHT: usize = 16;
 
 /// コマンドパレットの状態。入力欄と、その前方一致で選ばれた候補上のカーソルを持つ。
 #[derive(Debug, Clone, Default)]
@@ -87,9 +89,14 @@ impl OverviewModal {
         overview::complete(&overview::DefaultRegistry, self.input.value())
     }
 
-    /// 選択中候補の command 名を入力欄へ補完する。候補が無ければ no-op。
+    /// 選択中のトップレベル command、または一意な `session` subcommand を入力欄へ補完する。
+    /// 候補が無ければ no-op。
     #[coverage(off)]
     pub fn complete_selected(&mut self) {
+        if let Some(input) = overview::completion(self.input.value()) {
+            self.input = TextInput::with_value(&input);
+            return;
+        }
         if let Some(command) = self.matches().get(self.selected) {
             self.input = TextInput::with_value(command.name);
         }
@@ -308,7 +315,7 @@ fn body(state: &OverviewModal) -> Vec<String> {
             .dim()
             .paint("  Tab: complete   ↑↓: history/select   Esc: close"),
     );
-    lines
+    modal::fixed_body(lines, BODY_HEIGHT)
 }
 
 /// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
@@ -329,14 +336,11 @@ pub fn render_over(
     base: &[String],
     state: &OverviewModal,
 ) -> Vec<String> {
-    modal::render_over(
-        raw_height,
-        raw_width,
-        base,
-        "Command",
-        INNER_WIDTH,
-        &body(state),
-    )
+    let (height, _) = widgets::normalize_size(raw_height, raw_width);
+    // Leave a row of Home visible above and below a fixed-height palette on a
+    // short terminal. The normal-size body remains unchanged.
+    let body = modal::fixed_body(body(state), BODY_HEIGHT.min(height.saturating_sub(4)));
+    modal::render_over(raw_height, raw_width, base, "Command", INNER_WIDTH, &body)
 }
 
 #[cfg(test)]
@@ -449,6 +453,32 @@ mod tests {
     }
 
     #[test]
+    fn tab_completes_a_session_subcommand_without_replacing_the_command() {
+        let mut modal = OverviewModal::new();
+        for character in "session c".chars() {
+            modal.insert_char(character);
+        }
+        modal.complete_selected();
+        assert_eq!(modal.input(), "session create");
+    }
+
+    #[test]
+    fn content_changes_keep_the_overview_box_height_stable() {
+        let mut modal = OverviewModal::new();
+        let empty = render(40, 80, &modal)
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        modal.set_error("safe error");
+        let error = render(40, 80, &modal)
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
+        assert_eq!(empty, error);
+    }
+
+    #[test]
+    #[coverage(off)]
     fn history_recall_moves_between_submissions_without_duplicating_them() {
         let mut modal = OverviewModal::new();
         type_str(&mut modal, "issue list");

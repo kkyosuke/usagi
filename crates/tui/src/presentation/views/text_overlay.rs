@@ -8,6 +8,7 @@ use crate::presentation::widgets::modal;
 
 /// 長文 overlay の希望する内側幅。
 const INNER_WIDTH: usize = 68;
+const BODY_HEIGHT: usize = 14;
 
 /// overlay に表示する安全な document。`message` は backend の生エラーを含めない。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +71,8 @@ impl TextOverlay {
         // viewport に残し、render_modal / render_over が最終 clip を担う。
         // scroll indicator（最大 2 行）と footer（空行を含め 2 行）および枠を
         // 先に差し引く。これにより通常サイズでは footer が clip されない。
-        let viewport = height.saturating_sub(6).max(1);
+        let body_height = BODY_HEIGHT.min(height.saturating_sub(2));
+        let viewport = body_height.saturating_sub(4).max(1);
         let start = self.scroll.min(lines.len().saturating_sub(1));
         let end = start.saturating_add(viewport).min(lines.len());
         let mut body = Vec::new();
@@ -87,19 +89,20 @@ impl TextOverlay {
         }
         body.push(String::new());
         body.push(Style::new().dim().paint("↑↓ scroll   Esc: close"));
-        body
+        modal::fixed_body(body, body_height)
     }
 }
 
 /// 空の画面に中央配置して描く。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, state: &TextOverlay) -> Vec<String> {
+    let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
     modal::render_modal(
         raw_height,
         raw_width,
         &state.title,
         INNER_WIDTH,
-        &state.body(raw_height),
+        &state.body(height),
     )
 }
 
@@ -111,13 +114,14 @@ pub fn render_over(
     base: &[String],
     state: &TextOverlay,
 ) -> Vec<String> {
+    let (height, _) = crate::presentation::widgets::normalize_size(raw_height, raw_width);
     modal::render_over(
         raw_height,
         raw_width,
         base,
         &state.title,
         INNER_WIDTH,
-        &state.body(raw_height),
+        &state.body(height),
     )
 }
 
@@ -162,6 +166,22 @@ mod tests {
         assert_eq!(frame.len(), 3);
         assert!(frame.iter().all(|line| display_width(line) <= 3));
         assert!(frame.join("\n").contains("bac"));
+    }
+
+    #[test]
+    fn ready_and_fallback_documents_keep_the_overlay_height_stable() {
+        let ready = TextOverlay::new("Preview", OverlayDocument::Ready(vec!["body".into()]));
+        let fallback = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Unavailable("unavailable".into()),
+        );
+        let box_height = |modal: &TextOverlay| {
+            render(24, 80, modal)
+                .iter()
+                .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+                .count()
+        };
+        assert_eq!(box_height(&ready), box_height(&fallback));
     }
 
     #[test]

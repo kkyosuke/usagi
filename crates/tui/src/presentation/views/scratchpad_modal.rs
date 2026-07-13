@@ -10,6 +10,8 @@ use crate::usecase::application::controller::{EnvironmentEditor, NoteEditor, Not
 
 const INNER_WIDTH: usize = 62;
 const MAX_ROWS: usize = 8;
+const NOTES_BODY_HEIGHT: usize = 16;
+const ENVIRONMENT_BODY_HEIGHT: usize = 14;
 
 fn error_line(error: Option<&str>) -> Option<String> {
     error.map(|message| {
@@ -92,7 +94,7 @@ fn note_body(editor: &NoteEditor) -> Vec<String> {
     }
     lines.push(String::new());
     lines.push(Style::new().dim().paint("  Esc: close   Save: persist"));
-    lines
+    modal::fixed_body(lines, NOTES_BODY_HEIGHT)
 }
 
 fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
@@ -120,7 +122,7 @@ fn environment_body(editor: &EnvironmentEditor) -> Vec<String> {
     }
     lines.push(String::new());
     lines.push(Style::new().dim().paint("  Esc: close   Save: persist"));
-    lines
+    modal::fixed_body(lines, ENVIRONMENT_BODY_HEIGHT)
 }
 
 /// Render the scratchpad over an existing Home frame without replacing its background.
@@ -183,6 +185,10 @@ mod tests {
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenNotes));
         let empty_notes = render_notes_over(0, 0, &base(), state.note_editor().unwrap());
+        let notes_height = empty_notes
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
         assert!(empty_notes.join("\n").contains("(empty)"));
         assert_eq!(empty_notes.len(), 24);
         for (section, expected) in [
@@ -236,6 +242,13 @@ mod tests {
         assert!(notes.join("\n").contains("remember this"));
         assert!(notes.join("\n").contains("Could not save notes"));
         assert!(notes.iter().all(|line| display_width(line) == 80));
+        assert_eq!(
+            notes_height,
+            notes
+                .iter()
+                .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+                .count()
+        );
         for (section, expected) in [
             (NoteSection::Todos, "first"),
             (NoteSection::Decisions, "keep the port boundary"),
@@ -256,6 +269,10 @@ mod tests {
         let _ = update(&mut state, AppEvent::Key(AppKey::OpenEnvironment));
         let empty_environment =
             render_environment_over(24, 30, &base(), state.environment_editor().unwrap());
+        let environment_height = empty_environment
+            .iter()
+            .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+            .count();
         assert!(empty_environment.join("\n").contains("no environment"));
         let entries = (0..9)
             .map(|index| EnvironmentEntry {
@@ -286,5 +303,12 @@ mod tests {
         assert!(environment.join("\n").contains("1 more"));
         assert!(environment.join("\n").contains("Could not save"));
         assert!(environment.iter().all(|line| display_width(line) == 80));
+        assert_eq!(
+            environment_height,
+            render_environment_over(24, 30, &base(), state.environment_editor().unwrap())
+                .iter()
+                .filter(|line| line.contains('│') || line.contains('┌') || line.contains('└'))
+                .count()
+        );
     }
 }
