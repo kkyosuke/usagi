@@ -13,6 +13,7 @@
 
 pub mod icon;
 pub mod loading;
+pub mod mascot;
 pub mod modal;
 pub mod select;
 pub mod session_tab;
