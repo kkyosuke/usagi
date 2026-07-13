@@ -1028,9 +1028,7 @@ fn session_menu_rows_at(
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let wave = (0..name.chars().count().max(8))
-        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
-        .collect::<String>();
+    let wave = loading_wave(frame, name.chars().count().max(8));
     let label = Role::Accent.style().bold().paint(name);
     let loading = Style::new().dim().paint(&wave);
     let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
@@ -1039,6 +1037,15 @@ fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
         "░"
     });
     widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
+}
+
+/// Shared by session creation and daemon readiness so both pending states use
+/// the same moving block rather than inventing another spinner.
+#[coverage(off)]
+fn loading_wave(frame: usize, width: usize) -> String {
+    (0..width)
+        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
+        .collect()
 }
 
 #[coverage(off)]
@@ -1065,9 +1072,7 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
         || {
-            let shimmer = (0..6)
-                .map(|index| if index == frame % 6 { '▓' } else { '░' })
-                .collect::<String>();
+            let shimmer = loading_wave(frame, 8);
             vec![
                 Style::new()
                     .dim()
