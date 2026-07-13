@@ -1,14 +1,14 @@
 ---
 number: 264
 title: feat(daemon): generic terminal IPC runtime を接続する
-status: in-progress
+status: done
 priority: high
 labels: [daemon, ipc, terminal]
 dependson: [255]
 related: [235]
 parent: 227
 created_at: 2026-07-13T00:15:59.432663+00:00
-updated_at: 2026-07-13T00:18:41.439406+00:00
+updated_at: 2026-07-13T01:14:08.676404+00:00
 ---
 
 ## 目的

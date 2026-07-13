@@ -83,6 +83,11 @@ PTY endpoint に書き込まれた後だけ返す。partial write は ambiguous 
 terminal resize は registry の revision と geometry を更新する。terminal exit は final output を append
 してから exited state を記録するため、ownership を early release しない。
 
+generic shell terminal は IPC connection handler が所有 runtime へ渡す。runtime は generic terminal
+coordinator、trusted profile resolver、durable terminal store、injected PTY adapter を一つの ownership
+loop に保持する。connection close は runtime に通知して当該 connection の subscription だけを外し、
+profile resolution や replacement spawn を行わない。
+
 ## generation と orphan safety
 
 generation coordinator は active daemon を一つだけ持つ。active generation だけが session/control mutation
