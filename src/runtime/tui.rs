@@ -675,6 +675,15 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .map(|workspace| workspace.path)
             .collect())
     }
+
+    #[coverage(off)]
+    fn unregister(&mut self, paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+        Ok(workspace_usecase::remove(&self.storage, paths)
+            .map_err(io_error)?
+            .into_iter()
+            .map(|workspace| workspace.path)
+            .collect())
+    }
 }
 
 #[coverage(off)]

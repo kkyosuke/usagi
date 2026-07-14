@@ -184,6 +184,7 @@ enum OpenStep {
     Back,
     Choose(Vec<PathBuf>),
     ConfirmCleanup,
+    ConfirmUnregister(PathBuf),
 }
 
 /// Workspace 画面のキー処理結果。
@@ -723,6 +724,19 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 #[coverage(off)]
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
+    if open.unregistering_path().is_some() {
+        return match key {
+            Key::Char('y') | Key::Enter => open
+                .confirm_unregister()
+                .map_or(OpenStep::Stay, OpenStep::ConfirmUnregister),
+            Key::Char('n') | Key::Escape => {
+                open.cancel_unregister();
+                OpenStep::Stay
+            }
+            Key::Quit | Key::CtrlQ => OpenStep::Quit,
+            _ => OpenStep::Stay,
+        };
+    }
     if open.cleanup_confirming() {
         return match key {
             Key::Char('y') | Key::Enter => OpenStep::ConfirmCleanup,
@@ -781,6 +795,10 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         }
         Key::Char('C') => {
             open.request_cleanup();
+            OpenStep::Stay
+        }
+        Key::Char('d' | 'D') => {
+            open.request_unregister();
             OpenStep::Stay
         }
         Key::Char(ch) => {
@@ -2088,6 +2106,11 @@ fn run_with_settings_inner(
                     let removed = loader.cleanup_missing(&open.workspaces())?;
                     open.remove_paths(&removed);
                 }
+                OpenStep::ConfirmUnregister(path) => {
+                    let removed = loader.unregister(&[path]);
+                    let removed = removed?;
+                    open.remove_paths(&removed);
+                }
             },
             Screen::New => match step_new(&mut new_form, key) {
                 NewStep::Stay => {}
@@ -2569,6 +2592,8 @@ mod tests {
         opened: Vec<PathBuf>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
+        unregistered: Vec<PathBuf>,
+        unregister_calls: usize,
         fail: bool,
         opened_at: Option<DateTime<Utc>>,
     }
@@ -2616,6 +2641,12 @@ mod tests {
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
             self.cleanup_calls += 1;
             Ok(self.cleanup_removed.clone())
+        }
+
+        fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+            self.unregister_calls += 1;
+            self.unregistered.extend_from_slice(paths);
+            Ok(paths.to_vec())
         }
     }
 
@@ -3067,6 +3098,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unite_loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+    }
+
+    #[test]
+    fn open_unregister_requires_confirmation_and_only_passes_the_selected_path_to_loader() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+
+        let mut cancel = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Down,
+            Key::Char('d'),
+            Key::Char('n'),
+            Key::Quit,
+        ]);
+        let mut cancel_loader = FakeLoader::default();
+        run(
+            &mut cancel,
+            vec![alpha.clone(), beta.clone()],
+            Vec::new(),
+            now(),
+            &mut cancel_loader,
+        )
+        .unwrap();
+        assert_eq!(cancel_loader.unregister_calls, 0);
+        assert!(cancel.frames[3].join("\n").contains("beta"));
+
+        let mut confirm = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Down,
+            Key::Char('D'),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut confirm_loader = FakeLoader::default();
+        run(
+            &mut confirm,
+            vec![alpha, beta.clone()],
+            Vec::new(),
+            now(),
+            &mut confirm_loader,
+        )
+        .unwrap();
+        assert_eq!(confirm_loader.unregister_calls, 1);
+        assert_eq!(confirm_loader.unregistered, vec![beta.path]);
+        assert!(confirm.frames[4].join("\n").contains("alpha"));
+        assert!(!confirm.frames[4].join("\n").contains("beta"));
     }
 
     #[test]

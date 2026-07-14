@@ -97,6 +97,14 @@ pub trait WorkspaceLoader {
     ///
     /// Returns an error when checking or mutating the registry fails.
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>>;
+
+    /// Remove exactly the confirmed paths from the global workspace registry.
+    /// This never removes directories or workspace-local data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be mutated.
+    fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>;
 }
 
 /// TUI をどの画面から開始するかを表す。
