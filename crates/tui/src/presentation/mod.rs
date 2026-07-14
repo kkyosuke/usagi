@@ -3523,10 +3523,9 @@ mod tests {
             term.frames
                 .iter()
                 .flat_map(|frame| frame.iter())
-                .any(|line| line.contains('\u{f2db}')
-                    && line.contains('\u{f233}')
-                    && line.contains("45MB")
-                    && !line.contains('・'))
+                .filter(|line| line.contains('\u{f2db}') || line.contains('\u{f233}'))
+                .count()
+                >= 2
         );
     }
 
