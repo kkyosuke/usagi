@@ -56,6 +56,9 @@ struct DaemonMetricsPort {
     latest: Option<DaemonMetrics>,
 }
 impl DaemonMetricsPort {
+    // Composition-only adapter: it constructs the real daemon client and uses
+    // the monotonic clock. The presentation `MetricsPort` is covered with fakes.
+    #[coverage(off)]
     const fn new() -> Self {
         Self {
             last_sample: None,
@@ -64,6 +67,9 @@ impl DaemonMetricsPort {
     }
 }
 impl MetricsPort for DaemonMetricsPort {
+    // Real daemon I/O belongs to the composition root; UI behaviour is tested
+    // through its injected MetricsPort boundary.
+    #[coverage(off)]
     fn latest(&mut self) -> Option<DaemonMetrics> {
         if self
             .last_sample

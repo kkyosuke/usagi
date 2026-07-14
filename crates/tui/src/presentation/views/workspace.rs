@@ -1028,15 +1028,13 @@ fn session_menu_rows_at(
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let wave = widgets::shimmer_text(&"░".repeat(name.chars().count().max(8)), frame);
-    let label = Role::Accent.style().bold().paint(name);
-    let loading = wave;
+    let label = widgets::shimmer_text(name, frame);
     let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
         "▓"
     } else {
         "░"
     });
-    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
+    widgets::pad_to_width(&format!("  {activity} {label}  creating"), width)
 }
 
 #[coverage(off)]
