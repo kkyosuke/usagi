@@ -53,8 +53,8 @@ pub struct IssuePatch {
 /// Returns an error when the store cannot allocate a number or write the issue.
 #[coverage(off)]
 pub fn create(store: &IssueStore, spec: NewIssue, now: DateTime<Utc>) -> Result<Issue> {
+    let number = store.reserve_next_number()?;
     let lock = store.lock()?;
-    let number = store.max_number()? + 1;
     let issue = Issue {
         number,
         title: spec.title,
@@ -159,6 +159,9 @@ mod tests {
     use crate::domain::issue::{IssuePriority, IssueStatus};
     use crate::infrastructure::store::issue::IssueStore;
     use chrono::{DateTime, TimeZone, Utc};
+    use std::fs;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn ts(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, day, 0, 0, 0).unwrap()
@@ -189,6 +192,40 @@ mod tests {
         assert_eq!(first.status, IssueStatus::Todo);
         assert_eq!(first.priority, IssuePriority::High);
         assert_eq!(first.created_at, ts(20));
+    }
+
+    #[test]
+    fn create_reserves_distinct_numbers_for_concurrent_sibling_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let common_git_dir = tmp.path().join("common.git");
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        for (name, root) in [("first", &first_root), ("second", &second_root)] {
+            let private_git_dir = common_git_dir.join("worktrees").join(name);
+            fs::create_dir_all(&private_git_dir).unwrap();
+            fs::create_dir_all(root).unwrap();
+            fs::write(
+                root.join(".git"),
+                format!("gitdir: {}\n", private_git_dir.display()),
+            )
+            .unwrap();
+            fs::write(private_git_dir.join("commondir"), "../..\n").unwrap();
+        }
+
+        let start = Arc::new(Barrier::new(2));
+        let create_in = |root: std::path::PathBuf, title: &'static str| {
+            let start = Arc::clone(&start);
+            thread::spawn(move || {
+                let store = IssueStore::new(root);
+                start.wait();
+                create(&store, spec(title), ts(20)).unwrap().number
+            })
+        };
+        let first = create_in(first_root, "first");
+        let second = create_in(second_root, "second");
+        let mut numbers = [first.join().unwrap(), second.join().unwrap()];
+        numbers.sort_unstable();
+        assert_eq!(numbers, [1, 2]);
     }
 
     #[test]

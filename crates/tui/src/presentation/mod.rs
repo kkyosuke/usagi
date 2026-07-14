@@ -191,6 +191,7 @@ enum OpenStep {
     Back,
     Choose(Vec<PathBuf>),
     ConfirmCleanup,
+    ConfirmUnregister(PathBuf),
 }
 
 /// Workspace 画面のキー処理結果。
@@ -697,9 +698,13 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         Key::Char(ch) => welcome
             .action_for(ch)
             .map_or(WelcomeStep::Stay, welcome_action),
-        Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Live(_) | Key::Other => {
-            WelcomeStep::Stay
-        }
+        Key::Left
+        | Key::Right
+        | Key::Backspace
+        | Key::Tab
+        | Key::CtrlD
+        | Key::Live(_)
+        | Key::Other => WelcomeStep::Stay,
     }
 }
 
@@ -735,7 +740,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::Live(_) | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Other => NewStep::Stay,
     }
 }
 
@@ -755,6 +760,23 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 #[coverage(off)]
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
+    if open.unregistering_path().is_some() {
+        return match key {
+            Key::Left | Key::Right | Key::Tab => {
+                open.toggle_unregister_choice();
+                OpenStep::Stay
+            }
+            Key::Char('o' | 'O') | Key::Enter => open
+                .confirm_unregister()
+                .map_or(OpenStep::Stay, OpenStep::ConfirmUnregister),
+            Key::Char('c' | 'C') | Key::Escape => {
+                open.cancel_unregister();
+                OpenStep::Stay
+            }
+            Key::Quit | Key::CtrlQ => OpenStep::Quit,
+            _ => OpenStep::Stay,
+        };
+    }
     if open.cleanup_confirming() {
         return match key {
             Key::Char('y') | Key::Enter => OpenStep::ConfirmCleanup,
@@ -813,6 +835,10 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
         }
         Key::Char('C') => {
             open.request_cleanup();
+            OpenStep::Stay
+        }
+        Key::CtrlD => {
+            open.request_unregister();
             OpenStep::Stay
         }
         Key::Char(ch) => {
@@ -889,7 +915,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -1141,6 +1167,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::Tab
             | Key::Quit
             | Key::CtrlQ
+            | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
             | Key::Other => None,
@@ -1234,7 +1261,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -1253,6 +1280,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::CtrlQ
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1274,6 +1302,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::CtrlQ
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1305,6 +1334,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::Down
             | Key::Tab
             | Key::Quit
+            | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
             | Key::Other => {}
@@ -1338,7 +1368,13 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
-        Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
+        Key::Escape
+        | Key::Backspace
+        | Key::Tab
+        | Key::CtrlD
+        | Key::Char(_)
+        | Key::Live(_)
+        | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1376,7 +1412,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 execute_closeup_command(ui, &input);
             }
             Key::Tab => ui.closeup.complete_selected(),
-            Key::Up | Key::Down | Key::Live(_) | Key::Other => {}
+            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1405,7 +1441,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::Live(_) | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1430,6 +1466,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::Enter
         | Key::Backspace
         | Key::Tab
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1619,6 +1656,40 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
 }
 
 #[coverage(off)]
+fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+    let base = open::render(height, width, open, now);
+    let Some(path) = open.unregistering_path() else {
+        return base;
+    };
+    let title = Style::new()
+        .fg(Color::White)
+        .bold()
+        .paint("Unregister workspace");
+    let heading = Style::new()
+        .fg(Color::White)
+        .bold()
+        .paint(&format!("Unregister {}?", path.display()));
+    modal::render_over(
+        height,
+        width,
+        &base,
+        &title,
+        52,
+        &[
+            heading,
+            Style::new()
+                .fg(Color::White)
+                .paint("Only the registry entry is removed. Files stay."),
+            String::new(),
+            modal::confirmation_buttons(open.unregister_confirm_selected(), Role::Danger),
+            Style::new()
+                .dim()
+                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
+        ],
+    )
+}
+
+#[coverage(off)]
 fn render_quit_confirmation(
     height: usize,
     width: usize,
@@ -1658,7 +1729,7 @@ fn render_quit_confirmation(
             modal::confirmation_buttons(modal_state.confirm_selected, confirm_role),
             Style::new()
                 .dim()
-                .paint("  Enter: select   ←→/Tab: choose   o/c: select"),
+                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
         ],
     )
 }
@@ -2095,7 +2166,7 @@ fn run_with_settings_inner(
         let (height, width) = term.size()?;
         let frame = match screen {
             Screen::Welcome => welcome::render(height, width, &welcome, now),
-            Screen::Open => open::render(height, width, &open, now),
+            Screen::Open => render_open(height, width, &open, now),
             Screen::New => new::render(height, width, &new_form),
             Screen::Config => config::render(height, width, &config_form),
         };
@@ -2185,6 +2256,10 @@ fn run_with_settings_inner(
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(&open.workspaces())?;
+                    open.remove_paths(&removed);
+                }
+                OpenStep::ConfirmUnregister(path) => {
+                    let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
                 }
             },
@@ -2668,6 +2743,8 @@ mod tests {
         opened: Vec<PathBuf>,
         cleanup_removed: Vec<PathBuf>,
         cleanup_calls: usize,
+        unregistered: Vec<PathBuf>,
+        unregister_calls: usize,
         fail: bool,
         opened_at: Option<DateTime<Utc>>,
     }
@@ -2715,6 +2792,12 @@ mod tests {
         fn cleanup_missing(&mut self, _workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
             self.cleanup_calls += 1;
             Ok(self.cleanup_removed.clone())
+        }
+
+        fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+            self.unregister_calls += 1;
+            self.unregistered.extend_from_slice(paths);
+            Ok(paths.to_vec())
         }
     }
 
@@ -3166,6 +3249,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unite_loader.opened, vec![PathBuf::from("/tmp/alpha")]);
+    }
+
+    #[test]
+    fn open_unregister_requires_confirmation_and_only_passes_the_selected_path_to_loader() {
+        let alpha = ws("alpha");
+        let beta = ws("beta");
+
+        let mut cancel = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Down,
+            Key::CtrlD,
+            Key::Char('c'),
+            Key::Quit,
+        ]);
+        let mut cancel_loader = FakeLoader::default();
+        run(
+            &mut cancel,
+            vec![alpha.clone(), beta.clone()],
+            Vec::new(),
+            now(),
+            &mut cancel_loader,
+        )
+        .unwrap();
+        assert_eq!(cancel_loader.unregister_calls, 0);
+        assert!(cancel.frames[3].join("\n").contains("Unregister workspace"));
+        assert!(
+            cancel.frames[3]
+                .join("\n")
+                .contains("Only the registry entry is removed. Files stay.")
+        );
+        assert!(cancel.frames[3].join("\n").contains("beta"));
+
+        let mut confirm = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Down,
+            Key::CtrlD,
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut confirm_loader = FakeLoader::default();
+        run(
+            &mut confirm,
+            vec![alpha, beta.clone()],
+            Vec::new(),
+            now(),
+            &mut confirm_loader,
+        )
+        .unwrap();
+        assert_eq!(confirm_loader.unregister_calls, 1);
+        assert_eq!(confirm_loader.unregistered, vec![beta.path]);
+        assert!(
+            confirm.frames[3]
+                .join("\n")
+                .contains("Unregister workspace")
+        );
+        assert!(confirm.frames[4].join("\n").contains("alpha"));
+        assert!(!confirm.frames[4].join("\n").contains("beta"));
     }
 
     #[test]

@@ -97,6 +97,14 @@ pub trait WorkspaceLoader {
     ///
     /// Returns an error when checking or mutating the registry fails.
     fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>>;
+
+    /// Remove exactly the confirmed paths from the global workspace registry.
+    /// This never removes directories or workspace-local data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be mutated.
+    fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>>;
 }
 
 /// TUI をどの画面から開始するかを表す。
@@ -178,6 +186,8 @@ pub enum Key {
     Quit,
     /// Ctrl-Q ends the workspace, including its live sessions.
     CtrlQ,
+    /// Ctrl-D requests an unregister confirmation only on Open Workspace.
+    CtrlD,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
     /// 上記のいずれでもないキー（無視して再描画だけする。リサイズ通知など）。
@@ -337,6 +347,7 @@ mod tests {
             Key::Backspace,
             Key::Escape,
             Key::Quit,
+            Key::CtrlD,
             Key::Char('o'),
             Key::Live(LiveTerminalAction::Switch),
             Key::Other,

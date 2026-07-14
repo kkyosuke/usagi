@@ -585,17 +585,9 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
-                    // Exit chords stay outside the live-prefix classifier: Ctrl-Q ends
-                    // the workspace, while Ctrl-C only closes the TUI.
-                    if let LiveInput::Key(key) = &input
-                        && key.modifiers.control
-                    {
-                        if key.code == KeyCode::Char('c') {
-                            return Ok(Key::Quit);
-                        }
-                        if key.code == KeyCode::Char('q') {
-                            return Ok(Key::CtrlQ);
-                        }
+                    // Global control chords stay outside the live-prefix classifier.
+                    if let Some(key) = control_key(&input) {
+                        return Ok(key);
                     }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
@@ -618,6 +610,24 @@ impl Terminal for CrosstermTerminal {
             }
         }
     }
+}
+
+/// Map global control chords before their bytes can reach a text field.
+///
+/// [`Key::CtrlD`] has an effect only in Open Workspace; other screens explicitly
+/// ignore it. Keeping it as a dedicated key prevents a U+0004 control character
+/// from being inserted into their inputs.
+#[coverage(off)]
+fn control_key(input: &LiveInput) -> Option<Key> {
+    let LiveInput::Key(key) = input else {
+        return None;
+    };
+    key.modifiers.control.then_some(match key.code {
+        KeyCode::Char('c') => Some(Key::Quit),
+        KeyCode::Char('q') => Some(Key::CtrlQ),
+        KeyCode::Char('d') => Some(Key::CtrlD),
+        _ => None,
+    })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
@@ -736,6 +746,15 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .map(|workspace| workspace.path.clone())
             .collect::<Vec<_>>();
         Ok(workspace_usecase::remove(&self.storage, &missing)
+            .map_err(io_error)?
+            .into_iter()
+            .map(|workspace| workspace.path)
+            .collect())
+    }
+
+    #[coverage(off)]
+    fn unregister(&mut self, paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
+        Ok(workspace_usecase::remove(&self.storage, paths)
             .map_err(io_error)?
             .into_iter()
             .map(|workspace| workspace.path)
@@ -948,7 +967,7 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistentSettingsPort, Start, created_session_hook, load_screen_graph_data,
+        PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
         passthrough_key,
     };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
@@ -970,6 +989,19 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
+    }
+
+    #[test]
+    fn ctrl_d_maps_to_the_dedicated_open_workspace_unregister_key() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(control_key(&key), Some(Key::CtrlD));
     }
 
     #[test]

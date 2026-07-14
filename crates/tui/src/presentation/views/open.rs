@@ -25,7 +25,7 @@ use crate::presentation::widgets::{self, TextInput};
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
 const FOOTER: &str =
-    "↑↓ select / type filter / Tab Unite / C cleanup / Enter open / Esc back / Ctrl-C quit";
+    "↑↓ select / type filter / Ctrl-D unregister / Enter open / Esc back / Ctrl-C quit";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -40,6 +40,8 @@ pub struct Open {
     unite: bool,
     unite_paths: HashSet<std::path::PathBuf>,
     cleanup_confirming: bool,
+    unregistering_path: Option<std::path::PathBuf>,
+    unregister_confirm_selected: bool,
 }
 
 impl Open {
@@ -73,6 +75,8 @@ impl Open {
             unite: false,
             unite_paths: HashSet::new(),
             cleanup_confirming: false,
+            unregistering_path: None,
+            unregister_confirm_selected: true,
         }
     }
 
@@ -128,6 +132,20 @@ impl Open {
     #[coverage(off)]
     pub const fn cleanup_confirming(&self) -> bool {
         self.cleanup_confirming
+    }
+
+    /// Path whose registry entry awaits explicit removal confirmation.
+    #[must_use]
+    #[coverage(off)]
+    pub fn unregistering_path(&self) -> Option<&std::path::Path> {
+        self.unregistering_path.as_deref()
+    }
+
+    /// Whether the destructive action is selected in the unregister modal.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn unregister_confirm_selected(&self) -> bool {
+        self.unregister_confirm_selected
     }
 
     /// Append one character to the filter and return selection to its first hit.
@@ -197,6 +215,39 @@ impl Open {
         self.cleanup_confirming = false;
     }
 
+    /// Ask for explicit confirmation before removing the selected registry entry.
+    ///
+    /// This records only the entry path. The caller owns the actual registry
+    /// mutation, so this view can never delete the workspace directory or data.
+    #[coverage(off)]
+    pub fn request_unregister(&mut self) {
+        self.unregistering_path = self.selected().map(|workspace| workspace.path.clone());
+        self.unregister_confirm_selected = true;
+    }
+
+    /// Dismiss a selected-entry unregister confirmation without mutation.
+    #[coverage(off)]
+    pub fn cancel_unregister(&mut self) {
+        self.unregistering_path = None;
+        self.unregister_confirm_selected = true;
+    }
+
+    /// Move the unregister modal focus between its confirm and cancel buttons.
+    #[coverage(off)]
+    pub fn toggle_unregister_choice(&mut self) {
+        self.unregister_confirm_selected = !self.unregister_confirm_selected;
+    }
+
+    /// Consume the path selected for confirmed registry removal.
+    #[coverage(off)]
+    pub fn confirm_unregister(&mut self) -> Option<std::path::PathBuf> {
+        if !self.unregister_confirm_selected {
+            self.cancel_unregister();
+            return None;
+        }
+        self.unregistering_path.take()
+    }
+
     /// Finish a confirmed cleanup, removing the returned registry paths locally.
     #[coverage(off)]
     pub fn remove_paths(&mut self, paths: &[std::path::PathBuf]) {
@@ -204,6 +255,8 @@ impl Open {
             .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
         self.unite_paths.retain(|path| !paths.contains(path));
         self.cleanup_confirming = false;
+        self.unregistering_path = None;
+        self.unregister_confirm_selected = true;
         self.selected_index = 0;
     }
 
@@ -603,6 +656,39 @@ mod tests {
             open.unite_paths(),
             vec![Path::new("/tmp/beta").to_path_buf()]
         );
+    }
+
+    #[test]
+    fn unregister_confirmation_keeps_files_out_of_the_view_state_and_removes_only_confirmed_path() {
+        let mut open = Open::new(vec![workspace("alpha", 1), workspace("beta", 2)]);
+        open.select_next();
+
+        open.request_unregister();
+        assert_eq!(open.unregistering_path(), Some(Path::new("/tmp/beta")));
+        assert!(open.unregister_confirm_selected());
+
+        open.toggle_unregister_choice();
+        assert!(!open.unregister_confirm_selected());
+        assert_eq!(open.confirm_unregister(), None);
+        assert_eq!(open.unregistering_path(), None);
+
+        assert_eq!(open.workspaces().len(), 2);
+
+        open.request_unregister();
+        let path = open.confirm_unregister().unwrap();
+        assert_eq!(path, Path::new("/tmp/beta"));
+        open.remove_paths(&[path]);
+        assert_eq!(open.workspaces().len(), 1);
+        assert_eq!(open.selected().unwrap().path, Path::new("/tmp/alpha"));
+    }
+
+    #[test]
+    fn footer_advertises_unregister_without_stale_unite_or_cleanup_hints() {
+        let footer = rendered(&Open::new(vec![workspace("alpha", 1)]));
+
+        assert!(footer.contains("Ctrl-D unregister"));
+        assert!(!footer.contains("Tab Unite"));
+        assert!(!footer.contains("C cleanup"));
     }
 
     #[test]
