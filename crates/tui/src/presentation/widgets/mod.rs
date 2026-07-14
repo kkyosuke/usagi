@@ -479,4 +479,36 @@ mod tests {
         assert!(first.contains("\u{1b}["), "configured style is applied");
         assert_ne!(shimmer_text("waiting", 0), first);
     }
+
+    #[test]
+    fn shimmer_replaces_one_character_without_changing_the_status_text_width() {
+        let options = Shimmer {
+            style: Role::Feature.style().bold(),
+            speed: 1,
+            replacement: Some('\u{f907}'),
+        };
+        let rendered = |frame| strip_sgr(&shimmer_text_with("waiting daemon", frame, options));
+
+        assert_eq!(rendered(0), "\u{f907}aiting daemon");
+        assert_eq!(rendered(1), "w\u{f907}iting daemon");
+        assert_eq!(rendered(7), "waiting\u{f907}daemon");
+        assert_eq!(rendered(8), "waiting \u{f907}aemon");
+    }
+
+    fn strip_sgr(text: &str) -> String {
+        let mut plain = String::new();
+        let mut chars = text.chars();
+        while let Some(character) = chars.next() {
+            if character == '\u{1b}' && chars.next() == Some('[') {
+                for terminator in chars.by_ref() {
+                    if terminator == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(character);
+            }
+        }
+        plain
+    }
 }

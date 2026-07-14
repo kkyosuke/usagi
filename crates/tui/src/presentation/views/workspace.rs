@@ -1063,12 +1063,10 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
 fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
     metrics.map_or_else(
         || {
-            let label = Style::new().dim().paint("waiting daemon");
-            // The rabbit travels through a fixed-width word: only its current
-            // character is overwritten, while the `waiting daemon` label stays
-            // anchored in place.
-            let rabbit = widgets::shimmer_text_with(
-                "rabbit",
+            // Replace exactly one character in the status text while sweeping;
+            // this keeps the label's layout stable instead of appending a rail.
+            let waiting = widgets::shimmer_text_with(
+                "waiting daemon",
                 frame,
                 widgets::Shimmer {
                     style: Role::Feature.style().bold(),
@@ -1076,7 +1074,7 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     replacement: Some('\u{f907}'),
                 },
             );
-            vec![format!("{label} {rabbit}")]
+            vec![waiting]
         },
         |metrics| {
             vec![format!(
