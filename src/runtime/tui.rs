@@ -19,13 +19,17 @@ use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 use usagi_core::domain::session_lifecycle::ManagedSession;
 use usagi_core::domain::settings::Settings;
+use usagi_core::domain::terminal_launch::{
+    TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId,
+};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply, DaemonRequest,
-    MetricsAction, SessionAction,
+    MetricsAction, SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent,
+    TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -147,6 +151,58 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 .and_then(|terminal| {
                     serde_json::from_value(terminal)
                         .map_err(|_| "agent launch returned an invalid terminal".to_owned())
+                }),
+        }
+    }
+
+    #[coverage(off)]
+    fn launch_terminal(
+        &mut self,
+        workspace: WorkspaceId,
+        session: usagi_core::domain::id::SessionId,
+    ) -> Result<usagi_core::domain::id::TerminalRef, String> {
+        let lifecycle = request_lifecycle_snapshot()
+            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let managed = lifecycle
+            .sessions
+            .iter()
+            .find(|candidate| {
+                lifecycle.workspace_id == workspace && candidate.session_id == session
+            })
+            .ok_or_else(|| "selected session is no longer available".to_owned())?;
+        if managed.lifecycle != usagi_core::domain::session_lifecycle::SessionLifecycle::Available {
+            return Err("selected session is not ready for a terminal".to_owned());
+        }
+        let intent = TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell")
+                    .expect("static terminal profile is valid"),
+                scope: TerminalLaunchScope {
+                    workspace_id: workspace,
+                    session_id: Some(session),
+                    worktree_id: managed.worktree_id,
+                },
+            },
+            geometry: TerminalGeometry { cols: 80, rows: 24 },
+        };
+        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
+            .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
+        let payload = serde_json::to_value(TerminalRequest::Launch { intent })
+            .expect("terminal request is serializable");
+        match client
+            .request(DaemonRequest::Terminal {
+                action: TerminalAction::Launch,
+                payload,
+            })
+            .map_err(|_| "daemon request failed; reconnect to continue".to_owned())?
+        {
+            DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. } => body
+                .get("terminal")
+                .cloned()
+                .ok_or_else(|| "terminal launch was not accepted".to_owned())
+                .and_then(|terminal| {
+                    serde_json::from_value(terminal)
+                        .map_err(|_| "terminal launch returned an invalid terminal".to_owned())
                 }),
         }
     }

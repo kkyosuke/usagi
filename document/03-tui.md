@@ -186,7 +186,9 @@ forced state が無い Closeup は tab が input を所有し、action modal は
 modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent` または `terminal` を確定すると、その pending tab を即座に選択して右ペインへ
-表示し、action modal を隠す。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
+表示し、action modal を隠す。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
+`login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
 選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
 terminal を停止しない。

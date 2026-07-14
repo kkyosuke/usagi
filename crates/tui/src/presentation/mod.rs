@@ -59,6 +59,19 @@ pub trait AgentCommandPort {
         session: SessionId,
         profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String>;
+
+    /// Open a daemon-owned login shell for an existing managed session.
+    ///
+    /// The default keeps embedders that only expose Agent launch safe: the
+    /// Terminal action becomes an inline failure instead of spawning anything
+    /// locally.
+    fn launch_terminal(
+        &mut self,
+        _workspace: WorkspaceId,
+        _session: SessionId,
+    ) -> Result<TerminalRef, String> {
+        Err("terminal launch is unavailable".to_owned())
+    }
 }
 
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
@@ -1367,25 +1380,34 @@ fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
 #[coverage(off)]
 fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileId>) {
     let operation = ui.workspace.open_pane(kind);
-    if kind == PaneKind::Agent {
+    if kind == PaneKind::Agent || kind == PaneKind::Terminal {
         if ui.agent.is_none() {
+            ui.workspace.fail_pane(
+                operation,
+                "select an active session to open a terminal".to_owned(),
+            );
             ui.closeup_action_forced = false;
             return;
         }
         let selected = ui.workspace.selected().checked_sub(1);
-        let profile =
-            profile.or_else(|| ui.agent.as_ref().map(|agent| agent.default_profile.clone()));
         let result = ui.agent.as_mut().and_then(|agent| {
             selected
                 .and_then(|index| agent.sessions.get(index).copied())
-                .map(|session| agent.port.launch(agent.workspace, session, profile))
+                .map(|session| {
+                    if kind == PaneKind::Agent {
+                        let profile = profile.or_else(|| Some(agent.default_profile.clone()));
+                        agent.port.launch(agent.workspace, session, profile)
+                    } else {
+                        agent.port.launch_terminal(agent.workspace, session)
+                    }
+                })
         });
         match result {
             Some(Ok(terminal)) => ui.workspace.complete_pane(operation, terminal),
             Some(Err(message)) => ui.workspace.fail_pane(operation, message),
             None => ui.workspace.fail_pane(
                 operation,
-                "select an active session to start an agent".to_owned(),
+                "select an active session to open a terminal".to_owned(),
             ),
         }
     }
@@ -2305,6 +2327,27 @@ mod tests {
             _workspace: WorkspaceId,
             _session: SessionId,
             _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct SuccessfulTerminalPort(TerminalRef);
+
+    impl AgentCommandPort for SuccessfulTerminalPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("agent launch is not expected".to_owned())
+        }
+
+        fn launch_terminal(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
         }
@@ -3412,6 +3455,48 @@ mod tests {
             ui.workspace.pane().tabs(),
             [crate::usecase::application::pane::PaneTab::Live(live)]
                 if live.kind == crate::usecase::application::pane::PaneKind::Agent
+                    && live.terminal == terminal
+        ));
+    }
+
+    #[test]
+    fn selecting_terminal_in_a_session_replaces_its_pending_tab_with_the_daemon_terminal() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-terminal-live"),
+            state("closeup-terminal-live"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(SuccessfulTerminalPort(terminal.clone())),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        execute_closeup_command(&mut ui, "terminal");
+
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Live(live)]
+                if live.kind == crate::usecase::application::pane::PaneKind::Terminal
                     && live.terminal == terminal
         ));
     }

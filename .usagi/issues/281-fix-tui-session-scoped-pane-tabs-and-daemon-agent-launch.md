@@ -1,13 +1,13 @@
 ---
 number: 281
 title: fix(tui): session-scoped pane tabs and daemon Agent launch
-status: in-progress
+status: done
 priority: high
 labels: []
 dependson: []
 related: [279]
 created_at: 2026-07-13T11:17:27.225559+00:00
-updated_at: 2026-07-13T11:17:41.852807+00:00
+updated_at: 2026-07-14T12:34:12.675837+00:00
 ---
 
 ## 背景
