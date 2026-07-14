@@ -1088,7 +1088,7 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     "{MEMORY_ICON} {}",
                     format_memory(metrics.resident_memory_bytes)
                 ));
-            vec![cpu, memory]
+            vec![format!("{cpu}  {memory}")]
         },
     )
 }
@@ -2560,19 +2560,16 @@ mod tests {
             .iter()
             .map(|line| line.chars().take(LEFT_WIDTH).collect::<String>())
             .collect::<Vec<_>>();
-        let cpu = left_rows
+        let metrics = left_rows
             .iter()
             .position(|line| line.contains('\u{f2db}'))
             .expect("CPU beside usagi");
-        let memory = left_rows
-            .iter()
-            .position(|line| line.contains('\u{f233}'))
-            .expect("memory beside usagi");
-        assert_eq!(memory, cpu + 1, "metrics use two stacked rows");
-        assert!(left_rows[cpu].trim_end().ends_with("\u{f2db} 1%"));
-        assert!(left_rows[memory].trim_end().ends_with("\u{f233} 45MB"));
-        assert_eq!(body_rows[cpu].chars().nth(LEFT_WIDTH), Some('│'));
-        assert_eq!(body_rows[memory].chars().nth(LEFT_WIDTH), Some('│'));
+        assert!(
+            left_rows[metrics]
+                .trim_end()
+                .ends_with("\u{f2db} 1%    \u{f233} 45MB")
+        );
+        assert_eq!(body_rows[metrics].chars().nth(LEFT_WIDTH), Some('│'));
     }
 
     #[test]

@@ -3523,9 +3523,7 @@ mod tests {
             term.frames
                 .iter()
                 .flat_map(|frame| frame.iter())
-                .filter(|line| line.contains('\u{f2db}') || line.contains('\u{f233}'))
-                .count()
-                >= 2
+                .any(|line| line.contains('\u{f2db}') && line.contains('\u{f233}'))
         );
     }
 
