@@ -240,6 +240,7 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
         };
         let mut lines = vec![
             mascot_screen::centered_line(width, scope, Style::new()),
+            String::new(),
             mascot_screen::centered_line(
                 width,
                 &select::render(
@@ -264,7 +265,7 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             mascot_screen::centered_line(
                 width,
                 &select::render(
-                    "Default model",
+                    "Agent model",
                     default_model_name(config.settings().default_model),
                     config.field() == Field::DefaultModel,
                     config.settings().default_model != config.current().saved.default_model,
@@ -421,7 +422,7 @@ mod tests {
         assert!(frame.contains("Scope: [Global]"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
-        assert!(frame.contains("Default model") && frame.contains("OpenAI"));
+        assert!(frame.contains("Agent model") && frame.contains("OpenAI"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
     }
