@@ -2,9 +2,11 @@
 
 #![coverage(off)] // Unix socket / process / PTY wiring; fake-PTY owner contracts live in usagi-daemon tests.
 
+use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
+use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,6 +21,7 @@ use usagi_core::infrastructure::daemon::{
     DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
     Sleeper, Terminator,
 };
+use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
@@ -1096,6 +1099,56 @@ pub(crate) fn run<W: Write>(
     command: Option<&str>,
     info: &AppInfo,
 ) -> std::io::Result<()> {
+    install_panic_logger();
+    match panic::catch_unwind(AssertUnwindSafe(|| run_inner(out, command, info))) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            ErrorLog::record(&format!("daemon failed: {error}"));
+            Err(error)
+        }
+        // `install_panic_logger` has already recorded the payload, location,
+        // and backtrace. Convert the unwind to an ordinary process error so
+        // callers do not continue after a failed daemon startup or serve loop.
+        Err(_) => Err(std::io::Error::other(
+            "daemon panicked; see the error log for details",
+        )),
+    }
+}
+
+/// Install one process-wide panic hook for the daemon. A daemon owns several
+/// worker threads, so a boundary around its main thread alone cannot observe a
+/// panic in an IPC, PTY, or observer worker. The hook records every thread's
+/// panic before the thread unwinds; [`run`] then catches a main-thread panic at
+/// the outer daemon boundary and terminates the process with an ordinary error.
+#[coverage(off)]
+fn install_panic_logger() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        ErrorLog::record(&format_panic(info));
+        previous(info);
+    }));
+}
+
+#[coverage(off)]
+fn format_panic(info: &PanicHookInfo<'_>) -> String {
+    let payload = if let Some(message) = info.payload().downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = info.payload().downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    };
+    let location = info
+        .location()
+        .map_or_else(|| "unknown location".to_owned(), ToString::to_string);
+    format!(
+        "daemon panicked: {payload}\nlocation: {location}\nbacktrace:\n{}",
+        Backtrace::force_capture()
+    )
+}
+
+#[coverage(off)]
+fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> std::io::Result<()> {
     let daemon_dir = paths::data_dir()
         .map_err(|err| std::io::Error::other(format!("{err:#}")))?
         .join("daemon");
