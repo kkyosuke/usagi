@@ -1665,6 +1665,11 @@ fn home_row_lines_at(
         Role::Success.style().bold().paint(&label)
     } else if selected {
         Role::Accent.style().bold().paint(&label)
+    } else if home.mode == HomeMode::Switch {
+        // v1 keeps the Switch cursor legible by fading every inactive target.
+        // Do this after the selected/new-session cases so their established
+        // semantic colours and the marker precedence remain unchanged.
+        Style::new().dim().paint(&label)
     } else if detail.is_empty() {
         widgets::pad_to_width(&format!("{marker} {label}"), width)
     } else {
@@ -2094,6 +2099,34 @@ mod tests {
         for line in render_home(8, 7, &switch) {
             assert!(display_width(&line) <= 7);
         }
+    }
+
+    #[test]
+    fn switch_dims_inactive_targets_without_changing_selected_or_new_session_colours() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[
+                projected_session(first, "first", "/work/first"),
+                projected_session(second, "second", "/work/second"),
+            ],
+        );
+
+        let rendered = render_home(30, 100, &home).join("\n");
+        assert!(rendered.contains("\u{1b}[2mfirst\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[1;36msecond\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
     }
 
     #[test]
