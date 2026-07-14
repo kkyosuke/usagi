@@ -31,10 +31,15 @@ use crate::usecase::application::pane::{
 };
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
-/// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
-const LEFT_WIDTH: usize = 28;
+/// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
+const LEFT_WIDTH: usize = 36;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
+/// v1 と同じ Nerd Font glyph: processor and resident-memory server.
+const CPU_ICON: char = '\u{f2db}';
+const MEMORY_ICON: char = '\u{f233}';
+const MEBIBYTE: u64 = 1_048_576;
+const GIBIBYTE: u64 = 1_073_741_824;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -1072,21 +1077,42 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
             vec![waiting]
         },
         |metrics| {
-            vec![format!(
-                "CPU {}.{:01}% · {}",
-                metrics.cpu_percent_hundredths / 100,
-                metrics.cpu_percent_hundredths % 100 / 10,
-                format_memory(metrics.resident_memory_bytes),
-            )]
+            let cpu_label = format!(
+                "{CPU_ICON} {:<4}",
+                format!("{}%", metrics.cpu_percent_hundredths / 100)
+            );
+            let cpu = load_style(u64::from(metrics.cpu_percent_hundredths), 3_000, 12_000)
+                .paint(&cpu_label);
+            let memory = load_style(metrics.resident_memory_bytes, 512 * MEBIBYTE, 2 * GIBIBYTE)
+                .paint(&format!(
+                    "{MEMORY_ICON} {}",
+                    format_memory(metrics.resident_memory_bytes)
+                ));
+            vec![format!("{cpu}  {memory}")]
         },
     )
 }
 
 #[coverage(off)]
+fn load_style(value: u64, busy: u64, hot: u64) -> Style {
+    if value >= hot {
+        Style::new().fg(Color::Red)
+    } else if value >= busy {
+        Style::new().fg(Color::Yellow)
+    } else {
+        Style::new().dim()
+    }
+}
+
+#[coverage(off)]
 fn format_memory(bytes: u64) -> String {
-    let mebibytes = bytes / 1_048_576;
-    let tenths = bytes % 1_048_576 / 104_858;
-    format!("{mebibytes}.{tenths}M")
+    if bytes >= GIBIBYTE {
+        let gibibytes = bytes / GIBIBYTE;
+        let tenths = bytes % GIBIBYTE / 107_374_183;
+        format!("{gibibytes}.{tenths}GB")
+    } else {
+        format!("{}MB", bytes / MEBIBYTE)
+    }
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -2524,7 +2550,7 @@ mod tests {
             .collect::<Vec<_>>();
         let _metrics = left_rows
             .iter()
-            .position(|line| line.contains("CPU 1.2% · 45.0M"))
+            .position(|line| line.contains("\u{f2db} 1%    \u{f233} 45MB"))
             .expect("metrics beside usagi");
     }
 

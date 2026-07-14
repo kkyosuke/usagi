@@ -2398,7 +2398,17 @@ mod tests {
                 sampled_at_ms: 42,
                 active_subscribers: 3,
                 dropped_updates: 0,
+                cpu_percent_hundredths: 250,
+                resident_memory_bytes: 45 * 1024 * 1024,
             })
+        }
+    }
+
+    struct StaticMetricsFactory;
+
+    impl MetricsPortFactory for StaticMetricsFactory {
+        fn create(&mut self) -> Box<dyn MetricsPort> {
+            Box::new(StaticMetrics)
         }
     }
 
@@ -3477,6 +3487,50 @@ mod tests {
         assert_eq!(*created.lock().unwrap(), 1);
     }
 
+    #[test]
+    fn screen_graph_injects_metrics_when_opening_a_workspace() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut sessions = SnapshotSessionPortFactory {
+            calls,
+            created: Arc::new(Mutex::new(0)),
+        };
+        let mut agents = IdleAgentPortFactory;
+        let mut metrics = StaticMetricsFactory;
+        let keys = [Key::Char('o'), Key::Enter, Key::Char('q'), Key::Enter];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+
+        assert_eq!(
+            run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+                &mut term,
+                vec![ws("alpha")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+                &mut agents,
+                AvailableAgentModels::all(),
+                &mut metrics,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert!(
+            term.frames
+                .iter()
+                .flat_map(|frame| frame.iter())
+                .any(|line| line.contains('\u{f2db}')
+                    && line.contains('\u{f233}')
+                    && line.contains("45MB")
+                    && !line.contains('・'))
+        );
+    }
+
+>>>>>>> b4889f97 (style(tui): v1風のdaemon metricsを表示)
     /// Welcome の Recent 経由で開いた workspace も同じ factory から port を取り出す。
     #[test]
     fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
@@ -3580,11 +3634,11 @@ mod tests {
 
         refresh_metrics(&mut ui);
 
-        assert!(
-            render_workspace(40, 80, &ui)
-                .join("\n")
-                .contains("3 sub · 0 dropped")
-        );
+        let rendered = render_workspace(40, 80, &ui).join("\n");
+        assert!(rendered.contains('\u{f2db}'));
+        assert!(rendered.contains('\u{f233}'));
+        assert!(rendered.contains("45MB"));
+        assert!(!rendered.contains('・'));
     }
 
     #[test]
