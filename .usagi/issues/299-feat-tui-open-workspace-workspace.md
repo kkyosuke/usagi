@@ -7,7 +7,7 @@ labels: [feat, tui, workspace]
 dependson: []
 related: []
 created_at: 2026-07-14T22:30:42.962666+00:00
-updated_at: 2026-07-14T22:34:13.352556+00:00
+updated_at: 2026-07-14T22:46:31.297718+00:00
 ---
 
 ## 目的
@@ -16,10 +16,10 @@ Open Workspace 画面で、選択中の workspace を安全に登録解除でき
 
 ## 変更内容
 
-- Open Workspace の選択中 entry に登録解除の shortcut と確認状態を追加する。
-- 確認中は `y` または Enter で実行し、`n` または Esc で取り消す。
-- registry mutation は既存 core の `workspace::remove` を通す loader port に委譲し、成功時だけ Open list から実際に削除された path を反映する。
-- footer から実態と合わない `Tab` / `C` の説明を除去・訂正し、登録解除操作を案内する。
+- Open Workspace の選択中 entry に Ctrl-D の登録解除 shortcut を追加する。
+- workspace 終了時と同じ確認 modal を重ね、Enter または o で実行、Esc または c で取り消す。
+- registry mutation は既存 core の workspace::remove を通す loader port に委譲し、成功時だけ Open list から実際に削除された path を反映する。
+- footer から実態と合わない Tab / C の説明を除去・訂正し、Ctrl-D を案内する。
 
 ## 受け入れ条件
 
@@ -32,5 +32,5 @@ Open Workspace 画面で、選択中の workspace を安全に登録解除でき
 ## テスト
 
 - Open state: request/cancel/confirmed removal と選択・filter/unite 状態の整合。
-- presentation: 確認文と訂正済み footer。
+- presentation: Ctrl-D 表示、確認 modal、訂正済み footer。
 - screen graph: loader に選択 path だけが渡ること、confirm/cancel の動作。

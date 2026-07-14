@@ -24,7 +24,8 @@ use crate::presentation::widgets::{self, TextInput};
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
 /// 最下行に固定するキー操作ヒント。
-const FOOTER: &str = "↑↓ select / type filter / D unregister / Enter open / Esc back / Ctrl-C quit";
+const FOOTER: &str =
+    "↑↓ select / type filter / Ctrl-D unregister / Enter open / Esc back / Ctrl-C quit";
 /// 一覧ブロック全体の表示幅。各行をこの幅の列に収めて桁を揃え、端末に中央寄せする。
 const BLOCK_WIDTH: usize = 56;
 /// workspace 名に割り当てる固定表示幅（溢れは省略記号で切る）。
@@ -40,6 +41,7 @@ pub struct Open {
     unite_paths: HashSet<std::path::PathBuf>,
     cleanup_confirming: bool,
     unregistering_path: Option<std::path::PathBuf>,
+    unregister_confirm_selected: bool,
 }
 
 impl Open {
@@ -74,6 +76,7 @@ impl Open {
             unite_paths: HashSet::new(),
             cleanup_confirming: false,
             unregistering_path: None,
+            unregister_confirm_selected: true,
         }
     }
 
@@ -136,6 +139,13 @@ impl Open {
     #[coverage(off)]
     pub fn unregistering_path(&self) -> Option<&std::path::Path> {
         self.unregistering_path.as_deref()
+    }
+
+    /// Whether the destructive action is selected in the unregister modal.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn unregister_confirm_selected(&self) -> bool {
+        self.unregister_confirm_selected
     }
 
     /// Append one character to the filter and return selection to its first hit.
@@ -212,17 +222,29 @@ impl Open {
     #[coverage(off)]
     pub fn request_unregister(&mut self) {
         self.unregistering_path = self.selected().map(|workspace| workspace.path.clone());
+        self.unregister_confirm_selected = true;
     }
 
     /// Dismiss a selected-entry unregister confirmation without mutation.
     #[coverage(off)]
     pub fn cancel_unregister(&mut self) {
         self.unregistering_path = None;
+        self.unregister_confirm_selected = true;
+    }
+
+    /// Move the unregister modal focus between its confirm and cancel buttons.
+    #[coverage(off)]
+    pub fn toggle_unregister_choice(&mut self) {
+        self.unregister_confirm_selected = !self.unregister_confirm_selected;
     }
 
     /// Consume the path selected for confirmed registry removal.
     #[coverage(off)]
     pub fn confirm_unregister(&mut self) -> Option<std::path::PathBuf> {
+        if !self.unregister_confirm_selected {
+            self.cancel_unregister();
+            return None;
+        }
         self.unregistering_path.take()
     }
 
@@ -234,6 +256,7 @@ impl Open {
         self.unite_paths.retain(|path| !paths.contains(path));
         self.cleanup_confirming = false;
         self.unregistering_path = None;
+        self.unregister_confirm_selected = true;
         self.selected_index = 0;
     }
 
@@ -406,13 +429,6 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
                 .bold()
                 .paint("Remove missing registry entries? y/n"),
         ));
-    }
-    if let Some(path) = open.unregistering_path() {
-        lines.push(String::new());
-        lines.push(indent(&Role::Danger.style().bold().paint(&format!(
-            "Unregister {}? Registry only; files stay. y/n",
-            path.display()
-        ))));
     }
     lines
 }
@@ -649,10 +665,13 @@ mod tests {
 
         open.request_unregister();
         assert_eq!(open.unregistering_path(), Some(Path::new("/tmp/beta")));
-        assert!(rendered(&open).contains("Registry only; files stay. y/n"));
+        assert!(open.unregister_confirm_selected());
 
-        open.cancel_unregister();
+        open.toggle_unregister_choice();
+        assert!(!open.unregister_confirm_selected());
+        assert_eq!(open.confirm_unregister(), None);
         assert_eq!(open.unregistering_path(), None);
+
         assert_eq!(open.workspaces().len(), 2);
 
         open.request_unregister();
@@ -667,7 +686,7 @@ mod tests {
     fn footer_advertises_unregister_without_stale_unite_or_cleanup_hints() {
         let footer = rendered(&Open::new(vec![workspace("alpha", 1)]));
 
-        assert!(footer.contains("D unregister"));
+        assert!(footer.contains("Ctrl-D unregister"));
         assert!(!footer.contains("Tab Unite"));
         assert!(!footer.contains("C cleanup"));
     }

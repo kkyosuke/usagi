@@ -530,6 +530,9 @@ impl Terminal for CrosstermTerminal {
                         if key.code == KeyCode::Char('q') {
                             return Ok(Key::CtrlQ);
                         }
+                        if key.code == KeyCode::Char('d') {
+                            return Ok(Key::Char('\u{4}'));
+                        }
                     }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
@@ -585,6 +588,11 @@ fn passthrough_key(input: &LiveInput) -> Key {
         || key.code == KeyCode::Char('\u{1}')
     {
         return Key::Char('\u{1}');
+    }
+    if (key.modifiers.control && key.code == KeyCode::Char('d'))
+        || key.code == KeyCode::Char('\u{4}')
+    {
+        return Key::Char('\u{4}');
     }
     match key.code {
         KeyCode::Up => Key::Up,
@@ -913,6 +921,19 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
+    }
+
+    #[test]
+    fn ctrl_d_maps_to_the_open_workspace_unregister_shortcut() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&key), Key::Char('\u{4}'));
     }
 
     #[test]

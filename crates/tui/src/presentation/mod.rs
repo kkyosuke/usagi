@@ -726,10 +726,14 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
         return match key {
-            Key::Char('y') | Key::Enter => open
+            Key::Left | Key::Right | Key::Tab => {
+                open.toggle_unregister_choice();
+                OpenStep::Stay
+            }
+            Key::Char('o' | 'O') | Key::Enter => open
                 .confirm_unregister()
                 .map_or(OpenStep::Stay, OpenStep::ConfirmUnregister),
-            Key::Char('n') | Key::Escape => {
+            Key::Char('c' | 'C') | Key::Escape => {
                 open.cancel_unregister();
                 OpenStep::Stay
             }
@@ -797,7 +801,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char('d' | 'D') => {
+        Key::Char('\u{4}') => {
             open.request_unregister();
             OpenStep::Stay
         }
@@ -1549,6 +1553,40 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
 }
 
 #[coverage(off)]
+fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
+    let base = open::render(height, width, open, now);
+    let Some(path) = open.unregistering_path() else {
+        return base;
+    };
+    let title = Style::new()
+        .fg(Color::White)
+        .bold()
+        .paint("Unregister workspace");
+    let heading = Style::new()
+        .fg(Color::White)
+        .bold()
+        .paint(&format!("Unregister {}?", path.display()));
+    modal::render_over(
+        height,
+        width,
+        &base,
+        &title,
+        52,
+        &[
+            heading,
+            Style::new()
+                .fg(Color::White)
+                .paint("Only the registry entry is removed. Files stay."),
+            String::new(),
+            modal::confirmation_buttons(open.unregister_confirm_selected(), Role::Danger),
+            Style::new()
+                .dim()
+                .paint("  Enter: select   ←→/Tab: choose   o/c: select"),
+        ],
+    )
+}
+
+#[coverage(off)]
 fn render_quit_confirmation(
     height: usize,
     width: usize,
@@ -2014,7 +2052,7 @@ fn run_with_settings_inner(
         let (height, width) = term.size()?;
         let frame = match screen {
             Screen::Welcome => welcome::render(height, width, &welcome, now),
-            Screen::Open => open::render(height, width, &open, now),
+            Screen::Open => render_open(height, width, &open, now),
             Screen::New => new::render(height, width, &new_form),
             Screen::Config => config::render(height, width, &config_form),
         };
@@ -3108,8 +3146,8 @@ mod tests {
         let mut cancel = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::Char('d'),
-            Key::Char('n'),
+            Key::Char('\u{4}'),
+            Key::Char('c'),
             Key::Quit,
         ]);
         let mut cancel_loader = FakeLoader::default();
@@ -3122,12 +3160,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cancel_loader.unregister_calls, 0);
+        assert!(cancel.frames[3].join("\n").contains("Unregister workspace"));
+        assert!(
+            cancel.frames[3]
+                .join("\n")
+                .contains("Only the registry entry is removed. Files stay.")
+        );
         assert!(cancel.frames[3].join("\n").contains("beta"));
 
         let mut confirm = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::Char('D'),
+            Key::Char('\u{4}'),
             Key::Enter,
             Key::Quit,
         ]);
@@ -3142,6 +3186,11 @@ mod tests {
         .unwrap();
         assert_eq!(confirm_loader.unregister_calls, 1);
         assert_eq!(confirm_loader.unregistered, vec![beta.path]);
+        assert!(
+            confirm.frames[3]
+                .join("\n")
+                .contains("Unregister workspace")
+        );
         assert!(confirm.frames[4].join("\n").contains("alpha"));
         assert!(!confirm.frames[4].join("\n").contains("beta"));
     }
