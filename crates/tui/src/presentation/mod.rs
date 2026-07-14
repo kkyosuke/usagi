@@ -1111,7 +1111,8 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 let input = ui.closeup.submission();
                 execute_closeup_command(ui, &input);
             }
-            Key::Up | Key::Down | Key::Tab | Key::Live(_) | Key::Other => {}
+            Key::Tab => ui.closeup.complete_selected(),
+            Key::Up | Key::Down | Key::Live(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1139,7 +1140,8 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         }
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
-        Key::Tab | Key::Live(_) | Key::Other => {}
+        Key::Tab => ui.closeup.complete_selected(),
+        Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }

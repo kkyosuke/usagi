@@ -847,23 +847,52 @@ fn header_spacer(width: usize) -> String {
 
 // ── left pane: session menu ─────────────────────────────────────────────────
 
-/// main 行。フォーカス中は強調する。
+/// main は session と同じ2行の marker stack で描く。
 #[coverage(off)]
-fn root_row(width: usize, ws: &Workspace) -> String {
-    menu_row(width, ws.root_selected(), "main", "workspace main")
+fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
+    let selected = ws.root_selected();
+    let (marker, continuation) = if selected {
+        match ws.mode() {
+            Mode::Switch => (
+                Role::Danger.style().bold().paint("\u{f0907}"),
+                Role::Danger.style().bold().paint("|"),
+            ),
+            Mode::Closeup => (
+                Role::Success.style().bold().paint("|"),
+                Role::Success.style().bold().paint("|"),
+            ),
+        }
+    } else {
+        (" ".to_owned(), " ".to_owned())
+    };
+    let name = if selected {
+        Role::Accent.style().bold().paint("main")
+    } else {
+        "main".to_owned()
+    };
+    vec![
+        widgets::pad_to_width(&format!("{marker} {name}"), width),
+        widgets::pad_to_width(
+            &format!(
+                "{continuation} {}",
+                Style::new().dim().paint("workspace main")
+            ),
+            width,
+        ),
+    ]
 }
 
 /// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session、末尾は作成 action。
 #[coverage(off)]
 fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     if index == 0 {
-        vec![root_row(width, ws)]
+        root_rows(width, ws)
     } else if index == ws.sessions().len() + 1 {
         create_session_rows(width, index == ws.selected, ws)
     } else {
         ws.sessions().get(index - 1).map_or_else(
-            || vec![root_row(width, ws)],
-            |session| session_menu_rows(width, index == ws.selected, session),
+            || root_rows(width, ws),
+            |session| session_menu_rows(width, index == ws.selected, ws.mode(), session),
         )
     }
 }
@@ -930,29 +959,17 @@ fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<Stri
     rows
 }
 
-/// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
-#[coverage(off)]
-fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
-    } else {
-        " ".to_string()
-    };
-    let name = if selected {
-        Role::Accent.style().bold().paint(name)
-    } else {
-        name.to_string()
-    };
-    let detail = Style::new().dim().paint(detail);
-    widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
-}
-
 /// A real daemon-backed `SessionRecord` has a fixed two-line sidebar footprint.
 /// The first line reserves the note glyph; the second projects only persisted
 /// metadata, never a synthetic diff/GIF state or an executable shortcut.
 #[coverage(off)]
-fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> Vec<String> {
-    session_menu_rows_at(width, selected, session, Utc::now())
+fn session_menu_rows(
+    width: usize,
+    selected: bool,
+    mode: Mode,
+    session: &SessionRecord,
+) -> Vec<String> {
+    session_menu_rows_at(width, selected, mode, session, Utc::now())
 }
 
 /// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
@@ -961,11 +978,15 @@ fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> V
 fn session_menu_rows_at(
     width: usize,
     selected: bool,
+    mode: Mode,
     session: &SessionRecord,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
+    let marker = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("\u{f0907}"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
     } else {
         " ".to_owned()
     };
@@ -981,13 +1002,21 @@ fn session_menu_rows_at(
         "✎"
     };
     let first = widgets::pad_to_width(
-        &format!("{cursor} {label}  {}", Style::new().dim().paint(note)),
+        &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
         width,
     );
     let modified = widgets::relative_session_time(session.last_active_or_created(), now);
+    let continuation = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("|"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
+    } else {
+        " ".to_owned()
+    };
     let metadata = pr_summary(&session.prs).map_or_else(
-        || format!("  {modified}"),
-        |pr| format!("  {modified} · {pr}"),
+        || format!("{continuation} {modified}"),
+        |pr| format!("{continuation} {modified} · {pr}"),
     );
     vec![
         first,
@@ -1084,13 +1113,15 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let now = Utc::now();
     for index in start..ws.row_count() {
         let mut entry = if index == 0 {
-            vec![root_row(width, ws)]
+            root_rows(width, ws)
         } else if index == ws.sessions().len() + 1 {
             create_session_rows(width, index == ws.selected, ws)
         } else {
             ws.sessions().get(index - 1).map_or_else(
-                || vec![root_row(width, ws)],
-                |session| session_menu_rows_at(width, index == ws.selected, session, now),
+                || root_rows(width, ws),
+                |session| {
+                    session_menu_rows_at(width, index == ws.selected, ws.mode(), session, now)
+                },
             )
         };
         if index == ws.sessions().len() + 1
@@ -2363,16 +2394,22 @@ mod tests {
         let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(40, true, &record, base);
+        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, base);
         assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
         assert!(strip(&rows[0]).contains("✎"));
         assert!(strip(&rows[1]).contains("12m ago"));
         assert!(strip(&rows[1]).contains("PR #42"));
         assert!(!strip(&rows[1]).contains("diff"));
         assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(18, true, &record, base);
+        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, base);
         assert!(strip(&narrow[0]).contains("✎"));
         assert!(narrow.iter().all(|row| display_width(row) == 18));
+
+        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, base);
+        assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
+        assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
     }
 
     #[test]
@@ -2463,16 +2500,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("> main"));
+        assert!(text.contains("\u{f0907} main"));
         assert!(!text.contains("(o.o)?"));
     }
 
     #[test]
     fn render_places_the_selected_root_before_every_session() {
         let text = joined(&workspace());
-        let root = text
-            .find("> main  workspace main")
-            .expect("selected main row");
+        let root = text.find("\u{f0907} main").expect("selected main row");
         let first = text.find("UI work").expect("first session row");
         let second = text.find("daemon").expect("second session row");
         assert!(root < first);
@@ -2514,7 +2549,10 @@ mod tests {
         let frame = render(30, 100, &workspace());
         let cursor_rows = frame
             .iter()
-            .filter(|line| strip(line).trim_start().starts_with('>'))
+            .filter(|line| {
+                let trimmed = strip(line).trim_start().to_owned();
+                trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+            })
             .count();
         assert_eq!(cursor_rows, 1);
     }
@@ -2527,7 +2565,7 @@ mod tests {
             tiny_frame
                 .iter()
                 .map(|line| strip(line))
-                .any(|line| line.contains("> main"))
+                .any(|line| line.contains("\u{f0907} main"))
         );
         for expected in std::iter::once("main".to_string())
             .chain((0..12).map(|index| format!("session-{index:02}")))
@@ -2536,7 +2574,10 @@ mod tests {
             let selected = frame
                 .iter()
                 .map(|line| strip(line))
-                .find(|line| line.trim_start().starts_with('>'))
+                .find(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+                })
                 .expect("selected row must be inside the viewport");
             assert!(selected.contains(&expected), "selected row: {selected}");
             ws.select_next();

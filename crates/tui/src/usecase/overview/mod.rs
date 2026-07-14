@@ -159,6 +159,13 @@ pub fn complete(registry: &impl CommandRegistry, input: &str) -> Vec<CommandInfo
 /// 破壊せず `None` を返す。
 #[must_use]
 pub fn completion(input: &str) -> Option<String> {
+    // A trailing separator means the command word (or subcommand) is already
+    // complete and the user is starting an argument.  This registry does not
+    // complete arguments, so preserve the input verbatim instead of rebuilding
+    // it from whitespace-split tokens (which would drop that separator).
+    if input.ends_with(char::is_whitespace) {
+        return None;
+    }
     let mut tokens = input.split_whitespace();
     let command = tokens.next()?;
     let subcommand = tokens.next();
@@ -398,6 +405,7 @@ mod tests {
         assert_eq!(completion("session c"), Some("session create".to_owned()));
         assert_eq!(completion("session o"), Some("session overview".to_owned()));
         assert_eq!(completion("session z"), None);
+        assert_eq!(completion("session create "), None);
         assert_eq!(completion("session create extra"), None);
         assert_eq!(completion("issue list"), None);
     }
