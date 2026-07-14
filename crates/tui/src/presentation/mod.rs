@@ -1131,7 +1131,8 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('v') => ui.open_preview(),
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
-        Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::CtrlQ => ui.open_quit_confirmation(QuitAction::EndWorkspace),
+        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
         // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
