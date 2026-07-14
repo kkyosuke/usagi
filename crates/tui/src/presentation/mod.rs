@@ -1134,6 +1134,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             Key::Backspace => ui.workspace.inline_create_backspace(),
             Key::Left => ui.workspace.inline_create_move(false),
             Key::Right => ui.workspace.inline_create_move(true),
+            Key::CtrlQ => ui.open_quit_confirmation(QuitAction::EndWorkspace),
             Key::Char(character) if !character.is_control() => {
                 ui.workspace.inline_create_insert(character);
             }
