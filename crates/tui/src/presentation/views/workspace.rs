@@ -301,6 +301,8 @@ pub struct Workspace {
     /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行、末尾は作成 action 行。
     selected: usize,
     pane_owner: WorkspaceId,
+    /// Stable daemon session identities, aligned with `state.sessions`.
+    session_ids: Vec<SessionId>,
     /// Pane state belongs to a selected target, never to the whole workspace.
     /// The legacy view still projects sessions by name, so the name is used only
     /// as the local map key; daemon operations retain their fenced identities.
@@ -319,7 +321,26 @@ impl Workspace {
     #[must_use]
     #[coverage(off)]
     pub fn new(workspace: WorkspaceRecord, state: WorkspaceState) -> Self {
-        let pane_owner = WorkspaceId::new();
+        let session_ids = state.sessions.iter().map(|_| SessionId::new()).collect();
+        Self::with_runtime_ids(workspace, state, WorkspaceId::new(), session_ids)
+    }
+
+    /// Build a workspace view from daemon-authoritative workspace and session
+    /// identities. These identities fence pane requests and completions; names
+    /// remain display-only map keys for the legacy view projection.
+    #[must_use]
+    #[coverage(off)]
+    pub fn with_runtime_ids(
+        workspace: WorkspaceRecord,
+        state: WorkspaceState,
+        pane_owner: WorkspaceId,
+        session_ids: Vec<SessionId>,
+    ) -> Self {
+        let session_ids = if session_ids.len() == state.sessions.len() {
+            session_ids
+        } else {
+            state.sessions.iter().map(|_| SessionId::new()).collect()
+        };
         let mut panes = BTreeMap::from([(
             String::new(),
             PaneState::new(PaneSelection::Target(Target::Root(pane_owner))),
@@ -336,6 +357,7 @@ impl Workspace {
             mode: Mode::Switch,
             selected: 0,
             pane_owner,
+            session_ids,
             panes,
             pending_session: None,
             create_input: None,
@@ -723,7 +745,10 @@ impl Workspace {
 
     #[coverage(off)]
     fn pane_target(&self) -> Target {
-        Target::Root(self.pane_owner)
+        self.selected
+            .checked_sub(1)
+            .and_then(|index| self.session_ids.get(index).copied())
+            .map_or(Target::Root(self.pane_owner), Target::Session)
     }
 
     /// Pane state rendered by the right-hand Chrome strip.

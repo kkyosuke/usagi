@@ -1726,7 +1726,12 @@ fn drive_workspace_with_agent_port_and_selection_mode(
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
-    let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+    let workspace = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        workspace_id,
+        session_ids.clone(),
+    );
     let mut ui = WorkspaceUi::with_ports_and_selection_mode(
         workspace,
         Box::new(SnapshotOverlayData),
@@ -2172,10 +2177,10 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, NoMetricsFactory,
-        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        DefaultModel, DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep,
+        NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
+        Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
         execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
         run as run_from_start, run_with_settings,
@@ -2200,7 +2205,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
-    use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
+    use usagi_core::domain::id::{
+        DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -2249,6 +2256,35 @@ mod tests {
     }
 
     type SessionCommandCall = (String, Option<String>, SessionCommand);
+
+    type AgentCommandCall = (WorkspaceId, SessionId, Option<AgentProfileId>);
+
+    struct RecordingAgentPort(Arc<Mutex<Vec<AgentCommandCall>>>);
+
+    impl AgentCommandPort for RecordingAgentPort {
+        fn launch(
+            &mut self,
+            workspace: WorkspaceId,
+            session: SessionId,
+            profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            self.0.lock().unwrap().push((workspace, session, profile));
+            Err("agent launch is unavailable".to_owned())
+        }
+    }
+
+    struct SuccessfulAgentPort(TerminalRef);
+
+    impl AgentCommandPort for SuccessfulAgentPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.0.clone())
+        }
+    }
 
     #[derive(Clone)]
     struct RecordingSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
@@ -3278,6 +3314,81 @@ mod tests {
                 .iter()
                 .any(|frame| frame.contains("No tabs stirring yet. Enter starts one."))
         );
+    }
+
+    #[test]
+    fn selecting_agent_in_closeup_submits_the_selected_session_to_the_agent_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let workspace = WorkspaceView::new(ws("closeup-agent"), state("closeup-agent"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(RecordingAgentPort(calls.clone())),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        let _ = step_workspace(&mut ui, Key::Enter);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(
+                workspace_id,
+                session_id,
+                Some(AgentProfileId::new("codex").expect("canonical profile ID")),
+            ),]
+        );
+    }
+
+    #[test]
+    fn selecting_agent_in_a_session_replaces_its_pending_tab_with_the_daemon_terminal() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-agent-live"),
+            state("closeup-agent-live"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(SuccessfulAgentPort(terminal.clone())),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        let _ = step_workspace(&mut ui, Key::Enter);
+
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Live(live)]
+                if live.kind == crate::usecase::application::pane::PaneKind::Agent
+                    && live.terminal == terminal
+        ));
     }
 
     #[test]
