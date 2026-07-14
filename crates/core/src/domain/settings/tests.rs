@@ -1,4 +1,4 @@
-use super::{ModalSelectionMode, Settings, Theme};
+use super::{DefaultModel, ModalSelectionMode, Settings, Theme};
 
 #[test]
 fn theme_default_is_system() {
@@ -37,6 +37,7 @@ fn settings_default_uses_the_system_theme() {
         Settings::default().modal_selection_mode,
         ModalSelectionMode::Action
     );
+    assert_eq!(Settings::default().default_model, DefaultModel::OpenAi);
 }
 
 #[test]
@@ -44,15 +45,31 @@ fn settings_round_trip_through_json() {
     let settings = Settings {
         theme: Theme::Dark,
         modal_selection_mode: ModalSelectionMode::Prompt,
+        default_model: DefaultModel::Claude,
     };
     let json = serde_json::to_string(&settings).unwrap();
     assert!(json.contains("\"theme\":\"dark\""));
     assert!(json.contains("\"modal_selection_mode\":\"prompt\""));
+    assert!(json.contains("\"default_model\":\"claude\""));
     let back: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back, settings);
     // Exercise the derived Clone / Debug.
     assert_eq!(settings.clone(), settings);
     assert!(format!("{settings:?}").contains("Dark"));
+}
+
+#[test]
+fn default_model_tokens_select_the_expected_agent_profile() {
+    assert_eq!(DefaultModel::Claude.profile_id(), "claude");
+    assert_eq!(DefaultModel::OpenAi.profile_id(), "codex");
+    assert_eq!(
+        serde_json::to_value(DefaultModel::OpenAi).unwrap(),
+        "openai"
+    );
+    assert_eq!(
+        serde_json::from_str::<DefaultModel>("\"future_provider\"").unwrap(),
+        DefaultModel::OpenAi
+    );
 }
 
 #[test]

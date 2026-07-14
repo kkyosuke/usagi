@@ -22,7 +22,7 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::AgentProfileId;
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
-use usagi_core::domain::settings::ModalSelectionMode;
+use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode};
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::usecase::client::DaemonMetrics;
 
@@ -375,6 +375,7 @@ struct AgentContext {
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
     port: Box<dyn AgentCommandPort>,
+    default_profile: AgentProfileId,
 }
 
 struct SessionCommandCompletion {
@@ -430,11 +431,14 @@ impl WorkspaceUi {
         workspace: WorkspaceId,
         sessions: Vec<SessionId>,
         port: Box<dyn AgentCommandPort>,
+        default_model: DefaultModel,
     ) -> Self {
         self.agent = Some(AgentContext {
             workspace,
             sessions,
             port,
+            default_profile: AgentProfileId::new(default_model.profile_id())
+                .expect("default model profile IDs are canonical"),
         });
         self
     }
@@ -1333,6 +1337,8 @@ fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileI
             return;
         }
         let selected = ui.workspace.selected().checked_sub(1);
+        let profile =
+            profile.or_else(|| ui.agent.as_ref().map(|agent| agent.default_profile.clone()));
         let result = ui.agent.as_mut().and_then(|agent| {
             selected
                 .and_then(|index| agent.sessions.get(index).copied())
@@ -1677,6 +1683,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
+    default_model: DefaultModel,
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<Exit> {
@@ -1685,6 +1692,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
         snapshot,
         session_commands,
         modal_selection_mode,
+        default_model,
         agent_port,
         metrics_port,
     )
@@ -1700,6 +1708,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
+    default_model: DefaultModel,
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
@@ -1712,7 +1721,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         session_commands,
         modal_selection_mode,
     )
-    .with_agent_context(workspace_id, session_ids, agent_port)
+    .with_agent_context(workspace_id, session_ids, agent_port, default_model)
     .with_metrics_port(metrics_port);
     loop {
         drain_session_completions(&mut ui);
@@ -1880,6 +1889,7 @@ fn run_with_settings_inner(
                             snapshot,
                             session_commands.create(),
                             config_form.global_modal_selection_mode(),
+                            config_form.global_default_model(),
                             factory.create(),
                             Box::new(NoMetrics),
                         )?
@@ -1912,6 +1922,7 @@ fn run_with_settings_inner(
                                 snapshot,
                                 session_commands.create(),
                                 config_form.global_modal_selection_mode(),
+                                config_form.global_default_model(),
                                 factory.create(),
                                 Box::new(NoMetrics),
                             )?
@@ -2517,6 +2528,7 @@ mod tests {
             ConfigStep::Stay
         ));
         step_config(&mut config, Key::Right, &mut settings);
+        step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         step_config(&mut config, Key::Down, &mut settings);
         assert!(matches!(
