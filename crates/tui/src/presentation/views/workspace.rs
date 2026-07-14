@@ -19,7 +19,7 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::layouts::panes;
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::widgets;
 use crate::presentation::widgets::TextInput;
@@ -1028,25 +1028,18 @@ fn session_menu_rows_at(
 /// skeleton 自体は navigation target ではないため、cursor を持たない。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let wave = (0..name.chars().count().max(8))
-        .map(|index| if index % 8 == frame % 8 { '▓' } else { '░' })
-        .collect::<String>();
-    let label = Role::Accent.style().bold().paint(name);
-    let loading = Style::new().dim().paint(&wave);
+    let label = widgets::shimmer_text(name, frame);
     let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
         "▓"
     } else {
         "░"
     });
-    widgets::pad_to_width(&format!("  {activity} {label}  creating {loading}"), width)
+    widgets::pad_to_width(&format!("  {activity} {label}"), width)
 }
 
 #[coverage(off)]
 fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
-    vec![
-        pending_session_row(width, name, frame),
-        widgets::pad_to_width(&Style::new().dim().paint("  creating…"), width),
-    ]
+    vec![pending_session_row(width, name, frame)]
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
@@ -1061,17 +1054,30 @@ fn left_footer(width: usize, ws: &Workspace) -> String {
         .paint(&widgets::clip_to_width(hint, width))
 }
 
-/// daemon observation is deliberately placed immediately above the v1-style
-/// sidebar footer: it is useful ambient state, not navigable content.
 #[coverage(off)]
-fn metrics_line(width: usize, metrics: &DaemonMetrics) -> String {
-    let text = format!(
-        "daemon · {} sub · {} dropped",
-        metrics.active_subscribers, metrics.dropped_updates
-    );
-    Style::new()
-        .dim()
-        .paint(&widgets::clip_to_width(&text, width))
+fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> {
+    metrics.map_or_else(
+        || {
+            // Replace exactly one character in the status text while sweeping;
+            // this keeps the label's layout stable instead of appending a rail.
+            let waiting = widgets::shimmer_text_with(
+                "waiting daemon",
+                frame,
+                widgets::Shimmer {
+                    style: Style::new().fg(Color::White).bold(),
+                    base_style: Style::new().fg(Color::White).dim(),
+                    speed: 5,
+                },
+            );
+            vec![waiting]
+        },
+        |metrics| {
+            vec![format!(
+                "{} sub · {} dropped",
+                metrics.active_subscribers, metrics.dropped_updates
+            )]
+        },
+    )
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -1091,7 +1097,13 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let body_capacity = height - 1;
     // Keep the menu usable first. The mascot block includes its always-reserved
     // blank row, so the viewport and footer cannot drift when speech adds rows.
-    let mascot = widgets::mascot::sidebar_block(width, 0, None);
+    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(
+        width,
+        skeleton_frame as u64,
+        None,
+        &metric_labels,
+    );
     let show_mascot = mascot
         .as_ref()
         .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
@@ -1102,10 +1114,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     } else {
         0
     };
-    let metrics_rows = usize::from(ws.metrics.is_some());
-    let content_capacity = body_capacity
-        .saturating_sub(mascot_rows)
-        .saturating_sub(metrics_rows);
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
     let viewport_capacity = content_capacity;
     let start = workspace_viewport_start(ws.selected, ws, viewport_capacity);
 
@@ -1143,9 +1152,6 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     if show_mascot {
         rows.extend(mascot.expect("shown mascot exists").rows().iter().cloned());
         rows.push(String::new());
-    }
-    if let Some(metrics) = &ws.metrics {
-        rows.push(metrics_line(width, metrics));
     }
     rows.push(left_footer(width, ws));
     rows
@@ -2425,7 +2431,6 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("feature-x"));
-        assert!(text.contains("creating"));
         assert!(text.contains('▓'));
         let skeleton = text.find("feature-x").unwrap();
         let create = text.find("+ new session").unwrap();
@@ -2446,6 +2451,28 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!cleared.contains("feature-x"));
+    }
+
+    #[test]
+    fn pending_session_skeleton_uses_the_shared_shimmer_wave() {
+        let first = super::pending_session_row(100, "feature-x", 0);
+        let next = super::pending_session_row(100, "feature-x", 1);
+
+        assert_ne!(first, next, "the pending session name sweeps");
+    }
+
+    #[test]
+    fn waiting_daemon_sweep_advances_every_five_frames() {
+        let rendered = super::mascot_metrics(None, 0).concat();
+        let first = strip(&rendered);
+        let held_rendered = super::mascot_metrics(None, 4).concat();
+        let advanced_rendered = super::mascot_metrics(None, 5).concat();
+
+        assert!(rendered.contains("\u{1b}[1;37mw\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[2;37ma\u{1b}[0m"));
+        assert_eq!(rendered, held_rendered);
+        assert_ne!(rendered, advanced_rendered);
+        assert_eq!(first, strip(&advanced_rendered));
     }
 
     #[test]
@@ -2471,7 +2498,7 @@ mod tests {
     }
 
     #[test]
-    fn render_places_daemon_metrics_directly_above_the_left_footer() {
+    fn render_places_daemon_metrics_to_the_right_of_usagi() {
         let mut ws = workspace();
         ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
@@ -2484,11 +2511,10 @@ mod tests {
             .iter()
             .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
             .collect::<Vec<_>>();
-        let metrics = left_rows
+        let _metrics = left_rows
             .iter()
             .position(|line| line.contains("3 sub · 5 dropped"))
-            .expect("metrics line");
-        assert!(left_rows[metrics + 1].contains("[switch]"));
+            .expect("metrics beside usagi");
     }
 
     #[test]

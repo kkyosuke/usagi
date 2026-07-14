@@ -24,6 +24,7 @@ use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::ModalSelectionMode;
 use usagi_core::domain::workspace::Workspace;
+use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
@@ -58,6 +59,18 @@ pub trait AgentCommandPort {
         session: SessionId,
         profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String>;
+}
+
+/// Pulls the latest safe daemon observation at a TUI redraw boundary.
+pub trait MetricsPort {
+    fn latest(&mut self) -> Option<DaemonMetrics>;
+}
+
+struct NoMetrics;
+impl MetricsPort for NoMetrics {
+    fn latest(&mut self) -> Option<DaemonMetrics> {
+        None
+    }
 }
 
 /// Workspace entry ごとに fresh daemon Agent launch port を作る factory。
@@ -354,6 +367,7 @@ struct WorkspaceUi {
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
     skeleton_frame: usize,
+    metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
 }
 
@@ -401,8 +415,14 @@ impl WorkspaceUi {
             session_completions,
             session_completion_sender,
             skeleton_frame: 0,
+            metrics_port: Box::new(NoMetrics),
             agent: None,
         }
+    }
+
+    fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
+        self.metrics_port = metrics_port;
+        self
     }
 
     fn with_agent_context(
@@ -1576,6 +1596,7 @@ fn drive_workspace_with_ports_and_selection_mode(
     );
     loop {
         drain_session_completions(&mut ui);
+        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1657,6 +1678,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
     agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<Exit> {
     drive_workspace_with_agent_port_and_selection_mode(
         term,
@@ -1664,6 +1686,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
         session_commands,
         modal_selection_mode,
         agent_port,
+        metrics_port,
     )
     .map(|_| Exit::Quit)
 }
@@ -1678,6 +1701,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
     agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -1688,9 +1712,11 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         session_commands,
         modal_selection_mode,
     )
-    .with_agent_context(workspace_id, session_ids, agent_port);
+    .with_agent_context(workspace_id, session_ids, agent_port)
+    .with_metrics_port(metrics_port);
     loop {
         drain_session_completions(&mut ui);
+        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1698,6 +1724,12 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
             return Ok(WorkspaceStep::Quit);
         }
+    }
+}
+
+fn refresh_metrics(ui: &mut WorkspaceUi) {
+    if let Some(metrics) = ui.metrics_port.latest() {
+        ui.workspace.set_metrics(Some(metrics));
     }
 }
 
@@ -1849,6 +1881,7 @@ fn run_with_settings_inner(
                             session_commands.create(),
                             config_form.global_modal_selection_mode(),
                             factory.create(),
+                            Box::new(NoMetrics),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -1880,6 +1913,7 @@ fn run_with_settings_inner(
                                 session_commands.create(),
                                 config_form.global_modal_selection_mode(),
                                 factory.create(),
+                                Box::new(NoMetrics),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(
@@ -2033,13 +2067,13 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
+        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, MetricsPort, NewStep,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
-        execute_closeup_command, play_startup_splash, render_workspace, run as run_from_start,
-        run_with_settings, run_workspace, run_workspace_with_overlay_data,
+        execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
         run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
         step_workspace, welcome_action, write_banner,
     };
@@ -2065,6 +2099,7 @@ mod tests {
     use usagi_core::domain::settings::ModalSelectionMode;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
+    use usagi_core::usecase::client::DaemonMetrics;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -2249,6 +2284,19 @@ mod tests {
             self.keys
                 .pop_front()
                 .ok_or_else(|| io::Error::other("no more keys"))
+        }
+    }
+
+    struct StaticMetrics;
+
+    impl MetricsPort for StaticMetrics {
+        fn latest(&mut self) -> Option<DaemonMetrics> {
+            Some(DaemonMetrics {
+                schema_version: 1,
+                sampled_at_ms: 42,
+                active_subscribers: 3,
+                dropped_updates: 0,
+            })
         }
     }
 
@@ -3414,6 +3462,26 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+    }
+
+    #[test]
+    fn metrics_port_refreshes_the_workspace_sidebar() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(RecordingSessionPort(Arc::new(Mutex::new(Vec::new())))),
+            ModalSelectionMode::Action,
+        )
+        .with_metrics_port(Box::new(StaticMetrics));
+
+        refresh_metrics(&mut ui);
+
+        assert!(
+            render_workspace(40, 80, &ui)
+                .join("\n")
+                .contains("3 sub · 0 dropped")
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub use text_input::TextInput;
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthChar;
 
-use super::theme::Style;
+use super::theme::{Role, Style};
 
 /// エスケープシーケンスの先頭（ESC）。表示桁数を測るとき読み飛ばす。
 const ESC: char = '\u{1b}';
@@ -32,6 +32,50 @@ const ESC: char = '\u{1b}';
 /// 切り詰めがスタイルを開いたまま断ち切ったとき末尾に付ける SGR リセット
 /// (`ESC [ 0 m`)。開いた色が後続の内容に滲むのを防ぐ。
 const RESET: &str = "\u{1b}[0m";
+
+/// Configures a [`shimmer_text_with`] sweep. `speed` advances the two-cell band
+/// once per this many frames. `base_style` is used for every non-sweeping
+/// character, so the text does not inherit a parent widget's colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shimmer {
+    pub style: Style,
+    pub base_style: Style,
+    pub speed: usize,
+}
+
+impl Default for Shimmer {
+    fn default() -> Self {
+        Self {
+            style: Role::Accent.style().bold(),
+            base_style: Style::new().dim(),
+            speed: 1,
+        }
+    }
+}
+
+/// v1 の tab launch / session skeleton と同じ loading sweep。
+#[must_use]
+pub fn shimmer_text(text: &str, frame: usize) -> String {
+    shimmer_text_with(text, frame, Shimmer::default())
+}
+
+/// A configurable version of [`shimmer_text`].
+///
+/// `speed == 0` is treated as one frame per step.
+#[must_use]
+pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let head = (frame / shimmer.speed.max(1)) % (chars.len() + 3);
+    let mut out = String::new();
+    for (index, character) in chars.into_iter().enumerate() {
+        if index == head || index + 1 == head {
+            out.push_str(&shimmer.style.paint(&character.to_string()));
+        } else {
+            out.push_str(&shimmer.base_style.paint(&character.to_string()));
+        }
+    }
+    out
+}
 
 /// `value` の byte-offset `cursor` に block cursor を描く。
 ///
@@ -241,10 +285,10 @@ pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        block_caret, centered_padding, clip_to_width, display_width, normalize_size,
-        relative_session_time, relative_time, wrap_to_width,
+        Shimmer, block_caret, centered_padding, clip_to_width, display_width, normalize_size,
+        relative_session_time, relative_time, shimmer_text, shimmer_text_with, wrap_to_width,
     };
-    use crate::presentation::theme::Role;
+    use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
 
     fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -410,5 +454,21 @@ mod tests {
         let now = at("2026-06-25T12:00:00Z");
         // 1 か月を超えると絶対日付になる。
         assert_eq!(relative_time(at("2026-05-01T00:00:00Z"), now), "2026-05-01");
+    }
+
+    #[test]
+    fn shimmer_allows_colour_and_speed_configuration() {
+        let options = Shimmer {
+            style: Role::Success.style().bold(),
+            base_style: Style::new().dim(),
+            speed: 2,
+        };
+        let first = shimmer_text_with("waiting", 0, options);
+        let held = shimmer_text_with("waiting", 1, options);
+        let advanced = shimmer_text_with("waiting", 2, options);
+        assert_eq!(first, held, "speed holds a frame for two ticks");
+        assert_ne!(first, advanced);
+        assert!(first.contains("\u{1b}["), "configured style is applied");
+        assert_ne!(shimmer_text("waiting", 0), first);
     }
 }

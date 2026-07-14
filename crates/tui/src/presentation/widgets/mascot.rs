@@ -66,6 +66,19 @@ pub fn sidebar_block(
     tick: u64,
     speech: Option<&MascotSpeech>,
 ) -> Option<MascotBlock> {
+    sidebar_block_with_sidecar(width, tick, speech, &[])
+}
+
+/// Builds a sidebar mascot with up to three ambient-status lines placed to the
+/// right of the rabbit.  The sidecar is observational and never changes the
+/// mascot's navigation footprint.
+#[must_use]
+pub fn sidebar_block_with_sidecar(
+    width: usize,
+    tick: u64,
+    speech: Option<&MascotSpeech>,
+    sidecar: &[String],
+) -> Option<MascotBlock> {
     let rabbit_width = RABBIT
         .iter()
         .map(|row| display_width(row))
@@ -83,7 +96,14 @@ pub fn sidebar_block(
         .map(|speech| bubble_rows(speech, inner_width))
         .unwrap_or_default();
     let bubble_rows = plain_rows.len();
+    let rabbit_start = plain_rows.len();
     plain_rows.extend(rabbit_rows(tick));
+    let sidecar = sidecar.iter().take(3).collect::<Vec<_>>();
+    let sidecar_start = 3usize.saturating_sub(sidecar.len());
+    for (index, status) in sidecar.into_iter().enumerate() {
+        plain_rows[rabbit_start + sidecar_start + index].push(' ');
+        plain_rows[rabbit_start + sidecar_start + index].push_str(status);
+    }
     let block_width = plain_rows
         .iter()
         .map(|row| display_width(row))
@@ -157,7 +177,7 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MascotSpeech, sidebar_block};
+    use super::{MascotSpeech, sidebar_block, sidebar_block_with_sidecar};
     use crate::presentation::widgets::display_width;
 
     fn plain(rows: &[String]) -> String {
@@ -206,5 +226,13 @@ mod tests {
         assert!(plain(twitch.rows()).contains("(\\(/"));
         assert!(plain(blink.rows()).contains("(-.-)?"));
         assert_eq!(twitch.reserved_rows(), blink.reserved_rows());
+    }
+
+    #[test]
+    fn sidecar_is_aligned_with_the_usagi_feet() {
+        let sidecar = ["CPU 7% · MEM 3.3GB".to_owned()];
+        let block = sidebar_block_with_sidecar(40, 0, None, &sidecar).expect("mascot fits");
+        assert!(block.rows()[2].contains("CPU 7% · MEM 3.3GB"));
+        assert!(!block.rows()[0].contains("CPU 7%"));
     }
 }

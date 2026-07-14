@@ -55,6 +55,7 @@ pub enum DaemonRequest {
 pub enum MetricsAction {
     Subscribe,
     Unsubscribe,
+    Snapshot,
 }
 
 /// A deliberately small, versioned snapshot emitted by the daemon.  Counters
