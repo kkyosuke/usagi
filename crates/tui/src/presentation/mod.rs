@@ -2551,11 +2551,17 @@ mod tests {
 
     #[test]
     fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
-        let error = IdleAgentPort
+        let mut port = IdleAgentPort;
+        let error = port
             .launch(WorkspaceId::new(), SessionId::new(), None)
             .unwrap_err();
 
         assert_eq!(error, "not launched in this test");
+        assert_eq!(
+            port.launch_terminal(WorkspaceId::new(), SessionId::new())
+                .unwrap_err(),
+            "terminal launch is unavailable"
+        );
     }
 
     #[derive(Default)]
@@ -3470,6 +3476,11 @@ mod tests {
             session_id: Some(session_id),
             worktree_id: WorktreeId::new(),
         };
+        let mut port = SuccessfulTerminalPort(terminal.clone());
+        assert_eq!(
+            port.launch(workspace_id, session_id, None).unwrap_err(),
+            "agent launch is not expected"
+        );
         let workspace = WorkspaceView::with_runtime_ids(
             ws("closeup-terminal-live"),
             state("closeup-terminal-live"),
@@ -3485,7 +3496,7 @@ mod tests {
         .with_agent_context(
             workspace_id,
             vec![session_id],
-            Box::new(SuccessfulTerminalPort(terminal.clone())),
+            Box::new(port),
             DefaultModel::OpenAi,
         );
 
