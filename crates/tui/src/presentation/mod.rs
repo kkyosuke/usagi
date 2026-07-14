@@ -3263,6 +3263,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_inline_new_session_name_stays_open_with_a_safe_error() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        );
+        while !ui.workspace.new_session_selected() {
+            let _ = step_workspace(&mut ui, Key::Down);
+        }
+        let _ = step_workspace(&mut ui, Key::Enter);
+
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        assert!(ui.workspace.creating_session_inline());
+        assert!(
+            render_workspace(40, 80, &ui)
+                .join("\n")
+                .contains("session name is required")
+        );
+    }
+
+    #[test]
     fn ctrl_a_moves_the_cursor_to_the_inline_new_session_input() {
         let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
         let mut ui = WorkspaceUi::with_ports_and_selection_mode(
