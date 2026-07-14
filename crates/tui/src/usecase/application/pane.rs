@@ -15,6 +15,8 @@ pub enum PaneKind {
     Terminal,
     /// terminal 上で起動する Agent。
     Agent,
+    /// A read-only diff document for the selected target.
+    Diff,
 }
 
 /// backend の completion を待つ tab placeholder。
@@ -44,6 +46,12 @@ pub enum PaneTab {
     Pending(PendingPane),
     /// attach 済みまたは attach 可能な terminal。
     Live(LivePane),
+    /// A non-terminal pane whose request completed successfully.
+    ///
+    /// Diff has no daemon terminal incarnation to attach, but it still uses
+    /// the same request/pending/completion tab lifecycle as terminal and
+    /// Agent.  Its operation remains the stable tab identity.
+    Ready(PendingPane),
 }
 
 /// tab を index でなく stable identity により選ぶための key。
@@ -53,6 +61,8 @@ pub enum TabSelection {
     Pending(OperationId),
     /// completion 後または保存済みの live tab。
     Live(TerminalRef),
+    /// A completed non-terminal tab.
+    Ready(OperationId),
 }
 
 /// attach 判断に必要な TUI-local の選択位置。
@@ -354,6 +364,7 @@ fn event_belongs_to_target(event: &PaneEvent, target: Target) -> bool {
         PaneEvent::Select(PaneSelection::Target(selected)) => *selected == target,
         PaneEvent::Select(PaneSelection::Tab(_))
         | PaneEvent::Succeeded { .. }
+        | PaneEvent::Resolved { .. }
         | PaneEvent::Failed { .. }
         | PaneEvent::CloseSelected => true,
         PaneEvent::Request {
@@ -392,6 +403,8 @@ pub enum PaneEvent {
         /// 完全な terminal identity。
         terminal: TerminalRef,
     },
+    /// Complete a non-terminal pane without inventing a terminal identity.
+    Resolved { operation: OperationId },
     /// request が失敗した。`message` は adapter が安全と保証した文言だけを渡す。
     Failed {
         /// 完了した operation。
@@ -441,6 +454,7 @@ pub fn reduce(state: &mut PaneState, event: PaneEvent) -> Vec<PaneEffect> {
             operation,
             terminal,
         } => succeed(state, operation, terminal),
+        PaneEvent::Resolved { operation } => resolve(state, operation),
         PaneEvent::Failed { operation, message } => fail(state, operation, message),
         PaneEvent::Exited(terminal) => exit(state, &terminal),
         PaneEvent::Restore(pane) => restore(state, pane),
@@ -460,9 +474,25 @@ fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
             (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
                 live.terminal == *selected
             }
-            (PaneTab::Pending(_) | PaneTab::Live(_), PaneSelection::Target(_))
-            | (PaneTab::Pending(_), PaneSelection::Tab(TabSelection::Live(_)))
-            | (PaneTab::Live(_), PaneSelection::Tab(TabSelection::Pending(_))) => false,
+            (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
+                ready.operation == *selected
+            }
+            (
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_),
+                PaneSelection::Target(_),
+            )
+            | (
+                PaneTab::Pending(_),
+                PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
+            )
+            | (
+                PaneTab::Live(_),
+                PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
+            )
+            | (
+                PaneTab::Ready(_),
+                PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
+            ) => false,
         })
     else {
         return Vec::new();
@@ -473,6 +503,7 @@ fn close_selected(state: &mut PaneState) -> Vec<PaneEffect> {
             Some(session) => Target::Session(session),
             None => Target::Root(live.terminal.workspace_id),
         },
+        PaneTab::Ready(ready) => ready.target,
     };
     if state.tabs.is_empty() {
         state.selected = PaneSelection::Target(target);
@@ -509,7 +540,7 @@ fn succeed(
                 PaneTab::Pending(pending) if pending.operation == operation => {
                     Some((index, *pending))
                 }
-                PaneTab::Pending(_) | PaneTab::Live(_) => None,
+                PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
             })
     else {
         return Vec::new();
@@ -554,6 +585,29 @@ fn succeed(
         .collect()
 }
 
+fn resolve(state: &mut PaneState, operation: OperationId) -> Vec<PaneEffect> {
+    let Some((index, pending)) = state
+        .tabs
+        .iter()
+        .enumerate()
+        .find_map(|(index, tab)| match tab {
+            PaneTab::Pending(pending) if pending.operation == operation => Some((index, *pending)),
+            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+        })
+    else {
+        return Vec::new();
+    };
+    state.tabs[index] = PaneTab::Ready(pending);
+    if matches!(
+        &state.selected,
+        PaneSelection::Tab(TabSelection::Pending(selected)) if *selected == operation
+    ) {
+        state.selected = PaneSelection::Tab(TabSelection::Ready(operation));
+    }
+    state.error = None;
+    Vec::new()
+}
+
 #[coverage(off)]
 fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<PaneEffect> {
     let Some((index, target)) = state
@@ -564,7 +618,7 @@ fn fail(state: &mut PaneState, operation: OperationId, message: String) -> Vec<P
             PaneTab::Pending(pending) if pending.operation == operation => {
                 Some((index, pending.target))
             }
-            PaneTab::Pending(_) | PaneTab::Live(_) => None,
+            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
         })
     else {
         return Vec::new();
@@ -631,6 +685,7 @@ fn selection_for(tab: &PaneTab) -> PaneSelection {
     match tab {
         PaneTab::Pending(pending) => PaneSelection::Tab(TabSelection::Pending(pending.operation)),
         PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
+        PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
     }
 }
 
@@ -719,6 +774,27 @@ mod tests {
                     kind: PaneKind::Agent,
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn selected_diff_placeholder_becomes_a_ready_tab_without_a_terminal_identity() {
+        let target = target();
+        let mut state = PaneState::new(PaneSelection::Target(target));
+        let operation = request(&mut state, target, PaneKind::Diff);
+        let _ = reduce(
+            &mut state,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+
+        assert!(reduce(&mut state, PaneEvent::Resolved { operation }).is_empty());
+        assert!(matches!(
+            state.tabs(),
+            [PaneTab::Ready(ready)] if ready.kind == PaneKind::Diff && ready.operation == operation
+        ));
+        assert_eq!(
+            state.selected(),
+            &PaneSelection::Tab(TabSelection::Ready(operation))
         );
     }
 
@@ -868,6 +944,15 @@ mod tests {
                 PaneEvent::Succeeded {
                     operation,
                     terminal: opened.clone(),
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::Resolved {
+                    operation: OperationId::new(),
                 },
             )
             .is_empty()

@@ -29,7 +29,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
-use usagi_core::domain::id::{SessionId, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -245,10 +245,16 @@ fn pane_tab_label(tab: &PaneTab) -> String {
         PaneTab::Pending(pending) => match pending.kind {
             PaneKind::Terminal => "Terminal (resolving)".to_owned(),
             PaneKind::Agent => "Agent (starting)".to_owned(),
+            PaneKind::Diff => "Diff (loading)".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
+            PaneKind::Diff => "Diff".to_owned(),
+        },
+        PaneTab::Ready(ready) => match ready.kind {
+            PaneKind::Diff => "Diff".to_owned(),
+            PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
 }
@@ -262,9 +268,22 @@ fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
         (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
             live.terminal == *selected
         }
-        (PaneTab::Pending(_) | PaneTab::Live(_), PaneSelection::Target(_))
-        | (PaneTab::Pending(_), PaneSelection::Tab(TabSelection::Live(_)))
-        | (PaneTab::Live(_), PaneSelection::Tab(TabSelection::Pending(_))) => false,
+        (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
+            ready.operation == *selected
+        }
+        (PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_), PaneSelection::Target(_))
+        | (
+            PaneTab::Pending(_),
+            PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
+        )
+        | (
+            PaneTab::Live(_),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
+        )
+        | (
+            PaneTab::Ready(_),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
+        ) => false,
     }
 }
 
@@ -320,6 +339,8 @@ pub struct Workspace {
     /// The legacy view still projects sessions by name, so the name is used only
     /// as the local map key; daemon operations retain their fenced identities.
     panes: BTreeMap<String, PaneState>,
+    /// Completed read-only pane documents, keyed by their durable operation.
+    pane_documents: BTreeMap<OperationId, Vec<String>>,
     /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
     pending_session: Option<String>,
     /// `+ new session` を置き換える v1-style inline name editor。
@@ -374,6 +395,7 @@ impl Workspace {
             pane_owner,
             session_ids,
             panes,
+            pane_documents: BTreeMap::new(),
             pending_session: None,
             create_input: None,
             create_error: None,
@@ -791,6 +813,20 @@ impl Workspace {
         );
     }
 
+    /// Complete a non-terminal pane and retain its safe document for rendering.
+    #[coverage(off)]
+    pub fn resolve_pane(&mut self, operation: OperationId, document: Vec<String>) {
+        let pane = self.pane_mut();
+        let _ = pane::reduce(pane, PaneEvent::Resolved { operation });
+        if pane
+            .tabs()
+            .iter()
+            .any(|tab| matches!(tab, PaneTab::Ready(ready) if ready.operation == operation))
+        {
+            self.pane_documents.insert(operation, document);
+        }
+    }
+
     /// Remove a pending pane after a presentation-safe daemon error.
     #[coverage(off)]
     pub fn fail_pane(&mut self, operation: usagi_core::domain::id::OperationId, message: String) {
@@ -800,7 +836,15 @@ impl Workspace {
     /// Close the selected right-pane tab without affecting daemon ownership.
     #[coverage(off)]
     pub fn close_pane(&mut self) {
+        let document = match self.pane().selected() {
+            PaneSelection::Tab(TabSelection::Ready(operation)) => Some(*operation),
+            PaneSelection::Target(_)
+            | PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)) => None,
+        };
         let _ = pane::reduce(self.pane_mut(), PaneEvent::CloseSelected);
+        if let Some(operation) = document {
+            self.pane_documents.remove(&operation);
+        }
     }
 
     #[coverage(off)]
@@ -823,6 +867,16 @@ impl Workspace {
         self.panes
             .get(&self.pane_key())
             .expect("a pane state exists for every selected target")
+    }
+
+    /// Safe document lines for the selected completed non-terminal tab.
+    #[must_use]
+    #[coverage(off)]
+    pub fn pane_document(&self) -> Option<&[String]> {
+        let PaneSelection::Tab(TabSelection::Ready(operation)) = self.pane().selected() else {
+            return None;
+        };
+        self.pane_documents.get(operation).map(Vec::as_slice)
     }
 
     #[must_use]
@@ -852,6 +906,7 @@ impl Workspace {
                 PaneSelection::Tab(TabSelection::Pending(pending.operation))
             }
             PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
+            PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
         };
         let _ = pane::reduce(pane, PaneEvent::Select(selection));
     }
@@ -1369,6 +1424,13 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
+        if let Some(document) = ws.pane_document() {
+            rows.extend(
+                document
+                    .iter()
+                    .map(|line| widgets::pad_to_width(line, width)),
+            );
+        }
     } else {
         rows.push(widgets::pad_to_width(&header, width));
         rows.extend(widgets::session_tab::empty_pane(
