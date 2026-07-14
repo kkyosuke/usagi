@@ -66,6 +66,7 @@ struct DaemonMetricsPort {
     latest: Option<DaemonMetrics>,
     git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
     git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
+    last_git_refresh: Option<Instant>,
 }
 impl DaemonMetricsPort {
     // Composition-only adapter: it constructs the real daemon client and uses
@@ -77,6 +78,7 @@ impl DaemonMetricsPort {
             latest: None,
             git_diffs: BTreeMap::new(),
             git_receiver: None,
+            last_git_refresh: None,
         }
     }
 }
@@ -112,7 +114,31 @@ impl MetricsPort for DaemonMetricsPort {
         &mut self,
         sessions: &[(usagi_core::domain::id::SessionId, PathBuf)],
     ) -> BTreeMap<usagi_core::domain::id::SessionId, GitDiff> {
-        if self.git_receiver.is_none() {
+        let active_ids = sessions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        self.git_diffs.retain(|id, _| active_ids.contains(id));
+        let mut finished = false;
+        if let Some(receiver) = &self.git_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok((id, status)) => {
+                        self.git_diffs.insert(id, status);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.git_receiver = None;
+        }
+        if self.git_receiver.is_none()
+            && self
+                .last_git_refresh
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
             let (sender, receiver) = mpsc::channel();
             let sessions = sessions.to_vec();
             thread::spawn(move || {
@@ -134,11 +160,7 @@ impl MetricsPort for DaemonMetricsPort {
                 }
             });
             self.git_receiver = Some(receiver);
-        }
-        if let Some(receiver) = &self.git_receiver {
-            while let Ok((id, status)) = receiver.try_recv() {
-                self.git_diffs.insert(id, status);
-            }
+            self.last_git_refresh = Some(Instant::now());
         }
         self.git_diffs.clone()
     }

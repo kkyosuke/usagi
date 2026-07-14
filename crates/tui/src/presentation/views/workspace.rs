@@ -496,7 +496,6 @@ impl Workspace {
         self.git_diffs = diffs;
     }
 
-    #[coverage(off)]
     fn git_diff(&self, index: usize) -> Option<&GitDiff> {
         self.session_ids
             .get(index)
@@ -1809,6 +1808,7 @@ mod tests {
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use chrono::{DateTime, Utc};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
@@ -2596,6 +2596,35 @@ mod tests {
         assert!(plain.contains("↑2 ↓1"));
         assert!(plain.contains("+12 -4"));
         assert!(rows.iter().all(|row| display_width(row) == 60));
+
+        let narrow =
+            super::session_menu_rows_at(18, false, Mode::Switch, &record, Some(&diff), base);
+        assert!(narrow.iter().all(|row| display_width(row) == 18));
+    }
+
+    #[test]
+    fn render_joins_git_diffs_to_the_matching_stable_session_id() {
+        let mut ws = workspace();
+        let daemon = ws.session_ids()[1];
+        ws.set_git_diffs(BTreeMap::from([(
+            daemon,
+            GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 3,
+                behind: 2,
+                added: 8,
+                removed: 1,
+            },
+        )]));
+
+        let rendered = render(30, 100, &ws)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("daemon"));
+        assert!(rendered.contains("origin/main ↑3 ↓2 +8 -1"));
+        assert_eq!(rendered.matches("origin/main").count(), 1);
     }
 
     #[test]

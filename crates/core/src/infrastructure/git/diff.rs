@@ -39,7 +39,6 @@ fn run(runner: &dyn GitRunner, repo: &Path, args: &[&str]) -> Result<super::runn
 /// # Errors
 ///
 /// Returns an error only when a Git subprocess cannot be spawned.
-#[coverage(off)] // Git command sequences are exercised through the injected runner tests below.
 pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffStatus>> {
     let branch = run(runner, repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if !branch.success {
@@ -111,12 +110,44 @@ mod tests {
     use super::*;
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
     use anyhow::anyhow;
+    use std::cell::Cell;
 
     struct BrokenGit;
+
+    struct BrokenAfter {
+        successful_calls: Cell<usize>,
+    }
 
     impl GitRunner for BrokenGit {
         fn run(&self, _repo: &Path, _args: &[&str]) -> Result<super::super::runner::GitOutput> {
             Err(anyhow!("git is unavailable"))
+        }
+    }
+
+    impl BrokenAfter {
+        fn new(successful_calls: usize) -> Self {
+            Self {
+                successful_calls: Cell::new(successful_calls),
+            }
+        }
+    }
+
+    impl GitRunner for BrokenAfter {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> Result<super::super::runner::GitOutput> {
+            let remaining = self.successful_calls.get();
+            if remaining == 0 {
+                return Err(anyhow!("git is unavailable"));
+            }
+            self.successful_calls.set(remaining - 1);
+            Ok(super::super::runner::GitOutput {
+                success: true,
+                stdout: match remaining {
+                    3 => "topic".to_owned(),
+                    2 => "origin/main".to_owned(),
+                    _ => "1 1".to_owned(),
+                },
+                stderr: String::new(),
+            })
         }
     }
 
@@ -164,6 +195,9 @@ mod tests {
     fn hides_every_incomplete_git_query_without_failing_the_sidebar() {
         let repo = Path::new("/repo");
         assert!(diff_status(&BrokenGit, repo).is_err());
+        assert!(diff_status(&BrokenAfter::new(1), repo).is_err());
+        assert!(diff_status(&BrokenAfter::new(2), repo).is_err());
+        assert!(diff_status(&BrokenAfter::new(3), repo).is_err());
 
         let branch_failure = FakeGit::new(vec![fail("not a repository")]);
         assert_eq!(diff_status(&branch_failure, repo).unwrap(), None);
