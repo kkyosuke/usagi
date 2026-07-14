@@ -809,12 +809,39 @@ fn dispatch_session(
         Ok(reply) => {
             let outcome = match action {
                 SessionAction::Create | SessionAction::Remove => ResponseOutcome::Accepted {
-                    operation_id: usagi_core::infrastructure::ipc::OperationId(reply.operation_id),
+                    operation_id: usagi_core::infrastructure::ipc::OperationId(
+                        reply.operation_id.clone(),
+                    ),
                     operation_revision: reply.revision,
                 },
                 _ => ResponseOutcome::Ok,
             };
-            envelope(hello, request_id, outcome, reply.body)
+            // A mutation is synchronously finalized by the lifecycle runtime,
+            // but its wire outcome remains Accepted so retries retain the
+            // producer-issued operation identity.  Carry the safe final hook
+            // beside the snapshot: interactive clients use it to retire their
+            // pending UI only after the matching daemon operation completed.
+            let mut body = reply.body;
+            if let Some(kind) = match action {
+                SessionAction::Create => Some("session.created"),
+                SessionAction::Remove => Some("session.removed"),
+                SessionAction::List
+                | SessionAction::Overview
+                | SessionAction::Setup
+                | SessionAction::Prompt => None,
+            } {
+                if let Some(object) = body.as_object_mut() {
+                    object.insert(
+                        "hook".to_owned(),
+                        serde_json::json!({
+                            "kind": kind,
+                            "operation_id": reply.operation_id,
+                            "revision": reply.revision,
+                        }),
+                    );
+                }
+            }
+            envelope(hello, request_id, outcome, body)
         }
         Err(error) => {
             let code = if error == SessionRuntimeError::IdempotencyConflict {

@@ -91,7 +91,7 @@ observer の中間 sample を落として count する。切断された observe
 
 ## managed session request
 
-`session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
+`session` kind の `create`、`remove`、`list`、`overview` は daemon が所有する durable lifecycle runtime に届く。create / remove は producer-issued `OperationId` を accepted response に返し、list / overview は同じ revision 付き workspace snapshot を返す。create / remove の accepted response は snapshot とともに safe final hook を返す。hook は `kind`（`session.created` または `session.removed`）、`operation_id`、`revision` を持ち、TUI は create skeleton を同じ operation の `session.created` hook でだけ終了する。`OperationId` の再送は action と canonical session target が一致するときだけ同じ operation を返し、異なれば `idempotency_conflict` で拒否する。
 
 snapshot の session は `WorkspaceId`、`SessionId`、`WorktreeId`、lifecycle を含む。agent / terminal 起動用の checkout path は、daemon が available の完全一致 scope からだけ解決する。client が name または path を渡して scope を再探索する wire contract はない。
 

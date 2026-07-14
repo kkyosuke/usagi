@@ -1080,15 +1080,12 @@ fn session_menu_rows_at(
 }
 
 /// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
-/// skeleton 自体は navigation target ではないため、cursor を持たない。
+/// skeleton 自体は navigation target ではないため、cursor を持たない。名前と activity
+/// glyph は同じ左から右へ流れる wave に乗せ、静的な点滅ではなく作成中であることを示す。
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
     let label = widgets::shimmer_text(name, frame);
-    let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
-        "▓"
-    } else {
-        "░"
-    });
+    let activity = widgets::shimmer_text("●", frame);
     widgets::pad_to_width(&format!("  {activity} {label}"), width)
 }
 
@@ -2518,7 +2515,7 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("feature-x"));
-        assert!(text.contains('▓'));
+        assert!(text.contains('●'));
         let skeleton = text.find("feature-x").unwrap();
         let create = text.find("+ new session").unwrap();
         assert!(
