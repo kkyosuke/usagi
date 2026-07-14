@@ -22,6 +22,12 @@ use usagi_core::usecase::client::{
 };
 use usagi_daemon::infrastructure::unix_transport::connect_current;
 
+// The daemon is an instrumented child when cargo-llvm-cov runs this suite.
+// Starting it can take longer than the normal test-runner budget on a loaded
+// CI worker, even though it is healthy. Keep the readiness deadline above
+// that startup variance; connection failures still fail deterministically.
+const DAEMON_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn short_dir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(prefix)
@@ -102,7 +108,7 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, count: &Path) -> Daemon {
 }
 
 fn client(data_dir: &Path) -> IpcClient<std::os::unix::net::UnixStream> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + DAEMON_READINESS_TIMEOUT;
     loop {
         if let Ok(stream) = connect_current(data_dir) {
             return IpcClient::connect(
