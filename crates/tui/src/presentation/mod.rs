@@ -1438,9 +1438,7 @@ fn drive_workspace_with_ports_and_selection_mode(
     );
     loop {
         drain_session_completions(&mut ui);
-        if let Some(metrics) = ui.metrics_port.latest() {
-            ui.workspace.set_metrics(Some(metrics));
-        }
+        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1560,9 +1558,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     .with_metrics_port(metrics_port);
     loop {
         drain_session_completions(&mut ui);
-        if let Some(metrics) = ui.metrics_port.latest() {
-            ui.workspace.set_metrics(Some(metrics));
-        }
+        refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         let key = term.read_key()?;
@@ -1570,6 +1566,12 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
             return Ok(WorkspaceStep::Quit);
         }
+    }
+}
+
+fn refresh_metrics(ui: &mut WorkspaceUi) {
+    if let Some(metrics) = ui.metrics_port.latest() {
+        ui.workspace.set_metrics(Some(metrics));
     }
 }
 
@@ -1907,13 +1909,13 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, NewStep,
+        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, MetricsPort, NewStep,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
-        execute_closeup_command, play_startup_splash, render_workspace, run as run_from_start,
-        run_with_settings, run_workspace, run_workspace_with_overlay_data,
+        execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
         run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
         step_workspace, welcome_action, write_banner,
     };
@@ -1939,6 +1941,7 @@ mod tests {
     use usagi_core::domain::settings::ModalSelectionMode;
     use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
     use usagi_core::domain::workspace_state::WorkspaceState;
+    use usagi_core::usecase::client::DaemonMetrics;
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
@@ -2123,6 +2126,19 @@ mod tests {
             self.keys
                 .pop_front()
                 .ok_or_else(|| io::Error::other("no more keys"))
+        }
+    }
+
+    struct StaticMetrics;
+
+    impl MetricsPort for StaticMetrics {
+        fn latest(&mut self) -> Option<DaemonMetrics> {
+            Some(DaemonMetrics {
+                schema_version: 1,
+                sampled_at_ms: 42,
+                active_subscribers: 3,
+                dropped_updates: 0,
+            })
         }
     }
 
@@ -3232,6 +3248,26 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+    }
+
+    #[test]
+    fn metrics_port_refreshes_the_workspace_sidebar() {
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(RecordingSessionPort(Arc::new(Mutex::new(Vec::new())))),
+            ModalSelectionMode::Action,
+        )
+        .with_metrics_port(Box::new(StaticMetrics));
+
+        refresh_metrics(&mut ui);
+
+        assert!(
+            render_workspace(40, 80, &ui)
+                .join("\n")
+                .contains("3 sub · 0 dropped")
+        );
     }
 
     #[test]
