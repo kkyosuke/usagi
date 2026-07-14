@@ -13,6 +13,7 @@ pub mod theme;
 pub mod views;
 pub mod widgets;
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -37,7 +38,7 @@ use crate::presentation::views::remove_modal::{self, RemoveModal};
 use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
-use crate::presentation::views::workspace::{self, Mode, Workspace as WorkspaceView};
+use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
 use crate::presentation::widgets::modal;
 use crate::usecase::application::pane::PaneKind;
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
@@ -81,6 +82,12 @@ pub trait AgentCommandPort {
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics>;
+
+    /// Poll non-blocking session Git observations. The port owns any workers;
+    /// rendering only receives completed values.
+    fn git_diffs(&mut self, _sessions: &[(SessionId, PathBuf)]) -> BTreeMap<SessionId, GitDiff> {
+        BTreeMap::new()
+    }
 }
 
 /// Creates a fresh metrics port for every workspace opened from the screen graph.
@@ -1803,6 +1810,15 @@ fn refresh_metrics(ui: &mut WorkspaceUi) {
     if let Some(metrics) = ui.metrics_port.latest() {
         ui.workspace.set_metrics(Some(metrics));
     }
+    let sessions = ui
+        .workspace
+        .sessions()
+        .iter()
+        .zip(ui.workspace.session_ids())
+        .map(|(session, id)| (*id, session.root.clone()))
+        .collect::<Vec<_>>();
+    ui.workspace
+        .set_git_diffs(ui.metrics_port.git_diffs(&sessions));
 }
 
 /// Open list 用に、registry の生値と recent projection を結び付ける。

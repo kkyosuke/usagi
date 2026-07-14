@@ -8,10 +8,12 @@
 //! root binds the real `git`-spawning implementation (mirroring the daemon's
 //! `RecordFile` / `LivenessProbe` seams).
 
+pub mod diff;
 pub mod repo;
 pub mod runner;
 pub mod worktree;
 
+pub use diff::{DiffStatus, diff_status};
 pub use runner::{GitOutput, GitRunner};
 pub use worktree::{WorktreeInfo, add_worktree, list_worktrees, remove_worktree};
 

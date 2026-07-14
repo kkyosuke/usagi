@@ -95,7 +95,7 @@ Home sidebar は `main → divider → session* → + new session` の順序と 
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
 2 行目は daemon snapshot の `last_active`、または旧 record の `created_at` を基準に、`now`、`12m ago`、`3h ago`
-のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。PR title の解決はこの行の前提にしない。snapshot に無い
+のような相対時刻で表示し、dismissed でない PR があれば先頭の PR 番号と残り件数を続ける。Git の検査が完了した session は、remote の既定 branch（`origin/HEAD`）を優先した base との差分として `↑ahead ↓behind · +added -removed` を続ける。検査は sidebar の描画とは別スレッドで行い、未完了・取得不能・意味を持たない base branch 自身の状態は表示しない。PR title の解決はこの行の前提にしない。snapshot に無い
 session は selected / active を main に縮退させ、空一覧でも main と作成 action は残る。
 
 Switch で `+ new session` を選び Enter（または `t`）を押すと、その行が `+ new: <name>` の
@@ -109,8 +109,7 @@ request を非同期に開始し、完了まで行の直前に session と同じ
 IPC body を画面やログへ出さず、安全な error を画面に表示して `<data dir>/logs/error-YYYY-MM-DD.log` に schema
 error を記録する。
 
-diff と GIF はこの projection に含めない。実行可能な daemon command と対応する snapshot data が無い限り、
-sidebar は状態・進捗・shortcut を表示しない。既存の Closeup / overlay の入力所有者と操作だけを維持する。
+GIF はこの projection に含めない。diff の詳細表示や実行 shortcut は実行可能な daemon command が無いため追加せず、sidebar は read-only の Git summary だけを表示する。既存の Closeup / overlay の入力所有者と操作だけを維持する。
 
 狭幅では cursor / active marker、表示名、note icon を優先し、補足行を ANSI-safe・Unicode display width 準拠で
 clip する。viewport と作成中 skeleton は session ごとの 2 行 footprint を使い、mascot の予約より選択中 row を優先する。
