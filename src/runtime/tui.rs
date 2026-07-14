@@ -35,8 +35,8 @@ use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
-    SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start, WorkspaceLoader,
-    WorkspaceSnapshot,
+    MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
+    WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -92,6 +92,15 @@ impl MetricsPort for DaemonMetricsPort {
             }
             DaemonReply::Accepted { .. } => None,
         }
+    }
+}
+
+struct DaemonMetricsPortFactory;
+
+impl MetricsPortFactory for DaemonMetricsPortFactory {
+    #[coverage(off)]
+    fn create(&mut self) -> Box<dyn MetricsPort> {
+        Box::new(DaemonMetricsPort::new())
     }
 }
 
@@ -634,12 +643,13 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         let mut settings = PersistentSettingsPort::open()?;
         let mut session_commands = DaemonSessionCommandPortFactory;
         let mut agent_commands = DaemonAgentCommandPortFactory;
+        let mut metrics = DaemonMetricsPortFactory;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 if start == Start::Welcome {
                     presentation::play_startup_splash(terminal)?;
                 }
-                presentation::run_with_settings_and_agent_port_factory_and_model_availability(
+                presentation::run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
                     terminal,
                     workspaces,
                     recent,
@@ -650,6 +660,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                     &mut session_commands,
                     &mut agent_commands,
                     available_agent_models(),
+                    &mut metrics,
                 )
             })
         })?;

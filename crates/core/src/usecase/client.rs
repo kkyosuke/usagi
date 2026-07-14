@@ -64,6 +64,12 @@ pub enum MetricsAction {
 pub struct DaemonMetrics {
     pub schema_version: u16,
     pub sampled_at_ms: u64,
+    /// Daemon process CPU usage since the previous sample, in hundredths of a percent.
+    #[serde(default)]
+    pub cpu_percent_hundredths: u32,
+    /// Daemon process peak resident memory, in bytes.
+    #[serde(default)]
+    pub resident_memory_bytes: u64,
     pub active_subscribers: u32,
     pub dropped_updates: u64,
 }
@@ -390,11 +396,25 @@ mod metrics_schema_tests {
         let snapshot: DaemonMetrics = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "sampled_at_ms": 42,
+            "cpu_percent_hundredths": 123,
+            "resident_memory_bytes": 456,
             "active_subscribers": 2,
             "dropped_updates": 3
         }))
         .unwrap();
         assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.cpu_percent_hundredths, 123);
+        assert_eq!(snapshot.resident_memory_bytes, 456);
+
+        let legacy_snapshot: DaemonMetrics = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "sampled_at_ms": 42,
+            "active_subscribers": 2,
+            "dropped_updates": 3
+        }))
+        .unwrap();
+        assert_eq!(legacy_snapshot.cpu_percent_hundredths, 0);
+        assert_eq!(legacy_snapshot.resident_memory_bytes, 0);
     }
 }
 

@@ -31,10 +31,15 @@ use crate::usecase::application::pane::{
 };
 use usagi_core::domain::id::{SessionId, WorkspaceId};
 
-/// 左ペイン（session menu）の希望表示幅。残りが右ペイン（closeup）になる。
-const LEFT_WIDTH: usize = 28;
+/// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
+const LEFT_WIDTH: usize = 36;
 /// header・rule の 2 行を除いた本文（ペイン）領域の先頭からのオフセット。
 const CHROME_ROWS: usize = 2;
+/// v1 と同じ Nerd Font glyph: processor and resident-memory server.
+const CPU_ICON: char = '\u{f2db}';
+const MEMORY_ICON: char = '\u{f233}';
+const MEBIBYTE: u64 = 1_048_576;
+const GIBIBYTE: u64 = 1_073_741_824;
 
 /// Home snapshot の session 表示情報。
 ///
@@ -1072,12 +1077,44 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
             vec![waiting]
         },
         |metrics| {
-            vec![format!(
-                "{} sub · {} dropped",
-                metrics.active_subscribers, metrics.dropped_updates
-            )]
+            let cpu_label = format!(
+                "{CPU_ICON} {:<4}",
+                format!("{}%", metrics.cpu_percent_hundredths / 100)
+            );
+            let cpu = load_style(u64::from(metrics.cpu_percent_hundredths), 3_000, 12_000)
+                .paint(&cpu_label);
+            let memory = load_style(metrics.resident_memory_bytes, 512 * MEBIBYTE, 2 * GIBIBYTE)
+                .paint(&format!(
+                    "{MEMORY_ICON} {}",
+                    format_memory(metrics.resident_memory_bytes)
+                ));
+            vec![format!("{cpu}  {memory}")]
         },
     )
+}
+
+#[coverage(off)]
+fn load_style(value: u64, busy: u64, hot: u64) -> Style {
+    if value >= hot {
+        Style::new().fg(Color::Red)
+    } else if value >= busy {
+        Style::new().fg(Color::Yellow)
+    } else {
+        // The mascot row is pink. Set white explicitly so a calm metric does
+        // not inherit that outer foreground colour before becoming dim.
+        Style::new().fg(Color::White).dim()
+    }
+}
+
+#[coverage(off)]
+fn format_memory(bytes: u64) -> String {
+    if bytes >= GIBIBYTE {
+        let gibibytes = bytes / GIBIBYTE;
+        let tenths = bytes % GIBIBYTE / 107_374_183;
+        format!("{gibibytes}.{tenths}GB")
+    } else {
+        format!("{}MB", bytes / MEBIBYTE)
+    }
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -2500,21 +2537,30 @@ mod tests {
     #[test]
     fn render_places_daemon_metrics_to_the_right_of_usagi() {
         let mut ws = workspace();
-        ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
+        let metrics = usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
             sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * 1_048_576,
             active_subscribers: 3,
             dropped_updates: 5,
-        }));
+        };
+        assert!(
+            super::mascot_metrics(Some(&metrics), 0)
+                .concat()
+                .contains("\u{1b}[2;37m\u{f2db}")
+        );
+        ws.set_metrics(Some(metrics));
         let frame = render(30, 100, &ws);
         let left_rows = frame[CHROME_ROWS..]
             .iter()
             .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
             .collect::<Vec<_>>();
-        let _metrics = left_rows
+        let metrics = left_rows
             .iter()
-            .position(|line| line.contains("3 sub · 5 dropped"))
-            .expect("metrics beside usagi");
+            .position(|line| line.contains('\u{f2db}'))
+            .expect("CPU beside usagi");
+        assert!(left_rows[metrics].contains("\u{f2db} 1%    \u{f233} 45MB"));
     }
 
     #[test]

@@ -66,10 +66,22 @@ pub trait MetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics>;
 }
 
+/// Creates a fresh metrics port for every workspace opened from the screen graph.
+pub trait MetricsPortFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort>;
+}
+
 struct NoMetrics;
 impl MetricsPort for NoMetrics {
     fn latest(&mut self) -> Option<DaemonMetrics> {
         None
+    }
+}
+
+struct NoMetricsFactory;
+impl MetricsPortFactory for NoMetricsFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort> {
+        Box::new(NoMetrics)
     }
 }
 
@@ -1796,6 +1808,7 @@ pub fn run_with_settings(
         settings,
         session_commands,
         None,
+        None,
         AvailableAgentModels::all(),
     )
 }
@@ -1851,6 +1864,42 @@ pub fn run_with_settings_and_agent_port_factory_and_model_availability(
     agent_commands: &mut dyn AgentCommandPortFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
+    let mut metrics = NoMetricsFactory;
+    run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        session_commands,
+        agent_commands,
+        available_models,
+        &mut metrics,
+    )
+}
+
+/// Run the screen graph with daemon Agent and metrics port factories.
+///
+/// # Errors
+///
+/// Returns workspace loading or terminal IO failures from the screen graph.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
+    agent_commands: &mut dyn AgentCommandPortFactory,
+    available_models: AvailableAgentModels,
+    metrics: &mut dyn MetricsPortFactory,
+) -> io::Result<Exit> {
     run_with_settings_inner(
         term,
         workspaces,
@@ -1861,6 +1910,7 @@ pub fn run_with_settings_and_agent_port_factory_and_model_availability(
         settings,
         session_commands,
         Some(agent_commands),
+        Some(metrics),
         available_models,
     )
 }
@@ -1880,6 +1930,7 @@ fn run_with_settings_inner(
     settings: &mut dyn SettingsPort,
     session_commands: &mut dyn SessionCommandPortFactory,
     mut agent_commands: Option<&mut dyn AgentCommandPortFactory>,
+    mut metrics: Option<&mut dyn MetricsPortFactory>,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
@@ -1927,7 +1978,10 @@ fn run_with_settings_inner(
                             config_form.global_modal_selection_mode(),
                             config_form.global_default_model(),
                             factory.create(),
-                            Box::new(NoMetrics),
+                            metrics.as_deref_mut().map_or_else(
+                                || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
+                                |factory| factory.create(),
+                            ),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -1960,7 +2014,10 @@ fn run_with_settings_inner(
                                 config_form.global_modal_selection_mode(),
                                 config_form.global_default_model(),
                                 factory.create(),
-                                Box::new(NoMetrics),
+                                metrics.as_deref_mut().map_or_else(
+                                    || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
+                                    |factory| factory.create(),
+                                ),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(
@@ -2114,16 +2171,19 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, MetricsPort, NewStep,
+        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
+        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, NoMetricsFactory,
         OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
         SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
         execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
-        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
-        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
-        step_workspace, welcome_action, write_banner,
+        run as run_from_start, run_with_settings,
+        run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
+        run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
+        step_overview, step_pr, step_workspace, welcome_action, write_banner,
     };
+    use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::presentation::views::workspace::{
@@ -2139,6 +2199,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use usagi_core::domain::AppInfo;
+    use usagi_core::domain::agent::AgentProfileId;
+    use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -2343,8 +2405,53 @@ mod tests {
                 sampled_at_ms: 42,
                 active_subscribers: 3,
                 dropped_updates: 0,
+                cpu_percent_hundredths: 250,
+                resident_memory_bytes: 45 * 1024 * 1024,
             })
         }
+    }
+
+    struct StaticMetricsFactory;
+
+    impl MetricsPortFactory for StaticMetricsFactory {
+        fn create(&mut self) -> Box<dyn MetricsPort> {
+            Box::new(StaticMetrics)
+        }
+    }
+
+    struct IdleAgentPort;
+
+    impl AgentCommandPort for IdleAgentPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("not launched in this test".to_owned())
+        }
+    }
+
+    struct IdleAgentPortFactory;
+
+    impl AgentCommandPortFactory for IdleAgentPortFactory {
+        fn create(&mut self) -> Box<dyn AgentCommandPort> {
+            Box::new(IdleAgentPort)
+        }
+    }
+
+    #[test]
+    fn no_metrics_factory_creates_an_empty_port() {
+        assert_eq!(NoMetricsFactory.create().latest(), None);
+    }
+
+    #[test]
+    fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
+        let error = IdleAgentPort
+            .launch(WorkspaceId::new(), SessionId::new(), None)
+            .unwrap_err();
+
+        assert_eq!(error, "not launched in this test");
     }
 
     #[derive(Default)]
@@ -3163,7 +3270,7 @@ mod tests {
         assert!(
             terminal_frames
                 .iter()
-                .any(|frame| frame.contains("Terminal (resolving)"))
+                .any(|frame| frame.contains("Terminal (resolv"))
         );
         assert!(agent_frames.iter().any(|frame| frame.contains('▔')));
         assert!(
@@ -3422,6 +3529,46 @@ mod tests {
         assert_eq!(*created.lock().unwrap(), 1);
     }
 
+    #[test]
+    fn screen_graph_injects_metrics_when_opening_a_workspace() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut sessions = SnapshotSessionPortFactory {
+            calls,
+            created: Arc::new(Mutex::new(0)),
+        };
+        let mut agents = IdleAgentPortFactory;
+        let mut metrics = StaticMetricsFactory;
+        let keys = [Key::Char('o'), Key::Enter, Key::Char('q'), Key::Enter];
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader::default();
+        let mut settings = DefaultSettingsPort;
+
+        assert_eq!(
+            run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+                &mut term,
+                vec![ws("alpha")],
+                Vec::new(),
+                now(),
+                Start::Welcome,
+                &mut loader,
+                &mut settings,
+                &mut sessions,
+                &mut agents,
+                AvailableAgentModels::all(),
+                &mut metrics,
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+
+        assert!(
+            term.frames
+                .iter()
+                .flat_map(|frame| frame.iter())
+                .any(|line| line.contains('\u{f2db}') && line.contains('\u{f233}'))
+        );
+    }
+
     /// Welcome の Recent 経由で開いた workspace も同じ factory から port を取り出す。
     #[test]
     fn recent_workspace_pulls_the_session_command_port_from_the_factory() {
@@ -3525,11 +3672,11 @@ mod tests {
 
         refresh_metrics(&mut ui);
 
-        assert!(
-            render_workspace(40, 80, &ui)
-                .join("\n")
-                .contains("3 sub · 0 dropped")
-        );
+        let rendered = render_workspace(40, 80, &ui).join("\n");
+        assert!(rendered.contains('\u{f2db}'));
+        assert!(rendered.contains('\u{f233}'));
+        assert!(rendered.contains("45MB"));
+        assert!(!rendered.contains('・'));
     }
 
     #[test]

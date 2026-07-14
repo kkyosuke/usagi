@@ -57,6 +57,8 @@ impl MetricsBroker {
         let snapshot = DaemonMetrics {
             schema_version: 1,
             sampled_at_ms,
+            cpu_percent_hundredths: 0,
+            resident_memory_bytes: 0,
             active_subscribers: u32::try_from(self.subscribers.len()).unwrap_or(u32::MAX),
             dropped_updates: self.dropped_updates,
         };
