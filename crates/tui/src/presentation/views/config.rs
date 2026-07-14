@@ -1,6 +1,6 @@
 //! Config screen state and rendering.
 
-use usagi_core::domain::settings::{ModalSelectionMode, Settings, Theme};
+use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
 use crate::presentation::layouts::mascot_screen;
@@ -15,6 +15,7 @@ pub enum Field {
     #[default]
     Theme,
     ModalSelectionMode,
+    DefaultModel,
     Save,
 }
 
@@ -80,7 +81,8 @@ impl Config {
     pub fn next_field(&mut self) {
         self.field = match self.field {
             Field::Theme => Field::ModalSelectionMode,
-            Field::ModalSelectionMode => Field::Save,
+            Field::ModalSelectionMode => Field::DefaultModel,
+            Field::DefaultModel => Field::Save,
             Field::Save => Field::Theme,
         };
         self.notice = None;
@@ -91,7 +93,8 @@ impl Config {
         self.field = match self.field {
             Field::Theme => Field::Save,
             Field::ModalSelectionMode => Field::Theme,
-            Field::Save => Field::ModalSelectionMode,
+            Field::DefaultModel => Field::ModalSelectionMode,
+            Field::Save => Field::DefaultModel,
         };
         self.notice = None;
     }
@@ -112,6 +115,12 @@ impl Config {
     #[must_use]
     pub fn global_modal_selection_mode(&self) -> ModalSelectionMode {
         self.global.saved.modal_selection_mode
+    }
+
+    /// Returns the saved global default model for newly opened workspaces.
+    #[must_use]
+    pub fn global_default_model(&self) -> DefaultModel {
+        self.global.saved.default_model
     }
 
     /// Returns the latest save or load feedback, if any.
@@ -151,11 +160,22 @@ impl Config {
         self.notice = None;
     }
 
+    /// Switch the default cloud model between Claude and `OpenAI`.
+    pub fn cycle_default_model(&mut self) {
+        let model = &mut self.current_mut().draft.default_model;
+        *model = match *model {
+            DefaultModel::Claude => DefaultModel::OpenAi,
+            DefaultModel::OpenAi => DefaultModel::Claude,
+        };
+        self.notice = None;
+    }
+
     /// Change the focused select value. Returns false for the Save action.
     pub fn cycle_selected(&mut self, forward: bool) -> bool {
         match self.field {
             Field::Theme => self.cycle_theme(forward),
             Field::ModalSelectionMode => self.cycle_modal_selection_mode(),
+            Field::DefaultModel => self.cycle_default_model(),
             Field::Save => return false,
         }
         true
@@ -241,6 +261,16 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
                 ),
                 Style::new(),
             ),
+            mascot_screen::centered_line(
+                width,
+                &select::render(
+                    "Default model",
+                    default_model_name(config.settings().default_model),
+                    config.field() == Field::DefaultModel,
+                    config.settings().default_model != config.current().saved.default_model,
+                ),
+                Style::new(),
+            ),
             String::new(),
             mascot_screen::centered_line(
                 width,
@@ -282,11 +312,18 @@ fn modal_selection_mode_name(mode: ModalSelectionMode) -> &'static str {
     }
 }
 
+fn default_model_name(model: DefaultModel) -> &'static str {
+    match model {
+        DefaultModel::Claude => "Claude",
+        DefaultModel::OpenAi => "OpenAI",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, Field, render};
     use std::io;
-    use usagi_core::domain::settings::{ModalSelectionMode, Settings, Theme};
+    use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 
     #[derive(Default)]
@@ -384,6 +421,7 @@ mod tests {
         assert!(frame.contains("Scope: [Global]"));
         assert!(frame.contains("Theme") && frame.contains("system"));
         assert!(frame.contains("Modal mode") && frame.contains("action"));
+        assert!(frame.contains("Default model") && frame.contains("OpenAI"));
         assert!(frame.contains("[ Save ]"));
         assert!(frame.contains("Esc: back"));
     }
@@ -418,9 +456,11 @@ mod tests {
         let mut config = Config::load(&mut port);
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Save);
         assert!(!config.can_save());
 
+        config.previous_field();
         config.previous_field();
         config.cycle_modal_selection_mode();
         config.cycle_modal_selection_mode();
@@ -429,6 +469,7 @@ mod tests {
             config.settings().modal_selection_mode,
             ModalSelectionMode::Prompt
         );
+        config.next_field();
         config.next_field();
         assert!(config.can_save());
         assert!(config.save(&mut port));
@@ -447,12 +488,30 @@ mod tests {
         assert!(!config.save(&mut port));
 
         config.previous_field();
+        assert_eq!(config.field(), Field::DefaultModel);
+        config.previous_field();
         assert_eq!(config.field(), Field::ModalSelectionMode);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
         config.next_field();
         config.next_field();
         config.next_field();
+        config.next_field();
         assert_eq!(config.field(), Field::Theme);
+    }
+
+    #[test]
+    fn default_model_cycles_and_is_saved_with_the_global_settings() {
+        let mut port = FakeSettingsPort::default();
+        let mut config = Config::load(&mut port);
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::DefaultModel);
+        config.cycle_selected(true);
+        assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        config.next_field();
+        assert!(config.save(&mut port));
+        assert_eq!(port.global.default_model, DefaultModel::Claude);
+        assert_eq!(config.global_default_model(), DefaultModel::Claude);
     }
 }

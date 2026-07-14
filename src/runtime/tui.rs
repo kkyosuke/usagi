@@ -680,14 +680,15 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let mut settings = PersistentSettingsPort::open()?;
-        let modal_selection_mode = settings.read(SettingsScope::Global)?.modal_selection_mode;
+        let global_settings = settings.read(SettingsScope::Global)?;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 presentation::run_workspace_with_agent_port_and_selection_mode(
                     terminal,
                     snapshot,
                     Box::new(DaemonSessionCommandPort::default()),
-                    modal_selection_mode,
+                    global_settings.modal_selection_mode,
+                    global_settings.default_model,
                     Box::new(DaemonAgentCommandPort),
                     Box::new(DaemonMetricsPort::new()),
                 )

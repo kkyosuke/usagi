@@ -2,9 +2,8 @@
 //!
 //! The global, per-user preferences persisted as `settings.json` in the data
 //! directory. This is the growing home for usagi's configurable behaviour; it
-//! currently carries only the UI [`Theme`], with more settings added as the
-//! features that consume them land (per-project overrides and the settings store
-//! come later).
+//! currently carries the UI [`Theme`] and the default cloud model used for new
+//! Agent panes.
 //!
 //! Enum-valued settings degrade an unrecognised stored token to a sensible
 //! default rather than failing the whole file, so a value written by a newer
@@ -42,6 +41,29 @@ pub enum ModalSelectionMode {
     Action,
 }
 
+/// The cloud model provider used when a new Agent pane has no explicit profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultModel {
+    /// Anthropic Claude, launched through the `claude` profile.
+    Claude,
+    /// `OpenAI`, launched through the Codex `codex` profile.
+    #[default]
+    #[serde(rename = "openai", other)]
+    OpenAi,
+}
+
+impl DefaultModel {
+    /// Stable daemon profile ID selected by this model provider.
+    #[must_use]
+    pub const fn profile_id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenAi => "codex",
+        }
+    }
+}
+
 /// The global, per-user application settings.
 ///
 /// A missing field (and the whole file) falls back to [`Default`], and each enum
@@ -54,6 +76,8 @@ pub struct Settings {
     pub theme: Theme,
     /// The command-selection interaction used by Overview and Closeup modals.
     pub modal_selection_mode: ModalSelectionMode,
+    /// The provider used for Agent panes when no profile is selected explicitly.
+    pub default_model: DefaultModel,
 }
 
 #[cfg(test)]
