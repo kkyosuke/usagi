@@ -66,10 +66,22 @@ pub trait MetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics>;
 }
 
+/// Creates a fresh metrics port for every workspace opened from the screen graph.
+pub trait MetricsPortFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort>;
+}
+
 struct NoMetrics;
 impl MetricsPort for NoMetrics {
     fn latest(&mut self) -> Option<DaemonMetrics> {
         None
+    }
+}
+
+struct NoMetricsFactory;
+impl MetricsPortFactory for NoMetricsFactory {
+    fn create(&mut self) -> Box<dyn MetricsPort> {
+        Box::new(NoMetrics)
     }
 }
 
@@ -1796,6 +1808,7 @@ pub fn run_with_settings(
         settings,
         session_commands,
         None,
+        None,
         AvailableAgentModels::all(),
     )
 }
@@ -1851,6 +1864,42 @@ pub fn run_with_settings_and_agent_port_factory_and_model_availability(
     agent_commands: &mut dyn AgentCommandPortFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
+    let mut metrics = NoMetricsFactory;
+    run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        session_commands,
+        agent_commands,
+        available_models,
+        &mut metrics,
+    )
+}
+
+/// Run the screen graph with daemon Agent and metrics port factories.
+///
+/// # Errors
+///
+/// Returns workspace loading or terminal IO failures from the screen graph.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_settings_and_agent_and_metrics_port_factory_and_model_availability(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
+    agent_commands: &mut dyn AgentCommandPortFactory,
+    available_models: AvailableAgentModels,
+    metrics: &mut dyn MetricsPortFactory,
+) -> io::Result<Exit> {
     run_with_settings_inner(
         term,
         workspaces,
@@ -1861,6 +1910,7 @@ pub fn run_with_settings_and_agent_port_factory_and_model_availability(
         settings,
         session_commands,
         Some(agent_commands),
+        Some(metrics),
         available_models,
     )
 }
@@ -1880,6 +1930,7 @@ fn run_with_settings_inner(
     settings: &mut dyn SettingsPort,
     session_commands: &mut dyn SessionCommandPortFactory,
     mut agent_commands: Option<&mut dyn AgentCommandPortFactory>,
+    mut metrics: Option<&mut dyn MetricsPortFactory>,
     available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
@@ -1927,7 +1978,9 @@ fn run_with_settings_inner(
                             config_form.global_modal_selection_mode(),
                             config_form.global_default_model(),
                             factory.create(),
-                            Box::new(NoMetrics),
+                            metrics
+                                .as_deref_mut()
+                                .map_or_else(|| Box::new(NoMetrics), |factory| factory.create()),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -1960,7 +2013,9 @@ fn run_with_settings_inner(
                                 config_form.global_modal_selection_mode(),
                                 config_form.global_default_model(),
                                 factory.create(),
-                                Box::new(NoMetrics),
+                                metrics
+                                    .as_deref_mut()
+                                    .map_or_else(|| Box::new(NoMetrics), |factory| factory.create()),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(

@@ -473,6 +473,56 @@ struct SharedTerminal(
 type SharedSessionRuntime = Arc<Mutex<SessionRuntime<SystemGit>>>;
 type SharedTerminalRuntime =
     Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>;
+
+/// Samples daemon-owned process resources between metrics requests.
+struct ProcessMetrics {
+    previous: Option<(Instant, u64)>,
+}
+
+impl ProcessMetrics {
+    fn snapshot(&mut self) -> (u32, u64) {
+        let now = Instant::now();
+        let Some((cpu_micros, resident_memory_bytes)) = process_resource_usage() else {
+            return (0, 0);
+        };
+        let cpu_percent_hundredths = self.previous.map_or(0, |(then, previous_cpu_micros)| {
+            let elapsed_micros =
+                u64::try_from(now.duration_since(then).as_micros()).unwrap_or(u64::MAX);
+            let used_micros = cpu_micros.saturating_sub(previous_cpu_micros);
+            u32::try_from(
+                used_micros
+                    .saturating_mul(10_000)
+                    .checked_div(elapsed_micros)
+                    .unwrap_or(0),
+            )
+            .unwrap_or(u32::MAX)
+        });
+        self.previous = Some((now, cpu_micros));
+        (cpu_percent_hundredths, resident_memory_bytes)
+    }
+}
+
+fn process_resource_usage() -> Option<(u64, u64)> {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {
+        return None;
+    }
+    let seconds = u64::try_from(usage.ru_utime.tv_sec)
+        .ok()?
+        .saturating_add(u64::try_from(usage.ru_stime.tv_sec).ok()?);
+    let micros = u64::try_from(usage.ru_utime.tv_usec)
+        .ok()?
+        .saturating_add(u64::try_from(usage.ru_stime.tv_usec).ok()?);
+    let cpu_micros = seconds.saturating_mul(1_000_000).saturating_add(micros);
+    let max_rss = u64::try_from(usage.ru_maxrss).ok()?;
+    #[cfg(target_os = "macos")]
+    let resident_memory_bytes = max_rss;
+    #[cfg(not(target_os = "macos"))]
+    let resident_memory_bytes = max_rss.saturating_mul(1024);
+    Some((cpu_micros, resident_memory_bytes))
+}
+
+type SharedProcessMetrics = Arc<Mutex<ProcessMetrics>>;
 impl usagi_daemon::presentation::ipc::TerminalOwner for SharedTerminal {
     fn request(
         &mut self,
@@ -529,7 +579,14 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let (agent_pty, agent_observations) = AgentPty::new();
     let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
     start_agent_observer(Arc::clone(&agent), agent_observations)?;
-    start_ipc_accept_loop(listener, server, runtime, terminal, agent)
+    start_ipc_accept_loop(
+        listener,
+        server,
+        runtime,
+        terminal,
+        agent,
+        Arc::new(Mutex::new(ProcessMetrics { previous: None })),
+    )
 }
 
 fn open_agent_runtime(
@@ -640,6 +697,7 @@ fn start_ipc_accept_loop(
     runtime: SharedSessionRuntime,
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    metrics: SharedProcessMetrics,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-ipc".to_string())
@@ -653,6 +711,7 @@ fn start_ipc_accept_loop(
                         let terminal = Arc::clone(&terminal);
                         let agent_owner = Arc::clone(&agent);
                         let agent_launch = Arc::clone(&agent);
+                        let metrics = Arc::clone(&metrics);
                         let _ = std::thread::Builder::new()
                             .name("usagi-ipc-client".to_string())
                             .spawn(move || {
@@ -676,7 +735,7 @@ fn start_ipc_accept_loop(
                                     {
                                         Some("session") => dispatch_session(&session, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
-                                        Some("metrics") => dispatch_metrics(request_id, &body, hello),
+                                        Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
                                 );
@@ -693,10 +752,14 @@ fn start_ipc_accept_loop(
 }
 
 fn dispatch_metrics(
+    metrics: &SharedProcessMetrics,
     request_id: usagi_core::infrastructure::ipc::RequestId,
     _body: &serde_json::Value,
     hello: &usagi_core::infrastructure::ipc::ServerHello,
 ) -> usagi_core::infrastructure::ipc::Envelope {
+    let (cpu_percent_hundredths, resident_memory_bytes) = metrics
+        .lock()
+        .map_or((0, 0), |mut metrics| metrics.snapshot());
     let sampled_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| {
@@ -709,6 +772,8 @@ fn dispatch_metrics(
         serde_json::json!({
             "schema_version": 1,
             "sampled_at_ms": sampled_at_ms,
+            "cpu_percent_hundredths": cpu_percent_hundredths,
+            "resident_memory_bytes": resident_memory_bytes,
             "active_subscribers": 0,
             "dropped_updates": 0,
         }),

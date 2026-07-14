@@ -80,6 +80,8 @@ session / terminal の所有権や local fallback を判断する根拠にはし
 |---|---|---|
 | `schema_version` | `u16` | metrics payload schema version。現在は `1` |
 | `sampled_at_ms` | `u64` | daemon が sample を作成した monotonic timestamp |
+| `cpu_percent_hundredths` | `u32` | 前回 sample からの daemon process CPU 使用率（百分率の 1/100 単位） |
+| `resident_memory_bytes` | `u64` | daemon process の peak resident memory（byte） |
 | `active_subscribers` | `u32` | sample 作成時の observer 数 |
 | `dropped_updates` | `u64` | slow observer の bounded queue で coalesce した update 数 |
 

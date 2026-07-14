@@ -1073,11 +1073,20 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
         },
         |metrics| {
             vec![format!(
-                "{} sub · {} dropped",
-                metrics.active_subscribers, metrics.dropped_updates
+                "CPU {}.{:01}% · {}",
+                metrics.cpu_percent_hundredths / 100,
+                metrics.cpu_percent_hundredths % 100 / 10,
+                format_memory(metrics.resident_memory_bytes),
             )]
         },
     )
+}
+
+#[coverage(off)]
+fn format_memory(bytes: u64) -> String {
+    let mebibytes = bytes / 1_048_576;
+    let tenths = bytes % 1_048_576 / 104_858;
+    format!("{mebibytes}.{tenths}M")
 }
 
 /// 左ペイン（session menu）を `height` 行に組む。footer を最下行に
@@ -2503,6 +2512,8 @@ mod tests {
         ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
             sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * 1_048_576,
             active_subscribers: 3,
             dropped_updates: 5,
         }));
@@ -2513,7 +2524,7 @@ mod tests {
             .collect::<Vec<_>>();
         let _metrics = left_rows
             .iter()
-            .position(|line| line.contains("3 sub · 5 dropped"))
+            .position(|line| line.contains("CPU 1.2% · 45.0M"))
             .expect("metrics beside usagi");
     }
 
