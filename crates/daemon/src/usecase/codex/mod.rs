@@ -164,14 +164,14 @@ fn render_plan(
             "--sandbox".into(),
             "workspace-write".into(),
             "--ask-for-approval".into(),
-            "on-request".into(),
+            "never".into(),
         ],
         LaunchMode::Interactive => vec![
             "--dangerously-bypass-hook-trust".into(),
             "--sandbox".into(),
             "workspace-write".into(),
             "--ask-for-approval".into(),
-            "on-request".into(),
+            "never".into(),
         ],
         LaunchMode::Headless => vec![
             "exec".into(),

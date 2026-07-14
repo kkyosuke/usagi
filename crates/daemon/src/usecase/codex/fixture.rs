@@ -90,7 +90,7 @@ fn renders_public_interactive_argv_and_materializes_all_codex_artifacts_in_scope
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",
-            "on-request",
+            "never",
             "-m",
             "gpt-5-codex",
             "--",
@@ -133,7 +133,7 @@ fn renders_resume_only_without_an_initial_prompt() {
             "--sandbox",
             "workspace-write",
             "--ask-for-approval",
-            "on-request",
+            "never",
             "-m",
             "gpt-5-codex",
         ]
