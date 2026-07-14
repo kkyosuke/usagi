@@ -65,6 +65,10 @@ pub trait AgentCommandPort {
     /// The default keeps embedders that only expose Agent launch safe: the
     /// Terminal action becomes an inline failure instead of spawning anything
     /// locally.
+    ///
+    /// # Errors
+    ///
+    /// Returns a presentation-safe launch failure.
     fn launch_terminal(
         &mut self,
         _workspace: WorkspaceId,
@@ -1382,10 +1386,6 @@ fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileI
     let operation = ui.workspace.open_pane(kind);
     if kind == PaneKind::Agent || kind == PaneKind::Terminal {
         if ui.agent.is_none() {
-            ui.workspace.fail_pane(
-                operation,
-                "select an active session to open a terminal".to_owned(),
-            );
             ui.closeup_action_forced = false;
             return;
         }
