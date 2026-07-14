@@ -2177,10 +2177,10 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, NoMetricsFactory,
-        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        DefaultModel, DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep,
+        NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
+        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
+        Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
         execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
         run as run_from_start, run_with_settings,
@@ -3332,6 +3332,7 @@ mod tests {
             workspace_id,
             vec![session_id],
             Box::new(RecordingAgentPort(calls.clone())),
+            DefaultModel::OpenAi,
         );
 
         let _ = step_workspace(&mut ui, Key::Down);
@@ -3340,7 +3341,11 @@ mod tests {
 
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![(workspace_id, session_id, None)]
+            vec![(
+                workspace_id,
+                session_id,
+                Some(AgentProfileId::new("codex").expect("canonical profile ID")),
+            ),]
         );
     }
 
@@ -3371,6 +3376,7 @@ mod tests {
             workspace_id,
             vec![session_id],
             Box::new(SuccessfulAgentPort(terminal.clone())),
+            DefaultModel::OpenAi,
         );
 
         let _ = step_workspace(&mut ui, Key::Down);
