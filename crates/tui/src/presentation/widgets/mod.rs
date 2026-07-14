@@ -34,16 +34,13 @@ const ESC: char = '\u{1b}';
 const RESET: &str = "\u{1b}[0m";
 
 /// Configures a [`shimmer_text_with`] sweep. `speed` advances the two-cell band
-/// once per this many frames; `replacement` overwrites only the sweep head,
-/// leaving the trailing bright cell as its original text. `base_style` is used
-/// for every non-sweeping character, so the text does not inherit a parent
-/// widget's colour.
+/// once per this many frames. `base_style` is used for every non-sweeping
+/// character, so the text does not inherit a parent widget's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shimmer {
     pub style: Style,
     pub base_style: Style,
     pub speed: usize,
-    pub replacement: Option<char>,
 }
 
 impl Default for Shimmer {
@@ -52,7 +49,6 @@ impl Default for Shimmer {
             style: Role::Accent.style().bold(),
             base_style: Style::new().dim(),
             speed: 1,
-            replacement: None,
         }
     }
 }
@@ -65,9 +61,7 @@ pub fn shimmer_text(text: &str, frame: usize) -> String {
 
 /// A configurable version of [`shimmer_text`].
 ///
-/// `speed == 0` is treated as one frame per step. A replacement character is
-/// painted only at the two-cell band's head, which makes it suitable for
-/// progress glyphs without duplicating them.
+/// `speed == 0` is treated as one frame per step.
 #[must_use]
 pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     let chars = text.chars().collect::<Vec<_>>();
@@ -75,12 +69,7 @@ pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
     let mut out = String::new();
     for (index, character) in chars.into_iter().enumerate() {
         if index == head || index + 1 == head {
-            let visible = if index == head {
-                shimmer.replacement.unwrap_or(character)
-            } else {
-                character
-            };
-            out.push_str(&shimmer.style.paint(&visible.to_string()));
+            out.push_str(&shimmer.style.paint(&character.to_string()));
         } else {
             out.push_str(&shimmer.base_style.paint(&character.to_string()));
         }
@@ -468,53 +457,18 @@ mod tests {
     }
 
     #[test]
-    fn shimmer_allows_colour_speed_and_glyph_replacement() {
+    fn shimmer_allows_colour_and_speed_configuration() {
         let options = Shimmer {
             style: Role::Success.style().bold(),
             base_style: Style::new().dim(),
             speed: 2,
-            replacement: Some('\u{f907}'),
         };
         let first = shimmer_text_with("waiting", 0, options);
         let held = shimmer_text_with("waiting", 1, options);
         let advanced = shimmer_text_with("waiting", 2, options);
-        assert!(first.contains('\u{f907}'));
         assert_eq!(first, held, "speed holds a frame for two ticks");
         assert_ne!(first, advanced);
         assert!(first.contains("\u{1b}["), "configured style is applied");
         assert_ne!(shimmer_text("waiting", 0), first);
-    }
-
-    #[test]
-    fn shimmer_replaces_one_character_without_changing_the_status_text_width() {
-        let options = Shimmer {
-            style: Role::Feature.style().bold(),
-            base_style: Style::new().dim(),
-            speed: 1,
-            replacement: Some('\u{f907}'),
-        };
-        let rendered = |frame| strip_sgr(&shimmer_text_with("waiting daemon", frame, options));
-
-        assert_eq!(rendered(0), "\u{f907}aiting daemon");
-        assert_eq!(rendered(1), "w\u{f907}iting daemon");
-        assert_eq!(rendered(7), "waiting\u{f907}daemon");
-        assert_eq!(rendered(8), "waiting \u{f907}aemon");
-    }
-
-    fn strip_sgr(text: &str) -> String {
-        let mut plain = String::new();
-        let mut chars = text.chars();
-        while let Some(character) = chars.next() {
-            if character == '\u{1b}' && chars.next() == Some('[') {
-                for terminator in chars.by_ref() {
-                    if terminator == 'm' {
-                        break;
-                    }
-                }
-            } else {
-                plain.push(character);
-            }
-        }
-        plain
     }
 }

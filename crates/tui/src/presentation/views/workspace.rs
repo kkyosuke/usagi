@@ -1072,7 +1072,6 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     style: Style::new().fg(Color::White).bold(),
                     base_style: Style::new().fg(Color::White).dim(),
                     speed: 5,
-                    replacement: Some('\u{f907}'),
                 },
             );
             vec![waiting]
@@ -2461,16 +2460,26 @@ mod tests {
     }
 
     #[test]
+    fn pending_session_skeleton_uses_the_shared_shimmer_wave() {
+        let first = super::pending_session_rows(100, "feature-x", 0);
+        let next = super::pending_session_rows(100, "feature-x", 1);
+
+        assert_ne!(first[0], next[0], "the skeleton placeholder sweeps");
+        assert_ne!(first[1], next[1], "the creating label sweeps");
+    }
+
+    #[test]
     fn waiting_daemon_sweep_advances_every_five_frames() {
         let rendered = super::mascot_metrics(None, 0).concat();
         let first = strip(&rendered);
-        let held = strip(&super::mascot_metrics(None, 4).concat());
-        let advanced = strip(&super::mascot_metrics(None, 5).concat());
+        let held_rendered = super::mascot_metrics(None, 4).concat();
+        let advanced_rendered = super::mascot_metrics(None, 5).concat();
 
-        assert!(rendered.contains("\u{1b}[1;37m\u{f907}\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[1;37mw\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[2;37ma\u{1b}[0m"));
-        assert_eq!(first, held);
-        assert_ne!(first, advanced);
+        assert_eq!(rendered, held_rendered);
+        assert_ne!(rendered, advanced_rendered);
+        assert_eq!(first, strip(&advanced_rendered));
     }
 
     #[test]
