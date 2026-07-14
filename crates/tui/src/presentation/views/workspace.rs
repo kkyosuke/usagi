@@ -1010,10 +1010,10 @@ fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
     } else {
         (" ".to_owned(), " ".to_owned())
     };
-    let name = if selected {
-        Role::Accent.style().bold().paint("main")
-    } else {
-        "main".to_owned()
+    let name = match (selected, ws.mode()) {
+        (true, _) => Role::Accent.style().bold().paint("main"),
+        (false, Mode::Switch) => Style::new().dim().paint("main"),
+        (false, Mode::Closeup) => Role::Accent.style().paint("main"),
     };
     vec![
         widgets::pad_to_width(&format!("{marker} {name}"), width),
@@ -1091,7 +1091,11 @@ fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<Stri
     } else {
         " ".to_owned()
     };
-    let style = Role::Success.style().bold();
+    let style = if ws.mode() == Mode::Switch && !selected {
+        Style::new().dim()
+    } else {
+        Role::Success.style().bold()
+    };
     let label = ws.create_input.as_ref().map_or_else(
         || style.paint("+ new session"),
         |input| {
@@ -1146,10 +1150,10 @@ fn session_menu_rows_at(
         " ".to_owned()
     };
     let label = widgets::clip_to_width(session.display_label(), width.saturating_sub(5));
-    let label = if selected {
-        Role::Accent.style().bold().paint(&label)
-    } else {
-        label
+    let label = match (selected, mode) {
+        (true, _) => Role::Accent.style().bold().paint(&label),
+        (false, Mode::Switch) => Style::new().dim().paint(&label),
+        (false, Mode::Closeup) => Role::Accent.style().paint(&label),
     };
     let note = if session.notes.is_empty() {
         "·"
@@ -1661,14 +1665,19 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = if matches!(row, Selection::NewSession) {
-        Role::Success.style().bold().paint(&label)
-    } else if selected {
+    let label = if selected {
         Role::Accent.style().bold().paint(&label)
-    } else if detail.is_empty() {
-        widgets::pad_to_width(&format!("{marker} {label}"), width)
+    } else if home.mode == HomeMode::Switch {
+        // v1 keeps the Switch cursor legible by fading every inactive target.
+        // Do this after the selected case so the cursor's established semantic
+        // colour and marker precedence remain unchanged.
+        Style::new().dim().paint(&label)
+    } else if matches!(row, Selection::NewSession) {
+        Role::Success.style().bold().paint(&label)
+    } else if current {
+        Role::Accent.style().bold().paint(&label)
     } else {
-        label
+        Role::Accent.style().paint(&label)
     };
     let first = if let Some(session) = session {
         let note = if session.has_notes { "✎" } else { "·" };
@@ -2082,6 +2091,9 @@ mod tests {
         assert!(closeup_text.contains("| 同じ名前"));
         assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
         assert!(closeup_text.contains("[closeup] Ctrl-O then"));
+        let closeup_rendered = render_home(30, 100, &closeup).join("\n");
+        assert!(closeup_rendered.contains("\u{1b}[1;36m同じ名前\u{1b}[0m"));
+        assert!(closeup_rendered.contains("\u{1b}[36m同じ名前\u{1b}[0m"));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
@@ -2094,6 +2106,33 @@ mod tests {
         for line in render_home(8, 7, &switch) {
             assert!(display_width(&line) <= 7);
         }
+    }
+
+    #[test]
+    fn switch_dims_every_inactive_target_without_changing_selected_session_colour() {
+        let workspace = WorkspaceId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let mut state = AppState::home(workspace, vec![first, second]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[
+                projected_session(first, "first", "/work/first"),
+                projected_session(second, "second", "/work/second"),
+            ],
+        );
+
+        let rendered = render_home(30, 100, &home).join("\n");
+        assert!(rendered.contains("\u{1b}[2mfirst\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[1;36msecond\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
     }
 
     #[test]
@@ -2687,6 +2726,23 @@ mod tests {
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("origin/main ↑3 ↓2 +8 -1"));
         assert_eq!(rendered.matches("origin/main").count(), 1);
+    }
+
+    #[test]
+    fn workspace_renderer_uses_v1_colours_for_switch_and_closeup_rows() {
+        let mut ws = workspace();
+        ws.select_next();
+
+        let switch = render(30, 100, &ws).join("\n");
+        assert!(switch.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
+        assert!(switch.contains("\u{1b}[2mdaemon\u{1b}[0m"));
+        assert!(switch.contains("\u{1b}[2m+ new session\u{1b}[0m"));
+
+        ws.enter_closeup();
+        let closeup = render(30, 100, &ws).join("\n");
+        assert!(closeup.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
+        assert!(closeup.contains("\u{1b}[36mdaemon\u{1b}[0m"));
+        assert!(closeup.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
     }
 
     #[test]

@@ -56,7 +56,10 @@ environment は Home の背景を残す overlay として開き、最前面の o
 Closeup pane の tab として開く。
 
 左 sidebar の marker は Home target 表示の正本である。Switch では selected cursor と current
-target を別々に stable identity から照合し、同じ行なら cursor を優先する。Closeup では cursor を
+target を別々に stable identity から照合し、同じ行なら cursor を優先する。Switch の cursor ではない
+root / session / `+ new session` 行は v1 と同じ dim の非アクティブ色で描き、selected session の Accent は
+保つ。Closeup では root / session を Accent で描き、current session だけを太字にする。`+ new session` は
+Success を保つ。Closeup では cursor を
 描かず、current marker だけを残す。session cursor はうさぎ `󰤇` と太字の名前、main と `+ new session`
 の cursor は `>`、cursor ではない current target は緑の `▎` で示す。`+ new session` と pending
 skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
