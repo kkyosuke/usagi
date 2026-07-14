@@ -444,8 +444,18 @@ impl Terminal for CrosstermTerminal {
 /// for every other key and text/paste payload.
 #[coverage(off)]
 fn passthrough_key(input: &LiveInput) -> Key {
-    let LiveInput::Key(key) = input else {
-        return Key::Other;
+    let key = match input {
+        LiveInput::Key(key) => key,
+        // Some terminal decoders preserve Return as its original byte instead
+        // of emitting a semantic key event. Management modals must accept both
+        // forms, otherwise Closeup actions appear to ignore Enter.
+        LiveInput::Raw(bytes) if bytes.as_slice() == b"\r" || bytes.as_slice() == b"\n" => {
+            return Key::Enter;
+        }
+        LiveInput::Text(text) if text == "\r" || text == "\n" => {
+            return Key::Enter;
+        }
+        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably
@@ -798,6 +808,16 @@ mod tests {
         ));
 
         assert_eq!(passthrough_key(&key), Key::Other);
+    }
+
+    #[test]
+    fn raw_return_reaches_the_closeup_action_handler() {
+        for input in [
+            LiveInput::Raw(b"\r".to_vec()),
+            LiveInput::Text("\n".to_owned()),
+        ] {
+            assert_eq!(passthrough_key(&input), Key::Enter);
+        }
     }
 
     #[test]
