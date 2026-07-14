@@ -393,6 +393,27 @@ impl Workspace {
     /// row is treated as the snapshot's current incarnation.
     #[coverage(off)]
     pub fn replace_sessions(&mut self, sessions: Vec<SessionRecord>) {
+        self.replace_sessions_and_ids(sessions, None);
+    }
+
+    /// Replace sidebar rows and their daemon-issued runtime identities from
+    /// one lifecycle snapshot.  The vectors are aligned by snapshot order;
+    /// names remain display-only and are never used to recover an identity.
+    #[coverage(off)]
+    pub fn replace_sessions_with_runtime_ids(
+        &mut self,
+        sessions: Vec<SessionRecord>,
+        session_ids: Vec<SessionId>,
+    ) {
+        self.replace_sessions_and_ids(sessions, Some(session_ids));
+    }
+
+    #[coverage(off)]
+    fn replace_sessions_and_ids(
+        &mut self,
+        sessions: Vec<SessionRecord>,
+        session_ids: Option<Vec<SessionId>>,
+    ) {
         let selected_name = self.focused_session().map(|session| session.name.clone());
         // `pane()` is a read-only projection used by every render. Keep its
         // per-session state map in lockstep with the daemon-owned snapshot before
@@ -407,6 +428,10 @@ impl Workspace {
             });
         }
         self.state.sessions = sessions;
+        if let Some(session_ids) = session_ids {
+            debug_assert_eq!(session_ids.len(), self.state.sessions.len());
+            self.session_ids = session_ids;
+        }
         self.selected = selected_name
             .and_then(|name| {
                 self.state

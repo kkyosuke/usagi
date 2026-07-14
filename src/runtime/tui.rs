@@ -20,6 +20,7 @@ use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 use usagi_core::domain::session_lifecycle::ManagedSession;
 use usagi_core::domain::settings::Settings;
 use usagi_core::domain::workspace::Workspace;
+use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
@@ -183,34 +184,42 @@ impl LifecycleSnapshot {
 
 #[coverage(off)]
 fn lifecycle_snapshot(value: &serde_json::Value) -> Result<LifecycleSnapshot, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "invalid daemon session snapshot".to_owned())?;
-    let revision = object
-        .get("revision")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
-    let workspace_id = object
-        .get("workspace_id")
-        .cloned()
-        .ok_or_else(|| "daemon session snapshot has no workspace ID".to_owned())
-        .and_then(|id| {
-            serde_json::from_value(id)
-                .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
-        })?;
-    let sessions = object
-        .get("sessions")
-        .cloned()
-        .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())
-        .and_then(|sessions| {
-            serde_json::from_value(sessions)
-                .map_err(|error| format!("invalid daemon session snapshot: {error}"))
-        })?;
-    Ok(LifecycleSnapshot {
-        workspace_id,
-        revision,
-        sessions,
-    })
+    let result = (|| {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "invalid daemon session snapshot".to_owned())?;
+        let revision = object
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "daemon session snapshot has no revision".to_owned())?;
+        let workspace_id = object
+            .get("workspace_id")
+            .cloned()
+            .ok_or_else(|| "daemon session snapshot has no workspace ID".to_owned())
+            .and_then(|id| {
+                serde_json::from_value(id)
+                    .map_err(|_| "daemon session snapshot has an invalid workspace ID".to_owned())
+            })?;
+        let sessions = object
+            .get("sessions")
+            .cloned()
+            .ok_or_else(|| "daemon session snapshot has no sessions".to_owned())
+            .and_then(|sessions| {
+                serde_json::from_value(sessions)
+                    .map_err(|error| format!("invalid daemon session snapshot: {error}"))
+            })?;
+        Ok(LifecycleSnapshot {
+            workspace_id,
+            revision,
+            sessions,
+        })
+    })();
+    if let Err(error) = &result {
+        // The daemon snapshot contains no user-supplied argv or environment.
+        // Persist only the schema error, never the raw IPC body.
+        ErrorLog::record(&format!("daemon lifecycle snapshot rejected: {error}"));
+    }
+    result
 }
 
 impl SessionCommandPort for DaemonSessionCommandPort {
@@ -260,10 +269,11 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                     ));
                 }
                 self.last_revision = snapshot.revision;
-                return Ok(SessionCommandResult {
-                    message: "daemon snapshot refreshed".to_owned(),
-                    sessions: Some(snapshot.project(workspace)),
-                });
+                return Ok(session_snapshot_result(
+                    "daemon snapshot refreshed",
+                    snapshot,
+                    workspace,
+                ));
             }
         };
         let snapshot = request_lifecycle_snapshot()?;
@@ -273,10 +283,25 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             ));
         }
         self.last_revision = snapshot.revision;
-        Ok(SessionCommandResult {
-            message,
-            sessions: Some(snapshot.project(workspace)),
-        })
+        Ok(session_snapshot_result(message, snapshot, workspace))
+    }
+}
+
+#[coverage(off)]
+fn session_snapshot_result(
+    message: impl Into<String>,
+    snapshot: LifecycleSnapshot,
+    workspace: &Workspace,
+) -> SessionCommandResult {
+    let session_ids = snapshot
+        .sessions
+        .iter()
+        .map(|session| session.session_id)
+        .collect();
+    SessionCommandResult {
+        message: message.into(),
+        sessions: Some(snapshot.project(workspace)),
+        session_ids: Some(session_ids),
     }
 }
 

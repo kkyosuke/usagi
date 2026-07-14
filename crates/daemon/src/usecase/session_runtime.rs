@@ -540,6 +540,18 @@ mod tests {
             .unwrap();
         assert!(removed.body["sessions"].as_array().unwrap().is_empty());
     }
+
+    #[test]
+    fn creates_a_single_character_session_name() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+
+        let created = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"a"}))
+            .unwrap();
+
+        assert_eq!(created.body["sessions"][0]["name"], "a");
+        assert_eq!(created.body["sessions"][0]["lifecycle"], "available");
+    }
     #[test]
     fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
         let (_tmp, mut runtime) = runtime(FakeGit::fail());
