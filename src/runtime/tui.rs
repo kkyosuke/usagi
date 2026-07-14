@@ -447,7 +447,10 @@ fn passthrough_key(input: &LiveInput) -> Key {
     let LiveInput::Key(key) = input else {
         return Key::Other;
     };
-    if !matches!(key.kind, KeyEventKind::Press) {
+    // Some terminal backends report an auto-repeat as the first observable
+    // key event.  Treat it like a press so management controls (notably
+    // Closeup's Enter action) are never dropped; only releases are inert.
+    if matches!(key.kind, KeyEventKind::Release) {
         return Key::Other;
     }
     // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
@@ -773,6 +776,28 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
+    }
+
+    #[test]
+    fn repeat_enter_reaches_the_closeup_action_handler() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::default(),
+            KeyEventKind::Repeat,
+        ));
+
+        assert_eq!(passthrough_key(&key), Key::Enter);
+    }
+
+    #[test]
+    fn released_enter_does_not_repeat_the_closeup_action() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::default(),
+            KeyEventKind::Release,
+        ));
+
+        assert_eq!(passthrough_key(&key), Key::Other);
     }
 
     #[test]
