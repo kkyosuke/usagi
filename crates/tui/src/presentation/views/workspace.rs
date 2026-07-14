@@ -1034,15 +1034,12 @@ fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
     } else {
         "░"
     });
-    widgets::pad_to_width(&format!("  {activity} {label}  creating"), width)
+    widgets::pad_to_width(&format!("  {activity} {label}"), width)
 }
 
 #[coverage(off)]
 fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
-    vec![
-        pending_session_row(width, name, frame),
-        widgets::pad_to_width(&widgets::shimmer_text("  creating…", frame), width),
-    ]
+    vec![pending_session_row(width, name, frame)]
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
@@ -2434,7 +2431,6 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("feature-x"));
-        assert!(text.contains("creating"));
         assert!(text.contains('▓'));
         let skeleton = text.find("feature-x").unwrap();
         let create = text.find("+ new session").unwrap();
@@ -2459,11 +2455,10 @@ mod tests {
 
     #[test]
     fn pending_session_skeleton_uses_the_shared_shimmer_wave() {
-        let first = super::pending_session_rows(100, "feature-x", 0);
-        let next = super::pending_session_rows(100, "feature-x", 1);
+        let first = super::pending_session_row(100, "feature-x", 0);
+        let next = super::pending_session_row(100, "feature-x", 1);
 
-        assert_ne!(first[0], next[0], "the skeleton placeholder sweeps");
-        assert_ne!(first[1], next[1], "the creating label sweeps");
+        assert_ne!(first, next, "the pending session name sweeps");
     }
 
     #[test]
