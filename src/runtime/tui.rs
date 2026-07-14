@@ -1,9 +1,11 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+use std::{sync::mpsc, thread};
 
 use chrono::Utc;
 use crossterm::cursor;
@@ -24,6 +26,7 @@ use usagi_core::domain::terminal_launch::{
 };
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
+use usagi_core::infrastructure::git::diff_status;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
@@ -33,11 +36,12 @@ use usagi_core::usecase::client::{
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
+use usagi_daemon::usecase::session_runtime::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
+use usagi_tui::presentation::views::workspace::{self, GitDiff, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
     MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
@@ -60,6 +64,9 @@ struct DaemonSessionCommandPort {
 struct DaemonMetricsPort {
     last_sample: Option<Instant>,
     latest: Option<DaemonMetrics>,
+    git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
+    git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
+    last_git_refresh: Option<Instant>,
 }
 impl DaemonMetricsPort {
     // Composition-only adapter: it constructs the real daemon client and uses
@@ -69,6 +76,9 @@ impl DaemonMetricsPort {
         Self {
             last_sample: None,
             latest: None,
+            git_diffs: BTreeMap::new(),
+            git_receiver: None,
+            last_git_refresh: None,
         }
     }
 }
@@ -97,6 +107,62 @@ impl MetricsPort for DaemonMetricsPort {
             }
             DaemonReply::Accepted { .. } => None,
         }
+    }
+
+    #[coverage(off)]
+    fn git_diffs(
+        &mut self,
+        sessions: &[(usagi_core::domain::id::SessionId, PathBuf)],
+    ) -> BTreeMap<usagi_core::domain::id::SessionId, GitDiff> {
+        let active_ids = sessions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        self.git_diffs.retain(|id, _| active_ids.contains(id));
+        let mut finished = false;
+        if let Some(receiver) = &self.git_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok((id, status)) => {
+                        self.git_diffs.insert(id, status);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.git_receiver = None;
+        }
+        if self.git_receiver.is_none()
+            && self
+                .last_git_refresh
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
+            let (sender, receiver) = mpsc::channel();
+            let sessions = sessions.to_vec();
+            thread::spawn(move || {
+                let runner = SystemGit;
+                for (id, path) in sessions {
+                    let Ok(Some(status)) = diff_status(&runner, &path) else {
+                        continue;
+                    };
+                    let _ = sender.send((
+                        id,
+                        GitDiff {
+                            base: status.base,
+                            ahead: status.ahead,
+                            behind: status.behind,
+                            added: status.added,
+                            removed: status.removed,
+                        },
+                    ));
+                }
+            });
+            self.git_receiver = Some(receiver);
+            self.last_git_refresh = Some(Instant::now());
+        }
+        self.git_diffs.clone()
     }
 }
 

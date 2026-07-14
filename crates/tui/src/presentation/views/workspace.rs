@@ -63,6 +63,19 @@ pub struct ProjectedSession {
     pub pr_summary: Option<String>,
 }
 
+/// Read-only Git facts supplied asynchronously by the composition layer.
+///
+/// A missing value means inspection has not completed or Git could not provide
+/// a meaningful comparison; it is intentionally not rendered as an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitDiff {
+    pub base: String,
+    pub ahead: usize,
+    pub behind: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
 impl ProjectedSession {
     /// daemon snapshot record を、stable identity を保った sidebar projection へ変換する。
     #[must_use]
@@ -314,6 +327,8 @@ pub struct Workspace {
     create_error: Option<String>,
     /// 最新の daemon observation。永続 workspace state には保存しない。
     metrics: Option<DaemonMetrics>,
+    /// Non-persistent, asynchronously refreshed Git observations by stable ID.
+    git_diffs: BTreeMap<SessionId, GitDiff>,
 }
 
 impl Workspace {
@@ -363,6 +378,7 @@ impl Workspace {
             create_input: None,
             create_error: None,
             metrics: None,
+            git_diffs: BTreeMap::new(),
         }
     }
 
@@ -385,6 +401,13 @@ impl Workspace {
     #[coverage(off)]
     pub fn sessions(&self) -> &[SessionRecord] {
         &self.state.sessions
+    }
+
+    /// Daemon identities aligned with [`Self::sessions`].
+    #[must_use]
+    #[coverage(off)]
+    pub fn session_ids(&self) -> &[SessionId] {
+        &self.session_ids
     }
 
     /// Replace only the sidebar's session projection from a daemon lifecycle
@@ -465,6 +488,18 @@ impl Workspace {
     #[coverage(off)]
     pub fn set_metrics(&mut self, metrics: Option<DaemonMetrics>) {
         self.metrics = metrics;
+    }
+
+    /// Replace the completed Git observations without blocking the renderer.
+    #[coverage(off)]
+    pub fn set_git_diffs(&mut self, diffs: BTreeMap<SessionId, GitDiff>) {
+        self.git_diffs = diffs;
+    }
+
+    fn git_diff(&self, index: usize) -> Option<&GitDiff> {
+        self.session_ids
+            .get(index)
+            .and_then(|id| self.git_diffs.get(id))
     }
 
     /// The workspace record passed to the daemon lifecycle command port.
@@ -947,7 +982,15 @@ fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     } else {
         ws.sessions().get(index - 1).map_or_else(
             || root_rows(width, ws),
-            |session| session_menu_rows(width, index == ws.selected, ws.mode(), session),
+            |session| {
+                session_menu_rows(
+                    width,
+                    index == ws.selected,
+                    ws.mode(),
+                    session,
+                    ws.git_diff(index - 1),
+                )
+            },
         )
     }
 }
@@ -1023,8 +1066,9 @@ fn session_menu_rows(
     selected: bool,
     mode: Mode,
     session: &SessionRecord,
+    git_diff: Option<&GitDiff>,
 ) -> Vec<String> {
-    session_menu_rows_at(width, selected, mode, session, Utc::now())
+    session_menu_rows_at(width, selected, mode, session, git_diff, Utc::now())
 }
 
 /// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
@@ -1035,6 +1079,7 @@ fn session_menu_rows_at(
     selected: bool,
     mode: Mode,
     session: &SessionRecord,
+    git_diff: Option<&GitDiff>,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let marker = if selected {
@@ -1073,10 +1118,25 @@ fn session_menu_rows_at(
         || format!("{continuation} {modified}"),
         |pr| format!("{continuation} {modified} · {pr}"),
     );
+    let metadata = match git_diff {
+        Some(diff) => format!("{metadata} · {}", git_diff_text(diff)),
+        None => metadata,
+    };
     vec![
         first,
         widgets::pad_to_width(&Style::new().dim().paint(&metadata), width),
     ]
+}
+
+fn git_diff_text(diff: &GitDiff) -> String {
+    let commits = format!("↑{} ↓{}", diff.ahead, diff.behind);
+    let lines = format!("+{} -{}", diff.added, diff.removed);
+    format!(
+        "{} {} {}",
+        Style::new().dim().paint(&diff.base),
+        Role::Accent.style().paint(&commits),
+        Role::Success.style().paint(&lines)
+    )
 }
 
 /// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
@@ -1220,7 +1280,14 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
             ws.sessions().get(index - 1).map_or_else(
                 || root_rows(width, ws),
                 |session| {
-                    session_menu_rows_at(width, index == ws.selected, ws.mode(), session, now)
+                    session_menu_rows_at(
+                        width,
+                        index == ws.selected,
+                        ws.mode(),
+                        session,
+                        ws.git_diff(index - 1),
+                        now,
+                    )
                 },
             )
         };
@@ -1728,8 +1795,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace, render,
-        render_home, render_with_skeleton_frame,
+        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
+        render, render_home, render_with_skeleton_frame,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -1741,6 +1808,7 @@ mod tests {
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
     use chrono::{DateTime, Utc};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
@@ -2491,7 +2559,7 @@ mod tests {
         let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, base);
+        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, None, base);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
         assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
@@ -2500,13 +2568,63 @@ mod tests {
         assert!(strip(&rows[1]).contains("PR #42"));
         assert!(!strip(&rows[1]).contains("diff"));
         assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, base);
+        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, None, base);
         assert!(strip(&narrow[0]).contains("✎"));
         assert!(narrow.iter().all(|row| display_width(row) == 18));
 
-        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, base);
+        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, None, base);
         assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
         assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
+    }
+
+    #[test]
+    fn session_row_shows_completed_git_state_and_changed_lines() {
+        let record = session("topic", None, SessionOrigin::Unknown);
+        let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let diff = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 2,
+            behind: 1,
+            added: 12,
+            removed: 4,
+        };
+        let rows = super::session_menu_rows_at(60, false, Mode::Switch, &record, Some(&diff), base);
+        let plain = strip(&rows[1]);
+        assert!(plain.contains("origin/main"));
+        assert!(plain.contains("↑2 ↓1"));
+        assert!(plain.contains("+12 -4"));
+        assert!(rows.iter().all(|row| display_width(row) == 60));
+
+        let narrow =
+            super::session_menu_rows_at(18, false, Mode::Switch, &record, Some(&diff), base);
+        assert!(narrow.iter().all(|row| display_width(row) == 18));
+    }
+
+    #[test]
+    fn render_joins_git_diffs_to_the_matching_stable_session_id() {
+        let mut ws = workspace();
+        let daemon = ws.session_ids()[1];
+        ws.set_git_diffs(BTreeMap::from([(
+            daemon,
+            GitDiff {
+                base: "origin/main".to_owned(),
+                ahead: 3,
+                behind: 2,
+                added: 8,
+                removed: 1,
+            },
+        )]));
+
+        let rendered = render(30, 100, &ws)
+            .iter()
+            .map(|line| strip(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("daemon"));
+        assert!(rendered.contains("origin/main ↑3 ↓2 +8 -1"));
+        assert_eq!(rendered.matches("origin/main").count(), 1);
     }
 
     #[test]
