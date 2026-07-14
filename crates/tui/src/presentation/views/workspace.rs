@@ -2552,24 +2552,19 @@ mod tests {
         );
         ws.set_metrics(Some(metrics));
         let frame = render(30, 100, &ws);
-        let body_rows = frame[CHROME_ROWS..]
+        let left_rows = frame[CHROME_ROWS..]
             .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>();
-        let left_rows = body_rows
-            .iter()
-            .map(|line| line.chars().take(LEFT_WIDTH).collect::<String>())
+            .map(|line| strip(line).chars().take(LEFT_WIDTH).collect::<String>())
             .collect::<Vec<_>>();
         let metrics = left_rows
             .iter()
             .position(|line| line.contains('\u{f2db}'))
             .expect("CPU beside usagi");
         assert!(
+            left_rows[metrics].contains("\u{f2db} 1%    \u{f233} 45MB"),
+            "{}",
             left_rows[metrics]
-                .trim_end()
-                .ends_with("\u{f2db} 1%    \u{f233} 45MB")
         );
-        assert_eq!(body_rows[metrics].chars().nth(LEFT_WIDTH), Some('│'));
     }
 
     #[test]

@@ -69,8 +69,8 @@ pub fn sidebar_block(
     sidebar_block_with_sidecar(width, tick, speech, &[])
 }
 
-/// Builds a sidebar mascot with up to three ambient-status lines aligned to the
-/// sidebar's right edge. The sidecar is observational and never changes the
+/// Builds a sidebar mascot with up to three ambient-status lines beside the
+/// rabbit. The sidecar is observational and never changes the
 /// mascot's navigation footprint.
 #[must_use]
 pub fn sidebar_block_with_sidecar(
@@ -102,9 +102,7 @@ pub fn sidebar_block_with_sidecar(
     let sidecar_start = 3usize.saturating_sub(sidecar.len());
     for (index, status) in sidecar.into_iter().enumerate() {
         let row = &mut plain_rows[rabbit_start + sidecar_start + index];
-        let start = available.saturating_sub(display_width(status));
-        let gap = start.saturating_sub(display_width(row)).max(1);
-        row.push_str(&" ".repeat(gap));
+        row.push_str("    ");
         row.push_str(status);
     }
     let block_width = plain_rows
