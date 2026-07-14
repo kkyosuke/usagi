@@ -162,7 +162,7 @@ impl PaneRuntime {
             .iter()
             .filter_map(|tab| match tab {
                 PaneTab::Live(live) => Some(live.terminal.clone()),
-                PaneTab::Pending(_) => None,
+                PaneTab::Pending(_) | PaneTab::Ready(_) => None,
             })
             .collect();
         for terminal in saved {
@@ -336,7 +336,9 @@ fn selected_live(pane: &PaneState) -> Option<TerminalRef> {
     match pane.selected() {
         super::pane::PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal.clone()),
         super::pane::PaneSelection::Target(_)
-        | super::pane::PaneSelection::Tab(TabSelection::Pending(_)) => None,
+        | super::pane::PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)) => {
+            None
+        }
     }
 }
 

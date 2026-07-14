@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::AgentProfileId;
-use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode};
 use usagi_core::domain::workspace::Workspace;
@@ -403,6 +403,7 @@ struct WorkspaceUi {
     skeleton_frame: usize,
     metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
+    pane_launches: Vec<PaneLaunch>,
 }
 
 struct AgentContext {
@@ -415,6 +416,28 @@ struct AgentContext {
 struct SessionCommandCompletion {
     port: Box<dyn SessionCommandPort>,
     result: Result<SessionCommandResult, String>,
+}
+
+/// A pane has already been rendered as pending before this work is run.
+enum PaneLaunch {
+    Agent {
+        operation: OperationId,
+        workspace: WorkspaceId,
+        session: SessionId,
+        profile: Option<AgentProfileId>,
+    },
+    Terminal {
+        operation: OperationId,
+        workspace: WorkspaceId,
+        session: SessionId,
+    },
+    Diff {
+        operation: OperationId,
+    },
+    Fail {
+        operation: OperationId,
+        message: String,
+    },
 }
 
 impl WorkspaceUi {
@@ -452,6 +475,7 @@ impl WorkspaceUi {
             skeleton_frame: 0,
             metrics_port: Box::new(NoMetrics),
             agent: None,
+            pane_launches: Vec::new(),
         }
     }
 
@@ -587,8 +611,9 @@ impl WorkspaceUi {
 
     #[coverage(off)]
     fn open_diff(&mut self) {
-        let document = self.overlay_data.diff(&self.workspace);
-        self.modal = Some(WorkspaceModal::Text(TextOverlay::new("Diff", document)));
+        let operation = self.workspace.open_pane(PaneKind::Diff);
+        self.pane_launches.push(PaneLaunch::Diff { operation });
+        self.closeup_action_forced = false;
     }
 
     #[coverage(off)]
@@ -946,6 +971,51 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                     ui.workspace.fail_inline_session_create(error);
                 }
             }
+        }
+    }
+}
+
+/// Launch after the pending frame has reached the terminal.  Keeping this
+/// boundary in the presentation loop makes Agent, terminal, and snapshot diff
+/// visibly share one pending-wave -> selected completion lifecycle.
+#[coverage(off)]
+fn drain_pane_launches(ui: &mut WorkspaceUi) {
+    for launch in std::mem::take(&mut ui.pane_launches) {
+        match launch {
+            PaneLaunch::Agent {
+                operation,
+                workspace,
+                session,
+                profile,
+            } => match ui
+                .agent
+                .as_mut()
+                .expect("agent context remains while its launch is queued")
+                .port
+                .launch(workspace, session, profile)
+            {
+                Ok(terminal) => ui.workspace.complete_pane(operation, terminal),
+                Err(message) => ui.workspace.fail_pane(operation, message),
+            },
+            PaneLaunch::Terminal {
+                operation,
+                workspace,
+                session,
+            } => match ui
+                .agent
+                .as_mut()
+                .expect("agent context remains while its launch is queued")
+                .port
+                .launch_terminal(workspace, session)
+            {
+                Ok(terminal) => ui.workspace.complete_pane(operation, terminal),
+                Err(message) => ui.workspace.fail_pane(operation, message),
+            },
+            PaneLaunch::Diff { operation } => {
+                let _ = ui.overlay_data.diff(&ui.workspace);
+                ui.workspace.resolve_pane(operation);
+            }
+            PaneLaunch::Fail { operation, message } => ui.workspace.fail_pane(operation, message),
         }
     }
 }
@@ -1385,31 +1455,32 @@ fn open_pane_from_menu(ui: &mut WorkspaceUi, kind: PaneKind) {
 fn open_pane(ui: &mut WorkspaceUi, kind: PaneKind, profile: Option<AgentProfileId>) {
     let operation = ui.workspace.open_pane(kind);
     if kind == PaneKind::Agent || kind == PaneKind::Terminal {
-        if ui.agent.is_none() {
-            ui.closeup_action_forced = false;
-            return;
-        }
         let selected = ui.workspace.selected().checked_sub(1);
-        let result = ui.agent.as_mut().and_then(|agent| {
+        let launch = ui.agent.as_ref().and_then(|agent| {
             selected
                 .and_then(|index| agent.sessions.get(index).copied())
                 .map(|session| {
                     if kind == PaneKind::Agent {
                         let profile = profile.or_else(|| Some(agent.default_profile.clone()));
-                        agent.port.launch(agent.workspace, session, profile)
+                        PaneLaunch::Agent {
+                            operation,
+                            workspace: agent.workspace,
+                            session,
+                            profile,
+                        }
                     } else {
-                        agent.port.launch_terminal(agent.workspace, session)
+                        PaneLaunch::Terminal {
+                            operation,
+                            workspace: agent.workspace,
+                            session,
+                        }
                     }
                 })
         });
-        match result {
-            Some(Ok(terminal)) => ui.workspace.complete_pane(operation, terminal),
-            Some(Err(message)) => ui.workspace.fail_pane(operation, message),
-            None => ui.workspace.fail_pane(
-                operation,
-                "select an active session to open a terminal".to_owned(),
-            ),
-        }
+        ui.pane_launches.push(launch.unwrap_or(PaneLaunch::Fail {
+            operation,
+            message: "select an active session to open a terminal".to_owned(),
+        }));
     }
     ui.closeup_action_forced = false;
 }
@@ -1454,7 +1525,8 @@ fn execute_closeup_command(ui: &mut WorkspaceUi, input: &str) {
                 ui.open_remove_selector(force);
             }
         }
-        Ok(closeup::Command::Diff { .. }) | Err(_) => {}
+        Ok(closeup::Command::Diff { .. }) => ui.open_diff(),
+        Err(_) => {}
     }
 }
 
@@ -1663,6 +1735,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
+        drain_pane_launches(&mut ui);
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
         match step_workspace(&mut ui, key) {
@@ -1791,6 +1864,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
+        drain_pane_launches(&mut ui);
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
@@ -2227,9 +2301,9 @@ mod tests {
         NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
         SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
         Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
-        execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
-        run as run_from_start, run_with_settings,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
+        drain_session_completions, execute_closeup_command, play_startup_splash, refresh_metrics,
+        render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, welcome_action, write_banner,
@@ -3412,6 +3486,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         let _ = step_workspace(&mut ui, Key::Enter);
+        drain_pane_launches(&mut ui);
 
         assert_eq!(
             *calls.lock().unwrap(),
@@ -3456,12 +3531,24 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         let _ = step_workspace(&mut ui, Key::Enter);
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Pending(pending)]
+                if pending.kind == crate::usecase::application::pane::PaneKind::Agent
+        ));
+        drain_pane_launches(&mut ui);
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
             [crate::usecase::application::pane::PaneTab::Live(live)]
                 if live.kind == crate::usecase::application::pane::PaneKind::Agent
                     && live.terminal == terminal
+        ));
+        assert!(matches!(
+            ui.workspace.pane().selected(),
+            crate::usecase::application::pane::PaneSelection::Tab(
+                crate::usecase::application::pane::TabSelection::Live(selected)
+            ) if *selected == terminal
         ));
     }
 
@@ -3503,6 +3590,12 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         execute_closeup_command(&mut ui, "terminal");
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Pending(pending)]
+                if pending.kind == crate::usecase::application::pane::PaneKind::Terminal
+        ));
+        drain_pane_launches(&mut ui);
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -3510,6 +3603,41 @@ mod tests {
                 if live.kind == crate::usecase::application::pane::PaneKind::Terminal
                     && live.terminal == terminal
         ));
+        assert!(matches!(
+            ui.workspace.pane().selected(),
+            crate::usecase::application::pane::PaneSelection::Tab(
+                crate::usecase::application::pane::TabSelection::Live(selected)
+            ) if *selected == terminal
+        ));
+    }
+
+    #[test]
+    fn closeup_diff_uses_the_pending_tab_lifecycle_and_selects_its_ready_tab() {
+        let workspace = WorkspaceView::new(ws("closeup-diff"), state("closeup-diff"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        execute_closeup_command(&mut ui, "diff");
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Pending(pending)]
+                if pending.kind == crate::usecase::application::pane::PaneKind::Diff
+        ));
+        drain_pane_launches(&mut ui);
+
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Ready(ready)]
+                if ready.kind == crate::usecase::application::pane::PaneKind::Diff
+        ));
+        assert!(matches!(
+            ui.workspace.pane().selected(),
+            crate::usecase::application::pane::PaneSelection::Tab(
+                crate::usecase::application::pane::TabSelection::Ready(_)
+            )
+        ));
+        assert!(render_workspace(40, 80, &ui).join("\n").contains("Diff"));
     }
 
     #[test]
@@ -4136,15 +4264,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_text_overlays_keep_home_visible_and_capture_scroll_keys() {
+    fn workspace_overlays_and_diff_tab_keep_the_home_surface_visible() {
         let keys = [
             Key::Down,
             Key::Char('v'),
             Key::Down,
             Key::Escape,
             Key::Char('d'),
-            Key::Down,
-            Key::Escape,
             Key::Char('n'),
             Key::Down,
             Key::Escape,
@@ -4164,11 +4290,11 @@ mod tests {
         assert!(frame(2).contains("session: overlays-session"));
         assert!(frame(2).contains("overlays-session")); // Home background remains visible.
         assert!(frame(5).contains("Diff"));
-        assert!(frame(5).contains("unavailable until a backend"));
-        assert!(frame(8).contains("Notes"));
-        assert!(frame(8).contains("No notes are available"));
-        assert!(frame(11).contains("Pull Request"));
-        assert!(frame(11).contains("#42"));
+        assert!(!frame(5).contains("unavailable until a backend"));
+        assert!(frame(6).contains("Notes"));
+        assert!(frame(6).contains("No notes are available"));
+        assert!(frame(9).contains("Pull Request"));
+        assert!(frame(9).contains("#42"));
     }
 
     #[test]

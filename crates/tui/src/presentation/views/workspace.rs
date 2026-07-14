@@ -232,10 +232,16 @@ fn pane_tab_label(tab: &PaneTab) -> String {
         PaneTab::Pending(pending) => match pending.kind {
             PaneKind::Terminal => "Terminal (resolving)".to_owned(),
             PaneKind::Agent => "Agent (starting)".to_owned(),
+            PaneKind::Diff => "Diff (loading)".to_owned(),
         },
         PaneTab::Live(live) => match live.kind {
             PaneKind::Terminal => "Terminal".to_owned(),
             PaneKind::Agent => "Agent".to_owned(),
+            PaneKind::Diff => "Diff".to_owned(),
+        },
+        PaneTab::Ready(ready) => match ready.kind {
+            PaneKind::Diff => "Diff".to_owned(),
+            PaneKind::Terminal | PaneKind::Agent => "Pane".to_owned(),
         },
     }
 }
@@ -249,9 +255,22 @@ fn pane_tab_selected(tab: &PaneTab, selection: &PaneSelection) -> bool {
         (PaneTab::Live(live), PaneSelection::Tab(TabSelection::Live(selected))) => {
             live.terminal == *selected
         }
-        (PaneTab::Pending(_) | PaneTab::Live(_), PaneSelection::Target(_))
-        | (PaneTab::Pending(_), PaneSelection::Tab(TabSelection::Live(_)))
-        | (PaneTab::Live(_), PaneSelection::Tab(TabSelection::Pending(_))) => false,
+        (PaneTab::Ready(ready), PaneSelection::Tab(TabSelection::Ready(selected))) => {
+            ready.operation == *selected
+        }
+        (PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_), PaneSelection::Target(_))
+        | (
+            PaneTab::Pending(_),
+            PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)),
+        )
+        | (
+            PaneTab::Live(_),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_)),
+        )
+        | (
+            PaneTab::Ready(_),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)),
+        ) => false,
     }
 }
 
@@ -756,6 +775,12 @@ impl Workspace {
         );
     }
 
+    /// Complete a non-terminal pane after its safe document is available.
+    #[coverage(off)]
+    pub fn resolve_pane(&mut self, operation: usagi_core::domain::id::OperationId) {
+        let _ = pane::reduce(self.pane_mut(), PaneEvent::Resolved { operation });
+    }
+
     /// Remove a pending pane after a presentation-safe daemon error.
     #[coverage(off)]
     pub fn fail_pane(&mut self, operation: usagi_core::domain::id::OperationId, message: String) {
@@ -817,6 +842,7 @@ impl Workspace {
                 PaneSelection::Tab(TabSelection::Pending(pending.operation))
             }
             PaneTab::Live(live) => PaneSelection::Tab(TabSelection::Live(live.terminal.clone())),
+            PaneTab::Ready(ready) => PaneSelection::Tab(TabSelection::Ready(ready.operation)),
         };
         let _ = pane::reduce(pane, PaneEvent::Select(selection));
     }
