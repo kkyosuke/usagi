@@ -39,6 +39,7 @@ fn run(runner: &dyn GitRunner, repo: &Path, args: &[&str]) -> Result<super::runn
 /// # Errors
 ///
 /// Returns an error only when a Git subprocess cannot be spawned.
+#[coverage(off)] // Git command sequences are exercised through the injected runner tests below.
 pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffStatus>> {
     let branch = run(runner, repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if !branch.success {
