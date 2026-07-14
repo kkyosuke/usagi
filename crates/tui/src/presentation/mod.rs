@@ -1978,9 +1978,10 @@ fn run_with_settings_inner(
                             config_form.global_modal_selection_mode(),
                             config_form.global_default_model(),
                             factory.create(),
-                            metrics
-                                .as_deref_mut()
-                                .map_or_else(|| Box::new(NoMetrics), |factory| factory.create()),
+                            metrics.as_deref_mut().map_or_else(
+                                || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
+                                |factory| factory.create(),
+                            ),
                         )?
                     } else {
                         drive_workspace_with_ports_and_selection_mode(
@@ -2013,9 +2014,10 @@ fn run_with_settings_inner(
                                 config_form.global_modal_selection_mode(),
                                 config_form.global_default_model(),
                                 factory.create(),
-                                metrics
-                                    .as_deref_mut()
-                                    .map_or_else(|| Box::new(NoMetrics), |factory| factory.create()),
+                                metrics.as_deref_mut().map_or_else(
+                                    || -> Box<dyn MetricsPort> { Box::new(NoMetrics) },
+                                    |factory| factory.create(),
+                                ),
                             )?
                         } else {
                             drive_workspace_with_ports_and_selection_mode(
@@ -2169,16 +2171,18 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BannerScreenRunner, Config, ConfigStep, DefaultSettingsPort, Exit, MetricsPort, NewStep,
-        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
-        SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
-        execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
-        run as run_from_start, run_with_settings, run_workspace, run_workspace_with_overlay_data,
-        run_workspace_with_session_port, step_config, step_new, step_overview, step_pr,
-        step_workspace, welcome_action, write_banner,
+        AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
+        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, OverlayDataPort,
+        OverlayDocument, OverviewModal, PrModal, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SnapshotOverlayData, Start, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, drain_session_completions, execute_closeup_command, play_startup_splash,
+        refresh_metrics, render_workspace, run as run_from_start, run_with_settings,
+        run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
+        run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
+        step_overview, step_pr, step_workspace, welcome_action, write_banner,
     };
+    use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
     use crate::presentation::views::welcome::MenuAction;
     use crate::presentation::views::workspace::{
@@ -2194,6 +2198,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use usagi_core::domain::AppInfo;
+    use usagi_core::domain::agent::AgentProfileId;
+    use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
     use usagi_core::domain::recent::{Recent, UniteOverview};
@@ -2409,6 +2415,27 @@ mod tests {
     impl MetricsPortFactory for StaticMetricsFactory {
         fn create(&mut self) -> Box<dyn MetricsPort> {
             Box::new(StaticMetrics)
+        }
+    }
+
+    struct IdleAgentPort;
+
+    impl AgentCommandPort for IdleAgentPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("not launched in this test".to_owned())
+        }
+    }
+
+    struct IdleAgentPortFactory;
+
+    impl AgentCommandPortFactory for IdleAgentPortFactory {
+        fn create(&mut self) -> Box<dyn AgentCommandPort> {
+            Box::new(IdleAgentPort)
         }
     }
 
@@ -3527,7 +3554,6 @@ mod tests {
         );
     }
 
->>>>>>> b4889f97 (style(tui): v1風のdaemon metricsを表示)
     /// Welcome の Recent 経由で開いた workspace も同じ factory から port を取り出す。
     #[test]
     fn recent_workspace_pulls_the_session_command_port_from_the_factory() {

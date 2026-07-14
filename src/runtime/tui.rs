@@ -35,8 +35,8 @@ use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
-    MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-    Start, WorkspaceLoader, WorkspaceSnapshot,
+    MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
+    WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
