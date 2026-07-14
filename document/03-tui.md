@@ -190,7 +190,7 @@ modal が所有する間、tab selection、close、terminal passthrough は disp
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に選択して右ペインへ
 表示し、completion はその tab だけを live / document tab に置換して選択を維持する。diff は terminal identity を持たない
-document tab として完了する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
+document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
 pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
 選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ

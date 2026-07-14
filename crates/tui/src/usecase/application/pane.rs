@@ -585,7 +585,6 @@ fn succeed(
         .collect()
 }
 
-#[coverage(off)]
 fn resolve(state: &mut PaneState, operation: OperationId) -> Vec<PaneEffect> {
     let Some(index) = state
         .tabs

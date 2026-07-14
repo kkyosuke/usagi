@@ -1012,8 +1012,17 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
             PaneLaunch::Diff { operation } => {
-                let _ = ui.overlay_data.diff(&ui.workspace);
-                ui.workspace.resolve_pane(operation);
+                let document = ui.overlay_data.diff(&ui.workspace);
+                let lines = match document {
+                    OverlayDocument::Ready(lines) if !lines.is_empty() => lines,
+                    OverlayDocument::Ready(_) => {
+                        vec![Style::new().dim().paint("No diff content available.")]
+                    }
+                    OverlayDocument::Unavailable(message) => {
+                        vec![Style::new().dim().paint(&message)]
+                    }
+                };
+                ui.workspace.resolve_pane(operation, lines);
             }
             PaneLaunch::Fail { operation, message } => ui.workspace.fail_pane(operation, message),
         }
@@ -3637,7 +3646,9 @@ mod tests {
                 crate::usecase::application::pane::TabSelection::Ready(_)
             )
         ));
-        assert!(render_workspace(40, 80, &ui).join("\n").contains("Diff"));
+        let frame = render_workspace(40, 80, &ui).join("\n");
+        assert!(frame.contains("Diff"));
+        assert!(frame.contains("Diff data is unavailable until a backend"));
     }
 
     #[test]
@@ -4290,7 +4301,6 @@ mod tests {
         assert!(frame(2).contains("session: overlays-session"));
         assert!(frame(2).contains("overlays-session")); // Home background remains visible.
         assert!(frame(5).contains("Diff"));
-        assert!(!frame(5).contains("unavailable until a backend"));
         assert!(frame(6).contains("Notes"));
         assert!(frame(6).contains("No notes are available"));
         assert!(frame(9).contains("Pull Request"));
