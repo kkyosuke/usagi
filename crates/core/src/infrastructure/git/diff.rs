@@ -21,6 +21,13 @@ pub struct DiffStatus {
     pub removed: usize,
 }
 
+/// The runner call itself is an IO boundary. The query's parsing and fallback
+/// policy remains covered below; process-spawn failure is propagated unchanged.
+#[coverage(off)]
+fn run(runner: &dyn GitRunner, repo: &Path, args: &[&str]) -> Result<super::runner::GitOutput> {
+    runner.run(repo, args)
+}
+
 /// Inspect a worktree without changing it.
 ///
 /// `origin/HEAD` is preferred so the result follows the remote integration
@@ -33,7 +40,7 @@ pub struct DiffStatus {
 ///
 /// Returns an error only when a Git subprocess cannot be spawned.
 pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffStatus>> {
-    let branch = runner.run(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = run(runner, repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if !branch.success {
         return Ok(None);
     }
@@ -42,7 +49,8 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
         return Ok(None);
     }
 
-    let remote = runner.run(
+    let remote = run(
+        runner,
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )?;
@@ -58,7 +66,11 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
     }
 
     let range = format!("{base}...{branch}");
-    let counts = runner.run(repo, &["rev-list", "--left-right", "--count", &range])?;
+    let counts = run(
+        runner,
+        repo,
+        &["rev-list", "--left-right", "--count", &range],
+    )?;
     if !counts.success {
         return Ok(None);
     }
@@ -70,7 +82,7 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
         return Ok(None);
     };
 
-    let stat = runner.run(repo, &["diff", "--numstat", "--merge-base", &base])?;
+    let stat = run(runner, repo, &["diff", "--numstat", "--merge-base", &base])?;
     if !stat.success {
         return Ok(None);
     }
@@ -97,6 +109,15 @@ pub fn diff_status(runner: &dyn GitRunner, repo: &Path) -> Result<Option<DiffSta
 mod tests {
     use super::*;
     use crate::infrastructure::git::testkit::{FakeGit, fail, ok};
+    use anyhow::anyhow;
+
+    struct BrokenGit;
+
+    impl GitRunner for BrokenGit {
+        fn run(&self, _repo: &Path, _args: &[&str]) -> Result<super::super::runner::GitOutput> {
+            Err(anyhow!("git is unavailable"))
+        }
+    }
 
     #[test]
     fn prefers_remote_base_and_counts_commits_and_lines() {
@@ -136,5 +157,29 @@ mod tests {
         assert_eq!(diff_status(&base, Path::new("/repo")).unwrap(), None);
         let detached = FakeGit::new(vec![ok("HEAD\n")]);
         assert_eq!(diff_status(&detached, Path::new("/repo")).unwrap(), None);
+    }
+
+    #[test]
+    fn hides_every_incomplete_git_query_without_failing_the_sidebar() {
+        let repo = Path::new("/repo");
+        assert!(diff_status(&BrokenGit, repo).is_err());
+
+        let branch_failure = FakeGit::new(vec![fail("not a repository")]);
+        assert_eq!(diff_status(&branch_failure, repo).unwrap(), None);
+        let remote_without_name = FakeGit::new(vec![ok("topic"), ok("")]);
+        assert_eq!(diff_status(&remote_without_name, repo).unwrap(), None);
+        let count_failure = FakeGit::new(vec![ok("topic"), ok("origin/main"), fail("bad range")]);
+        assert_eq!(diff_status(&count_failure, repo).unwrap(), None);
+        let missing_behind = FakeGit::new(vec![ok("topic"), ok("origin/main"), ok("x 1")]);
+        assert_eq!(diff_status(&missing_behind, repo).unwrap(), None);
+        let missing_ahead = FakeGit::new(vec![ok("topic"), ok("origin/main"), ok("1")]);
+        assert_eq!(diff_status(&missing_ahead, repo).unwrap(), None);
+        let stat_failure = FakeGit::new(vec![
+            ok("topic"),
+            ok("origin/main"),
+            ok("1 2"),
+            fail("bad diff"),
+        ]);
+        assert_eq!(diff_status(&stat_failure, repo).unwrap(), None);
     }
 }
