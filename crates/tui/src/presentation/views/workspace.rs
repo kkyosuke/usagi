@@ -1064,8 +1064,11 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
     metrics.map_or_else(
         || {
             let label = Style::new().dim().paint("waiting daemon");
-            let rail = widgets::shimmer_text_with(
-                "░░░░░░░░",
+            // The rabbit travels through a fixed-width word: only its current
+            // character is overwritten, while the `waiting daemon` label stays
+            // anchored in place.
+            let rabbit = widgets::shimmer_text_with(
+                "rabbit",
                 frame,
                 widgets::Shimmer {
                     style: Role::Feature.style().bold(),
@@ -1073,7 +1076,7 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                     replacement: Some('\u{f907}'),
                 },
             );
-            vec![format!("{label} {rail}")]
+            vec![format!("{label} {rabbit}")]
         },
         |metrics| {
             vec![format!(
