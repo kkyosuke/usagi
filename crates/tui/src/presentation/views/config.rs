@@ -510,6 +510,11 @@ mod tests {
         assert_eq!(config.field(), Field::DefaultModel);
         config.cycle_selected(true);
         assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        assert!(render(24, 80, &config).join("\n").contains("Claude"));
+        config.cycle_selected(true);
+        assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
+        config.cycle_selected(true);
+        assert_eq!(config.settings().default_model, DefaultModel::Claude);
         config.next_field();
         assert!(config.save(&mut port));
         assert_eq!(port.global.default_model, DefaultModel::Claude);
