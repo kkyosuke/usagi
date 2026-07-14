@@ -1100,7 +1100,9 @@ fn load_style(value: u64, busy: u64, hot: u64) -> Style {
     } else if value >= busy {
         Style::new().fg(Color::Yellow)
     } else {
-        Style::new().dim()
+        // The mascot row is pink. Set white explicitly so a calm metric does
+        // not inherit that outer foreground colour before becoming dim.
+        Style::new().fg(Color::White).dim()
     }
 }
 
@@ -2535,14 +2537,20 @@ mod tests {
     #[test]
     fn render_places_daemon_metrics_to_the_right_of_usagi() {
         let mut ws = workspace();
-        ws.set_metrics(Some(usagi_core::usecase::client::DaemonMetrics {
+        let metrics = usagi_core::usecase::client::DaemonMetrics {
             schema_version: 1,
             sampled_at_ms: 42,
             cpu_percent_hundredths: 123,
             resident_memory_bytes: 45 * 1_048_576,
             active_subscribers: 3,
             dropped_updates: 5,
-        }));
+        };
+        assert!(
+            super::mascot_metrics(Some(&metrics), 0)
+                .concat()
+                .contains("\u{1b}[2;37m\u{f2db}")
+        );
+        ws.set_metrics(Some(metrics));
         let frame = render(30, 100, &ws);
         let left_rows = frame[CHROME_ROWS..]
             .iter()
