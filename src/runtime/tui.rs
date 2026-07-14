@@ -255,12 +255,28 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 payload,
             })
             .map_err(|error| format!("daemon request failed: {error}"))?;
-        let message = match reply {
+        match reply {
             DaemonReply::Accepted {
                 operation_id,
                 revision,
-                ..
-            } => format!("accepted operation {operation_id} (revision {revision})"),
+                body,
+            } => {
+                let snapshot = lifecycle_snapshot(&body)?;
+                if snapshot.revision < self.last_revision {
+                    return Ok(SessionCommandResult::message(
+                        "ignored stale daemon snapshot",
+                    ));
+                }
+                if action == SessionAction::Create {
+                    created_session_hook(&body, &operation_id, revision)?;
+                }
+                self.last_revision = snapshot.revision;
+                Ok(session_snapshot_result(
+                    format!("completed operation {operation_id} (revision {revision})"),
+                    snapshot,
+                    workspace,
+                ))
+            }
             DaemonReply::Ok(value) => {
                 let snapshot = lifecycle_snapshot(&value)?;
                 if snapshot.revision < self.last_revision {
@@ -269,21 +285,39 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                     ));
                 }
                 self.last_revision = snapshot.revision;
-                return Ok(session_snapshot_result(
+                Ok(session_snapshot_result(
                     "daemon snapshot refreshed",
                     snapshot,
                     workspace,
-                ));
+                ))
             }
-        };
-        let snapshot = request_lifecycle_snapshot()?;
-        if snapshot.revision < self.last_revision {
-            return Ok(SessionCommandResult::message(
-                "ignored stale daemon snapshot",
-            ));
         }
-        self.last_revision = snapshot.revision;
-        Ok(session_snapshot_result(message, snapshot, workspace))
+    }
+}
+
+/// Validate the daemon-owned final hook that ends a `session create` loading
+/// wave.  A snapshot by itself is not sufficient here: a delayed or unrelated
+/// accepted response must not clear the pending skeleton for this operation.
+#[coverage(off)]
+fn created_session_hook(
+    value: &serde_json::Value,
+    operation_id: &str,
+    revision: u64,
+) -> Result<(), String> {
+    let hook = value
+        .get("hook")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "daemon create completion hook is missing".to_owned())?;
+    let kind = hook.get("kind").and_then(serde_json::Value::as_str);
+    let hook_operation = hook.get("operation_id").and_then(serde_json::Value::as_str);
+    let hook_revision = hook.get("revision").and_then(serde_json::Value::as_u64);
+    if kind == Some("session.created")
+        && hook_operation == Some(operation_id)
+        && hook_revision == Some(revision)
+    {
+        Ok(())
+    } else {
+        Err("daemon create completion hook does not match the operation".to_owned())
     }
 }
 
@@ -791,7 +825,10 @@ pub(crate) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::{PersistentSettingsPort, Start, load_screen_graph_data, passthrough_key};
+    use super::{
+        PersistentSettingsPort, Start, created_session_hook, load_screen_graph_data,
+        passthrough_key,
+    };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -843,6 +880,21 @@ mod tests {
         ] {
             assert_eq!(passthrough_key(&input), Key::Enter);
         }
+    }
+
+    #[test]
+    fn create_loading_ends_only_on_the_matching_daemon_hook() {
+        let hook = serde_json::json!({
+            "hook": {
+                "kind": "session.created",
+                "operation_id": "op-1",
+                "revision": 7,
+            },
+        });
+        assert!(created_session_hook(&hook, "op-1", 7).is_ok());
+        assert!(created_session_hook(&hook, "op-2", 7).is_err());
+        assert!(created_session_hook(&hook, "op-1", 8).is_err());
+        assert!(created_session_hook(&serde_json::json!({}), "op-1", 7).is_err());
     }
 
     #[test]

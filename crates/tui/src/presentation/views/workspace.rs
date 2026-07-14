@@ -1080,21 +1080,25 @@ fn session_menu_rows_at(
 }
 
 /// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
-/// skeleton 自体は navigation target ではないため、cursor を持たない。
+/// skeleton 自体は navigation target ではないため、cursor を持たない。名前と activity
+/// glyph は同じ左から右へ流れる wave に乗せ、静的な点滅ではなく作成中であることを示す。
+/// 実 session と同じ 2 行の高さを確保して、完了時の sidebar の揺れを防ぐ。
+const PENDING_SESSION_WAVE_SPEED: usize = 4;
+
 #[coverage(off)]
 fn pending_session_row(width: usize, name: &str, frame: usize) -> String {
-    let label = widgets::shimmer_text(name, frame);
-    let activity = Role::Accent.style().paint(if frame.is_multiple_of(2) {
-        "▓"
-    } else {
-        "░"
-    });
+    let wave = widgets::Shimmer {
+        speed: PENDING_SESSION_WAVE_SPEED,
+        ..widgets::Shimmer::default()
+    };
+    let label = widgets::shimmer_text_with(name, frame, wave);
+    let activity = widgets::shimmer_text_with("●", frame, wave);
     widgets::pad_to_width(&format!("  {activity} {label}"), width)
 }
 
 #[coverage(off)]
 fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
-    vec![pending_session_row(width, name, frame)]
+    vec![pending_session_row(width, name, frame), String::new()]
 }
 
 /// 左ペインの footer（キー操作ヒント、dim）。
@@ -2518,7 +2522,7 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("feature-x"));
-        assert!(text.contains('▓'));
+        assert!(text.contains('●'));
         let skeleton = text.find("feature-x").unwrap();
         let create = text.find("+ new session").unwrap();
         assert!(
@@ -2543,9 +2547,20 @@ mod tests {
     #[test]
     fn pending_session_skeleton_uses_the_shared_shimmer_wave() {
         let first = super::pending_session_row(100, "feature-x", 0);
-        let next = super::pending_session_row(100, "feature-x", 1);
+        let held = super::pending_session_row(100, "feature-x", 3);
+        let next = super::pending_session_row(100, "feature-x", 4);
 
+        assert_eq!(first, held, "the pending session wave advances slowly");
         assert_ne!(first, next, "the pending session name sweeps");
+    }
+
+    #[test]
+    fn pending_session_skeleton_reserves_the_same_two_rows_as_a_session() {
+        let rows = super::pending_session_rows(30, "feature-x", 0);
+
+        assert_eq!(rows.len(), 2);
+        assert!(strip(&rows[0]).contains("feature-x"));
+        assert!(rows[1].is_empty());
     }
 
     #[test]
