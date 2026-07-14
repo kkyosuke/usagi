@@ -275,6 +275,10 @@ pub struct SessionCommandResult {
     pub message: String,
     /// Authoritative sidebar rows when the daemon supplied a fresh snapshot.
     pub sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
+    /// Stable daemon identities aligned with [`Self::sessions`].  A lifecycle
+    /// refresh must carry these together so a session created during this TUI
+    /// run can subsequently launch an Agent without falling back to a name.
+    pub session_ids: Option<Vec<SessionId>>,
 }
 
 impl SessionCommandResult {
@@ -283,6 +287,7 @@ impl SessionCommandResult {
         Self {
             message: message.into(),
             sessions: None,
+            session_ids: None,
         }
     }
 }
@@ -874,11 +879,32 @@ fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
 /// Apply a completed daemon result to the sidebar and the palette result band.
 #[coverage(off)]
 fn apply_session_result(ui: &mut WorkspaceUi, result: SessionCommandResult) {
-    if let Some(sessions) = result.sessions {
-        ui.workspace.replace_sessions(sessions);
-    }
+    apply_session_projection(ui, result.sessions, result.session_ids);
     if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
         modal.set_result(result.message);
+    }
+}
+
+/// Reconcile sidebar rows and the IDs used by Agent/terminal requests as one
+/// daemon-authoritative observation.  Legacy/test ports may provide rows only;
+/// they retain the existing non-runtime projection behaviour.
+#[coverage(off)]
+fn apply_session_projection(
+    ui: &mut WorkspaceUi,
+    sessions: Option<Vec<usagi_core::domain::session::SessionRecord>>,
+    session_ids: Option<Vec<SessionId>>,
+) {
+    let Some(sessions) = sessions else {
+        return;
+    };
+    if let Some(session_ids) = session_ids.filter(|ids| ids.len() == sessions.len()) {
+        ui.workspace
+            .replace_sessions_with_runtime_ids(sessions, session_ids.clone());
+        if let Some(agent) = ui.agent.as_mut() {
+            agent.sessions = session_ids;
+        }
+    } else {
+        ui.workspace.replace_sessions(sessions);
     }
 }
 
@@ -892,9 +918,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
         ui.workspace.clear_pending_session();
         match completion.result {
             Ok(result) => {
-                if let Some(sessions) = result.sessions {
-                    ui.workspace.replace_sessions(sessions);
-                }
+                apply_session_projection(ui, result.sessions, result.session_ids);
                 ui.workspace.finish_inline_session_create();
                 ui.modal = None;
             }
@@ -2343,6 +2367,7 @@ mod tests {
             Ok(SessionCommandResult {
                 message: "daemon accepted".to_owned(),
                 sessions,
+                session_ids: None,
             })
         }
     }
