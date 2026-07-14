@@ -519,20 +519,9 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
-                    // Exit chords stay outside the live-prefix classifier: Ctrl-Q ends
-                    // the workspace, while Ctrl-C only closes the TUI.
-                    if let LiveInput::Key(key) = &input
-                        && key.modifiers.control
-                    {
-                        if key.code == KeyCode::Char('c') {
-                            return Ok(Key::Quit);
-                        }
-                        if key.code == KeyCode::Char('q') {
-                            return Ok(Key::CtrlQ);
-                        }
-                        if key.code == KeyCode::Char('d') {
-                            return Ok(Key::Char('\u{4}'));
-                        }
+                    // Global control chords stay outside the live-prefix classifier.
+                    if let Some(key) = control_key(&input) {
+                        return Ok(key);
                     }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
@@ -555,6 +544,24 @@ impl Terminal for CrosstermTerminal {
             }
         }
     }
+}
+
+/// Map global control chords before their bytes can reach a text field.
+///
+/// [`Key::CtrlD`] has an effect only in Open Workspace; other screens explicitly
+/// ignore it. Keeping it as a dedicated key prevents a U+0004 control character
+/// from being inserted into their inputs.
+#[coverage(off)]
+fn control_key(input: &LiveInput) -> Option<Key> {
+    let LiveInput::Key(key) = input else {
+        return None;
+    };
+    key.modifiers.control.then_some(match key.code {
+        KeyCode::Char('c') => Some(Key::Quit),
+        KeyCode::Char('q') => Some(Key::CtrlQ),
+        KeyCode::Char('d') => Some(Key::CtrlD),
+        _ => None,
+    })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
@@ -588,11 +595,6 @@ fn passthrough_key(input: &LiveInput) -> Key {
         || key.code == KeyCode::Char('\u{1}')
     {
         return Key::Char('\u{1}');
-    }
-    if (key.modifiers.control && key.code == KeyCode::Char('d'))
-        || key.code == KeyCode::Char('\u{4}')
-    {
-        return Key::Char('\u{4}');
     }
     match key.code {
         KeyCode::Up => Key::Up,
@@ -899,7 +901,7 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistentSettingsPort, Start, created_session_hook, load_screen_graph_data,
+        PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
         passthrough_key,
     };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
@@ -924,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_maps_to_the_open_workspace_unregister_shortcut() {
+    fn ctrl_d_maps_to_the_dedicated_open_workspace_unregister_key() {
         let key = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('d'),
             Modifiers {
@@ -933,7 +935,7 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key), Key::Char('\u{4}'));
+        assert_eq!(control_key(&key), Some(Key::CtrlD));
     }
 
     #[test]

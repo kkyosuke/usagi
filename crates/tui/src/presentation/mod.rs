@@ -666,9 +666,13 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         Key::Char(ch) => welcome
             .action_for(ch)
             .map_or(WelcomeStep::Stay, welcome_action),
-        Key::Left | Key::Right | Key::Backspace | Key::Tab | Key::Live(_) | Key::Other => {
-            WelcomeStep::Stay
-        }
+        Key::Left
+        | Key::Right
+        | Key::Backspace
+        | Key::Tab
+        | Key::CtrlD
+        | Key::Live(_)
+        | Key::Other => WelcomeStep::Stay,
     }
 }
 
@@ -704,7 +708,7 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::Live(_) | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Other => NewStep::Stay,
     }
 }
 
@@ -801,7 +805,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.request_cleanup();
             OpenStep::Stay
         }
-        Key::Char('\u{4}') => {
+        Key::CtrlD => {
             open.request_unregister();
             OpenStep::Stay
         }
@@ -879,7 +883,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -1077,6 +1081,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::Tab
             | Key::Quit
             | Key::CtrlQ
+            | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
             | Key::Other => None,
@@ -1170,7 +1175,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::CtrlQ | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     false
 }
@@ -1189,6 +1194,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::CtrlQ
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1210,6 +1216,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Backspace
         | Key::Quit
         | Key::CtrlQ
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1241,6 +1248,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::Down
             | Key::Tab
             | Key::Quit
+            | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
             | Key::Other => {}
@@ -1274,7 +1282,13 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
-        Key::Escape | Key::Backspace | Key::Tab | Key::Char(_) | Key::Live(_) | Key::Other => {}
+        Key::Escape
+        | Key::Backspace
+        | Key::Tab
+        | Key::CtrlD
+        | Key::Char(_)
+        | Key::Live(_)
+        | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1312,7 +1326,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 execute_closeup_command(ui, &input);
             }
             Key::Tab => ui.closeup.complete_selected(),
-            Key::Up | Key::Down | Key::Live(_) | Key::Other => {}
+            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1341,7 +1355,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::Live(_) | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1366,6 +1380,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::Enter
         | Key::Backspace
         | Key::Tab
+        | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
         | Key::Other => {}
@@ -1581,7 +1596,7 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
             modal::confirmation_buttons(open.unregister_confirm_selected(), Role::Danger),
             Style::new()
                 .dim()
-                .paint("  Enter: select   ←→/Tab: choose   o/c: select"),
+                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
         ],
     )
 }
@@ -1626,7 +1641,7 @@ fn render_quit_confirmation(
             modal::confirmation_buttons(modal_state.confirm_selected, confirm_role),
             Style::new()
                 .dim()
-                .paint("  Enter: select   ←→/Tab: choose   o/c: select"),
+                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
         ],
     )
 }
@@ -2145,8 +2160,7 @@ fn run_with_settings_inner(
                     open.remove_paths(&removed);
                 }
                 OpenStep::ConfirmUnregister(path) => {
-                    let removed = loader.unregister(&[path]);
-                    let removed = removed?;
+                    let removed = loader.unregister(&[path])?;
                     open.remove_paths(&removed);
                 }
             },
@@ -3146,7 +3160,7 @@ mod tests {
         let mut cancel = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::Char('\u{4}'),
+            Key::CtrlD,
             Key::Char('c'),
             Key::Quit,
         ]);
@@ -3171,7 +3185,7 @@ mod tests {
         let mut confirm = FakeTerminal::with_keys(&[
             Key::Char('o'),
             Key::Down,
-            Key::Char('\u{4}'),
+            Key::CtrlD,
             Key::Enter,
             Key::Quit,
         ]);

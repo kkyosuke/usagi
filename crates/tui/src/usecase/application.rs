@@ -186,6 +186,8 @@ pub enum Key {
     Quit,
     /// Ctrl-Q ends the workspace, including its live sessions.
     CtrlQ,
+    /// Ctrl-D requests an unregister confirmation only on Open Workspace.
+    CtrlD,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
     /// 上記のいずれでもないキー（無視して再描画だけする。リサイズ通知など）。
@@ -345,6 +347,7 @@ mod tests {
             Key::Backspace,
             Key::Escape,
             Key::Quit,
+            Key::CtrlD,
             Key::Char('o'),
             Key::Live(LiveTerminalAction::Switch),
             Key::Other,
