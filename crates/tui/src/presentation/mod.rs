@@ -2250,6 +2250,22 @@ mod tests {
 
     type SessionCommandCall = (String, Option<String>, SessionCommand);
 
+    type AgentCommandCall = (WorkspaceId, SessionId, Option<AgentProfileId>);
+
+    struct RecordingAgentPort(Arc<Mutex<Vec<AgentCommandCall>>>);
+
+    impl AgentCommandPort for RecordingAgentPort {
+        fn launch(
+            &mut self,
+            workspace: WorkspaceId,
+            session: SessionId,
+            profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            self.0.lock().unwrap().push((workspace, session, profile));
+            Err("agent launch is unavailable".to_owned())
+        }
+    }
+
     #[derive(Clone)]
     struct RecordingSessionPort(Arc<Mutex<Vec<SessionCommandCall>>>);
 
@@ -3277,6 +3293,34 @@ mod tests {
             agent_frames
                 .iter()
                 .any(|frame| frame.contains("No tabs stirring yet. Enter starts one."))
+        );
+    }
+
+    #[test]
+    fn selecting_agent_in_closeup_submits_the_selected_session_to_the_agent_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let workspace = WorkspaceView::new(ws("closeup-agent"), state("closeup-agent"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(RecordingAgentPort(calls.clone())),
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        let _ = step_workspace(&mut ui, Key::Enter);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(workspace_id, session_id, None)]
         );
     }
 
