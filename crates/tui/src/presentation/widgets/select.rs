@@ -34,6 +34,14 @@ pub fn render(label: &str, value: &str, focused: bool, changed: bool) -> String 
     format!("{marker} {changed_marker} {label}{control}")
 }
 
+/// Render an unavailable select value as a non-focusable, dimmed row.
+#[must_use]
+pub fn disabled(label: &str, value: &str) -> String {
+    Style::new().dim().paint(&format!(
+        "    {label:<LABEL_WIDTH$}< {value:<VALUE_WIDTH$} >"
+    ))
+}
+
 /// Render a form action. Disabled actions remain visible but dimmed.
 #[must_use]
 pub fn action(label: &str, focused: bool, enabled: bool) -> String {
@@ -52,7 +60,7 @@ pub fn action(label: &str, focused: bool, enabled: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{action, render};
+    use super::{action, disabled, render};
 
     #[test]
     fn select_and_action_expose_focus_change_and_enabled_state() {
@@ -62,6 +70,7 @@ mod tests {
         assert!(render("Theme", "system", false, false).contains("Theme"));
         assert!(action("Save", true, true).contains("\u{1b}[1;32m[ Save ]"));
         assert!(action("Save", false, false).contains("[ Save ]"));
+        assert!(disabled("Agent model", "none").contains("\u{1b}[2m"));
     }
 
     #[test]

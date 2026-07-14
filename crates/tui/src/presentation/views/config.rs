@@ -19,6 +19,56 @@ pub enum Field {
     Save,
 }
 
+/// Agent-model CLIs available to the Config screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvailableAgentModels {
+    claude: bool,
+    open_ai: bool,
+}
+
+impl AvailableAgentModels {
+    /// Construct availability from the installed Claude and Codex CLIs.
+    #[must_use]
+    pub const fn new(claude: bool, open_ai: bool) -> Self {
+        Self { claude, open_ai }
+    }
+
+    /// Availability used by callers that do not supply a system probe.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self::new(true, true)
+    }
+
+    const fn is_empty(self) -> bool {
+        !self.claude && !self.open_ai
+    }
+
+    const fn contains(self, model: DefaultModel) -> bool {
+        match model {
+            DefaultModel::Claude => self.claude,
+            DefaultModel::OpenAi => self.open_ai,
+        }
+    }
+
+    const fn first(self) -> Option<DefaultModel> {
+        if self.open_ai {
+            Some(DefaultModel::OpenAi)
+        } else if self.claude {
+            Some(DefaultModel::Claude)
+        } else {
+            None
+        }
+    }
+
+    const fn next(self, model: DefaultModel) -> Option<DefaultModel> {
+        match (self.claude, self.open_ai, model) {
+            (false, false, _) => None,
+            (true, true, DefaultModel::Claude) | (false, true, _) => Some(DefaultModel::OpenAi),
+            (true, true, DefaultModel::OpenAi) | (true, false, _) => Some(DefaultModel::Claude),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ScopeSettings {
     saved: Settings,
@@ -26,13 +76,6 @@ struct ScopeSettings {
 }
 
 impl ScopeSettings {
-    fn new(saved: Settings) -> Self {
-        Self {
-            draft: saved.clone(),
-            saved,
-        }
-    }
-
     fn is_dirty(&self) -> bool {
         self.draft != self.saved
     }
@@ -46,6 +89,7 @@ pub struct Config {
     field: Field,
     global: ScopeSettings,
     workspace: ScopeSettings,
+    available_models: AvailableAgentModels,
     notice: Option<String>,
 }
 
@@ -54,13 +98,43 @@ impl Config {
     /// A failed initial read falls back to defaults while surfacing a safe error.
     #[must_use]
     pub fn load(port: &mut dyn SettingsPort) -> Self {
+        Self::load_with_available_models(port, AvailableAgentModels::all())
+    }
+
+    /// Read both settings scopes and constrain Agent model choices to installed CLIs.
+    #[must_use]
+    pub fn load_with_available_models(
+        port: &mut dyn SettingsPort,
+        available_models: AvailableAgentModels,
+    ) -> Self {
         let (global, global_error) = read_scope(port, SettingsScope::Global);
         let (workspace, workspace_error) = read_scope(port, SettingsScope::Workspace);
+        let global_draft = available_models
+            .first()
+            .filter(|_| !available_models.contains(global.default_model))
+            .map_or(global.clone(), |model| Settings {
+                default_model: model,
+                ..global
+            });
+        let workspace_draft = available_models
+            .first()
+            .filter(|_| !available_models.contains(workspace.default_model))
+            .map_or(workspace.clone(), |model| Settings {
+                default_model: model,
+                ..workspace
+            });
         Self {
             scope: SettingsScope::Global,
             field: Field::Theme,
-            global: ScopeSettings::new(global),
-            workspace: ScopeSettings::new(workspace),
+            global: ScopeSettings {
+                saved: global,
+                draft: global_draft,
+            },
+            workspace: ScopeSettings {
+                saved: workspace,
+                draft: workspace_draft,
+            },
+            available_models,
             notice: global_error.or(workspace_error),
         }
     }
@@ -85,6 +159,9 @@ impl Config {
             Field::DefaultModel => Field::Save,
             Field::Save => Field::Theme,
         };
+        if self.field == Field::DefaultModel && self.available_models.is_empty() {
+            self.field = Field::Save;
+        }
         self.notice = None;
     }
 
@@ -96,6 +173,9 @@ impl Config {
             Field::DefaultModel => Field::ModalSelectionMode,
             Field::Save => Field::DefaultModel,
         };
+        if self.field == Field::DefaultModel && self.available_models.is_empty() {
+            self.field = Field::ModalSelectionMode;
+        }
         self.notice = None;
     }
 
@@ -162,11 +242,10 @@ impl Config {
 
     /// Switch the default cloud model between Claude and `OpenAI`.
     pub fn cycle_default_model(&mut self) {
-        let model = &mut self.current_mut().draft.default_model;
-        *model = match *model {
-            DefaultModel::Claude => DefaultModel::OpenAi,
-            DefaultModel::OpenAi => DefaultModel::Claude,
-        };
+        let model = self.current().draft.default_model;
+        if let Some(next) = self.available_models.next(model) {
+            self.current_mut().draft.default_model = next;
+        }
         self.notice = None;
     }
 
@@ -264,12 +343,16 @@ pub fn render(raw_height: usize, raw_width: usize, config: &Config) -> Vec<Strin
             ),
             mascot_screen::centered_line(
                 width,
-                &select::render(
-                    "Agent model",
-                    default_model_name(config.settings().default_model),
-                    config.field() == Field::DefaultModel,
-                    config.settings().default_model != config.current().saved.default_model,
-                ),
+                &if config.available_models.is_empty() {
+                    select::disabled("Agent model", "none")
+                } else {
+                    select::render(
+                        "Agent model",
+                        default_model_name(config.settings().default_model),
+                        config.field() == Field::DefaultModel,
+                        config.settings().default_model != config.current().saved.default_model,
+                    )
+                },
                 Style::new(),
             ),
             String::new(),
@@ -322,7 +405,7 @@ fn default_model_name(model: DefaultModel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Field, render};
+    use super::{AvailableAgentModels, Config, Field, render};
     use std::io;
     use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode, Settings, Theme};
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -519,5 +602,52 @@ mod tests {
         assert!(config.save(&mut port));
         assert_eq!(port.global.default_model, DefaultModel::Claude);
         assert_eq!(config.global_default_model(), DefaultModel::Claude);
+    }
+
+    #[test]
+    fn agent_model_uses_only_the_available_cli() {
+        let mut port = FakeSettingsPort {
+            global: Settings {
+                default_model: DefaultModel::OpenAi,
+                ..Settings::default()
+            },
+            workspace: Settings {
+                default_model: DefaultModel::Claude,
+                ..Settings::default()
+            },
+            ..FakeSettingsPort::default()
+        };
+        let mut config =
+            Config::load_with_available_models(&mut port, AvailableAgentModels::new(true, false));
+
+        assert_eq!(config.settings().default_model, DefaultModel::Claude);
+        assert!(config.is_dirty());
+        assert!(render(24, 80, &config).join("\n").contains("Claude"));
+        config.cycle_default_model();
+        assert_eq!(config.settings().default_model, DefaultModel::Claude);
+
+        let mut open_ai_only =
+            Config::load_with_available_models(&mut port, AvailableAgentModels::new(false, true));
+        assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
+        open_ai_only.cycle_default_model();
+        assert_eq!(open_ai_only.settings().default_model, DefaultModel::OpenAi);
+    }
+
+    #[test]
+    fn agent_model_is_dimmed_and_skipped_when_no_cli_is_available() {
+        let mut port = FakeSettingsPort::default();
+        let mut config =
+            Config::load_with_available_models(&mut port, AvailableAgentModels::new(false, false));
+
+        let frame = render(24, 80, &config).join("\n");
+        assert!(frame.contains("Agent model") && frame.contains("< none   >"));
+        assert!(frame.contains("\u{1b}[2m"));
+        config.cycle_default_model();
+        assert_eq!(config.settings().default_model, DefaultModel::OpenAi);
+        config.next_field();
+        config.next_field();
+        assert_eq!(config.field(), Field::Save);
+        config.previous_field();
+        assert_eq!(config.field(), Field::ModalSelectionMode);
     }
 }

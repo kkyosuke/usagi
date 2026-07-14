@@ -2,6 +2,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -29,7 +30,7 @@ use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
 use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
-use usagi_tui::presentation::views::config::{self, Config};
+use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
 use usagi_tui::presentation::views::workspace::{self, Workspace as WorkspaceView};
 use usagi_tui::presentation::{
@@ -638,7 +639,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                 if start == Start::Welcome {
                     presentation::play_startup_splash(terminal)?;
                 }
-                presentation::run_with_settings_and_agent_port_factory(
+                presentation::run_with_settings_and_agent_port_factory_and_model_availability(
                     terminal,
                     workspaces,
                     recent,
@@ -648,6 +649,7 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
                     &mut settings,
                     &mut session_commands,
                     &mut agent_commands,
+                    available_agent_models(),
                 )
             })
         })?;
@@ -664,7 +666,11 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
             }
             Start::Config => {
                 let mut settings = PersistentSettingsPort::open()?;
-                config::render(0, 0, &Config::load(&mut settings))
+                config::render(
+                    0,
+                    0,
+                    &Config::load_with_available_models(&mut settings, available_agent_models()),
+                )
             }
         };
         for line in frame {
@@ -672,6 +678,16 @@ fn launch_screen_graph(out: &mut dyn Write, start: Start) -> std::io::Result<()>
         }
     }
     Ok(())
+}
+
+#[coverage(off)]
+fn available_agent_models() -> AvailableAgentModels {
+    AvailableAgentModels::new(cli_is_available("claude"), cli_is_available("codex"))
+}
+
+#[coverage(off)]
+fn cli_is_available(program: &str) -> bool {
+    Command::new(program).arg("--version").output().is_ok()
 }
 
 #[coverage(off)]

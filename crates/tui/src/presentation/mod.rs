@@ -28,7 +28,7 @@ use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::{self, CloseupModal};
-use crate::presentation::views::config::{self, Config};
+use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
@@ -1796,6 +1796,7 @@ pub fn run_with_settings(
         settings,
         session_commands,
         None,
+        AvailableAgentModels::all(),
     )
 }
 
@@ -1817,6 +1818,39 @@ pub fn run_with_settings_and_agent_port_factory(
     session_commands: &mut dyn SessionCommandPortFactory,
     agent_commands: &mut dyn AgentCommandPortFactory,
 ) -> io::Result<Exit> {
+    run_with_settings_and_agent_port_factory_and_model_availability(
+        term,
+        workspaces,
+        recent,
+        now,
+        start,
+        loader,
+        settings,
+        session_commands,
+        agent_commands,
+        AvailableAgentModels::all(),
+    )
+}
+
+/// Run the screen graph while limiting Config's Agent model choices to installed CLIs.
+///
+/// # Errors
+///
+/// Returns workspace loading or terminal IO failures from the screen graph.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_settings_and_agent_port_factory_and_model_availability(
+    term: &mut dyn Terminal,
+    workspaces: Vec<Workspace>,
+    recent: Vec<Recent>,
+    now: DateTime<Utc>,
+    start: Start,
+    loader: &mut dyn WorkspaceLoader,
+    settings: &mut dyn SettingsPort,
+    session_commands: &mut dyn SessionCommandPortFactory,
+    agent_commands: &mut dyn AgentCommandPortFactory,
+    available_models: AvailableAgentModels,
+) -> io::Result<Exit> {
     run_with_settings_inner(
         term,
         workspaces,
@@ -1827,6 +1861,7 @@ pub fn run_with_settings_and_agent_port_factory(
         settings,
         session_commands,
         Some(agent_commands),
+        available_models,
     )
 }
 
@@ -1845,11 +1880,12 @@ fn run_with_settings_inner(
     settings: &mut dyn SettingsPort,
     session_commands: &mut dyn SessionCommandPortFactory,
     mut agent_commands: Option<&mut dyn AgentCommandPortFactory>,
+    available_models: AvailableAgentModels,
 ) -> io::Result<Exit> {
     let mut welcome = Welcome::new(recent);
     let mut open = open_from_registry(workspaces, welcome.recent());
     let mut new_form = New::default();
-    let mut config_form = Config::load(settings);
+    let mut config_form = Config::load_with_available_models(settings, available_models);
     let mut screen = match start {
         Start::Welcome => Screen::Welcome,
         Start::Config => Screen::Config,
