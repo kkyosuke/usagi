@@ -1010,10 +1010,10 @@ fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
     } else {
         (" ".to_owned(), " ".to_owned())
     };
-    let name = if selected {
-        Role::Accent.style().bold().paint("main")
-    } else {
-        "main".to_owned()
+    let name = match (selected, ws.mode()) {
+        (true, _) => Role::Accent.style().bold().paint("main"),
+        (false, Mode::Switch) => Style::new().dim().paint("main"),
+        (false, Mode::Closeup) => Role::Accent.style().paint("main"),
     };
     vec![
         widgets::pad_to_width(&format!("{marker} {name}"), width),
@@ -1091,7 +1091,11 @@ fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<Stri
     } else {
         " ".to_owned()
     };
-    let style = Role::Success.style().bold();
+    let style = if ws.mode() == Mode::Switch && !selected {
+        Style::new().dim()
+    } else {
+        Role::Success.style().bold()
+    };
     let label = ws.create_input.as_ref().map_or_else(
         || style.paint("+ new session"),
         |input| {
@@ -1146,10 +1150,10 @@ fn session_menu_rows_at(
         " ".to_owned()
     };
     let label = widgets::clip_to_width(session.display_label(), width.saturating_sub(5));
-    let label = if selected {
-        Role::Accent.style().bold().paint(&label)
-    } else {
-        label
+    let label = match (selected, mode) {
+        (true, _) => Role::Accent.style().bold().paint(&label),
+        (false, Mode::Switch) => Style::new().dim().paint(&label),
+        (false, Mode::Closeup) => Role::Accent.style().paint(&label),
     };
     let note = if session.notes.is_empty() {
         "·"
@@ -2722,6 +2726,23 @@ mod tests {
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("origin/main ↑3 ↓2 +8 -1"));
         assert_eq!(rendered.matches("origin/main").count(), 1);
+    }
+
+    #[test]
+    fn workspace_renderer_uses_v1_colours_for_switch_and_closeup_rows() {
+        let mut ws = workspace();
+        ws.select_next();
+
+        let switch = render(30, 100, &ws).join("\n");
+        assert!(switch.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
+        assert!(switch.contains("\u{1b}[2mdaemon\u{1b}[0m"));
+        assert!(switch.contains("\u{1b}[2m+ new session\u{1b}[0m"));
+
+        ws.enter_closeup();
+        let closeup = render(30, 100, &ws).join("\n");
+        assert!(closeup.contains("\u{1b}[1;36mUI work\u{1b}[0m"));
+        assert!(closeup.contains("\u{1b}[36mdaemon\u{1b}[0m"));
+        assert!(closeup.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
     }
 
     #[test]
