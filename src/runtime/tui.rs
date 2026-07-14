@@ -285,11 +285,11 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                     ));
                 }
                 self.last_revision = snapshot.revision;
-                return Ok(session_snapshot_result(
+                Ok(session_snapshot_result(
                     "daemon snapshot refreshed",
                     snapshot,
                     workspace,
-                ));
+                ))
             }
         }
     }

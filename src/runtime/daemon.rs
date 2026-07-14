@@ -829,17 +829,16 @@ fn dispatch_session(
                 | SessionAction::Overview
                 | SessionAction::Setup
                 | SessionAction::Prompt => None,
-            } {
-                if let Some(object) = body.as_object_mut() {
-                    object.insert(
-                        "hook".to_owned(),
-                        serde_json::json!({
-                            "kind": kind,
-                            "operation_id": reply.operation_id,
-                            "revision": reply.revision,
-                        }),
-                    );
-                }
+            } && let Some(object) = body.as_object_mut()
+            {
+                object.insert(
+                    "hook".to_owned(),
+                    serde_json::json!({
+                        "kind": kind,
+                        "operation_id": reply.operation_id,
+                        "revision": reply.revision,
+                    }),
+                );
             }
             envelope(hello, request_id, outcome, body)
         }
