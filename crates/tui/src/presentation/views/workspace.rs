@@ -19,7 +19,7 @@ use usagi_core::domain::workspace_state::WorkspaceState;
 use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::layouts::panes;
-use crate::presentation::theme::{Role, Style};
+use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::widgets;
 use crate::presentation::widgets::TextInput;
@@ -1069,7 +1069,8 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                 "waiting daemon",
                 frame,
                 widgets::Shimmer {
-                    style: Role::Feature.style().bold(),
+                    style: Style::new().fg(Color::White).bold(),
+                    base_style: Style::new().fg(Color::White).dim(),
                     speed: 5,
                     replacement: Some('\u{f907}'),
                 },
@@ -2461,10 +2462,13 @@ mod tests {
 
     #[test]
     fn waiting_daemon_sweep_advances_every_five_frames() {
-        let first = strip(&super::mascot_metrics(None, 0).concat());
+        let rendered = super::mascot_metrics(None, 0).concat();
+        let first = strip(&rendered);
         let held = strip(&super::mascot_metrics(None, 4).concat());
         let advanced = strip(&super::mascot_metrics(None, 5).concat());
 
+        assert!(rendered.contains("\u{1b}[1;37m\u{f907}\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[2;37ma\u{1b}[0m"));
         assert_eq!(first, held);
         assert_ne!(first, advanced);
     }

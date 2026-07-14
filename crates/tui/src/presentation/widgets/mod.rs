@@ -35,10 +35,13 @@ const RESET: &str = "\u{1b}[0m";
 
 /// Configures a [`shimmer_text_with`] sweep. `speed` advances the two-cell band
 /// once per this many frames; `replacement` overwrites only the sweep head,
-/// leaving the trailing bright cell as its original text.
+/// leaving the trailing bright cell as its original text. `base_style` is used
+/// for every non-sweeping character, so the text does not inherit a parent
+/// widget's colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shimmer {
     pub style: Style,
+    pub base_style: Style,
     pub speed: usize,
     pub replacement: Option<char>,
 }
@@ -47,6 +50,7 @@ impl Default for Shimmer {
     fn default() -> Self {
         Self {
             style: Role::Accent.style().bold(),
+            base_style: Style::new().dim(),
             speed: 1,
             replacement: None,
         }
@@ -78,7 +82,7 @@ pub fn shimmer_text_with(text: &str, frame: usize, shimmer: Shimmer) -> String {
             };
             out.push_str(&shimmer.style.paint(&visible.to_string()));
         } else {
-            out.push_str(&Style::new().dim().paint(&character.to_string()));
+            out.push_str(&shimmer.base_style.paint(&character.to_string()));
         }
     }
     out
@@ -295,7 +299,7 @@ mod tests {
         Shimmer, block_caret, centered_padding, clip_to_width, display_width, normalize_size,
         relative_session_time, relative_time, shimmer_text, shimmer_text_with, wrap_to_width,
     };
-    use crate::presentation::theme::Role;
+    use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
 
     fn at(rfc3339: &str) -> DateTime<Utc> {
@@ -467,6 +471,7 @@ mod tests {
     fn shimmer_allows_colour_speed_and_glyph_replacement() {
         let options = Shimmer {
             style: Role::Success.style().bold(),
+            base_style: Style::new().dim(),
             speed: 2,
             replacement: Some('\u{f907}'),
         };
@@ -484,6 +489,7 @@ mod tests {
     fn shimmer_replaces_one_character_without_changing_the_status_text_width() {
         let options = Shimmer {
             style: Role::Feature.style().bold(),
+            base_style: Style::new().dim(),
             speed: 1,
             replacement: Some('\u{f907}'),
         };
