@@ -22,6 +22,7 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::widgets;
+use crate::presentation::widgets::TextInput;
 use crate::usecase::application::controller::{
     AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
 };
@@ -292,7 +293,7 @@ pub struct Workspace {
     record: WorkspaceRecord,
     state: WorkspaceState,
     mode: Mode,
-    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行。
+    /// 選択行。`0` は root 行、`1..=sessions.len()` は session 行、末尾は作成 action 行。
     selected: usize,
     pane_owner: WorkspaceId,
     /// Pane state belongs to a selected target, never to the whole workspace.
@@ -301,6 +302,9 @@ pub struct Workspace {
     panes: BTreeMap<String, PaneState>,
     /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
     pending_session: Option<String>,
+    /// `+ new session` を置き換える v1-style inline name editor。
+    create_input: Option<TextInput>,
+    create_error: Option<String>,
     /// 最新の daemon observation。永続 workspace state には保存しない。
     metrics: Option<DaemonMetrics>,
 }
@@ -329,6 +333,8 @@ impl Workspace {
             pane_owner,
             panes,
             pending_session: None,
+            create_input: None,
+            create_error: None,
             metrics: None,
         }
     }
@@ -484,6 +490,95 @@ impl Workspace {
     #[coverage(off)]
     pub fn root_selected(&self) -> bool {
         self.selected == 0
+    }
+
+    /// `+ new session` action row が選択されているか。
+    #[must_use]
+    #[coverage(off)]
+    pub fn new_session_selected(&self) -> bool {
+        self.selected == self.state.sessions.len() + 1
+    }
+
+    /// Move the sidebar cursor to the persistent `+ new session` row.
+    #[coverage(off)]
+    pub fn select_new_session(&mut self) {
+        self.selected = self.state.sessions.len() + 1;
+    }
+
+    #[must_use]
+    #[coverage(off)]
+    pub fn creating_session_inline(&self) -> bool {
+        self.create_input.is_some()
+    }
+
+    #[must_use]
+    #[coverage(off)]
+    pub fn inline_create_value(&self) -> Option<&str> {
+        self.create_input.as_ref().map(TextInput::value)
+    }
+
+    #[coverage(off)]
+    pub fn begin_inline_session_create(&mut self, first: Option<char>) {
+        let mut input = TextInput::default();
+        if let Some(character) = first {
+            input.insert(character);
+        }
+        self.create_input = Some(input);
+        self.create_error = None;
+    }
+
+    #[coverage(off)]
+    pub fn cancel_inline_session_create(&mut self) {
+        self.create_input = None;
+        self.create_error = None;
+    }
+
+    #[coverage(off)]
+    pub fn inline_create_insert(&mut self, character: char) {
+        if let Some(input) = &mut self.create_input {
+            input.insert(character);
+            self.create_error = None;
+        }
+    }
+
+    #[coverage(off)]
+    pub fn inline_create_backspace(&mut self) {
+        if let Some(input) = &mut self.create_input {
+            input.backspace();
+            self.create_error = None;
+        }
+    }
+
+    #[coverage(off)]
+    pub fn inline_create_move(&mut self, right: bool) {
+        if let Some(input) = &mut self.create_input {
+            if right {
+                input.move_right();
+            } else {
+                input.move_left();
+            }
+        }
+    }
+
+    pub fn inline_create_name(&mut self) -> Option<String> {
+        let name = self.create_input.as_ref()?.value().trim();
+        if name.is_empty() {
+            self.create_error = Some("session name is required".to_owned());
+            None
+        } else {
+            Some(name.to_owned())
+        }
+    }
+
+    #[coverage(off)]
+    pub fn fail_inline_session_create(&mut self, error: String) {
+        self.create_error = Some(error);
+    }
+
+    #[coverage(off)]
+    pub fn finish_inline_session_create(&mut self) {
+        self.create_input = None;
+        self.create_error = None;
     }
 
     /// フォーカス中 session の表示ラベル。main 行では `"main"`。
@@ -685,10 +780,10 @@ impl Workspace {
             .or_insert_with(|| PaneState::new(PaneSelection::Target(Target::Root(self.pane_owner))))
     }
 
-    /// 選択できる行数（root 行 1＋セッション数）。
+    /// 選択できる行数（root 行 1＋セッション数＋作成 action 行）。
     #[coverage(off)]
     fn row_count(&self) -> usize {
-        self.state.sessions.len() + 1
+        self.state.sessions.len() + 2
     }
 
     /// フォーカス中のセッション（root 選択なら `None`）。
@@ -752,28 +847,63 @@ fn header_spacer(width: usize) -> String {
 
 // ── left pane: session menu ─────────────────────────────────────────────────
 
-/// main 行。フォーカス中は強調する。
+/// main は session と同じ2行の marker stack で描く。
 #[coverage(off)]
-fn root_row(width: usize, ws: &Workspace) -> String {
-    menu_row(width, ws.root_selected(), "main", "workspace main")
+fn root_rows(width: usize, ws: &Workspace) -> Vec<String> {
+    let selected = ws.root_selected();
+    let (marker, continuation) = if selected {
+        match ws.mode() {
+            Mode::Switch => (
+                Role::Danger.style().bold().paint("\u{f0907}"),
+                Role::Danger.style().bold().paint("|"),
+            ),
+            Mode::Closeup => (
+                Role::Success.style().bold().paint("|"),
+                Role::Success.style().bold().paint("|"),
+            ),
+        }
+    } else {
+        (" ".to_owned(), " ".to_owned())
+    };
+    let name = if selected {
+        Role::Accent.style().bold().paint("main")
+    } else {
+        "main".to_owned()
+    };
+    vec![
+        widgets::pad_to_width(&format!("{marker} {name}"), width),
+        widgets::pad_to_width(
+            &format!(
+                "{continuation} {}",
+                Style::new().dim().paint("workspace main")
+            ),
+            width,
+        ),
+    ]
 }
 
-/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session。
+/// 選択可能な 1 行。`0` は root、`1..=sessions.len()` は session、末尾は作成 action。
 #[coverage(off)]
 fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
     if index == 0 {
-        vec![root_row(width, ws)]
+        root_rows(width, ws)
+    } else if index == ws.sessions().len() + 1 {
+        create_session_rows(width, index == ws.selected, ws)
     } else {
         ws.sessions().get(index - 1).map_or_else(
-            || vec![root_row(width, ws)],
-            |session| session_menu_rows(width, index == ws.selected, session),
+            || root_rows(width, ws),
+            |session| session_menu_rows(width, index == ws.selected, ws.mode(), session),
         )
     }
 }
 
 #[coverage(off)]
-fn workspace_row_height(_index: usize) -> usize {
-    2
+fn workspace_row_height(index: usize, ws: &Workspace) -> usize {
+    if index == ws.sessions().len() + 1 {
+        1 + usize::from(ws.create_error.is_some()) + 2 * usize::from(ws.pending_session.is_some())
+    } else {
+        2
+    }
 }
 
 #[coverage(off)]
@@ -788,38 +918,58 @@ fn sidebar_divider(width: usize) -> String {
 }
 
 #[coverage(off)]
-fn workspace_viewport_start(selected: usize, row_count: usize, capacity: usize) -> usize {
+fn workspace_viewport_start(selected: usize, ws: &Workspace, capacity: usize) -> usize {
     let mut start = 0;
-    while start < selected && (start..=selected).map(workspace_row_height).sum::<usize>() > capacity
+    while start < selected
+        && (start..=selected)
+            .map(|index| workspace_row_height(index, ws))
+            .sum::<usize>()
+            > capacity
     {
         start += 1;
     }
-    start.min(row_count.saturating_sub(1))
+    start.min(ws.row_count().saturating_sub(1))
 }
 
-/// 左ペインの 1 行: `>` カーソル＋名前（選択で accent 太字）＋dim の詳細。幅に詰める。
 #[coverage(off)]
-fn menu_row(width: usize, selected: bool, name: &str, detail: &str) -> String {
+fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<String> {
     let cursor = if selected {
         Role::Danger.style().bold().paint(">")
     } else {
-        " ".to_string()
+        " ".to_owned()
     };
-    let name = if selected {
-        Role::Accent.style().bold().paint(name)
-    } else {
-        name.to_string()
-    };
-    let detail = Style::new().dim().paint(detail);
-    widgets::pad_to_width(&format!("{cursor} {name}  {detail}"), width)
+    let style = Role::Success.style().bold();
+    let label = ws.create_input.as_ref().map_or_else(
+        || style.paint("+ new session"),
+        |input| {
+            format!(
+                "{}{}",
+                style.paint("+ new: "),
+                widgets::block_caret(input.value(), input.cursor(), &style)
+            )
+        },
+    );
+    let mut rows = vec![widgets::pad_to_width(&format!("{cursor} {label}"), width)];
+    if let Some(error) = &ws.create_error {
+        rows.push(widgets::pad_to_width(
+            &Role::Danger.style().paint(error),
+            width,
+        ));
+    }
+    rows
 }
 
 /// A real daemon-backed `SessionRecord` has a fixed two-line sidebar footprint.
 /// The first line reserves the note glyph; the second projects only persisted
 /// metadata, never a synthetic diff/GIF state or an executable shortcut.
 #[coverage(off)]
-fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> Vec<String> {
-    session_menu_rows_at(width, selected, session, Utc::now())
+fn session_menu_rows(
+    width: usize,
+    selected: bool,
+    mode: Mode,
+    session: &SessionRecord,
+) -> Vec<String> {
+    session_menu_rows_at(width, selected, mode, session, Utc::now())
 }
 
 /// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
@@ -828,11 +978,15 @@ fn session_menu_rows(width: usize, selected: bool, session: &SessionRecord) -> V
 fn session_menu_rows_at(
     width: usize,
     selected: bool,
+    mode: Mode,
     session: &SessionRecord,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let cursor = if selected {
-        Role::Danger.style().bold().paint(">")
+    let marker = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("\u{f0907}"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
     } else {
         " ".to_owned()
     };
@@ -848,13 +1002,21 @@ fn session_menu_rows_at(
         "✎"
     };
     let first = widgets::pad_to_width(
-        &format!("{cursor} {label}  {}", Style::new().dim().paint(note)),
+        &format!("{marker} {label}  {}", Style::new().dim().paint(note)),
         width,
     );
     let modified = widgets::relative_session_time(session.last_active_or_created(), now);
+    let continuation = if selected {
+        match mode {
+            Mode::Switch => Role::Danger.style().bold().paint("|"),
+            Mode::Closeup => Role::Success.style().bold().paint("|"),
+        }
+    } else {
+        " ".to_owned()
+    };
     let metadata = pr_summary(&session.prs).map_or_else(
-        || format!("  {modified}"),
-        |pr| format!("  {modified} · {pr}"),
+        || format!("{continuation} {modified}"),
+        |pr| format!("{continuation} {modified} · {pr}"),
     );
     vec![
         first,
@@ -944,31 +1106,38 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
     let content_capacity = body_capacity
         .saturating_sub(mascot_rows)
         .saturating_sub(metrics_rows);
-    let pending_rows = 2 * usize::from(ws.pending_session().is_some());
-    let viewport_capacity = content_capacity.saturating_sub(pending_rows);
-    let start = workspace_viewport_start(ws.selected, ws.row_count(), viewport_capacity);
+    let viewport_capacity = content_capacity;
+    let start = workspace_viewport_start(ws.selected, ws, viewport_capacity);
 
     let mut rows = Vec::with_capacity(height);
     let now = Utc::now();
     for index in start..ws.row_count() {
-        let entry = if index == 0 {
-            vec![root_row(width, ws)]
+        let mut entry = if index == 0 {
+            root_rows(width, ws)
+        } else if index == ws.sessions().len() + 1 {
+            create_session_rows(width, index == ws.selected, ws)
         } else {
             ws.sessions().get(index - 1).map_or_else(
-                || vec![root_row(width, ws)],
-                |session| session_menu_rows_at(width, index == ws.selected, session, now),
+                || root_rows(width, ws),
+                |session| {
+                    session_menu_rows_at(width, index == ws.selected, ws.mode(), session, now)
+                },
             )
         };
+        if index == ws.sessions().len() + 1
+            && let Some(name) = ws.pending_session()
+        {
+            let mut pending = pending_session_rows(width, name, skeleton_frame);
+            pending.append(&mut entry);
+            entry = pending;
+        }
         if rows.len() + entry.len() > viewport_capacity {
             break;
         }
         rows.extend(entry);
-        if index == 0 && !ws.sessions().is_empty() && rows.len() < viewport_capacity {
+        if index == 0 && rows.len() < viewport_capacity {
             rows.push(sidebar_divider(width));
         }
-    }
-    if let Some(name) = ws.pending_session() {
-        rows.extend(pending_session_rows(width, name, skeleton_frame));
     }
     rows.resize(content_capacity, String::new());
     if show_mascot {
@@ -1256,7 +1425,7 @@ fn home_row_lines_at(
                     Some(session),
                 )
             }),
-        Selection::NewSession => ("+ new session", "action", None),
+        Selection::NewSession => ("+ new session", "", None),
     };
     let selected = home.mode == HomeMode::Switch && home.selected == row;
     let current = target == Some(home.active);
@@ -1266,8 +1435,12 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = if selected {
+    let label = if matches!(row, Selection::NewSession) {
+        Role::Success.style().bold().paint(&label)
+    } else if selected {
         Role::Accent.style().bold().paint(&label)
+    } else if detail.is_empty() {
+        widgets::pad_to_width(&format!("{marker} {label}"), width)
     } else {
         label
     };
@@ -1595,7 +1768,8 @@ mod tests {
         let text = joined_home(&home);
         assert!(text.contains("main  workspace main"));
         assert_eq!(text.matches("same label").count(), 2);
-        assert!(text.contains("+ new session  action"));
+        assert!(text.contains("+ new session"));
+        assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
     }
 
@@ -2013,9 +2187,14 @@ mod tests {
         ws.select_next();
         assert_eq!(ws.selected(), 2);
         ws.select_next();
+        assert!(ws.new_session_selected());
+        let rendered = render(30, 100, &ws).join("\n");
+        assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
+        assert!(!rendered.contains("+ new session  action"));
+        ws.select_next();
         assert!(ws.root_selected());
         ws.select_prev();
-        assert_eq!(ws.selected(), 2);
+        assert!(ws.new_session_selected());
     }
 
     #[test]
@@ -2031,6 +2210,8 @@ mod tests {
         let text = joined(&ws);
         assert!(text.contains("USAGI > empty"));
         assert!(!text.contains("/tmp/empty"));
+        assert!(text.contains("─"));
+        assert!(text.contains("+ new session"));
     }
 
     #[test]
@@ -2213,16 +2394,22 @@ mod tests {
         let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(40, true, &record, base);
+        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, base);
         assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
         assert!(strip(&rows[0]).contains("✎"));
         assert!(strip(&rows[1]).contains("12m ago"));
         assert!(strip(&rows[1]).contains("PR #42"));
         assert!(!strip(&rows[1]).contains("diff"));
         assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(18, true, &record, base);
+        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, base);
         assert!(strip(&narrow[0]).contains("✎"));
         assert!(narrow.iter().all(|row| display_width(row) == 18));
+
+        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, base);
+        assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
+        assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
     }
 
     #[test]
@@ -2240,6 +2427,12 @@ mod tests {
         assert!(text.contains("feature-x"));
         assert!(text.contains("creating"));
         assert!(text.contains('▓'));
+        let skeleton = text.find("feature-x").unwrap();
+        let create = text.find("+ new session").unwrap();
+        assert!(
+            skeleton < create,
+            "skeleton is immediately above new session"
+        );
         assert_eq!(
             text.matches("> feature-x").count(),
             0,
@@ -2307,16 +2500,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("> main"));
+        assert!(text.contains("\u{f0907} main"));
         assert!(!text.contains("(o.o)?"));
     }
 
     #[test]
     fn render_places_the_selected_root_before_every_session() {
         let text = joined(&workspace());
-        let root = text
-            .find("> main  workspace main")
-            .expect("selected main row");
+        let root = text.find("\u{f0907} main").expect("selected main row");
         let first = text.find("UI work").expect("first session row");
         let second = text.find("daemon").expect("second session row");
         assert!(root < first);
@@ -2358,7 +2549,10 @@ mod tests {
         let frame = render(30, 100, &workspace());
         let cursor_rows = frame
             .iter()
-            .filter(|line| strip(line).trim_start().starts_with('>'))
+            .filter(|line| {
+                let trimmed = strip(line).trim_start().to_owned();
+                trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+            })
             .count();
         assert_eq!(cursor_rows, 1);
     }
@@ -2371,7 +2565,7 @@ mod tests {
             tiny_frame
                 .iter()
                 .map(|line| strip(line))
-                .any(|line| line.contains("> main"))
+                .any(|line| line.contains("\u{f0907} main"))
         );
         for expected in std::iter::once("main".to_string())
             .chain((0..12).map(|index| format!("session-{index:02}")))
@@ -2380,7 +2574,10 @@ mod tests {
             let selected = frame
                 .iter()
                 .map(|line| strip(line))
-                .find(|line| line.trim_start().starts_with('>'))
+                .find(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with('>') || trimmed.starts_with('\u{f0907}')
+                })
                 .expect("selected row must be inside the viewport");
             assert!(selected.contains(&expected), "selected row: {selected}");
             ws.select_next();
