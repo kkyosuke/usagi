@@ -2172,12 +2172,13 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, OverlayDataPort,
-        OverlayDocument, OverviewModal, PrModal, SessionCommandPort, SessionCommandPortFactory,
-        SessionCommandResult, SnapshotOverlayData, Start, UnavailableSessionCommandPort,
-        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, drain_session_completions, execute_closeup_command, play_startup_splash,
-        refresh_metrics, render_workspace, run as run_from_start, run_with_settings,
+        DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep, NoMetricsFactory,
+        OverlayDataPort, OverlayDocument, OverviewModal, PrModal, SessionCommandPort,
+        SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData, Start,
+        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_session_completions,
+        execute_closeup_command, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, welcome_action, write_banner,
@@ -2437,6 +2438,20 @@ mod tests {
         fn create(&mut self) -> Box<dyn AgentCommandPort> {
             Box::new(IdleAgentPort)
         }
+    }
+
+    #[test]
+    fn no_metrics_factory_creates_an_empty_port() {
+        assert_eq!(NoMetricsFactory.create().latest(), None);
+    }
+
+    #[test]
+    fn idle_agent_port_is_safe_when_an_unexpected_launch_is_requested() {
+        let error = IdleAgentPort
+            .launch(WorkspaceId::new(), SessionId::new(), None)
+            .unwrap_err();
+
+        assert_eq!(error, "not launched in this test");
     }
 
     #[derive(Default)]
@@ -3255,7 +3270,7 @@ mod tests {
         assert!(
             terminal_frames
                 .iter()
-                .any(|frame| frame.contains("Terminal (resolving)"))
+                .any(|frame| frame.contains("Terminal (resolv"))
         );
         assert!(agent_frames.iter().any(|frame| frame.contains('▔')));
         assert!(

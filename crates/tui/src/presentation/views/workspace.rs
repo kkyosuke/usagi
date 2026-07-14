@@ -2560,11 +2560,7 @@ mod tests {
             .iter()
             .position(|line| line.contains('\u{f2db}'))
             .expect("CPU beside usagi");
-        assert!(
-            left_rows[metrics].contains("\u{f2db} 1%    \u{f233} 45MB"),
-            "{}",
-            left_rows[metrics]
-        );
+        assert!(left_rows[metrics].contains("\u{f2db} 1%    \u{f233} 45MB"));
     }
 
     #[test]
