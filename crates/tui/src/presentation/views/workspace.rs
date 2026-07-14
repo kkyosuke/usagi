@@ -1661,19 +1661,19 @@ fn home_row_lines_at(
     } else {
         label.to_string()
     };
-    let label = if matches!(row, Selection::NewSession) {
-        Role::Success.style().bold().paint(&label)
-    } else if selected {
+    let label = if selected {
         Role::Accent.style().bold().paint(&label)
     } else if home.mode == HomeMode::Switch {
         // v1 keeps the Switch cursor legible by fading every inactive target.
-        // Do this after the selected/new-session cases so their established
-        // semantic colours and the marker precedence remain unchanged.
+        // Do this after the selected case so the cursor's established semantic
+        // colour and marker precedence remain unchanged.
         Style::new().dim().paint(&label)
-    } else if detail.is_empty() {
-        widgets::pad_to_width(&format!("{marker} {label}"), width)
+    } else if matches!(row, Selection::NewSession) {
+        Role::Success.style().bold().paint(&label)
+    } else if current {
+        Role::Accent.style().bold().paint(&label)
     } else {
-        label
+        Role::Accent.style().paint(&label)
     };
     let first = if let Some(session) = session {
         let note = if session.has_notes { "✎" } else { "·" };
@@ -2087,6 +2087,9 @@ mod tests {
         assert!(closeup_text.contains("| 同じ名前"));
         assert!(!closeup_text.contains("\u{f0907} 同じ名前"));
         assert!(closeup_text.contains("[closeup] Ctrl-O then"));
+        let closeup_rendered = render_home(30, 100, &closeup).join("\n");
+        assert!(closeup_rendered.contains("\u{1b}[1;36m同じ名前\u{1b}[0m"));
+        assert!(closeup_rendered.contains("\u{1b}[36m同じ名前\u{1b}[0m"));
 
         let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
         assert_eq!(state.route(), Route::Home(HomeMode::Switch));
@@ -2102,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_dims_inactive_targets_without_changing_selected_or_new_session_colours() {
+    fn switch_dims_every_inactive_target_without_changing_selected_session_colour() {
         let workspace = WorkspaceId::new();
         let first = SessionId::new();
         let second = SessionId::new();
@@ -2125,8 +2128,7 @@ mod tests {
         let rendered = render_home(30, 100, &home).join("\n");
         assert!(rendered.contains("\u{1b}[2mfirst\u{1b}[0m"));
         assert!(rendered.contains("\u{1b}[1;36msecond\u{1b}[0m"));
-        assert!(rendered.contains("\u{1b}[1;32m+ new session\u{1b}[0m"));
-        assert!(!rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
+        assert!(rendered.contains("\u{1b}[2m+ new session\u{1b}[0m"));
     }
 
     #[test]
