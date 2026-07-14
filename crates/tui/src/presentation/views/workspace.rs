@@ -1070,7 +1070,7 @@ fn mascot_metrics(metrics: Option<&DaemonMetrics>, frame: usize) -> Vec<String> 
                 frame,
                 widgets::Shimmer {
                     style: Role::Feature.style().bold(),
-                    speed: 3,
+                    speed: 5,
                     replacement: Some('\u{f907}'),
                 },
             );
@@ -2457,6 +2457,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!cleared.contains("feature-x"));
+    }
+
+    #[test]
+    fn waiting_daemon_sweep_advances_every_five_frames() {
+        let first = strip(&super::mascot_metrics(None, 0).concat());
+        let held = strip(&super::mascot_metrics(None, 4).concat());
+        let advanced = strip(&super::mascot_metrics(None, 5).concat());
+
+        assert_eq!(first, held);
+        assert_ne!(first, advanced);
     }
 
     #[test]
