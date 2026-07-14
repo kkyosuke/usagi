@@ -586,14 +586,15 @@ fn succeed(
 }
 
 fn resolve(state: &mut PaneState, operation: OperationId) -> Vec<PaneEffect> {
-    let Some(index) = state
+    let Some((index, pending)) = state
         .tabs
         .iter()
-        .position(|tab| matches!(tab, PaneTab::Pending(pending) if pending.operation == operation))
+        .enumerate()
+        .find_map(|(index, tab)| match tab {
+            PaneTab::Pending(pending) if pending.operation == operation => Some((index, *pending)),
+            PaneTab::Pending(_) | PaneTab::Live(_) | PaneTab::Ready(_) => None,
+        })
     else {
-        return Vec::new();
-    };
-    let PaneTab::Pending(pending) = state.tabs[index].clone() else {
         return Vec::new();
     };
     state.tabs[index] = PaneTab::Ready(pending);
@@ -943,6 +944,15 @@ mod tests {
                 PaneEvent::Succeeded {
                     operation,
                     terminal: opened.clone(),
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            reduce(
+                &mut state,
+                PaneEvent::Resolved {
+                    operation: OperationId::new(),
                 },
             )
             .is_empty()
