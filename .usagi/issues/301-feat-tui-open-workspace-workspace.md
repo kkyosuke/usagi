@@ -1,5 +1,5 @@
 ---
-number: 299
+number: 301
 title: feat(tui): Open Workspace から安全に workspace 登録を解除する
 status: done
 priority: medium
