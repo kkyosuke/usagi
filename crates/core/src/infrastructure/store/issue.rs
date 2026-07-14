@@ -17,10 +17,13 @@ use serde::{Deserialize, Serialize};
 use crate::domain::frontmatter::FrontmatterDoc;
 use crate::domain::issue::{Issue, IssueSummary};
 use crate::infrastructure::paths::STATE_DIR;
+use crate::infrastructure::persistence::json_file::write_text_atomic;
 use crate::infrastructure::persistence::markdown_store::{MarkdownEntry, MarkdownStore};
 use crate::infrastructure::persistence::store_lock::StoreLock;
 
 const ISSUES_DIR_NAME: &str = "issues";
+const ALLOCATION_DIR_NAME: &str = "usagi-issue-sequence";
+const ALLOCATION_FILE_NAME: &str = "next";
 
 #[derive(Debug, Deserialize)]
 struct IndexFile {
@@ -106,6 +109,7 @@ impl MarkdownEntry for IssueEntry {
 /// File-based persistence rooted at a repository's `.usagi/issues/` directory.
 pub struct IssueStore {
     inner: MarkdownStore<IssueEntry>,
+    repo_root: PathBuf,
 }
 
 impl IssueStore {
@@ -113,8 +117,10 @@ impl IssueStore {
     #[must_use]
     #[coverage(off)]
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
+        let repo_root = repo_root.as_ref().to_path_buf();
         Self {
-            inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(ISSUES_DIR_NAME)),
+            inner: MarkdownStore::new(repo_root.join(STATE_DIR).join(ISSUES_DIR_NAME)),
+            repo_root,
         }
     }
 
@@ -183,6 +189,45 @@ impl IssueStore {
             .filter_map(|path| number_from_filename(path))
             .max()
             .unwrap_or(0))
+    }
+
+    /// Reserve the next issue number across every worktree of this repository.
+    ///
+    /// A worktree has its own checked-out `.usagi/issues` directory, so its
+    /// local maximum alone cannot safely allocate a number while another
+    /// worktree is creating an issue. The git common directory is shared by
+    /// every worktree; a locked sequence there makes each reservation unique.
+    /// The local maximum is folded in to migrate repositories that predate the
+    /// sequence file or received an issue markdown file manually.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the allocation lock or sequence cannot be read or
+    /// written.
+    #[coverage(off)]
+    pub fn reserve_next_number(&self) -> Result<u32> {
+        let allocation_dir = self.allocation_dir()?;
+        let _lock = StoreLock::acquire(&allocation_dir)?;
+        let sequence_path = allocation_dir.join(ALLOCATION_FILE_NAME);
+        let reserved = match fs::read_to_string(&sequence_path) {
+            Ok(text) => text.trim().parse::<u32>().context(format!(
+                "invalid issue sequence in {}",
+                sequence_path.display()
+            ))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                return Err(error).context(format!(
+                    "failed to read issue sequence {}",
+                    sequence_path.display()
+                ));
+            }
+        };
+        let next = reserved
+            .max(self.max_number()?)
+            .checked_add(1)
+            .context("cannot allocate another issue number because the u32 range is exhausted")?;
+        write_text_atomic(&sequence_path, &format!("{next}\n"))?;
+        Ok(next)
     }
 
     /// Read a single issue by number, or `None` if it does not exist.
@@ -275,6 +320,65 @@ impl IssueStore {
     fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
         self.inner.files_for_key(&number)
     }
+
+    #[coverage(off)]
+    fn allocation_dir(&self) -> Result<PathBuf> {
+        let dot_git = self.repo_root.join(".git");
+        if dot_git.is_dir() {
+            return Ok(dot_git.join(ALLOCATION_DIR_NAME));
+        }
+        if !dot_git.exists() {
+            // Unit tests and repositories not yet initialized by git still
+            // serialize local writers. A shared git directory is unavailable
+            // in this case, so no cross-worktree guarantee is possible.
+            return Ok(self.dir().join(ALLOCATION_DIR_NAME));
+        }
+
+        let git_dir = git_dir_from_dot_git(&dot_git)?;
+        let common_dir_file = git_dir.join("commondir");
+        let common_dir = match fs::read_to_string(&common_dir_file) {
+            Ok(text) => {
+                let path = Path::new(text.trim());
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    git_dir.join(path)
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir,
+            Err(error) => {
+                return Err(error).context(format!(
+                    "failed to read git common directory {}",
+                    common_dir_file.display()
+                ));
+            }
+        };
+        Ok(common_dir.join(ALLOCATION_DIR_NAME))
+    }
+}
+
+/// Resolve a worktree's `.git` file to its private git directory.
+#[coverage(off)]
+fn git_dir_from_dot_git(dot_git: &Path) -> Result<PathBuf> {
+    let text = fs::read_to_string(dot_git).context(format!(
+        "failed to read git directory file {}",
+        dot_git.display()
+    ))?;
+    let path = text
+        .strip_prefix("gitdir: ")
+        .or_else(|| text.strip_prefix("gitdir:\t"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .context(format!("invalid git directory file {}", dot_git.display()))?;
+    let path = Path::new(path);
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        dot_git
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+    })
 }
 
 /// Whether `path` is an issue markdown file.
