@@ -113,9 +113,10 @@ reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-mod
 
 Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
-`q` は基底の Switch / Closeup で TUI を終了し、最前面モーダルではそのモーダルが受け取る。
-Ctrl-C は表示状態にかかわらず TUI を終了する。terminal tab は daemon が所有する terminal だけを表示し、
-client の detach は tab の subscription を外すだけで process を停止しない。
+`q` は基底の Switch / Closeup で確認後に TUI を閉じ、daemon の実行は継続する。Ctrl-Q は確認後に
+workspace の live session を終了してから TUI を閉じる。Ctrl-C は表示状態にかかわらず TUI を終了する。
+terminal tab は daemon が所有する terminal だけを表示し、client の detach は tab の subscription を外すだけで
+process を停止しない。
 
 `usagi open [path]` も同じ Workspace 画面を直接起動する。相対 path と省略時のカレントディレクトリは
 実在する絶対 path へ解決し、未登録ならディレクトリ名を workspace 名として登録する。同名が既に別

@@ -6,6 +6,7 @@
 //! 短ければ空白で詰めて右端を揃える。色付け（枠色）はテーマ導入時に載せるため無色で描く。
 
 use super::{centered_padding, clip_to_width, display_width, normalize_size};
+use crate::presentation::theme::{Color, Role, Style};
 use unicode_width::UnicodeWidthChar;
 
 /// 背景の ANSI スタイルを modal へ滲ませないための SGR reset。
@@ -61,6 +62,31 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body.truncate(body_height);
     body.resize(body_height, String::new());
     body
+}
+
+/// Two fixed-width buttons shared by destructive and dismiss-only modals.
+/// Selection uses role-coloured text and bold weight; focus never changes the
+/// bracket geometry.
+#[must_use]
+#[coverage(off)]
+pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
+    let selected = |role: Role| role.style().bold();
+    // `dim` alone inherits the terminal's current foreground colour. Give idle
+    // labels an explicit white base so focus changes cannot leave a stale
+    // success/danger colour behind.
+    let idle = Style::new().fg(Color::White).dim();
+    let (ok, cancel) = if confirm_selected {
+        (
+            selected(confirm_role).paint("[  ok  ]"),
+            idle.paint("[cancel]"),
+        )
+    } else {
+        (
+            idle.paint("[  ok  ]"),
+            selected(Role::Warning).paint("[cancel]"),
+        )
+    };
+    format!("  {ok}  {cancel}")
 }
 
 /// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
@@ -230,7 +256,10 @@ pub fn render_over(
         let prefix = columns(background, 0, left);
         let suffix_start = left + box_width;
         let suffix = columns(background, suffix_start, width.saturating_sub(suffix_start));
-        frame[row] = format!("{prefix}{box_line}{suffix}");
+        // A modal line may contain coloured title, copy, or button text. Close
+        // every style before restoring the background suffix so no SGR state
+        // leaks into the rest of the row or subsequent redraws.
+        frame[row] = format!("{prefix}{box_line}{RESET}{suffix}");
     }
 
     frame
@@ -238,7 +267,25 @@ pub fn render_over(
 
 #[cfg(test)]
 mod tests {
-    use super::{boxed, columns, fixed_body, modal_inner_width, render_modal, render_over};
+    use super::{
+        boxed, columns, confirmation_buttons, fixed_body, modal_inner_width, render_modal,
+        render_over,
+    };
+    use crate::presentation::theme::Role;
+
+    #[test]
+    fn confirmation_buttons_mark_the_selected_choice() {
+        let ok_selected = confirmation_buttons(true, Role::Success);
+        let cancel_selected = confirmation_buttons(false, Role::Danger);
+        assert_eq!(display_width(&ok_selected), display_width(&cancel_selected));
+        assert_eq!(display_width(&ok_selected), 20);
+        assert!(ok_selected.contains("[  ok  ]"));
+        assert!(cancel_selected.contains("[cancel]"));
+        assert!(ok_selected.contains("\u{1b}[1;32m"));
+        assert!(cancel_selected.contains("\u{1b}[1;33m"));
+        assert!(ok_selected.contains("\u{1b}[2;37m"));
+        assert!(cancel_selected.contains("\u{1b}[2;37m"));
+    }
     use crate::presentation::widgets::display_width;
 
     #[test]

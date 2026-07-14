@@ -176,6 +176,8 @@ pub enum Key {
     Escape,
     /// 画面を終了する（Ctrl-C など）。
     Quit,
+    /// Ctrl-Q ends the workspace, including its live sessions.
+    CtrlQ,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
     /// 上記のいずれでもないキー（無視して再描画だけする。リサイズ通知など）。

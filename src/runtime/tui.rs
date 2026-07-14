@@ -349,13 +349,17 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
-                    // Ctrl-C stays an unconditional quit before the prefix classifier,
-                    // matching the previous management contract.
+                    // Exit chords stay outside the live-prefix classifier: Ctrl-Q ends
+                    // the workspace, while Ctrl-C only closes the TUI.
                     if let LiveInput::Key(key) = &input
                         && key.modifiers.control
-                        && key.code == KeyCode::Char('c')
                     {
-                        return Ok(Key::Quit);
+                        if key.code == KeyCode::Char('c') {
+                            return Ok(Key::Quit);
+                        }
+                        if key.code == KeyCode::Char('q') {
+                            return Ok(Key::CtrlQ);
+                        }
                     }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {

@@ -45,7 +45,7 @@ jobs:
       run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
     - name: Generate coverage summary
-      if: always()
+      if: success()
       run: |
         . ./scripts/coverage.sh
         report=$(coverage_report --summary-only)
@@ -88,7 +88,7 @@ jobs:
         } > coverage-comment.md
 
     - name: Comment coverage on PR
-      if: always()
+      if: success()
       uses: marocchino/sticky-pull-request-comment@v2
       with:
         header: coverage

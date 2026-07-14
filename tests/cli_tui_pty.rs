@@ -171,7 +171,8 @@ fn real_pty_entry_resize_quit_and_reattach_restore_terminal() {
     // which requests that boundary without changing the visible Home state.
     send(&mut master, b"x");
     thread::sleep(Duration::from_millis(100));
-    send(&mut master, b"q");
+    // `q` opens the TUI-close confirmation; Enter accepts its default `ok`.
+    send(&mut master, b"q\r");
 
     let status = match wait_with_timeout(&mut child, Duration::from_secs(5)) {
         Ok(status) => status,

@@ -84,9 +84,9 @@ identity は保持しない。
 | `Ctrl-O` `p` / `←` | PreviousTab | 前の tab を選ぶ |
 | `Ctrl-O` `g` | Agent | agent pane を開く／再接続する |
 | `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
-| `Ctrl-O` `q` | QuitConfirmation | 終了確認を開く |
+| `Ctrl-O` `q` | QuitConfirmation | TUI を閉じる確認を開く |
 
-leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。`Ctrl-C` は prefix より先に終了として扱う。
+leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。`Ctrl-C` と `Ctrl-Q` は prefix より先に扱う。
 
 ## Session sidebar rows
 
@@ -250,5 +250,6 @@ phase、operation / terminal error、disconnect、reconnect、resync は safe me
 TUI-local feedback として表示する。transport の内部 detail や secret は表示しない。orphan state では
 terminal input を送らない。
 
-live pane がある場合の quit は確認を通し、確定後は detach だけを実行する。TUI の終了は daemon-owned
-terminal を終了させない。
+`q` は確認後に TUI だけを閉じ、daemon-owned terminal は継続する。`Ctrl-Q` は確認後に workspace の
+live session すべてへ強制終了を要求してから TUI を閉じる。確認 modal は `[ ok ] [cancel]` を表示し、
+`Enter`、左右、Tab、`o`、`c`、Esc で操作できる。

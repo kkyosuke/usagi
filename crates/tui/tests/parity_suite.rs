@@ -356,7 +356,7 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
         vec![Span {
             row: 0,
             column: 1,
-            text: "語".into()
+            text: "\u{1b}[0m語\u{1b}[0m".into()
         }]
     );
 }
