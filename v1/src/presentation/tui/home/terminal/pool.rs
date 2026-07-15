@@ -1850,17 +1850,13 @@ impl TerminalPool {
     /// The tab strip for `dir`: a label per pane (in tab order) and the active
     /// index, for the renderer to draw above the embedded terminal. Empty when no
     /// session is rooted there.
-    pub fn tabs(&self, dir: &Path) -> (Vec<String>, Vec<u64>, usize) {
+    pub fn tabs(&self, dir: &Path) -> (Vec<String>, usize) {
         match self.sessions.get(dir) {
             Some(sp) => {
                 let active = sp.active.min(sp.panes.len().saturating_sub(1));
-                (
-                    sp.tab_labels.clone(),
-                    sp.panes.iter().map(|pane| pane.id).collect(),
-                    active,
-                )
+                (sp.tab_labels.clone(), active)
             }
-            None => (Vec::new(), Vec::new(), 0),
+            None => (Vec::new(), 0),
         }
     }
 

@@ -67,64 +67,8 @@ pub enum TabSwap {
 pub struct TabStrip {
     /// One label per pane, in pane order (see [`tab_labels`]).
     pub labels: Vec<String>,
-    /// Stable pane identity in the same order as [`labels`](Self::labels).
-    pub ids: Vec<u64>,
     /// The 0-based index of the active (visible) tab.
     pub active: usize,
-    /// Identity of the first tab in the horizontal viewport.
-    pub viewport: u64,
-}
-
-impl TabStrip {
-    pub fn new(labels: Vec<String>, active: usize) -> Self {
-        let ids = labels
-            .iter()
-            .enumerate()
-            .map(|(index, label)| stable_label_id(label, index))
-            .collect();
-        Self::with_ids(labels, ids, active)
-    }
-
-    /// Creates a strip from pane creation IDs. IDs, not display indices, anchor
-    /// the horizontal viewport across reorder, close, and reconnect snapshots.
-    pub fn with_ids(labels: Vec<String>, mut ids: Vec<u64>, active: usize) -> Self {
-        ids.truncate(labels.len());
-        while ids.len() < labels.len() {
-            let index = ids.len();
-            ids.push(stable_label_id(&labels[index], index));
-        }
-        let active = active.min(labels.len().saturating_sub(1));
-        let viewport = ids.get(active).copied().unwrap_or_default();
-        Self { labels, ids, active, viewport }
-    }
-
-    pub fn republish(&self, labels: Vec<String>, ids: Vec<u64>, active: usize) -> Self {
-        let mut next = Self::with_ids(labels, ids, active);
-        if self.active == next.active && next.ids.contains(&self.viewport) {
-            next.viewport = self.viewport;
-        }
-        next
-    }
-
-    /// Adds a virtual UI-only tab (such as `+ new`) without losing the live
-    /// strip's viewport anchor. The virtual id cannot collide with a pane id.
-    pub fn with_virtual_tab(&self, label: String) -> Self {
-        let mut next = self.clone();
-        let occurrence = next.labels.len();
-        next.ids.push(stable_label_id(&label, occurrence) | (1_u64 << 63));
-        next.labels.push(label);
-        next.active = next.labels.len().saturating_sub(1);
-        next
-    }
-}
-
-fn stable_label_id(label: &str, occurrence: usize) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in label.bytes().chain(occurrence.to_le_bytes()) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
 }
 
 /// Pure state of a session's live, virtual `+ new`, and in-flight tabs.
@@ -754,23 +698,5 @@ mod tests {
         assert!(model.pending_gone(42));
         assert_eq!(model.selection(), TabSelection::New);
         assert_eq!(model.reduce(TabAction::Prev), Some(0));
-    }
-
-    #[test]
-    fn republish_keeps_viewport_by_pane_identity_and_normalizes_removed_anchor() {
-        let strip = TabStrip::with_ids(
-            vec!["terminal 1".to_string(), "terminal 2".to_string()],
-            vec![10, 20],
-            1,
-        );
-        let reordered = strip.republish(
-            vec!["terminal 2".to_string(), "terminal 1".to_string()],
-            vec![20, 10],
-            1,
-        );
-        assert_eq!(reordered.viewport, 20, "the same pane remains the anchor");
-
-        let closed = reordered.republish(vec!["terminal 1".to_string()], vec![10], 0);
-        assert_eq!(closed.viewport, 10, "a removed anchor falls back to selection");
     }
 }

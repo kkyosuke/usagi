@@ -387,16 +387,7 @@ impl SurfaceWriter<'_> {
     /// Publish the tab strip shown above the embedded terminal: the session's
     /// pane `labels` and which one is `active`.
     pub fn set_tabs(&mut self, labels: Vec<String>, active: usize) {
-        self.set_tabs_with_ids(labels, Vec::new(), active);
-    }
-
-    /// Re-publish pane tabs while preserving the viewport only for the same
-    /// stable pane identity. A selection change anchors the viewport to that tab.
-    pub fn set_tabs_with_ids(&mut self, labels: Vec<String>, ids: Vec<u64>, active: usize) {
-        self.surface.tabs = Some(match self.surface.tabs.take() {
-            Some(previous) => previous.republish(labels, ids, active),
-            None => TabStrip::with_ids(labels, ids, active),
-        });
+        self.surface.tabs = Some(TabStrip { labels, active });
     }
 
     /// Mark the active tab's body as launching for this frame. The tab strip
