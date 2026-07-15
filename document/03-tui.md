@@ -72,7 +72,8 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
-prefix の打鍵は live terminal への passthrough として扱う（`Ctrl-O`・`Ctrl-^` 以外は予約しない）。prefix の
+prefix の打鍵は live terminal への passthrough として扱う。`Ctrl-O`、`Ctrl-^`、Esc は TUI が予約し、Esc は
+PTY へ送らない。prefix の
 follow-up は下表のアクションに解決する。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
@@ -90,7 +91,8 @@ identity は保持しない。
 | `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
 | `Ctrl-O` `q` | QuitConfirmation | TUI を閉じる確認を開く |
 
-leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。`Ctrl-C` と `Ctrl-Q` は prefix より先に扱う。
+leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。prefix 待機中の Esc は leader を取り消し、
+follow-up を実行しない。`Ctrl-C` と `Ctrl-Q` は prefix より先に扱う。
 
 ## Session sidebar rows
 
@@ -212,11 +214,11 @@ terminal を停止しない。
 その screen 行を右ペインへ clip して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
 atomic snapshot（再 attach）で置き換える。
 
-live terminal に focus がある間、通常のキー（文字・Enter・Backspace・Tab・矢印など）は management ではなく
+live terminal に focus がある間、通常のキー（文字・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了
-（`Ctrl-C`）は live terminal でも global に効く。前面 modal や forced action modal がある間は入力を PTY へ
-渡さない。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
+（`Ctrl-C`）は live terminal でも global に効く。Esc は最前面の modal、prefix、または tab operation を閉じ、
+PTY へ送らない。前面 modal や forced action modal がある間は入力を PTY へ渡さない。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
 初期 geometry 80x24 で起動する（redraw に追従する resize は後続作業）。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
 

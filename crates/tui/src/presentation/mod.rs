@@ -176,18 +176,20 @@ const TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
 /// `None` so they keep driving the workspace instead of the shell.
-fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
+fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
     let bytes = match key {
+        Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
         Key::Char(ch) => ch.to_string().into_bytes(),
         Key::Enter => b"\r".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
         Key::Tab => b"\t".to_vec(),
-        Key::Escape => b"\x1b".to_vec(),
         Key::Up => b"\x1b[A".to_vec(),
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => return None,
+        Key::Escape | Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => {
+            return None;
+        }
     };
     Some(bytes)
 }
@@ -664,7 +666,7 @@ impl WorkspaceUi {
     /// Routes a keystroke to the focused live terminal.  Returns `true` when the
     /// key was consumed by the terminal so the workspace does not also act on it.
     #[coverage(off)]
-    fn forward_terminal_input(&mut self, key: Key) -> bool {
+    fn forward_terminal_input(&mut self, key: &Key) -> bool {
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             return false;
         };
@@ -819,6 +821,7 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 /// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、成功後は confirmation
 /// frame を表示して welcome へ戻る。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
         Key::Tab => {
@@ -856,6 +859,7 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
 
 /// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -877,6 +881,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Tab
         | Key::CtrlD
         | Key::Live(_)
+        | Key::Passthrough(_)
         | Key::Other => WelcomeStep::Stay,
     }
 }
@@ -885,6 +890,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -913,7 +919,9 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {
+            NewStep::Stay
+        }
     }
 }
 
@@ -932,6 +940,7 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
         return match key {
@@ -1018,12 +1027,13 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Live(_) | Key::Other => OpenStep::Stay,
+        Key::Live(_) | Key::Passthrough(_) | Key::Other => OpenStep::Stay,
     }
 }
 
 /// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
     if ui.session_commands.is_none() {
         return key == Key::Escape;
@@ -1088,7 +1098,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
     }
     false
 }
@@ -1308,6 +1318,7 @@ fn submit_remove_selector(
 /// restores the underlying Switch / Closeup surface; Enter adds no confirmation
 /// step, matching v1.
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
     let submit = {
         let WorkspaceModal::Remove(modal) = ui.modal.as_mut().expect("remove modal is active")
@@ -1346,6 +1357,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Passthrough(_)
             | Key::Other => None,
         }
     };
@@ -1377,6 +1389,7 @@ fn end_workspace(ui: &mut WorkspaceUi) {
 }
 
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_quit_confirmation(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     let WorkspaceModal::Quit(modal) = ui.modal.as_mut().expect("quit modal is active") else {
         return WorkspaceStep::Stay;
@@ -1418,6 +1431,7 @@ fn confirm_quit(ui: &mut WorkspaceUi) -> WorkspaceStep {
 /// execution uses [`step_overview_command`] so session commands reach its port.
 #[cfg(test)]
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
         Key::Up => {
@@ -1437,13 +1451,14 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
     }
     false
 }
 
 /// PR modal の入力処理。Enter のブラウザ起動は外部 IO port が接続されるまで no-op とする。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_pr(modal: &mut PrModal, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.select_prev(),
@@ -1459,6 +1474,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Passthrough(_)
         | Key::Other => {}
     }
     false
@@ -1466,6 +1482,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
 
 /// 長文 overlay の入力処理。背景の cursor / tab は動かさない。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.scroll_up(),
@@ -1481,6 +1498,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Passthrough(_)
         | Key::Other => {}
     }
     false
@@ -1490,6 +1508,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
 /// 選択行の Closeup action menu へ入る。基底の workspace は back stack の終端なので、
 /// Esc はここから抜けず no-op とする。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     if ui.workspace.creating_session_inline() {
         match key {
@@ -1513,6 +1532,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Passthrough(_)
             | Key::Other => {}
         }
         return WorkspaceStep::Stay;
@@ -1550,6 +1570,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Passthrough(_)
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -1588,7 +1609,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 execute_closeup_command(ui, &input);
             }
             Key::Tab => ui.closeup.complete_selected(),
-            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Other => {}
+            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1598,6 +1619,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// action modal が前面のときの menu 操作。Enter は選択 action で pane を開き、開いた後は
 /// forced modal を倒して新しい tab を前面へ出す。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Up => ui.closeup.select_prev(),
@@ -1617,7 +1639,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1625,6 +1647,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// tab が前面のときの操作。左右で tab を巡回し、`x` で閉じる。overlay / quit は共通。
 /// action menu は前面に無いので上下・Enter は無視する。
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
@@ -1636,8 +1659,8 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
         Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Escape
-        | Key::Up
+        Key::Escape => ui.enter_switch(),
+        Key::Up
         | Key::Down
         | Key::Enter
         | Key::Backspace
@@ -1645,6 +1668,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Passthrough(_)
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -1667,6 +1691,7 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
         LiveTerminalAction::PreviousSession => ui.select_previous_session(),
+        LiveTerminalAction::Escape => ui.enter_switch(),
     }
     WorkspaceStep::Stay
 }
@@ -1778,7 +1803,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     // A focused live terminal owns ordinary keys (letters, Enter, arrows) so
     // shell input reaches the daemon PTY.  Reserved chords and the global quit
     // keys fall through, and any open modal keeps priority.
-    if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(key) {
+    if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(&key) {
         return WorkspaceStep::Stay;
     }
 
@@ -2892,7 +2917,7 @@ mod tests {
     impl FakeTerminal {
         fn with_keys(keys: &[Key]) -> Self {
             Self {
-                keys: keys.iter().copied().collect(),
+                keys: keys.iter().cloned().collect(),
                 ..Self::default()
             }
         }
@@ -4182,26 +4207,30 @@ mod tests {
 
     #[test]
     fn key_to_terminal_bytes_encodes_input_and_ignores_control_chords() {
-        assert_eq!(key_to_terminal_bytes(Key::Char('a')), Some(b"a".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Enter), Some(b"\r".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Char('a')), Some(b"a".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Enter), Some(b"\r".to_vec()));
         assert_eq!(
-            key_to_terminal_bytes(Key::Backspace),
+            key_to_terminal_bytes(&Key::Backspace),
             Some(b"\x7f".to_vec())
         );
-        assert_eq!(key_to_terminal_bytes(Key::Tab), Some(b"\t".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Escape), Some(b"\x1b".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Up), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Left), Some(b"\x1b[D".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Quit), None);
-        assert_eq!(key_to_terminal_bytes(Key::CtrlQ), None);
-        assert_eq!(key_to_terminal_bytes(Key::Other), None);
+        assert_eq!(key_to_terminal_bytes(&Key::Tab), Some(b"\t".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Escape), None);
+        assert_eq!(key_to_terminal_bytes(&Key::Up), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Down), Some(b"\x1b[B".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Right), Some(b"\x1b[C".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Left), Some(b"\x1b[D".to_vec()));
+        assert_eq!(key_to_terminal_bytes(&Key::Quit), None);
+        assert_eq!(key_to_terminal_bytes(&Key::CtrlQ), None);
+        assert_eq!(key_to_terminal_bytes(&Key::Other), None);
         assert_eq!(
-            key_to_terminal_bytes(Key::Live(
+            key_to_terminal_bytes(&Key::Live(
                 crate::usecase::terminal_input::LiveTerminalAction::NextTab
             )),
             None
+        );
+        assert_eq!(
+            key_to_terminal_bytes(&Key::Passthrough(b"paste\n".to_vec())),
+            Some(b"paste\n".to_vec())
         );
     }
 
@@ -4340,6 +4369,17 @@ mod tests {
         assert_eq!(step_workspace(&mut ui, Key::Escape), WorkspaceStep::Stay);
         assert!(!ui.closeup_modal_visible());
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+
+        // Esc then closes the tab operation surface without closing the tab or
+        // rebinding the selected session.
+        let selected_tab = ui.workspace.pane().selected().clone();
+        let selected_session = ui.workspace.focused_label().to_owned();
+        step_workspace(&mut ui, Key::Escape);
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+        assert_eq!(ui.workspace.pane().selected(), &selected_tab);
+        assert_eq!(ui.workspace.focused_label(), selected_session);
+
+        ui.enter_closeup();
 
         // Ctrl-O o returns Closeup to Switch.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
@@ -4897,7 +4937,7 @@ mod tests {
                 Key::Other,
             ];
             keys.extend(navigation);
-            keys.push(exit);
+            keys.push(exit.clone());
             if exit == Key::Char('q') {
                 keys.push(Key::Enter);
             }

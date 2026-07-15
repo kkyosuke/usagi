@@ -154,6 +154,8 @@ pub enum LiveTerminalAction {
     QuitConfirmation,
     /// Select the previous session, if one exists.
     PreviousSession,
+    /// Cancel the topmost management state without forwarding ESC to the PTY.
+    Escape,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -214,6 +216,12 @@ impl LiveInputClassifier {
     ) -> LiveInputOutput {
         if key.kind == KeyEventKind::Release {
             return LiveInputOutput::Swallowed;
+        }
+        // Escape cancels a pending leader and belongs to the TUI escape stack.
+        // It must never be forwarded as a terminal byte.
+        if matches!(key.code, KeyCode::Escape) {
+            self.leader_at = None;
+            return LiveInputOutput::Action(LiveTerminalAction::Escape);
         }
         if leader_alive {
             self.leader_at = None;
@@ -362,11 +370,6 @@ mod tests {
                 name: "plain q",
                 input: key(KeyCode::Char('q')),
                 expected: b"q".to_vec(),
-            },
-            Case {
-                name: "escape",
-                input: key(KeyCode::Escape),
-                expected: vec![0x1b],
             },
             Case {
                 name: "cjk utf8",
@@ -567,6 +570,24 @@ mod tests {
         assert_eq!(
             classifier.classify(Duration::from_millis(2), key(KeyCode::Char('z'))),
             LiveInputOutput::Passthrough(b"z".to_vec())
+        );
+    }
+
+    #[test]
+    fn escape_cancels_a_leader_without_becoming_a_terminal_byte() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(Duration::from_millis(1), key(KeyCode::Escape)),
+            LiveInputOutput::Action(LiveTerminalAction::Escape)
+        );
+        assert!(!classifier.leader_pending(Duration::from_millis(1)));
+        assert_eq!(
+            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('n'))),
+            LiveInputOutput::Passthrough(b"n".to_vec())
         );
     }
 

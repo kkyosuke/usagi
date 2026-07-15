@@ -759,12 +759,17 @@ impl Terminal for CrosstermTerminal {
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
                         // A resolved `Ctrl-O` prefix action drives the live runtime.
+                        LiveInputOutput::Action(
+                            usagi_tui::usecase::terminal_input::LiveTerminalAction::Escape,
+                        ) => return Ok(Key::Escape),
                         LiveInputOutput::Action(action) => return Ok(Key::Live(action)),
                         // Leader pending, unknown follow-up, or key release: keep reading.
                         LiveInputOutput::Swallowed => {}
                         // Everything else is a normal key; preserve the prior mapping so
                         // non-prefix keys and future PTY passthrough are unchanged.
-                        LiveInputOutput::Passthrough(_) => return Ok(passthrough_key(&input)),
+                        LiveInputOutput::Passthrough(bytes) => {
+                            return Ok(passthrough_key(&input, bytes));
+                        }
                     }
                 }
                 RuntimeEvent::Resize { .. } => {
@@ -801,7 +806,7 @@ fn control_key(input: &LiveInput) -> Option<Key> {
 /// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
 /// for every other key and text/paste payload.
 #[coverage(off)]
-fn passthrough_key(input: &LiveInput) -> Key {
+fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     let key = match input {
         LiveInput::Key(key) => key,
         // Some terminal decoders preserve Return as its original byte instead
@@ -813,7 +818,9 @@ fn passthrough_key(input: &LiveInput) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => return Key::Other,
+        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
+            return Key::Passthrough(bytes);
+        }
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably
@@ -839,7 +846,7 @@ fn passthrough_key(input: &LiveInput) -> Key {
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Escape => Key::Escape,
         KeyCode::Char(ch) => Key::Char(ch),
-        _ => Key::Other,
+        _ => Key::Passthrough(bytes),
     }
 }
 
@@ -1155,7 +1162,7 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
+        assert_eq!(passthrough_key(&key, vec![1]), Key::Char('\u{1}'));
     }
 
     #[test]
@@ -1179,7 +1186,7 @@ mod tests {
             KeyEventKind::Repeat,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Enter);
+        assert_eq!(passthrough_key(&key, b"\r".to_vec()), Key::Enter);
     }
 
     #[test]
@@ -1190,7 +1197,7 @@ mod tests {
             KeyEventKind::Release,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Other);
+        assert_eq!(passthrough_key(&key, Vec::new()), Key::Other);
     }
 
     #[test]
@@ -1199,7 +1206,7 @@ mod tests {
             LiveInput::Raw(b"\r".to_vec()),
             LiveInput::Text("\n".to_owned()),
         ] {
-            assert_eq!(passthrough_key(&input), Key::Enter);
+            assert_eq!(passthrough_key(&input, b"\r".to_vec()), Key::Enter);
         }
     }
 

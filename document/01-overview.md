@@ -91,7 +91,8 @@ Workspace 画面は、`state.json` から読んだ session 一覧と root 行を
 で、`↑↓`（`j` / `k`）で session と root の選択を循環し、`←→`（`h` / `l`）で Preview / Terminal /
 Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
 モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
-タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` で行い、Esc は mode を変えない。
+タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` で行う。live tab の Esc は tab operation を閉じて
+Switch へ戻り、tab と選択中 session は維持する。
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
