@@ -12,11 +12,18 @@ use super::panes::{active_session_header, overview_preview_header, FOCUS_NEW_TAB
 pub(super) fn tab_strip_parts(
     strip: &TabStrip,
     loading: Option<(usize, usize)>,
+    available: usize,
 ) -> (String, String) {
+    let indices = viewport_indices(strip, available);
     let mut chips = String::new();
     let mut marker = String::new();
-    for (i, label) in strip.labels.iter().enumerate() {
-        if i > 0 {
+    if indices.first().is_some_and(|index| *index > 0) {
+        chips.push('‹');
+        marker.push(' ');
+    }
+    for (position, &i) in indices.iter().enumerate() {
+        let label = &strip.labels[i];
+        if position > 0 {
             chips.push_str(&" ".repeat(TAB_CHIP_GAP));
             marker.push_str(&" ".repeat(TAB_CHIP_GAP));
         }
@@ -41,7 +48,56 @@ pub(super) fn tab_strip_parts(
             marker.push_str(&" ".repeat(width));
         }
     }
+    if indices.last().is_some_and(|index| *index + 1 < strip.labels.len()) {
+        chips.push('›');
+        marker.push(' ');
+    }
     (chips, marker)
+}
+
+/// Resolves the horizontal viewport from the stable tab-id anchor. An anchor
+/// removed by close/reconnect falls back to the selected tab, and the selected
+/// tab is always returned even at a width too narrow for its full label.
+pub(super) fn viewport_indices(strip: &TabStrip, available: usize) -> Vec<usize> {
+    if strip.labels.is_empty() {
+        return Vec::new();
+    }
+    // A terminal narrower than the fixed identity has no drawable chip columns,
+    // but retaining the logical ranges keeps keyboard/mouse routing normalized;
+    // the outer renderer clips the row just as it did before viewport support.
+    if available == 0 {
+        return (0..strip.labels.len()).collect();
+    }
+    let active = strip.active.min(strip.labels.len() - 1);
+    // Start at selection, then backfill toward its stable anchor. This preserves
+    // the immediate previous target when `+ new` is selected without ever
+    // allowing an old offset to hide the selected tab.
+    let mut indices = vec![active];
+    let mut used = console::measure_text_width(&tab_chip_text(active, &strip.labels[active]));
+    let mut start = active;
+    while start > 0 {
+        let candidate = start - 1;
+        let candidate_width =
+            console::measure_text_width(&tab_chip_text(candidate, &strip.labels[candidate]));
+        if candidate_width + TAB_CHIP_GAP + used + 1 > available {
+            break;
+        }
+        indices.insert(0, candidate);
+        used += candidate_width + TAB_CHIP_GAP;
+        start = candidate;
+    }
+    used += usize::from(start > 0);
+    for index in (active + 1)..strip.labels.len() {
+        let gap = usize::from(!indices.is_empty()) * TAB_CHIP_GAP;
+        let chip = console::measure_text_width(&tab_chip_text(index, &strip.labels[index]));
+        let right_indicator = usize::from(index + 1 < strip.labels.len());
+        if !indices.is_empty() && used + gap + chip + right_indicator > available {
+            break;
+        }
+        indices.push(index);
+        used += gap + chip;
+    }
+    indices
 }
 
 /// Render one tab chip's text as a left-to-right loading wave: the whole chip is
@@ -75,12 +131,12 @@ pub(super) fn header_tab_rows(
     let Some(strip) = strip.filter(|s| !s.labels.is_empty()) else {
         return vec![clip_to_width(&header, width)];
     };
-    let (chips, marker) = tab_strip_parts(strip, loading);
+    let indent = tab_strip_indent(&header);
+    let (chips, marker) = tab_strip_parts(strip, loading, width.saturating_sub(indent));
     let divider = style(HEADER_TAB_DIVIDER).dim().to_string();
     // Push the marker right past the identity and the divider so it lands under
     // the chips on the row above. The identity is a fixed width, so this indent
     // is the same for every session.
-    let indent = tab_strip_indent(&header);
     vec![
         clip_to_width(&format!("{header}{divider}{chips}"), width),
         clip_to_width(&format!("{}{marker}", " ".repeat(indent)), width),
@@ -89,7 +145,7 @@ pub(super) fn header_tab_rows(
 
 /// Gap, in columns, between two chips on the strip's top row (and under it on the
 /// marker row), so the chips read as separate tabs without a hard separator glyph.
-pub(super) const TAB_CHIP_GAP: usize = 2;
+pub(super) const TAB_CHIP_GAP: usize = 1;
 
 /// One chip's text: a leading space, the 1-based tab number, the pane `label`, and
 /// a trailing space — ` N label `. The single recipe both the renderer
@@ -111,16 +167,24 @@ pub(super) fn tab_strip_indent(header: &str) -> usize {
 /// per pane with a [`TAB_CHIP_GAP`] between. Reconstructs the layout
 /// [`tab_strip_parts`] / [`header_tab_rows`] draw so a click column can be mapped
 /// to the tab under it (see [`attached_tab_at`]).
-pub(super) fn tab_chip_ranges(header: &str, strip: &TabStrip) -> Vec<std::ops::Range<usize>> {
+pub(super) fn tab_chip_ranges(
+    header: &str,
+    strip: &TabStrip,
+    width: usize,
+) -> Vec<(usize, std::ops::Range<usize>)> {
     let mut col = tab_strip_indent(header);
-    let mut ranges = Vec::with_capacity(strip.labels.len());
-    for (i, label) in strip.labels.iter().enumerate() {
-        if i > 0 {
+    let indices = viewport_indices(strip, width.saturating_sub(col));
+    if indices.first().is_some_and(|index| *index > 0) {
+        col += 1;
+    }
+    let mut ranges = Vec::with_capacity(indices.len());
+    for (position, i) in indices.into_iter().enumerate() {
+        if position > 0 {
             col += TAB_CHIP_GAP;
         }
-        let width = console::measure_text_width(&tab_chip_text(i, label));
-        ranges.push(col..col + width);
-        col += width;
+        let chip_width = console::measure_text_width(&tab_chip_text(i, &strip.labels[i]));
+        ranges.push((i, col..col + chip_width));
+        col += chip_width;
     }
     ranges
 }
@@ -143,9 +207,9 @@ pub(in crate::presentation::tui::home) fn attached_tab_hit(
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
     let header = active_session_header(state);
-    tab_chip_ranges(&header, strip)
+    tab_chip_ranges(&header, strip, geo.cols as usize)
         .into_iter()
-        .position(|range| range.contains(&rel_col))
+        .find_map(|(index, range)| range.contains(&rel_col).then_some(index))
 }
 
 /// The tab a left click at the 0-based screen (`col`, `row`) lands on while the Closeup live-terminal sub-state, or `None` when the click is not on a switchable chip. The strip
@@ -195,18 +259,15 @@ pub(in crate::presentation::tui::home) fn closeup_tab_at(
         return None;
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
-    let mut labels = strip.labels.clone();
-    let active = if state.closeup_on_new_tab() {
-        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
-        labels.len().saturating_sub(1)
+    let combined = if state.closeup_on_new_tab() {
+        strip.with_virtual_tab(FOCUS_NEW_TAB_LABEL.to_string())
     } else {
-        strip.active
+        strip.clone()
     };
-    let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    let target = tab_chip_ranges(&header, &combined)
+    let target = tab_chip_ranges(&header, &combined, geo.cols as usize)
         .into_iter()
-        .position(|range| range.contains(&rel_col))?;
+        .find_map(|(index, range)| range.contains(&rel_col).then_some(index))?;
     // Clicking the active tab — including the appended `+ new` chip, which only
     // shows while selected — is a no-op; every other hit is a live pane chip.
     (target != combined.active).then_some(target)
@@ -238,18 +299,15 @@ pub(super) fn closeup_tab_hit_inner(
         return None;
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
-    let mut labels = strip.labels.clone();
-    let active = if state.closeup_on_new_tab() {
-        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
-        labels.len().saturating_sub(1)
+    let combined = if state.closeup_on_new_tab() {
+        strip.with_virtual_tab(FOCUS_NEW_TAB_LABEL.to_string())
     } else {
-        strip.active
+        strip.clone()
     };
-    let combined = TabStrip { labels, active };
     let header = active_session_header(state);
-    tab_chip_ranges(&header, &combined)
+    tab_chip_ranges(&header, &combined, geo.cols as usize)
         .into_iter()
-        .position(|range| range.contains(&rel_col))
+        .find_map(|(index, range)| range.contains(&rel_col).then_some(index))
         .filter(|target| *target < strip.labels.len())
 }
 
@@ -281,9 +339,9 @@ pub(in crate::presentation::tui::home) fn overview_tab_at(
         return None;
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
-    let target = tab_chip_ranges(&header, strip)
+    let target = tab_chip_ranges(&header, strip, geo.cols as usize)
         .into_iter()
-        .position(|range| range.contains(&rel_col))?;
+        .find_map(|(index, range)| range.contains(&rel_col).then_some(index))?;
     // Clicking the active tab is a no-op; inactive chips select that pane.
     (target != strip.active).then_some(target)
 }
@@ -308,7 +366,7 @@ pub(in crate::presentation::tui::home) fn overview_tab_hit(
         return None;
     }
     let rel_col = col.checked_sub(geo.origin_col)? as usize;
-    tab_chip_ranges(&header, strip)
+    tab_chip_ranges(&header, strip, geo.cols as usize)
         .into_iter()
-        .position(|range| range.contains(&rel_col))
+        .find_map(|(index, range)| range.contains(&rel_col).then_some(index))
 }

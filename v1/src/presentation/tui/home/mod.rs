@@ -523,7 +523,7 @@ impl LaunchJobManager {
                     match spawn {
                         Ok(()) => {
                             if let Some(label) = prepared.stored_label.as_deref() {
-                                let (labels, _) = pool.borrow().tabs(&prepared.dir);
+                            let (labels, _, _) = pool.borrow().tabs(&prepared.dir);
                                 if let Some(index) = labels.len().checked_sub(1) {
                                     let _ =
                                         pool.borrow_mut().rename_tab(&prepared.dir, index, label);
@@ -1718,9 +1718,9 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
             loop {
                 // Publish the tab strip for this session before driving the pane,
                 // so it reflects any add / close / switch from the last step.
-                let (labels, active_tab) = pool.borrow().tabs(dir);
+                let (labels, ids, active_tab) = pool.borrow().tabs(dir);
                 home.surface_writer(SurfaceOwner::Attached)
-                    .set_tabs(labels, active_tab);
+                    .set_tabs_with_ids(labels, ids, active_tab);
                 // The pane loop resolves the active pane from the pool itself each
                 // pass (borrowing per iteration), so it can release the borrow on
                 // its idle tick to autostart; it returns `Closed` when the session
@@ -2207,7 +2207,8 @@ pub fn run(term: &Term, workspaces: &[Workspace], preload: Preload) -> Result<Ou
         if let Some(nav) = nav {
             pool.nav(dir, nav);
         }
-        pool.tabs(dir)
+        let (labels, _ids, active) = pool.tabs(dir);
+        (labels, active)
     };
 
     // Close the highlighted session's active tab (pane) from 選択 (`x`): kill its

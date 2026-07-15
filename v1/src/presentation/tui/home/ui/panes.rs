@@ -150,7 +150,7 @@ fn diff_tab_pane(state: &HomeState, diff: &DiffView, width: usize, rows: usize) 
         .unwrap_or_default();
     labels.push(DIFF_TAB_LABEL.to_string());
     let active = labels.len().saturating_sub(1);
-    let combined = TabStrip { labels, active };
+    let combined = TabStrip::new(labels, active);
     let header = active_session_header(state);
     let mut lines = header_tab_rows(header, Some(&combined), None, width);
     lines.resize(super::TAB_BAR_ROWS, String::new());
@@ -204,7 +204,7 @@ fn pending_diff_tab_pane(
         .unwrap_or_default();
     labels.push(DIFF_TAB_LABEL.to_string());
     let active = labels.len().saturating_sub(1);
-    let combined = TabStrip { labels, active };
+    let combined = TabStrip::new(labels, active);
     let header = active_session_header(state);
     let mut lines = header_tab_rows(header, Some(&combined), Some((active, frame)), width);
     lines.resize(super::TAB_BAR_ROWS, String::new());
@@ -240,14 +240,11 @@ fn closeup_pane(state: &HomeState, width: usize, rows: usize) -> Vec<String> {
     // leaving a stale "+ new" sitting on the strip. The identity rides the
     // strip's row (as in 没入), so the body below carries no header of its own.
     let on_new = state.closeup_on_new_tab();
-    let mut labels = strip.labels.clone();
-    let active = if on_new {
-        labels.push(FOCUS_NEW_TAB_LABEL.to_string());
-        labels.len().saturating_sub(1)
+    let combined = if on_new {
+        strip.with_virtual_tab(FOCUS_NEW_TAB_LABEL.to_string())
     } else {
-        strip.active
+        strip.clone()
     };
-    let combined = TabStrip { labels, active };
     let header = active_session_header(state);
     // A background pane loading in this session animates its chip here (the
     // resolving placeholder chip is appended to the published strip by the loop; a

@@ -315,10 +315,7 @@ fn tab_context_hit_tests_cover_empty_and_off_row_paths() {
 fn overview_tab_marker() {
     use super::super::super::terminal::tabs::TabStrip;
     // Styling is stripped in the (non-TTY) test environment, so assert on content.
-    let strip = TabStrip {
-        labels: vec!["agent".to_string(), "terminal".to_string()],
-        active: 0,
-    };
+    let strip = TabStrip::new(vec!["agent".to_string(), "terminal".to_string()], 0);
     // Header + chips on the top row; the active-tab underline on the row below.
     let rows = header_tab_rows("feat".to_string(), Some(&strip), None, 80);
     assert_eq!(rows.len(), 2);
@@ -337,10 +334,7 @@ fn overview_tab_marker() {
 
     // No strip — or an empty one — leaves the header alone on a single row.
     assert_eq!(header_tab_rows("feat".to_string(), None, None, 40).len(), 1);
-    let empty = TabStrip {
-        labels: Vec::new(),
-        active: 0,
-    };
+    let empty = TabStrip::new(Vec::new(), 0);
     assert_eq!(
         header_tab_rows("feat".to_string(), Some(&empty), None, 40).len(),
         1
@@ -350,10 +344,7 @@ fn overview_tab_marker() {
 #[test]
 fn header_tab_rows_animate_a_loading_chip_without_the_active_marker() {
     use super::super::super::terminal::tabs::TabStrip;
-    let strip = TabStrip {
-        labels: vec!["agent".to_string(), "terminal".to_string()],
-        active: 0,
-    };
+    let strip = TabStrip::new(vec!["agent".to_string(), "terminal".to_string()], 0);
     // The second chip is loading (a background pane starting); styling is stripped
     // in tests, so the chip text is unchanged — the animation is a colour sweep.
     let rows = header_tab_rows("feat".to_string(), Some(&strip), Some((1, 1)), 80);
@@ -372,6 +363,30 @@ fn header_tab_rows_animate_a_loading_chip_without_the_active_marker() {
         chips,
         "the frame changes styling, not the chip text"
     );
+}
+
+#[test]
+fn tab_viewport_keeps_selected_cjk_tab_visible_and_marks_both_overflows() {
+    use super::super::super::terminal::tabs::TabStrip;
+    let strip = TabStrip::with_ids(
+        vec![
+            "first long tab".to_string(),
+            "日本語の幅広いタブ".to_string(),
+            "third long tab".to_string(),
+            "fourth long tab".to_string(),
+        ],
+        vec![11, 22, 33, 44],
+        2,
+    );
+    let visible = viewport_indices(&strip, 24);
+    assert!(visible.contains(&2), "selected CJK tab stays in the viewport");
+    assert!(!visible.contains(&0), "the stable viewport anchor scrolls left tabs off");
+
+    let rows = header_tab_rows("feat".to_string(), Some(&strip), None, 32);
+    let top = console::strip_ansi_codes(&rows[0]).into_owned();
+    assert!(top.contains('‹') && top.contains('›'), "both overflow sides are signalled");
+    assert!(top.contains("3 third"), "the selected tab chip is rendered");
+    assert!(rows.iter().all(|row| console::measure_text_width(row) <= 32));
 }
 
 #[test]
