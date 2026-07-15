@@ -1,7 +1,7 @@
 ---
 number: 113
 title: refactor: issue/memory のドメイン〜インフラにわたる二重実装を横断的に解消する（親）
-status: todo
+status: done
 priority: medium
 labels: [refactor, review]
 dependson: []

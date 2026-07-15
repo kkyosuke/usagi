@@ -1,7 +1,7 @@
 ---
 number: 91
 title: feat(tui): 在席コマンド結果のインライン表示とマウス専用機能のキーボード代替
-status: todo
+status: done
 priority: medium
 labels: [tui, review]
 dependson: []

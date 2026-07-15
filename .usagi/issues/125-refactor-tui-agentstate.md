@@ -1,7 +1,7 @@
 ---
 number: 125
 title: refactor(tui): AgentState のフェーズ・グリフ/語/色の三重定義を単一テーブル化する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

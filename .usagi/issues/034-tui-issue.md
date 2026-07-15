@@ -1,7 +1,7 @@
 ---
 number: 34
 title: TUI issue コマンド（関連性テーブル・進捗の可視化）
-status: todo
+status: done
 priority: medium
 labels: [tui]
 dependson: [2, 23, 24]

@@ -1,7 +1,7 @@
 ---
 number: 18
 title: usagi alias（コマンドエイリアス）
-status: todo
+status: done
 priority: low
 labels: [cli]
 dependson: [5]

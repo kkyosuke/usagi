@@ -1,7 +1,7 @@
 ---
 number: 16
 title: usagi context（AI 用コンテキスト生成）
-status: todo
+status: done
 priority: low
 labels: [cli]
 dependson: [1]

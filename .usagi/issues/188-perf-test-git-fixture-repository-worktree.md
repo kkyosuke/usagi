@@ -1,7 +1,7 @@
 ---
 number: 188
 title: perf(test): Git fixture の repository/worktree 構築コストを削減する
-status: todo
+status: done
 priority: medium
 labels: [perf, test]
 dependson: []

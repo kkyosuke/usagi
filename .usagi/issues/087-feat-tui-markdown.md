@@ -1,7 +1,7 @@
 ---
 number: 87
 title: feat(tui): Markdown プレビューを折り返し表示する
-status: todo
+status: done
 priority: high
 labels: [tui, review]
 dependson: []

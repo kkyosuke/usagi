@@ -1,7 +1,7 @@
 ---
 number: 186
 title: feat(orchestration): stacked PR・review・CI retry policy を安全に統合する
-status: todo
+status: done
 priority: high
 labels: [orchestration, github]
 dependson: [183, 185]

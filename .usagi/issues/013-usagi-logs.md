@@ -1,7 +1,7 @@
 ---
 number: 13
 title: usagi logs（履歴の閲覧・検索）
-status: todo
+status: done
 priority: low
 labels: [cli]
 dependson: [7]

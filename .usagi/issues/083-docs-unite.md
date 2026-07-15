@@ -1,7 +1,7 @@
 ---
 number: 83
 title: docs: 統合(unite)モードのドキュメント整備
-status: todo
+status: done
 priority: medium
 labels: [docs]
 dependson: [79, 80, 81, 82]

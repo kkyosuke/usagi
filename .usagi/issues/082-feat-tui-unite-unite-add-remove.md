@@ -1,7 +1,7 @@
 ---
 number: 82
 title: feat(tui): unite動的操作 — コマンドパレットの unite add/remove
-status: todo
+status: done
 priority: low
 labels: [feat, tui]
 dependson: [81]

@@ -1,7 +1,7 @@
 ---
 number: 187
 title: feat(skills): Claude/Codex 共通の issue orchestrator skill を配布する
-status: todo
+status: done
 priority: high
 labels: [orchestration, agent, skills]
 dependson: [183]

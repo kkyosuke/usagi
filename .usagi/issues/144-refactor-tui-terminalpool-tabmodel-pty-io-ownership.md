@@ -1,7 +1,7 @@
 ---
 number: 144
 title: refactor(tui): TerminalPool を TabModel 適用と PTY IO ownership に分割する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, terminal, review]
 dependson: [141]

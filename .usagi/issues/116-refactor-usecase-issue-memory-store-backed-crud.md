@@ -1,7 +1,7 @@
 ---
 number: 116
 title: refactor(usecase): issue/memory の store-backed CRUD を共通化する
-status: todo
+status: done
 priority: high
 labels: [refactor, core, review]
 dependson: [114]

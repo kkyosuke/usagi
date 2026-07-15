@@ -1,7 +1,7 @@
 ---
 number: 45
 title: refactor(tui): HomeState の状態・入力・モーダルの保持を整理する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui]
 dependson: []

@@ -1,7 +1,7 @@
 ---
 number: 133
 title: refactor(cli): config.rs の enum ラベル関数を domain の as_str/serde と SSoT 化する
-status: todo
+status: done
 priority: low
 labels: [refactor, cli, review]
 dependson: []
