@@ -1,14 +1,14 @@
 ---
 number: 190
 title: test: coverage 下の diff layout key test の順序依存を解消する
-status: todo
+status: done
 priority: high
 labels: [test, flaky]
 dependson: []
 related: [181]
 parent: 177
 created_at: 2026-07-11T00:55:13.258324+00:00
-updated_at: 2026-07-11T00:55:13.258324+00:00
+updated_at: 2026-07-15T22:18:20.420300+00:00
 ---
 
 ## 背景
