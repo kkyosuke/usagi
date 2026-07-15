@@ -3342,6 +3342,9 @@ mod tests {
             assert!(!runtime.handle(key));
         }
 
+        let mut confirmed_quit = ControllerWorkspaceRuntime::new(&snapshot("confirm-quit"));
+        assert!(!confirmed_quit.handle(Key::CtrlQ));
+        assert!(confirmed_quit.handle(Key::Enter));
         assert!(runtime.handle(Key::Char('q')));
     }
 
