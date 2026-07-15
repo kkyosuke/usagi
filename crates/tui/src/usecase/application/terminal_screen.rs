@@ -524,6 +524,18 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_omits_unused_visible_rows_and_is_bounded() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo\r\n");
+        assert_eq!(screen.rows_with_scrollback(), vec!["one", "two"]);
+
+        for _ in 0..10_001 {
+            screen.advance(b"x\r\n");
+        }
+        assert_eq!(screen.scrollback.len(), 10_000);
+    }
+
+    #[test]
     fn bell_del_and_other_controls_are_ignored() {
         assert_eq!(screen_after(1, 10, b"a\x07\x7f\x01b"), vec!["ab"]);
     }
