@@ -40,7 +40,7 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
 use crate::presentation::widgets::modal;
-use crate::usecase::application::pane::PaneKind;
+use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
@@ -665,6 +665,12 @@ impl WorkspaceUi {
     /// key was consumed by the terminal so the workspace does not also act on it.
     #[coverage(off)]
     fn forward_terminal_input(&mut self, key: Key) -> bool {
+        // A live tab is only the input owner while Closeup exposes it.  In
+        // particular, Ctrl-O o must return to Switch before the next ordinary
+        // key can reach the previously focused PTY.
+        if self.workspace.mode() != Mode::Closeup {
+            return false;
+        }
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             return false;
         };
@@ -680,6 +686,47 @@ impl WorkspaceUi {
             session.send_input(&mut AgentStreamPort(agent.port.as_mut()), &bytes);
         }
         true
+    }
+
+    /// Close only the focused pane and release its client-side subscription.
+    ///
+    /// Closing is a view concern: the daemon keeps the terminal alive, while
+    /// this TUI detaches from its stream.  A still-queued launch is removed
+    /// before it can create a detached daemon terminal after its placeholder
+    /// has disappeared.
+    #[coverage(off)]
+    fn close_focused_pane(&mut self) {
+        let selection = self.workspace.pane().selected().clone();
+        let live_terminal = self.workspace.focused_live_terminal().cloned();
+        self.workspace.close_pane();
+
+        if let PaneSelection::Tab(TabSelection::Pending(operation)) = selection {
+            self.pane_launches.retain(|launch| match launch {
+                PaneLaunch::Agent {
+                    operation: queued, ..
+                }
+                | PaneLaunch::Terminal {
+                    operation: queued, ..
+                }
+                | PaneLaunch::Diff { operation: queued }
+                | PaneLaunch::Fail {
+                    operation: queued, ..
+                } => *queued != operation,
+            });
+        }
+
+        if let Some(terminal) = live_terminal {
+            if let Some(agent) = self.agent.as_mut()
+                && let Some(session) = self
+                    .terminals
+                    .iter_mut()
+                    .find(|session| session.terminal().fences(&terminal))
+            {
+                session.detach(&mut AgentStreamPort(agent.port.as_mut()));
+            }
+            self.terminals
+                .retain(|session| !session.terminal().fences(&terminal));
+        }
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
@@ -1200,7 +1247,10 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 .port
                 .launch(workspace, session, profile)
             {
-                Ok(terminal) => ui.workspace.complete_pane(operation, terminal),
+                Ok(terminal) => {
+                    ui.workspace.complete_pane(operation, terminal.clone());
+                    ui.start_terminal_session(terminal);
+                }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
             PaneLaunch::Terminal {
@@ -1629,7 +1679,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
         Key::Right | Key::Char('l') => ui.workspace.tab_next(),
-        Key::Char('x') => ui.workspace.close_pane(),
+        Key::Char('x') => ui.close_focused_pane(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Char('v') => ui.open_preview(),
@@ -1664,7 +1714,7 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::NextTab => ui.workspace.tab_next(),
         LiveTerminalAction::PreviousTab => ui.workspace.tab_prev(),
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
-        LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
+        LiveTerminalAction::CloseTab => ui.close_focused_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
         LiveTerminalAction::PreviousSession => ui.select_previous_session(),
     }
@@ -2723,6 +2773,7 @@ mod tests {
         offset: u64,
         chunk: Option<TerminalChunk>,
         inputs: TerminalInputLog,
+        detaches: Arc<Mutex<Vec<u64>>>,
     }
 
     impl AgentCommandPort for StreamingTerminalPort {
@@ -2776,6 +2827,9 @@ mod tests {
                 .unwrap()
                 .push((subscription, input_seq, bytes.to_vec()));
             Ok(())
+        }
+        fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: u64) {
+            self.detaches.lock().unwrap().push(subscription);
         }
     }
 
@@ -4060,6 +4114,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // classifier-to-runtime acceptance scenario
     fn a_live_terminal_renders_daemon_output_and_forwards_keystrokes() {
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();
@@ -4071,6 +4126,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let inputs = Arc::new(Mutex::new(Vec::new()));
+        let detaches = Arc::new(Mutex::new(Vec::new()));
         let mut port = StreamingTerminalPort {
             terminal: terminal.clone(),
             replay: b"$ ".to_vec(),
@@ -4082,6 +4138,7 @@ mod tests {
                 data: b"ls\r\na.txt\r\n".to_vec(),
             }),
             inputs: Arc::clone(&inputs),
+            detaches: Arc::clone(&detaches),
         };
         // A generic terminal never launches an Agent through this port.
         assert!(port.launch(workspace_id, session_id, None).is_err());
@@ -4132,6 +4189,51 @@ mod tests {
         let frame = render_workspace(24, 80, &ui).join("\n");
         assert!(frame.contains("$ ls"), "prompt echo missing: {frame}");
         assert!(frame.contains("a.txt"), "command output missing: {frame}");
+
+        // Plain a/o/x stay terminal input. The Ctrl-O versions, however, are
+        // reducer actions: a opens Closeup, o leaves the live-input owner, and
+        // x detaches exactly the selected terminal before removing its tab.
+        for character in ['a', 'o', 'x'] {
+            let _ = step_workspace(&mut ui, Key::Char(character));
+        }
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![
+                (5, 0, b"l".to_vec()),
+                (5, 1, b"s".to_vec()),
+                (5, 2, b"\r".to_vec()),
+                (5, 3, b"a".to_vec()),
+                (5, 4, b"o".to_vec()),
+                (5, 5, b"x".to_vec()),
+            ]
+        );
+
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::OpenCloseupModal),
+        );
+        assert!(ui.closeup_modal_visible());
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::Switch),
+        );
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+        let _ = step_workspace(&mut ui, Key::Char('a'));
+        assert_eq!(inputs.lock().unwrap().len(), 6);
+
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::OpenCloseupModal),
+        );
+        let _ = step_workspace(&mut ui, Key::Escape);
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::CloseTab),
+        );
+        assert!(ui.workspace.pane().tabs().is_empty());
+        assert!(ui.closeup_modal_visible());
+        assert_eq!(*detaches.lock().unwrap(), vec![5]);
+        assert!(ui.terminals.is_empty());
     }
 
     struct DefaultTerminalPort;
