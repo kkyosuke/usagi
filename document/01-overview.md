@@ -116,8 +116,11 @@ Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では m
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
 `q` は基底の Switch / Closeup で確認後に TUI を閉じ、daemon の実行は継続する。Ctrl-Q は確認後に
 workspace の live session を終了してから TUI を閉じる。Ctrl-C は表示状態にかかわらず TUI を終了する。
-terminal tab は daemon が所有する terminal だけを表示し、client の detach は tab の subscription を外すだけで
-process を停止しない。
+terminal tab は daemon が所有する terminal だけを表示する。選択中の live terminal は PTY 出力を右ペインへ
+描画し、focus 中の通常キーをその PTY へ送るため、`ls` などを対話的に実行できる（`q` は shell へ渡り、終了には
+ならない）。tab 巡回や Switch への復帰は `Ctrl-O` prefix が所有し、`Ctrl-Q` / `Ctrl-C` は live terminal でも global に
+効く。出力表示・入力送信の詳細は [TUI の live terminal](03-tui.md#closeup-pane) が正本である。client の detach は
+tab の subscription を外すだけで process を停止しない。
 
 `usagi open [path]` も同じ Workspace 画面を直接起動する。相対 path と省略時のカレントディレクトリは
 実在する絶対 path へ解決し、未登録ならディレクトリ名を workspace 名として登録する。同名が既に別

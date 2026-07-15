@@ -31,8 +31,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply, DaemonRequest,
-    MetricsAction, SessionAction, TerminalAction, TerminalGeometry, TerminalLaunchIntent,
-    TerminalRequest,
+    IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
+    TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -46,6 +46,10 @@ use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
     MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
     WorkspaceLoader, WorkspaceSnapshot,
+};
+use usagi_tui::usecase::application::pane_runtime::Geometry;
+use usagi_tui::usecase::application::terminal_session::{
+    TerminalAttach, TerminalChunk, TerminalError,
 };
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
@@ -176,14 +180,80 @@ impl MetricsPortFactory for DaemonMetricsPortFactory {
 }
 
 /// Root composition adapter for the only Agent launch authority: the daemon.
-struct DaemonAgentCommandPort;
+///
+/// Terminal streaming keeps one persistent daemon connection for its lifetime:
+/// the daemon fences a terminal subscription (and therefore input/detach) to the
+/// connection that attached it, so attach, poll and input must share it.
+#[derive(Default)]
+struct DaemonAgentCommandPort {
+    terminal: Option<IpcClient<std::os::unix::net::UnixStream>>,
+}
+
+impl DaemonAgentCommandPort {
+    #[coverage(off)]
+    const fn new() -> Self {
+        Self { terminal: None }
+    }
+
+    /// Returns the persistent terminal connection, opening it on first use.
+    #[coverage(off)]
+    fn terminal_client(
+        &mut self,
+    ) -> Result<&mut IpcClient<std::os::unix::net::UnixStream>, TerminalError> {
+        if self.terminal.is_none() {
+            self.terminal = Some(
+                crate::runtime::daemon::client(ClientPolicy::tui())
+                    .map_err(|_| TerminalError::Unavailable)?,
+            );
+        }
+        Ok(self
+            .terminal
+            .as_mut()
+            .expect("terminal client was just set"))
+    }
+
+    /// Sends one terminal request over the persistent connection and returns its
+    /// success body.  A transport failure drops the connection so the next
+    /// attach reconnects instead of reusing a broken socket.
+    #[coverage(off)]
+    fn terminal_request(
+        &mut self,
+        action: TerminalAction,
+        request: TerminalRequest,
+    ) -> Result<serde_json::Value, TerminalError> {
+        let payload = serde_json::to_value(request).expect("terminal request is serializable");
+        let reply = {
+            let client = self.terminal_client()?;
+            client.request(DaemonRequest::Terminal { action, payload })
+        };
+        match reply {
+            Ok(DaemonReply::Ok(body) | DaemonReply::Accepted { body, .. }) => Ok(body),
+            Err(error) => {
+                self.terminal = None;
+                Err(map_terminal_error(&error))
+            }
+        }
+    }
+}
 
 struct DaemonAgentCommandPortFactory;
 
 impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
     #[coverage(off)]
     fn create(&mut self) -> Box<dyn AgentCommandPort> {
-        Box::new(DaemonAgentCommandPort)
+        Box::new(DaemonAgentCommandPort::new())
+    }
+}
+
+/// Maps a typed client failure onto the safe terminal feedback the UI renders.
+/// No mapping authorizes a local PTY fallback.
+#[coverage(off)]
+fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> TerminalError {
+    use usagi_core::infrastructure::ipc::ErrorCode;
+    match error.code() {
+        ErrorCode::StaleTarget => TerminalError::Stale,
+        ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
+        _ => TerminalError::Unavailable,
     }
 }
 
@@ -271,6 +341,103 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                         .map_err(|_| "terminal launch returned an invalid terminal".to_owned())
                 }),
         }
+    }
+
+    #[coverage(off)]
+    fn attach_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
+        let body = self.terminal_request(
+            TerminalAction::Attach,
+            TerminalRequest::Attach {
+                terminal: terminal.clone(),
+            },
+        )?;
+        let subscription = body["subscription"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let snapshot = &body["snapshot"];
+        let output_offset = snapshot["output_offset"]
+            .as_u64()
+            .ok_or(TerminalError::Unavailable)?;
+        let replay = serde_json::from_value(snapshot["replay"].clone()).unwrap_or_default();
+        // `exited` is `Option<i32>`: null while the process is still running.
+        let exited = !snapshot["exited"].is_null();
+        Ok(TerminalAttach {
+            subscription,
+            output_offset,
+            replay,
+            exited,
+        })
+    }
+
+    #[coverage(off)]
+    fn poll_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        after_offset: u64,
+    ) -> Result<Vec<TerminalChunk>, TerminalError> {
+        let body = self.terminal_request(
+            TerminalAction::Resume,
+            TerminalRequest::Resume {
+                terminal: terminal.clone(),
+                after_offset,
+            },
+        )?;
+        let outputs = body["output"].as_array().cloned().unwrap_or_default();
+        let mut chunks = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            let start_offset = output["start_offset"]
+                .as_u64()
+                .ok_or(TerminalError::Unavailable)?;
+            let end_offset = output["end_offset"]
+                .as_u64()
+                .ok_or(TerminalError::Unavailable)?;
+            let data = serde_json::from_value(output["data"].clone()).unwrap_or_default();
+            chunks.push(TerminalChunk {
+                start_offset,
+                end_offset,
+                data,
+            });
+        }
+        Ok(chunks)
+    }
+
+    #[coverage(off)]
+    fn input_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        subscription: u64,
+        input_seq: u64,
+        bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        self.terminal_request(
+            TerminalAction::Input,
+            TerminalRequest::Input {
+                terminal: terminal.clone(),
+                subscription,
+                input_seq,
+                bytes: bytes.to_vec(),
+            },
+        )?;
+        Ok(())
+    }
+
+    #[coverage(off)]
+    fn detach_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        subscription: u64,
+    ) {
+        let _ = self.terminal_request(
+            TerminalAction::Detach,
+            TerminalRequest::Detach {
+                terminal: terminal.clone(),
+                subscription,
+            },
+        );
     }
 }
 
@@ -929,7 +1096,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     global_settings.modal_selection_mode,
                     global_settings.default_model,
-                    Box::new(DaemonAgentCommandPort),
+                    Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonMetricsPort::new()),
                 )
             })

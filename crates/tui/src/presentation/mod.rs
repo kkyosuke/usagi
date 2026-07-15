@@ -41,6 +41,10 @@ use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
 use crate::presentation::widgets::modal;
 use crate::usecase::application::pane::PaneKind;
+use crate::usecase::application::pane_runtime::Geometry;
+use crate::usecase::application::terminal_session::{
+    TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
+};
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::closeup;
 use crate::usecase::overview::{self, SessionCommand};
@@ -77,6 +81,115 @@ pub trait AgentCommandPort {
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
+
+    /// Attach to a daemon-owned terminal, taking its retained replay and cursor.
+    ///
+    /// The default keeps embedders without a terminal stream safe: attach fails
+    /// and the pane shows only the tab, never a locally spawned process.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn attach_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
+        Err(TerminalError::Unavailable)
+    }
+
+    /// Fetch the daemon terminal output produced after `after_offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn poll_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _after_offset: u64,
+    ) -> Result<Vec<TerminalChunk>, TerminalError> {
+        Err(TerminalError::Unavailable)
+    }
+
+    /// Send input bytes to a daemon terminal, fenced by subscription/sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn input_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _subscription: u64,
+        _input_seq: u64,
+        _bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        Err(TerminalError::Unavailable)
+    }
+
+    /// Release a daemon terminal subscription; it must not stop the process.
+    fn detach_terminal(&mut self, _terminal: &TerminalRef, _subscription: u64) {}
+}
+
+/// Bridges the workspace [`AgentCommandPort`] into the [`TerminalStreamPort`]
+/// expected by a [`TerminalSession`], so the session coordinator stays free of
+/// the wider Agent launch vocabulary.
+struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
+
+impl TerminalStreamPort for AgentStreamPort<'_> {
+    #[coverage(off)]
+    fn attach(
+        &mut self,
+        terminal: &TerminalRef,
+        geometry: Geometry,
+    ) -> Result<TerminalAttach, TerminalError> {
+        self.0.attach_terminal(terminal, geometry)
+    }
+    #[coverage(off)]
+    fn poll(
+        &mut self,
+        terminal: &TerminalRef,
+        after_offset: u64,
+    ) -> Result<Vec<TerminalChunk>, TerminalError> {
+        self.0.poll_terminal(terminal, after_offset)
+    }
+    #[coverage(off)]
+    fn input(
+        &mut self,
+        terminal: &TerminalRef,
+        subscription: u64,
+        input_seq: u64,
+        bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        self.0
+            .input_terminal(terminal, subscription, input_seq, bytes)
+    }
+    #[coverage(off)]
+    fn detach(&mut self, terminal: &TerminalRef, subscription: u64) {
+        self.0.detach_terminal(terminal, subscription);
+    }
+}
+
+/// The fixed geometry a launched terminal is created with.  Resize tracking is
+/// a follow-on; the daemon spawns its PTY at the same size (see issue #301).
+const TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
+
+/// Maps a management [`Key`] to the bytes a focused live terminal should
+/// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
+/// `None` so they keep driving the workspace instead of the shell.
+fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
+    let bytes = match key {
+        Key::Char(ch) => ch.to_string().into_bytes(),
+        Key::Enter => b"\r".to_vec(),
+        Key::Backspace => b"\x7f".to_vec(),
+        Key::Tab => b"\t".to_vec(),
+        Key::Escape => b"\x1b".to_vec(),
+        Key::Up => b"\x1b[A".to_vec(),
+        Key::Down => b"\x1b[B".to_vec(),
+        Key::Right => b"\x1b[C".to_vec(),
+        Key::Left => b"\x1b[D".to_vec(),
+        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => return None,
+    };
+    Some(bytes)
 }
 
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
@@ -412,6 +525,9 @@ struct WorkspaceUi {
     metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
+    /// Live coordinators for daemon-owned terminals opened in this workspace,
+    /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
+    terminals: Vec<TerminalSession>,
 }
 
 struct AgentContext {
@@ -484,6 +600,7 @@ impl WorkspaceUi {
             metrics_port: Box::new(NoMetrics),
             agent: None,
             pane_launches: Vec::new(),
+            terminals: Vec::new(),
         }
     }
 
@@ -507,6 +624,62 @@ impl WorkspaceUi {
                 .expect("default model profile IDs are canonical"),
         });
         self
+    }
+
+    /// Attach to a freshly launched daemon terminal and start streaming it.
+    ///
+    /// A failed attach still records the session so its safe feedback renders;
+    /// it never spawns a local process.
+    #[coverage(off)]
+    fn start_terminal_session(&mut self, terminal: TerminalRef) {
+        if let Some(agent) = self.agent.as_mut() {
+            let mut session = TerminalSession::new(terminal, TERMINAL_GEOMETRY);
+            session.connect(&mut AgentStreamPort(agent.port.as_mut()));
+            self.terminals.push(session);
+        }
+    }
+
+    /// Polls the focused live terminal once and projects its screen rows into
+    /// the view.  A non-terminal or unattached selection clears the projection.
+    #[coverage(off)]
+    fn refresh_terminal(&mut self) {
+        let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
+            self.workspace.set_terminal_view(None);
+            return;
+        };
+        let rows = if let (Some(agent), Some(session)) = (
+            self.agent.as_mut(),
+            self.terminals
+                .iter_mut()
+                .find(|session| session.terminal().fences(&terminal)),
+        ) {
+            session.poll(&mut AgentStreamPort(agent.port.as_mut()));
+            Some(session.rows())
+        } else {
+            None
+        };
+        self.workspace.set_terminal_view(rows);
+    }
+
+    /// Routes a keystroke to the focused live terminal.  Returns `true` when the
+    /// key was consumed by the terminal so the workspace does not also act on it.
+    #[coverage(off)]
+    fn forward_terminal_input(&mut self, key: Key) -> bool {
+        let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
+            return false;
+        };
+        let Some(bytes) = key_to_terminal_bytes(key) else {
+            return false;
+        };
+        if let (Some(agent), Some(session)) = (
+            self.agent.as_mut(),
+            self.terminals
+                .iter_mut()
+                .find(|session| session.terminal().fences(&terminal)),
+        ) {
+            session.send_input(&mut AgentStreamPort(agent.port.as_mut()), &bytes);
+        }
+        true
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
@@ -1041,7 +1214,10 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 .port
                 .launch_terminal(workspace, session)
             {
-                Ok(terminal) => ui.workspace.complete_pane(operation, terminal),
+                Ok(terminal) => {
+                    ui.workspace.complete_pane(operation, terminal.clone());
+                    ui.start_terminal_session(terminal);
+                }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
             PaneLaunch::Diff { operation } => {
@@ -1599,6 +1775,13 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    // A focused live terminal owns ordinary keys (letters, Enter, arrows) so
+    // shell input reaches the daemon PTY.  Reserved chords and the global quit
+    // keys fall through, and any open modal keeps priority.
+    if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(key) {
+        return WorkspaceStep::Stay;
+    }
+
     if key == Key::CtrlQ {
         ui.open_quit_confirmation(QuitAction::EndWorkspace);
         return WorkspaceStep::Stay;
@@ -1949,6 +2132,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
+        ui.refresh_terminal();
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui);
@@ -2397,13 +2581,14 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultModel, DefaultSettingsPort, Exit, MetricsPort, MetricsPortFactory, NewStep,
-        NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
+        DefaultModel, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory,
+        NewStep, NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
         SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
-        Start, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
-        drain_session_completions, execute_closeup_command, play_startup_splash, refresh_metrics,
-        render_workspace, run as run_from_start, run_with_settings,
+        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
+        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, welcome_action, write_banner,
@@ -2524,6 +2709,73 @@ mod tests {
             _session: SessionId,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
+        }
+    }
+
+    /// A fake daemon terminal: launch/attach succeed, one queued output chunk is
+    /// returned on the first poll, and input bytes are recorded for assertions.
+    /// `(subscription, input_seq, bytes)` recorded for each forwarded keystroke.
+    type TerminalInputLog = Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>>;
+
+    struct StreamingTerminalPort {
+        terminal: TerminalRef,
+        replay: Vec<u8>,
+        offset: u64,
+        chunk: Option<TerminalChunk>,
+        inputs: TerminalInputLog,
+    }
+
+    impl AgentCommandPort for StreamingTerminalPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("agent launch is not expected".to_owned())
+        }
+        fn launch_terminal(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+        ) -> Result<TerminalRef, String> {
+            Ok(self.terminal.clone())
+        }
+        fn attach_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _geometry: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Ok(TerminalAttach {
+                subscription: 5,
+                output_offset: self.offset,
+                replay: self.replay.clone(),
+                exited: false,
+            })
+        }
+        fn poll_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            _after_offset: u64,
+        ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            // The command output only appears once the shell has received input.
+            if self.inputs.lock().unwrap().is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(self.chunk.take().into_iter().collect())
+        }
+        fn input_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            subscription: u64,
+            input_seq: u64,
+            bytes: &[u8],
+        ) -> Result<(), TerminalError> {
+            self.inputs
+                .lock()
+                .unwrap()
+                .push((subscription, input_seq, bytes.to_vec()));
+            Ok(())
         }
     }
 
@@ -3805,6 +4057,152 @@ mod tests {
         let frame = render_workspace(40, 80, &ui).join("\n");
         assert!(frame.contains("Diff"));
         assert!(frame.contains("Diff data is unavailable until a backend"));
+    }
+
+    #[test]
+    fn a_live_terminal_renders_daemon_output_and_forwards_keystrokes() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let mut port = StreamingTerminalPort {
+            terminal: terminal.clone(),
+            replay: b"$ ".to_vec(),
+            offset: 2,
+            // The prompt echo plus the command output that a `ls` run produces.
+            chunk: Some(TerminalChunk {
+                start_offset: 2,
+                end_offset: 2 + b"ls\r\na.txt\r\n".len() as u64,
+                data: b"ls\r\na.txt\r\n".to_vec(),
+            }),
+            inputs: Arc::clone(&inputs),
+        };
+        // A generic terminal never launches an Agent through this port.
+        assert!(port.launch(workspace_id, session_id, None).is_err());
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-terminal-io"),
+            state("closeup-terminal-io"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(port),
+            DefaultModel::OpenAi,
+        );
+
+        // Select the session, enter Closeup, and open the daemon terminal. The
+        // launch is queued, then drained to attach; the attach replay (the
+        // prompt) renders without needing a poll.
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        execute_closeup_command(&mut ui, "terminal");
+        drain_pane_launches(&mut ui);
+        ui.refresh_terminal();
+        assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
+
+        // Typing forwards raw bytes exactly once with a monotonic sequence.
+        let _ = step_workspace(&mut ui, Key::Char('l'));
+        let _ = step_workspace(&mut ui, Key::Char('s'));
+        let _ = step_workspace(&mut ui, Key::Enter);
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![
+                (5, 0, b"l".to_vec()),
+                (5, 1, b"s".to_vec()),
+                (5, 2, b"\r".to_vec()),
+            ]
+        );
+
+        // The next redraw polls the daemon and renders the command output.
+        ui.refresh_terminal();
+        let frame = render_workspace(24, 80, &ui).join("\n");
+        assert!(frame.contains("$ ls"), "prompt echo missing: {frame}");
+        assert!(frame.contains("a.txt"), "command output missing: {frame}");
+    }
+
+    struct DefaultTerminalPort;
+    impl AgentCommandPort for DefaultTerminalPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("agent launch is unavailable".to_owned())
+        }
+    }
+
+    #[test]
+    fn agent_command_port_terminal_methods_are_safe_by_default() {
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let mut port = DefaultTerminalPort;
+        assert!(
+            port.launch(WorkspaceId::new(), SessionId::new(), None)
+                .is_err()
+        );
+        assert_eq!(
+            port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            port.poll_terminal(&terminal, 0),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            port.input_terminal(&terminal, 1, 0, b"x"),
+            Err(TerminalError::Unavailable)
+        );
+        // Detach is a no-op default and must not panic.
+        port.detach_terminal(&terminal, 1);
+        assert_eq!(
+            port.launch_terminal(WorkspaceId::new(), SessionId::new()),
+            Err("terminal launch is unavailable".to_owned())
+        );
+    }
+
+    #[test]
+    fn key_to_terminal_bytes_encodes_input_and_ignores_control_chords() {
+        assert_eq!(key_to_terminal_bytes(Key::Char('a')), Some(b"a".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Enter), Some(b"\r".to_vec()));
+        assert_eq!(
+            key_to_terminal_bytes(Key::Backspace),
+            Some(b"\x7f".to_vec())
+        );
+        assert_eq!(key_to_terminal_bytes(Key::Tab), Some(b"\t".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Escape), Some(b"\x1b".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Up), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Left), Some(b"\x1b[D".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Quit), None);
+        assert_eq!(key_to_terminal_bytes(Key::CtrlQ), None);
+        assert_eq!(key_to_terminal_bytes(Key::Other), None);
+        assert_eq!(
+            key_to_terminal_bytes(Key::Live(
+                crate::usecase::terminal_input::LiveTerminalAction::NextTab
+            )),
+            None
+        );
     }
 
     #[test]
