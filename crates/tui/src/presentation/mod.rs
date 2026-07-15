@@ -1298,7 +1298,7 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
             {
                 Ok(terminal) => {
                     ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal);
+                    ui.start_terminal_session(terminal, geometry);
                 }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
