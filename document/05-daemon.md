@@ -112,6 +112,9 @@ generic shell terminal は root IPC server が全 connection で共有する own
 generic terminal coordinator、trusted `login-shell` profile resolver、durable terminal store、実 PTY adapter
 を一つの ownership loop に保持する。PTY reader は output journal へ drain され、connection close は runtime
 に通知して当該 connection の subscription だけを外し、profile resolution や replacement spawn を行わない。
+PTY reader が EOF に達したら（shell の終了）その child を reap し、Agent terminal と同じく final output を
+append してから exited state を記録する（[terminal ownership](#terminal-ownership) の exit 契約と一致し、
+terminal を Running のまま残さない）。
 
 ## agent ownership
 
@@ -149,6 +152,20 @@ root IPC の Agent fixture は次を確認する。実 CLI を install または
 pending Agent pane を attachable にするのは、同じ `OperationId` の成功 final が返す完全な `TerminalRef`
 だけである。late / duplicate / wrong-generation / wrong-scope の completion は現 incarnation を変更しない。
 TUI 側の pending pane と fenced attach policy は [3. TUI](03-tui.md) を正本とする。
+
+### generic terminal の e2e 確認
+
+managed session から生の shell PTY を実行するまでの経路は次で確認する。fixture executable は要らない
+（`login-shell` profile は daemon の repository root で実 `/bin/sh` を起動する）。
+
+1. `cargo test --test generic_terminal_e2e` を実行する。
+2. 一時 Git repository と data directory に対し、root daemon の Unix IPC で managed session を作成し、その
+   fenced scope（`WorkspaceId` / `SessionId` / `WorktreeId`）で `login-shell` terminal を launch する。
+3. attach 後に `echo …` と `ls` を input として送り、その出力が replay journal から読めることを確認する
+   （client が「terminal タブで `ls` を打つと出力が返る」経路の daemon 側 contract）。
+4. `exit` を送ると child が reap され、terminal が exited status を記録することを確認する。
+5. trusted profile 以外の launch は typed safe error（`invalid_argument`）で拒否され、program・argv・path を
+   漏らさないことを確認する。
 
 ## metrics observer
 
