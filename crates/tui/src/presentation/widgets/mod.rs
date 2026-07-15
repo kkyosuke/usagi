@@ -437,6 +437,18 @@ mod tests {
     }
 
     #[test]
+    fn dim_ansi_preserves_non_sgr_and_incomplete_ansi_sequences() {
+        let non_sgr = dim_ansi("\u{1b}]title\u{7}");
+        assert_eq!(non_sgr, "\u{1b}[2m\u{1b}]title\u{7}\u{1b}[0m");
+
+        let csi = dim_ansi("before\u{1b}[2Kafter");
+        assert_eq!(csi, "\u{1b}[2mbefore\u{1b}[2Kafter\u{1b}[0m");
+
+        let incomplete = dim_ansi("before\u{1b}[31");
+        assert_eq!(incomplete, "\u{1b}[2mbefore\u{1b}[31\u{1b}[0m");
+    }
+
+    #[test]
     fn wrap_to_width_zero_yields_no_lines() {
         assert!(wrap_to_width("abc", 0).is_empty());
         assert!(wrap_to_width("", 5).is_empty());

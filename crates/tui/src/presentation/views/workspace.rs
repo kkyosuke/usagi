@@ -1519,7 +1519,10 @@ pub fn render_with_skeleton_frame(
     let body_height = height.saturating_sub(CHROME_ROWS);
     let split = panes::split(width, LEFT_WIDTH);
     let left = left_pane(body_height, split.left, ws, skeleton_frame);
-    let right = right_pane(body_height, split.right, ws);
+    let right = dim_inactive_right_pane(
+        ws.mode() == Mode::Switch,
+        right_pane(body_height, split.right, ws),
+    );
     frame.extend(panes::join(body_height, &left, &right, split));
 
     frame.truncate(height);
@@ -1541,15 +1544,10 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     frame.push(home_header_line(width, home));
     frame.push(header_spacer(width));
     let now = Utc::now();
-    let right = home_right_pane(body_height, split.right, home);
-    let right = if home.mode == HomeMode::Switch {
-        right
-            .into_iter()
-            .map(|line| widgets::dim_ansi(&line))
-            .collect()
-    } else {
-        right
-    };
+    let right = dim_inactive_right_pane(
+        home.mode == HomeMode::Switch,
+        home_right_pane(body_height, split.right, home),
+    );
     frame.extend(panes::join(
         body_height,
         &home_left_pane(body_height, split.left, home, now),
@@ -1566,6 +1564,19 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         )
     } else {
         frame
+    }
+}
+
+/// Apply the inactive treatment only while the left sidebar owns navigation.
+/// Modals are composed after this frame, preserving their foreground styles.
+fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
+    if inactive {
+        right
+            .into_iter()
+            .map(|line| widgets::dim_ansi(&line))
+            .collect()
+    } else {
+        right
     }
 }
 
@@ -2693,6 +2704,29 @@ mod tests {
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal (resolving)"));
         assert!(closeup.contains('▔'));
+    }
+
+    #[test]
+    fn runtime_workspace_renderer_dims_the_right_pane_only_in_switch() {
+        let mut ws = workspace();
+        ws.open_pane(PaneKind::Terminal);
+
+        let switch_frame = render(30, 100, &ws);
+        let switch_right = switch_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(switch_right.contains("\u{1b}[2;36mmain"));
+        assert!(!switch_right.contains("\u{1b}[1;36mmain"));
+
+        ws.enter_closeup();
+        let closeup_frame = render(30, 100, &ws);
+        let closeup_right = closeup_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
+        assert!(!closeup_right.starts_with("\u{1b}[2m"));
     }
 
     #[test]
