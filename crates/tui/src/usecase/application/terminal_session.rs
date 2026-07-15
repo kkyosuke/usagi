@@ -169,6 +169,15 @@ impl TerminalSession {
                 self.screen.rows()
             }
         }
+    /// The retained terminal history projected into an active terminal pane.
+    #[must_use]
+    pub fn display_rows_with_scrollback(&self) -> Vec<String> {
+        match self.state {
+            SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
+            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
+                self.screen.rows_with_scrollback()
+            }
+        }
     }
 
     /// Attaches (or reattaches) and rebuilds the screen from the retained

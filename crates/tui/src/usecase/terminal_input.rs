@@ -158,6 +158,10 @@ pub enum LiveTerminalAction {
     QuitConfirmation,
     /// Select the previous session, if one exists.
     PreviousSession,
+    /// Scroll the focused terminal pane one line toward older output.
+    ScrollUp,
+    /// Scroll the focused terminal pane one line toward the live bottom.
+    ScrollDown,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -270,6 +274,8 @@ fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
         KeyCode::Char('g') => Some(LiveTerminalAction::Agent),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('q') => Some(LiveTerminalAction::QuitConfirmation),
+        KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
+        KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
         _ => None,
     }
 }
@@ -531,6 +537,14 @@ mod tests {
             Case {
                 follow_up: key(KeyCode::Char('q')),
                 action: LiveTerminalAction::QuitConfirmation,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('u')),
+                action: LiveTerminalAction::ScrollUp,
+            },
+            Case {
+                follow_up: key(KeyCode::Down),
+                action: LiveTerminalAction::ScrollDown,
             },
         ];
         for case in cases {

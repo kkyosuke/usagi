@@ -365,6 +365,9 @@ pub struct Workspace {
     /// 選択中 live terminal tab の描画済み screen 行。runtime が redraw ごとに
     /// daemon から poll した内容を投影する presentation-only の値。
     terminal_view: Option<Vec<String>>,
+    /// Number of retained terminal rows kept below the viewport. Zero follows
+    /// live output; this belongs to the selected target's presentation state.
+    terminal_scroll: usize,
 }
 
 impl Workspace {
@@ -417,6 +420,7 @@ impl Workspace {
             metrics: None,
             git_diffs: BTreeMap::new(),
             terminal_view: None,
+            terminal_scroll: 0,
         }
     }
 
@@ -891,6 +895,21 @@ impl Workspace {
     #[coverage(off)]
     pub fn set_terminal_view(&mut self, rows: Option<Vec<String>>) {
         self.terminal_view = rows;
+        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
+        self.terminal_scroll = self.terminal_scroll.min(len.saturating_sub(1));
+    }
+
+    /// Move one retained row toward older terminal output.
+    #[coverage(off)]
+    pub fn terminal_scroll_up(&mut self) {
+        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
+        self.terminal_scroll = (self.terminal_scroll + 1).min(len.saturating_sub(1));
+    }
+
+    /// Move one retained row back toward the live terminal bottom.
+    #[coverage(off)]
+    pub fn terminal_scroll_down(&mut self) {
+        self.terminal_scroll = self.terminal_scroll.saturating_sub(1);
     }
 
     #[coverage(off)]
@@ -1544,7 +1563,10 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
             // A focused live terminal renders daemon PTY output. Reserve the last
             // line for the footer and clip each screen row to the pane width.
             let content_cap = height.saturating_sub(rows.len() + 1);
-            for line in view.iter().take(content_cap) {
+            let start = view
+                .len()
+                .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+            for line in view.iter().skip(start).take(content_cap) {
                 rows.push(widgets::clip_to_width(line, width));
             }
         } else if let Some(document) = ws.pane_document() {
@@ -2060,6 +2082,27 @@ mod tests {
             updated_at: now(),
         };
         Workspace::new(record, state)
+    }
+
+    #[test]
+    fn terminal_scroll_is_bounded_by_retained_history_and_returns_to_live_bottom() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some(vec![
+            "old".to_string(),
+            "middle".to_string(),
+            "live".to_string(),
+        ]));
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        assert_eq!(ws.terminal_scroll, 2);
+        ws.terminal_scroll_down();
+        assert_eq!(ws.terminal_scroll, 1);
+        ws.set_terminal_view(Some(vec!["live".to_string()]));
+        assert_eq!(
+            ws.terminal_scroll, 0,
+            "a shorter replay normalizes stale scroll"
+        );
     }
 
     fn workspace_with_sessions(count: usize) -> Workspace {
