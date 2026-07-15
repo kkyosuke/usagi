@@ -327,6 +327,12 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     let session = SessionId::new();
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    let switch_projection = HomeProjection::from_state(
+        &state,
+        "東京",
+        "/work/root",
+        &[session_projection(session, "開発")],
+    );
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
     let projection = HomeProjection::from_state(
@@ -344,6 +350,16 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(actual, include_str!("fixtures/home_cjk.golden").trim_end());
+
+    // Keep the golden layout stable while also fixing its ANSI brightness
+    // contract: the same inactive pane is dim in Switch and active in Closeup.
+    let switch_frame = render_home(8, 40, &switch_projection);
+    let switch_right = switch_frame[2].split_once('│').expect("pane divider").1;
+    let closeup_right = lines[2].split_once('│').expect("pane divider").1;
+    assert!(switch_right.contains("\u{1b}[2m"));
+    assert!(switch_right.contains("\u{1b}[0m"));
+    assert!(closeup_right.contains("\u{1b}[1;36m"));
+    assert!(!closeup_right.starts_with("\u{1b}[2m"));
 
     let tiny = render_home(1, 1, &projection);
     assert_eq!(tiny.len(), 1);

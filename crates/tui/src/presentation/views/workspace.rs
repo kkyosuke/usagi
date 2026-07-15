@@ -1541,10 +1541,19 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     frame.push(home_header_line(width, home));
     frame.push(header_spacer(width));
     let now = Utc::now();
+    let right = home_right_pane(body_height, split.right, home);
+    let right = if home.mode == HomeMode::Switch {
+        right
+            .into_iter()
+            .map(|line| widgets::dim_ansi(&line))
+            .collect()
+    } else {
+        right
+    };
     frame.extend(panes::join(
         body_height,
         &home_left_pane(body_height, split.left, home, now),
-        &home_right_pane(body_height, split.right, home),
+        &right,
         split,
     ));
     frame.truncate(height);
@@ -2297,6 +2306,43 @@ mod tests {
         let name = right_header.find("session").expect("session name");
         let tab = right_header.find("Agent (starting)").expect("agent tab");
         assert!(name < tab);
+    }
+
+    #[test]
+    fn home_right_pane_is_dim_in_switch_and_bright_in_closeup() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let target = Target::Root(workspace);
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let state = AppState::home(workspace, Vec::new());
+        let switch = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let switch_frame = render_home(18, 100, &switch);
+        let switch_right = switch_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(switch_right.contains("\u{1b}[2m"));
+        assert!(switch_right.contains("\u{1b}[2;36mmain"));
+        assert!(!switch_right.contains("\u{1b}[1;36m"));
+
+        let mut state = state;
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let closeup = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let closeup_frame = render_home(18, 100, &closeup);
+        let closeup_right = closeup_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
+        assert!(!closeup_right.starts_with("\u{1b}[2m"));
     }
 
     #[test]
