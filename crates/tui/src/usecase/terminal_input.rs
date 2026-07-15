@@ -118,6 +118,10 @@ pub enum LiveInput {
     Paste(Vec<u8>),
     /// Bytes supplied by a terminal backend without a semantic key event.
     Raw(Vec<u8>),
+    /// A left-button press at a 0-based terminal cell. Mouse input is not
+    /// forwarded to a daemon-owned terminal; the presentation layer owns its
+    /// sidebar hit testing.
+    Mouse { column: u16, row: u16 },
 }
 
 /// terminal、backend、timer を controller へ渡す統一 runtime stream。
@@ -191,6 +195,10 @@ impl LiveInputClassifier {
             LiveInput::Key(key) => self.classify_key(now, leader_alive, &key),
             LiveInput::Text(text) => self.forward_non_key(text.into_bytes()),
             LiveInput::Paste(bytes) | LiveInput::Raw(bytes) => self.forward_non_key(bytes),
+            LiveInput::Mouse { .. } => {
+                self.leader_at = None;
+                LiveInputOutput::Swallowed
+            }
         }
     }
 
@@ -602,6 +610,23 @@ mod tests {
             classifier.classify(Duration::from_millis(2), key(KeyCode::Char('x'))),
             LiveInputOutput::Passthrough(b"x".to_vec())
         );
+    }
+
+    #[test]
+    fn mouse_input_clears_a_pending_leader_without_reaching_the_terminal() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(
+                Duration::from_millis(1),
+                LiveInput::Mouse { column: 4, row: 9 },
+            ),
+            LiveInputOutput::Swallowed
+        );
+        assert!(!classifier.leader_pending(Duration::from_millis(1)));
     }
 
     #[test]

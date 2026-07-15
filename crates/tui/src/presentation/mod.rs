@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
@@ -187,7 +188,9 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => return None,
+        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Click { .. } | Key::Other => {
+            return None;
+        }
     };
     Some(bytes)
 }
@@ -528,6 +531,52 @@ struct WorkspaceUi {
     /// Live coordinators for daemon-owned terminals opened in this workspace,
     /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
     terminals: Vec<TerminalSession>,
+}
+
+/// The maximum gap between two presses on the same sidebar session row.
+const SIDEBAR_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Apply a sidebar click before regular key dispatch. A single click only moves
+/// the cursor; a double click on a session opens that session's Closeup, exactly
+/// as selecting it and pressing Enter would. Overlays and inline creation own
+/// the pointer, so background rows cannot be changed through them.
+#[coverage(off)]
+fn handle_sidebar_click(
+    ui: &mut WorkspaceUi,
+    height: usize,
+    width: usize,
+    key: Key,
+    previous: &mut Option<(usize, Instant)>,
+) -> bool {
+    let Key::Click { column, row } = key else {
+        return false;
+    };
+    if ui.modal.is_some() || ui.closeup_modal_visible() || ui.workspace.creating_session_inline() {
+        *previous = None;
+        return true;
+    }
+    let Some(index) =
+        workspace::sidebar_row_at(height, width, &ui.workspace, ui.skeleton_frame, column, row)
+    else {
+        *previous = None;
+        return true;
+    };
+    // The root and persistent create action retain their existing keyboard
+    // grammar. This gesture is intentionally limited to real session rows.
+    if index == 0 || index > ui.workspace.sessions().len() {
+        *previous = None;
+        return true;
+    }
+    let now = Instant::now();
+    let doubled = previous.is_some_and(|(previous_index, at)| {
+        previous_index == index && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
+    });
+    *previous = (!doubled).then_some((index, now));
+    ui.workspace.select_row(index);
+    if doubled {
+        ui.enter_closeup();
+    }
+    true
 }
 
 struct AgentContext {
@@ -924,6 +973,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Tab
         | Key::CtrlD
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Other => WelcomeStep::Stay,
     }
 }
@@ -960,7 +1010,9 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Other => NewStep::Stay,
+        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Other => {
+            NewStep::Stay
+        }
     }
 }
 
@@ -1065,7 +1117,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Live(_) | Key::Other => OpenStep::Stay,
+        Key::Live(_) | Key::Click { .. } | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -1135,7 +1187,7 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Other => {}
     }
     false
 }
@@ -1396,6 +1448,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Click { .. }
             | Key::Other => None,
         }
     };
@@ -1487,7 +1540,7 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Other => {}
     }
     false
 }
@@ -1509,6 +1562,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Other => {}
     }
     false
@@ -1531,6 +1585,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Other => {}
     }
     false
@@ -1563,6 +1618,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Click { .. }
             | Key::Other => {}
         }
         return WorkspaceStep::Stay;
@@ -1600,6 +1656,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -1638,7 +1695,7 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 execute_closeup_command(ui, &input);
             }
             Key::Tab => ui.closeup.complete_selected(),
-            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Other => {}
+            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1667,7 +1724,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::CtrlD | Key::Live(_) | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1695,6 +1752,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -2050,6 +2108,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         session_commands,
         modal_selection_mode,
     );
+    let mut previous_sidebar_click = None;
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
@@ -2058,6 +2117,9 @@ fn drive_workspace_with_ports_and_selection_mode(
         drain_pane_launches(&mut ui);
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
+            continue;
+        }
         match step_workspace(&mut ui, key) {
             WorkspaceStep::Stay => {}
             WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),
@@ -2179,6 +2241,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     )
     .with_agent_context(workspace_id, session_ids, agent_port, default_model)
     .with_metrics_port(metrics_port);
+    let mut previous_sidebar_click = None;
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
@@ -2188,6 +2251,9 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         drain_pane_launches(&mut ui);
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
+            continue;
+        }
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
             return Ok(WorkspaceStep::Quit);
         }
@@ -2637,8 +2703,8 @@ mod tests {
         Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
         WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
         WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
-        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
-        run as run_from_start, run_with_settings,
+        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
+        render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, welcome_action, write_banner,
@@ -3398,6 +3464,23 @@ mod tests {
         step_workspace(&mut ui, Key::Escape);
         assert!(ui.modal.is_none());
         assert_eq!(step_workspace(&mut ui, Key::Backspace), WorkspaceStep::Stay);
+    }
+
+    #[test]
+    fn double_clicking_a_sidebar_session_selects_and_opens_its_closeup() {
+        let snapshot = snapshot("click");
+        let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        let mut previous = None;
+        let click = Key::Click { column: 0, row: 5 };
+
+        assert!(handle_sidebar_click(&mut ui, 24, 100, click, &mut previous));
+        assert_eq!(ui.workspace.selected(), 1);
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+
+        assert!(handle_sidebar_click(&mut ui, 24, 100, click, &mut previous));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert!(ui.closeup_modal_visible());
     }
 
     #[test]
@@ -4996,6 +5079,7 @@ mod tests {
                 Key::Char('k'),
                 Key::Char('j'),
                 Key::Char('z'),
+                Key::Click { column: 0, row: 5 },
                 Key::Other,
             ];
             keys.extend(navigation);
