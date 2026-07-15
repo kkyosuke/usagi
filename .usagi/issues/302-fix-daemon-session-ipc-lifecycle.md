@@ -1,13 +1,13 @@
 ---
 number: 302
 title: fix(daemon): session 作成時の IPC 公開順序を lifecycle に整合させる
-status: in-progress
+status: done
 priority: high
 labels: [daemon, ipc, session, lifecycle, regression]
 dependson: []
 related: []
 created_at: 2026-07-15T00:03:14.053296+00:00
-updated_at: 2026-07-15T00:03:17.546147+00:00
+updated_at: 2026-07-15T00:04:53.800119+00:00
 ---
 
 ## 背景・根拠
