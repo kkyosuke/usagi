@@ -296,6 +296,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
         session: usagi_core::domain::id::SessionId,
+        geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         let lifecycle = request_lifecycle_snapshot()
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -319,7 +320,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                     worktree_id: managed.worktree_id,
                 },
             },
-            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            geometry: TerminalGeometry {
+                cols: geometry.cols,
+                rows: geometry.rows,
+            },
         };
         let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
