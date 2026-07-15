@@ -491,6 +491,10 @@ fn snapshot(state: &WorkspaceLifecycleState) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::TempDir;
 
     struct FakeGit(bool);
@@ -508,6 +512,20 @@ mod tests {
                 success: self.0,
                 stdout: String::new(),
                 stderr: "no".into(),
+            })
+        }
+    }
+
+    struct CountingGit {
+        calls: Arc<AtomicUsize>,
+    }
+    impl GitRunner for CountingGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(GitOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
             })
         }
     }
@@ -608,6 +626,43 @@ mod tests {
                 .unwrap_err(),
             SessionRuntimeError::IdempotencyConflict
         );
+    }
+
+    #[test]
+    fn replaying_a_successful_create_after_daemon_restart_does_not_create_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let operation = operation();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let mut first = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            DaemonGeneration::new(),
+            CountingGit {
+                calls: Arc::clone(&first_calls),
+            },
+        )
+        .unwrap();
+
+        let created = first
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap();
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let mut restarted = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            DaemonGeneration::new(),
+            CountingGit {
+                calls: Arc::clone(&replay_calls),
+            },
+        )
+        .unwrap();
+        let replayed = restarted
+            .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
+            .unwrap();
+
+        assert_eq!(replayed.body, created.body);
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(replayed.body["sessions"].as_array().unwrap().len(), 1);
     }
 
     #[test]

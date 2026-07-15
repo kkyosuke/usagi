@@ -52,6 +52,11 @@ managed session をローカルに代替実行することはない。
 `serve` は process lifetime にわたって単一インスタンス lock を保持する。record は daemon の発見に使う
 補助情報であり、単一インスタンスの権威は lock である。
 
+IPC endpoint は `serve` が lock を取得して pid record を登録した後にだけ公開する。したがって restart の
+切替中に lock を取得できない replacement が session request を受理することはなく、接続済み client は
+publish 済み generation の lifecycle snapshot と operation ID を使って再接続する。再送された create は
+durable operation journal で照合し、worktree effect を二重に実行しない。
+
 ## daemon data directory
 
 daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使う。これは daemon の

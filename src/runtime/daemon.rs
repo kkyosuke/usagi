@@ -1004,11 +1004,20 @@ impl Terminator for SigtermTerminator {
     }
 }
 
-struct SignalShutdown;
-impl ShutdownSignal for SignalShutdown {
+/// The IPC endpoint is published only after `serve` has acquired the process
+/// lock and registered its PID.  Starting it from the shutdown boundary keeps
+/// the socket's externally visible lifetime inside the daemon lifecycle: a
+/// replacement that is still waiting for the old lock holder cannot accept a
+/// session mutation and then exit as a duplicate daemon.
+struct SignalShutdown<'a> {
+    data_dir: &'a Path,
+    info: &'a AppInfo,
+}
+impl ShutdownSignal for SignalShutdown<'_> {
     #[cfg(unix)]
     #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
+        spawn_ipc_server(self.data_dir, self.info)?;
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&raw mut set);
@@ -1152,18 +1161,15 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
     let daemon_dir = paths::data_dir()
         .map_err(|err| std::io::Error::other(format!("{err:#}")))?
         .join("daemon");
-    if matches!(command, None | Some("serve")) {
-        let data_dir = daemon_dir
-            .parent()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "daemon data path has no parent",
-                )
-            })?
-            .to_path_buf();
-        spawn_ipc_server(&data_dir, info)?;
-    }
+    let data_dir = daemon_dir
+        .parent()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon data path has no parent",
+            )
+        })?
+        .to_path_buf();
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
     });
@@ -1174,11 +1180,15 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
         path: daemon_dir.join("daemon.lock"),
         held: RefCell::new(None),
     };
+    let shutdown = SignalShutdown {
+        data_dir: &data_dir,
+        info,
+    };
     let env = DaemonEnv {
         store: &store,
         probe: &KillProbe,
         terminator: &SigtermTerminator,
-        shutdown: &SignalShutdown,
+        shutdown: &shutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,
