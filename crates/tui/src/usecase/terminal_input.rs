@@ -122,6 +122,10 @@ pub enum LiveInput {
     /// forwarded to a daemon-owned terminal; the presentation layer owns its
     /// sidebar hit testing.
     Mouse { column: u16, row: u16 },
+    /// Pointer wheel moved toward older terminal output.
+    WheelUp,
+    /// Pointer wheel moved toward newer terminal output.
+    WheelDown,
 }
 
 /// terminal、backend、timer を controller へ渡す統一 runtime stream。
@@ -197,6 +201,14 @@ impl LiveInputClassifier {
 
         match input {
             LiveInput::Key(key) => self.classify_key(now, leader_alive, &key),
+            LiveInput::WheelUp => {
+                self.leader_at = None;
+                LiveInputOutput::Action(LiveTerminalAction::ScrollUp)
+            }
+            LiveInput::WheelDown => {
+                self.leader_at = None;
+                LiveInputOutput::Action(LiveTerminalAction::ScrollDown)
+            }
             LiveInput::Text(text) => self.forward_non_key(text.into_bytes()),
             LiveInput::Paste(bytes) | LiveInput::Raw(bytes) => self.forward_non_key(bytes),
             LiveInput::Mouse { .. } => {
@@ -573,6 +585,19 @@ mod tests {
             LiveInputOutput::Passthrough(b"q".to_vec())
         );
         assert!(!classifier.leader_pending(LEADER_TIMEOUT));
+    }
+
+    #[test]
+    fn wheel_events_are_reserved_for_pane_scrolling_without_terminal_bytes() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, LiveInput::WheelUp),
+            LiveInputOutput::Action(LiveTerminalAction::ScrollUp)
+        );
+        assert_eq!(
+            classifier.classify(T0, LiveInput::WheelDown),
+            LiveInputOutput::Action(LiveTerminalAction::ScrollDown)
+        );
     }
 
     #[test]

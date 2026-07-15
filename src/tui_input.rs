@@ -132,18 +132,18 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
         Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),
         Event::Paste(text) => Some(RuntimeEvent::Input(LiveInput::Paste(text.into_bytes()))),
         Event::Resize(width, height) => Some(RuntimeEvent::Resize { width, height }),
-        Event::Mouse(mouse)
-            if matches!(
-                mouse.kind,
-                MouseEventKind::Down(crossterm::event::MouseButton::Left)
-            ) =>
-        {
-            Some(RuntimeEvent::Input(LiveInput::Mouse {
-                column: mouse.column,
-                row: mouse.row,
-            }))
-        }
-        Event::FocusGained | Event::FocusLost | Event::Mouse(_) => None,
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                Some(RuntimeEvent::Input(LiveInput::Mouse {
+                    column: mouse.column,
+                    row: mouse.row,
+                }))
+            }
+            MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp)),
+            MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown)),
+            _ => None,
+        },
+        Event::FocusGained | Event::FocusLost => None,
     }
 }
 
@@ -302,6 +302,24 @@ mod tests {
                 ..left
             })),
             None
+        );
+    }
+
+    #[test]
+    fn adapter_routes_wheel_direction_to_live_pane_scroll_actions() {
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: 41,
+            row: 12,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollUp))),
+            Some(RuntimeEvent::Input(LiveInput::WheelUp))
+        );
+        assert_eq!(
+            adapt_event::<()>(Event::Mouse(mouse(MouseEventKind::ScrollDown))),
+            Some(RuntimeEvent::Input(LiveInput::WheelDown))
         );
     }
 

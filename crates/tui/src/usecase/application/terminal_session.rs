@@ -169,6 +169,8 @@ impl TerminalSession {
                 self.screen.rows()
             }
         }
+    }
+
     /// The retained terminal history projected into an active terminal pane.
     #[must_use]
     pub fn display_rows_with_scrollback(&self) -> Vec<String> {

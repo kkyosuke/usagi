@@ -820,9 +820,12 @@ fn passthrough_key(input: &LiveInput) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Mouse { .. } => {
-            return Key::Other;
-        }
+        LiveInput::Raw(_)
+        | LiveInput::Text(_)
+        | LiveInput::Paste(_)
+        | LiveInput::Mouse { .. }
+        | LiveInput::WheelUp
+        | LiveInput::WheelDown => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably
