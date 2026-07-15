@@ -32,6 +32,8 @@ pub mod pane_runtime;
 pub mod terminal_launch;
 /// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
 pub mod terminal_screen;
+/// Pure selection and text extraction for daemon-owned terminal output.
+pub mod terminal_selection;
 /// Polling coordinator mirroring one daemon-owned terminal into a screen grid.
 pub mod terminal_session;
 

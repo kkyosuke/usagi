@@ -1,13 +1,13 @@
 ---
 number: 307
 title: feat(tui): 右ペインの terminal 出力を選択してコピーできるようにする
-status: todo
+status: in-progress
 priority: high
 labels: [tui, terminal, clipboard, ux]
 dependson: []
 related: [248, 265]
 created_at: 2026-07-15T00:28:01.651029+00:00
-updated_at: 2026-07-15T00:29:55.065334+00:00
+updated_at: 2026-07-15T23:03:21.787706+00:00
 ---
 
 ## 目的

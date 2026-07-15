@@ -161,6 +161,16 @@ impl TerminalScreen {
             .collect()
     }
 
+    /// Returns the complete visible grid without trimming trailing spaces.
+    ///
+    /// Rendering uses [`Self::rows`] because blank padding is not interesting
+    /// on screen. Copying, however, must preserve a selected space at the end
+    /// of a line, so selection works from this unstyled grid instead.
+    #[must_use]
+    pub fn cells(&self) -> Vec<String> {
+        self.grid.iter().map(|row| row.iter().collect()).collect()
+    }
+
     /// The zero-based cursor position, clamped inside the grid.
     #[must_use]
     pub const fn cursor(&self) -> (usize, usize) {
@@ -470,6 +480,14 @@ mod tests {
         let screen = TerminalScreen::new(0, 0);
         assert_eq!(screen.rows(), vec![String::new()]);
         assert_eq!(screen.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn cells_keep_trailing_spaces_for_copying() {
+        let mut screen = TerminalScreen::new(1, 5);
+        screen.advance(b"a b");
+        assert_eq!(screen.rows(), vec!["a b"]);
+        assert_eq!(screen.cells(), vec!["a b  "]);
     }
 
     #[test]
