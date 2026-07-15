@@ -3322,6 +3322,25 @@ mod tests {
         assert!(!runtime.handle(Key::Enter));
         let closeup = runtime.frame(24, 100).join("\n");
         assert!(closeup.contains("[closeup]"));
+        for key in [
+            Key::Up,
+            Key::Tab,
+            Key::Backspace,
+            Key::Escape,
+            Key::CtrlQ,
+            Key::Char(':'),
+            Key::Char('x'),
+            Key::Live(LiveTerminalAction::OpenCloseupModal),
+            Key::Live(LiveTerminalAction::Switch),
+            Key::Live(LiveTerminalAction::NextTab),
+            Key::Live(LiveTerminalAction::PreviousTab),
+            Key::Left,
+            Key::Right,
+            Key::CtrlD,
+            Key::Other,
+        ] {
+            assert!(!runtime.handle(key));
+        }
 
         assert!(runtime.handle(Key::Char('q')));
     }
