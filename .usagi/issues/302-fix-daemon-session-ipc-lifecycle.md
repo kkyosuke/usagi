@@ -7,7 +7,7 @@ labels: [daemon, ipc, session, lifecycle, regression]
 dependson: []
 related: []
 created_at: 2026-07-15T00:03:14.053296+00:00
-updated_at: 2026-07-15T00:20:25.483039+00:00
+updated_at: 2026-07-15T00:30:25.715605+00:00
 ---
 
 ## 背景・根拠

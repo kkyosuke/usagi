@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use usagi_core::infrastructure::ipc::BuildIdentity;
 
-const READINESS_ATTEMPTS: usize = 20;
+// `daemon start` confirms the PID record before the subsequently published IPC
+// endpoint becomes connectable. Leave room for that bounded publication on a
+// cold or contended host instead of surfacing a transient unavailable state.
+const READINESS_ATTEMPTS: usize = 40;
 const READINESS_DELAY: Duration = Duration::from_millis(50);
 
 #[coverage(off)]
