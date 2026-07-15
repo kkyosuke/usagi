@@ -30,6 +30,10 @@ pub mod pane;
 pub mod pane_runtime;
 /// daemon-owned generic terminal launch / attach adapter for Closeup panes.
 pub mod terminal_launch;
+/// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
+pub mod terminal_screen;
+/// Polling coordinator mirroring one daemon-owned terminal into a screen grid.
+pub mod terminal_session;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]

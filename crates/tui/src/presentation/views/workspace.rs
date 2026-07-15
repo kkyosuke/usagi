@@ -29,7 +29,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
-use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
 const LEFT_WIDTH: usize = 36;
@@ -350,6 +350,9 @@ pub struct Workspace {
     metrics: Option<DaemonMetrics>,
     /// Non-persistent, asynchronously refreshed Git observations by stable ID.
     git_diffs: BTreeMap<SessionId, GitDiff>,
+    /// 選択中 live terminal tab の描画済み screen 行。runtime が redraw ごとに
+    /// daemon から poll した内容を投影する presentation-only の値。
+    terminal_view: Option<Vec<String>>,
 }
 
 impl Workspace {
@@ -401,6 +404,7 @@ impl Workspace {
             create_error: None,
             metrics: None,
             git_diffs: BTreeMap::new(),
+            terminal_view: None,
         }
     }
 
@@ -845,6 +849,27 @@ impl Workspace {
         if let Some(operation) = document {
             self.pane_documents.remove(&operation);
         }
+    }
+
+    /// The fenced terminal of the focused live tab, if the selection is one.
+    ///
+    /// The runtime uses this to attach, poll and route keystrokes to the
+    /// daemon-owned terminal that is currently on screen.
+    #[must_use]
+    #[coverage(off)]
+    pub fn focused_live_terminal(&self) -> Option<&TerminalRef> {
+        match self.pane().selected() {
+            PaneSelection::Tab(TabSelection::Live(terminal)) => Some(terminal),
+            PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Ready(_))
+            | PaneSelection::Target(_) => None,
+        }
+    }
+
+    /// Projects the focused live terminal's rendered screen rows, or clears it.
+    /// This is presentation-only state supplied by the runtime each redraw.
+    #[coverage(off)]
+    pub fn set_terminal_view(&mut self, rows: Option<Vec<String>>) {
+        self.terminal_view = rows;
     }
 
     #[coverage(off)]
@@ -1428,7 +1453,14 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
-        if let Some(document) = ws.pane_document() {
+        if let Some(view) = &ws.terminal_view {
+            // A focused live terminal renders daemon PTY output. Reserve the last
+            // line for the footer and clip each screen row to the pane width.
+            let content_cap = height.saturating_sub(rows.len() + 1);
+            for line in view.iter().take(content_cap) {
+                rows.push(widgets::clip_to_width(line, width));
+            }
+        } else if let Some(document) = ws.pane_document() {
             rows.extend(
                 document
                     .iter()

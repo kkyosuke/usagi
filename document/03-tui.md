@@ -202,6 +202,24 @@ terminal を停止しない。
 各起動 request は launch / document resolve の前に一度描画されるため、pending chip は既存の共有 shimmer wave を
 必ず表示する。completion が到着した後の次フレームでだけ、同じ stable identity の live / document tab を選択する。
 
+### live terminal の出力表示と入力
+
+選択中の live terminal tab は、daemon が所有する PTY の出力を右ペインへ描画し、キー入力をその PTY へ
+そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
+取得する: launch 直後に一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
+`Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去を解釈し、色などの styling は無視する）へ流し込み、
+その screen 行を右ペインへ clip して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
+atomic snapshot（再 attach）で置き換える。
+
+live terminal に focus がある間、通常のキー（文字・Enter・Backspace・Tab・矢印など）は management ではなく
+PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
+`Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了
+（`Ctrl-C`）は live terminal でも global に効く。前面 modal や forced action modal がある間は入力を PTY へ
+渡さない。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
+初期 geometry 80x24 で起動する（redraw に追従する resize は後続作業）。daemon 不通・stale・orphan は安全な
+feedback だけを表示し、local PTY を生成しない。
+
 Closeup の `agent [profile]` は既存 session だけで実行できる。profile を省略すると daemon の
 workspace policy を使い、指定時も product-neutral な profile ID だけを durable operation に渡す。
 TUI は daemon の accepted response 後に Agent pending tab を置き、同じ operation の成功 final が返す
