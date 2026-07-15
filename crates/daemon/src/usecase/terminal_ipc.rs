@@ -293,6 +293,7 @@ mod tests {
                     request.clone(),
                     1,
                     "/bin/sh",
+                    vec![],
                     PathBuf::from("/"),
                     [],
                 )?,

@@ -28,6 +28,7 @@ pub mod status;
 pub mod stop;
 pub mod terminal;
 pub mod terminal_ipc;
+pub mod terminal_profile;
 
 /// 認識できない `usagi daemon <subcommand>` に対する案内 1 行を返す。
 ///

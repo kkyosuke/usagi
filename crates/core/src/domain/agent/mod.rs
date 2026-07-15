@@ -195,6 +195,11 @@ impl EnvironmentVariableName {
             Err(LaunchValidationError::InvalidEnvironmentVariableName)
         }
     }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A shell-neutral process launch plan, rendered once by an adapter.
@@ -372,6 +377,10 @@ mod tests {
         assert_eq!(
             EnvironmentVariableName::new(String::from("TEST")),
             Ok(EnvironmentVariableName::new("TEST").unwrap())
+        );
+        assert_eq!(
+            EnvironmentVariableName::new("TERM").unwrap().as_str(),
+            "TERM"
         );
         assert_eq!(
             LaunchPlan::new(

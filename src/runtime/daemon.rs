@@ -50,9 +50,10 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
+use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
 struct TrustedLoginShell {
-    repository_root: PathBuf,
+    profile: LoginShellProfile,
 }
 
 impl TerminalProfileResolver for TrustedLoginShell {
@@ -63,27 +64,19 @@ impl TerminalProfileResolver for TrustedLoginShell {
         usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
         usagi_core::domain::terminal_launch::TerminalLaunchValidationError,
     > {
-        use usagi_core::domain::terminal_launch::{
-            DurableTerminalLaunchSnapshot, ResolvedTerminalLaunch, TerminalLaunchValidationError,
-            TerminalProfileId,
-        };
-        let login_shell = TerminalProfileId::new("login-shell").expect("static profile is valid");
-        if request.profile_id != login_shell {
-            return Err(TerminalLaunchValidationError::UnknownProfile {
-                profile_id: request.profile_id.clone(),
-            });
-        }
-        ResolvedTerminalLaunch::new(
-            DurableTerminalLaunchSnapshot::new(
-                request.clone(),
-                1,
-                "/bin/sh",
-                self.repository_root.clone(),
-                BTreeSet::new(),
-            )?,
-            BTreeMap::new(),
-        )
+        self.profile.resolve(request)
     }
+}
+
+fn terminal_environment() -> BTreeMap<String, String> {
+    TERMINAL_ENVIRONMENT_VARIABLES
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), value))
+        })
+        .collect()
 }
 
 struct FileTerminalStore(PathBuf);
@@ -298,15 +291,17 @@ struct AgentPty {
     terminals: BTreeMap<String, Arc<Mutex<PtyTerminal>>>,
     selected: Option<String>,
     observations: Sender<AgentPtyObservation>,
+    environment: BTreeMap<String, String>,
 }
 impl AgentPty {
-    fn new() -> (Self, Receiver<AgentPtyObservation>) {
+    fn new(environment: BTreeMap<String, String>) -> (Self, Receiver<AgentPtyObservation>) {
         let (observations, receiver) = mpsc::channel();
         (
             Self {
                 terminals: BTreeMap::new(),
                 selected: None,
                 observations,
+                environment,
             },
             receiver,
         )
@@ -322,10 +317,17 @@ impl PtySpawner for AgentPty {
         let plan = &launch.plan;
         let mut argv = plan.argv.clone();
         argv.extend(provision.arguments().iter().cloned());
+        let mut environment = self.environment.clone();
+        environment.extend(
+            provision
+                .environment()
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
+        );
         let pty = PtyTerminal::spawn_with(
             &plan.program,
             &argv,
-            &[],
+            &environment.into_iter().collect::<Vec<_>>(),
             &plan.working_directory,
             Geometry { cols: 80, rows: 24 },
         )
@@ -415,8 +417,15 @@ impl GenericPtySpawner for DaemonPty {
         launch: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
         terminal: &usagi_core::domain::id::TerminalRef,
     ) -> Result<ProcessIdentity, SpawnFailure> {
-        let pty = PtyTerminal::spawn(
+        let environment = launch
+            .environment
+            .iter()
+            .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+            .collect::<Vec<_>>();
+        let pty = PtyTerminal::spawn_with(
             &launch.snapshot.program,
+            &launch.snapshot.arguments,
+            &environment,
             &launch.snapshot.working_directory,
             Geometry { cols: 80, rows: 24 },
         )
@@ -580,7 +589,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let (pty, observations) = DaemonPty::new();
     let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
     start_terminal_observer(Arc::clone(&terminal), observations)?;
-    let (agent_pty, agent_observations) = AgentPty::new();
+    let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
     let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
     start_agent_observer(Arc::clone(&agent), agent_observations)?;
     start_ipc_accept_loop(
@@ -667,7 +676,7 @@ fn new_terminal_runtime(
     Arc::new(Mutex::new(GenericTerminalRuntime::new(
         generation,
         TrustedLoginShell {
-            repository_root: repo_root,
+            profile: LoginShellProfile::new(terminal_environment(), repo_root),
         },
         FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
         pty,

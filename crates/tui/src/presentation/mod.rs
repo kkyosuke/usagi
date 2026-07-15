@@ -79,6 +79,7 @@ pub trait AgentCommandPort {
         &mut self,
         _workspace: WorkspaceId,
         _session: SessionId,
+        _geometry: Geometry,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
@@ -169,10 +170,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
         self.0.detach_terminal(terminal, subscription);
     }
 }
-
-/// The fixed geometry a launched terminal is created with.  Resize tracking is
-/// a follow-on; the daemon spawns its PTY at the same size (see issue #301).
-const TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
 
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
@@ -680,9 +677,9 @@ impl WorkspaceUi {
     /// A failed attach still records the session so its safe feedback renders;
     /// it never spawns a local process.
     #[coverage(off)]
-    fn start_terminal_session(&mut self, terminal: TerminalRef) {
+    fn start_terminal_session(&mut self, terminal: TerminalRef, geometry: Geometry) {
         if let Some(agent) = self.agent.as_mut() {
-            let mut session = TerminalSession::new(terminal, TERMINAL_GEOMETRY);
+            let mut session = TerminalSession::new(terminal, geometry);
             session.connect(&mut AgentStreamPort(agent.port.as_mut()));
             self.terminals.push(session);
         }
@@ -703,7 +700,7 @@ impl WorkspaceUi {
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
             session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(session.rows())
+            Some(session.display_rows())
         } else {
             None
         };
@@ -1284,7 +1281,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
 /// boundary in the presentation loop makes Agent, terminal, and snapshot diff
 /// visibly share one pending-wave -> selected completion lifecycle.
 #[coverage(off)]
-fn drain_pane_launches(ui: &mut WorkspaceUi) {
+fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
     for launch in std::mem::take(&mut ui.pane_launches) {
         match launch {
             PaneLaunch::Agent {
@@ -1314,11 +1311,11 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 .as_mut()
                 .expect("agent context remains while its launch is queued")
                 .port
-                .launch_terminal(workspace, session)
+                .launch_terminal(workspace, session, geometry)
             {
                 Ok(terminal) => {
                     ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal);
+                    ui.start_terminal_session(terminal, geometry);
                 }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
@@ -1946,6 +1943,16 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
     }
 }
 
+fn terminal_geometry(height: usize, width: usize) -> Geometry {
+    let (rows, cols) = workspace::terminal_viewport(height, width);
+    Geometry {
+        cols: u16::try_from(cols.min(usize::from(u16::MAX)))
+            .expect("clamped terminal width fits u16"),
+        rows: u16::try_from(rows.min(usize::from(u16::MAX)))
+            .expect("clamped terminal height fits u16"),
+    }
+}
+
 #[coverage(off)]
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let base = open::render(height, width, open, now);
@@ -2114,7 +2121,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
         if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
@@ -2248,7 +2255,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         ui.refresh_terminal();
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
         if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
@@ -2707,7 +2714,7 @@ mod tests {
         render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
-        step_overview, step_pr, step_workspace, welcome_action, write_banner,
+        step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
@@ -2823,6 +2830,7 @@ mod tests {
             &mut self,
             _workspace: WorkspaceId,
             _session: SessionId,
+            _geometry: Geometry,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
         }
@@ -2855,6 +2863,7 @@ mod tests {
             &mut self,
             _workspace: WorkspaceId,
             _session: SessionId,
+            _geometry: Geometry,
         ) -> Result<TerminalRef, String> {
             Ok(self.terminal.clone())
         }
@@ -3104,8 +3113,12 @@ mod tests {
 
         assert_eq!(error, "not launched in this test");
         assert_eq!(
-            port.launch_terminal(WorkspaceId::new(), SessionId::new())
-                .unwrap_err(),
+            port.launch_terminal(
+                WorkspaceId::new(),
+                SessionId::new(),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap_err(),
             "terminal launch is unavailable"
         );
     }
@@ -4040,7 +4053,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         let _ = step_workspace(&mut ui, Key::Enter);
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert_eq!(
             *calls.lock().unwrap(),
@@ -4090,7 +4103,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Agent
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4149,7 +4162,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Terminal
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4178,7 +4191,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Diff
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4250,7 +4263,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         execute_closeup_command(&mut ui, "terminal");
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
 
@@ -4360,7 +4373,11 @@ mod tests {
         // Detach is a no-op default and must not panic.
         port.detach_terminal(&terminal, 1);
         assert_eq!(
-            port.launch_terminal(WorkspaceId::new(), SessionId::new()),
+            port.launch_terminal(
+                WorkspaceId::new(),
+                SessionId::new(),
+                Geometry { cols: 80, rows: 24 },
+            ),
             Err("terminal launch is unavailable".to_owned())
         );
     }
@@ -4388,6 +4405,11 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn terminal_geometry_uses_the_visible_right_pane_width() {
+        assert_eq!(terminal_geometry(24, 80), Geometry { cols: 43, rows: 22 });
     }
 
     #[test]

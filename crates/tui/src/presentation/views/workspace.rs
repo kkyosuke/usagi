@@ -41,6 +41,18 @@ const MEMORY_ICON: char = '\u{f233}';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
+/// Returns the PTY viewport that is visible inside the right-hand pane.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    (
+        height.saturating_sub(CHROME_ROWS).max(1),
+        split.right.max(1),
+    )
+}
+
 /// Home snapshot の session 表示情報。
 ///
 /// `id` が selection / active と照合する唯一の identity である。`label` は表示専用で、

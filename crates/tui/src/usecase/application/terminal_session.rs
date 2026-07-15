@@ -160,6 +160,17 @@ impl TerminalSession {
         self.screen.rows()
     }
 
+    /// The rows projected into an active terminal pane, including its cursor.
+    #[must_use]
+    pub fn display_rows(&self) -> Vec<String> {
+        match self.state {
+            SessionState::Live => self.screen.rows_with_cursor(),
+            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
+                self.screen.rows()
+            }
+        }
+    }
+
     /// Attaches (or reattaches) and rebuilds the screen from the retained
     /// replay.  A prior transport error is cleared on success.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
@@ -356,6 +367,26 @@ mod tests {
         // Polling an exited session is inert.
         session.poll(&mut port);
         assert_eq!(session.state(), SessionState::Exited);
+    }
+
+    #[test]
+    fn display_rows_shows_the_cursor_only_while_live() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 2, b"$ ", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert_eq!(session.display_rows()[0], "$ \x1b[7m \x1b[0m");
+
+        for state in [
+            SessionState::Disconnected,
+            SessionState::Orphaned,
+            SessionState::Exited,
+        ] {
+            session.state = state;
+            assert_eq!(session.display_rows(), session.rows());
+        }
     }
 
     #[test]
