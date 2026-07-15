@@ -82,6 +82,21 @@ pub trait ShutdownSignal {
     fn wait(&self) -> io::Result<()>;
 }
 
+/// Publishes the daemon's externally connectable endpoint after it has become
+/// the registered single process owner.
+///
+/// [`crate::usecase::serve`] calls [`publish`](DaemonReady::publish) exactly
+/// once after acquiring the instance lock and saving its PID record, and never
+/// calls it when another daemon owns the lock. Implementations must therefore
+/// make repeated calls safe, but must not expose an endpoint before `publish`.
+pub trait DaemonReady {
+    /// Publish the endpoint for an already registered daemon.
+    ///
+    /// # Errors
+    /// Returns an error when the endpoint cannot be made available.
+    fn publish(&self) -> io::Result<()>;
+}
+
 /// Spawns a detached daemon process — the effecting half of `start`.
 ///
 /// The real implementation launches `usagi daemon serve` as a detached child

@@ -7,8 +7,10 @@
 //!    daemon holds it, refuse rather than start a second one;
 //! 2. **register** — otherwise overwrite any stale record with this process's
 //!    pid in `daemon.json`;
-//! 3. **run** — block until asked to shut down;
-//! 4. **deregister** — clear the record on the way out. The lock is released by
+//! 3. **publish** — expose its endpoint only after the lock and record prove it
+//!    is the active daemon;
+//! 4. **run** — block until asked to shut down;
+//! 5. **deregister** — clear the record on the way out. The lock is released by
 //!    the OS when the process exits.
 //!
 //! The lock is the authoritative guard: because it waits briefly for a departing
@@ -26,7 +28,7 @@ use std::io::{self, Write};
 use usagi_core::domain::AppInfo;
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::daemon::{
-    DaemonRecordStore, InstanceLock, RecordFile, ShutdownSignal,
+    DaemonReady, DaemonRecordStore, InstanceLock, RecordFile, ShutdownSignal,
 };
 
 /// Run the daemon in the foreground under process id `pid`, writing progress
@@ -35,11 +37,12 @@ use usagi_core::infrastructure::daemon::{
 /// # Errors
 ///
 /// Returns the lock's acquire error, the store's load / save / clear error, the
-/// shutdown signal's wait error, or an `out` write error.
+/// ready publication / shutdown signal error, or an `out` write error.
 #[coverage(off)]
-pub fn serve<W: Write, F: RecordFile, S: ShutdownSignal, M: InstanceLock>(
+pub fn serve<W: Write, F: RecordFile, R: DaemonReady, S: ShutdownSignal, M: InstanceLock>(
     out: &mut W,
     store: &DaemonRecordStore<F>,
+    ready: &R,
     shutdown: &S,
     lock: &M,
     pid: u32,
@@ -58,6 +61,14 @@ pub fn serve<W: Write, F: RecordFile, S: ShutdownSignal, M: InstanceLock>(
 
     // We hold the lock. Overwrite any stale record and register this process.
     store.save(&DaemonRecord::new(pid))?;
+    if let Err(error) = ready.publish() {
+        // A failed endpoint was never usable, so leave no live-looking record
+        // for a process that has not begun serving. Preserve the publish error:
+        // a cleanup failure only leaves a stale record, which status/stop can
+        // safely reclaim after this process exits.
+        let _ = store.clear();
+        return Err(error);
+    }
     writeln!(out, "{describe}: daemon serving (pid {pid})")?;
 
     shutdown.wait()?;
@@ -69,10 +80,14 @@ pub fn serve<W: Write, F: RecordFile, S: ShutdownSignal, M: InstanceLock>(
 #[cfg(test)]
 mod tests {
     use super::serve;
-    use crate::test_support::{FailingShutdown, FakeLock, ImmediateShutdown, InMemoryRecordFile};
+    use crate::test_support::{
+        FailingShutdown, FakeLock, ImmediateShutdown, InMemoryRecordFile, NoopReady,
+    };
+    use std::cell::Cell;
+    use std::io;
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::daemon::DaemonRecord;
-    use usagi_core::infrastructure::daemon::DaemonRecordStore;
+    use usagi_core::infrastructure::daemon::{DaemonReady, DaemonRecordStore};
 
     fn info() -> AppInfo {
         AppInfo {
@@ -87,6 +102,7 @@ mod tests {
         serve(
             &mut buf,
             store,
+            &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Acquired,
             pid,
@@ -94,6 +110,28 @@ mod tests {
         )
         .unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    struct RecordingReady<'a> {
+        store: &'a DaemonRecordStore<InMemoryRecordFile>,
+        published: Cell<u8>,
+    }
+    impl DaemonReady for RecordingReady<'_> {
+        fn publish(&self) -> io::Result<()> {
+            assert_eq!(
+                self.store.load().unwrap().map(|record| record.pid),
+                Some(2222)
+            );
+            self.published.set(self.published.get() + 1);
+            Ok(())
+        }
+    }
+
+    struct FailingReady;
+    impl DaemonReady for FailingReady {
+        fn publish(&self) -> io::Result<()> {
+            Err(io::Error::other("publish failed"))
+        }
     }
 
     #[test]
@@ -104,6 +142,61 @@ mod tests {
             "usagi v0.1.0: daemon serving (pid 2222)\nusagi v0.1.0: daemon stopped (pid 2222)\n"
         );
         // The record is cleared on the way out.
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn publishes_after_registration_and_never_when_the_lock_is_held() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let ready = RecordingReady {
+            store: &store,
+            published: Cell::new(0),
+        };
+        serve(
+            &mut Vec::new(),
+            &store,
+            &ready,
+            &ImmediateShutdown,
+            &FakeLock::Acquired,
+            2222,
+            &info(),
+        )
+        .unwrap();
+        assert_eq!(ready.published.get(), 1);
+
+        let refused = DaemonRecordStore::new(InMemoryRecordFile::default());
+        let refused_ready = RecordingReady {
+            store: &refused,
+            published: Cell::new(0),
+        };
+        serve(
+            &mut Vec::new(),
+            &refused,
+            &refused_ready,
+            &ImmediateShutdown,
+            &FakeLock::Held,
+            2222,
+            &info(),
+        )
+        .unwrap();
+        assert_eq!(refused_ready.published.get(), 0);
+    }
+
+    #[test]
+    fn clears_the_record_when_endpoint_publication_fails() {
+        let store = DaemonRecordStore::new(InMemoryRecordFile::default());
+        assert!(
+            serve(
+                &mut Vec::new(),
+                &store,
+                &FailingReady,
+                &ImmediateShutdown,
+                &FakeLock::Acquired,
+                2222,
+                &info(),
+            )
+            .is_err()
+        );
         assert_eq!(store.load().unwrap(), None);
     }
 
@@ -128,6 +221,7 @@ mod tests {
         serve(
             &mut buf,
             &store,
+            &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Held,
             2222,
@@ -149,6 +243,7 @@ mod tests {
         serve(
             &mut buf,
             &store,
+            &NoopReady,
             &ImmediateShutdown,
             &FakeLock::Held,
             2222,
@@ -169,6 +264,7 @@ mod tests {
             serve(
                 &mut buf,
                 &store,
+                &NoopReady,
                 &ImmediateShutdown,
                 &FakeLock::Failing,
                 2222,
@@ -186,6 +282,7 @@ mod tests {
             serve(
                 &mut buf,
                 &store,
+                &NoopReady,
                 &FailingShutdown,
                 &FakeLock::Acquired,
                 2222,
@@ -205,6 +302,7 @@ mod tests {
             serve(
                 &mut buf,
                 &store,
+                &NoopReady,
                 &ImmediateShutdown,
                 &FakeLock::Held,
                 2222,

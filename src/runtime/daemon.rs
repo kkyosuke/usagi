@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +19,8 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
-    Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
+    ShutdownSignal, Sleeper, Terminator,
 };
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
@@ -1004,6 +1005,30 @@ impl Terminator for SigtermTerminator {
     }
 }
 
+/// Root-bound IPC publication seam. `serve` invokes it only after the daemon
+/// owns the singleton lock and has persisted its PID record. The guard makes a
+/// future duplicate invocation a no-op instead of binding a second endpoint.
+struct IpcReady<'a> {
+    data_dir: &'a Path,
+    info: &'a AppInfo,
+    published: AtomicBool,
+}
+impl DaemonReady for IpcReady<'_> {
+    #[coverage(off)]
+    fn publish(&self) -> std::io::Result<()> {
+        if self
+            .published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && let Err(error) = spawn_ipc_server(self.data_dir, self.info)
+        {
+            self.published.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
 struct SignalShutdown;
 impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
@@ -1152,18 +1177,15 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
     let daemon_dir = paths::data_dir()
         .map_err(|err| std::io::Error::other(format!("{err:#}")))?
         .join("daemon");
-    if matches!(command, None | Some("serve")) {
-        let data_dir = daemon_dir
-            .parent()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "daemon data path has no parent",
-                )
-            })?
-            .to_path_buf();
-        spawn_ipc_server(&data_dir, info)?;
-    }
+    let data_dir = daemon_dir
+        .parent()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "daemon data path has no parent",
+            )
+        })?
+        .to_path_buf();
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon_dir.join("daemon.json"),
     });
@@ -1174,10 +1196,16 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
         path: daemon_dir.join("daemon.lock"),
         held: RefCell::new(None),
     };
+    let ready = IpcReady {
+        data_dir: &data_dir,
+        info,
+        published: AtomicBool::new(false),
+    };
     let env = DaemonEnv {
         store: &store,
         probe: &KillProbe,
         terminator: &SigtermTerminator,
+        ready: &ready,
         shutdown: &SignalShutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
