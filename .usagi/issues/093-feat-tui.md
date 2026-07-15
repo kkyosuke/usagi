@@ -1,7 +1,7 @@
 ---
 number: 93
 title: feat(tui): ステータスラベルキーの発見可能性（チートシート/フッター追加）
-status: todo
+status: done
 priority: medium
 labels: [tui, review]
 dependson: []

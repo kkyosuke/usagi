@@ -1,7 +1,7 @@
 ---
 number: 129
 title: refactor(tui): terminal/pane.rs の pump_input（13 引数・イベント種別混在）を状態構造体化・ハンドラ分割する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

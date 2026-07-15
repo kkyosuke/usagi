@@ -1,7 +1,7 @@
 ---
 number: 33
 title: 右ペイン統合プレビュー（diff / Markdown / ファイル）
-status: in-progress
+status: done
 priority: medium
 labels: [tui]
 dependson: [2, 3, 12]

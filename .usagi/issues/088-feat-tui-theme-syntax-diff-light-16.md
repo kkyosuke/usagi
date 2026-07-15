@@ -1,7 +1,7 @@
 ---
 number: 88
 title: feat(tui): ライト端末対応（Theme 設定の配線・syntax/diff の light パレット・16色フォールバック）
-status: todo
+status: done
 priority: high
 labels: [tui, review]
 dependson: []

@@ -1,7 +1,7 @@
 ---
 number: 63
 title: fix: 軽微な correctness 改善（worktree_status の Err 握り潰し・remove dirty 判定の根拠明確化・new Mode の左右キー）
-status: todo
+status: done
 priority: low
 labels: [fix, review]
 dependson: []

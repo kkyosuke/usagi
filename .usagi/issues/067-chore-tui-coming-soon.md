@@ -1,7 +1,7 @@
 ---
 number: 67
 title: chore(tui): coming-soon プレースホルダコマンドを規約に沿って整理する
-status: todo
+status: done
 priority: medium
 labels: [chore, tui, review]
 dependson: []

@@ -1,7 +1,7 @@
 ---
 number: 127
 title: refactor(tui): Nerd Font グリフ語彙を 1 モジュールに集約し FA4 注記重複・SEP 重複を解消する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

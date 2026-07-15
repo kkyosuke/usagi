@@ -1,7 +1,7 @@
 ---
 number: 95
 title: chore(tui): UI 文言ポリシーと用語・アセットの整理
-status: todo
+status: done
 priority: low
 labels: [tui, review]
 dependson: []

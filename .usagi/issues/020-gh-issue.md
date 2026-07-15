@@ -1,7 +1,7 @@
 ---
 number: 20
 title: gh Issue 連携によるセッション作成
-status: todo
+status: done
 priority: low
 labels: [cli]
 dependson: [3]

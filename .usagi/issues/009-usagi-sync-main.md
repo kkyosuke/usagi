@@ -1,7 +1,7 @@
 ---
 number: 9
 title: usagi sync（main の変更をセッションへ同期）
-status: todo
+status: done
 priority: medium
 labels: [cli]
 dependson: [3]

@@ -1,7 +1,7 @@
 ---
 number: 131
 title: refactor(domain/usecase): workspace_state 周辺の SSoT/DRY 小整理（PrLink dedup 一本化・BranchStatus 文字列/rank 導出・worktree_status clean フォールバック集約）
-status: todo
+status: done
 priority: low
 labels: [refactor, core, review]
 dependson: []

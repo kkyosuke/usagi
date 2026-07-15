@@ -1,7 +1,7 @@
 ---
 number: 147
 title: refactor(tui): Home event handler を reducer と effect runner に分離する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: [143, 141]

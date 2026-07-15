@@ -1,7 +1,7 @@
 ---
 number: 89
 title: feat(tui): Open 一覧の縦スクロールと New 入力行のクリップ／水平スクロール
-status: todo
+status: done
 priority: medium
 labels: [tui, review]
 dependson: []

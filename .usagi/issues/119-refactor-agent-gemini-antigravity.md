@@ -1,7 +1,7 @@
 ---
 number: 119
 title: refactor(agent): Gemini/Antigravity アダプタをパラメータ化して統合する
-status: todo
+status: done
 priority: medium
 labels: [refactor, agent, review]
 dependson: []

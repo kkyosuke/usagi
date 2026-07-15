@@ -1,7 +1,7 @@
 ---
 number: 143
 title: refactor(tui): Focus menu/prompt の実行経路を SessionAction dispatcher に統合する
-status: todo
+status: done
 priority: high
 labels: [refactor, tui, review]
 dependson: [140]

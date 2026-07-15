@@ -1,7 +1,7 @@
 ---
 number: 122
 title: refactor(infra): agent/codex.rs・claude.rs を「launch 生成」と「session 探索」に分割する
-status: todo
+status: done
 priority: medium
 labels: [refactor, agent, review]
 dependson: []

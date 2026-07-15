@@ -1,7 +1,7 @@
 ---
 number: 134
 title: feat(agent): Gemini / Antigravity(agy) に MCP を注入する（worktree ローカル設定書き出し + Agent port の provision）
-status: todo
+status: done
 priority: high
 labels: [orchestration, agent]
 dependson: [120]

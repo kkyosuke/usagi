@@ -1,7 +1,7 @@
 ---
 number: 11
 title: usagi list / status（全セッションの俯瞰）
-status: todo
+status: done
 priority: medium
 labels: [cli]
 dependson: [3]

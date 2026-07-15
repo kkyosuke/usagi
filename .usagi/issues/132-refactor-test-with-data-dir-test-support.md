@@ -1,7 +1,7 @@
 ---
 number: 132
 title: refactor(test): with_data_dir テストヘルパを test_support に集約する
-status: todo
+status: done
 priority: low
 labels: [refactor, infra, review]
 dependson: []

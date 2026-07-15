@@ -1,7 +1,7 @@
 ---
 number: 182
 title: feat(orchestration): issue DAG 永続オーケストレータ
-status: todo
+status: done
 priority: high
 labels: [orchestration, epic]
 dependson: []

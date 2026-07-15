@@ -1,7 +1,7 @@
 ---
 number: 142
 title: refactor(agent): Claude/Codex launch 生成を共通 builder へ段階移行する
-status: todo
+status: done
 priority: medium
 labels: [refactor, agent, review]
 dependson: [139]

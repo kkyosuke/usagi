@@ -1,7 +1,7 @@
 ---
 number: 146
 title: refactor(orchestration): session agent override 検証を Agent capability に接続する
-status: todo
+status: done
 priority: medium
 labels: [refactor, orchestration, agent, mcp, review]
 dependson: [139]

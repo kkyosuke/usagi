@@ -1,7 +1,7 @@
 ---
 number: 130
 title: refactor(domain): settings.rs（~990 行）を 1 トピック 1 ファイルに分割し editor-buffer codec の層配置を見直す
-status: todo
+status: done
 priority: medium
 labels: [refactor, core, review]
 dependson: []

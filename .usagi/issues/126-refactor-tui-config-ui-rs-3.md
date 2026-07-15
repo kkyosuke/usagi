@@ -1,7 +1,7 @@
 ---
 number: 126
 title: refactor(tui): config/ui.rs の行エディタ系モーダル 3 種の重複を共通ビルダに集約する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

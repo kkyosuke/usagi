@@ -1,7 +1,7 @@
 ---
 number: 121
 title: refactor(infra): agent_state_store から Claude Code hook ペイロード解析を分離する
-status: todo
+status: done
 priority: medium
 labels: [refactor, infra, review]
 dependson: []

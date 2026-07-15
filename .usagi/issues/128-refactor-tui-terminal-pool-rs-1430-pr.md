@@ -1,7 +1,7 @@
 ---
 number: 128
 title: refactor(tui): terminal/pool.rs（1430 行）からバックグラウンド監視・PR スキャンを分離する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

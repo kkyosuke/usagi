@@ -1,7 +1,7 @@
 ---
 number: 145
 title: refactor(agent): Gemini/Antigravity を shared no-inline adapter と resume store に分離する
-status: todo
+status: done
 priority: medium
 labels: [refactor, agent, review]
 dependson: [139]

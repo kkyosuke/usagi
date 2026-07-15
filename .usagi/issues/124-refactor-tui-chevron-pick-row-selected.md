@@ -1,7 +1,7 @@
 ---
 number: 124
 title: refactor(tui): 在席メニューの行ビルダ重複（chevron/pick-row/selected 強調）を共通化する
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

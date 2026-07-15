@@ -1,7 +1,7 @@
 ---
 number: 57
 title: refactor(tui-home): run の closure 配線整理（18 引数 event_loop・handlers の context 構造体化）
-status: todo
+status: done
 priority: medium
 labels: [refactor, tui, review]
 dependson: []

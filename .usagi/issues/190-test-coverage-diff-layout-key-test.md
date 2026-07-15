@@ -1,7 +1,7 @@
 ---
 number: 190
 title: test: coverage 下の diff layout key test の順序依存を解消する
-status: todo
+status: done
 priority: high
 labels: [test, flaky]
 dependson: []

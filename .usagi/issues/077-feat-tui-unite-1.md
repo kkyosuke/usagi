@@ -1,7 +1,7 @@
 ---
 number: 77
 title: feat(tui): 統合(unite)モード — 複数ワークスペースを1画面にグループ表示する
-status: todo
+status: done
 priority: medium
 labels: [feat, tui]
 dependson: []
