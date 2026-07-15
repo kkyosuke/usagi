@@ -183,11 +183,12 @@ fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
         Key::Enter => b"\r".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
         Key::Tab => b"\t".to_vec(),
+        Key::Escape => b"\x1b".to_vec(),
         Key::Up => b"\x1b[A".to_vec(),
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Escape | Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => {
+        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => {
             return None;
         }
     };
@@ -719,13 +720,6 @@ impl WorkspaceUi {
         self.workspace.enter_switch();
         self.modal = None;
         self.closeup_action_forced = false;
-    }
-
-    /// Closeup の session 移動後に、表示・入力 target を選択行へ同期する。
-    #[coverage(off)]
-    fn select_previous_session(&mut self) {
-        self.workspace.select_prev();
-        self.open_closeup(false);
     }
 
     /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
@@ -1659,8 +1653,8 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
         Key::Quit | Key::CtrlQ | Key::Char('q') => return WorkspaceStep::Quit,
-        Key::Escape => ui.enter_switch(),
-        Key::Up
+        Key::Escape
+        | Key::Up
         | Key::Down
         | Key::Enter
         | Key::Backspace
@@ -1690,8 +1684,6 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
         LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
-        LiveTerminalAction::PreviousSession => ui.select_previous_session(),
-        LiveTerminalAction::Escape => ui.enter_switch(),
     }
     WorkspaceStep::Stay
 }
@@ -4214,7 +4206,7 @@ mod tests {
             Some(b"\x7f".to_vec())
         );
         assert_eq!(key_to_terminal_bytes(&Key::Tab), Some(b"\t".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Escape), None);
+        assert_eq!(key_to_terminal_bytes(&Key::Escape), Some(b"\x1b".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Up), Some(b"\x1b[A".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Down), Some(b"\x1b[B".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Right), Some(b"\x1b[C".to_vec()));
@@ -4370,24 +4362,6 @@ mod tests {
         assert!(!ui.closeup_modal_visible());
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
 
-        // Esc then closes the tab operation surface without closing the tab or
-        // rebinding the selected session.
-        let selected_tab = ui.workspace.pane().selected().clone();
-        let selected_session = ui.workspace.focused_label().to_owned();
-        step_workspace(&mut ui, Key::Escape);
-        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
-        assert_eq!(ui.workspace.pane().selected(), &selected_tab);
-        assert_eq!(ui.workspace.focused_label(), selected_session);
-
-        ui.enter_closeup();
-
-        // The runtime normally translates this action to `Key::Escape`, but
-        // the reducer remains safe if an adapter dispatches it directly.
-        step_workspace(&mut ui, Key::Live(LiveTerminalAction::Escape));
-        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
-
-        ui.enter_closeup();
-
         // Ctrl-O o returns Closeup to Switch.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
@@ -4418,11 +4392,6 @@ mod tests {
         // Moving the target in Closeup rebuilds its modal for the new session;
         // the old target's label/action state cannot receive input.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
-        step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousSession));
-        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
-        assert_eq!(ui.workspace.focused_label(), "main");
-        assert_eq!(ui.closeup.session(), "main");
-        assert!(ui.closeup_modal_visible());
     }
 
     #[test]

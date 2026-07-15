@@ -152,10 +152,6 @@ pub enum LiveTerminalAction {
     CloseTab,
     /// Open quit confirmation.
     QuitConfirmation,
-    /// Select the previous session, if one exists.
-    PreviousSession,
-    /// Cancel the topmost management state without forwarding ESC to the PTY.
-    Escape,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -217,12 +213,6 @@ impl LiveInputClassifier {
         if key.kind == KeyEventKind::Release {
             return LiveInputOutput::Swallowed;
         }
-        // Escape cancels a pending leader and belongs to the TUI escape stack.
-        // It must never be forwarded as a terminal byte.
-        if matches!(key.code, KeyCode::Escape) {
-            self.leader_at = None;
-            return LiveInputOutput::Action(LiveTerminalAction::Escape);
-        }
         if leader_alive {
             self.leader_at = None;
             return prefix_action(key).map_or(LiveInputOutput::Swallowed, LiveInputOutput::Action);
@@ -230,9 +220,6 @@ impl LiveInputClassifier {
         if is_ctrl_o(key) {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
-        }
-        if is_ctrl_caret(key) {
-            return LiveInputOutput::Action(LiveTerminalAction::PreviousSession);
         }
         LiveInputOutput::Passthrough(encode_key(key))
     }
@@ -250,11 +237,6 @@ fn is_only_control(modifiers: Modifiers) -> bool {
 fn is_ctrl_o(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{0f}'))
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_caret(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{1e}'))
-        || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
@@ -574,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_cancels_a_leader_without_becoming_a_terminal_byte() {
+    fn escape_and_ctrl_caret_are_passthrough_even_during_a_leader() {
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(
             classifier.classify(T0, ctrl('o')),
@@ -582,7 +564,7 @@ mod tests {
         );
         assert_eq!(
             classifier.classify(Duration::from_millis(1), key(KeyCode::Escape)),
-            LiveInputOutput::Action(LiveTerminalAction::Escape)
+            LiveInputOutput::Swallowed
         );
         assert!(!classifier.leader_pending(Duration::from_millis(1)));
         assert_eq!(
@@ -593,24 +575,11 @@ mod tests {
         let mut without_leader = LiveInputClassifier::default();
         assert_eq!(
             without_leader.classify(T0, key(KeyCode::Escape)),
-            LiveInputOutput::Action(LiveTerminalAction::Escape)
-        );
-    }
-
-    #[test]
-    fn ctrl_caret_is_reserved_once_and_not_a_prefix_follow_up() {
-        let mut classifier = LiveInputClassifier::default();
-        assert_eq!(
-            classifier.classify(T0, ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
+            LiveInputOutput::Passthrough(vec![0x1b])
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(1), ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
-        );
-        assert_eq!(
-            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('\u{1e}'))),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
+            without_leader.classify(Duration::from_millis(1), ctrl('^')),
+            LiveInputOutput::Passthrough(vec![30])
         );
     }
 
