@@ -11,7 +11,24 @@ use usagi_core::domain::{
     },
 };
 
-const PRESERVED_ENVIRONMENT: [&str; 6] = ["SHELL", "TERM", "PATH", "LANG", "LC_ALL", "LC_CTYPE"];
+/// Public, non-secret terminal and shell-configuration inputs inherited by an
+/// interactive login shell. Values are used only for the live PTY and never
+/// written into the durable terminal record.
+pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 13] = [
+    "SHELL",
+    "TERM",
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "COLORTERM",
+    "COLORFGBG",
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "NO_COLOR",
+    "ZDOTDIR",
+    "XDG_CONFIG_HOME",
+];
 
 /// Resolves a trusted shell and its public terminal characteristics.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +91,7 @@ impl LoginShellProfile {
     }
 
     fn preserved_environment(&self) -> BTreeMap<EnvironmentVariableName, String> {
-        PRESERVED_ENVIRONMENT
+        TERMINAL_ENVIRONMENT_VARIABLES
             .into_iter()
             .filter_map(|name| {
                 self.environment
@@ -119,6 +136,8 @@ mod tests {
                 ("TERM".into(), "xterm-256color".into()),
                 ("PATH".into(), "/opt/homebrew/bin:/usr/bin".into()),
                 ("LANG".into(), "ja_JP.UTF-8".into()),
+                ("COLORTERM".into(), "truecolor".into()),
+                ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
                 ("SECRET".into(), "do-not-copy".into()),
             ]),
             PathBuf::from("/workspace"),
@@ -130,7 +149,15 @@ mod tests {
             resolved.snapshot.working_directory,
             PathBuf::from("/workspace")
         );
-        assert_eq!(resolved.environment.len(), 4);
+        assert_eq!(resolved.environment.len(), 6);
+        assert_eq!(
+            resolved
+                .environment
+                .iter()
+                .find(|(name, _)| name.as_str() == "COLORTERM")
+                .map(|(_, value)| value.as_str()),
+            Some("truecolor")
+        );
         assert!(
             !resolved
                 .environment

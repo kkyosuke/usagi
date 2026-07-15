@@ -1453,15 +1453,6 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         let chrome = tab_menu(width, &header, ws);
         rows.extend(chrome);
         rows.push(String::new());
-        if ws.focused_live_terminal().is_some() {
-            let path = ws
-                .focused_session()
-                .map_or_else(|| ws.path(), |session| session.root.as_path());
-            rows.push(Style::new().dim().paint(&widgets::clip_to_width(
-                &format!("[{}]", path.display()),
-                width,
-            )));
-        }
         if let Some(view) = &ws.terminal_view {
             // A focused live terminal renders daemon PTY output. Reserve the last
             // line for the footer and clip each screen row to the pane width.
@@ -1922,9 +1913,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use usagi_core::domain::id::{
-        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
-    };
+    use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -2958,32 +2947,6 @@ mod tests {
         let second_session_text = joined(&ws);
         assert!(second_session_text.contains("daemon"));
         assert!(second_session_text.contains("No tabs stirring yet. Enter starts one."));
-    }
-
-    #[test]
-    fn live_terminal_shows_the_selected_session_worktree_path() {
-        let mut ws = workspace();
-        ws.select_next();
-        let operation = ws.open_pane(PaneKind::Terminal);
-        ws.complete_pane(
-            operation,
-            TerminalRef {
-                daemon_generation: DaemonGeneration::new(),
-                terminal_id: TerminalId::new(),
-                workspace_id: WorkspaceId::new(),
-                session_id: Some(ws.session_ids()[0]),
-                worktree_id: WorktreeId::new(),
-            },
-        );
-        ws.set_terminal_view(Some(vec!["shell output".to_owned()]));
-
-        let rendered = render(30, 100, &ws)
-            .iter()
-            .map(|line| strip(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("[/tmp/actual/.usagi/sessions/tui]"));
-        assert!(rendered.contains("shell output"));
     }
 
     #[test]

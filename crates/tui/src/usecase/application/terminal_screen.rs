@@ -61,6 +61,8 @@ pub struct TerminalScreen {
     utf8_needed: usize,
     /// The complete SGR state to apply to subsequently printed cells.
     style: String,
+    /// Cursor position saved by DECSC (`ESC 7`) or SCP (`CSI s`).
+    saved_cursor: Option<(usize, usize)>,
 }
 
 impl TerminalScreen {
@@ -81,6 +83,7 @@ impl TerminalScreen {
             utf8_pending: Vec::new(),
             utf8_needed: 0,
             style: String::new(),
+            saved_cursor: None,
         }
     }
 
@@ -182,6 +185,14 @@ impl TerminalScreen {
             }
             b']' => self.phase = Phase::Osc,
             b'(' | b')' => self.phase = Phase::Charset,
+            b'7' => {
+                self.save_cursor();
+                self.phase = Phase::Ground;
+            }
+            b'8' => {
+                self.restore_cursor();
+                self.phase = Phase::Ground;
+            }
             // Single-byte escapes (e.g. `ESC =`, `ESC c`) are ignored.
             _ => self.phase = Phase::Ground,
         }
@@ -224,6 +235,8 @@ impl TerminalScreen {
             'K' => self.erase_line(),
             'J' => self.erase_display(),
             'm' => self.sgr(),
+            's' => self.save_cursor(),
+            'u' => self.restore_cursor(),
             // Unhandled finals leave the grid unchanged.
             _ => {}
         }
@@ -313,6 +326,17 @@ impl TerminalScreen {
             self.style.push_str("\u{1b}[");
             self.style.push_str(&self.params);
             self.style.push('m');
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = Some((self.cursor_row, self.cursor_col));
+    }
+
+    fn restore_cursor(&mut self) {
+        if let Some((row, col)) = self.saved_cursor {
+            self.cursor_row = row;
+            self.cursor_col = col;
         }
     }
 
@@ -508,6 +532,23 @@ mod tests {
         assert_eq!(screen.cursor(), (0, 4));
         screen.advance(b"\x1b[3dY"); // VPA: row 3 (zero-based 2)
         assert_eq!(screen.cursor(), (2, 5));
+    }
+
+    #[test]
+    fn saved_cursor_restores_the_input_position_after_a_right_prompt() {
+        let mut screen = TerminalScreen::new(1, 30);
+        screen.advance(b"left\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
+        assert_eq!(screen.cursor(), (0, 10));
+        assert_eq!(
+            screen.rows(),
+            vec!["left input              \x1b[36mright\x1b[0m"]
+        );
+
+        screen.advance(b"\x1b7\x1b[1G$ \x1b8!");
+        assert_eq!(
+            screen.rows()[0],
+            "$ ft input!             \x1b[36mright\x1b[0m"
+        );
     }
 
     #[test]

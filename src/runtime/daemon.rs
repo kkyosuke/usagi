@@ -50,7 +50,7 @@ use usagi_daemon::usecase::runtime::{
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
 use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
-use usagi_daemon::usecase::terminal_profile::LoginShellProfile;
+use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
 struct TrustedLoginShell {
     profile: LoginShellProfile,
@@ -69,7 +69,7 @@ impl TerminalProfileResolver for TrustedLoginShell {
 }
 
 fn terminal_environment() -> BTreeMap<String, String> {
-    ["SHELL", "TERM", "PATH", "LANG", "LC_ALL", "LC_CTYPE"]
+    TERMINAL_ENVIRONMENT_VARIABLES
         .into_iter()
         .filter_map(|name| {
             std::env::var(name)
