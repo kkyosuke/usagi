@@ -448,6 +448,15 @@ impl SessionMcpServer {
     }
 
     /// Resolve a target and delivery channel once.
+    ///
+    /// An explicit `mode="queue"` aimed at a target that already has a live agent
+    /// pane is rejected rather than silently queued. The launch queue only feeds
+    /// the next *fresh* agent launch, and a live pane means no fresh launch is
+    /// coming, so such a prompt would sit undelivered until the running agent
+    /// exits — the "accepted but nothing happens" strand. `auto` already routes a
+    /// live target to the live channel; the error steers the caller there (or to
+    /// removing and relaunching the session), so an accepted prompt is never
+    /// stranded. A target with no live pane keeps the fresh-launch contract.
     fn resolve_prompt_delivery(
         &self,
         name: &str,
@@ -455,6 +464,15 @@ impl SessionMcpServer {
     ) -> Result<(PathBuf, Channel), String> {
         let target_root = self.resolve_target(name)?;
         let channel = match mode {
+            PromptMode::Queue if self.backend.agent_is_live(&target_root) => {
+                return Err(format!(
+                    "\"{name}\" already has a running agent pane, so mode=\"queue\" would strand \
+                     this prompt: the launch queue only feeds the next fresh agent launch, which \
+                     will not happen while that pane is live. Send it with mode=\"auto\" (or \
+                     \"live\") to reach the running agent, or remove and relaunch the session for \
+                     a fresh queued start."
+                ));
+            }
             PromptMode::Queue => Channel::Queue,
             PromptMode::Live => Channel::Live,
             PromptMode::Auto if self.backend.agent_is_live(&target_root) => Channel::Live,
@@ -838,7 +856,9 @@ pub(crate) enum PromptMode {
     /// Deliver live when a live pane is detected, otherwise queue for launch.
     #[default]
     Auto,
-    /// Always queue for the session's next fresh agent launch.
+    /// Queue for the session's next fresh agent launch. Rejected when the target
+    /// already has a live agent pane (no fresh launch is coming, so the prompt
+    /// would strand); use `auto`/`live` to reach the running agent instead.
     Queue,
     /// Always append to the live queue for an already-running pane.
     Live,
@@ -1062,7 +1082,7 @@ fn session_tool_schemas() -> Value {
                     "mode": {
                         "type": "string",
                         "enum": ["auto", "queue", "live"],
-                        "description": "auto (default): live if a pane is running, else queue for launch. queue: always the next fresh launch. live: always the running pane (waits if none open)."
+                        "description": "auto (default): live if a pane is running, else queue for launch. queue: the next fresh launch (rejected if the target already has a running pane, since it would never be delivered — use auto/live). live: always the running pane (waits if none open)."
                     },
                     "agent_cli": {
                         "type": "string",
@@ -2557,8 +2577,8 @@ mod tests {
             json!({"name":"w"}),
         );
 
-        // `queue` forces the launch channel even though a pane is live…
-        let queued_backend = FakeBackend::ok("q").with_live(true);
+        // `queue` forces the launch channel when no live pane is detected…
+        let queued_backend = FakeBackend::ok("q").with_live(false);
         let queued_deliveries = queued_backend.prompt_deliveries.clone();
         let queued = call(
             &server_at(root.path(), queued_backend),
@@ -2578,6 +2598,38 @@ mod tests {
             json!({"name":"w","prompt":"hi","mode":"live"}),
         );
         assert_eq!(tool_json(&live)["delivered_to"], "live");
+    }
+
+    #[test]
+    fn explicit_queue_to_a_live_pane_is_rejected_not_stranded() {
+        let root = tempfile::tempdir().unwrap();
+        init_repo(root.path());
+        call(
+            &server_at(root.path(), FakeBackend::ok("x")),
+            "session_create",
+            json!({"name":"w"}),
+        );
+
+        // A live pane means no fresh launch is coming, so `queue` (fresh-launch
+        // only) would never be delivered. Reject with an actionable error instead
+        // of silently accepting a prompt that strands on disk.
+        let backend = FakeBackend::ok("q").with_live(true);
+        let deliveries = backend.prompt_deliveries.clone();
+        let result = call(
+            &server_at(root.path(), backend),
+            "session_prompt",
+            json!({"name":"w","prompt":"hi","mode":"queue"}),
+        );
+
+        assert_eq!(result["isError"], true);
+        let message = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            message.contains("already has a running agent pane"),
+            "{message}"
+        );
+        assert!(message.contains("mode=\"auto\""), "{message}");
+        // Nothing was appended to any queue.
+        assert!(deliveries.borrow().is_empty());
     }
 
     #[test]
