@@ -2,12 +2,12 @@
 number: 308
 title: fix(tui): Session mode では右ペインを非アクティブ表示にする
 status: todo
-priority: medium
+priority: high
 labels: [tui, ui, parity]
 dependson: []
 related: [302]
 created_at: 2026-07-15T00:28:01.690978+00:00
-updated_at: 2026-07-15T00:28:01.690978+00:00
+updated_at: 2026-07-15T00:29:55.106127+00:00
 ---
 
 ## 目的

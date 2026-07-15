@@ -7,7 +7,7 @@ labels: [terminal, macos, pty, parity]
 dependson: []
 related: [218, 264]
 created_at: 2026-07-15T00:28:01.613067+00:00
-updated_at: 2026-07-15T00:28:01.613067+00:00
+updated_at: 2026-07-15T00:29:55.022478+00:00
 ---
 
 ## 目的

@@ -7,7 +7,7 @@ labels: [tui, terminal, input, bug]
 dependson: []
 related: [279, 282]
 created_at: 2026-07-15T00:28:01.578111+00:00
-updated_at: 2026-07-15T00:28:01.578111+00:00
+updated_at: 2026-07-15T00:29:54.983519+00:00
 ---
 
 ## 目的
