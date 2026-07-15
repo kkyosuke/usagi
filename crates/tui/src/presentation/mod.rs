@@ -39,8 +39,13 @@ use crate::presentation::views::remove_modal::{self, RemoveModal};
 use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
-use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
+use crate::presentation::views::workspace::{
+    self, GitDiff, HomeProjection, Mode, ProjectedSession, Workspace as WorkspaceView,
+};
 use crate::presentation::widgets::modal;
+use crate::usecase::application::controller::{
+    AppEvent, AppKey, AppState, Effect as ControllerEffect,
+};
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -679,6 +684,7 @@ impl WorkspaceUi {
         }
     }
 
+    #[cfg(test)]
     fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
         self.metrics_port = metrics_port;
         self
@@ -688,6 +694,7 @@ impl WorkspaceUi {
         self.terminal_size = (height, width);
     }
 
+    #[cfg(test)]
     fn with_agent_context(
         mut self,
         workspace: WorkspaceId,
@@ -721,6 +728,7 @@ impl WorkspaceUi {
     /// Polls the focused live terminal once and projects its screen rows into
     /// the view.  A non-terminal or unattached selection clears the projection.
     #[coverage(off)]
+    #[cfg(test)]
     fn refresh_terminal(&mut self) {
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             self.workspace.set_terminal_view(None);
@@ -2454,6 +2462,7 @@ pub fn run_workspace_with_session_port_and_selection_mode(
 ///
 /// Returns terminal IO failures from the interactive loop.
 #[coverage(off)]
+#[allow(clippy::needless_pass_by_value)] // public Terminal entry keeps the established snapshot-owning API.
 pub fn run_workspace_with_agent_port_and_selection_mode(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2465,7 +2474,7 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
 ) -> io::Result<Exit> {
     drive_workspace_with_agent_port_and_selection_mode(
         term,
-        snapshot,
+        &snapshot,
         session_commands,
         modal_selection_mode,
         default_model,
@@ -2475,58 +2484,101 @@ pub fn run_workspace_with_agent_port_and_selection_mode(
     .map(|_| Exit::Quit)
 }
 
+/// The production workspace loop's renderer state.
+///
+/// This deliberately owns the controller's [`AppState`] instead of the legacy
+/// `Workspace` view model.  The persisted snapshot is converted once into
+/// display-only records; selection and mode transitions stay in the reducer.
+struct ControllerWorkspaceRuntime {
+    state: AppState,
+    workspace_name: String,
+    root: PathBuf,
+    sessions: Vec<ProjectedSession>,
+    metrics: Option<DaemonMetrics>,
+}
+
+impl ControllerWorkspaceRuntime {
+    fn new(snapshot: &WorkspaceSnapshot) -> Self {
+        let sessions = snapshot
+            .state
+            .sessions
+            .iter()
+            .zip(&snapshot.session_ids)
+            .map(|(record, id)| ProjectedSession::from_record(*id, record))
+            .collect();
+        Self {
+            state: AppState::home(snapshot.workspace_id, snapshot.session_ids.clone()),
+            workspace_name: snapshot.workspace.name.clone(),
+            root: snapshot.workspace.path.clone(),
+            sessions,
+            metrics: None,
+        }
+    }
+
+    fn frame(&self, height: usize, width: usize) -> Vec<String> {
+        let home = HomeProjection::from_state(
+            &self.state,
+            &self.workspace_name,
+            &self.root,
+            &self.sessions,
+        );
+        workspace::render_home(height, width, &home.with_metrics(self.metrics.clone()))
+    }
+
+    fn refresh_metrics(&mut self, port: &mut dyn MetricsPort) {
+        self.metrics = port.latest();
+    }
+
+    fn handle(&mut self, key: Key) -> bool {
+        let app_key = match key {
+            Key::Quit | Key::Char('q') => return true,
+            Key::Up => AppKey::Up,
+            Key::Down => AppKey::Down,
+            Key::Enter => AppKey::Enter,
+            Key::Tab => AppKey::Tab,
+            Key::Backspace => AppKey::Backspace,
+            Key::Escape => AppKey::Escape,
+            Key::CtrlQ => AppKey::CtrlQ,
+            Key::Char(':') => AppKey::OpenOverview,
+            Key::Char(ch) => AppKey::Char(ch),
+            Key::Live(LiveTerminalAction::OpenCloseupModal) => AppKey::OpenCloseupOverlay,
+            Key::Live(LiveTerminalAction::Switch) => AppKey::CtrlO,
+            Key::Live(LiveTerminalAction::NextTab) => AppKey::CtrlN,
+            Key::Live(LiveTerminalAction::PreviousTab) => AppKey::CtrlP,
+            Key::Left | Key::Right | Key::CtrlD | Key::Live(_) | Key::Other => return false,
+        };
+        let effects = crate::usecase::application::controller::update(
+            &mut self.state,
+            AppEvent::Key(app_key),
+        );
+        effects
+            .into_iter()
+            .any(|effect| matches!(effect, ControllerEffect::Detach))
+    }
+}
+
 // This is the real terminal composition loop.  Agent launch dispatch itself is
 // covered through the injected-port tests below; exercising the loop requires
 // terminal IO and belongs to the composition root.
 #[coverage(off)]
 fn drive_workspace_with_agent_port_and_selection_mode(
     term: &mut dyn Terminal,
-    snapshot: WorkspaceSnapshot,
+    snapshot: &WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     modal_selection_mode: ModalSelectionMode,
     default_model: DefaultModel,
     agent_port: Box<dyn AgentCommandPort>,
-    metrics_port: Box<dyn MetricsPort>,
+    mut metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
-    let workspace_id = snapshot.workspace_id;
-    let session_ids = snapshot.session_ids.clone();
-    let workspace = WorkspaceView::with_runtime_ids(
-        snapshot.workspace,
-        snapshot.state,
-        workspace_id,
-        session_ids.clone(),
-    );
-    let mut ui = WorkspaceUi::with_ports_and_selection_mode(
-        workspace,
-        Box::new(SnapshotOverlayData),
-        session_commands,
-        modal_selection_mode,
-    )
-    .with_agent_context(workspace_id, session_ids, agent_port, default_model)
-    .with_metrics_port(metrics_port);
-    let mut previous_sidebar_click = None;
+    let _ = (session_commands, modal_selection_mode, default_model, agent_port);
+    let mut runtime = ControllerWorkspaceRuntime::new(snapshot);
     loop {
-        drain_session_completions(&mut ui);
-        refresh_metrics(&mut ui);
-        ui.refresh_terminal();
+        runtime.refresh_metrics(metrics_port.as_mut());
         let (height, width) = term.size()?;
-        ui.set_terminal_size(height, width);
-        term.draw(&render_workspace(height, width, &ui))?;
-        drain_pane_launches(&mut ui, terminal_geometry(height, width));
+        term.draw(&runtime.frame(height, width))?;
         let key = term.read_key()?;
-        ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
-        if handle_sidebar_click(&mut ui, height, width, &key, &mut previous_sidebar_click) {
-            continue;
-        }
-        if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
+        if runtime.handle(key) {
             return Ok(WorkspaceStep::Quit);
-        }
-        if let Some(text) = ui.take_terminal_copy() {
-            ui.workspace
-                .set_terminal_feedback(Some(match term.copy_text(&text) {
-                    Ok(()) => "terminal selection copied".to_owned(),
-                    Err(error) => format!("clipboard failed: {error}"),
-                }));
         }
     }
 }
@@ -2765,7 +2817,7 @@ fn run_with_settings_inner(
                     let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
                         drive_workspace_with_agent_port_and_selection_mode(
                             term,
-                            snapshot,
+                            &snapshot,
                             session_commands.create(),
                             config_form.global_modal_selection_mode(),
                             config_form.global_default_model(),
@@ -2801,7 +2853,7 @@ fn run_with_settings_inner(
                         let workspace_step = if let Some(factory) = agent_commands.as_deref_mut() {
                             drive_workspace_with_agent_port_and_selection_mode(
                                 term,
-                                snapshot,
+                                &snapshot,
                                 session_commands.create(),
                                 config_form.global_modal_selection_mode(),
                                 config_form.global_default_model(),
@@ -2968,14 +3020,15 @@ impl<W: Write + ?Sized> ScreenRunner for BannerScreenRunner<'_, W> {
 mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
-        DefaultModel, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory,
-        NewStep, NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
-        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
-        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
-        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
-        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
-        render_workspace, run as run_from_start, run_with_settings,
+        ControllerWorkspaceRuntime, DefaultModel, DefaultSettingsPort, Exit, Geometry, MetricsPort,
+        MetricsPortFactory, NewStep, NoMetricsFactory, OverlayDataPort, OverlayDocument,
+        OverviewModal, PrModal, SessionCommandPort, SessionCommandPortFactory,
+        SessionCommandResult, SnapshotOverlayData, Start, TerminalAttach, TerminalChunk,
+        TerminalError, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
+        drain_session_completions, execute_closeup_command, key_to_terminal_bytes,
+        play_startup_splash, refresh_metrics, render_workspace, run as run_from_start,
+        run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
@@ -3256,6 +3309,21 @@ mod tests {
         pr.title = Some("Workspace navigation".to_string());
         snapshot.state.sessions[0].prs.push(pr);
         snapshot
+    }
+
+    #[test]
+    fn controller_runtime_projects_snapshot_and_routes_home_keys() {
+        let mut runtime = ControllerWorkspaceRuntime::new(&snapshot("controller-runtime"));
+        let switch = runtime.frame(24, 100).join("\n");
+        assert!(switch.contains("controller-runtime"));
+        assert!(switch.contains("+ new session"));
+
+        assert!(!runtime.handle(Key::Down));
+        assert!(!runtime.handle(Key::Enter));
+        let closeup = runtime.frame(24, 100).join("\n");
+        assert!(closeup.contains("[closeup]"));
+
+        assert!(runtime.handle(Key::Char('q')));
     }
 
     fn recent(name: &str) -> Recent {

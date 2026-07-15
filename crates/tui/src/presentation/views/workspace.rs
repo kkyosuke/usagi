@@ -149,6 +149,7 @@ pub struct HomeProjection {
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     closeup_action_visible: bool,
+    metrics: Option<DaemonMetrics>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -202,6 +203,7 @@ impl HomeProjection {
             ) && (!state.has_live_pane()
                 || state.overlay()
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
+            metrics: None,
         }
     }
 
@@ -230,6 +232,14 @@ impl HomeProjection {
     #[must_use]
     pub fn with_mascot_speech(mut self, speech: Option<widgets::mascot::MascotSpeech>) -> Self {
         self.mascot_speech = speech;
+        self
+    }
+
+    /// Attach the latest daemon sample at the composition boundary.  Metrics
+    /// are display data only and do not participate in Home navigation.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -1872,10 +1882,20 @@ fn home_left_pane(
         HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
         HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
     };
+    let footer = home.metrics.as_ref().map_or_else(
+        || footer.to_owned(),
+        |metrics| {
+            format!(
+                "{CPU_ICON} {}%  {MEMORY_ICON} {}MB  {footer}",
+                metrics.cpu_percent_hundredths / 100,
+                metrics.resident_memory_bytes / MEBIBYTE,
+            )
+        },
+    );
     lines.push(
         Style::new()
             .dim()
-            .paint(&widgets::clip_to_width(footer, width)),
+            .paint(&widgets::clip_to_width(&footer, width)),
     );
     lines
 }
