@@ -167,7 +167,10 @@ mod tests {
     fn spawn_with_applies_rendered_argv_and_reaps_the_status() {
         let terminal = PtyTerminal::spawn_with(
             "/bin/sh",
-            &["-c".to_owned(), "exit 7".to_owned()],
+            &[
+                "-c".to_owned(),
+                "test \"$USAGI_AGENT\" = 1 || exit 8; exit 7".to_owned(),
+            ],
             &[("USAGI_AGENT".to_owned(), "1".to_owned())],
             std::path::Path::new("/"),
             Geometry { cols: 80, rows: 24 },

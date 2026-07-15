@@ -195,6 +195,11 @@ impl EnvironmentVariableName {
             Err(LaunchValidationError::InvalidEnvironmentVariableName)
         }
     }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// A shell-neutral process launch plan, rendered once by an adapter.
