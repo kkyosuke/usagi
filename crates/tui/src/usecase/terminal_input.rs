@@ -589,6 +589,12 @@ mod tests {
             classifier.classify(Duration::from_millis(2), key(KeyCode::Char('n'))),
             LiveInputOutput::Passthrough(b"n".to_vec())
         );
+
+        let mut without_leader = LiveInputClassifier::default();
+        assert_eq!(
+            without_leader.classify(T0, key(KeyCode::Escape)),
+            LiveInputOutput::Action(LiveTerminalAction::Escape)
+        );
     }
 
     #[test]
@@ -631,6 +637,7 @@ mod tests {
             (KeyCode::Backspace, vec![0x7f]),
             (KeyCode::Tab, vec![b'\t']),
             (KeyCode::BackTab, b"\x1b[Z".to_vec()),
+            (KeyCode::Escape, vec![0x1b]),
             (KeyCode::Down, b"\x1b[B".to_vec()),
             (KeyCode::Left, b"\x1b[D".to_vec()),
             (KeyCode::Right, b"\x1b[C".to_vec()),

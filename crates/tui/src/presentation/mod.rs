@@ -4381,6 +4381,13 @@ mod tests {
 
         ui.enter_closeup();
 
+        // The runtime normally translates this action to `Key::Escape`, but
+        // the reducer remains safe if an adapter dispatches it directly.
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::Escape));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+
+        ui.enter_closeup();
+
         // Ctrl-O o returns Closeup to Switch.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
