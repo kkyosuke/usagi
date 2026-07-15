@@ -14,7 +14,7 @@ use usagi_core::domain::{
 /// Public, non-secret terminal and shell-configuration inputs inherited by an
 /// interactive login shell. Values are used only for the live PTY and never
 /// written into the durable terminal record.
-pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 13] = [
+pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 14] = [
     "SHELL",
     "TERM",
     "PATH",
@@ -25,6 +25,7 @@ pub const TERMINAL_ENVIRONMENT_VARIABLES: [&str; 13] = [
     "COLORFGBG",
     "TERM_PROGRAM",
     "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
     "NO_COLOR",
     "ZDOTDIR",
     "XDG_CONFIG_HOME",
@@ -91,8 +92,9 @@ impl LoginShellProfile {
     }
 
     fn preserved_environment(&self) -> BTreeMap<EnvironmentVariableName, String> {
-        TERMINAL_ENVIRONMENT_VARIABLES
+        let mut environment = TERMINAL_ENVIRONMENT_VARIABLES
             .into_iter()
+            .filter(|name| *name != "TERM_SESSION_ID")
             .filter_map(|name| {
                 self.environment
                     .get(name)
@@ -104,7 +106,17 @@ impl LoginShellProfile {
                         )
                     })
             })
-            .collect()
+            .collect::<BTreeMap<_, _>>();
+        // Terminal.app's `/etc/zshrc_Apple_Terminal` treats this as a request
+        // to restore and persist its own window session. The daemon-owned PTY
+        // is not that window, but it still needs the rest of the Terminal.app
+        // prompt configuration. An empty value prevents that session hook
+        // while overriding an inherited host value.
+        environment.insert(
+            EnvironmentVariableName::new("TERM_SESSION_ID").expect("static name is valid"),
+            String::new(),
+        );
+        environment
     }
 }
 
@@ -138,6 +150,7 @@ mod tests {
                 ("LANG".into(), "ja_JP.UTF-8".into()),
                 ("COLORTERM".into(), "truecolor".into()),
                 ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
+                ("TERM_SESSION_ID".into(), "host-window-1".into()),
                 ("SECRET".into(), "do-not-copy".into()),
             ]),
             PathBuf::from("/workspace"),
@@ -149,7 +162,7 @@ mod tests {
             resolved.snapshot.working_directory,
             PathBuf::from("/workspace")
         );
-        assert_eq!(resolved.environment.len(), 6);
+        assert_eq!(resolved.environment.len(), 7);
         assert_eq!(
             resolved
                 .environment
@@ -157,6 +170,14 @@ mod tests {
                 .find(|(name, _)| name.as_str() == "COLORTERM")
                 .map(|(_, value)| value.as_str()),
             Some("truecolor")
+        );
+        assert_eq!(
+            resolved
+                .environment
+                .iter()
+                .find(|(name, _)| name.as_str() == "TERM_SESSION_ID")
+                .map(|(_, value)| value.as_str()),
+            Some("")
         );
         assert!(
             !resolved
