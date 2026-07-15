@@ -6,8 +6,8 @@ use std::io;
 
 use usagi_core::domain::daemon::DaemonRecord;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
-    Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
+    ShutdownSignal, Sleeper, Terminator,
 };
 
 /// An in-memory [`RecordFile`] standing in for `daemon.json` on disk.
@@ -101,6 +101,16 @@ pub struct FailingShutdown;
 impl ShutdownSignal for FailingShutdown {
     fn wait(&self) -> io::Result<()> {
         Err(io::Error::other("wait failed"))
+    }
+}
+
+/// A [`DaemonReady`] that publishes nothing, for lifecycle tests that do not
+/// exercise the endpoint boundary.
+pub struct NoopReady;
+
+impl DaemonReady for NoopReady {
+    fn publish(&self) -> io::Result<()> {
+        Ok(())
     }
 }
 

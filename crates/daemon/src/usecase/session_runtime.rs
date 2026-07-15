@@ -646,6 +646,7 @@ mod tests {
             .handle(SessionAction::Create, &operation, &json!({"name":"one"}))
             .unwrap();
         assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        drop(first);
 
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let mut restarted = SessionRuntime::open(

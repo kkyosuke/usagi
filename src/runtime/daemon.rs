@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::panic::{self, AssertUnwindSafe, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +19,8 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::{AgentProfileId, DurableLaunchSnapshot, EnvironmentVariableName};
 use usagi_core::domain::id::{SessionId, TerminalRef, WorkspaceId, WorktreeId};
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
-    Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
+    ShutdownSignal, Sleeper, Terminator,
 };
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
@@ -1004,20 +1005,35 @@ impl Terminator for SigtermTerminator {
     }
 }
 
-/// The IPC endpoint is published only after `serve` has acquired the process
-/// lock and registered its PID.  Starting it from the shutdown boundary keeps
-/// the socket's externally visible lifetime inside the daemon lifecycle: a
-/// replacement that is still waiting for the old lock holder cannot accept a
-/// session mutation and then exit as a duplicate daemon.
-struct SignalShutdown<'a> {
+/// Root-bound IPC publication seam. `serve` invokes it only after the daemon
+/// owns the singleton lock and has persisted its PID record. The guard makes a
+/// future duplicate invocation a no-op instead of binding a second endpoint.
+struct IpcReady<'a> {
     data_dir: &'a Path,
     info: &'a AppInfo,
+    published: AtomicBool,
 }
-impl ShutdownSignal for SignalShutdown<'_> {
+impl DaemonReady for IpcReady<'_> {
+    #[coverage(off)]
+    fn publish(&self) -> std::io::Result<()> {
+        if self
+            .published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            && let Err(error) = spawn_ipc_server(self.data_dir, self.info)
+        {
+            self.published.store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+struct SignalShutdown;
+impl ShutdownSignal for SignalShutdown {
     #[cfg(unix)]
     #[coverage(off)]
     fn wait(&self) -> std::io::Result<()> {
-        spawn_ipc_server(self.data_dir, self.info)?;
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&raw mut set);
@@ -1180,15 +1196,17 @@ fn run_inner<W: Write>(out: &mut W, command: Option<&str>, info: &AppInfo) -> st
         path: daemon_dir.join("daemon.lock"),
         held: RefCell::new(None),
     };
-    let shutdown = SignalShutdown {
+    let ready = IpcReady {
         data_dir: &data_dir,
         info,
+        published: AtomicBool::new(false),
     };
     let env = DaemonEnv {
         store: &store,
         probe: &KillProbe,
         terminator: &SigtermTerminator,
-        shutdown: &shutdown,
+        ready: &ready,
+        shutdown: &SignalShutdown,
         launcher: &launcher,
         sleeper: &RealSleeper,
         lock: &lock,

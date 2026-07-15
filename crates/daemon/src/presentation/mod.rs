@@ -8,8 +8,8 @@ use std::io::Write;
 
 use usagi_core::domain::AppInfo;
 use usagi_core::infrastructure::daemon::{
-    DaemonLauncher, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile, ShutdownSignal,
-    Sleeper, Terminator,
+    DaemonLauncher, DaemonReady, DaemonRecordStore, InstanceLock, LivenessProbe, RecordFile,
+    ShutdownSignal, Sleeper, Terminator,
 };
 
 use crate::usecase;
@@ -20,13 +20,15 @@ pub mod ipc;
 /// signal 0・SIGTERM・signal 待受・detached spawn・sleep・単一インスタンスロック・
 /// 自プロセス pid）を束ねて構築し、テストは fake を差し込む。[`run`] にまとめて渡すことで、
 /// verb ごとに必要な seam が増えても entry point の引数を平らに保つ。
-pub struct DaemonEnv<'a, F, P, T, S, L, K, M> {
+pub struct DaemonEnv<'a, F, P, T, R, S, L, K, M> {
     /// `daemon.json` の read/write/clear。
     pub store: &'a DaemonRecordStore<F>,
     /// pid の生存判定。
     pub probe: &'a P,
     /// 稼働中 daemon への終了要求（signal）。
     pub terminator: &'a T,
+    /// `serve` が PID 登録後に IPC endpoint を公開する ready hook。
+    pub ready: &'a R,
     /// `serve` が shutdown まで待つための待受。
     pub shutdown: &'a S,
     /// `start` が detached `serve` を spawn するための起動器。
@@ -59,6 +61,7 @@ pub fn run<
     P: LivenessProbe,
     T: Terminator,
     S: ShutdownSignal,
+    R: DaemonReady,
     L: DaemonLauncher,
     K: Sleeper,
     M: InstanceLock,
@@ -66,12 +69,18 @@ pub fn run<
     out: &mut W,
     subcommand: Option<&str>,
     info: &AppInfo,
-    env: &DaemonEnv<F, P, T, S, L, K, M>,
+    env: &DaemonEnv<F, P, T, R, S, L, K, M>,
 ) -> std::io::Result<()> {
     match subcommand {
-        None | Some("serve") => {
-            usecase::serve::serve(out, env.store, env.shutdown, env.lock, env.pid, info)
-        }
+        None | Some("serve") => usecase::serve::serve(
+            out,
+            env.store,
+            env.ready,
+            env.shutdown,
+            env.lock,
+            env.pid,
+            info,
+        ),
         Some("start") => {
             let line =
                 usecase::start::start(env.store, env.probe, env.launcher, env.sleeper, info)?;
@@ -104,7 +113,7 @@ pub fn run<
 mod tests {
     use super::{DaemonEnv, run};
     use crate::test_support::{
-        FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopSleeper,
+        FakeLock, FixedProbe, ImmediateShutdown, InMemoryRecordFile, NoopReady, NoopSleeper,
         RecordingTerminator, TestLauncher,
     };
     use usagi_core::domain::AppInfo;
@@ -128,10 +137,12 @@ mod tests {
             NoopSleeper,
         );
         let launcher = TestLauncher::idle(store);
+        let ready = NoopReady;
         let env = DaemonEnv {
             store,
             probe: &probe,
             terminator: &terminator,
+            ready: &ready,
             shutdown: &shutdown,
             launcher: &launcher,
             sleeper: &sleeper,
@@ -180,10 +191,12 @@ mod tests {
                 NoopSleeper,
             );
             let launcher = TestLauncher::registering(&store, 5555);
+            let ready = NoopReady;
             let env = DaemonEnv {
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,
+                ready: &ready,
                 shutdown: &shutdown,
                 launcher: &launcher,
                 sleeper: &sleeper,
@@ -243,10 +256,12 @@ mod tests {
         for subcommand in [Some("status"), Some("stop"), Some("start"), Some("restart")] {
             let store = DaemonRecordStore::new(InMemoryRecordFile::with("not json"));
             let launcher = TestLauncher::idle(&store);
+            let ready = NoopReady;
             let env = DaemonEnv {
                 store: &store,
                 probe: &probe,
                 terminator: &terminator,
+                ready: &ready,
                 shutdown: &shutdown,
                 launcher: &launcher,
                 sleeper: &sleeper,
