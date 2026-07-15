@@ -1141,7 +1141,7 @@ pub fn sidebar_row_at(
     }
     let body_height = height - CHROME_ROWS;
     if body_height == 1 {
-        return (row == CHROME_ROWS as u16).then_some(ws.selected);
+        return (usize::from(row) == CHROME_ROWS).then_some(ws.selected);
     }
     let body_capacity = body_height - 1;
     let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
