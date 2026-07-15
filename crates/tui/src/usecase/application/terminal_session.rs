@@ -370,6 +370,26 @@ mod tests {
     }
 
     #[test]
+    fn display_rows_shows_the_cursor_only_while_live() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 2, b"$ ", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        assert_eq!(session.display_rows()[0], "$ \x1b[7m \x1b[0m");
+
+        for state in [
+            SessionState::Disconnected,
+            SessionState::Orphaned,
+            SessionState::Exited,
+        ] {
+            session.state = state;
+            assert_eq!(session.display_rows(), session.rows());
+        }
+    }
+
+    #[test]
     fn connect_failure_reports_safe_feedback_without_a_subscription() {
         let mut port = FakePort {
             attach: vec![Err(TerminalError::Unavailable)],
