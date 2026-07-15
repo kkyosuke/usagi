@@ -654,7 +654,7 @@ impl WorkspaceUi {
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
             session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(session.rows())
+            Some(session.display_rows())
         } else {
             None
         };

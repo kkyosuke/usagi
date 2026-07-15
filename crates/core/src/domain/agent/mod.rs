@@ -379,6 +379,10 @@ mod tests {
             Ok(EnvironmentVariableName::new("TEST").unwrap())
         );
         assert_eq!(
+            EnvironmentVariableName::new("TERM").unwrap().as_str(),
+            "TERM"
+        );
+        assert_eq!(
             LaunchPlan::new(
                 AgentProfileId::new("test").unwrap(),
                 1,

@@ -208,8 +208,8 @@ terminal を停止しない。
 そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
 取得する: launch 直後に一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
 `Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去を解釈し、色などの styling は無視する）へ流し込み、
-その screen 行を右ペインへ clip して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・SGR の色と属性を解釈）へ流し込み、
+その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
 atomic snapshot（再 attach）で置き換える。
 
 live terminal に focus がある間、通常のキー（文字・Enter・Backspace・Tab・矢印など）は management ではなく

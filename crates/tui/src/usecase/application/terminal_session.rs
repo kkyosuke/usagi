@@ -160,6 +160,17 @@ impl TerminalSession {
         self.screen.rows()
     }
 
+    /// The rows projected into an active terminal pane, including its cursor.
+    #[must_use]
+    pub fn display_rows(&self) -> Vec<String> {
+        match self.state {
+            SessionState::Live => self.screen.rows_with_cursor(),
+            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
+                self.screen.rows()
+            }
+        }
+    }
+
     /// Attaches (or reattaches) and rebuilds the screen from the retained
     /// replay.  A prior transport error is cleared on success.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {

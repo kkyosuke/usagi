@@ -160,4 +160,10 @@ mod tests {
         );
         assert!(profile.resolve(&request("other")).is_err());
     }
+
+    #[test]
+    fn rejects_a_profile_without_a_working_directory() {
+        let profile = LoginShellProfile::new(BTreeMap::new(), PathBuf::new());
+        assert!(profile.resolve(&request("login-shell")).is_err());
+    }
 }
