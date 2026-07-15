@@ -618,6 +618,15 @@ impl Workspace {
         self.selected = self.state.sessions.len() + 1;
     }
 
+    /// Select a sidebar row resolved from a pointer hit test. Out-of-range
+    /// indices are ignored so a stale frame can never select a different row.
+    #[coverage(off)]
+    pub fn select_row(&mut self, index: usize) {
+        if index < self.row_count() {
+            self.selected = index;
+        }
+    }
+
     #[must_use]
     #[coverage(off)]
     pub fn creating_session_inline(&self) -> bool {
@@ -1107,6 +1116,72 @@ fn workspace_viewport_start(selected: usize, ws: &Workspace, capacity: usize) ->
         start += 1;
     }
     start.min(ws.row_count().saturating_sub(1))
+}
+
+/// Resolve a left-sidebar cell in the current frame to its selectable row.
+///
+/// The calculation deliberately follows [`left_pane`]'s viewport and pending
+/// skeleton layout, so a click can neither land on the divider/mascot/footer
+/// nor select a row hidden above the viewport.
+#[must_use]
+#[coverage(off)]
+pub fn sidebar_row_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    skeleton_frame: usize,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    if usize::from(column) >= split.left || usize::from(row) < CHROME_ROWS || height <= CHROME_ROWS
+    {
+        return None;
+    }
+    let body_height = height - CHROME_ROWS;
+    if body_height == 1 {
+        return (row == CHROME_ROWS as u16).then_some(ws.selected);
+    }
+    let body_capacity = body_height - 1;
+    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(
+        split.left,
+        skeleton_frame as u64,
+        None,
+        &metric_labels,
+    );
+    let mascot_rows = mascot
+        .as_ref()
+        .filter(|block| body_capacity >= block.reserved_rows() + 2)
+        .map_or(0, widgets::mascot::MascotBlock::reserved_rows);
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
+    let target = usize::from(row) - CHROME_ROWS;
+    if target >= content_capacity {
+        return None;
+    }
+
+    let start = workspace_viewport_start(ws.selected, ws, content_capacity);
+    let mut offset = 0;
+    for index in start..ws.row_count() {
+        let pending_rows =
+            usize::from(index == ws.sessions().len() + 1 && ws.pending_session.is_some()) * 2;
+        let entry_rows = pending_rows + workspace_row_height(index, ws);
+        if offset + entry_rows > content_capacity {
+            break;
+        }
+        if target >= offset && target < offset + entry_rows {
+            return (target >= offset + pending_rows).then_some(index);
+        }
+        offset += entry_rows;
+        if index == 0 && offset < content_capacity {
+            if target == offset {
+                return None;
+            }
+            offset += 1;
+        }
+    }
+    None
 }
 
 #[coverage(off)]
@@ -1899,7 +1974,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame,
+        render, render_home, render_with_skeleton_frame, sidebar_row_at,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2437,6 +2512,17 @@ mod tests {
         assert_eq!(ws.sessions().len(), 1);
         assert_eq!(ws.sessions()[0].name, "fresh");
         assert!(ws.root_selected());
+    }
+
+    #[test]
+    fn sidebar_hit_test_resolves_visible_session_rows_only() {
+        let ws = workspace();
+        // Two chrome rows, the two-line root, then its divider precede the
+        // two-line session rows in the sidebar.
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 5), Some(1));
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 7), Some(2));
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 4), None);
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 36, 5), None);
     }
 
     #[test]

@@ -752,6 +752,9 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
+                    if let LiveInput::Mouse { column, row } = input {
+                        return Ok(Key::Click { column, row });
+                    }
                     // Global control chords stay outside the live-prefix classifier.
                     if let Some(key) = control_key(&input) {
                         return Ok(key);
@@ -813,7 +816,9 @@ fn passthrough_key(input: &LiveInput) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => return Key::Other,
+        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) | LiveInput::Mouse { .. } => {
+            return Key::Other;
+        }
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably

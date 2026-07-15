@@ -8,7 +8,7 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode as CrosstermKeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    self, Event, KeyCode as CrosstermKeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
 use usagi_tui::usecase::terminal_input::{
     KeyCode, KeyEvent as InputKeyEvent, KeyEventKind as InputKeyEventKind, LiveInput, Modifiers,
@@ -132,6 +132,17 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
         Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),
         Event::Paste(text) => Some(RuntimeEvent::Input(LiveInput::Paste(text.into_bytes()))),
         Event::Resize(width, height) => Some(RuntimeEvent::Resize { width, height }),
+        Event::Mouse(mouse)
+            if matches!(
+                mouse.kind,
+                MouseEventKind::Down(crossterm::event::MouseButton::Left)
+            ) =>
+        {
+            Some(RuntimeEvent::Input(LiveInput::Mouse {
+                column: mouse.column,
+                row: mouse.row,
+            }))
+        }
         Event::FocusGained | Event::FocusLost | Event::Mouse(_) => None,
     }
 }
@@ -180,7 +191,9 @@ pub fn adapt_key(key: KeyEvent) -> InputKeyEvent {
 mod tests {
     use std::collections::VecDeque;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
 
     use super::*;
 
@@ -268,6 +281,27 @@ mod tests {
                 width: 120,
                 height: 40
             })
+        );
+    }
+
+    #[test]
+    fn adapter_preserves_left_click_coordinates_and_ignores_other_mouse_events() {
+        let left = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            adapt_event::<()>(Event::Mouse(left)),
+            Some(RuntimeEvent::Input(LiveInput::Mouse { column: 12, row: 7 }))
+        );
+        assert_eq!(
+            adapt_event::<()>(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                ..left
+            })),
+            None
         );
     }
 

@@ -70,6 +70,10 @@ Home controller の management input では、Switch の `Ctrl-A` は新規 sess
 は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は
 `LiveInputClassifier` が pane navigation として予約するため、この management transition に渡さない。
 
+左 sidebar の実 session 行は、左クリックで cursor を移し、同じ行を 400ms 以内にダブルクリックすると
+その session の Closeup を開く。root・`+ new session`・divider・mascot・footer はこの操作の対象外であり、
+modal と inline 作成中は背景の sidebar click を受け取らない。
+
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
 prefix の打鍵は live terminal への passthrough として扱う（`Ctrl-O`・`Ctrl-^` 以外は予約しない）。prefix の
