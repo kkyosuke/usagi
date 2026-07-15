@@ -4977,6 +4977,7 @@ mod tests {
                 Key::Char('k'),
                 Key::Char('j'),
                 Key::Char('z'),
+                Key::Click { column: 0, row: 5 },
                 Key::Other,
             ];
             keys.extend(navigation);

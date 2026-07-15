@@ -613,6 +613,23 @@ mod tests {
     }
 
     #[test]
+    fn mouse_input_clears_a_pending_leader_without_reaching_the_terminal() {
+        let mut classifier = LiveInputClassifier::default();
+        assert_eq!(
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
+        );
+        assert_eq!(
+            classifier.classify(
+                Duration::from_millis(1),
+                LiveInput::Mouse { column: 4, row: 9 },
+            ),
+            LiveInputOutput::Swallowed
+        );
+        assert!(!classifier.leader_pending(Duration::from_millis(1)));
+    }
+
+    #[test]
     fn encoder_covers_remaining_portable_key_variants() {
         let cases = [
             (KeyCode::Backspace, vec![0x7f]),
