@@ -660,6 +660,9 @@ impl AppState {
 /// terminal adapter が将来投影する入力語彙。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppKey {
+    /// Move the sidebar cursor to a row resolved by the presentation hit-test.
+    /// The reducer validates that the row belongs to the current snapshot.
+    Select(Selection),
     /// cursor を前の row へ動かす。
     Up,
     /// cursor を次の row へ動かす。
@@ -1774,6 +1777,12 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
 #[coverage(off)]
 fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     match key {
+        AppKey::Select(selection) => {
+            if state.rows().contains(&selection) {
+                state.selected = selection;
+            }
+            Vec::new()
+        }
         AppKey::Up => {
             state.move_selection(-1);
             Vec::new()
