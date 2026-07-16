@@ -210,6 +210,9 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Initial PTY geometry before the first render-derived viewport is available.
+const CONTROLLER_TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
+
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
     fn latest(&mut self) -> Option<DaemonMetrics>;
@@ -2593,11 +2596,13 @@ impl ControllerWorkspaceRuntime {
         self.metrics = port.latest();
     }
 
-    fn handle(&mut self, key: Key) -> bool {
-        if matches!(key, Key::Quit | Key::Char('q')) {
+    fn handle(&mut self, key: &Key) -> bool {
+        if self.panes.input_owner() != PaneInputOwner::Tab
+            && matches!(key, Key::Quit | Key::Char('q'))
+        {
             return true;
         }
-        if self.state.overlay() == Some(Overlay::QuitConfirmation) && key == Key::Enter {
+        if self.state.overlay() == Some(Overlay::QuitConfirmation) && *key == Key::Enter {
             let effects = crate::usecase::application::controller::update(
                 &mut self.state,
                 AppEvent::Key(AppKey::Enter),
@@ -2613,6 +2618,9 @@ impl ControllerWorkspaceRuntime {
         if self.forward_terminal_input(key) {
             return false;
         }
+        if matches!(key, Key::Quit | Key::Char('q')) {
+            return true;
+        }
         let app_key = match key {
             Key::Quit => return true,
             Key::Up => AppKey::Up,
@@ -2623,12 +2631,18 @@ impl ControllerWorkspaceRuntime {
             Key::Escape => AppKey::Escape,
             Key::CtrlQ => AppKey::CtrlQ,
             Key::Char(':') => AppKey::OpenOverview,
-            Key::Char(ch) => AppKey::Char(ch),
+            Key::Char(ch) => AppKey::Char(*ch),
             Key::Live(LiveTerminalAction::OpenCloseupModal) => AppKey::OpenCloseupOverlay,
             Key::Live(LiveTerminalAction::Switch) => AppKey::CtrlO,
             Key::Live(LiveTerminalAction::NextTab) => AppKey::CtrlN,
             Key::Live(LiveTerminalAction::PreviousTab) => AppKey::CtrlP,
-            Key::Left | Key::Right | Key::CtrlD | Key::Live(_) | Key::Other => return false,
+            Key::Left
+            | Key::Right
+            | Key::CtrlD
+            | Key::Live(_)
+            | Key::Passthrough(_)
+            | Key::Click { .. }
+            | Key::Other => return false,
         };
         let effects = crate::usecase::application::controller::update(
             &mut self.state,
@@ -2640,7 +2654,7 @@ impl ControllerWorkspaceRuntime {
             .any(|effect| matches!(effect, ControllerEffect::Detach))
     }
 
-    fn handle_modal_key(&mut self, key: Key) -> bool {
+    fn handle_modal_key(&mut self, key: &Key) -> bool {
         let overlay = self.state.overlay();
         let submit = match overlay {
             Some(Overlay::Overview) => Self::edit_overview(&mut self.overview, key),
@@ -2670,9 +2684,9 @@ impl ControllerWorkspaceRuntime {
         true
     }
 
-    fn edit_overview(modal: &mut OverviewModal, key: Key) -> Option<String> {
+    fn edit_overview(modal: &mut OverviewModal, key: &Key) -> Option<String> {
         match key {
-            Key::Char(ch) => modal.insert_char(ch),
+            Key::Char(ch) => modal.insert_char(*ch),
             Key::Backspace => modal.backspace(),
             Key::Tab => modal.complete_selected(),
             Key::Up => {
@@ -2690,10 +2704,10 @@ impl ControllerWorkspaceRuntime {
         None
     }
 
-    fn edit_closeup(modal: &mut CloseupModal, key: Key) -> Option<String> {
+    fn edit_closeup(modal: &mut CloseupModal, key: &Key) -> Option<String> {
         match key {
             Key::Char(ch) if modal.selection_mode() == ModalSelectionMode::Prompt => {
-                modal.insert_char(ch);
+                modal.insert_char(*ch);
             }
             Key::Backspace if modal.selection_mode() == ModalSelectionMode::Prompt => {
                 modal.backspace();
@@ -2798,7 +2812,11 @@ impl ControllerWorkspaceRuntime {
                 operation,
                 message: "terminal launch is unavailable".to_owned(),
             },
-            |agent| match agent.launch_terminal(self.state.workspace(), session) {
+            |agent| match agent.launch_terminal(
+                self.state.workspace(),
+                session,
+                CONTROLLER_TERMINAL_GEOMETRY,
+            ) {
                 Ok(terminal) => PaneEvent::Succeeded {
                     operation,
                     terminal,
@@ -2852,7 +2870,7 @@ impl ControllerWorkspaceRuntime {
             return;
         }
         if let Some(agent) = self.agent.as_mut() {
-            let mut session = TerminalSession::new(terminal, TERMINAL_GEOMETRY);
+            let mut session = TerminalSession::new(terminal, CONTROLLER_TERMINAL_GEOMETRY);
             session.connect(&mut AgentStreamPort(agent.as_mut()));
             self.terminals.push(session);
         }
@@ -2872,7 +2890,7 @@ impl ControllerWorkspaceRuntime {
         Some(session.rows())
     }
 
-    fn forward_terminal_input(&mut self, key: Key) -> bool {
+    fn forward_terminal_input(&mut self, key: &Key) -> bool {
         if self.panes.input_owner() != PaneInputOwner::Tab {
             return false;
         }
@@ -3026,7 +3044,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         let (height, width) = term.size()?;
         term.draw(&runtime.frame(height, width))?;
         let key = term.read_key()?;
-        if runtime.handle(key) {
+        if runtime.handle(&key) {
             return Ok(WorkspaceStep::Quit);
         }
     }
@@ -3475,9 +3493,9 @@ mod tests {
         SessionCommandResult, SnapshotOverlayData, Start, TerminalAttach, TerminalChunk,
         TerminalError, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
         WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
-        drain_session_completions, execute_closeup_command, key_to_terminal_bytes,
-        play_startup_splash, refresh_metrics, render_workspace, run as run_from_start,
-        run_with_settings,
+        drain_session_completions, execute_closeup_command, handle_sidebar_click,
+        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
@@ -3767,17 +3785,17 @@ mod tests {
         assert!(switch.contains("controller-runtime"));
         assert!(switch.contains("+ new session"));
 
-        assert!(!runtime.handle(Key::Char(':')));
+        assert!(!runtime.handle(&Key::Char(':')));
         assert!(
             runtime
                 .frame(24, 100)
                 .join("\n")
                 .contains("workspace commands")
         );
-        assert!(!runtime.handle(Key::Escape));
+        assert!(!runtime.handle(&Key::Escape));
 
-        assert!(!runtime.handle(Key::Down));
-        assert!(!runtime.handle(Key::Enter));
+        assert!(!runtime.handle(&Key::Down));
+        assert!(!runtime.handle(&Key::Enter));
         let closeup = runtime.frame(24, 100).join("\n");
         assert!(closeup.contains("[closeup]"));
         for key in [
@@ -3797,19 +3815,19 @@ mod tests {
             Key::CtrlD,
             Key::Other,
         ] {
-            assert!(!runtime.handle(key));
+            assert!(!runtime.handle(&key));
         }
 
         let mut confirmed_quit = ControllerWorkspaceRuntime::new(&snapshot("confirm-quit"));
-        assert!(!confirmed_quit.handle(Key::CtrlQ));
+        assert!(!confirmed_quit.handle(&Key::CtrlQ));
         assert!(
             confirmed_quit
                 .frame(24, 100)
                 .join("\n")
                 .contains("End workspace")
         );
-        assert!(confirmed_quit.handle(Key::Enter));
-        assert!(runtime.handle(Key::Char('q')));
+        assert!(confirmed_quit.handle(&Key::Enter));
+        assert!(runtime.handle(&Key::Char('q')));
     }
 
     fn recent(name: &str) -> Recent {
