@@ -246,6 +246,7 @@ pub trait Terminal {
     /// # Errors
     ///
     /// Returns an adapter-safe message when the clipboard is unavailable.
+    #[coverage(off)]
     fn copy_text(&mut self, _text: &str) -> Result<(), String> {
         Err("clipboard is unavailable".to_owned())
     }

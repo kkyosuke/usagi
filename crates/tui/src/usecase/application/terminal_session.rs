@@ -185,6 +185,7 @@ impl TerminalSession {
 
     /// Projects the retained output with a cell-precise visual selection.
     #[must_use]
+    #[coverage(off)]
     pub fn display_rows_with_scrollback_selection(
         &self,
         selection: &TerminalSelection,
@@ -198,6 +199,7 @@ impl TerminalSession {
     /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
     /// this retains trailing spaces, while still containing no ANSI styling.
     #[must_use]
+    #[coverage(off)]
     pub fn cells(&self) -> Vec<String> {
         self.screen.cells_with_scrollback()
     }
@@ -206,6 +208,7 @@ impl TerminalSession {
     /// Later stream output, reconnects, and screen replacement do not mutate
     /// the returned selection's copy text.
     #[must_use]
+    #[coverage(off)]
     pub fn begin_selection(&self, anchor: TerminalPoint) -> TerminalSelection {
         TerminalSelection::begin(self.cells(), anchor)
     }

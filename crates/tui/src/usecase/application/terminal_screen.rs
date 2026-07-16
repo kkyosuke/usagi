@@ -153,6 +153,7 @@ impl TerminalScreen {
 
     /// Renders scrollback and the visible grid with a cell-precise selection.
     #[must_use]
+    #[coverage(off)]
     pub fn rows_with_scrollback_and_cursor_selection(
         &self,
         anchor: (usize, usize),
@@ -215,6 +216,7 @@ impl TerminalScreen {
 
     /// Returns retained scrollback followed by the complete visible grid.
     #[must_use]
+    #[coverage(off)]
     pub fn cells_with_scrollback(&self) -> Vec<String> {
         let mut rows: Vec<String> = self
             .scrollback

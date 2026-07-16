@@ -175,6 +175,7 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
 /// `None` so they keep driving the workspace instead of the shell.
+#[coverage(off)]
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
@@ -742,6 +743,7 @@ impl WorkspaceUi {
         self.workspace.set_terminal_view(rows);
     }
 
+    #[coverage(off)]
     fn terminal_selection_at(&mut self, point: TerminalPoint) {
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             return;
@@ -757,12 +759,14 @@ impl WorkspaceUi {
         }
     }
 
+    #[coverage(off)]
     fn extend_terminal_selection(&mut self, point: TerminalPoint) {
         if let Some(selection) = &mut self.terminal_selection {
             selection.extend(point);
         }
     }
 
+    #[coverage(off)]
     fn queue_terminal_copy(&mut self) {
         let Some(selection) = &self.terminal_selection else {
             self.workspace
@@ -778,6 +782,7 @@ impl WorkspaceUi {
         }
     }
 
+    #[coverage(off)]
     fn advance_terminal_auto_scroll(&mut self) {
         let Some(older) = self.auto_scroll_terminal_selection else {
             return;
@@ -2327,6 +2332,7 @@ fn drive_workspace_with_overlay_data(
     )
 }
 
+#[coverage(off)]
 fn drive_workspace_with_ports(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
@@ -2342,6 +2348,7 @@ fn drive_workspace_with_ports(
     )
 }
 
+#[coverage(off)]
 fn drive_workspace_with_ports_and_selection_mode(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,

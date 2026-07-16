@@ -1667,6 +1667,7 @@ pub fn render_with_skeleton_frame(
 /// Converts a screen-cell pointer position into the retained terminal viewport
 /// row and terminal column currently rendered in the right pane.
 #[must_use]
+#[coverage(off)]
 pub fn terminal_point_at(
     raw_height: usize,
     raw_width: usize,

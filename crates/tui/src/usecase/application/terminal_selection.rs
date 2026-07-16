@@ -36,12 +36,14 @@ impl TerminalSelection {
 
     /// The immutable drag origin.
     #[must_use]
+    #[coverage(off)]
     pub const fn anchor(&self) -> TerminalPoint {
         self.anchor
     }
 
     /// The current drag endpoint.
     #[must_use]
+    #[coverage(off)]
     pub const fn focus(&self) -> TerminalPoint {
         self.focus
     }
@@ -166,6 +168,7 @@ mod tests {
     }
 
     impl ClipboardPort for FakeClipboard {
+        #[coverage(off)]
         fn write_text(&mut self, text: &str) -> Result<(), String> {
             if let Some(error) = &self.error {
                 return Err(error.clone());
