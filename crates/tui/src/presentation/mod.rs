@@ -2505,6 +2505,7 @@ struct ControllerWorkspaceRuntime {
     session_commands: Option<Box<dyn SessionCommandPort>>,
     overview: OverviewModal,
     closeup: CloseupModal,
+    pane_document: Option<Vec<String>>,
 }
 
 impl ControllerWorkspaceRuntime {
@@ -2530,6 +2531,7 @@ impl ControllerWorkspaceRuntime {
             terminals: Vec::new(),
             overview: OverviewModal::new(),
             closeup: CloseupModal::new(snapshot.workspace.name.clone()),
+            pane_document: None,
         }
     }
 
@@ -2557,7 +2559,8 @@ impl ControllerWorkspaceRuntime {
             &home
                 .with_pane(self.panes.active_pane())
                 .with_metrics(self.metrics.clone())
-                .with_terminal_rows(terminal_rows),
+                .with_terminal_rows(terminal_rows)
+                .with_pane_document(self.pane_document.clone()),
         );
         match self.state.overlay() {
             Some(Overlay::Overview) => {
@@ -2730,6 +2733,9 @@ impl ControllerWorkspaceRuntime {
                             operation: *operation_id,
                         },
                     );
+                    self.pane_document = Some(vec![
+                        "Diff data is unavailable until a backend projection arrives.".to_owned(),
+                    ]);
                 }
                 ControllerEffect::CreateSession { token, intent, .. } => {
                     self.create_session(*token, &intent.name);

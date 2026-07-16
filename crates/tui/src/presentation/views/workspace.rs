@@ -151,6 +151,7 @@ pub struct HomeProjection {
     closeup_action_visible: bool,
     metrics: Option<DaemonMetrics>,
     terminal_rows: Option<Vec<String>>,
+    pane_document: Option<Vec<String>>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -206,6 +207,7 @@ impl HomeProjection {
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
             metrics: None,
             terminal_rows: None,
+            pane_document: None,
         }
     }
 
@@ -250,6 +252,13 @@ impl HomeProjection {
     #[must_use]
     pub fn with_terminal_rows(mut self, terminal_rows: Option<Vec<String>>) -> Self {
         self.terminal_rows = terminal_rows;
+        self
+    }
+
+    /// Attach a safe non-terminal pane document, such as a diff fallback.
+    #[must_use]
+    pub fn with_pane_document(mut self, pane_document: Option<Vec<String>>) -> Self {
+        self.pane_document = pane_document;
         self
     }
 
@@ -2109,6 +2118,12 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
     if let Some(terminal_rows) = &home.terminal_rows {
         rows.extend(
             terminal_rows
+                .iter()
+                .map(|row| widgets::clip_to_width(row, width)),
+        );
+    } else if let Some(document) = &home.pane_document {
+        rows.extend(
+            document
                 .iter()
                 .map(|row| widgets::clip_to_width(row, width)),
         );
