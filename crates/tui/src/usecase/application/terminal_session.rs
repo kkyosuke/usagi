@@ -421,7 +421,7 @@ mod tests {
         session.connect(&mut port);
         assert_eq!(
             session.display_rows()[0],
-            format!("$ \x1b[7m\u{e0001} \x1b[0m")
+            "$ \x1b[7m\u{e0001} \x1b[0m".to_string()
         );
 
         for state in [
