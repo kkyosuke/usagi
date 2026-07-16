@@ -36,6 +36,8 @@ pub mod terminal_screen;
 pub mod terminal_selection;
 /// Polling coordinator mirroring one daemon-owned terminal into a screen grid.
 pub mod terminal_session;
+/// Read/write ports for controller-owned workspace documents and editors.
+pub mod workspace_content;
 
 /// Workspace 画面の描画に必要な、workspace identity と永続化済み state の組。
 #[derive(Debug, Clone, PartialEq, Eq)]
