@@ -171,6 +171,17 @@ impl TerminalSession {
         }
     }
 
+    /// The retained terminal history projected into an active terminal pane.
+    #[must_use]
+    pub fn display_rows_with_scrollback(&self) -> Vec<String> {
+        match self.state {
+            SessionState::Live => self.screen.rows_with_scrollback_and_cursor(),
+            SessionState::Disconnected | SessionState::Orphaned | SessionState::Exited => {
+                self.screen.rows_with_scrollback()
+            }
+        }
+    }
+
     /// Attaches (or reattaches) and rebuilds the screen from the retained
     /// replay.  A prior transport error is cleared on success.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
@@ -387,6 +398,21 @@ mod tests {
             session.state = state;
             assert_eq!(session.display_rows(), session.rows());
         }
+    }
+
+    #[test]
+    fn scrollback_display_hides_the_cursor_after_the_session_stops() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(1, 0, b"one\r\ntwo\r\nthree", false))],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        session.state = SessionState::Exited;
+        assert_eq!(
+            session.display_rows_with_scrollback(),
+            vec!["one", "two", "three"]
+        );
     }
 
     #[test]

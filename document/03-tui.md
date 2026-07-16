@@ -221,6 +221,11 @@ terminal を停止しない。
 その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
 atomic snapshot（再 attach）で置き換える。
 
+screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
+表示する。`Ctrl-O u` / `Ctrl-O d` とホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
+replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
+history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
+
 live terminal に focus がある間、通常のキー（文字・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了

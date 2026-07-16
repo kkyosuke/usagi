@@ -365,6 +365,9 @@ pub struct Workspace {
     /// 選択中 live terminal tab の描画済み screen 行。runtime が redraw ごとに
     /// daemon から poll した内容を投影する presentation-only の値。
     terminal_view: Option<Vec<String>>,
+    /// Number of retained terminal rows kept below the viewport. Zero follows
+    /// live output; this belongs to the selected target's presentation state.
+    terminal_scroll: usize,
 }
 
 impl Workspace {
@@ -417,6 +420,7 @@ impl Workspace {
             metrics: None,
             git_diffs: BTreeMap::new(),
             terminal_view: None,
+            terminal_scroll: 0,
         }
     }
 
@@ -891,6 +895,21 @@ impl Workspace {
     #[coverage(off)]
     pub fn set_terminal_view(&mut self, rows: Option<Vec<String>>) {
         self.terminal_view = rows;
+        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
+        self.terminal_scroll = self.terminal_scroll.min(len.saturating_sub(1));
+    }
+
+    /// Move one retained row toward older terminal output.
+    #[coverage(off)]
+    pub fn terminal_scroll_up(&mut self) {
+        let len = self.terminal_view.as_ref().map_or(0, Vec::len);
+        self.terminal_scroll = (self.terminal_scroll + 1).min(len.saturating_sub(1));
+    }
+
+    /// Move one retained row back toward the live terminal bottom.
+    #[coverage(off)]
+    pub fn terminal_scroll_down(&mut self) {
+        self.terminal_scroll = self.terminal_scroll.saturating_sub(1);
     }
 
     #[coverage(off)]
@@ -1541,10 +1560,14 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         rows.extend(chrome);
         rows.push(String::new());
         if let Some(view) = &ws.terminal_view {
-            // A focused live terminal renders daemon PTY output. Reserve the last
-            // line for the footer and clip each screen row to the pane width.
-            let content_cap = height.saturating_sub(rows.len() + 1);
-            for line in view.iter().take(content_cap) {
+            // A focused live terminal renders daemon PTY output. Reserve the
+            // footer and its breathing row, then clip each screen row to the
+            // pane width.
+            let content_cap = height.saturating_sub(rows.len() + 2);
+            let start = view
+                .len()
+                .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+            for line in view.iter().skip(start).take(content_cap) {
                 rows.push(widgets::clip_to_width(line, width));
             }
         } else if let Some(document) = ws.pane_document() {
@@ -1558,24 +1581,30 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
         rows.push(widgets::pad_to_width(&header, width));
         rows.extend(widgets::session_tab::empty_pane(
             width,
-            height.saturating_sub(2),
+            height.saturating_sub(3),
             "No tabs stirring yet. Enter starts one.",
         ));
     }
-    with_footer(rows, height, right_footer(width, ws))
+    with_footer_gap(rows, height, right_footer(width, ws))
 }
 
 // ── composition ─────────────────────────────────────────────────────────────
 
-/// `rows` を `height` 行に収め、`footer` を最下行に固定する（本文が溢れたら切り、足りなければ
-/// 空行で詰める）。
+/// Pins a right-pane footer while preserving one blank breathing row above it.
+/// Tiny terminals degrade to a footer-only row rather than overflowing.
 #[coverage(off)]
-fn with_footer(mut rows: Vec<String>, height: usize, footer: String) -> Vec<String> {
-    let body_cap = height.saturating_sub(1);
+fn with_footer_gap(mut rows: Vec<String>, height: usize, footer: String) -> Vec<String> {
+    if height == 0 {
+        return Vec::new();
+    }
+    if height == 1 {
+        return vec![footer];
+    }
+    let body_cap = height - 2;
     rows.truncate(body_cap);
     rows.resize(body_cap, String::new());
+    rows.push(String::new());
     rows.push(footer);
-    rows.truncate(height);
     rows
 }
 
@@ -1916,11 +1945,11 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         let mut rows = vec![header];
         rows.extend(widgets::session_tab::empty_pane_with_detail(
             width,
-            height.saturating_sub(2),
+            height.saturating_sub(3),
             "No tabs stirring yet. Enter starts one.",
             feedback.as_deref(),
         ));
-        return with_footer(rows, height, footer);
+        return with_footer_gap(rows, height, footer);
     }
 
     let indicators = home
@@ -1942,7 +1971,7 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
-    with_footer(
+    with_footer_gap(
         vec![
             chrome[0].clone(),
             chrome[1].clone(),
@@ -2006,7 +2035,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame, sidebar_row_at,
+        render, render_home, render_with_skeleton_frame, sidebar_row_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2060,6 +2089,37 @@ mod tests {
             updated_at: now(),
         };
         Workspace::new(record, state)
+    }
+
+    #[test]
+    fn terminal_scroll_is_bounded_by_retained_history_and_returns_to_live_bottom() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some(vec![
+            "old".to_string(),
+            "middle".to_string(),
+            "live".to_string(),
+        ]));
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        assert_eq!(ws.terminal_scroll, 2);
+        ws.terminal_scroll_down();
+        assert_eq!(ws.terminal_scroll, 1);
+        ws.set_terminal_view(Some(vec!["live".to_string()]));
+        assert_eq!(
+            ws.terminal_scroll, 0,
+            "a shorter replay normalizes stale scroll"
+        );
+    }
+
+    #[test]
+    fn right_pane_footer_keeps_a_blank_breathing_row() {
+        let rows = with_footer_gap(vec!["body".to_string()], 4, "footer".to_string());
+        assert_eq!(rows, vec!["body", "", "", "footer"]);
+        assert_eq!(
+            with_footer_gap(Vec::new(), 1, "footer".to_string()),
+            vec!["footer"]
+        );
     }
 
     fn workspace_with_sessions(count: usize) -> Workspace {

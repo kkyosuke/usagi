@@ -707,7 +707,7 @@ impl WorkspaceUi {
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
             session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(session.display_rows())
+            Some(session.display_rows_with_scrollback())
         } else {
             None
         };
@@ -817,6 +817,13 @@ impl WorkspaceUi {
         self.workspace.enter_switch();
         self.modal = None;
         self.closeup_action_forced = false;
+    }
+
+    /// Closeup の session 移動後に、表示・入力 target を選択行へ同期する。
+    #[coverage(off)]
+    fn select_previous_session(&mut self) {
+        self.workspace.select_prev();
+        self.open_closeup(false);
     }
 
     /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
@@ -1813,6 +1820,9 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
         LiveTerminalAction::CloseTab => ui.close_focused_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
+        LiveTerminalAction::PreviousSession => ui.select_previous_session(),
+        LiveTerminalAction::ScrollUp => ui.workspace.terminal_scroll_up(),
+        LiveTerminalAction::ScrollDown => ui.workspace.terminal_scroll_down(),
     }
     WorkspaceStep::Stay
 }

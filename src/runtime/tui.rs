@@ -803,7 +803,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
             return Key::Passthrough(bytes);
         }
-        LiveInput::Mouse { .. } => return Key::Other,
+        LiveInput::Mouse { .. } | LiveInput::WheelUp | LiveInput::WheelDown => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably

@@ -9,7 +9,8 @@
 //! It is pure and holds no IO, so it is exercised entirely by unit tests.
 //!
 //! Out of scope on purpose: double-width (CJK) cells are stored as a single
-//! grid column, alternate screen buffers, and scrollback beyond the viewport.
+//! grid column and alternate screen buffers. Scrollback is retained locally
+//! with a bounded history for the pane viewport.
 
 /// Escape-sequence parser position.  Only these five states are reachable; any
 /// byte that does not belong to the active state returns the parser to
@@ -50,6 +51,10 @@ pub struct TerminalScreen {
     rows: usize,
     cols: usize,
     grid: Vec<Vec<Cell>>,
+    /// Rows pushed off the visible grid. Keeping this at the terminal decoder
+    /// layer preserves the exact terminal semantics for both agent and shell
+    /// panes while the view chooses which rows to project.
+    scrollback: Vec<Vec<Cell>>,
     cursor_row: usize,
     cursor_col: usize,
     phase: Phase,
@@ -76,6 +81,7 @@ impl TerminalScreen {
             rows,
             cols,
             grid: vec![vec![Cell::blank(); cols]; rows],
+            scrollback: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
             phase: Phase::Ground,
@@ -102,6 +108,44 @@ impl TerminalScreen {
             .iter()
             .map(|row| render_row(row, None, ""))
             .collect()
+    }
+
+    /// Renders retained scrollback followed by the visible terminal grid.
+    #[must_use]
+    pub fn rows_with_scrollback(&self) -> Vec<String> {
+        let mut rows: Vec<_> = self
+            .scrollback
+            .iter()
+            .map(|row| render_row(row, None, ""))
+            .chain(self.grid.iter().map(|row| render_row(row, None, "")))
+            .collect();
+        // The visible grid is fixed-height, but its unused tail is not terminal
+        // content. Dropping it lets the live viewport stay anchored to the last
+        // meaningful output instead of a screenful of padding.
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
+    }
+
+    /// Renders retained scrollback and the visible grid with the current PTY
+    /// cursor as an inverted cell.
+    #[must_use]
+    #[coverage(off)] // Iterator closure instrumentation is emitted twice by coverage builds.
+    pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
+        let mut rows: Vec<_> = self
+            .scrollback
+            .iter()
+            .map(|row| render_row(row, None, ""))
+            .chain(self.grid.iter().enumerate().map(|(row, cells)| {
+                let cursor = (row == self.cursor_row).then_some(self.cursor_col);
+                render_row(cells, cursor, &self.style)
+            }))
+            .collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
     }
 
     /// Renders the grid with the current PTY cursor as an inverted cell.
@@ -298,7 +342,13 @@ impl TerminalScreen {
 
     fn line_feed(&mut self) {
         if self.cursor_row + 1 >= self.rows {
-            self.grid.remove(0);
+            self.scrollback.push(self.grid.remove(0));
+            // Bounded client-side history: the daemon remains authoritative for
+            // retained replay, while a long-running pane cannot grow this view
+            // without limit.
+            if self.scrollback.len() > 10_000 {
+                self.scrollback.remove(0);
+            }
             self.grid.push(vec![Cell::blank(); self.cols]);
         } else {
             self.cursor_row += 1;
@@ -464,6 +514,26 @@ mod tests {
         let mut screen = TerminalScreen::new(2, 3);
         screen.advance(b"a\r\nb\r\nc");
         assert_eq!(screen.rows(), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn scrollback_retains_rows_pushed_off_the_visible_grid() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo\r\nthree");
+        assert_eq!(screen.rows(), vec!["two", "three"]);
+        assert_eq!(screen.rows_with_scrollback(), vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn scrollback_omits_unused_visible_rows_and_is_bounded() {
+        let mut screen = TerminalScreen::new(2, 8);
+        screen.advance(b"one\r\ntwo\r\n");
+        assert_eq!(screen.rows_with_scrollback(), vec!["one", "two"]);
+
+        for _ in 0..10_001 {
+            screen.advance(b"x\r\n");
+        }
+        assert_eq!(screen.scrollback.len(), 10_000);
     }
 
     #[test]
