@@ -69,10 +69,10 @@ Success を保つ。Closeup では cursor を
 skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
 CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を壊さない。
 
-Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。Closeup
-の `Ctrl-A` は active target の Closeup action overlay を開き、作成フォームを開かない。Closeup の `Ctrl-O`
-は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は
-`LiveInputClassifier` が pane navigation として予約するため、この management transition に渡さない。
+Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開き、`Ctrl-Q`
+は workspace 終了確認、`Ctrl-C` は TUI 終了として扱う。Closeup の live pane は `Ctrl-O` prefix 以外の
+入力を所有するため、同じ control bytes は management transition に渡さない。Closeup の `Ctrl-O o` は
+Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。
 
 左 sidebar の実 session 行は、左クリックで cursor を移し、同じ行を 400ms 以内にダブルクリックすると
 その session の Closeup を開く。root・`+ new session`・divider・mascot・footer はこの操作の対象外であり、
@@ -81,7 +81,7 @@ modal と inline 作成中は背景の sidebar click を受け取らない。
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
 prefix の打鍵は live terminal への passthrough として扱う。TUI が予約するのは `Ctrl-O` prefix だけであり、
-Ctrl-C、Esc、Ctrl-^ を含むその他の bytes は PTY へ送る。prefix の
+Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q、Esc、Ctrl-^ を含むその他の bytes は PTY へ送る。prefix の
 follow-up は下表のアクションに解決する。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を

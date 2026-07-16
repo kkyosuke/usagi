@@ -172,8 +172,8 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 }
 
 /// Maps a management [`Key`] to the bytes a focused live terminal should
-/// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
-/// `None` so they keep driving the workspace instead of the shell.
+/// receive.  Reserved prefix actions ([`Key::Live`]) return `None`; all other
+/// keys, including global controls, are encoded when Closeup owns a live pane.
 fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
     let bytes = match key {
         Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
@@ -186,9 +186,10 @@ fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Click { .. } | Key::Other => {
-            return None;
-        }
+        Key::Quit => vec![3],
+        Key::CtrlQ => vec![17],
+        Key::CtrlD => vec![4],
+        Key::Live(_) | Key::Click { .. } | Key::Other => return None,
     };
     Some(bytes)
 }
@@ -1920,9 +1921,9 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
-    // A focused live terminal owns ordinary keys (letters, Enter, arrows) so
-    // shell input reaches the daemon PTY.  Reserved chords and the global quit
-    // keys fall through, and any open modal keeps priority.
+    // Closeup's focused live terminal owns every non-prefix key. Switch has no
+    // pane input owner, so the same semantic keys continue to drive the TUI.
+    // Any open modal keeps priority.
     if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(&key) {
         return WorkspaceStep::Stay;
     }
@@ -4344,6 +4345,18 @@ mod tests {
         for character in ['a', 'o', 'x'] {
             let _ = step_workspace(&mut ui, Key::Char(character));
         }
+        // Closeup sends semantic global controls to the pane too.  The runtime
+        // restores these keys for Switch, while this earlier forwarding step
+        // preserves the pane's ownership in Closeup.
+        for key in [
+            Key::Char('\u{1}'),
+            Key::Quit,
+            Key::CtrlD,
+            Key::CtrlQ,
+            Key::Escape,
+        ] {
+            let _ = step_workspace(&mut ui, key);
+        }
         assert_eq!(
             *inputs.lock().unwrap(),
             vec![
@@ -4353,6 +4366,11 @@ mod tests {
                 (5, 3, b"a".to_vec()),
                 (5, 4, b"o".to_vec()),
                 (5, 5, b"x".to_vec()),
+                (5, 6, vec![1]),
+                (5, 7, vec![3]),
+                (5, 8, vec![4]),
+                (5, 9, vec![17]),
+                (5, 10, vec![0x1b]),
             ]
         );
 
@@ -4367,7 +4385,7 @@ mod tests {
         );
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
         let _ = step_workspace(&mut ui, Key::Char('a'));
-        assert_eq!(inputs.lock().unwrap().len(), 6);
+        assert_eq!(inputs.lock().unwrap().len(), 11);
 
         let _ = step_workspace(
             &mut ui,
@@ -4435,7 +4453,7 @@ mod tests {
     }
 
     #[test]
-    fn key_to_terminal_bytes_encodes_input_and_ignores_control_chords() {
+    fn key_to_terminal_bytes_encodes_every_non_prefix_key() {
         assert_eq!(key_to_terminal_bytes(&Key::Char('a')), Some(b"a".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Enter), Some(b"\r".to_vec()));
         assert_eq!(
@@ -4448,8 +4466,9 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(&Key::Down), Some(b"\x1b[B".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Right), Some(b"\x1b[C".to_vec()));
         assert_eq!(key_to_terminal_bytes(&Key::Left), Some(b"\x1b[D".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Quit), None);
-        assert_eq!(key_to_terminal_bytes(&Key::CtrlQ), None);
+        assert_eq!(key_to_terminal_bytes(&Key::Quit), Some(vec![3]));
+        assert_eq!(key_to_terminal_bytes(&Key::CtrlQ), Some(vec![17]));
+        assert_eq!(key_to_terminal_bytes(&Key::CtrlD), Some(vec![4]));
         assert_eq!(key_to_terminal_bytes(&Key::Other), None);
         assert_eq!(
             key_to_terminal_bytes(&Key::Live(

@@ -811,18 +811,24 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     if matches!(key.kind, KeyEventKind::Release) {
         return Key::Other;
     }
-    // The live classifier has reserved only Ctrl-O. Keep every other control
-    // chord (including Ctrl-C and Ctrl-^) as its original encoded bytes so a
-    // focused pane, rather than the TUI, owns it.
-    if key.modifiers.control || matches!(key.code, KeyCode::Escape) {
+    // Switch has no focused pane, so its global shortcuts must remain visible
+    // to the workspace.  Closeup forwards these semantic keys back to their
+    // original bytes before it considers workspace actions.
+    if key.modifiers.control {
+        match key.code {
+            KeyCode::Char('a' | '\u{1}') => return Key::Char('\u{1}'),
+            KeyCode::Char('c' | '\u{3}') => return Key::Quit,
+            KeyCode::Char('d' | '\u{4}') => return Key::CtrlD,
+            KeyCode::Char('q' | '\u{11}') => return Key::CtrlQ,
+            _ => {}
+        }
+    }
+    if matches!(key.code, KeyCode::Escape) {
         return Key::Passthrough(bytes);
     }
     // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
-    // action. Preserve it as a control byte so typing `c` directly on the
-    // action row can still start a session name with that character.
-    if (key.modifiers.control && key.code == KeyCode::Char('a'))
-        || key.code == KeyCode::Char('\u{1}')
-    {
+    // action. Some decoders deliver the control byte without a modifier.
+    if key.code == KeyCode::Char('\u{1}') {
         return Key::Char('\u{1}');
     }
     match key.code {
@@ -1142,7 +1148,7 @@ mod tests {
     };
 
     #[test]
-    fn control_bytes_remain_passthrough() {
+    fn control_shortcuts_remain_available_outside_closeup() {
         let key = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('a'),
             Modifiers {
@@ -1151,7 +1157,7 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key, vec![1]), Key::Passthrough(vec![1]));
+        assert_eq!(passthrough_key(&key, vec![1]), Key::Char('\u{1}'));
 
         let ctrl_c = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('c'),
@@ -1161,7 +1167,17 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&ctrl_c, vec![3]), Key::Passthrough(vec![3]));
+        assert_eq!(passthrough_key(&ctrl_c, vec![3]), Key::Quit);
+
+        let ctrl_q = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&ctrl_q, vec![17]), Key::CtrlQ);
 
         let escape = LiveInput::Key(KeyEvent::new(
             KeyCode::Escape,
