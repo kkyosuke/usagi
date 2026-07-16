@@ -174,6 +174,16 @@ impl TerminalScreen {
             .collect()
     }
 
+    /// Returns retained scrollback followed by the complete visible grid.
+    #[must_use]
+    pub fn cells_with_scrollback(&self) -> Vec<String> {
+        self.scrollback
+            .iter()
+            .chain(&self.grid)
+            .map(|row| row.iter().map(|cell| cell.ch).collect())
+            .collect()
+    }
+
     /// The zero-based cursor position, clamped inside the grid.
     #[must_use]
     pub const fn cursor(&self) -> (usize, usize) {

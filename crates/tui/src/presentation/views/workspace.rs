@@ -1673,6 +1673,39 @@ pub fn render_with_skeleton_frame(
     frame
 }
 
+/// Converts a screen-cell pointer position into the retained terminal viewport
+/// row and terminal column currently rendered in the right pane.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_point_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let right_left = split.left.saturating_add(1);
+    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
+    let column = usize::from(column).checked_sub(right_left)?;
+    let view = ws.terminal_view.as_ref()?;
+    let body_height = height.saturating_sub(CHROME_ROWS);
+    let content_top = 3;
+    let content_cap = body_height.saturating_sub(content_top + 2);
+    let content_row = body_row.checked_sub(content_top)?;
+    if content_row >= content_cap {
+        return None;
+    }
+    let start = view
+        .len()
+        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+    Some(TerminalPoint {
+        row: start + content_row,
+        column,
+    })
+}
+
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は

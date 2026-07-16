@@ -187,7 +187,7 @@ impl TerminalSession {
     /// this retains trailing spaces, while still containing no ANSI styling.
     #[must_use]
     pub fn cells(&self) -> Vec<String> {
-        self.screen.cells()
+        self.screen.cells_with_scrollback()
     }
 
     /// Starts a stable selection from the current visible terminal cells.

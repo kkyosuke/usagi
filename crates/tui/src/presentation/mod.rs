@@ -537,6 +537,7 @@ struct WorkspaceUi {
     terminals: Vec<TerminalSession>,
     terminal_selection: Option<TerminalSelection>,
     pending_clipboard_text: Option<String>,
+    terminal_size: (usize, usize),
 }
 
 /// The maximum gap between two presses on the same sidebar session row.
@@ -661,12 +662,17 @@ impl WorkspaceUi {
             terminals: Vec::new(),
             terminal_selection: None,
             pending_clipboard_text: None,
+            terminal_size: (0, 0),
         }
     }
 
     fn with_metrics_port(mut self, metrics_port: Box<dyn MetricsPort>) -> Self {
         self.metrics_port = metrics_port;
         self
+    }
+
+    fn set_terminal_size(&mut self, height: usize, width: usize) {
+        self.terminal_size = (height, width);
     }
 
     fn with_agent_context(
@@ -1867,14 +1873,14 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
 
 #[coverage(off)]
 fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Option<PointerKind>) {
-    const CONTENT_TOP: u16 = 5;
-    const RIGHT_LEFT: u16 = 37;
-    if column < RIGHT_LEFT || row < CONTENT_TOP {
+    let Some(point) = workspace::terminal_point_at(
+        ui.terminal_size.0,
+        ui.terminal_size.1,
+        &ui.workspace,
+        column,
+        row,
+    ) else {
         return;
-    }
-    let point = TerminalPoint {
-        row: usize::from(row - CONTENT_TOP),
-        column: usize::from(column - RIGHT_LEFT),
     };
     match kind {
         None => ui.terminal_selection_at(point),
@@ -2242,6 +2248,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
+        ui.set_terminal_size(height, width);
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
@@ -2383,6 +2390,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         refresh_metrics(&mut ui);
         ui.refresh_terminal();
         let (height, width) = term.size()?;
+        ui.set_terminal_size(height, width);
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
