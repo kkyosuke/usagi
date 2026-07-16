@@ -2750,6 +2750,9 @@ impl ControllerWorkspaceRuntime {
                 ControllerEffect::CreateSession { token, intent, .. } => {
                     self.create_session(*token, &intent.name);
                 }
+                ControllerEffect::RemoveSession { session, force, .. } => {
+                    self.remove_session(*session, *force);
+                }
                 _ => {}
             }
         }
@@ -2909,6 +2912,41 @@ impl ControllerWorkspaceRuntime {
         self.sync_active_pane();
     }
 
+    fn remove_session(&mut self, session: SessionId, force: bool) {
+        let Some(name) = self
+            .sessions
+            .iter()
+            .find(|projected| projected.id == session)
+            .map(|projected| projected.label.clone())
+        else {
+            return;
+        };
+        let result = self.session_commands.as_mut().map_or_else(
+            || Err("session commands are unavailable".to_owned()),
+            |port| {
+                port.execute(
+                    &self.workspace,
+                    None,
+                    SessionCommand::Remove { name, force },
+                )
+            },
+        );
+        match result {
+            Ok(result) => self.apply_session_snapshot(result),
+            Err(message) => {
+                let _ = crate::usecase::application::controller::update(
+                    &mut self.state,
+                    AppEvent::Backend(
+                        crate::usecase::application::controller::BackendEvent::Notice(
+                            crate::usecase::application::controller::Notice::new(message),
+                        ),
+                    ),
+                );
+            }
+        }
+        self.sync_active_pane();
+    }
+
     fn apply_created_session(
         &mut self,
         token: PendingToken,
@@ -2923,7 +2961,11 @@ impl ControllerWorkspaceRuntime {
                     .and_then(|index| ids.get(index).copied())
             })
         });
-        self.apply_operation_result(token, true, created, result.message);
+        self.apply_operation_result(token, true, created, result.message.clone());
+        self.apply_session_snapshot(result);
+    }
+
+    fn apply_session_snapshot(&mut self, result: SessionCommandResult) {
         if let (Some(records), Some(ids)) = (result.sessions, result.session_ids)
             && records.len() == ids.len()
         {
