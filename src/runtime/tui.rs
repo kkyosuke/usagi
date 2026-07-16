@@ -671,7 +671,7 @@ struct CrosstermTerminal {
     input_started: Instant,
     renderer: FrameRenderer,
     /// live-terminal `Ctrl-O` prefix の SSoT。leader を保持して follow-up を
-    /// [`Key::Live`] へ翻訳する。`Ctrl-O`・`Ctrl-^` 以外は passthrough として従来の
+    /// [`Key::Live`] へ翻訳する。`Ctrl-O` 以外は passthrough として従来の
     /// `Key` マッピングに委ねるため、live terminal への passthrough を壊さない。
     live_input: LiveInputClassifier,
 }
@@ -759,10 +759,6 @@ impl Terminal for CrosstermTerminal {
                     if let LiveInput::Mouse { column, row } = input {
                         return Ok(Key::Click { column, row });
                     }
-                    // Global control chords stay outside the live-prefix classifier.
-                    if let Some(key) = control_key(&input) {
-                        return Ok(key);
-                    }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
                         // A resolved `Ctrl-O` prefix action drives the live runtime.
@@ -771,7 +767,9 @@ impl Terminal for CrosstermTerminal {
                         LiveInputOutput::Swallowed => {}
                         // Everything else is a normal key; preserve the prior mapping so
                         // non-prefix keys and future PTY passthrough are unchanged.
-                        LiveInputOutput::Passthrough(_) => return Ok(passthrough_key(&input)),
+                        LiveInputOutput::Passthrough(bytes) => {
+                            return Ok(passthrough_key(&input, bytes));
+                        }
                     }
                 }
                 RuntimeEvent::Resize { .. } => {
@@ -786,29 +784,11 @@ impl Terminal for CrosstermTerminal {
     }
 }
 
-/// Map global control chords before their bytes can reach a text field.
-///
-/// [`Key::CtrlD`] has an effect only in Open Workspace; other screens explicitly
-/// ignore it. Keeping it as a dedicated key prevents a U+0004 control character
-/// from being inserted into their inputs.
-#[coverage(off)]
-fn control_key(input: &LiveInput) -> Option<Key> {
-    let LiveInput::Key(key) = input else {
-        return None;
-    };
-    key.modifiers.control.then_some(match key.code {
-        KeyCode::Char('c') => Some(Key::Quit),
-        KeyCode::Char('q') => Some(Key::CtrlQ),
-        KeyCode::Char('d') => Some(Key::CtrlD),
-        _ => None,
-    })?
-}
-
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
 /// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
 /// for every other key and text/paste payload.
 #[coverage(off)]
-fn passthrough_key(input: &LiveInput) -> Key {
+fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     let key = match input {
         LiveInput::Key(key) => key,
         // Some terminal decoders preserve Return as its original byte instead
@@ -820,12 +800,10 @@ fn passthrough_key(input: &LiveInput) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_)
-        | LiveInput::Text(_)
-        | LiveInput::Paste(_)
-        | LiveInput::Mouse { .. }
-        | LiveInput::WheelUp
-        | LiveInput::WheelDown => return Key::Other,
+        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
+            return Key::Passthrough(bytes);
+        }
+        LiveInput::Mouse { .. } | LiveInput::WheelUp | LiveInput::WheelDown => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably
@@ -833,12 +811,24 @@ fn passthrough_key(input: &LiveInput) -> Key {
     if matches!(key.kind, KeyEventKind::Release) {
         return Key::Other;
     }
+    // Switch has no focused pane, so its global shortcuts must remain visible
+    // to the workspace.  Closeup forwards these semantic keys back to their
+    // original bytes before it considers workspace actions.
+    if key.modifiers.control {
+        match key.code {
+            KeyCode::Char('a' | '\u{1}') => return Key::Char('\u{1}'),
+            KeyCode::Char('c' | '\u{3}') => return Key::Quit,
+            KeyCode::Char('d' | '\u{4}') => return Key::CtrlD,
+            KeyCode::Char('q' | '\u{11}') => return Key::CtrlQ,
+            _ => {}
+        }
+    }
+    if matches!(key.code, KeyCode::Escape) {
+        return Key::Passthrough(bytes);
+    }
     // Ctrl-A is the IME-safe shortcut for the persistent `+ new session`
-    // action. Preserve it as a control byte so typing `c` directly on the
-    // action row can still start a session name with that character.
-    if (key.modifiers.control && key.code == KeyCode::Char('a'))
-        || key.code == KeyCode::Char('\u{1}')
-    {
+    // action. Some decoders deliver the control byte without a modifier.
+    if key.code == KeyCode::Char('\u{1}') {
         return Key::Char('\u{1}');
     }
     match key.code {
@@ -851,7 +841,7 @@ fn passthrough_key(input: &LiveInput) -> Key {
         KeyCode::Backspace => Key::Backspace,
         KeyCode::Escape => Key::Escape,
         KeyCode::Char(ch) => Key::Char(ch),
-        _ => Key::Other,
+        _ => Key::Passthrough(bytes),
     }
 }
 
@@ -1146,7 +1136,7 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
+        PersistentSettingsPort, Start, created_session_hook, load_screen_graph_data,
         passthrough_key,
     };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
@@ -1158,7 +1148,7 @@ mod tests {
     };
 
     #[test]
-    fn ctrl_a_maps_to_the_new_session_shortcut() {
+    fn control_shortcuts_remain_available_outside_closeup() {
         let key = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('a'),
             Modifiers {
@@ -1167,20 +1157,37 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
-    }
+        assert_eq!(passthrough_key(&key, vec![1]), Key::Char('\u{1}'));
 
-    #[test]
-    fn ctrl_d_maps_to_the_dedicated_open_workspace_unregister_key() {
-        let key = LiveInput::Key(KeyEvent::new(
-            KeyCode::Char('d'),
+        let ctrl_c = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('c'),
             Modifiers {
                 control: true,
                 ..Modifiers::default()
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(control_key(&key), Some(Key::CtrlD));
+        assert_eq!(passthrough_key(&ctrl_c, vec![3]), Key::Quit);
+
+        let ctrl_q = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(passthrough_key(&ctrl_q, vec![17]), Key::CtrlQ);
+
+        let escape = LiveInput::Key(KeyEvent::new(
+            KeyCode::Escape,
+            Modifiers::default(),
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&escape, vec![0x1b]),
+            Key::Passthrough(vec![0x1b])
+        );
     }
 
     #[test]
@@ -1191,7 +1198,7 @@ mod tests {
             KeyEventKind::Repeat,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Enter);
+        assert_eq!(passthrough_key(&key, b"\r".to_vec()), Key::Enter);
     }
 
     #[test]
@@ -1202,7 +1209,7 @@ mod tests {
             KeyEventKind::Release,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Other);
+        assert_eq!(passthrough_key(&key, Vec::new()), Key::Other);
     }
 
     #[test]
@@ -1211,7 +1218,7 @@ mod tests {
             LiveInput::Raw(b"\r".to_vec()),
             LiveInput::Text("\n".to_owned()),
         ] {
-            assert_eq!(passthrough_key(&input), Key::Enter);
+            assert_eq!(passthrough_key(&input, b"\r".to_vec()), Key::Enter);
         }
     }
 

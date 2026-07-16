@@ -247,9 +247,6 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
-        if is_ctrl_caret(key) {
-            return LiveInputOutput::Action(LiveTerminalAction::PreviousSession);
-        }
         LiveInputOutput::Passthrough(encode_key(key))
     }
 }
@@ -266,11 +263,6 @@ fn is_only_control(modifiers: Modifiers) -> bool {
 fn is_ctrl_o(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{0f}'))
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
-}
-
-fn is_ctrl_caret(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{1e}'))
-        || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
@@ -388,11 +380,6 @@ mod tests {
                 name: "plain q",
                 input: key(KeyCode::Char('q')),
                 expected: b"q".to_vec(),
-            },
-            Case {
-                name: "escape",
-                input: key(KeyCode::Escape),
-                expected: vec![0x1b],
             },
             Case {
                 name: "cjk utf8",
@@ -618,19 +605,30 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_caret_is_reserved_once_and_not_a_prefix_follow_up() {
+    fn escape_and_ctrl_caret_are_passthrough_even_during_a_leader() {
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(
-            classifier.classify(T0, ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
+            classifier.classify(T0, ctrl('o')),
+            LiveInputOutput::Swallowed
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(1), ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
+            classifier.classify(Duration::from_millis(1), key(KeyCode::Escape)),
+            LiveInputOutput::Swallowed
+        );
+        assert!(!classifier.leader_pending(Duration::from_millis(1)));
+        assert_eq!(
+            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('n'))),
+            LiveInputOutput::Passthrough(b"n".to_vec())
+        );
+
+        let mut without_leader = LiveInputClassifier::default();
+        assert_eq!(
+            without_leader.classify(T0, key(KeyCode::Escape)),
+            LiveInputOutput::Passthrough(vec![0x1b])
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('\u{1e}'))),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
+            without_leader.classify(Duration::from_millis(1), ctrl('^')),
+            LiveInputOutput::Passthrough(vec![30])
         );
     }
 
@@ -674,6 +672,7 @@ mod tests {
             (KeyCode::Backspace, vec![0x7f]),
             (KeyCode::Tab, vec![b'\t']),
             (KeyCode::BackTab, b"\x1b[Z".to_vec()),
+            (KeyCode::Escape, vec![0x1b]),
             (KeyCode::Down, b"\x1b[B".to_vec()),
             (KeyCode::Left, b"\x1b[D".to_vec()),
             (KeyCode::Right, b"\x1b[C".to_vec()),

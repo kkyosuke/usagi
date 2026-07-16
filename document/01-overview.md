@@ -91,7 +91,8 @@ Workspace 画面は、`state.json` から読んだ session 一覧と root 行を
 で、`↑↓`（`j` / `k`）で session と root の選択を循環し、`←→`（`h` / `l`）で Preview / Terminal /
 Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
 モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
-タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` で行い、Esc は mode を変えない。
+タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` prefix で行う。live tab に focus がある間は
+Esc、Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q を含む非 prefix 入力をすべて pane へ渡す。
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
@@ -115,11 +116,11 @@ reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-mod
 Esc は最前面のモーダルを閉じる。Switch / Closeup の背景では mode や画面遷移を起こさない。Switch からの
 Open・Welcome への遷移と直接起動した `usagi open` の終了は、明示的な終了操作で行う。
 `q` は基底の Switch / Closeup で確認後に TUI を閉じ、daemon の実行は継続する。Ctrl-Q は確認後に
-workspace の live session を終了してから TUI を閉じる。Ctrl-C は表示状態にかかわらず TUI を終了する。
+workspace の live session を終了してから TUI を閉じる。live pane に focus がない画面では Ctrl-C は TUI を終了する。
 terminal tab は daemon が所有する terminal だけを表示する。選択中の live terminal は PTY 出力を右ペインへ
 描画し、focus 中の通常キーをその PTY へ送るため、`ls` などを対話的に実行できる（`q` は shell へ渡り、終了には
-ならない）。tab 巡回や Switch への復帰は `Ctrl-O` prefix が所有し、`Ctrl-Q` / `Ctrl-C` は live terminal でも global に
-効く。出力表示・入力送信の詳細は [TUI の live terminal](03-tui.md#closeup-pane) が正本である。client の detach は
+ならない）。tab 巡回や Switch への復帰は `Ctrl-O` prefix だけが所有し、その他の入力は live terminal へ渡す。
+出力表示・入力送信の詳細は [TUI の live terminal](03-tui.md#closeup-pane) が正本である。client の detach は
 tab の subscription を外すだけで process を停止しない。
 
 `usagi open [path]` も同じ Workspace 画面を直接起動する。相対 path と省略時のカレントディレクトリは

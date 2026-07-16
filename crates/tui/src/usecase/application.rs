@@ -162,7 +162,7 @@ pub trait ScreenRunner {
 
 /// 対話画面が端末から受け取る 1 つのキー入力。実端末のイベント（crossterm など）は
 /// 合成ルートがこの語彙へ翻訳して渡すため、TUI 面は特定の端末ライブラリに依存しない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key {
     /// live terminal prefix（`Ctrl-O` leader）から [`LiveInputClassifier`] が解決した
     /// 予約アクション。合成ルートが classifier を保持し、leader の follow-up を
@@ -170,6 +170,9 @@ pub enum Key {
     ///
     /// [`LiveInputClassifier`]: crate::usecase::terminal_input::LiveInputClassifier
     Live(crate::usecase::terminal_input::LiveTerminalAction),
+    /// Exact bytes classified as ordinary live-pane input.  This preserves
+    /// paste and backend-native encodings for the focused daemon terminal.
+    Passthrough(Vec<u8>),
     /// 選択を 1 つ上へ移す。
     Up,
     /// 選択を 1 つ下へ移す。
@@ -343,8 +346,8 @@ mod tests {
     fn key_derives_are_exercised() {
         use super::Key;
         use crate::usecase::terminal_input::LiveTerminalAction;
-        // derive された Debug / Clone / Copy / PartialEq を全バリアントで実行する。
-        let keys = [
+        // derive された Debug / Clone / PartialEq を全バリアントで実行する。
+        let keys = vec![
             Key::Up,
             Key::Down,
             Key::Left,
@@ -358,10 +361,11 @@ mod tests {
             Key::Char('o'),
             Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),
+            Key::Passthrough(b"paste".to_vec()),
             Key::Other,
         ];
         for key in keys {
-            assert_eq!(key, key);
+            assert_eq!(key.clone(), key);
             assert!(!format!("{key:?}").is_empty());
         }
         assert_ne!(Key::Char('a'), Key::Char('b'));

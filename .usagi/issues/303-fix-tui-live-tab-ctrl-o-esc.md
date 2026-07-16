@@ -1,13 +1,13 @@
 ---
 number: 303
 title: fix(tui): live tab の入力優先と Ctrl+O・Esc の脱出契約を統一する
-status: todo
+status: done
 priority: high
 labels: [tui, terminal, input, bug]
 dependson: []
 related: [279, 282]
 created_at: 2026-07-15T00:28:01.491437+00:00
-updated_at: 2026-07-15T00:29:54.899426+00:00
+updated_at: 2026-07-16T00:00:00.000000+00:00
 ---
 
 ## 目的

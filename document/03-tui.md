@@ -69,10 +69,10 @@ Success を保つ。Closeup では cursor を
 skeleton は current target にならない。名前・補足・marker は ANSI を閉じた表示幅で clip/pad するため、
 CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を壊さない。
 
-Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開く。Closeup
-の `Ctrl-A` は active target の Closeup action overlay を開き、作成フォームを開かない。Closeup の `Ctrl-O`
-は Switch へ戻り、Switch 中の `Ctrl-O` は mode を変えない。daemon-owned live pane の同じ control bytes は
-`LiveInputClassifier` が pane navigation として予約するため、この management transition に渡さない。
+Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開き、`Ctrl-Q`
+は workspace 終了確認、`Ctrl-C` は TUI 終了として扱う。Closeup の live pane は `Ctrl-O` prefix 以外の
+入力を所有するため、同じ control bytes は management transition に渡さない。Closeup の `Ctrl-O o` は
+Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。
 
 左 sidebar の実 session 行は、左クリックで cursor を移し、同じ行を 400ms 以内にダブルクリックすると
 その session の Closeup を開く。root・`+ new session`・divider・mascot・footer はこの操作の対象外であり、
@@ -80,7 +80,8 @@ modal と inline 作成中は背景の sidebar click を受け取らない。
 
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
-prefix の打鍵は live terminal への passthrough として扱う（`Ctrl-O`・`Ctrl-^` 以外は予約しない）。prefix の
+prefix の打鍵は live terminal への passthrough として扱う。TUI が予約するのは `Ctrl-O` prefix だけであり、
+Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q、Esc、Ctrl-^ を含むその他の bytes は PTY へ送る。prefix の
 follow-up は下表のアクションに解決する。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
@@ -98,7 +99,8 @@ identity は保持しない。
 | `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
 | `Ctrl-O` `q` | QuitConfirmation | TUI を閉じる確認を開く |
 
-leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。`Ctrl-C` と `Ctrl-Q` は prefix より先に扱う。
+leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。leader 待機中の次の入力は prefix の
+follow-up として扱う。
 
 ## Session sidebar rows
 
@@ -224,11 +226,11 @@ screen から押し出された行は 10,000 行を上限とする local scrollb
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-live terminal に focus がある間、通常のキー（文字・Enter・Backspace・Tab・矢印など）は management ではなく
+live terminal に focus がある間、通常のキー（文字・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
 `Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了
-（`Ctrl-C`）は live terminal でも global に効く。前面 modal や forced action modal がある間は入力を PTY へ
-渡さない。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
+（`Ctrl-C`）を含むすべての non-prefix input は live terminal に渡す。前面 modal や forced action modal がある間は
+その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
 terminal は起動時点の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。redraw に追従する resize は後続作業である。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
 
