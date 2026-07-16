@@ -562,7 +562,7 @@ fn handle_sidebar_click(
     let Key::Click { column, row } = key else {
         return false;
     };
-    if *column >= 36 {
+    if usize::from(*column) >= workspace::right_pane_left(width) {
         return false;
     }
     if ui.modal.is_some() || ui.closeup_modal_visible() || ui.workspace.creating_session_inline() {

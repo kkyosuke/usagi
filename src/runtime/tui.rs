@@ -779,7 +779,9 @@ impl Terminal for CrosstermTerminal {
                         LiveInputOutput::Swallowed => {}
                         // Everything else is a normal key; preserve the prior mapping so
                         // non-prefix keys and future PTY passthrough are unchanged.
-                        LiveInputOutput::Passthrough(_) => return Ok(passthrough_key(&input)),
+                        LiveInputOutput::Passthrough(bytes) => {
+                            return Ok(passthrough_key(&input, bytes));
+                        }
                     }
                 }
                 RuntimeEvent::Resize { .. } => {
@@ -822,7 +824,7 @@ fn control_key(input: &LiveInput) -> Option<Key> {
 /// has already reserved the `Ctrl-O` prefix, so this preserves the prior mapping
 /// for every other key and text/paste payload.
 #[coverage(off)]
-fn passthrough_key(input: &LiveInput) -> Key {
+fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     let key = match input {
         LiveInput::Key(key) => key,
         // Some terminal decoders preserve Return as its original byte instead
@@ -834,10 +836,10 @@ fn passthrough_key(input: &LiveInput) -> Key {
         LiveInput::Text(text) if text == "\r" || text == "\n" => {
             return Key::Enter;
         }
-        LiveInput::Raw(_)
-        | LiveInput::Text(_)
-        | LiveInput::Paste(_)
-        | LiveInput::Mouse { .. }
+        LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
+            return Key::Passthrough(bytes);
+        }
+        LiveInput::Mouse { .. }
         | LiveInput::WheelUp
         | LiveInput::WheelDown
         | LiveInput::Pointer(_) => return Key::Other,
@@ -1183,7 +1185,7 @@ mod tests {
             },
             KeyEventKind::Press,
         ));
-        assert_eq!(passthrough_key(&key), Key::Char('\u{1}'));
+        assert_eq!(passthrough_key(&key, Vec::new()), Key::Char('\u{1}'));
     }
 
     #[test]
@@ -1207,7 +1209,7 @@ mod tests {
             KeyEventKind::Repeat,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Enter);
+        assert_eq!(passthrough_key(&key, Vec::new()), Key::Enter);
     }
 
     #[test]
@@ -1218,7 +1220,7 @@ mod tests {
             KeyEventKind::Release,
         ));
 
-        assert_eq!(passthrough_key(&key), Key::Other);
+        assert_eq!(passthrough_key(&key, Vec::new()), Key::Other);
     }
 
     #[test]
@@ -1227,8 +1229,17 @@ mod tests {
             LiveInput::Raw(b"\r".to_vec()),
             LiveInput::Text("\n".to_owned()),
         ] {
-            assert_eq!(passthrough_key(&input), Key::Enter);
+            assert_eq!(passthrough_key(&input, Vec::new()), Key::Enter);
         }
+    }
+
+    #[test]
+    fn non_key_terminal_payloads_preserve_their_original_bytes() {
+        let payload = b"\x1b[200~paste\x1b[201~".to_vec();
+        assert_eq!(
+            passthrough_key(&LiveInput::Paste(payload.clone()), payload.clone()),
+            Key::Passthrough(payload)
+        );
     }
 
     #[test]

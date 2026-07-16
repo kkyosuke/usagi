@@ -42,6 +42,13 @@ const MEMORY_ICON: char = '\u{f233}';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
+/// Returns the first screen column owned by the right pane.
+#[must_use]
+pub fn right_pane_left(raw_width: usize) -> usize {
+    let (_, width) = widgets::normalize_size(0, raw_width);
+    panes::split(width, LEFT_WIDTH).left.saturating_add(1)
+}
+
 /// Returns the PTY viewport that is visible inside the right-hand pane.
 #[must_use]
 #[coverage(off)]
@@ -1660,7 +1667,6 @@ pub fn render_with_skeleton_frame(
 /// Converts a screen-cell pointer position into the retained terminal viewport
 /// row and terminal column currently rendered in the right pane.
 #[must_use]
-#[coverage(off)]
 pub fn terminal_point_at(
     raw_height: usize,
     raw_width: usize,
@@ -1669,8 +1675,7 @@ pub fn terminal_point_at(
     row: u16,
 ) -> Option<TerminalPoint> {
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
-    let split = panes::split(width, LEFT_WIDTH);
-    let right_left = split.left.saturating_add(1);
+    let right_left = right_pane_left(width);
     let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
     let column = usize::from(column).checked_sub(right_left)?;
     let view = ws.terminal_view.as_ref()?;
@@ -2134,7 +2139,7 @@ mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
         render, render_home, render_with_skeleton_frame, sidebar_row_at,
-        terminal_auto_scroll_direction_at, with_footer_gap,
+        terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2145,6 +2150,7 @@ mod tests {
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
+    use crate::usecase::application::terminal_selection::TerminalPoint;
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -2224,6 +2230,25 @@ mod tests {
         assert_eq!(
             terminal_auto_scroll_direction_at(24, 80, &ws, 37, 4),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn terminal_point_tracks_the_visible_scrollback_window() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some((0..20).map(|row| format!("row {row}")).collect()));
+
+        assert_eq!(
+            terminal_point_at(24, 80, &ws, 37, 5),
+            Some(TerminalPoint { row: 3, column: 0 })
+        );
+        assert_eq!(terminal_point_at(24, 80, &ws, 37, 4), None);
+
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        assert_eq!(
+            terminal_point_at(24, 80, &ws, 37, 5),
+            Some(TerminalPoint { row: 1, column: 0 })
         );
     }
 
