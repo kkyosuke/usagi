@@ -95,12 +95,13 @@ pub fn block_caret(value: &str, cursor: usize, base: &Style) -> String {
         None => (" ", ""),
     };
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         if before.is_empty() {
             String::new()
         } else {
             base.paint(before)
         },
+        crate::presentation::frame::INPUT_CURSOR_MARKER,
         base.reverse().paint(caret),
         if rest.is_empty() {
             String::new()
@@ -383,10 +384,19 @@ mod tests {
     #[test]
     fn block_caret_draws_a_reversed_space_for_empty_and_end_positions() {
         let accent = Role::Accent.style();
-        assert_eq!(block_caret("", 0, &accent), "\u{1b}[7;36m \u{1b}[0m");
+        assert_eq!(
+            block_caret("", 0, &accent),
+            format!(
+                "{}\u{1b}[7;36m \u{1b}[0m",
+                crate::presentation::frame::INPUT_CURSOR_MARKER
+            )
+        );
         assert_eq!(
             block_caret("ab", usize::MAX, &accent),
-            "\u{1b}[36mab\u{1b}[0m\u{1b}[7;36m \u{1b}[0m"
+            format!(
+                "\u{1b}[36mab\u{1b}[0m{}\u{1b}[7;36m \u{1b}[0m",
+                crate::presentation::frame::INPUT_CURSOR_MARKER
+            )
         );
     }
 

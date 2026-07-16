@@ -9,6 +9,18 @@ use unicode_width::UnicodeWidthChar;
 const ESC: char = '\u{1b}';
 const RESET: &str = "\u{1b}[0m";
 
+/// Zero-width, renderer-only marker for a background terminal cursor.
+///
+/// Views put this immediately before the visual block caret.  It never reaches
+/// the terminal; [`Frame::from_lines`] instead records the cell so the runtime
+/// can place the physical cursor there for IME candidate windows.
+pub const TERMINAL_CURSOR_MARKER: char = '\u{e0001}';
+
+/// Zero-width renderer-only marker for the currently focused text control.
+/// This wins over [`TERMINAL_CURSOR_MARKER`] when a modal is open above a live
+/// terminal pane.
+pub const INPUT_CURSOR_MARKER: char = '\u{e0002}';
+
 /// One terminal cell in a [`Frame`].
 ///
 /// A double-width glyph occupies a `Glyph` cell followed by a `Continuation`.
@@ -48,6 +60,7 @@ pub struct Frame {
     width: usize,
     height: usize,
     cells: Vec<Cell>,
+    input_cursor: Option<(usize, usize)>,
 }
 
 impl Frame {
@@ -66,6 +79,7 @@ impl Frame {
             width,
             height,
             cells: vec![Cell::Empty; width.saturating_mul(height)],
+            input_cursor: None,
         };
         for (row, line) in lines.into_iter().take(height).enumerate() {
             frame.set_line(row, line.as_ref());
@@ -94,6 +108,14 @@ impl Frame {
         (row < self.height && column < self.width).then(|| &self.cells[row * self.width + column])
     }
 
+    /// The requested OS text-input cursor cell, if this frame has an active
+    /// editable control.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn input_cursor(&self) -> Option<(usize, usize)> {
+        self.input_cursor
+    }
+
     #[coverage(off)]
     fn set_line(&mut self, row: usize, line: &str) {
         if self.width == 0 {
@@ -106,6 +128,20 @@ impl Frame {
         let chars = line.chars().collect::<Vec<_>>();
         let mut index = 0;
         while index < chars.len() {
+            if chars[index] == INPUT_CURSOR_MARKER {
+                // A focused form/modal must take precedence over a live
+                // terminal cursor that can still be present in its background.
+                self.input_cursor = Some((row, column));
+                index += 1;
+                continue;
+            }
+            if chars[index] == TERMINAL_CURSOR_MARKER {
+                if self.input_cursor.is_none() {
+                    self.input_cursor = Some((row, column));
+                }
+                index += 1;
+                continue;
+            }
             if chars[index] == '\u{1b}' {
                 let (sequence, consumed) = ansi_sequence(&chars[index..]);
                 pending_ansi.push_str(&sequence);
@@ -222,6 +258,9 @@ pub struct FrameDiff {
     pub clear_surface: bool,
     /// Changed row/column spans, in terminal order.
     pub spans: Vec<Span>,
+    /// Physical cursor location for the active text input, independent of
+    /// which spans happened to change in this frame.
+    pub input_cursor: Option<(usize, usize)>,
 }
 
 /// Retains the previous frame and creates pure incremental diffs.
@@ -269,10 +308,12 @@ impl FrameRenderer {
             // state transition total if that invariant changes later.
             diff_spans(self.previous.as_ref().unwrap_or(&next), &next)
         };
+        let input_cursor = next.input_cursor();
         self.previous = Some(next);
         FrameDiff {
             clear_surface: full_repaint,
             spans,
+            input_cursor,
         }
     }
 }
@@ -371,7 +412,10 @@ fn update_active_style(active_style: &mut String, sequence: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Frame, FrameRenderer, Span, update_active_style};
+    use super::{
+        Cell, Frame, FrameRenderer, INPUT_CURSOR_MARKER, Span, TERMINAL_CURSOR_MARKER,
+        update_active_style,
+    };
 
     fn frame(width: usize, height: usize, lines: &[&str]) -> Frame {
         Frame::from_lines(width, height, lines)
@@ -428,6 +472,35 @@ mod tests {
             ambiguous.cell(0, 1),
             Some(Cell::Glyph { width: 1, .. })
         ));
+    }
+
+    #[test]
+    fn input_cursor_marker_is_not_drawn_and_tracks_its_display_cell() {
+        let rendered = frame(8, 2, &[&format!("aあ{INPUT_CURSOR_MARKER}b"), ""]);
+        assert_eq!(rendered.input_cursor(), Some((0, 3)));
+        assert!(matches!(rendered.cell(0, 3), Some(Cell::Glyph { text, .. }) if text == "b"));
+
+        let diff = FrameRenderer::new().render(rendered);
+        assert_eq!(diff.input_cursor, Some((0, 3)));
+        assert!(
+            !diff
+                .spans
+                .iter()
+                .any(|span| span.text.contains(INPUT_CURSOR_MARKER))
+        );
+    }
+
+    #[test]
+    fn focused_input_cursor_overrides_a_terminal_cursor_in_its_background() {
+        let rendered = frame(
+            8,
+            2,
+            &[
+                &format!("{INPUT_CURSOR_MARKER}form"),
+                &format!("{TERMINAL_CURSOR_MARKER}shell"),
+            ],
+        );
+        assert_eq!(rendered.input_cursor(), Some((0, 0)));
     }
 
     #[test]

@@ -13,6 +13,11 @@
 
 use unicode_width::UnicodeWidthChar;
 
+// Kept in sync with `presentation::frame::TERMINAL_CURSOR_MARKER`.  This
+// use-case module deliberately does not depend on presentation, while the
+// renderer consumes the marker before writing terminal output.
+const TERMINAL_CURSOR_MARKER: char = '\u{e0001}';
+
 /// Escape-sequence parser position.  Only these five states are reachable; any
 /// byte that does not belong to the active state returns the parser to
 /// [`Phase::Ground`] without emitting output.
@@ -548,6 +553,9 @@ fn render_row_selected(
             rendered.push_str(&style);
             active = style;
         }
+        if cursor == Some(column) {
+            rendered.push(TERMINAL_CURSOR_MARKER);
+        }
         rendered.push(cell.ch);
     }
     if !active.is_empty() {
@@ -701,12 +709,16 @@ mod tests {
         screen.advance(b"\x1b[32mgo");
         assert_eq!(
             screen.rows_with_cursor(),
-            vec!["\x1b[32mgo\x1b[0m\x1b[32m\x1b[7m \x1b[0m"]
+            vec![format!(
+                "\x1b[32mgo\x1b[0m\x1b[32m\x1b[7m{TERMINAL_CURSOR_MARKER} \x1b[0m"
+            )]
         );
         screen.advance(b"\r");
         assert_eq!(
             screen.rows_with_cursor(),
-            vec!["\x1b[32m\x1b[7mg\x1b[0m\x1b[32mo\x1b[0m"]
+            vec![format!(
+                "\x1b[32m\x1b[7m{TERMINAL_CURSOR_MARKER}g\x1b[0m\x1b[32mo\x1b[0m"
+            )]
         );
     }
 

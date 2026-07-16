@@ -419,7 +419,10 @@ mod tests {
         };
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
-        assert_eq!(session.display_rows()[0], "$ \x1b[7m \x1b[0m");
+        assert_eq!(
+            session.display_rows()[0],
+            format!("$ \x1b[7m\u{e0001} \x1b[0m")
+        );
 
         for state in [
             SessionState::Disconnected,
