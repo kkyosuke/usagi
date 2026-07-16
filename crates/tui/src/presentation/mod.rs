@@ -700,7 +700,7 @@ impl WorkspaceUi {
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
             session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(session.display_rows())
+            Some(session.display_rows_with_scrollback())
         } else {
             None
         };
@@ -1298,7 +1298,7 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
             {
                 Ok(terminal) => {
                     ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal);
+                    ui.start_terminal_session(terminal, geometry);
                 }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
@@ -1772,6 +1772,8 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::CloseTab => ui.close_focused_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
         LiveTerminalAction::PreviousSession => ui.select_previous_session(),
+        LiveTerminalAction::ScrollUp => ui.workspace.terminal_scroll_up(),
+        LiveTerminalAction::ScrollDown => ui.workspace.terminal_scroll_down(),
     }
     WorkspaceStep::Stay
 }

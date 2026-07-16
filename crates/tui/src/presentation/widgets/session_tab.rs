@@ -120,6 +120,12 @@ pub fn empty_pane_with_detail(
         block.push(gray.paint(&super::pad_to_width(&centered, width)));
     }
 
+    // On a short pane keep the invitation and safe detail visible. The rabbit
+    // is decorative, so discard its leading rows before dropping captions.
+    if rows < block.len() {
+        block = block.split_off(block.len() - rows);
+    }
+
     let top = rows.saturating_sub(block.len()) / 2;
     let mut lines = vec![String::new(); top];
     lines.extend(block);
