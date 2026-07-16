@@ -1057,7 +1057,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             run_in_terminal(|terminal| {
                 presentation::run_workspace_with_agent_port_and_selection_mode(
                     terminal,
-                    &snapshot,
+                    snapshot,
                     Box::new(DaemonSessionCommandPort::default()),
                     global_settings.modal_selection_mode,
                     global_settings.default_model,

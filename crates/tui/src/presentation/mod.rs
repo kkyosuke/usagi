@@ -2642,6 +2642,7 @@ impl ControllerWorkspaceRuntime {
             | Key::Live(_)
             | Key::Passthrough(_)
             | Key::Click { .. }
+            | Key::Pointer(_)
             | Key::Other => return false,
         };
         let effects = crate::usecase::application::controller::update(
@@ -2894,7 +2895,8 @@ impl ControllerWorkspaceRuntime {
         if self.panes.input_owner() != PaneInputOwner::Tab {
             return false;
         }
-        let (Some(terminal), Some(bytes)) = (self.selected_terminal(), key_to_terminal_bytes(key))
+        let (Some(terminal), Some(bytes)) =
+            (self.selected_terminal(), key_to_terminal_bytes(key.clone()))
         else {
             return false;
         };
