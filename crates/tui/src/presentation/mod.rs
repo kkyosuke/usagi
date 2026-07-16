@@ -3697,6 +3697,15 @@ mod tests {
         assert!(switch.contains("controller-runtime"));
         assert!(switch.contains("+ new session"));
 
+        assert!(!runtime.handle(Key::Char(':')));
+        assert!(
+            runtime
+                .frame(24, 100)
+                .join("\n")
+                .contains("workspace commands")
+        );
+        assert!(!runtime.handle(Key::Escape));
+
         assert!(!runtime.handle(Key::Down));
         assert!(!runtime.handle(Key::Enter));
         let closeup = runtime.frame(24, 100).join("\n");
@@ -3723,6 +3732,12 @@ mod tests {
 
         let mut confirmed_quit = ControllerWorkspaceRuntime::new(&snapshot("confirm-quit"));
         assert!(!confirmed_quit.handle(Key::CtrlQ));
+        assert!(
+            confirmed_quit
+                .frame(24, 100)
+                .join("\n")
+                .contains("End workspace")
+        );
         assert!(confirmed_quit.handle(Key::Enter));
         assert!(runtime.handle(Key::Char('q')));
     }
