@@ -2566,6 +2566,12 @@ impl ControllerWorkspaceRuntime {
             Some(Overlay::Closeup) => {
                 closeup_modal::render_over(height, width, &base, &self.closeup)
             }
+            Some(Overlay::QuitConfirmation) => render_quit_confirmation(
+                height,
+                width,
+                &base,
+                QuitModal::new(QuitAction::EndWorkspace),
+            ),
             _ => base,
         }
     }
@@ -2577,6 +2583,16 @@ impl ControllerWorkspaceRuntime {
     fn handle(&mut self, key: Key) -> bool {
         if matches!(key, Key::Quit | Key::Char('q')) {
             return true;
+        }
+        if self.state.overlay() == Some(Overlay::QuitConfirmation) && key == Key::Enter {
+            let effects = crate::usecase::application::controller::update(
+                &mut self.state,
+                AppEvent::Key(AppKey::Enter),
+            );
+            return self
+                .run_effects(effects)
+                .into_iter()
+                .any(|effect| matches!(effect, ControllerEffect::Detach));
         }
         if self.handle_modal_key(key) {
             return false;
@@ -2616,9 +2632,15 @@ impl ControllerWorkspaceRuntime {
         let submit = match overlay {
             Some(Overlay::Overview) => Self::edit_overview(&mut self.overview, key),
             Some(Overlay::Closeup) => Self::edit_closeup(&mut self.closeup, key),
+            Some(Overlay::QuitConfirmation) => match key {
+                Key::Enter => Some(String::new()),
+                Key::Escape => None,
+                _ => return true,
+            },
             _ => return false,
         };
         let app_key = match submit {
+            Some(_) if overlay == Some(Overlay::QuitConfirmation) => AppKey::Enter,
             Some(input) if overlay == Some(Overlay::Overview) => AppKey::SubmitOverview(input),
             Some(input) => AppKey::SubmitCloseup(input),
             None => match key {
