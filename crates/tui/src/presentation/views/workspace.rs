@@ -150,6 +150,7 @@ pub struct HomeProjection {
     pane_error: Option<String>,
     closeup_action_visible: bool,
     metrics: Option<DaemonMetrics>,
+    terminal_rows: Option<Vec<String>>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -204,6 +205,7 @@ impl HomeProjection {
                 || state.overlay()
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
             metrics: None,
+            terminal_rows: None,
         }
     }
 
@@ -240,6 +242,14 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach the selected daemon terminal's screen snapshot. The runtime owns
+    /// polling and input; this projection only clips the resulting rows.
+    #[must_use]
+    pub fn with_terminal_rows(mut self, terminal_rows: Option<Vec<String>>) -> Self {
+        self.terminal_rows = terminal_rows;
         self
     }
 
@@ -2095,28 +2105,29 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
-    with_footer_gap(
-        vec![
-            chrome[0].clone(),
-            chrome[1].clone(),
-            String::new(),
-            Style::new().dim().paint(&widgets::pad_to_width(
-                &format!("  agent: {}", phase_label(home.active_phase)),
-                width,
-            )),
-            Style::new().dim().paint(&widgets::pad_to_width(
-                &format!(
-                    "  feedback: {}",
-                    home.pane_error
-                        .as_deref()
-                        .map_or_else(|| feedback_label(home.feedback.as_ref()), str::to_owned)
-                ),
-                width,
-            )),
-        ],
-        height,
-        footer,
-    )
+    let mut rows = vec![chrome[0].clone(), chrome[1].clone(), String::new()];
+    if let Some(terminal_rows) = &home.terminal_rows {
+        rows.extend(
+            terminal_rows
+                .iter()
+                .map(|row| widgets::clip_to_width(row, width)),
+        );
+    } else {
+        rows.push(Style::new().dim().paint(&widgets::pad_to_width(
+            &format!("  agent: {}", phase_label(home.active_phase)),
+            width,
+        )));
+        rows.push(Style::new().dim().paint(&widgets::pad_to_width(
+            &format!(
+                "  feedback: {}",
+                home.pane_error
+                    .as_deref()
+                    .map_or_else(|| feedback_label(home.feedback.as_ref()), str::to_owned)
+            ),
+            width,
+        )));
+    }
+    with_footer_gap(rows, height, footer)
 }
 
 #[coverage(off)]
