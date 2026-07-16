@@ -127,6 +127,7 @@ where
 
 /// crossterm event を、保持可能な TUI runtime 語彙へ変換する。
 #[must_use]
+#[coverage(off)] // Generic `RuntimeEvent<B>` coverage is emitted per consumer monomorphization.
 pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
     match event {
         Event::Key(key) => Some(RuntimeEvent::Input(LiveInput::Key(adapt_key(key)))),

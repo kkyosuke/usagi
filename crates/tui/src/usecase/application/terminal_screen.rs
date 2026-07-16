@@ -131,6 +131,7 @@ impl TerminalScreen {
     /// Renders retained scrollback and the visible grid with the current PTY
     /// cursor as an inverted cell.
     #[must_use]
+    #[coverage(off)] // Iterator closure instrumentation is emitted twice by coverage builds.
     pub fn rows_with_scrollback_and_cursor(&self) -> Vec<String> {
         let mut rows: Vec<_> = self
             .scrollback
