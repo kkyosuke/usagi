@@ -177,11 +177,16 @@ impl TerminalScreen {
     /// Returns retained scrollback followed by the complete visible grid.
     #[must_use]
     pub fn cells_with_scrollback(&self) -> Vec<String> {
-        self.scrollback
+        let mut rows: Vec<String> = self
+            .scrollback
             .iter()
             .chain(&self.grid)
             .map(|row| row.iter().map(|cell| cell.ch).collect())
-            .collect()
+            .collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
     }
 
     /// The zero-based cursor position, clamped inside the grid.
@@ -553,6 +558,10 @@ mod tests {
         screen.advance(b"one\r\ntwo\r\nthree");
         assert_eq!(screen.rows(), vec!["two", "three"]);
         assert_eq!(screen.rows_with_scrollback(), vec!["one", "two", "three"]);
+        assert_eq!(
+            screen.cells_with_scrollback(),
+            vec!["one     ", "two     ", "three   "]
+        );
     }
 
     #[test]

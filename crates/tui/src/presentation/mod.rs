@@ -4553,7 +4553,7 @@ mod tests {
 
     #[test]
     fn terminal_geometry_uses_the_visible_right_pane_width() {
-        assert_eq!(terminal_geometry(24, 80), Geometry { cols: 43, rows: 22 });
+        assert_eq!(terminal_geometry(24, 80), Geometry { cols: 43, rows: 17 });
     }
 
     #[test]

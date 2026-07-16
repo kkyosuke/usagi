@@ -49,7 +49,10 @@ pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
     (
-        height.saturating_sub(CHROME_ROWS).max(1),
+        // Header/tab chrome (3) plus the footer gap and footer (2) do not
+        // display PTY cells. The PTY geometry must match the selectable output
+        // viewport exactly, otherwise mouse rows drift as output scrolls.
+        height.saturating_sub(CHROME_ROWS + 5).max(1),
         split.right.max(1),
     )
 }
