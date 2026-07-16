@@ -368,6 +368,7 @@ pub struct Workspace {
     /// Number of retained terminal rows kept below the viewport. Zero follows
     /// live output; this belongs to the selected target's presentation state.
     terminal_scroll: usize,
+    terminal_feedback: Option<String>,
 }
 
 impl Workspace {
@@ -421,6 +422,7 @@ impl Workspace {
             git_diffs: BTreeMap::new(),
             terminal_view: None,
             terminal_scroll: 0,
+            terminal_feedback: None,
         }
     }
 
@@ -910,6 +912,11 @@ impl Workspace {
     #[coverage(off)]
     pub fn terminal_scroll_down(&mut self) {
         self.terminal_scroll = self.terminal_scroll.saturating_sub(1);
+    }
+
+    #[coverage(off)]
+    pub fn set_terminal_feedback(&mut self, feedback: Option<String>) {
+        self.terminal_feedback = feedback;
     }
 
     #[coverage(off)]
@@ -1541,10 +1548,10 @@ fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
 /// 右ペインの footer（キー操作ヒント、dim）。
 #[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
-    let hint = match ws.mode() {
+    let hint = ws.terminal_feedback.as_deref().unwrap_or(match ws.mode() {
         Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q close / Ctrl-Q end",
         Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q close / Ctrl-Q end",
-    };
+    });
     Style::new()
         .dim()
         .paint(&widgets::clip_to_width(hint, width))

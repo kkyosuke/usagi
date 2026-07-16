@@ -12,7 +12,7 @@ use crossterm::event::{
 };
 use usagi_tui::usecase::terminal_input::{
     KeyCode, KeyEvent as InputKeyEvent, KeyEventKind as InputKeyEventKind, LiveInput, Modifiers,
-    RuntimeEvent,
+    PointerEvent, PointerKind, RuntimeEvent,
 };
 
 /// poll/read を差し替えられる crossterm event source。
@@ -142,6 +142,20 @@ pub fn adapt_event<B>(event: Event) -> Option<RuntimeEvent<B>> {
             }
             MouseEventKind::ScrollUp => Some(RuntimeEvent::Input(LiveInput::WheelUp)),
             MouseEventKind::ScrollDown => Some(RuntimeEvent::Input(LiveInput::WheelDown)),
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Drag,
+                    column: mouse.column,
+                    row: mouse.row,
+                })))
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                Some(RuntimeEvent::Input(LiveInput::Pointer(PointerEvent {
+                    kind: PointerKind::Up,
+                    column: mouse.column,
+                    row: mouse.row,
+                })))
+            }
             _ => None,
         },
         Event::FocusGained | Event::FocusLost => None,

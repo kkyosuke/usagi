@@ -43,13 +43,14 @@ use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as Wo
 use crate::presentation::widgets::modal;
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
+use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::closeup;
 use crate::usecase::overview::{self, SessionCommand};
-use crate::usecase::terminal_input::LiveTerminalAction;
+use crate::usecase::terminal_input::{LiveTerminalAction, PointerEvent, PointerKind};
 use usagi_core::usecase::settings::SettingsPort;
 
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
@@ -172,11 +173,10 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 }
 
 /// Maps a management [`Key`] to the bytes a focused live terminal should
-/// receive.  Reserved prefix actions ([`Key::Live`]) return `None`; all other
-/// keys, including global controls, are encoded when Closeup owns a live pane.
-fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
+/// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
+/// `None` so they keep driving the workspace instead of the shell.
+fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
-        Key::Passthrough(bytes) => return (!bytes.is_empty()).then(|| bytes.clone()),
         Key::Char(ch) => ch.to_string().into_bytes(),
         Key::Enter => b"\r".to_vec(),
         Key::Backspace => b"\x7f".to_vec(),
@@ -186,10 +186,15 @@ fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Quit => vec![3],
-        Key::CtrlQ => vec![17],
-        Key::CtrlD => vec![4],
-        Key::Live(_) | Key::Click { .. } | Key::Other => return None,
+        Key::Live(_)
+        | Key::Quit
+        | Key::CtrlQ
+        | Key::CtrlD
+        | Key::Click { .. }
+        | Key::Pointer(_)
+        | Key::Other => {
+            return None;
+        }
     };
     Some(bytes)
 }
@@ -530,6 +535,8 @@ struct WorkspaceUi {
     /// Live coordinators for daemon-owned terminals opened in this workspace,
     /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
     terminals: Vec<TerminalSession>,
+    terminal_selection: Option<TerminalSelection>,
+    pending_clipboard_text: Option<String>,
 }
 
 /// The maximum gap between two presses on the same sidebar session row.
@@ -544,24 +551,22 @@ fn handle_sidebar_click(
     ui: &mut WorkspaceUi,
     height: usize,
     width: usize,
-    key: &Key,
+    key: Key,
     previous: &mut Option<(usize, Instant)>,
 ) -> bool {
     let Key::Click { column, row } = key else {
         return false;
     };
+    if column >= 36 {
+        return false;
+    }
     if ui.modal.is_some() || ui.closeup_modal_visible() || ui.workspace.creating_session_inline() {
         *previous = None;
         return true;
     }
-    let Some(index) = workspace::sidebar_row_at(
-        height,
-        width,
-        &ui.workspace,
-        ui.skeleton_frame,
-        *column,
-        *row,
-    ) else {
+    let Some(index) =
+        workspace::sidebar_row_at(height, width, &ui.workspace, ui.skeleton_frame, column, row)
+    else {
         *previous = None;
         return true;
     };
@@ -654,6 +659,8 @@ impl WorkspaceUi {
             agent: None,
             pane_launches: Vec::new(),
             terminals: Vec::new(),
+            terminal_selection: None,
+            pending_clipboard_text: None,
         }
     }
 
@@ -714,10 +721,50 @@ impl WorkspaceUi {
         self.workspace.set_terminal_view(rows);
     }
 
+    fn terminal_selection_at(&mut self, point: TerminalPoint) {
+        let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
+            return;
+        };
+        if let Some(session) = self
+            .terminals
+            .iter()
+            .find(|session| session.terminal().fences(&terminal))
+        {
+            self.terminal_selection = Some(session.begin_selection(point));
+            self.workspace
+                .set_terminal_feedback(Some("terminal selection started".to_owned()));
+        }
+    }
+
+    fn extend_terminal_selection(&mut self, point: TerminalPoint) {
+        if let Some(selection) = &mut self.terminal_selection {
+            selection.extend(point);
+        }
+    }
+
+    fn queue_terminal_copy(&mut self) {
+        let Some(selection) = &self.terminal_selection else {
+            self.workspace
+                .set_terminal_feedback(Some("no terminal text is selected".to_owned()));
+            return;
+        };
+        let text = selection.text();
+        if text.is_empty() {
+            self.workspace
+                .set_terminal_feedback(Some("no terminal text is selected".to_owned()));
+        } else {
+            self.pending_clipboard_text = Some(text);
+        }
+    }
+
+    fn take_terminal_copy(&mut self) -> Option<String> {
+        self.pending_clipboard_text.take()
+    }
+
     /// Routes a keystroke to the focused live terminal.  Returns `true` when the
     /// key was consumed by the terminal so the workspace does not also act on it.
     #[coverage(off)]
-    fn forward_terminal_input(&mut self, key: &Key) -> bool {
+    fn forward_terminal_input(&mut self, key: Key) -> bool {
         // A live tab is only the input owner while Closeup exposes it.  In
         // particular, Ctrl-O o must return to Switch before the next ordinary
         // key can reach the previously focused PTY.
@@ -919,7 +966,6 @@ fn welcome_action(action: MenuAction) -> WelcomeStep {
 /// Config 画面のキー処理。Save は dirty な Save 行でのみ有効で、成功後は confirmation
 /// frame を表示して welcome へ戻る。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -> ConfigStep {
     match key {
         Key::Tab => {
@@ -957,7 +1003,6 @@ fn step_config(config: &mut Config, key: Key, settings: &mut dyn SettingsPort) -
 
 /// welcome 画面のキー処理。最上位画面なので Esc も終了として扱う。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -980,7 +1025,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::CtrlD
         | Key::Live(_)
         | Key::Click { .. }
-        | Key::Passthrough(_)
+        | Key::Pointer(_)
         | Key::Other => WelcomeStep::Stay,
     }
 }
@@ -989,7 +1034,6 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
         Key::Up | Key::Char('k') => {
@@ -1022,8 +1066,8 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         | Key::Tab
         | Key::CtrlD
         | Key::Live(_)
-        | Key::Passthrough(_)
         | Key::Click { .. }
+        | Key::Pointer(_)
         | Key::Other => NewStep::Stay,
     }
 }
@@ -1043,7 +1087,6 @@ fn step_new_horizontal(form: &mut New, right: bool) {
 
 /// Open 画面のキー処理。Enter で選択 path を確定し、Esc で welcome へ戻る。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_open(open: &mut Open, key: Key) -> OpenStep {
     if open.unregistering_path().is_some() {
         return match key {
@@ -1130,13 +1173,12 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Live(_) | Key::Passthrough(_) | Key::Click { .. } | Key::Other => OpenStep::Stay,
+        Key::Live(_) | Key::Click { .. } | Key::Pointer(_) | Key::Other => OpenStep::Stay,
     }
 }
 
 /// Overview modal の入力処理。文字入力中の `q` を含め、modal が全キーを先に受け取る。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
     if ui.session_commands.is_none() {
         return key == Key::Escape;
@@ -1205,8 +1247,8 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
         | Key::CtrlQ
         | Key::CtrlD
         | Key::Live(_)
-        | Key::Passthrough(_)
         | Key::Click { .. }
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     false
@@ -1430,7 +1472,6 @@ fn submit_remove_selector(
 /// restores the underlying Switch / Closeup surface; Enter adds no confirmation
 /// step, matching v1.
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
     let submit = {
         let WorkspaceModal::Remove(modal) = ui.modal.as_mut().expect("remove modal is active")
@@ -1470,7 +1511,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::Char(_)
             | Key::Live(_)
             | Key::Click { .. }
-            | Key::Passthrough(_)
+            | Key::Pointer(_)
             | Key::Other => None,
         }
     };
@@ -1502,7 +1543,6 @@ fn end_workspace(ui: &mut WorkspaceUi) {
 }
 
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_quit_confirmation(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     let WorkspaceModal::Quit(modal) = ui.modal.as_mut().expect("quit modal is active") else {
         return WorkspaceStep::Stay;
@@ -1544,7 +1584,6 @@ fn confirm_quit(ui: &mut WorkspaceUi) -> WorkspaceStep {
 /// execution uses [`step_overview_command`] so session commands reach its port.
 #[cfg(test)]
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
     match key {
         Key::Up => {
@@ -1568,8 +1607,8 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         | Key::CtrlQ
         | Key::CtrlD
         | Key::Live(_)
-        | Key::Passthrough(_)
         | Key::Click { .. }
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     false
@@ -1577,7 +1616,6 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
 
 /// PR modal の入力処理。Enter のブラウザ起動は外部 IO port が接続されるまで no-op とする。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_pr(modal: &mut PrModal, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.select_prev(),
@@ -1594,7 +1632,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::Char(_)
         | Key::Live(_)
         | Key::Click { .. }
-        | Key::Passthrough(_)
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     false
@@ -1602,7 +1640,6 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
 
 /// 長文 overlay の入力処理。背景の cursor / tab は動かさない。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
     match key {
         Key::Up | Key::Char('k') => modal.scroll_up(),
@@ -1619,7 +1656,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::Char(_)
         | Key::Live(_)
         | Key::Click { .. }
-        | Key::Passthrough(_)
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     false
@@ -1629,7 +1666,6 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
 /// 選択行の Closeup action menu へ入る。基底の workspace は back stack の終端なので、
 /// Esc はここから抜けず no-op とする。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     if ui.workspace.creating_session_inline() {
         match key {
@@ -1654,7 +1690,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::Char(_)
             | Key::Live(_)
             | Key::Click { .. }
-            | Key::Passthrough(_)
+            | Key::Pointer(_)
             | Key::Other => {}
         }
         return WorkspaceStep::Stay;
@@ -1693,7 +1729,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::Char(_)
         | Key::Live(_)
         | Key::Click { .. }
-        | Key::Passthrough(_)
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -1736,8 +1772,8 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::Down
             | Key::CtrlD
             | Key::Live(_)
-            | Key::Passthrough(_)
             | Key::Click { .. }
+            | Key::Pointer(_)
             | Key::Other => {}
         }
         return WorkspaceStep::Stay;
@@ -1748,7 +1784,6 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// action modal が前面のときの menu 操作。Enter は選択 action で pane を開き、開いた後は
 /// forced modal を倒して新しい tab を前面へ出す。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Up => ui.closeup.select_prev(),
@@ -1768,7 +1803,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Click { .. } | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Click { .. } | Key::Pointer(_) | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1776,7 +1811,6 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 /// tab が前面のときの操作。左右で tab を巡回し、`x` で閉じる。overlay / quit は共通。
 /// action menu は前面に無いので上下・Enter は無視する。
 #[coverage(off)]
-#[allow(clippy::needless_pass_by_value)] // Key may own a passthrough payload.
 fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
@@ -1798,7 +1832,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::Char(_)
         | Key::Live(_)
         | Key::Click { .. }
-        | Key::Passthrough(_)
+        | Key::Pointer(_)
         | Key::Other => {}
     }
     WorkspaceStep::Stay
@@ -1823,8 +1857,31 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::PreviousSession => ui.select_previous_session(),
         LiveTerminalAction::ScrollUp => ui.workspace.terminal_scroll_up(),
         LiveTerminalAction::ScrollDown => ui.workspace.terminal_scroll_down(),
+        LiveTerminalAction::CopyTerminalSelection => ui.queue_terminal_copy(),
     }
     WorkspaceStep::Stay
+}
+
+#[coverage(off)]
+fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Option<PointerKind>) {
+    const CONTENT_TOP: u16 = 5;
+    const RIGHT_LEFT: u16 = 37;
+    if column < RIGHT_LEFT || row < CONTENT_TOP {
+        return;
+    }
+    let point = TerminalPoint {
+        row: usize::from(row - CONTENT_TOP),
+        column: usize::from(column - RIGHT_LEFT),
+    };
+    match kind {
+        None => ui.terminal_selection_at(point),
+        Some(PointerKind::Drag) => ui.extend_terminal_selection(point),
+        Some(PointerKind::Up) => {
+            ui.extend_terminal_selection(point);
+            ui.workspace
+                .set_terminal_feedback(Some("terminal selection ready; Cmd-S copies".to_owned()));
+        }
+    }
 }
 
 /// Open a pane and hide the (possibly forced) action modal so the new tab is front.
@@ -1931,10 +1988,21 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
-    // Closeup's focused live terminal owns every non-prefix key. Switch has no
-    // pane input owner, so the same semantic keys continue to drive the TUI.
-    // Any open modal keeps priority.
-    if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(&key) {
+    match key {
+        Key::Click { column, row } => {
+            handle_terminal_pointer(ui, column, row, None);
+            return WorkspaceStep::Stay;
+        }
+        Key::Pointer(PointerEvent { kind, column, row }) => {
+            handle_terminal_pointer(ui, column, row, Some(kind));
+            return WorkspaceStep::Stay;
+        }
+        _ => {}
+    }
+    // A focused live terminal owns ordinary keys (letters, Enter, arrows) so
+    // shell input reaches the daemon PTY.  Reserved chords and the global quit
+    // keys fall through, and any open modal keeps priority.
+    if ui.modal.is_none() && !ui.closeup_modal_visible() && ui.forward_terminal_input(key) {
         return WorkspaceStep::Stay;
     }
 
@@ -2175,12 +2243,19 @@ fn drive_workspace_with_ports_and_selection_mode(
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
-        if handle_sidebar_click(&mut ui, height, width, &key, &mut previous_sidebar_click) {
+        if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
             continue;
         }
         match step_workspace(&mut ui, key) {
             WorkspaceStep::Stay => {}
             WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),
+        }
+        if let Some(text) = ui.take_terminal_copy() {
+            ui.workspace
+                .set_terminal_feedback(Some(match term.copy_text(&text) {
+                    Ok(()) => "terminal selection copied".to_owned(),
+                    Err(error) => format!("clipboard failed: {error}"),
+                }));
         }
     }
 }
@@ -2309,11 +2384,18 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
-        if handle_sidebar_click(&mut ui, height, width, &key, &mut previous_sidebar_click) {
+        if handle_sidebar_click(&mut ui, height, width, key, &mut previous_sidebar_click) {
             continue;
         }
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
             return Ok(WorkspaceStep::Quit);
+        }
+        if let Some(text) = ui.take_terminal_copy() {
+            ui.workspace
+                .set_terminal_feedback(Some(match term.copy_text(&text) {
+                    Ok(()) => "terminal selection copied".to_owned(),
+                    Err(error) => format!("clipboard failed: {error}"),
+                }));
         }
     }
 }
@@ -3072,7 +3154,7 @@ mod tests {
     impl FakeTerminal {
         fn with_keys(keys: &[Key]) -> Self {
             Self {
-                keys: keys.iter().cloned().collect(),
+                keys: keys.iter().copied().collect(),
                 ..Self::default()
             }
         }
@@ -3538,23 +3620,11 @@ mod tests {
         let mut previous = None;
         let click = Key::Click { column: 0, row: 5 };
 
-        assert!(handle_sidebar_click(
-            &mut ui,
-            24,
-            100,
-            &click,
-            &mut previous
-        ));
+        assert!(handle_sidebar_click(&mut ui, 24, 100, click, &mut previous));
         assert_eq!(ui.workspace.selected(), 1);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
 
-        assert!(handle_sidebar_click(
-            &mut ui,
-            24,
-            100,
-            &click,
-            &mut previous
-        ));
+        assert!(handle_sidebar_click(&mut ui, 24, 100, click, &mut previous));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(ui.closeup_modal_visible());
     }
@@ -4355,18 +4425,6 @@ mod tests {
         for character in ['a', 'o', 'x'] {
             let _ = step_workspace(&mut ui, Key::Char(character));
         }
-        // Closeup sends semantic global controls to the pane too.  The runtime
-        // restores these keys for Switch, while this earlier forwarding step
-        // preserves the pane's ownership in Closeup.
-        for key in [
-            Key::Char('\u{1}'),
-            Key::Quit,
-            Key::CtrlD,
-            Key::CtrlQ,
-            Key::Escape,
-        ] {
-            let _ = step_workspace(&mut ui, key);
-        }
         assert_eq!(
             *inputs.lock().unwrap(),
             vec![
@@ -4376,11 +4434,6 @@ mod tests {
                 (5, 3, b"a".to_vec()),
                 (5, 4, b"o".to_vec()),
                 (5, 5, b"x".to_vec()),
-                (5, 6, vec![1]),
-                (5, 7, vec![3]),
-                (5, 8, vec![4]),
-                (5, 9, vec![17]),
-                (5, 10, vec![0x1b]),
             ]
         );
 
@@ -4395,7 +4448,7 @@ mod tests {
         );
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
         let _ = step_workspace(&mut ui, Key::Char('a'));
-        assert_eq!(inputs.lock().unwrap().len(), 11);
+        assert_eq!(inputs.lock().unwrap().len(), 6);
 
         let _ = step_workspace(
             &mut ui,
@@ -4463,32 +4516,27 @@ mod tests {
     }
 
     #[test]
-    fn key_to_terminal_bytes_encodes_every_non_prefix_key() {
-        assert_eq!(key_to_terminal_bytes(&Key::Char('a')), Some(b"a".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Enter), Some(b"\r".to_vec()));
+    fn key_to_terminal_bytes_encodes_input_and_ignores_control_chords() {
+        assert_eq!(key_to_terminal_bytes(Key::Char('a')), Some(b"a".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Enter), Some(b"\r".to_vec()));
         assert_eq!(
-            key_to_terminal_bytes(&Key::Backspace),
+            key_to_terminal_bytes(Key::Backspace),
             Some(b"\x7f".to_vec())
         );
-        assert_eq!(key_to_terminal_bytes(&Key::Tab), Some(b"\t".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Escape), Some(b"\x1b".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Up), Some(b"\x1b[A".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Down), Some(b"\x1b[B".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Right), Some(b"\x1b[C".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Left), Some(b"\x1b[D".to_vec()));
-        assert_eq!(key_to_terminal_bytes(&Key::Quit), Some(vec![3]));
-        assert_eq!(key_to_terminal_bytes(&Key::CtrlQ), Some(vec![17]));
-        assert_eq!(key_to_terminal_bytes(&Key::CtrlD), Some(vec![4]));
-        assert_eq!(key_to_terminal_bytes(&Key::Other), None);
+        assert_eq!(key_to_terminal_bytes(Key::Tab), Some(b"\t".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Escape), Some(b"\x1b".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Up), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Left), Some(b"\x1b[D".to_vec()));
+        assert_eq!(key_to_terminal_bytes(Key::Quit), None);
+        assert_eq!(key_to_terminal_bytes(Key::CtrlQ), None);
+        assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(
-            key_to_terminal_bytes(&Key::Live(
+            key_to_terminal_bytes(Key::Live(
                 crate::usecase::terminal_input::LiveTerminalAction::NextTab
             )),
             None
-        );
-        assert_eq!(
-            key_to_terminal_bytes(&Key::Passthrough(b"paste\n".to_vec())),
-            Some(b"paste\n".to_vec())
         );
     }
 
@@ -4663,6 +4711,11 @@ mod tests {
         // Moving the target in Closeup rebuilds its modal for the new session;
         // the old target's label/action state cannot receive input.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
+        step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousSession));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert_eq!(ui.workspace.focused_label(), "main");
+        assert_eq!(ui.closeup.session(), "main");
+        assert!(ui.closeup_modal_visible());
     }
 
     #[test]
@@ -5185,7 +5238,7 @@ mod tests {
                 Key::Other,
             ];
             keys.extend(navigation);
-            keys.push(exit.clone());
+            keys.push(exit);
             if exit == Key::Char('q') {
                 keys.push(Key::Enter);
             }

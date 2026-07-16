@@ -168,7 +168,10 @@ impl TerminalScreen {
     /// of a line, so selection works from this unstyled grid instead.
     #[must_use]
     pub fn cells(&self) -> Vec<String> {
-        self.grid.iter().map(|row| row.iter().collect()).collect()
+        self.grid
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.ch).collect())
+            .collect()
     }
 
     /// The zero-based cursor position, clamped inside the grid.
