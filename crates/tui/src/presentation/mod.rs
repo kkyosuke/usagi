@@ -36,6 +36,7 @@ use crate::presentation::views::open::{self, Open};
 use crate::presentation::views::overview_modal::{self, OverviewModal};
 use crate::presentation::views::pr_modal::{self, PrModal};
 use crate::presentation::views::remove_modal::{self, RemoveModal};
+use crate::presentation::views::scratchpad_modal;
 use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
@@ -2575,6 +2576,15 @@ impl ControllerWorkspaceRuntime {
                 &base,
                 QuitModal::new(QuitAction::EndWorkspace),
             ),
+            Some(Overlay::Notes) => self.state.note_editor().map_or(base.clone(), |editor| {
+                scratchpad_modal::render_notes_over(height, width, &base, editor)
+            }),
+            Some(Overlay::Environment) => self
+                .state
+                .environment_editor()
+                .map_or(base.clone(), |editor| {
+                    scratchpad_modal::render_environment_over(height, width, &base, editor)
+                }),
             _ => base,
         }
     }
