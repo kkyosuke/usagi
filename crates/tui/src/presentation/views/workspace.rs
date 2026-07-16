@@ -29,6 +29,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
+use crate::usecase::application::terminal_selection::TerminalPoint;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
@@ -369,6 +370,7 @@ pub struct Workspace {
     /// live output; this belongs to the selected target's presentation state.
     terminal_scroll: usize,
     terminal_feedback: Option<String>,
+    terminal_selection: Option<(TerminalPoint, TerminalPoint)>,
 }
 
 impl Workspace {
@@ -423,6 +425,7 @@ impl Workspace {
             terminal_view: None,
             terminal_scroll: 0,
             terminal_feedback: None,
+            terminal_selection: None,
         }
     }
 
@@ -917,6 +920,11 @@ impl Workspace {
     #[coverage(off)]
     pub fn set_terminal_feedback(&mut self, feedback: Option<String>) {
         self.terminal_feedback = feedback;
+    }
+
+    #[coverage(off)]
+    pub fn set_terminal_selection(&mut self, anchor: TerminalPoint, focus: TerminalPoint) {
+        self.terminal_selection = Some((anchor, focus));
     }
 
     #[coverage(off)]
@@ -1574,8 +1582,21 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
             let start = view
                 .len()
                 .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
-            for line in view.iter().skip(start).take(content_cap) {
-                rows.push(widgets::clip_to_width(line, width));
+            for (index, line) in view.iter().skip(start).take(content_cap).enumerate() {
+                let line = widgets::clip_to_width(line, width);
+                let selected = ws.terminal_selection.is_some_and(|(anchor, focus)| {
+                    let (first, last) = if anchor <= focus {
+                        (anchor, focus)
+                    } else {
+                        (focus, anchor)
+                    };
+                    (first.row..=last.row).contains(&(start + index))
+                });
+                rows.push(if selected {
+                    Style::new().reverse().paint(&line)
+                } else {
+                    line
+                });
             }
         } else if let Some(document) = ws.pane_document() {
             rows.extend(

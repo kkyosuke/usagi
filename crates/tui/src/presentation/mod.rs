@@ -731,6 +731,7 @@ impl WorkspaceUi {
             .find(|session| session.terminal().fences(&terminal))
         {
             self.terminal_selection = Some(session.begin_selection(point));
+            self.workspace.set_terminal_selection(point, point);
             self.workspace
                 .set_terminal_feedback(Some("terminal selection started".to_owned()));
         }
@@ -739,6 +740,8 @@ impl WorkspaceUi {
     fn extend_terminal_selection(&mut self, point: TerminalPoint) {
         if let Some(selection) = &mut self.terminal_selection {
             selection.extend(point);
+            self.workspace
+                .set_terminal_selection(selection.anchor(), selection.focus());
         }
     }
 
