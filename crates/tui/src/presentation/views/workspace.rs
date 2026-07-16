@@ -1709,9 +1709,12 @@ pub fn terminal_auto_scroll_direction_at(
     let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
     let content_top = 3;
     let content_cap = height.saturating_sub(CHROME_ROWS + content_top + 2);
-    (body_row <= content_top).then_some(true).or_else(|| {
-        (body_row >= content_top.saturating_add(content_cap.saturating_sub(1))).then_some(false)
-    })
+    // The first and last output rows are ordinary selectable cells. Only a
+    // pointer *outside* the viewport starts edge auto-scroll; treating the
+    // first row as an edge made that row impossible to select reliably.
+    (body_row < content_top)
+        .then_some(true)
+        .or_else(|| (body_row >= content_top.saturating_add(content_cap)).then_some(false))
 }
 
 /// The selectable row currently visible at the requested auto-scroll edge.
@@ -2130,7 +2133,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame, sidebar_row_at, with_footer_gap,
+        render, render_home, render_with_skeleton_frame, sidebar_row_at,
+        terminal_auto_scroll_direction_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2204,6 +2208,22 @@ mod tests {
         assert_eq!(
             ws.terminal_scroll, 0,
             "a shorter replay normalizes stale scroll"
+        );
+    }
+
+    #[test]
+    fn terminal_auto_scroll_keeps_the_first_output_row_selectable() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some(vec!["first".to_string(), "second".to_string()]));
+
+        assert_eq!(
+            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 5),
+            None,
+            "the first visible output row is a selectable cell, not an edge"
+        );
+        assert_eq!(
+            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 4),
+            Some(true)
         );
     }
 
