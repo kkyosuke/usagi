@@ -2719,6 +2719,18 @@ impl ControllerWorkspaceRuntime {
                 } => {
                     self.open_terminal(*target, *operation_id);
                 }
+                ControllerEffect::OpenDiff {
+                    target,
+                    operation_id,
+                } => {
+                    self.request_pane(*target, *operation_id, PaneKind::Diff);
+                    self.apply_pane_event(
+                        *target,
+                        PaneEvent::Resolved {
+                            operation: *operation_id,
+                        },
+                    );
+                }
                 ControllerEffect::CreateSession { token, intent, .. } => {
                     self.create_session(*token, &intent.name);
                 }
