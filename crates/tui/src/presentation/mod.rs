@@ -46,7 +46,9 @@ use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{
     AppEvent, AppKey, AppState, Effect as ControllerEffect,
 };
-use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
+use crate::usecase::application::pane::{
+    self, PaneEvent, PaneKind, PaneRegistry, PaneRegistryEvent, PaneSelection, TabSelection,
+};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
@@ -2495,6 +2497,8 @@ struct ControllerWorkspaceRuntime {
     root: PathBuf,
     sessions: Vec<ProjectedSession>,
     metrics: Option<DaemonMetrics>,
+    panes: PaneRegistry,
+    agent: Option<Box<dyn AgentCommandPort>>,
 }
 
 impl ControllerWorkspaceRuntime {
@@ -2506,13 +2510,21 @@ impl ControllerWorkspaceRuntime {
             .zip(&snapshot.session_ids)
             .map(|(record, id)| ProjectedSession::from_record(*id, record))
             .collect();
+        let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
         Self {
-            state: AppState::home(snapshot.workspace_id, snapshot.session_ids.clone()),
+            panes: PaneRegistry::new(state.active()),
+            state,
             workspace_name: snapshot.workspace.name.clone(),
             root: snapshot.workspace.path.clone(),
             sessions,
             metrics: None,
+            agent: None,
         }
+    }
+
+    fn with_agent_port(mut self, agent: Box<dyn AgentCommandPort>) -> Self {
+        self.agent = Some(agent);
+        self
     }
 
     fn frame(&self, height: usize, width: usize) -> Vec<String> {
@@ -2522,7 +2534,13 @@ impl ControllerWorkspaceRuntime {
             &self.root,
             &self.sessions,
         );
-        workspace::render_home(height, width, &home.with_metrics(self.metrics.clone()))
+        workspace::render_home(
+            height,
+            width,
+            &home
+                .with_pane(self.panes.active_pane())
+                .with_metrics(self.metrics.clone()),
+        )
     }
 
     fn refresh_metrics(&mut self, port: &mut dyn MetricsPort) {
@@ -2551,9 +2569,109 @@ impl ControllerWorkspaceRuntime {
             &mut self.state,
             AppEvent::Key(app_key),
         );
-        effects
+        self.sync_active_pane();
+        self.run_effects(effects)
             .into_iter()
             .any(|effect| matches!(effect, ControllerEffect::Detach))
+    }
+
+    fn sync_active_pane(&mut self) {
+        let _ = pane::reduce_registry(
+            &mut self.panes,
+            PaneRegistryEvent::SelectTarget(self.state.active()),
+        );
+    }
+
+    fn run_effects(&mut self, effects: Vec<ControllerEffect>) -> Vec<ControllerEffect> {
+        for effect in &effects {
+            match effect {
+                ControllerEffect::LaunchAgent {
+                    workspace,
+                    session,
+                    operation_id,
+                    profile,
+                } => {
+                    let target = crate::usecase::application::controller::Target::Session(*session);
+                    let _ = pane::reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target,
+                            event: PaneEvent::Request {
+                                operation: *operation_id,
+                                target,
+                                kind: PaneKind::Agent,
+                            },
+                        },
+                    );
+                    let result = self.agent.as_mut().map_or_else(
+                        || Err("agent launch is unavailable".to_owned()),
+                        |agent| agent.launch(*workspace, *session, profile.clone()),
+                    );
+                    let event = match result {
+                        Ok(terminal) => PaneEvent::Succeeded {
+                            operation: *operation_id,
+                            terminal,
+                        },
+                        Err(message) => PaneEvent::Failed {
+                            operation: *operation_id,
+                            message,
+                        },
+                    };
+                    let _ = pane::reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane { target, event },
+                    );
+                }
+                ControllerEffect::OpenTerminal {
+                    target,
+                    operation_id,
+                    ..
+                } => {
+                    let Some(session) = (match target {
+                        crate::usecase::application::controller::Target::Session(session) => {
+                            Some(*session)
+                        }
+                        crate::usecase::application::controller::Target::Root(_) => None,
+                    }) else {
+                        continue;
+                    };
+                    let _ = pane::reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target: *target,
+                            event: PaneEvent::Request {
+                                operation: *operation_id,
+                                target: *target,
+                                kind: PaneKind::Terminal,
+                            },
+                        },
+                    );
+                    let result = self.agent.as_mut().map_or_else(
+                        || Err("terminal launch is unavailable".to_owned()),
+                        |agent| agent.launch_terminal(self.state.workspace(), session),
+                    );
+                    let event = match result {
+                        Ok(terminal) => PaneEvent::Succeeded {
+                            operation: *operation_id,
+                            terminal,
+                        },
+                        Err(message) => PaneEvent::Failed {
+                            operation: *operation_id,
+                            message,
+                        },
+                    };
+                    let _ = pane::reduce_registry(
+                        &mut self.panes,
+                        PaneRegistryEvent::Pane {
+                            target: *target,
+                            event,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        effects
     }
 }
 
@@ -2570,8 +2688,8 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     agent_port: Box<dyn AgentCommandPort>,
     mut metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
-    let _ = (session_commands, modal_selection_mode, default_model, agent_port);
-    let mut runtime = ControllerWorkspaceRuntime::new(snapshot);
+    let _ = (session_commands, modal_selection_mode, default_model);
+    let mut runtime = ControllerWorkspaceRuntime::new(snapshot).with_agent_port(agent_port);
     loop {
         runtime.refresh_metrics(metrics_port.as_mut());
         let (height, width) = term.size()?;
