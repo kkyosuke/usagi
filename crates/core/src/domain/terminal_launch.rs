@@ -73,6 +73,8 @@ pub struct DurableTerminalLaunchSnapshot {
     pub request: TerminalLaunchRequest,
     pub profile_revision: u32,
     pub program: String,
+    #[serde(default)]
+    pub arguments: Vec<String>,
     pub working_directory: PathBuf,
     pub environment_allowlist: BTreeSet<EnvironmentVariableName>,
 }
@@ -88,6 +90,7 @@ impl DurableTerminalLaunchSnapshot {
         request: TerminalLaunchRequest,
         profile_revision: u32,
         program: impl Into<String>,
+        arguments: Vec<String>,
         working_directory: PathBuf,
         environment_allowlist: impl IntoIterator<Item = EnvironmentVariableName>,
     ) -> Result<Self, TerminalLaunchValidationError> {
@@ -95,7 +98,10 @@ impl DurableTerminalLaunchSnapshot {
         if profile_revision == 0 {
             return Err(TerminalLaunchValidationError::InvalidProfileRevision);
         }
-        if program.is_empty() || program.contains('\0') {
+        if program.is_empty()
+            || program.contains('\0')
+            || arguments.iter().any(|arg| arg.contains('\0'))
+        {
             return Err(TerminalLaunchValidationError::InvalidProgram);
         }
         if working_directory.as_os_str().is_empty() {
@@ -106,6 +112,7 @@ impl DurableTerminalLaunchSnapshot {
             request,
             profile_revision,
             program,
+            arguments,
             working_directory,
             environment_allowlist: environment_allowlist.into_iter().collect(),
         })
@@ -183,6 +190,7 @@ mod tests {
             request(),
             1,
             "/bin/sh",
+            vec!["-l".into(), "-i".into()],
             PathBuf::from("."),
             [EnvironmentVariableName::new("TERM").unwrap()],
         )
@@ -207,25 +215,35 @@ mod tests {
             TerminalProfileId::new("shell").unwrap().to_string(),
             "shell"
         );
-        let snapshot = DurableTerminalLaunchSnapshot::new(request(), 1, "", PathBuf::from("."), [])
-            .unwrap_err();
+        let snapshot =
+            DurableTerminalLaunchSnapshot::new(request(), 1, "", vec![], PathBuf::from("."), [])
+                .unwrap_err();
         assert_eq!(snapshot, TerminalLaunchValidationError::InvalidProgram);
         assert_eq!(
-            DurableTerminalLaunchSnapshot::new(request(), 1, "sh\0", PathBuf::from("."), [])
-                .unwrap_err(),
+            DurableTerminalLaunchSnapshot::new(
+                request(),
+                1,
+                "sh\0",
+                vec![],
+                PathBuf::from("."),
+                []
+            )
+            .unwrap_err(),
             TerminalLaunchValidationError::InvalidProgram
         );
         assert_eq!(
-            DurableTerminalLaunchSnapshot::new(request(), 0, "sh", PathBuf::from("."), [])
+            DurableTerminalLaunchSnapshot::new(request(), 0, "sh", vec![], PathBuf::from("."), [])
                 .unwrap_err(),
             TerminalLaunchValidationError::InvalidProfileRevision
         );
         assert_eq!(
-            DurableTerminalLaunchSnapshot::new(request(), 1, "sh", PathBuf::new(), []).unwrap_err(),
+            DurableTerminalLaunchSnapshot::new(request(), 1, "sh", vec![], PathBuf::new(), [])
+                .unwrap_err(),
             TerminalLaunchValidationError::InvalidWorkingDirectory
         );
         let snapshot =
-            DurableTerminalLaunchSnapshot::new(request(), 1, "sh", PathBuf::from("."), []).unwrap();
+            DurableTerminalLaunchSnapshot::new(request(), 1, "sh", vec![], PathBuf::from("."), [])
+                .unwrap();
         assert_eq!(
             ResolvedTerminalLaunch::new(
                 snapshot,
@@ -238,6 +256,7 @@ mod tests {
             request(),
             1,
             "sh",
+            vec![],
             PathBuf::from("."),
             [EnvironmentVariableName::new("TERM").unwrap()],
         )

@@ -5,7 +5,7 @@
 //! pane can render.  It is a deliberately small VT interpreter: it covers what a
 //! login shell prompt and everyday commands such as `ls` emit — printable text,
 //! `CR` / `LF` / `BS` / `HT`, line wrap and scroll, cursor moves, line/display
-//! erase — and silently ignores styling (SGR) and window-title (OSC) sequences.
+//! erase and SGR styling — and silently ignores window-title (OSC) sequences.
 //! It is pure and holds no IO, so it is exercised entirely by unit tests.
 //!
 //! Out of scope on purpose: double-width (CJK) cells are stored as a single
@@ -28,12 +28,28 @@ enum Phase {
     Charset,
 }
 
+/// One terminal cell and the SGR state that was active when it was written.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Cell {
+    ch: char,
+    style: String,
+}
+
+impl Cell {
+    fn blank() -> Self {
+        Self {
+            ch: ' ',
+            style: String::new(),
+        }
+    }
+}
+
 /// A fixed-size character grid updated from a raw terminal byte stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalScreen {
     rows: usize,
     cols: usize,
-    grid: Vec<Vec<char>>,
+    grid: Vec<Vec<Cell>>,
     cursor_row: usize,
     cursor_col: usize,
     phase: Phase,
@@ -43,6 +59,10 @@ pub struct TerminalScreen {
     utf8_pending: Vec<u8>,
     /// The total length of the multibyte sequence currently being assembled.
     utf8_needed: usize,
+    /// The complete SGR state to apply to subsequently printed cells.
+    style: String,
+    /// Cursor position saved by DECSC (`ESC 7`) or SCP (`CSI s`).
+    saved_cursor: Option<(usize, usize)>,
 }
 
 impl TerminalScreen {
@@ -55,13 +75,15 @@ impl TerminalScreen {
         Self {
             rows,
             cols,
-            grid: vec![vec![' '; cols]; rows],
+            grid: vec![vec![Cell::blank(); cols]; rows],
             cursor_row: 0,
             cursor_col: 0,
             phase: Phase::Ground,
             params: String::new(),
             utf8_pending: Vec::new(),
             utf8_needed: 0,
+            style: String::new(),
+            saved_cursor: None,
         }
     }
 
@@ -78,11 +100,19 @@ impl TerminalScreen {
     pub fn rows(&self) -> Vec<String> {
         self.grid
             .iter()
-            .map(|row| {
-                let mut line: String = row.iter().collect();
-                let trimmed = line.trim_end().len();
-                line.truncate(trimmed);
-                line
+            .map(|row| render_row(row, None, ""))
+            .collect()
+    }
+
+    /// Renders the grid with the current PTY cursor as an inverted cell.
+    #[must_use]
+    pub fn rows_with_cursor(&self) -> Vec<String> {
+        self.grid
+            .iter()
+            .enumerate()
+            .map(|(row, cells)| {
+                let cursor = (row == self.cursor_row).then_some(self.cursor_col);
+                render_row(cells, cursor, &self.style)
             })
             .collect()
     }
@@ -155,6 +185,14 @@ impl TerminalScreen {
             }
             b']' => self.phase = Phase::Osc,
             b'(' | b')' => self.phase = Phase::Charset,
+            b'7' => {
+                self.save_cursor();
+                self.phase = Phase::Ground;
+            }
+            b'8' => {
+                self.restore_cursor();
+                self.phase = Phase::Ground;
+            }
             // Single-byte escapes (e.g. `ESC =`, `ESC c`) are ignored.
             _ => self.phase = Phase::Ground,
         }
@@ -196,7 +234,10 @@ impl TerminalScreen {
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
-            // Styling (`m`) and unhandled finals leave the grid unchanged.
+            'm' => self.sgr(),
+            's' => self.save_cursor(),
+            'u' => self.restore_cursor(),
+            // Unhandled finals leave the grid unchanged.
             _ => {}
         }
     }
@@ -209,7 +250,7 @@ impl TerminalScreen {
             _ => (self.cursor_col, self.cols),
         };
         for col in start..end.min(self.cols) {
-            self.grid[row][col] = ' ';
+            self.grid[row][col] = Cell::blank();
         }
     }
 
@@ -220,7 +261,7 @@ impl TerminalScreen {
                     self.blank_row(row);
                 }
                 for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    self.grid[self.cursor_row][col] = ' ';
+                    self.grid[self.cursor_row][col] = Cell::blank();
                 }
             }
             2 => {
@@ -230,7 +271,7 @@ impl TerminalScreen {
             }
             _ => {
                 for col in self.cursor_col..self.cols {
-                    self.grid[self.cursor_row][col] = ' ';
+                    self.grid[self.cursor_row][col] = Cell::blank();
                 }
                 for row in (self.cursor_row + 1)..self.rows {
                     self.blank_row(row);
@@ -240,7 +281,7 @@ impl TerminalScreen {
     }
 
     fn blank_row(&mut self, row: usize) {
-        self.grid[row].fill(' ');
+        self.grid[row].fill(Cell::blank());
     }
 
     fn print(&mut self, ch: char) {
@@ -248,14 +289,17 @@ impl TerminalScreen {
             self.cursor_col = 0;
             self.line_feed();
         }
-        self.grid[self.cursor_row][self.cursor_col] = ch;
+        self.grid[self.cursor_row][self.cursor_col] = Cell {
+            ch,
+            style: self.style.clone(),
+        };
         self.cursor_col += 1;
     }
 
     fn line_feed(&mut self) {
         if self.cursor_row + 1 >= self.rows {
             self.grid.remove(0);
-            self.grid.push(vec![' '; self.cols]);
+            self.grid.push(vec![Cell::blank(); self.cols]);
         } else {
             self.cursor_row += 1;
         }
@@ -264,6 +308,36 @@ impl TerminalScreen {
     fn tab(&mut self) {
         let next = ((self.cursor_col / 8) + 1) * 8;
         self.cursor_col = next.min(self.cols - 1);
+    }
+
+    fn sgr(&mut self) {
+        // `CSI m` is reset. Any sequence containing `0` also starts a fresh
+        // state, so a later repaint can faithfully reconstruct the style from
+        // the beginning of a row rather than relying on terminal history.
+        let reset = self.params.is_empty()
+            || self
+                .params
+                .split(';')
+                .any(|parameter| parameter.is_empty() || parameter == "0");
+        if reset {
+            self.style.clear();
+        }
+        if !self.params.is_empty() && self.params != "0" {
+            self.style.push_str("\u{1b}[");
+            self.style.push_str(&self.params);
+            self.style.push('m');
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = Some((self.cursor_row, self.cursor_col));
+    }
+
+    fn restore_cursor(&mut self) {
+        if let Some((row, col)) = self.saved_cursor {
+            self.cursor_row = row;
+            self.cursor_col = col;
+        }
     }
 
     /// Reads the `idx`-th `;`-separated numeric CSI parameter, or `default` when
@@ -275,6 +349,44 @@ impl TerminalScreen {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(default)
     }
+}
+
+fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
+    let last = row
+        .iter()
+        .rposition(|cell| cell.ch != ' ')
+        .into_iter()
+        .chain(cursor)
+        .max();
+    let Some(last) = last else {
+        return String::new();
+    };
+    let mut rendered = String::new();
+    let mut active = String::new();
+    for (column, cell) in row[..=last].iter().enumerate() {
+        let style = if cursor == Some(column) {
+            let base = if cell.style.is_empty() {
+                cursor_style
+            } else {
+                cell.style.as_str()
+            };
+            format!("{base}\u{1b}[7m")
+        } else {
+            cell.style.clone()
+        };
+        if style != active {
+            if !active.is_empty() {
+                rendered.push_str("\u{1b}[0m");
+            }
+            rendered.push_str(&style);
+            active = style;
+        }
+        rendered.push(cell.ch);
+    }
+    if !active.is_empty() {
+        rendered.push_str("\u{1b}[0m");
+    }
+    rendered
 }
 
 /// The byte length of a UTF-8 sequence from its lead byte, or `1` when the byte
@@ -360,8 +472,30 @@ mod tests {
     }
 
     #[test]
-    fn sgr_color_sequences_do_not_appear_on_screen() {
-        assert_eq!(screen_after(1, 10, b"\x1b[31mred\x1b[0m"), vec!["red"]);
+    fn sgr_colors_and_attributes_are_preserved_in_rendered_rows() {
+        assert_eq!(
+            screen_after(1, 10, b"\x1b[31mred\x1b[0m"),
+            vec!["\x1b[31mred\x1b[0m"]
+        );
+        assert_eq!(
+            screen_after(1, 10, b"\x1b[1;38;5;208mhi\x1b[0mok"),
+            vec!["\x1b[1;38;5;208mhi\x1b[0mok"]
+        );
+    }
+
+    #[test]
+    fn cursor_is_visible_at_the_input_position_without_losing_cell_style() {
+        let mut screen = TerminalScreen::new(1, 8);
+        screen.advance(b"\x1b[32mgo");
+        assert_eq!(
+            screen.rows_with_cursor(),
+            vec!["\x1b[32mgo\x1b[0m\x1b[32m\x1b[7m \x1b[0m"]
+        );
+        screen.advance(b"\r");
+        assert_eq!(
+            screen.rows_with_cursor(),
+            vec!["\x1b[32m\x1b[7mg\x1b[0m\x1b[32mo\x1b[0m"]
+        );
     }
 
     #[test]
@@ -398,6 +532,23 @@ mod tests {
         assert_eq!(screen.cursor(), (0, 4));
         screen.advance(b"\x1b[3dY"); // VPA: row 3 (zero-based 2)
         assert_eq!(screen.cursor(), (2, 5));
+    }
+
+    #[test]
+    fn saved_cursor_restores_the_input_position_after_a_right_prompt() {
+        let mut screen = TerminalScreen::new(1, 30);
+        screen.advance(b"left\x1b[s\x1b[25G\x1b[36mright\x1b[0m\x1b[u input");
+        assert_eq!(screen.cursor(), (0, 10));
+        assert_eq!(
+            screen.rows(),
+            vec!["left input              \x1b[36mright\x1b[0m"]
+        );
+
+        screen.advance(b"\x1b7\x1b[1G$ \x1b8!");
+        assert_eq!(
+            screen.rows()[0],
+            "$ ft input!             \x1b[36mright\x1b[0m"
+        );
     }
 
     #[test]

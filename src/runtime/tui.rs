@@ -296,6 +296,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         &mut self,
         workspace: WorkspaceId,
         session: usagi_core::domain::id::SessionId,
+        geometry: usagi_tui::usecase::application::pane_runtime::Geometry,
     ) -> Result<usagi_core::domain::id::TerminalRef, String> {
         let lifecycle = request_lifecycle_snapshot()
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -319,7 +320,10 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                     worktree_id: managed.worktree_id,
                 },
             },
-            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            geometry: TerminalGeometry {
+                cols: geometry.cols,
+                rows: geometry.rows,
+            },
         };
         let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
             .map_err(|_| "daemon unavailable; reconnect to continue".to_owned())?;
@@ -752,6 +756,9 @@ impl Terminal for CrosstermTerminal {
         loop {
             match self.input.next(self.input_started.elapsed())? {
                 RuntimeEvent::Input(input) => {
+                    if let LiveInput::Mouse { column, row } = input {
+                        return Ok(Key::Click { column, row });
+                    }
                     let now = self.input_started.elapsed();
                     match self.live_input.classify(now, input.clone()) {
                         // A resolved `Ctrl-O` prefix action drives the live runtime.
@@ -796,6 +803,7 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         LiveInput::Raw(_) | LiveInput::Text(_) | LiveInput::Paste(_) => {
             return Key::Passthrough(bytes);
         }
+        LiveInput::Mouse { .. } => return Key::Other,
     };
     // Some terminal backends report an auto-repeat as the first observable
     // key event.  Treat it like a press so management controls (notably

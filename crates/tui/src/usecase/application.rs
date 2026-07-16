@@ -197,6 +197,9 @@ pub enum Key {
     CtrlD,
     /// 文字キー。メニューのショートカット文字や recent の番号キーに使う。
     Char(char),
+    /// 左ボタンのクリック位置（0-based terminal cell）。画面ごとの hit test は
+    /// presentation が担い、座標を reducer や domain へは渡さない。
+    Click { column: u16, row: u16 },
     /// 上記のいずれでもないキー（無視して再描画だけする。リサイズ通知など）。
     Other,
 }
@@ -356,6 +359,7 @@ mod tests {
             Key::Quit,
             Key::CtrlD,
             Key::Char('o'),
+            Key::Click { column: 3, row: 4 },
             Key::Live(LiveTerminalAction::Switch),
             Key::Passthrough(b"paste".to_vec()),
             Key::Other,

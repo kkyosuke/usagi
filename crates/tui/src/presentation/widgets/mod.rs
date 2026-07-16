@@ -221,6 +221,63 @@ pub fn pad_to_width(text: &str, width: usize) -> String {
     format!("{clipped}{}", " ".repeat(pad))
 }
 
+/// Force an ANSI-styled line into a dim, inactive appearance.
+///
+/// The renderer composes a line from independently styled spans, each of
+/// which closes with an SGR reset. Wrapping the whole line in `dim` therefore
+/// is insufficient: a nested reset would make the rest of the line bright
+/// again. This rewrites every SGR sequence so dim remains active after each
+/// span while preserving its foreground colour and other safe attributes.
+/// The returned line always closes its style, so it cannot affect the next
+/// pane row or a later modal overlay.
+#[must_use]
+pub fn dim_ansi(text: &str) -> String {
+    let mut output = String::with_capacity(text.len() + 16);
+    output.push_str("\u{1b}[2m");
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != ESC || chars.next_if_eq(&'[').is_none() {
+            output.push(character);
+            continue;
+        }
+
+        let mut sequence = String::new();
+        let mut final_byte = None;
+        for next in chars.by_ref() {
+            if ('\u{40}'..='\u{7e}').contains(&next) {
+                final_byte = Some(next);
+                break;
+            }
+            sequence.push(next);
+        }
+        let Some(final_byte) = final_byte else {
+            output.push(ESC);
+            output.push('[');
+            output.push_str(&sequence);
+            break;
+        };
+        if final_byte != 'm' {
+            output.push(ESC);
+            output.push('[');
+            output.push_str(&sequence);
+            output.push(final_byte);
+            continue;
+        }
+
+        let mut params = sequence
+            .split(';')
+            .filter(|param| *param != "1" && *param != "2")
+            .collect::<Vec<_>>();
+        params.insert(0, "2");
+        output.push(ESC);
+        output.push('[');
+        output.push_str(&params.join(";"));
+        output.push('m');
+    }
+    output.push_str(RESET);
+    output
+}
+
 /// 生の端末サイズを正規化する。非対話環境が報告する 0 を 80x24 のフォールバックに置き換える。
 #[must_use]
 pub fn normalize_size(height: usize, width: usize) -> (usize, usize) {
@@ -285,8 +342,9 @@ pub fn relative_session_time(from: DateTime<Utc>, now: DateTime<Utc>) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        Shimmer, block_caret, centered_padding, clip_to_width, display_width, normalize_size,
-        relative_session_time, relative_time, shimmer_text, shimmer_text_with, wrap_to_width,
+        Shimmer, block_caret, centered_padding, clip_to_width, dim_ansi, display_width,
+        normalize_size, relative_session_time, relative_time, shimmer_text, shimmer_text_with,
+        wrap_to_width,
     };
     use crate::presentation::theme::{Role, Style};
     use chrono::{DateTime, Duration, Utc};
@@ -364,6 +422,30 @@ mod tests {
         assert!(clipped.contains('…'));
         // 見た目の桁数は max に収まる（色と reset は 0 桁）。
         assert!(display_width(&clipped) <= 4);
+    }
+
+    #[test]
+    fn dim_ansi_preserves_colours_but_removes_bold_and_closes_the_line() {
+        let dimmed = dim_ansi("plain \u{1b}[1;36mtab\u{1b}[0m \u{1b}[31merror\u{1b}[0m");
+
+        assert_eq!(display_width(&dimmed), 15);
+        assert!(dimmed.starts_with("\u{1b}[2mplain"));
+        assert!(dimmed.contains("\u{1b}[2;36mtab"));
+        assert!(dimmed.contains("\u{1b}[2;31merror"));
+        assert!(!dimmed.contains("[1;36m"));
+        assert!(dimmed.ends_with("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn dim_ansi_preserves_non_sgr_and_incomplete_ansi_sequences() {
+        let non_sgr = dim_ansi("\u{1b}]title\u{7}");
+        assert_eq!(non_sgr, "\u{1b}[2m\u{1b}]title\u{7}\u{1b}[0m");
+
+        let csi = dim_ansi("before\u{1b}[2Kafter");
+        assert_eq!(csi, "\u{1b}[2mbefore\u{1b}[2Kafter\u{1b}[0m");
+
+        let incomplete = dim_ansi("before\u{1b}[31");
+        assert_eq!(incomplete, "\u{1b}[2mbefore\u{1b}[31\u{1b}[0m");
     }
 
     #[test]

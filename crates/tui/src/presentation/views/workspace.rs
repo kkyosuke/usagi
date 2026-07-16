@@ -41,6 +41,18 @@ const MEMORY_ICON: char = '\u{f233}';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
+/// Returns the PTY viewport that is visible inside the right-hand pane.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    (
+        height.saturating_sub(CHROME_ROWS).max(1),
+        split.right.max(1),
+    )
+}
+
 /// Home snapshot の session 表示情報。
 ///
 /// `id` が selection / active と照合する唯一の identity である。`label` は表示専用で、
@@ -618,6 +630,15 @@ impl Workspace {
         self.selected = self.state.sessions.len() + 1;
     }
 
+    /// Select a sidebar row resolved from a pointer hit test. Out-of-range
+    /// indices are ignored so a stale frame can never select a different row.
+    #[coverage(off)]
+    pub fn select_row(&mut self, index: usize) {
+        if index < self.row_count() {
+            self.selected = index;
+        }
+    }
+
     #[must_use]
     #[coverage(off)]
     pub fn creating_session_inline(&self) -> bool {
@@ -1109,6 +1130,72 @@ fn workspace_viewport_start(selected: usize, ws: &Workspace, capacity: usize) ->
     start.min(ws.row_count().saturating_sub(1))
 }
 
+/// Resolve a left-sidebar cell in the current frame to its selectable row.
+///
+/// The calculation deliberately follows [`left_pane`]'s viewport and pending
+/// skeleton layout, so a click can neither land on the divider/mascot/footer
+/// nor select a row hidden above the viewport.
+#[must_use]
+#[coverage(off)]
+pub fn sidebar_row_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    skeleton_frame: usize,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    if usize::from(column) >= split.left || usize::from(row) < CHROME_ROWS || height <= CHROME_ROWS
+    {
+        return None;
+    }
+    let body_height = height - CHROME_ROWS;
+    if body_height == 1 {
+        return (usize::from(row) == CHROME_ROWS).then_some(ws.selected);
+    }
+    let body_capacity = body_height - 1;
+    let metric_labels = mascot_metrics(ws.metrics.as_ref(), skeleton_frame);
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(
+        split.left,
+        skeleton_frame as u64,
+        None,
+        &metric_labels,
+    );
+    let mascot_rows = mascot
+        .as_ref()
+        .filter(|block| body_capacity >= block.reserved_rows() + 2)
+        .map_or(0, widgets::mascot::MascotBlock::reserved_rows);
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
+    let target = usize::from(row) - CHROME_ROWS;
+    if target >= content_capacity {
+        return None;
+    }
+
+    let start = workspace_viewport_start(ws.selected, ws, content_capacity);
+    let mut offset = 0;
+    for index in start..ws.row_count() {
+        let pending_rows =
+            usize::from(index == ws.sessions().len() + 1 && ws.pending_session.is_some()) * 2;
+        let entry_rows = pending_rows + workspace_row_height(index, ws);
+        if offset + entry_rows > content_capacity {
+            break;
+        }
+        if target >= offset && target < offset + entry_rows {
+            return (target >= offset + pending_rows).then_some(index);
+        }
+        offset += entry_rows;
+        if index == 0 && offset < content_capacity {
+            if target == offset {
+                return None;
+            }
+            offset += 1;
+        }
+    }
+    None
+}
+
 #[coverage(off)]
 fn create_session_rows(width: usize, selected: bool, ws: &Workspace) -> Vec<String> {
     let cursor = if selected {
@@ -1519,7 +1606,10 @@ pub fn render_with_skeleton_frame(
     let body_height = height.saturating_sub(CHROME_ROWS);
     let split = panes::split(width, LEFT_WIDTH);
     let left = left_pane(body_height, split.left, ws, skeleton_frame);
-    let right = right_pane(body_height, split.right, ws);
+    let right = dim_inactive_right_pane(
+        ws.mode() == Mode::Switch,
+        right_pane(body_height, split.right, ws),
+    );
     frame.extend(panes::join(body_height, &left, &right, split));
 
     frame.truncate(height);
@@ -1541,10 +1631,14 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     frame.push(home_header_line(width, home));
     frame.push(header_spacer(width));
     let now = Utc::now();
+    let right = dim_inactive_right_pane(
+        home.mode == HomeMode::Switch,
+        home_right_pane(body_height, split.right, home),
+    );
     frame.extend(panes::join(
         body_height,
         &home_left_pane(body_height, split.left, home, now),
-        &home_right_pane(body_height, split.right, home),
+        &right,
         split,
     ));
     frame.truncate(height);
@@ -1557,6 +1651,19 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         )
     } else {
         frame
+    }
+}
+
+/// Apply the inactive treatment only while the left sidebar owns navigation.
+/// Modals are composed after this frame, preserving their foreground styles.
+fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
+    if inactive {
+        right
+            .into_iter()
+            .map(|line| widgets::dim_ansi(&line))
+            .collect()
+    } else {
+        right
     }
 }
 
@@ -1899,7 +2006,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame,
+        render, render_home, render_with_skeleton_frame, sidebar_row_at,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2300,6 +2407,43 @@ mod tests {
     }
 
     #[test]
+    fn home_right_pane_is_dim_in_switch_and_bright_in_closeup() {
+        let workspace = WorkspaceId::new();
+        let operation = OperationId::new();
+        let target = Target::Root(workspace);
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let state = AppState::home(workspace, Vec::new());
+        let switch = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let switch_frame = render_home(18, 100, &switch);
+        let switch_right = switch_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(switch_right.contains("\u{1b}[2m"));
+        assert!(switch_right.contains("\u{1b}[2;36mmain"));
+        assert!(!switch_right.contains("\u{1b}[1;36m"));
+
+        let mut state = state;
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let closeup = HomeProjection::from_state(&state, "work", "/work", &[]).with_pane(&pane);
+        let closeup_frame = render_home(18, 100, &closeup);
+        let closeup_right = closeup_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
+        assert!(!closeup_right.starts_with("\u{1b}[2m"));
+    }
+
+    #[test]
     fn pending_tab_chip_animates_on_home_tick_without_changing_the_pending_transition() {
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
@@ -2437,6 +2581,17 @@ mod tests {
         assert_eq!(ws.sessions().len(), 1);
         assert_eq!(ws.sessions()[0].name, "fresh");
         assert!(ws.root_selected());
+    }
+
+    #[test]
+    fn sidebar_hit_test_resolves_visible_session_rows_only() {
+        let ws = workspace();
+        // Two chrome rows, the two-line root, then its divider precede the
+        // two-line session rows in the sidebar.
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 5), Some(1));
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 7), Some(2));
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 0, 4), None);
+        assert_eq!(sidebar_row_at(24, 100, &ws, 0, 36, 5), None);
     }
 
     #[test]
@@ -2647,6 +2802,29 @@ mod tests {
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal (resolving)"));
         assert!(closeup.contains('▔'));
+    }
+
+    #[test]
+    fn runtime_workspace_renderer_dims_the_right_pane_only_in_switch() {
+        let mut ws = workspace();
+        ws.open_pane(PaneKind::Terminal);
+
+        let switch_frame = render(30, 100, &ws);
+        let switch_right = switch_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(switch_right.contains("\u{1b}[2;36mmain"));
+        assert!(!switch_right.contains("\u{1b}[1;36mmain"));
+
+        ws.enter_closeup();
+        let closeup_frame = render(30, 100, &ws);
+        let closeup_right = closeup_frame[CHROME_ROWS]
+            .split_once('│')
+            .expect("pane divider")
+            .1;
+        assert!(closeup_right.contains("\u{1b}[1;36mmain"));
+        assert!(!closeup_right.starts_with("\u{1b}[2m"));
     }
 
     #[test]

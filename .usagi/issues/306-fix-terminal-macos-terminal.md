@@ -1,13 +1,13 @@
 ---
 number: 306
 title: fix(terminal): macOS の対話 terminal と同等の起動環境を再現する
-status: todo
+status: done
 priority: high
 labels: [terminal, macos, pty, parity]
 dependson: []
 related: [218, 264]
 created_at: 2026-07-15T00:28:01.613067+00:00
-updated_at: 2026-07-15T00:29:55.022478+00:00
+updated_at: 2026-07-15T22:20:05.939298+00:00
 ---
 
 ## 目的

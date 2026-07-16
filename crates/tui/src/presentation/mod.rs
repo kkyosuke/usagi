@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use usagi_core::domain::AppInfo;
@@ -40,7 +41,7 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
 use crate::presentation::widgets::modal;
-use crate::usecase::application::pane::PaneKind;
+use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
@@ -78,6 +79,7 @@ pub trait AgentCommandPort {
         &mut self,
         _workspace: WorkspaceId,
         _session: SessionId,
+        _geometry: Geometry,
     ) -> Result<TerminalRef, String> {
         Err("terminal launch is unavailable".to_owned())
     }
@@ -169,10 +171,6 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
     }
 }
 
-/// The fixed geometry a launched terminal is created with.  Resize tracking is
-/// a follow-on; the daemon spawns its PTY at the same size (see issue #301).
-const TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
-
 /// Maps a management [`Key`] to the bytes a focused live terminal should
 /// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
 /// `None` so they keep driving the workspace instead of the shell.
@@ -188,7 +186,7 @@ fn key_to_terminal_bytes(key: &Key) -> Option<Vec<u8>> {
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Other => {
+        Key::Live(_) | Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Click { .. } | Key::Other => {
             return None;
         }
     };
@@ -533,6 +531,57 @@ struct WorkspaceUi {
     terminals: Vec<TerminalSession>,
 }
 
+/// The maximum gap between two presses on the same sidebar session row.
+const SIDEBAR_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Apply a sidebar click before regular key dispatch. A single click only moves
+/// the cursor; a double click on a session opens that session's Closeup, exactly
+/// as selecting it and pressing Enter would. Overlays and inline creation own
+/// the pointer, so background rows cannot be changed through them.
+#[coverage(off)]
+fn handle_sidebar_click(
+    ui: &mut WorkspaceUi,
+    height: usize,
+    width: usize,
+    key: &Key,
+    previous: &mut Option<(usize, Instant)>,
+) -> bool {
+    let Key::Click { column, row } = key else {
+        return false;
+    };
+    if ui.modal.is_some() || ui.closeup_modal_visible() || ui.workspace.creating_session_inline() {
+        *previous = None;
+        return true;
+    }
+    let Some(index) = workspace::sidebar_row_at(
+        height,
+        width,
+        &ui.workspace,
+        ui.skeleton_frame,
+        *column,
+        *row,
+    ) else {
+        *previous = None;
+        return true;
+    };
+    // The root and persistent create action retain their existing keyboard
+    // grammar. This gesture is intentionally limited to real session rows.
+    if index == 0 || index > ui.workspace.sessions().len() {
+        *previous = None;
+        return true;
+    }
+    let now = Instant::now();
+    let doubled = previous.is_some_and(|(previous_index, at)| {
+        previous_index == index && now.duration_since(at) <= SIDEBAR_DOUBLE_CLICK
+    });
+    *previous = (!doubled).then_some((index, now));
+    ui.workspace.select_row(index);
+    if doubled {
+        ui.enter_closeup();
+    }
+    true
+}
+
 struct AgentContext {
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
@@ -634,9 +683,9 @@ impl WorkspaceUi {
     /// A failed attach still records the session so its safe feedback renders;
     /// it never spawns a local process.
     #[coverage(off)]
-    fn start_terminal_session(&mut self, terminal: TerminalRef) {
+    fn start_terminal_session(&mut self, terminal: TerminalRef, geometry: Geometry) {
         if let Some(agent) = self.agent.as_mut() {
-            let mut session = TerminalSession::new(terminal, TERMINAL_GEOMETRY);
+            let mut session = TerminalSession::new(terminal, geometry);
             session.connect(&mut AgentStreamPort(agent.port.as_mut()));
             self.terminals.push(session);
         }
@@ -657,7 +706,7 @@ impl WorkspaceUi {
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
             session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(session.rows())
+            Some(session.display_rows())
         } else {
             None
         };
@@ -668,6 +717,12 @@ impl WorkspaceUi {
     /// key was consumed by the terminal so the workspace does not also act on it.
     #[coverage(off)]
     fn forward_terminal_input(&mut self, key: &Key) -> bool {
+        // A live tab is only the input owner while Closeup exposes it.  In
+        // particular, Ctrl-O o must return to Switch before the next ordinary
+        // key can reach the previously focused PTY.
+        if self.workspace.mode() != Mode::Closeup {
+            return false;
+        }
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             return false;
         };
@@ -683,6 +738,47 @@ impl WorkspaceUi {
             session.send_input(&mut AgentStreamPort(agent.port.as_mut()), &bytes);
         }
         true
+    }
+
+    /// Close only the focused pane and release its client-side subscription.
+    ///
+    /// Closing is a view concern: the daemon keeps the terminal alive, while
+    /// this TUI detaches from its stream.  A still-queued launch is removed
+    /// before it can create a detached daemon terminal after its placeholder
+    /// has disappeared.
+    #[coverage(off)]
+    fn close_focused_pane(&mut self) {
+        let selection = self.workspace.pane().selected().clone();
+        let live_terminal = self.workspace.focused_live_terminal().cloned();
+        self.workspace.close_pane();
+
+        if let PaneSelection::Tab(TabSelection::Pending(operation)) = selection {
+            self.pane_launches.retain(|launch| match launch {
+                PaneLaunch::Agent {
+                    operation: queued, ..
+                }
+                | PaneLaunch::Terminal {
+                    operation: queued, ..
+                }
+                | PaneLaunch::Diff { operation: queued }
+                | PaneLaunch::Fail {
+                    operation: queued, ..
+                } => *queued != operation,
+            });
+        }
+
+        if let Some(terminal) = live_terminal {
+            if let Some(agent) = self.agent.as_mut()
+                && let Some(session) = self
+                    .terminals
+                    .iter_mut()
+                    .find(|session| session.terminal().fences(&terminal))
+            {
+                session.detach(&mut AgentStreamPort(agent.port.as_mut()));
+            }
+            self.terminals
+                .retain(|session| !session.terminal().fences(&terminal));
+        }
     }
 
     /// 選択中の行を対象に Closeup へ入り、action menu を先頭から開く。
@@ -875,6 +971,7 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
         | Key::Tab
         | Key::CtrlD
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Passthrough(_)
         | Key::Other => WelcomeStep::Stay,
     }
@@ -913,9 +1010,13 @@ fn step_new(form: &mut New, key: Key) -> NewStep {
         }
         Key::Escape => NewStep::Back,
         Key::Quit | Key::CtrlQ => NewStep::Quit,
-        Key::Enter | Key::Tab | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {
-            NewStep::Stay
-        }
+        Key::Enter
+        | Key::Tab
+        | Key::CtrlD
+        | Key::Live(_)
+        | Key::Passthrough(_)
+        | Key::Click { .. }
+        | Key::Other => NewStep::Stay,
     }
 }
 
@@ -1021,7 +1122,7 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
             open.push_filter(ch);
             OpenStep::Stay
         }
-        Key::Live(_) | Key::Passthrough(_) | Key::Other => OpenStep::Stay,
+        Key::Live(_) | Key::Passthrough(_) | Key::Click { .. } | Key::Other => OpenStep::Stay,
     }
 }
 
@@ -1092,7 +1193,13 @@ fn step_overview_command(ui: &mut WorkspaceUi, key: Key) -> bool {
                 Err(error) => modal.set_error(error.to_string()),
             }
         }
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
+        Key::Quit
+        | Key::CtrlQ
+        | Key::CtrlD
+        | Key::Live(_)
+        | Key::Passthrough(_)
+        | Key::Click { .. }
+        | Key::Other => {}
     }
     false
 }
@@ -1189,7 +1296,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
 /// boundary in the presentation loop makes Agent, terminal, and snapshot diff
 /// visibly share one pending-wave -> selected completion lifecycle.
 #[coverage(off)]
-fn drain_pane_launches(ui: &mut WorkspaceUi) {
+fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
     for launch in std::mem::take(&mut ui.pane_launches) {
         match launch {
             PaneLaunch::Agent {
@@ -1204,7 +1311,10 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 .port
                 .launch(workspace, session, profile)
             {
-                Ok(terminal) => ui.workspace.complete_pane(operation, terminal),
+                Ok(terminal) => {
+                    ui.workspace.complete_pane(operation, terminal.clone());
+                    ui.start_terminal_session(terminal, geometry);
+                }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
             PaneLaunch::Terminal {
@@ -1216,11 +1326,11 @@ fn drain_pane_launches(ui: &mut WorkspaceUi) {
                 .as_mut()
                 .expect("agent context remains while its launch is queued")
                 .port
-                .launch_terminal(workspace, session)
+                .launch_terminal(workspace, session, geometry)
             {
                 Ok(terminal) => {
                     ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal);
+                    ui.start_terminal_session(terminal, geometry);
                 }
                 Err(message) => ui.workspace.fail_pane(operation, message),
             },
@@ -1351,6 +1461,7 @@ fn step_remove_selector(ui: &mut WorkspaceUi, key: Key) -> bool {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Click { .. }
             | Key::Passthrough(_)
             | Key::Other => None,
         }
@@ -1445,7 +1556,13 @@ fn step_overview(modal: &mut OverviewModal, key: Key) -> bool {
         Key::Char(ch) => modal.insert_char(ch),
         Key::Escape => return true,
         Key::Enter => modal.record_submission(),
-        Key::Quit | Key::CtrlQ | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
+        Key::Quit
+        | Key::CtrlQ
+        | Key::CtrlD
+        | Key::Live(_)
+        | Key::Passthrough(_)
+        | Key::Click { .. }
+        | Key::Other => {}
     }
     false
 }
@@ -1468,6 +1585,7 @@ fn step_pr(modal: &mut PrModal, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Passthrough(_)
         | Key::Other => {}
     }
@@ -1492,6 +1610,7 @@ fn step_text_overlay(modal: &mut TextOverlay, key: Key) -> bool {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Passthrough(_)
         | Key::Other => {}
     }
@@ -1526,6 +1645,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             | Key::CtrlD
             | Key::Char(_)
             | Key::Live(_)
+            | Key::Click { .. }
             | Key::Passthrough(_)
             | Key::Other => {}
         }
@@ -1564,6 +1684,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Passthrough(_)
         | Key::Other => {}
     }
@@ -1603,7 +1724,13 @@ fn step_closeup(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
                 execute_closeup_command(ui, &input);
             }
             Key::Tab => ui.closeup.complete_selected(),
-            Key::Up | Key::Down | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
+            Key::Up
+            | Key::Down
+            | Key::CtrlD
+            | Key::Live(_)
+            | Key::Passthrough(_)
+            | Key::Click { .. }
+            | Key::Other => {}
         }
         return WorkspaceStep::Stay;
     }
@@ -1633,7 +1760,7 @@ fn step_closeup_menu(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Backspace => ui.closeup.backspace(),
         Key::Char(ch) => ui.closeup.insert_char(ch),
         Key::Tab => ui.closeup.complete_selected(),
-        Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Other => {}
+        Key::CtrlD | Key::Live(_) | Key::Passthrough(_) | Key::Click { .. } | Key::Other => {}
     }
     WorkspaceStep::Stay
 }
@@ -1646,7 +1773,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     match key {
         Key::Left | Key::Char('h') => ui.workspace.tab_prev(),
         Key::Right | Key::Char('l') => ui.workspace.tab_next(),
-        Key::Char('x') => ui.workspace.close_pane(),
+        Key::Char('x') => ui.close_focused_pane(),
         Key::Char(':') => ui.open_overview(),
         Key::Char('p') => ui.open_prs(),
         Key::Char('v') => ui.open_preview(),
@@ -1662,6 +1789,7 @@ fn step_closeup_tabs(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
+        | Key::Click { .. }
         | Key::Passthrough(_)
         | Key::Other => {}
     }
@@ -1682,7 +1810,7 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::NextTab => ui.workspace.tab_next(),
         LiveTerminalAction::PreviousTab => ui.workspace.tab_prev(),
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
-        LiveTerminalAction::CloseTab => ui.workspace.close_pane(),
+        LiveTerminalAction::CloseTab => ui.close_focused_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
     }
     WorkspaceStep::Stay
@@ -1855,6 +1983,16 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
     }
 }
 
+fn terminal_geometry(height: usize, width: usize) -> Geometry {
+    let (rows, cols) = workspace::terminal_viewport(height, width);
+    Geometry {
+        cols: u16::try_from(cols.min(usize::from(u16::MAX)))
+            .expect("clamped terminal width fits u16"),
+        rows: u16::try_from(rows.min(usize::from(u16::MAX)))
+            .expect("clamped terminal height fits u16"),
+    }
+}
+
 #[coverage(off)]
 fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
     let base = open::render(height, width, open, now);
@@ -2017,14 +2155,18 @@ fn drive_workspace_with_ports_and_selection_mode(
         session_commands,
         modal_selection_mode,
     );
+    let mut previous_sidebar_click = None;
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        if handle_sidebar_click(&mut ui, height, width, &key, &mut previous_sidebar_click) {
+            continue;
+        }
         match step_workspace(&mut ui, key) {
             WorkspaceStep::Stay => {}
             WorkspaceStep::Quit => return Ok(WorkspaceStep::Quit),
@@ -2146,15 +2288,19 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     )
     .with_agent_context(workspace_id, session_ids, agent_port, default_model)
     .with_metrics_port(metrics_port);
+    let mut previous_sidebar_click = None;
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
         ui.refresh_terminal();
         let (height, width) = term.size()?;
         term.draw(&render_workspace(height, width, &ui))?;
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
         ui.skeleton_frame = ui.skeleton_frame.wrapping_add(1);
+        if handle_sidebar_click(&mut ui, height, width, &key, &mut previous_sidebar_click) {
+            continue;
+        }
         if step_workspace(&mut ui, key) == WorkspaceStep::Quit {
             return Ok(WorkspaceStep::Quit);
         }
@@ -2604,11 +2750,11 @@ mod tests {
         Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
         WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
         WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
-        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
-        run as run_from_start, run_with_settings,
+        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
+        render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
-        step_overview, step_pr, step_workspace, welcome_action, write_banner,
+        step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
     };
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
@@ -2724,6 +2870,7 @@ mod tests {
             &mut self,
             _workspace: WorkspaceId,
             _session: SessionId,
+            _geometry: Geometry,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
         }
@@ -2740,6 +2887,7 @@ mod tests {
         offset: u64,
         chunk: Option<TerminalChunk>,
         inputs: TerminalInputLog,
+        detaches: Arc<Mutex<Vec<u64>>>,
     }
 
     impl AgentCommandPort for StreamingTerminalPort {
@@ -2755,6 +2903,7 @@ mod tests {
             &mut self,
             _workspace: WorkspaceId,
             _session: SessionId,
+            _geometry: Geometry,
         ) -> Result<TerminalRef, String> {
             Ok(self.terminal.clone())
         }
@@ -2793,6 +2942,9 @@ mod tests {
                 .unwrap()
                 .push((subscription, input_seq, bytes.to_vec()));
             Ok(())
+        }
+        fn detach_terminal(&mut self, _terminal: &TerminalRef, subscription: u64) {
+            self.detaches.lock().unwrap().push(subscription);
         }
     }
 
@@ -3001,8 +3153,12 @@ mod tests {
 
         assert_eq!(error, "not launched in this test");
         assert_eq!(
-            port.launch_terminal(WorkspaceId::new(), SessionId::new())
-                .unwrap_err(),
+            port.launch_terminal(
+                WorkspaceId::new(),
+                SessionId::new(),
+                Geometry { cols: 80, rows: 24 },
+            )
+            .unwrap_err(),
             "terminal launch is unavailable"
         );
     }
@@ -3361,6 +3517,35 @@ mod tests {
         step_workspace(&mut ui, Key::Escape);
         assert!(ui.modal.is_none());
         assert_eq!(step_workspace(&mut ui, Key::Backspace), WorkspaceStep::Stay);
+    }
+
+    #[test]
+    fn double_clicking_a_sidebar_session_selects_and_opens_its_closeup() {
+        let snapshot = snapshot("click");
+        let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        let mut previous = None;
+        let click = Key::Click { column: 0, row: 5 };
+
+        assert!(handle_sidebar_click(
+            &mut ui,
+            24,
+            100,
+            &click,
+            &mut previous
+        ));
+        assert_eq!(ui.workspace.selected(), 1);
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+
+        assert!(handle_sidebar_click(
+            &mut ui,
+            24,
+            100,
+            &click,
+            &mut previous
+        ));
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
+        assert!(ui.closeup_modal_visible());
     }
 
     #[test]
@@ -3920,7 +4105,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         let _ = step_workspace(&mut ui, Key::Enter);
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert_eq!(
             *calls.lock().unwrap(),
@@ -3970,7 +4155,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Agent
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4029,7 +4214,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Terminal
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4058,7 +4243,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Diff
         ));
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4077,6 +4262,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // classifier-to-runtime acceptance scenario
     fn a_live_terminal_renders_daemon_output_and_forwards_keystrokes() {
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();
@@ -4088,6 +4274,7 @@ mod tests {
             worktree_id: WorktreeId::new(),
         };
         let inputs = Arc::new(Mutex::new(Vec::new()));
+        let detaches = Arc::new(Mutex::new(Vec::new()));
         let mut port = StreamingTerminalPort {
             terminal: terminal.clone(),
             replay: b"$ ".to_vec(),
@@ -4099,6 +4286,7 @@ mod tests {
                 data: b"ls\r\na.txt\r\n".to_vec(),
             }),
             inputs: Arc::clone(&inputs),
+            detaches: Arc::clone(&detaches),
         };
         // A generic terminal never launches an Agent through this port.
         assert!(port.launch(workspace_id, session_id, None).is_err());
@@ -4127,7 +4315,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         execute_closeup_command(&mut ui, "terminal");
-        drain_pane_launches(&mut ui);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
 
@@ -4149,6 +4337,51 @@ mod tests {
         let frame = render_workspace(24, 80, &ui).join("\n");
         assert!(frame.contains("$ ls"), "prompt echo missing: {frame}");
         assert!(frame.contains("a.txt"), "command output missing: {frame}");
+
+        // Plain a/o/x stay terminal input. The Ctrl-O versions, however, are
+        // reducer actions: a opens Closeup, o leaves the live-input owner, and
+        // x detaches exactly the selected terminal before removing its tab.
+        for character in ['a', 'o', 'x'] {
+            let _ = step_workspace(&mut ui, Key::Char(character));
+        }
+        assert_eq!(
+            *inputs.lock().unwrap(),
+            vec![
+                (5, 0, b"l".to_vec()),
+                (5, 1, b"s".to_vec()),
+                (5, 2, b"\r".to_vec()),
+                (5, 3, b"a".to_vec()),
+                (5, 4, b"o".to_vec()),
+                (5, 5, b"x".to_vec()),
+            ]
+        );
+
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::OpenCloseupModal),
+        );
+        assert!(ui.closeup_modal_visible());
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::Switch),
+        );
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+        let _ = step_workspace(&mut ui, Key::Char('a'));
+        assert_eq!(inputs.lock().unwrap().len(), 6);
+
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::OpenCloseupModal),
+        );
+        let _ = step_workspace(&mut ui, Key::Escape);
+        let _ = step_workspace(
+            &mut ui,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::CloseTab),
+        );
+        assert!(ui.workspace.pane().tabs().is_empty());
+        assert!(ui.closeup_modal_visible());
+        assert_eq!(*detaches.lock().unwrap(), vec![5]);
+        assert!(ui.terminals.is_empty());
     }
 
     struct DefaultTerminalPort;
@@ -4192,7 +4425,11 @@ mod tests {
         // Detach is a no-op default and must not panic.
         port.detach_terminal(&terminal, 1);
         assert_eq!(
-            port.launch_terminal(WorkspaceId::new(), SessionId::new()),
+            port.launch_terminal(
+                WorkspaceId::new(),
+                SessionId::new(),
+                Geometry { cols: 80, rows: 24 },
+            ),
             Err("terminal launch is unavailable".to_owned())
         );
     }
@@ -4224,6 +4461,11 @@ mod tests {
             key_to_terminal_bytes(&Key::Passthrough(b"paste\n".to_vec())),
             Some(b"paste\n".to_vec())
         );
+    }
+
+    #[test]
+    fn terminal_geometry_uses_the_visible_right_pane_width() {
+        assert_eq!(terminal_geometry(24, 80), Geometry { cols: 43, rows: 22 });
     }
 
     #[test]
@@ -4910,6 +5152,7 @@ mod tests {
                 Key::Char('k'),
                 Key::Char('j'),
                 Key::Char('z'),
+                Key::Click { column: 0, row: 5 },
                 Key::Other,
             ];
             keys.extend(navigation);
