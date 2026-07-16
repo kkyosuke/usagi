@@ -536,6 +536,8 @@ struct WorkspaceUi {
     /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
     terminals: Vec<TerminalSession>,
     terminal_selection: Option<TerminalSelection>,
+    pending_terminal_pointer: Option<TerminalPoint>,
+    dragging_terminal_selection: bool,
     pending_clipboard_text: Option<String>,
     terminal_size: (usize, usize),
 }
@@ -661,6 +663,8 @@ impl WorkspaceUi {
             pane_launches: Vec::new(),
             terminals: Vec::new(),
             terminal_selection: None,
+            pending_terminal_pointer: None,
+            dragging_terminal_selection: false,
             pending_clipboard_text: None,
             terminal_size: (0, 0),
         }
@@ -1883,12 +1887,28 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
         return;
     };
     match kind {
-        None => ui.terminal_selection_at(point),
-        Some(PointerKind::Drag) => ui.extend_terminal_selection(point),
+        // A press alone is not a selection. Keep its cell as a potential
+        // anchor, and create the selection only after the pointer actually
+        // moves; this preserves ordinary terminal clicks.
+        None => ui.pending_terminal_pointer = Some(point),
+        Some(PointerKind::Drag) => {
+            if let Some(anchor) = ui.pending_terminal_pointer.take() {
+                ui.terminal_selection_at(anchor);
+                ui.dragging_terminal_selection = true;
+            }
+            if ui.dragging_terminal_selection {
+                ui.extend_terminal_selection(point);
+            }
+        }
         Some(PointerKind::Up) => {
-            ui.extend_terminal_selection(point);
-            ui.workspace
-                .set_terminal_feedback(Some("terminal selection ready; Cmd-S copies".to_owned()));
+            ui.pending_terminal_pointer = None;
+            if ui.dragging_terminal_selection {
+                ui.extend_terminal_selection(point);
+                ui.dragging_terminal_selection = false;
+                ui.workspace.set_terminal_feedback(Some(
+                    "terminal selection ready; Cmd-S copies".to_owned(),
+                ));
+            }
         }
     }
 }
