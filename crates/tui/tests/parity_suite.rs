@@ -325,13 +325,17 @@ fn quit_phase_error_redaction() {
 fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
     let workspace = WorkspaceId::new();
     let session = SessionId::new();
+    let mut projected_session = session_projection(session, "開発");
+    // `render_home` intentionally renders relative time against the real
+    // frame clock. Keep this layout fixture independent of the calendar.
+    projected_session.last_modified = Utc::now();
     let mut state = AppState::home(workspace, vec![session]);
     let _ = update(&mut state, AppEvent::Key(AppKey::Down));
     let switch_projection = HomeProjection::from_state(
         &state,
         "東京",
         "/work/root",
-        &[session_projection(session, "開発")],
+        std::slice::from_ref(&projected_session),
     );
     let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
@@ -339,7 +343,7 @@ fn home_frame_golden_covers_ansi_cjk_wide_and_tiny_geometry() {
         &state,
         "東京",
         "/work/root",
-        &[session_projection(session, "開発")],
+        std::slice::from_ref(&projected_session),
     );
 
     let lines = render_home(8, 40, &projection);
