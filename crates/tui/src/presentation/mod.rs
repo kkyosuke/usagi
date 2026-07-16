@@ -44,7 +44,7 @@ use crate::presentation::views::workspace::{
 };
 use crate::presentation::widgets::modal;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, Effect as ControllerEffect, PendingToken,
+    AppEvent, AppKey, AppState, Effect as ControllerEffect, Overlay, PendingToken,
 };
 use crate::usecase::application::pane::{
     self, PaneEvent, PaneInputOwner, PaneKind, PaneRegistry, PaneRegistryEvent, PaneSelection,
@@ -2503,6 +2503,8 @@ struct ControllerWorkspaceRuntime {
     terminals: Vec<TerminalSession>,
     agent: Option<Box<dyn AgentCommandPort>>,
     session_commands: Option<Box<dyn SessionCommandPort>>,
+    overview: OverviewModal,
+    closeup: CloseupModal,
 }
 
 impl ControllerWorkspaceRuntime {
@@ -2526,6 +2528,8 @@ impl ControllerWorkspaceRuntime {
             agent: None,
             session_commands: None,
             terminals: Vec::new(),
+            overview: OverviewModal::new(),
+            closeup: CloseupModal::new(snapshot.workspace.name.clone()),
         }
     }
 
@@ -2547,14 +2551,23 @@ impl ControllerWorkspaceRuntime {
             &self.root,
             &self.sessions,
         );
-        workspace::render_home(
+        let base = workspace::render_home(
             height,
             width,
             &home
                 .with_pane(self.panes.active_pane())
                 .with_metrics(self.metrics.clone())
                 .with_terminal_rows(terminal_rows),
-        )
+        );
+        match self.state.overlay() {
+            Some(Overlay::Overview) => {
+                overview_modal::render_over(height, width, &base, &self.overview)
+            }
+            Some(Overlay::Closeup) => {
+                closeup_modal::render_over(height, width, &base, &self.closeup)
+            }
+            _ => base,
+        }
     }
 
     fn refresh_metrics(&mut self, port: &mut dyn MetricsPort) {
@@ -2562,11 +2575,17 @@ impl ControllerWorkspaceRuntime {
     }
 
     fn handle(&mut self, key: Key) -> bool {
+        if matches!(key, Key::Quit | Key::Char('q')) {
+            return true;
+        }
+        if self.handle_modal_key(key) {
+            return false;
+        }
         if self.forward_terminal_input(key) {
             return false;
         }
         let app_key = match key {
-            Key::Quit | Key::Char('q') => return true,
+            Key::Quit => return true,
             Key::Up => AppKey::Up,
             Key::Down => AppKey::Down,
             Key::Enter => AppKey::Enter,
@@ -2590,6 +2609,67 @@ impl ControllerWorkspaceRuntime {
         self.run_effects(effects)
             .into_iter()
             .any(|effect| matches!(effect, ControllerEffect::Detach))
+    }
+
+    fn handle_modal_key(&mut self, key: Key) -> bool {
+        let overlay = self.state.overlay();
+        let submit = match overlay {
+            Some(Overlay::Overview) => Self::edit_overview(&mut self.overview, key),
+            Some(Overlay::Closeup) => Self::edit_closeup(&mut self.closeup, key),
+            _ => return false,
+        };
+        let app_key = match submit {
+            Some(input) if overlay == Some(Overlay::Overview) => AppKey::SubmitOverview(input),
+            Some(input) => AppKey::SubmitCloseup(input),
+            None => match key {
+                Key::Escape => AppKey::Escape,
+                _ => return true,
+            },
+        };
+        let effects = crate::usecase::application::controller::update(
+            &mut self.state,
+            AppEvent::Key(app_key),
+        );
+        self.sync_active_pane();
+        let _ = self.run_effects(effects);
+        true
+    }
+
+    fn edit_overview(modal: &mut OverviewModal, key: Key) -> Option<String> {
+        match key {
+            Key::Char(ch) => modal.insert_char(ch),
+            Key::Backspace => modal.backspace(),
+            Key::Tab => modal.complete_selected(),
+            Key::Up => {
+                let _ = modal.recall_previous();
+            }
+            Key::Down => {
+                let _ = modal.recall_next();
+            }
+            Key::Enter => {
+                modal.record_submission();
+                return Some(modal.submission());
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn edit_closeup(modal: &mut CloseupModal, key: Key) -> Option<String> {
+        match key {
+            Key::Char(ch) if modal.selection_mode() == ModalSelectionMode::Prompt => {
+                modal.insert_char(ch);
+            }
+            Key::Backspace if modal.selection_mode() == ModalSelectionMode::Prompt => {
+                modal.backspace();
+            }
+            Key::Tab => modal.complete_selected(),
+            Key::Up => modal.select_prev(),
+            Key::Down => modal.select_next(),
+            Key::Enter => return Some(modal.submission()),
+            _ => {}
+        }
+        None
     }
 
     fn sync_active_pane(&mut self) {
