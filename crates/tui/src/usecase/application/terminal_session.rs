@@ -183,6 +183,18 @@ impl TerminalSession {
         }
     }
 
+    /// Projects the retained output with a cell-precise visual selection.
+    #[must_use]
+    pub fn display_rows_with_scrollback_selection(
+        &self,
+        selection: &TerminalSelection,
+    ) -> Vec<String> {
+        self.screen.rows_with_scrollback_and_cursor_selection(
+            (selection.anchor().row, selection.anchor().column),
+            (selection.focus().row, selection.focus().column),
+        )
+    }
+
     /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
     /// this retains trailing spaces, while still containing no ANSI styling.
     #[must_use]
