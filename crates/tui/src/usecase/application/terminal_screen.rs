@@ -8,9 +8,10 @@
 //! erase and SGR styling — and silently ignores window-title (OSC) sequences.
 //! It is pure and holds no IO, so it is exercised entirely by unit tests.
 //!
-//! Out of scope on purpose: double-width (CJK) cells are stored as a single
-//! grid column and alternate screen buffers. Scrollback is retained locally
-//! with a bounded history for the pane viewport.
+//! Out of scope on purpose: alternate screen buffers. Scrollback is retained
+//! locally with a bounded history for the pane viewport.
+
+use unicode_width::UnicodeWidthChar;
 
 /// Escape-sequence parser position.  Only these five states are reachable; any
 /// byte that does not belong to the active state returns the parser to
@@ -34,6 +35,7 @@ enum Phase {
 struct Cell {
     ch: char,
     style: String,
+    continuation: bool,
 }
 
 impl Cell {
@@ -41,6 +43,7 @@ impl Cell {
         Self {
             ch: ' ',
             style: String::new(),
+            continuation: false,
         }
     }
 }
@@ -148,6 +151,38 @@ impl TerminalScreen {
         rows
     }
 
+    /// Renders scrollback and the visible grid with a cell-precise selection.
+    #[must_use]
+    #[coverage(off)]
+    pub fn rows_with_scrollback_and_cursor_selection(
+        &self,
+        anchor: (usize, usize),
+        focus: (usize, usize),
+    ) -> Vec<String> {
+        let (first, last) = if anchor <= focus {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        };
+        let mut rows: Vec<_> = self
+            .scrollback
+            .iter()
+            .enumerate()
+            .map(|(row, cells)| {
+                render_row_selected(cells, None, "", selection_for(row, first, last))
+            })
+            .chain(self.grid.iter().enumerate().map(|(index, cells)| {
+                let row = self.scrollback.len() + index;
+                let cursor = (index == self.cursor_row).then_some(self.cursor_col);
+                render_row_selected(cells, cursor, &self.style, selection_for(row, first, last))
+            }))
+            .collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
+    }
+
     /// Renders the grid with the current PTY cursor as an inverted cell.
     #[must_use]
     pub fn rows_with_cursor(&self) -> Vec<String> {
@@ -159,6 +194,45 @@ impl TerminalScreen {
                 render_row(cells, cursor, &self.style)
             })
             .collect()
+    }
+
+    /// Returns the complete visible grid without trimming trailing spaces.
+    ///
+    /// Rendering uses [`Self::rows`] because blank padding is not interesting
+    /// on screen. Copying, however, must preserve a selected space at the end
+    /// of a line, so selection works from this unstyled grid instead.
+    #[must_use]
+    pub fn cells(&self) -> Vec<String> {
+        self.grid
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter(|cell| !cell.continuation)
+                    .map(|cell| cell.ch)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Returns retained scrollback followed by the complete visible grid.
+    #[must_use]
+    #[coverage(off)]
+    pub fn cells_with_scrollback(&self) -> Vec<String> {
+        let mut rows: Vec<String> = self
+            .scrollback
+            .iter()
+            .chain(&self.grid)
+            .map(|row| {
+                row.iter()
+                    .filter(|cell| !cell.continuation)
+                    .map(|cell| cell.ch)
+                    .collect()
+            })
+            .collect();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        rows
     }
 
     /// The zero-based cursor position, clamped inside the grid.
@@ -329,15 +403,24 @@ impl TerminalScreen {
     }
 
     fn print(&mut self, ch: char) {
-        if self.cursor_col >= self.cols {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if self.cursor_col >= self.cols || self.cursor_col + width > self.cols {
             self.cursor_col = 0;
             self.line_feed();
         }
         self.grid[self.cursor_row][self.cursor_col] = Cell {
             ch,
             style: self.style.clone(),
+            continuation: false,
         };
-        self.cursor_col += 1;
+        for column in 1..width {
+            self.grid[self.cursor_row][self.cursor_col + column] = Cell {
+                ch: '\0',
+                style: self.style.clone(),
+                continuation: true,
+            };
+        }
+        self.cursor_col += width;
     }
 
     fn line_feed(&mut self) {
@@ -402,9 +485,30 @@ impl TerminalScreen {
 }
 
 fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String {
+    render_row_selected(row, cursor, cursor_style, None)
+}
+
+fn selection_for(
+    row: usize,
+    first: (usize, usize),
+    last: (usize, usize),
+) -> Option<(usize, usize)> {
+    (first.0..=last.0).contains(&row).then_some((
+        if row == first.0 { first.1 } else { 0 },
+        if row == last.0 { last.1 } else { usize::MAX },
+    ))
+}
+
+fn render_row_selected(
+    row: &[Cell],
+    cursor: Option<usize>,
+    cursor_style: &str,
+    selection: Option<(usize, usize)>,
+) -> String {
+    let cursor = cursor.filter(|column| *column < row.len());
     let last = row
         .iter()
-        .rposition(|cell| cell.ch != ' ')
+        .rposition(|cell| cell.ch != ' ' && !cell.continuation)
         .into_iter()
         .chain(cursor)
         .max();
@@ -414,7 +518,17 @@ fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String
     let mut rendered = String::new();
     let mut active = String::new();
     for (column, cell) in row[..=last].iter().enumerate() {
-        let style = if cursor == Some(column) {
+        if cell.continuation {
+            continue;
+        }
+        let width = if row.get(column + 1).is_some_and(|next| next.continuation) {
+            2
+        } else {
+            1
+        };
+        let selected = selection
+            .is_some_and(|(start, end)| column <= end && column.saturating_add(width) > start);
+        let mut style = if cursor == Some(column) {
             let base = if cell.style.is_empty() {
                 cursor_style
             } else {
@@ -424,6 +538,9 @@ fn render_row(row: &[Cell], cursor: Option<usize>, cursor_style: &str) -> String
         } else {
             cell.style.clone()
         };
+        if selected {
+            style.push_str("\u{1b}[7m");
+        }
         if style != active {
             if !active.is_empty() {
                 rendered.push_str("\u{1b}[0m");
@@ -473,6 +590,14 @@ mod tests {
     }
 
     #[test]
+    fn cells_keep_trailing_spaces_for_copying() {
+        let mut screen = TerminalScreen::new(1, 5);
+        screen.advance(b"a b");
+        assert_eq!(screen.rows(), vec!["a b"]);
+        assert_eq!(screen.cells(), vec!["a b  "]);
+    }
+
+    #[test]
     fn crlf_returns_to_column_zero_on_the_next_row() {
         assert_eq!(screen_after(3, 10, b"ab\r\ncd"), vec!["ab", "cd", ""]);
     }
@@ -505,6 +630,19 @@ mod tests {
     }
 
     #[test]
+    fn wide_characters_occupy_terminal_columns_and_selection_marks_their_cell() {
+        let mut screen = TerminalScreen::new(2, 4);
+        screen.advance("AあB".as_bytes());
+        assert_eq!(screen.rows(), vec!["AあB", ""]);
+        assert_eq!(screen.cells(), vec!["AあB", "    "]);
+        assert_eq!(screen.cursor(), (0, 4));
+        assert_eq!(
+            screen.rows_with_scrollback_and_cursor_selection((0, 1), (0, 2)),
+            vec!["A\u{1b}[7mあ\u{1b}[0mB"]
+        );
+    }
+
+    #[test]
     fn writing_past_the_last_row_scrolls_up() {
         assert_eq!(screen_after(2, 3, b"one\r\ntwo\r\nend"), vec!["two", "end"]);
     }
@@ -522,6 +660,10 @@ mod tests {
         screen.advance(b"one\r\ntwo\r\nthree");
         assert_eq!(screen.rows(), vec!["two", "three"]);
         assert_eq!(screen.rows_with_scrollback(), vec!["one", "two", "three"]);
+        assert_eq!(
+            screen.cells_with_scrollback(),
+            vec!["one     ", "two     ", "three   "]
+        );
     }
 
     #[test]

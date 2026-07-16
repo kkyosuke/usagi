@@ -29,6 +29,7 @@ use crate::usecase::application::controller::{
 use crate::usecase::application::pane::{
     self, PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
 };
+use crate::usecase::application::terminal_selection::TerminalPoint;
 use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 
 /// 左ペイン（session menu）の希望表示幅。ここだけを変更して sidebar 幅を調整する。
@@ -41,6 +42,13 @@ const MEMORY_ICON: char = '\u{f233}';
 const MEBIBYTE: u64 = 1_048_576;
 const GIBIBYTE: u64 = 1_073_741_824;
 
+/// Returns the first screen column owned by the right pane.
+#[must_use]
+pub fn right_pane_left(raw_width: usize) -> usize {
+    let (_, width) = widgets::normalize_size(0, raw_width);
+    panes::split(width, LEFT_WIDTH).left.saturating_add(1)
+}
+
 /// Returns the PTY viewport that is visible inside the right-hand pane.
 #[must_use]
 #[coverage(off)]
@@ -48,7 +56,10 @@ pub fn terminal_viewport(raw_height: usize, raw_width: usize) -> (usize, usize) 
     let (height, width) = widgets::normalize_size(raw_height, raw_width);
     let split = panes::split(width, LEFT_WIDTH);
     (
-        height.saturating_sub(CHROME_ROWS).max(1),
+        // Header/tab chrome (3) plus the footer gap and footer (2) do not
+        // display PTY cells. The PTY geometry must match the selectable output
+        // viewport exactly, otherwise mouse rows drift as output scrolls.
+        height.saturating_sub(CHROME_ROWS + 5).max(1),
         split.right.max(1),
     )
 }
@@ -368,6 +379,7 @@ pub struct Workspace {
     /// Number of retained terminal rows kept below the viewport. Zero follows
     /// live output; this belongs to the selected target's presentation state.
     terminal_scroll: usize,
+    terminal_feedback: Option<String>,
 }
 
 impl Workspace {
@@ -421,6 +433,7 @@ impl Workspace {
             git_diffs: BTreeMap::new(),
             terminal_view: None,
             terminal_scroll: 0,
+            terminal_feedback: None,
         }
     }
 
@@ -910,6 +923,11 @@ impl Workspace {
     #[coverage(off)]
     pub fn terminal_scroll_down(&mut self) {
         self.terminal_scroll = self.terminal_scroll.saturating_sub(1);
+    }
+
+    #[coverage(off)]
+    pub fn set_terminal_feedback(&mut self, feedback: Option<String>) {
+        self.terminal_feedback = feedback;
     }
 
     #[coverage(off)]
@@ -1541,10 +1559,10 @@ fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
 /// 右ペインの footer（キー操作ヒント、dim）。
 #[coverage(off)]
 fn right_footer(width: usize, ws: &Workspace) -> String {
-    let hint = match ws.mode() {
+    let hint = ws.terminal_feedback.as_deref().unwrap_or(match ws.mode() {
         Mode::Switch => "←→/hl tab / Enter/t closeup / : commands / p PR / q close / Ctrl-Q end",
         Mode::Closeup => "←→/hl tab / ↑↓/jk action / : commands / p PR / q close / Ctrl-Q end",
-    };
+    });
     Style::new()
         .dim()
         .paint(&widgets::clip_to_width(hint, width))
@@ -1568,7 +1586,8 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
                 .len()
                 .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
             for line in view.iter().skip(start).take(content_cap) {
-                rows.push(widgets::clip_to_width(line, width));
+                let line = widgets::clip_to_width(line, width);
+                rows.push(line);
             }
         } else if let Some(document) = ws.pane_document() {
             rows.extend(
@@ -1643,6 +1662,91 @@ pub fn render_with_skeleton_frame(
 
     frame.truncate(height);
     frame
+}
+
+/// Converts a screen-cell pointer position into the retained terminal viewport
+/// row and terminal column currently rendered in the right pane.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_point_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    column: u16,
+    row: u16,
+) -> Option<TerminalPoint> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let right_left = right_pane_left(width);
+    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
+    let column = usize::from(column).checked_sub(right_left)?;
+    let view = ws.terminal_view.as_ref()?;
+    let body_height = height.saturating_sub(CHROME_ROWS);
+    let content_top = 3;
+    let content_cap = body_height.saturating_sub(content_top + 2);
+    let content_row = body_row.checked_sub(content_top)?;
+    if content_row >= content_cap {
+        return None;
+    }
+    let start = view
+        .len()
+        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+    Some(TerminalPoint {
+        row: start + content_row,
+        column,
+    })
+}
+
+/// Returns the auto-scroll direction for a pointer held at either terminal
+/// viewport edge: `true` is toward older output and `false` toward live output.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_auto_scroll_direction_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    column: u16,
+    row: u16,
+) -> Option<bool> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    if usize::from(column) < split.left.saturating_add(1) || ws.terminal_view.is_none() {
+        return None;
+    }
+    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
+    let content_top = 3;
+    let content_cap = height.saturating_sub(CHROME_ROWS + content_top + 2);
+    // The first and last output rows are ordinary selectable cells. Only a
+    // pointer *outside* the viewport starts edge auto-scroll; treating the
+    // first row as an edge made that row impossible to select reliably.
+    (body_row < content_top)
+        .then_some(true)
+        .or_else(|| (body_row >= content_top.saturating_add(content_cap)).then_some(false))
+}
+
+/// The selectable row currently visible at the requested auto-scroll edge.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_edge_point(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    older: bool,
+) -> Option<TerminalPoint> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let view = ws.terminal_view.as_ref()?;
+    let content_cap = height.saturating_sub(CHROME_ROWS + 3 + 2);
+    let start = view
+        .len()
+        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+    Some(TerminalPoint {
+        row: if older {
+            start
+        } else {
+            start.saturating_add(content_cap.saturating_sub(1))
+        },
+        column: split.right.saturating_sub(1),
+    })
 }
 
 /// controller projection の Home frame を描く。
@@ -2035,7 +2139,8 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame, sidebar_row_at, with_footer_gap,
+        render, render_home, render_with_skeleton_frame, sidebar_row_at,
+        terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2046,6 +2151,7 @@ mod tests {
     use crate::usecase::application::pane::{
         PaneEvent, PaneKind, PaneSelection, PaneState, PaneTab, TabSelection, reduce,
     };
+    use crate::usecase::application::terminal_selection::TerminalPoint;
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -2109,6 +2215,41 @@ mod tests {
         assert_eq!(
             ws.terminal_scroll, 0,
             "a shorter replay normalizes stale scroll"
+        );
+    }
+
+    #[test]
+    fn terminal_auto_scroll_keeps_the_first_output_row_selectable() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some(vec!["first".to_string(), "second".to_string()]));
+
+        assert_eq!(
+            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 5),
+            None,
+            "the first visible output row is a selectable cell, not an edge"
+        );
+        assert_eq!(
+            terminal_auto_scroll_direction_at(24, 80, &ws, 37, 4),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn terminal_point_tracks_the_visible_scrollback_window() {
+        let mut ws = workspace();
+        ws.set_terminal_view(Some((0..20).map(|row| format!("row {row}")).collect()));
+
+        assert_eq!(
+            terminal_point_at(24, 80, &ws, 37, 5),
+            Some(TerminalPoint { row: 3, column: 0 })
+        );
+        assert_eq!(terminal_point_at(24, 80, &ws, 37, 4), None);
+
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        assert_eq!(
+            terminal_point_at(24, 80, &ws, 37, 5),
+            Some(TerminalPoint { row: 1, column: 0 })
         );
     }
 

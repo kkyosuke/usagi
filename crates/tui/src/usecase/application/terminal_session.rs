@@ -15,6 +15,7 @@ use usagi_core::domain::id::TerminalRef;
 
 use super::pane_runtime::Geometry;
 use super::terminal_screen::TerminalScreen;
+use super::terminal_selection::{TerminalPoint, TerminalSelection};
 
 /// The atomic view returned by attaching to a daemon terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,6 +181,36 @@ impl TerminalSession {
                 self.screen.rows_with_scrollback()
             }
         }
+    }
+
+    /// Projects the retained output with a cell-precise visual selection.
+    #[must_use]
+    #[coverage(off)]
+    pub fn display_rows_with_scrollback_selection(
+        &self,
+        selection: &TerminalSelection,
+    ) -> Vec<String> {
+        self.screen.rows_with_scrollback_and_cursor_selection(
+            (selection.anchor().row, selection.anchor().column),
+            (selection.focus().row, selection.focus().column),
+        )
+    }
+
+    /// Complete visible screen cells for selection/copy. Unlike [`Self::rows`]
+    /// this retains trailing spaces, while still containing no ANSI styling.
+    #[must_use]
+    #[coverage(off)]
+    pub fn cells(&self) -> Vec<String> {
+        self.screen.cells_with_scrollback()
+    }
+
+    /// Starts a stable selection from the current visible terminal cells.
+    /// Later stream output, reconnects, and screen replacement do not mutate
+    /// the returned selection's copy text.
+    #[must_use]
+    #[coverage(off)]
+    pub fn begin_selection(&self, anchor: TerminalPoint) -> TerminalSelection {
+        TerminalSelection::begin(self.cells(), anchor)
     }
 
     /// Attaches (or reattaches) and rebuilds the screen from the retained

@@ -126,6 +126,21 @@ pub enum LiveInput {
     WheelUp,
     /// Pointer wheel moved toward newer terminal output.
     WheelDown,
+    /// Drag lifecycle for terminal-output selection. It never reaches the PTY.
+    Pointer(PointerEvent),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerEvent {
+    pub kind: PointerKind,
+    pub column: u16,
+    pub row: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    Drag,
+    Up,
 }
 
 /// terminal、backend、timer を controller へ渡す統一 runtime stream。
@@ -166,6 +181,8 @@ pub enum LiveTerminalAction {
     ScrollUp,
     /// Scroll the focused terminal pane one line toward the live bottom.
     ScrollDown,
+    /// Copy the selected terminal output to the OS clipboard.
+    CopyTerminalSelection,
 }
 
 /// A classifier result that an adapter can dispatch without daemon wire types.
@@ -211,7 +228,7 @@ impl LiveInputClassifier {
             }
             LiveInput::Text(text) => self.forward_non_key(text.into_bytes()),
             LiveInput::Paste(bytes) | LiveInput::Raw(bytes) => self.forward_non_key(bytes),
-            LiveInput::Mouse { .. } => {
+            LiveInput::Mouse { .. } | LiveInput::Pointer(_) => {
                 self.leader_at = None;
                 LiveInputOutput::Swallowed
             }
@@ -247,6 +264,12 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
+        if is_ctrl_caret(key) {
+            return LiveInputOutput::Action(LiveTerminalAction::PreviousSession);
+        }
+        if is_command_s(key) {
+            return LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection);
+        }
         LiveInputOutput::Passthrough(encode_key(key))
     }
 }
@@ -263,6 +286,21 @@ fn is_only_control(modifiers: Modifiers) -> bool {
 fn is_ctrl_o(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{0f}'))
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
+}
+
+fn is_ctrl_caret(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{1e}'))
+        || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
+}
+
+fn is_command_s(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('s'))
+        && key.modifiers.super_
+        && !key.modifiers.control
+        && !key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.hyper
+        && !key.modifiers.meta
 }
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
@@ -369,6 +407,22 @@ mod tests {
     }
 
     #[test]
+    fn command_s_is_reserved_for_copy_without_a_live_prefix() {
+        let input = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers {
+                super_: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            LiveInputClassifier::default().classify(T0, input),
+            LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection)
+        );
+    }
+
+    #[test]
     fn input_one_acceptance_table_preserves_live_terminal_bytes() {
         struct Case {
             name: &'static str,
@@ -380,6 +434,11 @@ mod tests {
                 name: "plain q",
                 input: key(KeyCode::Char('q')),
                 expected: b"q".to_vec(),
+            },
+            Case {
+                name: "escape",
+                input: key(KeyCode::Escape),
+                expected: vec![0x1b],
             },
             Case {
                 name: "cjk utf8",
@@ -605,30 +664,19 @@ mod tests {
     }
 
     #[test]
-    fn escape_and_ctrl_caret_are_passthrough_even_during_a_leader() {
+    fn ctrl_caret_is_reserved_once_and_not_a_prefix_follow_up() {
         let mut classifier = LiveInputClassifier::default();
         assert_eq!(
-            classifier.classify(T0, ctrl('o')),
-            LiveInputOutput::Swallowed
+            classifier.classify(T0, ctrl('^')),
+            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
         );
         assert_eq!(
-            classifier.classify(Duration::from_millis(1), key(KeyCode::Escape)),
-            LiveInputOutput::Swallowed
-        );
-        assert!(!classifier.leader_pending(Duration::from_millis(1)));
-        assert_eq!(
-            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('n'))),
-            LiveInputOutput::Passthrough(b"n".to_vec())
-        );
-
-        let mut without_leader = LiveInputClassifier::default();
-        assert_eq!(
-            without_leader.classify(T0, key(KeyCode::Escape)),
-            LiveInputOutput::Passthrough(vec![0x1b])
+            classifier.classify(Duration::from_millis(1), ctrl('^')),
+            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
         );
         assert_eq!(
-            without_leader.classify(Duration::from_millis(1), ctrl('^')),
-            LiveInputOutput::Passthrough(vec![30])
+            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('\u{1e}'))),
+            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
         );
     }
 
@@ -672,7 +720,6 @@ mod tests {
             (KeyCode::Backspace, vec![0x7f]),
             (KeyCode::Tab, vec![b'\t']),
             (KeyCode::BackTab, b"\x1b[Z".to_vec()),
-            (KeyCode::Escape, vec![0x1b]),
             (KeyCode::Down, b"\x1b[B".to_vec()),
             (KeyCode::Left, b"\x1b[D".to_vec()),
             (KeyCode::Right, b"\x1b[C".to_vec()),

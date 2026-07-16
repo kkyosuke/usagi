@@ -32,6 +32,8 @@ pub mod pane_runtime;
 pub mod terminal_launch;
 /// Minimal VT screen grid turning raw daemon PTY output into renderable rows.
 pub mod terminal_screen;
+/// Pure selection and text extraction for daemon-owned terminal output.
+pub mod terminal_selection;
 /// Polling coordinator mirroring one daemon-owned terminal into a screen grid.
 pub mod terminal_session;
 
@@ -173,6 +175,8 @@ pub enum Key {
     /// Exact bytes classified as ordinary live-pane input.  This preserves
     /// paste and backend-native encodings for the focused daemon terminal.
     Passthrough(Vec<u8>),
+    /// Pointer input intended for the terminal output viewport.
+    Pointer(crate::usecase::terminal_input::PointerEvent),
     /// 選択を 1 つ上へ移す。
     Up,
     /// 選択を 1 つ下へ移す。
@@ -236,6 +240,16 @@ pub trait Terminal {
     ///
     /// キー入力の読み取りに失敗した場合、そのエラーを返す。
     fn read_key(&mut self) -> io::Result<Key>;
+
+    /// Writes terminal output to the system clipboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter-safe message when the clipboard is unavailable.
+    #[coverage(off)]
+    fn copy_text(&mut self, _text: &str) -> Result<(), String> {
+        Err("clipboard is unavailable".to_owned())
+    }
 }
 
 /// `entry` に対応する画面を `runner` で実行する。
