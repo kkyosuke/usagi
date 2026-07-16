@@ -57,7 +57,7 @@ use usagi_tui::usecase::terminal_input::{
     KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, RuntimeEvent,
 };
 
-use crate::runtime::clipboard::MacosClipboard;
+use crate::runtime::clipboard::PlatformClipboard;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
@@ -678,7 +678,7 @@ struct CrosstermTerminal {
     /// The concrete OS adapter is owned by the composition root. Selection
     /// commands receive it through the TUI clipboard port rather than creating
     /// subprocesses in presentation code.
-    clipboard: MacosClipboard,
+    clipboard: PlatformClipboard,
 }
 
 struct PersistentSettingsPort {
@@ -1009,7 +1009,7 @@ fn run_in_terminal(
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
         live_input: LiveInputClassifier::default(),
-        clipboard: MacosClipboard,
+        clipboard: PlatformClipboard,
     };
     let result = run(&mut terminal);
     let mut teardown = std::io::stdout();
