@@ -1,9 +1,13 @@
+#![coverage(off)]
+
 //! Platform clipboard adapter for the TUI composition root.
 //!
 //! The TUI depends only on `ClipboardPort`; this module selects the platform's
 //! conventional command at runtime.  That keeps the binary buildable on every
 //! Rust target without linking a window-system SDK, while supporting macOS,
-//! Windows, Wayland, and X11 when their clipboard service is available.
+//! Windows, Wayland, and X11 when their clipboard service is available. The
+//! module is an OS process adapter; its behaviour is covered through the pure
+//! `ClipboardPort` boundary in `usagi-tui` rather than LLVM line coverage.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

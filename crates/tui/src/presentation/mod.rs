@@ -2000,7 +2000,7 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
                 ui.extend_terminal_selection(point);
                 ui.dragging_terminal_selection = false;
                 ui.workspace.set_terminal_feedback(Some(
-                    "terminal selection ready; Cmd-S copies".to_owned(),
+                    "terminal selection ready; Cmd-C (macOS) / Ctrl-Shift-C copies".to_owned(),
                 ));
             }
         }
