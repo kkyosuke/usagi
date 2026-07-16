@@ -1690,6 +1690,56 @@ pub fn terminal_point_at(
     })
 }
 
+/// Returns the auto-scroll direction for a pointer held at either terminal
+/// viewport edge: `true` is toward older output and `false` toward live output.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_auto_scroll_direction_at(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    column: u16,
+    row: u16,
+) -> Option<bool> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    if usize::from(column) < split.left.saturating_add(1) || ws.terminal_view.is_none() {
+        return None;
+    }
+    let body_row = usize::from(row).checked_sub(CHROME_ROWS)?;
+    let content_top = 3;
+    let content_cap = height.saturating_sub(CHROME_ROWS + content_top + 2);
+    (body_row <= content_top).then_some(true).or_else(|| {
+        (body_row >= content_top.saturating_add(content_cap.saturating_sub(1))).then_some(false)
+    })
+}
+
+/// The selectable row currently visible at the requested auto-scroll edge.
+#[must_use]
+#[coverage(off)]
+pub fn terminal_edge_point(
+    raw_height: usize,
+    raw_width: usize,
+    ws: &Workspace,
+    older: bool,
+) -> Option<TerminalPoint> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    let split = panes::split(width, LEFT_WIDTH);
+    let view = ws.terminal_view.as_ref()?;
+    let content_cap = height.saturating_sub(CHROME_ROWS + 3 + 2);
+    let start = view
+        .len()
+        .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
+    Some(TerminalPoint {
+        row: if older {
+            start
+        } else {
+            start.saturating_add(content_cap.saturating_sub(1))
+        },
+        column: split.right.saturating_sub(1),
+    })
+}
+
 /// controller projection の Home frame を描く。
 ///
 /// 既存 Workspace view と同じ header / 2-pane geometry / viewport を使う。左側の gutter は

@@ -538,6 +538,7 @@ struct WorkspaceUi {
     terminal_selection: Option<TerminalSelection>,
     pending_terminal_pointer: Option<TerminalPoint>,
     dragging_terminal_selection: bool,
+    auto_scroll_terminal_selection: Option<bool>,
     pending_clipboard_text: Option<String>,
     terminal_size: (usize, usize),
 }
@@ -665,6 +666,7 @@ impl WorkspaceUi {
             terminal_selection: None,
             pending_terminal_pointer: None,
             dragging_terminal_selection: false,
+            auto_scroll_terminal_selection: None,
             pending_clipboard_text: None,
             terminal_size: (0, 0),
         }
@@ -767,6 +769,28 @@ impl WorkspaceUi {
                 .set_terminal_feedback(Some("no terminal text is selected".to_owned()));
         } else {
             self.pending_clipboard_text = Some(text);
+        }
+    }
+
+    fn advance_terminal_auto_scroll(&mut self) {
+        let Some(older) = self.auto_scroll_terminal_selection else {
+            return;
+        };
+        if !self.dragging_terminal_selection {
+            return;
+        }
+        if older {
+            self.workspace.terminal_scroll_up();
+        } else {
+            self.workspace.terminal_scroll_down();
+        }
+        if let Some(point) = workspace::terminal_edge_point(
+            self.terminal_size.0,
+            self.terminal_size.1,
+            &self.workspace,
+            older,
+        ) {
+            self.extend_terminal_selection(point);
         }
     }
 
@@ -1877,13 +1901,30 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
 
 #[coverage(off)]
 fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Option<PointerKind>) {
+    let auto_scroll = workspace::terminal_auto_scroll_direction_at(
+        ui.terminal_size.0,
+        ui.terminal_size.1,
+        &ui.workspace,
+        column,
+        row,
+    );
     let Some(point) = workspace::terminal_point_at(
         ui.terminal_size.0,
         ui.terminal_size.1,
         &ui.workspace,
         column,
         row,
-    ) else {
+    )
+    .or_else(|| {
+        auto_scroll.and_then(|older| {
+            workspace::terminal_edge_point(
+                ui.terminal_size.0,
+                ui.terminal_size.1,
+                &ui.workspace,
+                older,
+            )
+        })
+    }) else {
         return;
     };
     match kind {
@@ -1896,6 +1937,7 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
             ui.terminal_selection = None;
             ui.pending_clipboard_text = None;
             ui.dragging_terminal_selection = false;
+            ui.auto_scroll_terminal_selection = None;
             ui.workspace.set_terminal_feedback(None);
             ui.pending_terminal_pointer = Some(point);
         }
@@ -1906,10 +1948,12 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
             }
             if ui.dragging_terminal_selection {
                 ui.extend_terminal_selection(point);
+                ui.auto_scroll_terminal_selection = auto_scroll;
             }
         }
         Some(PointerKind::Up) => {
             ui.pending_terminal_pointer = None;
+            ui.auto_scroll_terminal_selection = None;
             if ui.dragging_terminal_selection {
                 ui.extend_terminal_selection(point);
                 ui.dragging_terminal_selection = false;
@@ -2025,6 +2069,10 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
+    if key == Key::Other {
+        ui.advance_terminal_auto_scroll();
+        return WorkspaceStep::Stay;
+    }
     match key {
         Key::Click { column, row } => {
             handle_terminal_pointer(ui, column, row, None);
