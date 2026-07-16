@@ -1890,7 +1890,15 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
         // A press alone is not a selection. Keep its cell as a potential
         // anchor, and create the selection only after the pointer actually
         // moves; this preserves ordinary terminal clicks.
-        None => ui.pending_terminal_pointer = Some(point),
+        None => {
+            // Match native text selection: a fresh press immediately clears an
+            // old range; only a subsequent drag creates the next one.
+            ui.terminal_selection = None;
+            ui.pending_clipboard_text = None;
+            ui.dragging_terminal_selection = false;
+            ui.workspace.set_terminal_feedback(None);
+            ui.pending_terminal_pointer = Some(point);
+        }
         Some(PointerKind::Drag) => {
             if let Some(anchor) = ui.pending_terminal_pointer.take() {
                 ui.terminal_selection_at(anchor);
