@@ -45,7 +45,7 @@ use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
 use crate::usecase::application::terminal_session::{
-    TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
+    SessionState, TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
 };
 use crate::usecase::application::{Key, ScreenRunner, Terminal};
 use crate::usecase::closeup;
@@ -736,29 +736,61 @@ impl WorkspaceUi {
         }
     }
 
-    /// Polls the focused live terminal once and projects its screen rows into
-    /// the view.  A non-terminal or unattached selection clears the projection.
+    /// Polls every attached terminal, removes tabs for exited processes, and
+    /// projects only the focused terminal's screen rows into the view.
     #[coverage(off)]
     fn refresh_terminal(&mut self) {
+        let exited = if let Some(agent) = self.agent.as_mut() {
+            self.terminals
+                .iter_mut()
+                .filter_map(|session| {
+                    session.poll(&mut AgentStreamPort(agent.port.as_mut()));
+                    (session.state() == SessionState::Exited).then(|| session.terminal().clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for terminal in exited {
+            self.close_exited_terminal(&terminal);
+        }
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             self.workspace.set_terminal_view(None);
             return;
         };
-        let rows = if let (Some(agent), Some(session)) = (
-            self.agent.as_mut(),
-            self.terminals
-                .iter_mut()
-                .find(|session| session.terminal().fences(&terminal)),
-        ) {
-            session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            Some(self.terminal_selection.as_ref().map_or_else(
-                || session.display_rows_with_scrollback(),
-                |selection| session.display_rows_with_scrollback_selection(selection),
-            ))
-        } else {
-            None
-        };
+        let rows = self.terminals.iter().find_map(|session| {
+            session.terminal().fences(&terminal).then(|| {
+                self.terminal_selection.as_ref().map_or_else(
+                    || session.display_rows_with_scrollback(),
+                    |selection| session.display_rows_with_scrollback_selection(selection),
+                )
+            })
+        });
         self.workspace.set_terminal_view(rows);
+    }
+
+    #[coverage(off)]
+    fn close_exited_terminal(&mut self, terminal: &TerminalRef) {
+        let was_focused = self
+            .workspace
+            .focused_live_terminal()
+            .is_some_and(|focused| focused.fences(terminal));
+        self.workspace.exit_terminal_pane(terminal);
+        if let Some(agent) = self.agent.as_mut()
+            && let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.terminal().fences(terminal))
+        {
+            session.detach(&mut AgentStreamPort(agent.port.as_mut()));
+        }
+        self.terminals
+            .retain(|session| !session.terminal().fences(terminal));
+        self.terminal_selection = None;
+        if was_focused && !self.workspace.has_panes() {
+            self.closeup.reset();
+            self.closeup_action_forced = false;
+        }
     }
 
     fn resize_terminals(&mut self, geometry: Geometry) {
@@ -3157,6 +3189,7 @@ mod tests {
         replay: Vec<u8>,
         offset: u64,
         chunk: Option<TerminalChunk>,
+        exit_on_poll: bool,
         inputs: TerminalInputLog,
         detaches: Arc<Mutex<Vec<u64>>>,
         resizes: Arc<Mutex<Vec<Geometry>>>,
@@ -3204,6 +3237,9 @@ mod tests {
             _terminal: &TerminalRef,
             _after_offset: u64,
         ) -> Result<Vec<TerminalChunk>, TerminalError> {
+            if self.exit_on_poll {
+                return Err(TerminalError::Exited);
+            }
             // The command output only appears once the shell has received input.
             if self.inputs.lock().unwrap().is_empty() {
                 return Ok(Vec::new());
@@ -4567,6 +4603,7 @@ mod tests {
                 end_offset: 2 + b"ls\r\na.txt\r\n".len() as u64,
                 data: b"ls\r\na.txt\r\n".to_vec(),
             }),
+            exit_on_poll: false,
             inputs: Arc::clone(&inputs),
             detaches: Arc::clone(&detaches),
             resizes: Arc::clone(&resizes),
@@ -4678,6 +4715,60 @@ mod tests {
         );
         assert!(ui.workspace.pane().tabs().is_empty());
         assert!(ui.closeup_modal_visible());
+        assert_eq!(*detaches.lock().unwrap(), vec![5]);
+        assert!(ui.terminals.is_empty());
+    }
+
+    #[test]
+    fn terminal_or_agent_exit_closes_its_live_pane_and_detaches() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let detaches = Arc::new(Mutex::new(Vec::new()));
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-terminal-exit"),
+            state("closeup-terminal-exit"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Prompt,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(StreamingTerminalPort {
+                terminal,
+                replay: Vec::new(),
+                offset: 0,
+                chunk: None,
+                exit_on_poll: true,
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                detaches: Arc::clone(&detaches),
+                resizes: Arc::new(Mutex::new(Vec::new())),
+            }),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        execute_closeup_command(&mut ui, "terminal");
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        ui.closeup.insert_char('x');
+        ui.refresh_terminal();
+
+        assert!(ui.workspace.pane().tabs().is_empty());
+        assert!(ui.closeup_modal_visible());
+        assert_eq!(ui.closeup.submission(), "");
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
         assert!(ui.terminals.is_empty());
     }
