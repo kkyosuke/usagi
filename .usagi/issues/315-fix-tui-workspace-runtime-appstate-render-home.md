@@ -1,14 +1,14 @@
 ---
 number: 315
 title: fix(tui): 実端末 Workspace runtime を AppState / render_home 経路へ切り替える
-status: todo
+status: in-progress
 priority: high
 labels: [tui, controller, runtime]
 dependson: [313, 314]
 related: [258, 287, 295, 305]
 parent: 258
 created_at: 2026-07-17T14:22:12.472188+00:00
-updated_at: 2026-07-17T14:22:12.472188+00:00
+updated_at: 2026-07-17T22:06:17.473194+00:00
 ---
 
 ## 目的
