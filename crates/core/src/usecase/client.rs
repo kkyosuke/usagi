@@ -54,6 +54,26 @@ pub enum DaemonRequest {
         operation_id: String,
         intent: DispatchIntent,
     },
+    /// MCP dispatch surface.  Its payload stays JSON at this presentation
+    /// boundary; the daemon validates and resolves all identities.
+    DispatchTool {
+        action: DispatchToolAction,
+        operation_id: String,
+        payload: Value,
+    },
+}
+
+/// The MCP operations backed by the daemon-owned dispatch registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchToolAction {
+    Dispatch,
+    SessionGet,
+    AgentList,
+    AgentGet,
+    AgentComplete,
+    AgentFail,
+    AgentInbox,
 }
 
 /// Control vocabulary for the daemon metrics stream.

@@ -113,8 +113,12 @@ CLI コマンドと MCP tool は、実行を伴うかどうかで経路が 2 つ
 |---|---|---|---|
 | store 系 | issue / memory の CRUD・検索 | cwd の `.usagi/{issues,memory}/` を core usecase で直接読み書き | git 追跡ファイルの編集であり実行を伴わない。session worktree 内ならブランチに乗って PR で `main` へ流れる（v1 と同じ）。daemon 不要 |
 | session 系 | `session_create` / `session_prompt` / `session_status` / `session_remove` / `session_delegate_*` と対応 CLI | daemon への IPC リクエスト。daemon が worktree 生成・`state.json` 記録・prompt 配送・破棄を実行する | 実行（PTY・autostart）と session 状態の権威が daemon にあるため。書き手の一本化で v1 のロック・watcher 競合を排す |
+| dispatch 系 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` | daemon への IPC リクエスト。daemon が agent registry・run binding・durable inbox を操作する | worker は宛先を指定せず、保存済み binding を使うため取り違えない |
 
 prompt 配送も daemon に一本化される。
+
+dispatch は常に即時実行で queue/live を公開しない。既存の `session_delegate_brief`、`session_delegate_issue`、
+`issue_to_prompt`、`session_prompt`、`session_complete` は置き換えず併存する。
 
 - **live 配送**: daemon が対象端末の PTY に直接書く（v1 で TUI の監視スレッドが「貼り付け → Enter」して
   いた役割の移設）。live か queue かの `auto` 判定は、v1 の live-pane マーカーに代わって daemon 自身の

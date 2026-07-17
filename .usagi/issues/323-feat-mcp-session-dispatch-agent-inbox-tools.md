@@ -1,7 +1,7 @@
 ---
 number: 323
 title: feat(mcp): session_dispatch / session_get / agent_list / agent_get / agent_complete / agent_fail / agent_inbox を実装する
-status: todo
+status: done
 priority: high
 labels: [mcp, cli, orchestration, agent]
 dependson: [321, 322]

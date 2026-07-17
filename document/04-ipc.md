@@ -143,3 +143,8 @@ protocol error、ownership unknown は local managed PTY や local session mutat
 retry は `ProtocolError` の retry mode に従う。mutation を再送するときは元の request / operation identity
 を保持する。TUI は stream sequence、resource revision、terminal output offset を別々に保持し、gap や
 epoch の不一致では output を継ぎ足さず、snapshot resync を要求する。
+
+MCP の dispatch request は `DispatchTool` action として送る。daemon が session upsert、agent/run/binding
+の解決、inbox の読み書きを行い、MCP は durable state を直接読んだり書いたりしない。完了・失敗は worker
+の current run と binding が一意に一致するときだけ配送し、不一致は completion fence と同じ fail-closed
+方針で no-op にする。
