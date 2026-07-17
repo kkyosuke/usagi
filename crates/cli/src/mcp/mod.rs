@@ -9,6 +9,7 @@
 //! 委譲する方針で、CLI のコマンドハンドラと同じ core usecase を呼ぶ兄弟。
 
 pub mod protocol;
+pub mod resources;
 pub mod serve;
 pub mod tool;
 pub mod tools;

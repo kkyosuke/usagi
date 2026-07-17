@@ -1,0 +1,73 @@
+# 7. MCP サーバ（agent 入口面）
+
+> [ドキュメント目次](README.md) ｜ ← 前へ [6. 開発規約](06-conventions.md)
+
+`usagi mcp` は AI エージェント向けの入口面で、stdio 上の JSON-RPC 2.0 で tool と resource を
+公開する。面の責務・経路・daemon を権威とする反映フローの設計判断は
+[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md) が正本で、本章は現在の
+ビルドが公開する wire 面をまとめる。
+
+## 目次
+
+- [起動と経路](#起動と経路)
+- [JSON-RPC メソッド](#json-rpc-メソッド)
+- [tool 面](#tool-面)
+- [resource 面](#resource-面)
+- [orchestration ガイド](#orchestration-ガイド)
+
+## 起動と経路
+
+`usagi mcp` は合成ルートが stdin/stdout を束ねて serve ループを回す（エージェントが spawn する
+stdio プロセスで、CLI からは隠している）。経路は入口面（CLI / MCP）で共通で、store 系
+（issue / memory）はカレントディレクトリの `.usagi/` を core usecase で直接読み書きし、session
+系は daemon への IPC リクエストになる（[2. アーキテクチャ](02-architecture.md)、
+[proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。
+
+## JSON-RPC メソッド
+
+serve ループが応答するメソッドは次のとおり。1 行 = 1 メッセージで、通知（`id` 無し）には
+応答しない。不正入力 1 行ではサーバを止めず、リクエスト単位のエラーは JSON-RPC エラー応答に
+整形する。
+
+| メソッド | 役割 |
+|---|---|
+| `initialize` | プロトコル版のエコー、capabilities（`tools` / `resources`）、`serverInfo` を返す |
+| `ping` | 空の結果を返す（疎通確認） |
+| `tools/list` | 全 tool の `name` / `description` / `inputSchema` を返す |
+| `tools/call` | tool 名で実行を dispatch する |
+| `resources/list` | 公開 resource の `uri` / `name` / `description` / `mimeType` を返す |
+| `resources/read` | `uri` を指定して resource 本文（`contents`）を返す |
+
+## tool 面
+
+tool は系統ごとに分かれ、`tools/list` に載る `name` と `inputSchema` が wire 契約の正本である。
+各 `description` は agent が一覧から選べるよう「いつ使うか」「何をするか」「主な制約・前提」を
+簡潔に述べる。
+
+| 系統 | 例 | 経路 |
+|---|---|---|
+| issue | `issue_create` / `issue_search` / `issue_update` … | store 系（cwd の `.usagi/issues/`） |
+| memory | `memory_save` / `memory_search` … | store 系（cwd の `.usagi/memory/`） |
+| session | `session_create` / `session_prompt` / `session_status` / `session_delegate_*` … | session 系（daemon への IPC） |
+
+## resource 面
+
+resource は**静的テキスト**（`uri` / `name` / `description` / `mimeType` / `text`）で、agent は
+`resources/list` で発見し `resources/read` で本文を取得する。`initialize` の capabilities に
+`resources` を宣言する。tool（振る舞い）と分離し、「実行はしないが agent に読ませたい」導線を
+配信するのに使う。
+
+resource のレジストリと応答 `Value` の組み立ては純関数（`crates/cli/src/mcp/resources.rs`）に
+閉じ、serve ループ側は薄い glue に保つ。本文はクレート同梱の Markdown アセットを埋め込む。
+
+## orchestration ガイド
+
+現在公開している resource は orchestration の利用ガイド 1 つである。
+
+| URI | mimeType | 内容 |
+|---|---|---|
+| `usagi://guides/orchestration` | `text/markdown` | セッションの委譲（dispatch）・観測（observe）・完了報告（complete）の使い方（agent 向け） |
+
+ガイドは `tools/list` に載る実在の tool 名だけを使い、daemon を権威とする orchestration の
+ワークフロー・代表例・状態遷移・制約を説明する。agent 起動プロンプトへ大きな説明文を注入せず、
+必要な導線はこの resource で発見させる。
