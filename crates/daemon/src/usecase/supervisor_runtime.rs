@@ -121,37 +121,24 @@ impl SupervisorRuntime {
                 .cloned()
                 .expect("provenance task exists");
             if task.state == TaskState::Dispatched {
-                run = self.apply(
-                    &run,
-                    now,
-                    SupervisorEventSource::DispatchCompletion,
-                    SupervisorEventKind::Running {
-                        task_id: task_id.clone(),
-                        generation: task.generation,
-                    },
-                )?;
+                let event = SupervisorEventKind::Running {
+                    task_id: task_id.clone(),
+                    generation: task.generation,
+                };
+                run = self.apply(&run, now, SupervisorEventSource::DispatchCompletion, event)?;
             }
             let current = run.tasks.get(&task_id).expect("task retained");
             if !current.state.terminal() {
-                run = self.apply(
-                    &run,
-                    now,
-                    source(kind),
-                    SupervisorEventKind::SetTaskState {
-                        task_id: task_id.clone(),
-                        generation: current.generation,
-                        state: terminal,
-                    },
-                )?;
+                let event = SupervisorEventKind::SetTaskState {
+                    task_id: task_id.clone(),
+                    generation: current.generation,
+                    state: terminal,
+                };
+                run = self.apply(&run, now, source(kind), event)?;
             }
             if let Some(parent_id) = task.parent_task_id {
-                self.reserve_parent_wake(
-                    &mut run,
-                    &parent_id,
-                    provenance.dispatch_run_id,
-                    kind,
-                    now,
-                )?;
+                let child_run = provenance.dispatch_run_id;
+                self.reserve_parent_wake(&mut run, &parent_id, child_run, kind, now)?;
             }
         }
         self.deliver_reserved(waker)
@@ -197,16 +184,12 @@ impl SupervisorRuntime {
     ) -> Result<()> {
         let parent = run.tasks.get(parent_id).cloned().expect("parent exists");
         if parent.state == TaskState::Running {
-            *run = self.apply(
-                run,
-                now,
-                SupervisorEventSource::DispatchCompletion,
-                SupervisorEventKind::SetTaskState {
-                    task_id: parent_id.clone(),
-                    generation: parent.generation,
-                    state: TaskState::AwaitingDecision,
-                },
-            )?;
+            let event = SupervisorEventKind::SetTaskState {
+                task_id: parent_id.clone(),
+                generation: parent.generation,
+                state: TaskState::AwaitingDecision,
+            };
+            *run = self.apply(run, now, SupervisorEventSource::DispatchCompletion, event)?;
         }
         let parent = run.tasks.get(parent_id).expect("parent retained");
         if parent.state != TaskState::AwaitingDecision {
