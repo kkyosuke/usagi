@@ -22,10 +22,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use usagi_core::{
     domain::{
-        agent::{AgentProfileId, LaunchMode, LaunchRequest, LaunchScope},
+        agent::{
+            AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun, InboxKind,
+            InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
+        },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
             DaemonGeneration, OperationId, RequestId, SessionId, TerminalId, TerminalRef,
@@ -33,7 +37,10 @@ use usagi_core::{
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
-    usecase::client::{AgentLaunchIntent, TerminalAction, TerminalRequest},
+    infrastructure::store::dispatch::DispatchStore,
+    usecase::client::{
+        AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
+    },
 };
 
 use crate::presentation::ipc::TerminalOwner;
@@ -137,6 +144,7 @@ pub struct AgentRuntime<S, P, J> {
     pty: P,
     default_profile: AgentProfileId,
     geometry: Geometry,
+    dispatch: DispatchStore,
     operations: BTreeMap<String, AgentOperation>,
 }
 
@@ -151,6 +159,31 @@ impl<S, P, J> AgentRuntime<S, P, J> {
         default_profile: AgentProfileId,
         geometry: Geometry,
     ) -> Self {
+        Self::with_dispatch(
+            generation,
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            DispatchStore::new(
+                std::env::temp_dir().join(format!("usagi-dispatch-{}", AgentRuntimeId::new())),
+            ),
+        )
+    }
+
+    #[must_use]
+    pub fn with_dispatch(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+    ) -> Self {
         Self {
             generation,
             coordinator: RuntimeCoordinator::new(16, 64 * 1024, 64),
@@ -161,6 +194,7 @@ impl<S, P, J> AgentRuntime<S, P, J> {
             pty,
             default_profile,
             geometry,
+            dispatch,
             operations: BTreeMap::new(),
         }
     }
@@ -175,6 +209,11 @@ impl<S, P, J> AgentRuntime<S, P, J> {
         self.operations
             .get(operation_id)
             .map(|operation| operation.outcome.clone())
+    }
+
+    #[must_use]
+    pub fn dispatch_store(&self) -> &DispatchStore {
+        &self.dispatch
     }
 }
 
@@ -209,6 +248,176 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
             },
         );
         outcome
+    }
+
+    /// Launches a dispatch-selected worker through the same fenced Agent
+    /// runtime used by ordinary Agent launch, then records its durable run and
+    /// caller binding.  The caller is captured now and never accepted from a
+    /// later completion request.
+    pub fn dispatch<R: SessionScopeResolver>(
+        &mut self,
+        operation_id: &str,
+        intent: &DispatchIntent,
+        session: SessionId,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let operation = OperationId::parse(operation_id).map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch operation id must be canonical",
+            )
+        })?;
+        if intent.prompt.is_empty() {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch prompt must not be empty",
+            ));
+        }
+        let worker = match &intent.agent {
+            DispatchAgentIntent::Existing { agent_id } => self
+                .dispatch
+                .agent(*agent_id)
+                .map_err(|_| dispatch_storage_error())?
+                .ok_or_else(|| {
+                    ProtocolError::new(ErrorCode::InvalidArgument, "dispatch agent was not found")
+                })?,
+            DispatchAgentIntent::New { runtime, model } => self
+                .dispatch
+                .upsert_agent_by_runtime_model(session, runtime.clone(), model.clone())
+                .map_err(|_| dispatch_storage_error())?,
+        };
+        if worker.session_id != session {
+            return Err(ProtocolError::new(
+                ErrorCode::InvalidArgument,
+                "dispatch agent does not belong to session",
+            ));
+        }
+        let launch = AgentLaunchIntent {
+            workspace: intent.workspace,
+            session,
+            profile: Some(worker.runtime.clone()),
+        };
+        let semantic = format!(
+            "dispatch:{}:{}:{}",
+            intent.session_name, worker.agent_id, intent.prompt
+        );
+        if let Some(existing) = self.operations.get(operation_id) {
+            if existing.semantic_key != semantic {
+                return Err(ProtocolError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "operation id was reused with a different dispatch",
+                ));
+            }
+            return existing.outcome.clone();
+        }
+        let outcome = self.admit_dispatch(
+            operation,
+            &launch,
+            &intent.prompt,
+            &worker,
+            &intent.caller,
+            scope,
+        );
+        self.operations.insert(
+            operation_id.to_owned(),
+            AgentOperation {
+                semantic_key: semantic,
+                outcome: outcome.clone(),
+            },
+        );
+        outcome
+    }
+
+    fn admit_dispatch<R: SessionScopeResolver>(
+        &mut self,
+        operation: OperationId,
+        launch: &AgentLaunchIntent,
+        prompt: &str,
+        worker: &usagi_core::domain::agent::Agent,
+        caller: &CallerRef,
+        scope: &R,
+    ) -> Result<AgentAdmission, ProtocolError> {
+        let resolved = scope
+            .resolve_available_scope(launch.workspace, launch.session)
+            .map_err(map_scope_error)?;
+        let terminal = TerminalRef {
+            daemon_generation: self.generation,
+            terminal_id: TerminalId::new(),
+            workspace_id: launch.workspace,
+            session_id: Some(launch.session),
+            worktree_id: resolved.worktree_id,
+        };
+        let runtime = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal.clone(), launch.session)
+            .map_err(|_| {
+                ProtocolError::new(ErrorCode::Internal, "agent runtime scope is inconsistent")
+            })?;
+        let fence = CompletionFence {
+            workspace_id: launch.workspace,
+            session_id: launch.session,
+            operation_id: operation,
+            owner_daemon_generation: self.generation,
+            execution_attempt: 1,
+            lifecycle_attempt: 1,
+            expected_revision: 0,
+        };
+        let request = LaunchRequest {
+            profile_id: worker.runtime.clone(),
+            mode: LaunchMode::Interactive,
+            model: Some(worker.model.clone()),
+            resume: false,
+            initial_prompt: Some(prompt.to_owned()),
+            scope: LaunchScope {
+                workspace_id: launch.workspace,
+                session_id: launch.session,
+                worktree_id: resolved.worktree_id,
+            },
+            required_capabilities: BTreeSet::new(),
+        };
+        let authorization = RuntimeAuthorization {
+            runtime,
+            operation: fence,
+            mcp_allowed: false,
+        };
+        self.orchestrator
+            .launch(
+                &mut self.coordinator,
+                &mut self.registry,
+                &authorization,
+                &request,
+                self.geometry,
+                &mut self.store,
+                &mut self.pty,
+            )
+            .map_err(map_orchestration_error)?;
+        self.dispatch
+            .upsert_run(DispatchRun {
+                run_id: operation,
+                agent_id: worker.agent_id,
+                prompt: prompt.to_owned(),
+                started_at: Utc::now(),
+                ended_at: None,
+                status: RunStatus::Running,
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .upsert_binding(DispatchBinding {
+                run_id: operation,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: worker.session_id,
+                    agent_id: worker.agent_id,
+                },
+            })
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_agent(worker.agent_id, AgentStatus::Running, Some(operation))
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(AgentAdmission {
+            operation_id: operation.to_string(),
+            revision: 1,
+            terminal,
+            completed: false,
+        })
     }
 
     fn admit<R: SessionScopeResolver>(
@@ -340,6 +549,124 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 Err(error) => Err(error.clone()),
             };
         }
+        self.synthesize_no_report(&runtime)?;
+        Ok(())
+    }
+
+    fn synthesize_no_report(&mut self, runtime: &AgentRuntimeRef) -> Result<(), ProtocolError> {
+        let fence = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?
+            .operation
+            .clone();
+        let run_id = fence.operation_id;
+        let Some(binding) = self
+            .dispatch
+            .binding(run_id)
+            .map_err(|_| dispatch_storage_error())?
+        else {
+            return Ok(());
+        };
+        // A dispatch run only accepts a report for the exact runtime fence.
+        // This exit is itself reached through the fenced terminal lookup above.
+        let inbox = self
+            .dispatch
+            .inbox(&binding.caller)
+            .map_err(|_| dispatch_storage_error())?;
+        if inbox.iter().any(|message| {
+            message.run_id == run_id
+                && matches!(
+                    message.kind,
+                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
+                )
+        }) {
+            return Ok(());
+        }
+        self.dispatch
+            .append_inbox(
+                &binding.caller,
+                InboxMessage {
+                    run_id,
+                    from: binding.worker.clone(),
+                    kind: InboxKind::NoReport,
+                    summary: "worker exited without a completion report".into(),
+                    result: None,
+                    created_at: Utc::now(),
+                    read: false,
+                },
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_run(run_id, RunStatus::NoReport, Some(Utc::now()))
+            .map_err(|_| dispatch_storage_error())?;
+        self.dispatch
+            .transition_agent(binding.worker.agent_id, AgentStatus::Exited, None)
+            .map_err(|_| dispatch_storage_error())?;
+        Ok(())
+    }
+
+    /// Delivers a worker report only when the supplied completion fence is the
+    /// exact current runtime fence.  Late, duplicate, or wrong-generation
+    /// reports are safe no-ops, preserving the single inbox delivery.
+    pub fn report(
+        &mut self,
+        runtime: &AgentRuntimeRef,
+        candidate: &CompletionFence,
+        kind: InboxKind,
+        summary: String,
+    ) -> Result<(), ProtocolError> {
+        let record = self
+            .coordinator
+            .record_for(runtime)
+            .map_err(map_runtime_error)?;
+        if !record.operation.fences(candidate)
+            || !matches!(kind, InboxKind::Completed | InboxKind::Failed)
+        {
+            return Ok(());
+        }
+        let Some(binding) = self
+            .dispatch
+            .binding(candidate.operation_id)
+            .map_err(|_| dispatch_storage_error())?
+        else {
+            return Ok(());
+        };
+        let inbox = self
+            .dispatch
+            .inbox(&binding.caller)
+            .map_err(|_| dispatch_storage_error())?;
+        if inbox.iter().any(|message| {
+            message.run_id == candidate.operation_id
+                && matches!(
+                    message.kind,
+                    InboxKind::Completed | InboxKind::Failed | InboxKind::NoReport
+                )
+        }) {
+            return Ok(());
+        }
+        self.dispatch
+            .append_inbox(
+                &binding.caller,
+                InboxMessage {
+                    run_id: candidate.operation_id,
+                    from: binding.worker.clone(),
+                    kind,
+                    summary,
+                    result: None,
+                    created_at: Utc::now(),
+                    read: false,
+                },
+            )
+            .map_err(|_| dispatch_storage_error())?;
+        let status = if kind == InboxKind::Completed {
+            RunStatus::Completed
+        } else {
+            RunStatus::Failed
+        };
+        self.dispatch
+            .transition_run(candidate.operation_id, status, Some(Utc::now()))
+            .map_err(|_| dispatch_storage_error())?;
         Ok(())
     }
 
@@ -529,6 +856,13 @@ fn terminal_geometry(
 
 fn stale_terminal() -> ProtocolError {
     ProtocolError::new(ErrorCode::StaleTarget, "agent terminal reference is stale")
+}
+
+fn dispatch_storage_error() -> ProtocolError {
+    ProtocolError::new(
+        ErrorCode::Unavailable,
+        "daemon could not persist dispatch state",
+    )
 }
 
 fn map_scope_error(error: ScopeResolveError) -> ProtocolError {
@@ -987,6 +1321,100 @@ mod tests {
                 .code,
             ErrorCode::InvalidArgument
         );
+    }
+
+    #[test]
+    fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: SessionId::new(),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let operation = OperationId::new().to_string();
+        let dispatch = DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            },
+            prompt: "finish the task".into(),
+        };
+        let admission = runtime
+            .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+            .unwrap();
+        let run_id = OperationId::parse(&operation).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch_store()
+                .binding(run_id)
+                .unwrap()
+                .unwrap()
+                .caller,
+            caller
+        );
+        assert_eq!(runtime.dispatch_store().inbox(&caller).unwrap(), Vec::new());
+        assert_eq!(
+            runtime
+                .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+                .unwrap(),
+            admission
+        );
+        runtime.exit(&admission.terminal, 0).unwrap();
+        let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, InboxKind::NoReport);
+    }
+
+    #[test]
+    fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
+        let mut runtime = runtime();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let caller = CallerRef {
+            session_id: SessionId::new(),
+            agent_id: usagi_core::domain::id::AgentId::new(),
+        };
+        let operation = OperationId::new().to_string();
+        let dispatch = DispatchIntent {
+            workspace,
+            session_name: "worker".into(),
+            caller: caller.clone(),
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new("test").unwrap(),
+            },
+            prompt: "finish".into(),
+        };
+        let admission = runtime
+            .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+            .unwrap();
+        let runtime_ref = runtime
+            .coordinator
+            .runtime_for_terminal(&admission.terminal)
+            .unwrap();
+        let fence = runtime
+            .coordinator
+            .record_for(&runtime_ref)
+            .unwrap()
+            .operation
+            .clone();
+        let mut wrong = fence.clone();
+        wrong.owner_daemon_generation = DaemonGeneration::new();
+        runtime
+            .report(&runtime_ref, &wrong, InboxKind::Completed, "wrong".into())
+            .unwrap();
+        assert!(runtime.dispatch_store().inbox(&caller).unwrap().is_empty());
+        runtime
+            .report(&runtime_ref, &fence, InboxKind::Completed, "done".into())
+            .unwrap();
+        runtime.exit(&admission.terminal, 0).unwrap();
+        let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, InboxKind::Completed);
     }
 
     #[test]

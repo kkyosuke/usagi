@@ -26,6 +26,7 @@ use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
+use usagi_core::infrastructure::store::dispatch::DispatchStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
@@ -718,7 +719,7 @@ fn open_agent_runtime(
             readiness,
         }),
     );
-    Arc::new(Mutex::new(AgentRuntime::new(
+    Arc::new(Mutex::new(AgentRuntime::with_dispatch(
         generation,
         registry,
         FileRuntimeStore(data_dir.join("daemon").join("agents.json")),
@@ -726,6 +727,7 @@ fn open_agent_runtime(
         pty,
         AgentProfileId::new("codex").expect("literal profile id is canonical"),
         Geometry { cols: 80, rows: 24 },
+        DispatchStore::new(data_dir.join("daemon")),
     )))
 }
 
@@ -863,6 +865,7 @@ fn start_ipc_accept_loop(
                                     {
                                         Some("session") => dispatch_session(&session, request_id, &body, hello),
                                         Some("agent") => dispatch_agent(&agent_launch, &scope_sessions, request_id, &body, hello),
+                                        Some("dispatch") => dispatch_dispatch(&agent_launch, &scope_sessions, request_id, &body, hello),
                                         Some("metrics") => dispatch_metrics(&metrics, request_id, &body, hello),
                                         _ => usagi_daemon::presentation::ipc::dispatch(request_id, body, hello),
                                     },
@@ -877,6 +880,93 @@ fn start_ipc_accept_loop(
             }
         })
         .map(|_| ())
+}
+
+fn dispatch_dispatch(
+    agent: &SharedAgentRuntime,
+    sessions: &SharedSessionRuntime,
+    request_id: usagi_core::infrastructure::ipc::RequestId,
+    body: &serde_json::Value,
+    hello: &usagi_core::infrastructure::ipc::ServerHello,
+) -> usagi_core::infrastructure::ipc::Envelope {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError, ResponseOutcome};
+    use usagi_core::usecase::client::{DaemonRequest, SessionAction};
+    let Some((operation_id, intent)) = serde_json::from_value::<DaemonRequest>(body.clone())
+        .ok()
+        .and_then(|request| match request {
+            DaemonRequest::Dispatch {
+                operation_id,
+                intent,
+            } => Some((operation_id, intent)),
+            _ => None,
+        })
+    else {
+        return usagi_daemon::presentation::ipc::dispatch(request_id, body.clone(), hello);
+    };
+    let session_id = (|| {
+        let mut runtime = sessions.lock().map_err(|_| {
+            ProtocolError::new(ErrorCode::Unavailable, "session runtime is unavailable")
+        })?;
+        let snapshot = runtime.snapshot().map_err(|_| {
+            ProtocolError::new(
+                ErrorCode::Unavailable,
+                "daemon could not read managed sessions",
+            )
+        })?;
+        if let Some(id) = session_id_by_name(&snapshot, &intent.session_name) {
+            return Ok(id);
+        }
+        let created = runtime
+            .handle(
+                SessionAction::Create,
+                &operation_id,
+                &serde_json::json!({"name": intent.session_name}),
+            )
+            .map_err(|error| {
+                ProtocolError::new(ErrorCode::InvalidArgument, error.safe_message())
+            })?;
+        session_id_by_name(&created.body, &intent.session_name).ok_or_else(|| {
+            ProtocolError::new(ErrorCode::Unavailable, "created session is not available")
+        })
+    })();
+    let result = session_id.and_then(|session_id| {
+        let scope = SharedScopeResolver(Arc::clone(sessions));
+        agent
+            .lock()
+            .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
+            .dispatch(&operation_id, &intent, session_id, &scope)
+    });
+    match result {
+        Ok(admission) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Accepted {
+                operation_id: usagi_core::infrastructure::ipc::OperationId(
+                    admission.operation_id.clone(),
+                ),
+                operation_revision: admission.revision,
+            },
+            serde_json::json!({"run_id": admission.operation_id, "terminal": admission.terminal, "completed": admission.completed}),
+        ),
+        Err(error) => envelope(
+            hello,
+            request_id,
+            ResponseOutcome::Error(error),
+            serde_json::json!(null),
+        ),
+    }
+}
+
+fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
+    snapshot
+        .get("sessions")?
+        .as_array()?
+        .iter()
+        .find(|session| {
+            session.get("name").and_then(serde_json::Value::as_str) == Some(name)
+                && session.get("lifecycle").and_then(serde_json::Value::as_str) == Some("available")
+        })
+        .and_then(|session| serde_json::from_value(session.get("session_id")?.clone()).ok())
 }
 
 fn dispatch_metrics(
