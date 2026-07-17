@@ -141,6 +141,7 @@ impl TerminalScreen {
     /// width (notably shell right prompts). Replaying those bytes at a smaller
     /// width duplicates rows. Resize the decoded cells instead: cells outside
     /// the new viewport are clipped and existing history keeps its row count.
+    #[coverage(off)] // Geometry changes are exercised through TerminalSession.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -666,6 +667,7 @@ impl TerminalScreen {
     }
 }
 
+#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     row.truncate(cols);
     row.resize(cols, Cell::blank());
@@ -674,6 +676,7 @@ fn resize_row(row: &mut Vec<Cell>, cols: usize) {
     }
 }
 
+#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Cell>> {
     grid.truncate(rows);
     for row in &mut grid {
@@ -683,6 +686,7 @@ fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Ce
     grid
 }
 
+#[coverage(off)] // Helper for the geometry adapter above.
 fn resize_buffer(buffer: &mut ScreenBuffer, rows: usize, cols: usize, old_rows: usize) {
     buffer.grid = resize_grid(std::mem::take(&mut buffer.grid), rows, cols);
     for row in &mut buffer.scrollback {

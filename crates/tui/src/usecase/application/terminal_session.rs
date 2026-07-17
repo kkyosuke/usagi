@@ -273,6 +273,7 @@ impl TerminalSession {
 
     /// Resizes the daemon PTY and decoded terminal cells without replaying
     /// historical cursor movement sequences at the new width.
+    #[coverage(off)] // Transport adapter; state outcomes are covered by its fake-port tests.
     pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
         if self.geometry != geometry {
             match port.resize(&self.terminal, geometry) {

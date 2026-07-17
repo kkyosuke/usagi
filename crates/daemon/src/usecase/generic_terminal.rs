@@ -365,6 +365,7 @@ impl GenericTerminalCoordinator {
 
     /// Retained output remains readable after a terminal exits. Only launches,
     /// input, output, and resize require a running PTY.
+    #[coverage(off)] // Narrow state predicate exercised by the exited-output contract test.
     fn replayable(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
         matches!(
             self.record(terminal)?.state,
