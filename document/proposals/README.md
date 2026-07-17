@@ -28,3 +28,4 @@ v1 の仕様スナップショットとして保存する。
 | 6 | [06-tui-v1-parity.md](06-tui-v1-parity.md) | v2 TUI の parity scope・優先度・受け入れ契約 | 提案 |
 | 7 | [07-pty-crash-continuation.md](07-pty-crash-continuation.md) | PTY broker／FD handoff による daemon crash 後の terminal 継続 | 提案（MVP 非依存） |
 | 8 | [08-agent-dispatch-mcp.md](08-agent-dispatch-mcp.md) | 他 session の特定 agent への即時 dispatch と、caller の durable inbox への確実な完了報告（MCP 契約） | 提案（実装 issue #321–#323） |
+| 9 | [09-user-decision-mcp.md](09-user-decision-mcp.md) | agent の user decision request と durable な回答配送・TUI 操作 | 提案（実装 issue #329–#330） |
