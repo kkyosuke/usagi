@@ -164,6 +164,13 @@ fn config_entry_renders_the_config_screen() {
     assert!(out.contains("Theme") && out.contains("system"));
     assert!(out.contains("Esc: back"));
     assert!(output.stderr.is_empty());
+    let status = Command::new(env!("CARGO_BIN_EXE_usagi"))
+        .args([OsStr::new("daemon"), OsStr::new("status")])
+        .env("USAGI_HOME", home.path())
+        .output()
+        .expect("usagi daemon status を起動できる");
+    assert!(status.status.success());
+    assert!(stdout(&status).contains("daemon not running"));
     stop_daemon(home.path());
 }
 

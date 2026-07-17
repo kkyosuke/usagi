@@ -1204,7 +1204,9 @@ pub(crate) fn launch(
     info: &AppInfo,
     entry: &EntryScreen,
 ) -> std::io::Result<()> {
-    if let Err(error) = crate::runtime::daemon::ensure_ready() {
+    if !matches!(entry, EntryScreen::Config | EntryScreen::Doctor)
+        && let Err(error) = crate::runtime::daemon::ensure_ready()
+    {
         writeln!(std::io::stderr(), "daemon unavailable: {error}")?;
         return Ok(());
     }
