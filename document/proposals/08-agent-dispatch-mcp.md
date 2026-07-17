@@ -8,7 +8,7 @@
 書かず、この提案に分離する。実装が確定した部分は [02-architecture.md](../02-architecture.md) /
 [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み、この提案はリンクだけ残す。
 
-実装タスクは issue ストア（`.usagi/issues/`）の #321–#323、#329–#330 で追跡する（[§8](#8-実装-issue-分割)）。
+実装タスクは issue ストア（`.usagi/issues/`）の #321–#323、#331–#332 で追跡する（[§8](#8-実装-issue-分割)）。
 
 ## 目次
 
@@ -245,10 +245,10 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 #323 mcp: session_dispatch / *_get / *_list / agent_complete|fail / inbox + caller 推論
       │
       ▼
-#329 mcp: runtime/model allowlist schema snapshot
+#331 mcp: runtime/model allowlist schema snapshot
       │
       ▼
-#330 daemon: current allowlist / executable の launch 前再検証
+#332 daemon: current allowlist / executable の launch 前再検証
 ```
 
 | issue | スコープ | 依存 |
@@ -256,8 +256,8 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 | #321 | Agent / DispatchRun / DispatchBinding / InboxMessage / StructuredResult のドメイン型と durable store（daemon state dir、atomic + lock）。100% ユニットテスト。MCP/daemon 配線はしない | — |
 | #322 | `DaemonRequest` に dispatch を追加し、session upsert・agent 解決・`initial_prompt` 即時 launch・run/binding 永続化・run_id 返却・PTY exit 時の「報告なし」合成配送を接続 | #321 |
 | #323 | 7 tool を daemon IPC client として実装し、caller/run をコンテキスト推論。互換・移行を正本 docs へ反映 | #321, #322 |
-| #329 | workspace runtime/model allowlist、injectable executable locator、MCP schema snapshot、`agent_cli` の段階的移行 | #323 |
-| #330 | dispatch launch 前の current allowlist / executable 再検証と safe error | #322, #329 |
+| #331 | workspace runtime/model allowlist、injectable executable locator、MCP schema snapshot、`agent_cli` の段階的移行 | #323 |
+| #332 | dispatch launch 前の current allowlist / executable 再検証と safe error | #322, #331 |
 
 ## 9. runtime/model allowlist、schema snapshot と再検証
 
