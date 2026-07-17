@@ -1469,9 +1469,16 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 mod tests {
     use super::*;
     use usagi_core::domain::{
-        id::{DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId},
+        id::{
+            ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
+            WorkspaceId, WorktreeId,
+        },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
+    use usagi_core::usecase::client::{
+        TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    };
+    use usagi_daemon::presentation::ipc::TerminalOwner;
 
     #[test]
     fn generic_pty_reports_child_exit_after_the_shell_exits() {
@@ -1513,6 +1520,109 @@ mod tests {
                     break;
                 }
             }
+        }
+    }
+
+    #[test]
+    fn generic_terminal_exit_reaches_its_resume_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let (pty, observations) = DaemonPty::new();
+        let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            TrustedLoginShell {
+                profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+            },
+            FileTerminalStore(directory.path().join("terminals.json")),
+            pty,
+        )));
+        start_terminal_observer(Arc::clone(&runtime), observations).unwrap();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let launch = TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: TerminalLaunchScope {
+                    workspace_id: workspace,
+                    session_id: Some(session),
+                    worktree_id: worktree,
+                },
+            },
+            geometry: TerminalGeometry { cols: 80, rows: 24 },
+        };
+        let terminal: TerminalRef = serde_json::from_value(
+            runtime
+                .lock()
+                .unwrap()
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    TerminalAction::Launch,
+                    serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
+                )
+                .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        let subscription = runtime
+            .lock()
+            .unwrap()
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Attach,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap()["subscription"]
+            .as_u64()
+            .unwrap();
+        runtime
+            .lock()
+            .unwrap()
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Input,
+                serde_json::to_value(TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription,
+                    input_seq: 0,
+                    bytes: b"exit\n".to_vec(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = runtime
+                .lock()
+                .unwrap()
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    TerminalAction::Resume,
+                    serde_json::to_value(TerminalRequest::Resume {
+                        terminal: terminal.clone(),
+                        after_offset: 0,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            if response["exited"] == true {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal exit was not observed");
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
