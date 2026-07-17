@@ -215,8 +215,8 @@ terminal を停止しない。
 取得する: launch 直後に一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
 `Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
 `CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・SGR の色と属性・alternate screen buffer）へ流し込み、
-その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
-atomic snapshot（再 attach）で置き換える。
+その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
+resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
 screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
 表示する。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい

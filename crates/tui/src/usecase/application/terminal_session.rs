@@ -42,6 +42,9 @@ pub struct TerminalChunk {
 /// a local PTY fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalError {
+    /// The output cursor fell outside the daemon's retained journal. The
+    /// terminal remains owned and must be rebuilt from an atomic snapshot.
+    ResyncRequired,
     /// The daemon connection is unavailable; a reconnect may recover it.
     Unavailable,
     /// The referenced terminal is gone or its generation no longer matches.
@@ -231,6 +234,7 @@ impl TerminalSession {
         }
         match port.poll(&self.terminal, self.cursor) {
             Ok(chunks) => self.apply(port, chunks),
+            Err(TerminalError::ResyncRequired) => self.connect(port),
             Err(error) => self.fail(error),
         }
     }
@@ -287,10 +291,13 @@ impl TerminalSession {
         self.state = match error {
             TerminalError::Orphaned => SessionState::Orphaned,
             TerminalError::Exited => SessionState::Exited,
-            TerminalError::Unavailable | TerminalError::Stale => SessionState::Disconnected,
+            TerminalError::ResyncRequired | TerminalError::Unavailable | TerminalError::Stale => {
+                SessionState::Disconnected
+            }
         };
         self.error = Some(
             match error {
+                TerminalError::ResyncRequired => "terminal output is resynchronizing",
                 TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
                 TerminalError::Stale => "terminal is no longer available",
                 TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
@@ -530,6 +537,30 @@ mod tests {
         session.connect(&mut port);
         session.poll(&mut port);
         assert_eq!(session.rows()[0], "ok");
+    }
+
+    #[test]
+    fn a_trimmed_output_cursor_reattaches_to_the_atomic_snapshot() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 0, b"old", false)),
+                Ok(attach(2, 12, b"fresh output", false)),
+            ],
+            polls: vec![Err(TerminalError::ResyncRequired)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        session.poll(&mut port);
+        assert_eq!(session.rows()[0], "fresh output");
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.error(), None);
+
+        // `poll` recovers this error before calling `fail`, but keep the
+        // defensive terminal-state mapping covered as well.
+        session.fail(TerminalError::ResyncRequired);
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(session.error(), Some("terminal output is resynchronizing"));
     }
 
     #[test]

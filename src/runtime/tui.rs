@@ -252,6 +252,7 @@ impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
 fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> TerminalError {
     use usagi_core::infrastructure::ipc::ErrorCode;
     match error.code() {
+        ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
         ErrorCode::StaleTarget => TerminalError::Stale,
         ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
         _ => TerminalError::Unavailable,
