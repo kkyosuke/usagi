@@ -506,6 +506,32 @@ mod tests {
         assert_eq!(c.occupied_slots(), 1);
         assert_eq!(c.terminal_snapshot(&terminal).unwrap().terminal, terminal);
     }
+
+    #[test]
+    fn exited_terminal_keeps_its_retained_output_available_for_resume() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        coordinator.output(&terminal, b"done".to_vec()).unwrap();
+        coordinator.exit(&terminal, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator.replay_from(&terminal, 0).unwrap()[0].data,
+            b"done"
+        );
+    }
     #[test]
     fn ambiguity_blocks_replacement_until_verified_exit_or_gone() {
         let request = request();
