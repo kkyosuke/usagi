@@ -19,7 +19,7 @@
 )] // Injected runtime ports make these boundary signatures part of the contract.
 #![coverage(off)] // Generic injected ports (scope resolver, store, journal, PTY) are monomorphized at the composition root; the fake-based tests below exercise every safety outcome without double-counting those instantiations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::Utc;
@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 use usagi_core::{
     domain::{
         agent::{
-            AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun, InboxKind,
-            InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
+            AgentCapability, AgentProfileId, AgentStatus, CallerRef, DispatchBinding, DispatchRun,
+            InboxKind, InboxMessage, LaunchMode, LaunchRequest, LaunchScope, RunStatus, WorkerRef,
         },
         id::{
             AgentRuntimeId, AgentRuntimeRef, ClientId, CompletionFence, ConnectionId,
@@ -371,12 +371,12 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 session_id: launch.session,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: BTreeSet::new(),
+            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         };
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
-            mcp_allowed: false,
+            mcp_allowed: true,
         };
         self.orchestrator
             .launch(
@@ -473,12 +473,12 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 session_id: intent.session,
                 worktree_id: resolved.worktree_id,
             },
-            required_capabilities: BTreeSet::new(),
+            required_capabilities: [AgentCapability::McpWiring].into_iter().collect(),
         };
         let authorization = RuntimeAuthorization {
             runtime,
             operation: fence,
-            mcp_allowed: false,
+            mcp_allowed: true,
         };
         self.orchestrator
             .launch(
@@ -934,6 +934,8 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::usecase::{
         claude::{ClaudeAdapter, ClaudeProvision, ClaudeProvisionFailure, ClaudeProvisioner},
