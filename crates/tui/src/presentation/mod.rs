@@ -2502,6 +2502,7 @@ struct ControllerWorkspaceRuntime {
     workspace_name: String,
     root: PathBuf,
     sessions: Vec<ProjectedSession>,
+    session_names: BTreeMap<SessionId, String>,
     metrics: Option<DaemonMetrics>,
     terminal_geometry: Geometry,
     panes: PaneRegistry,
@@ -2523,6 +2524,13 @@ impl ControllerWorkspaceRuntime {
             .map(|(record, id)| ProjectedSession::from_record(*id, record))
             .collect();
         let state = AppState::home(snapshot.workspace_id, snapshot.session_ids.clone());
+        let session_names = snapshot
+            .state
+            .sessions
+            .iter()
+            .zip(&snapshot.session_ids)
+            .map(|(record, id)| (*id, record.name.clone()))
+            .collect();
         Self {
             panes: PaneRegistry::new(state.active()),
             state,
@@ -2530,6 +2538,7 @@ impl ControllerWorkspaceRuntime {
             workspace_name: snapshot.workspace.name.clone(),
             root: snapshot.workspace.path.clone(),
             sessions,
+            session_names,
             metrics: None,
             terminal_geometry: INITIAL_TERMINAL_GEOMETRY,
             agent: None,
@@ -2958,12 +2967,7 @@ impl ControllerWorkspaceRuntime {
     }
 
     fn remove_session(&mut self, session: SessionId, force: bool) {
-        let Some(name) = self
-            .sessions
-            .iter()
-            .find(|projected| projected.id == session)
-            .map(|projected| projected.label.clone())
-        else {
+        let Some(name) = self.session_names.get(&session).cloned() else {
             return;
         };
         let result = self.session_commands.as_mut().map_or_else(
@@ -3018,6 +3022,11 @@ impl ControllerWorkspaceRuntime {
                 .iter()
                 .zip(&ids)
                 .map(|(record, id)| ProjectedSession::from_record(*id, record))
+                .collect();
+            self.session_names = records
+                .iter()
+                .zip(&ids)
+                .map(|(record, id)| (*id, record.name.clone()))
                 .collect();
             let _ = crate::usecase::application::controller::update(
                 &mut self.state,
@@ -3915,6 +3924,32 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             vec![("controller-refresh".to_owned(), None, SessionCommand::List)]
+        );
+    }
+
+    #[test]
+    fn controller_runtime_removes_sessions_by_record_name_not_display_label() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut snapshot = snapshot("controller-remove");
+        snapshot.state.sessions[0].display_name = Some("Readable label".to_owned());
+        let session = snapshot.session_ids[0];
+        let mut runtime = ControllerWorkspaceRuntime::new(&snapshot)
+            .with_session_port(Box::new(RecordingSessionPort(calls.clone())));
+
+        runtime.remove_session(session, true);
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ((
+                    "controller-remove".to_owned(),
+                    None,
+                    SessionCommand::Remove {
+                        name: "controller-remove-session".to_owned(),
+                        force: true,
+                    },
+                ))
+            ]
         );
     }
 
