@@ -8,8 +8,9 @@
 //! erase and SGR styling — and silently ignores window-title (OSC) sequences.
 //! It is pure and holds no IO, so it is exercised entirely by unit tests.
 //!
-//! Out of scope on purpose: alternate screen buffers. Scrollback is retained
-//! locally with a bounded history for the pane viewport.
+//! Alternate screen buffers used by full-screen terminal applications are
+//! supported. Scrollback is retained locally with a bounded history for the
+//! pane viewport.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -41,6 +42,19 @@ struct Cell {
     ch: char,
     style: String,
     continuation: bool,
+}
+
+/// The primary screen state saved while a full-screen application owns the
+/// alternate buffer. Parser state itself remains shared: `DECSET` / `DECRST`
+/// are consumed as one continuous byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenBuffer {
+    grid: Vec<Vec<Cell>>,
+    scrollback: Vec<Vec<Cell>>,
+    cursor_row: usize,
+    cursor_col: usize,
+    style: String,
+    saved_cursor: Option<(usize, usize)>,
 }
 
 impl Cell {
@@ -76,6 +90,9 @@ pub struct TerminalScreen {
     style: String,
     /// Cursor position saved by DECSC (`ESC 7`) or SCP (`CSI s`).
     saved_cursor: Option<(usize, usize)>,
+    /// The primary screen while a full-screen program (for example Codex)
+    /// renders into the active alternate buffer.
+    primary_screen: Option<Box<ScreenBuffer>>,
 }
 
 impl TerminalScreen {
@@ -98,6 +115,7 @@ impl TerminalScreen {
             utf8_needed: 0,
             style: String::new(),
             saved_cursor: None,
+            primary_screen: None,
         }
     }
 
@@ -360,6 +378,8 @@ impl TerminalScreen {
             'm' => self.sgr(),
             's' => self.save_cursor(),
             'u' => self.restore_cursor(),
+            'h' => self.set_private_modes(),
+            'l' => self.reset_private_modes(),
             // Unhandled finals leave the grid unchanged.
             _ => {}
         }
@@ -476,6 +496,63 @@ impl TerminalScreen {
             self.cursor_row = row;
             self.cursor_col = col;
         }
+    }
+
+    /// Applies the DEC private modes that change the visible buffer.  Codex's
+    /// ratatui renderer uses 1049; accepting the older 47/1047 variants keeps
+    /// the pane compatible with other full-screen agents as well.
+    fn set_private_modes(&mut self) {
+        let modes = self.private_modes();
+        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
+            self.enter_alternate_screen();
+        }
+    }
+
+    fn reset_private_modes(&mut self) {
+        let modes = self.private_modes();
+        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
+            self.leave_alternate_screen();
+        }
+    }
+
+    fn private_modes(&self) -> Vec<usize> {
+        self.params
+            .strip_prefix('?')
+            .map_or_else(Vec::new, |values| {
+                values
+                    .split(';')
+                    .filter_map(|value| value.parse::<usize>().ok())
+                    .collect()
+            })
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        if self.primary_screen.is_some() {
+            return;
+        }
+        self.primary_screen = Some(Box::new(ScreenBuffer {
+            grid: std::mem::take(&mut self.grid),
+            scrollback: std::mem::take(&mut self.scrollback),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            style: std::mem::take(&mut self.style),
+            saved_cursor: self.saved_cursor.take(),
+        }));
+        self.grid = vec![vec![Cell::blank(); self.cols]; self.rows];
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    fn leave_alternate_screen(&mut self) {
+        let Some(primary) = self.primary_screen.take() else {
+            return;
+        };
+        self.grid = primary.grid;
+        self.scrollback = primary.scrollback;
+        self.cursor_row = primary.cursor_row;
+        self.cursor_col = primary.cursor_col;
+        self.style = primary.style;
+        self.saved_cursor = primary.saved_cursor;
     }
 
     /// Reads the `idx`-th `;`-separated numeric CSI parameter, or `default` when
@@ -824,6 +901,31 @@ mod tests {
         // `ESC[?25l` (hide cursor) and a stray CSI abort leave text intact.
         assert_eq!(screen_after(1, 6, b"\x1b[?25lAB"), vec!["AB"]);
         assert_eq!(screen_after(1, 6, b"\x1b[1\x00AB"), vec!["AB"]);
+    }
+
+    #[test]
+    fn alternate_screen_keeps_full_screen_agent_output_visible_and_restores_the_shell() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.advance(b"$ shell");
+
+        // An unmatched restore and unknown CSI are harmless before an agent
+        // takes over the pane.
+        screen.advance(b"\x1b[?1049l\x1b[?9999z");
+        assert_eq!(screen.rows(), vec!["$ shell", ""]);
+
+        // Codex uses DECSET 1049 before its ratatui frame. Its output must be
+        // rendered from the alternate buffer while it is active, rather than
+        // leaving the pane on the underlying shell frame.
+        screen.advance(b"\x1b[?1049h\x1b[2J\x1b[Hcodex reply");
+        assert_eq!(screen.rows(), vec!["codex reply", ""]);
+
+        // A repeated DECSET must not replace the saved primary screen.
+        screen.advance(b"\x1b[?1049h");
+        assert_eq!(screen.rows(), vec!["codex reply", ""]);
+
+        // A normal exit restores the prior shell viewport exactly.
+        screen.advance(b"\x1b[?1049l");
+        assert_eq!(screen.rows(), vec!["$ shell", ""]);
     }
 
     #[test]
