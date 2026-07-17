@@ -375,6 +375,8 @@ impl TerminalScreen {
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
+            'S' => self.scroll_up(self.param(0, 1)),
+            'T' => self.scroll_down(self.param(0, 1)),
             'm' => self.sgr(),
             's' => self.save_cursor(),
             'u' => self.restore_cursor(),
@@ -450,22 +452,33 @@ impl TerminalScreen {
 
     fn line_feed(&mut self) {
         if self.cursor_row + 1 >= self.rows {
+            self.scroll_up(1);
+        } else {
+            self.cursor_row += 1;
+        }
+    }
+
+    /// Applies CSI SU. On the primary screen, rows leaving the viewport are
+    /// shell history; on the alternate screen they are transient app frames.
+    fn scroll_up(&mut self, count: usize) {
+        for _ in 0..count.min(self.rows) {
             let row = self.grid.remove(0);
-            // Full-screen programs redraw the alternate buffer in place. Its
-            // scrolled rows are not terminal history; retaining them would mix
-            // stale frames into the current Agent pane after a long response.
             if self.primary_screen.is_none() {
                 self.scrollback.push(row);
-                // Bounded client-side history: the daemon remains authoritative
-                // for retained replay, while a long-running pane cannot grow
-                // this view without limit.
                 if self.scrollback.len() > 10_000 {
                     self.scrollback.remove(0);
                 }
             }
             self.grid.push(vec![Cell::blank(); self.cols]);
-        } else {
-            self.cursor_row += 1;
+        }
+    }
+
+    /// Applies CSI SD. Reverse scrolling is a viewport operation and never
+    /// invents local history.
+    fn scroll_down(&mut self, count: usize) {
+        for _ in 0..count.min(self.rows) {
+            self.grid.pop();
+            self.grid.insert(0, vec![Cell::blank(); self.cols]);
         }
     }
 
@@ -755,6 +768,17 @@ mod tests {
             screen.cells_with_scrollback(),
             vec!["one     ", "two     ", "three   "]
         );
+    }
+
+    #[test]
+    fn csi_scroll_commands_keep_the_latest_full_screen_agent_frame_visible() {
+        let mut screen = TerminalScreen::new(3, 12);
+        screen.advance(b"\x1b[?1049hone\r\ntwo\r\nthree");
+        screen.advance(b"\x1b[1S\x1b[3;1Hreply");
+        assert_eq!(screen.rows_with_scrollback(), vec!["two", "three", "reply"]);
+
+        screen.advance(b"\x1b[1T");
+        assert_eq!(screen.rows_with_scrollback(), vec!["", "two", "three"]);
     }
 
     #[test]
