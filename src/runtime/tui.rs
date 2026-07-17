@@ -474,9 +474,15 @@ struct LifecycleSnapshot {
 
 impl LifecycleSnapshot {
     #[coverage(off)]
-    fn project(self, workspace: &Workspace) -> Vec<SessionRecord> {
-        self.sessions
-            .into_iter()
+    fn available_sessions(&self) -> impl Iterator<Item = &ManagedSession> {
+        self.sessions.iter().filter(|session| {
+            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+        })
+    }
+
+    #[coverage(off)]
+    fn project(&self, workspace: &Workspace) -> Vec<SessionRecord> {
+        self.available_sessions()
             .map(|session| SessionRecord {
                 name: session.name.clone(),
                 display_name: None,
@@ -486,7 +492,7 @@ impl LifecycleSnapshot {
                     .path
                     .join(".usagi")
                     .join("sessions")
-                    .join(session.name),
+                    .join(&session.name),
                 created_at: session.changed_at,
                 last_active: None,
                 notes: Scratchpad::default(),
@@ -587,7 +593,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 self.last_revision = snapshot.revision;
                 Ok(session_snapshot_result(
                     format!("completed operation {operation_id} (revision {revision})"),
-                    snapshot,
+                    &snapshot,
                     workspace,
                 ))
             }
@@ -601,7 +607,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 self.last_revision = snapshot.revision;
                 Ok(session_snapshot_result(
                     "daemon snapshot refreshed",
-                    snapshot,
+                    &snapshot,
                     workspace,
                 ))
             }
@@ -638,12 +644,11 @@ fn created_session_hook(
 #[coverage(off)]
 fn session_snapshot_result(
     message: impl Into<String>,
-    snapshot: LifecycleSnapshot,
+    snapshot: &LifecycleSnapshot,
     workspace: &Workspace,
 ) -> SessionCommandResult {
     let session_ids = snapshot
-        .sessions
-        .iter()
+        .available_sessions()
         .map(|session| session.session_id)
         .collect();
     SessionCommandResult {
@@ -979,8 +984,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
         let session_ids = lifecycle
-            .sessions
-            .iter()
+            .available_sessions()
             .map(|session| session.session_id)
             .collect();
         state.sessions = lifecycle.project(&workspace);
@@ -1222,9 +1226,12 @@ pub(crate) fn launch(
 #[cfg(test)]
 mod tests {
     use super::{
-        PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
-        load_workspace_state, passthrough_key,
+        LifecycleSnapshot, PersistentSettingsPort, Start, control_key, created_session_hook,
+        load_screen_graph_data, load_workspace_state, passthrough_key,
     };
+    use chrono::Utc;
+    use usagi_core::domain::id::{OperationId, WorkspaceId};
+    use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
     use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -1232,6 +1239,29 @@ mod tests {
     use usagi_tui::usecase::terminal_input::{
         KeyCode, KeyEvent, KeyEventKind, LiveInput, Modifiers,
     };
+
+    #[test]
+    fn lifecycle_snapshot_excludes_failed_sessions_from_the_tui_projection() {
+        let mut available =
+            ManagedSession::new_creating("available".into(), OperationId::new(), Utc::now());
+        available.lifecycle = SessionLifecycle::Available;
+        let mut failed =
+            ManagedSession::new_creating("failed".into(), OperationId::new(), Utc::now());
+        failed.lifecycle = SessionLifecycle::Failed;
+        let snapshot = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            revision: 1,
+            sessions: vec![available, failed],
+        };
+
+        assert_eq!(
+            snapshot
+                .available_sessions()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            ["available"]
+        );
+    }
 
     #[test]
     fn ctrl_a_maps_to_the_new_session_shortcut() {
