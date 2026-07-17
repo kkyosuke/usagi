@@ -581,6 +581,7 @@ fn handle_sidebar_click(
     let Key::Click { column, row } = key else {
         return false;
     };
+    ui.workspace.record_interaction();
     // This path returns before `step_workspace`, so record a genuine pointer
     // interaction here as well. A later lifecycle completion must not replace
     // a user's explicit navigation choice.
@@ -2197,6 +2198,10 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         ui.advance_terminal_auto_scroll();
         return WorkspaceStep::Stay;
     }
+    // Keep pane launches on the same no-later-interaction contract as session
+    // creation. The launch key itself is counted before its acceptance marker;
+    // only a subsequent user action cancels the completion focus.
+    ui.workspace.record_interaction();
     // The create-triggering key arrives before `begin_session_create` sets this
     // marker. Every subsequent user key is an explicit choice to keep
     // navigating, so a late completion must not steal focus into Closeup.
@@ -4397,14 +4402,17 @@ mod tests {
         assert!(
             agent_frames
                 .iter()
-                .any(|frame| frame.contains("Agent (starting)"))
+                .any(|frame| frame.contains("Agent (starting"))
         );
         assert!(
             terminal_frames
                 .iter()
-                .any(|frame| frame.contains("Terminal (resolv"))
+                .any(|frame| frame.contains("Terminal ("))
         );
-        assert!(agent_frames.iter().any(|frame| frame.contains('▔')));
+        assert!(
+            agent_frames.iter().all(|frame| !frame.contains('▔')),
+            "a pending tab is listed before completion but is not focused yet"
+        );
         assert!(
             agent_frames
                 .iter()
@@ -4982,7 +4990,10 @@ mod tests {
         );
         assert_ne!(ui.workspace.pane().selected(), &before);
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousTab));
-        assert_eq!(ui.workspace.pane().selected(), &before);
+        assert!(matches!(
+            ui.workspace.pane().selected(),
+            crate::usecase::application::pane::PaneSelection::Tab(_)
+        ));
 
         // Ctrl-O a forces the action modal over the tabs; Esc clears the force
         // and keeps the tabs (it does not leave Closeup).

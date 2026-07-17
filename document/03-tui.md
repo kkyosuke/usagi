@@ -200,8 +200,8 @@ forced state が無い Closeup は tab が input を所有し、action modal は
 を再び出すのは `Ctrl-O Ctrl-A` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
 modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
-Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に選択して右ペインへ
-表示し、completion はその tab だけを live / document tab に置換して選択を維持する。diff は terminal identity を持たない
+Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に一覧へ表示する。completion まで
+入力がなければ completion はその tab を選択して live / document tab に置換し、入力があれば自動選択を取り消す。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
 pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`x` は
@@ -210,7 +210,7 @@ target selection と Closeup action の空状態へ戻る。close は client-sid
 terminal を停止しない。
 
 各起動 request は launch / document resolve の前に一度描画されるため、pending chip は既存の共有 shimmer wave を
-必ず表示する。completion が到着した後の次フレームでだけ、同じ stable identity の live / document tab を選択する。
+必ず表示する。completion が到着した後の次フレームでは、request 受付後に入力がなかった場合だけ同じ stable identity の live / document tab を選択する。
 
 ### live terminal の出力表示と入力
 

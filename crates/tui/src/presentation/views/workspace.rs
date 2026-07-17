@@ -418,6 +418,11 @@ pub struct Workspace {
     panes: BTreeMap<String, PaneState>,
     /// Completed read-only pane documents, keyed by their durable operation.
     pane_documents: BTreeMap<OperationId, Vec<String>>,
+    /// The user-interaction counter captured when a pane launch was requested.
+    /// A completion may take focus only while this remains unchanged, matching
+    /// the session-create landing rule.
+    pane_focus_at_request: BTreeMap<OperationId, u64>,
+    interaction_count: u64,
     /// daemon で作成中の session。実 record が届くまで sidebar に skeleton として置く。
     pending_session: Option<String>,
     /// `+ new session` を置き換える v1-style inline name editor。
@@ -480,6 +485,8 @@ impl Workspace {
             session_ids,
             panes,
             pane_documents: BTreeMap::new(),
+            pane_focus_at_request: BTreeMap::new(),
+            interaction_count: 0,
             pending_session: None,
             create_input: None,
             create_error: None,
@@ -870,9 +877,17 @@ impl Workspace {
         self.select_pane_tab(-1);
     }
 
-    /// Request a visible daemon-owned pane placeholder and focus it immediately.
+    /// Records a user action. Runtime wakeups deliberately do not call this,
+    /// so an asynchronous pane completion can safely land after redraws.
+    #[coverage(off)]
+    pub fn record_interaction(&mut self) {
+        self.interaction_count = self.interaction_count.saturating_add(1);
+    }
+
+    /// Request a visible daemon-owned pane placeholder.
     /// The pane reducer keeps the durable operation identity until the runtime
-    /// replaces it with its fenced terminal reference.
+    /// replaces it with its fenced terminal reference; focus waits for that
+    /// completion unless the user acts in the meantime.
     #[coverage(off)]
     pub fn open_pane(&mut self, kind: PaneKind) -> usagi_core::domain::id::OperationId {
         let operation = usagi_core::domain::id::OperationId::new();
@@ -886,10 +901,8 @@ impl Workspace {
                 kind,
             },
         );
-        let _ = pane::reduce(
-            pane,
-            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
-        );
+        self.pane_focus_at_request
+            .insert(operation, self.interaction_count);
         operation
     }
 
@@ -904,9 +917,10 @@ impl Workspace {
             self.pane_mut(),
             PaneEvent::Succeeded {
                 operation,
-                terminal,
+                terminal: terminal.clone(),
             },
         );
+        self.focus_completed_pane(operation, TabSelection::Live(terminal));
     }
 
     /// Complete a non-terminal pane and retain its safe document for rendering.
@@ -921,25 +935,48 @@ impl Workspace {
         {
             self.pane_documents.insert(operation, document);
         }
+        self.focus_completed_pane(operation, TabSelection::Ready(operation));
     }
 
     /// Remove a pending pane after a presentation-safe daemon error.
     #[coverage(off)]
     pub fn fail_pane(&mut self, operation: usagi_core::domain::id::OperationId, message: String) {
+        self.pane_focus_at_request.remove(&operation);
         let _ = pane::reduce(self.pane_mut(), PaneEvent::Failed { operation, message });
     }
 
     /// Close the selected right-pane tab without affecting daemon ownership.
     #[coverage(off)]
     pub fn close_pane(&mut self) {
+        let pending = match self.pane().selected() {
+            PaneSelection::Tab(TabSelection::Pending(operation)) => Some(*operation),
+            PaneSelection::Target(_)
+            | PaneSelection::Tab(TabSelection::Live(_) | TabSelection::Ready(_)) => None,
+        };
         let document = match self.pane().selected() {
             PaneSelection::Tab(TabSelection::Ready(operation)) => Some(*operation),
             PaneSelection::Target(_)
             | PaneSelection::Tab(TabSelection::Pending(_) | TabSelection::Live(_)) => None,
         };
         let _ = pane::reduce(self.pane_mut(), PaneEvent::CloseSelected);
+        if let Some(operation) = pending {
+            self.pane_focus_at_request.remove(&operation);
+        }
         if let Some(operation) = document {
             self.pane_documents.remove(&operation);
+        }
+    }
+
+    #[coverage(off)]
+    fn focus_completed_pane(&mut self, operation: OperationId, selection: TabSelection) {
+        let Some(accepted_at) = self.pane_focus_at_request.remove(&operation) else {
+            return;
+        };
+        if accepted_at == self.interaction_count {
+            let _ = pane::reduce(
+                self.pane_mut(),
+                PaneEvent::Select(PaneSelection::Tab(selection)),
+            );
         }
     }
 
@@ -1703,24 +1740,32 @@ fn closeup_header(ws: &Workspace) -> String {
 
 /// tabmenu: pane reducer の stable selection を session 名の右の Chrome 風タブへ投影する。
 #[coverage(off)]
-fn tab_menu(width: usize, header: &str, ws: &Workspace) -> [String; 2] {
+fn tab_menu(width: usize, header: &str, ws: &Workspace, frame: usize) -> [String; 2] {
     let labels = ws
         .pane()
         .tabs()
         .iter()
         .map(pane_tab_label)
         .collect::<Vec<_>>();
+    let indicators = ws
+        .pane()
+        .tabs()
+        .iter()
+        .map(|tab| {
+            matches!(tab, PaneTab::Pending(_))
+                .then(|| widgets::session_tab::pending_indicator(frame as u64))
+        })
+        .collect::<Vec<_>>();
     let tabs = ws
         .pane()
         .tabs()
         .iter()
         .zip(&labels)
-        .map(|(tab, label)| widgets::session_tab::Tab {
+        .zip(&indicators)
+        .map(|((tab, label), indicator)| widgets::session_tab::Tab {
             label,
             selected: pane_tab_selected(tab, ws.pane().selected()),
-            // The legacy Workspace loop has no frame clock; HomeProjection
-            // supplies the animated pending glyph in the runtime-backed path.
-            pending_indicator: None,
+            pending_indicator: indicator.as_deref(),
         })
         .collect::<Vec<_>>();
     widgets::session_tab::render_with_prefix(width, header, &tabs)
@@ -1740,11 +1785,11 @@ fn right_footer(width: usize, ws: &Workspace) -> String {
 
 /// 右ペイン（closeup）を `height` 行に組む: header・tabmenu・content、footer を最下行に固定。
 #[coverage(off)]
-fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
+fn right_pane(height: usize, width: usize, ws: &Workspace, frame: usize) -> Vec<String> {
     let header = closeup_header(ws);
     let mut rows = Vec::new();
     if ws.has_panes() {
-        let chrome = tab_menu(width, &header, ws);
+        let chrome = tab_menu(width, &header, ws, frame);
         rows.extend(chrome);
         rows.push(String::new());
         if let Some(view) = &ws.terminal_view {
@@ -1846,7 +1891,7 @@ pub fn render_with_skeleton_frame(
     let left = left_pane(body_height, split.left, ws, skeleton_frame);
     let right = dim_inactive_right_pane(
         ws.mode() == Mode::Switch,
-        right_pane(body_height, split.right, ws),
+        right_pane(body_height, split.right, ws, skeleton_frame),
     );
     frame.extend(panes::join(body_height, &left, &right, split));
 
@@ -3299,7 +3344,11 @@ mod tests {
         assert!(!closeup.contains("Esc switch"));
         assert!(closeup.contains("↑↓/jk action"));
         assert!(closeup.contains("Terminal (resolving)"));
-        assert!(closeup.contains('▔'));
+        assert!(closeup.contains('\u{f0907}'));
+        assert!(
+            !closeup.contains('▔'),
+            "a pending tab remains listed but does not take focus before completion"
+        );
     }
 
     #[test]
@@ -3600,6 +3649,62 @@ mod tests {
             session_id: Some(session),
             worktree_id: WorktreeId::new(),
         }
+    }
+
+    #[test]
+    fn pending_tab_is_listed_with_a_wave_and_focuses_only_when_completion_is_uninterrupted() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let mut ws = Workspace::with_runtime_ids(
+            WorkspaceRecord::new("actual", "/tmp/actual"),
+            WorkspaceState {
+                sessions: vec![session("tui", None, SessionOrigin::Human)],
+                root_notes: Scratchpad::default(),
+                updated_at: now(),
+            },
+            workspace_id,
+            vec![session_id],
+        );
+        ws.select_next();
+        ws.enter_closeup();
+        let operation = ws.open_pane(PaneKind::Terminal);
+
+        let early = render_with_skeleton_frame(30, 100, &ws, 0).join("\n");
+        let later = render_with_skeleton_frame(30, 100, &ws, 3).join("\n");
+        assert!(early.contains("Terminal (resolving)"));
+        assert!(early.contains('\u{f0907}'));
+        assert_ne!(early, later, "the pending tab uses the shared loading wave");
+
+        let terminal = terminal_ref(workspace_id, session_id);
+        ws.complete_pane(operation, terminal.clone());
+        assert_eq!(
+            ws.pane().selected(),
+            &PaneSelection::Tab(TabSelection::Live(terminal))
+        );
+    }
+
+    #[test]
+    fn later_interaction_cancels_pending_tab_completion_focus() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let mut ws = Workspace::with_runtime_ids(
+            WorkspaceRecord::new("actual", "/tmp/actual"),
+            WorkspaceState {
+                sessions: vec![session("tui", None, SessionOrigin::Human)],
+                root_notes: Scratchpad::default(),
+                updated_at: now(),
+            },
+            workspace_id,
+            vec![session_id],
+        );
+        ws.select_next();
+        ws.enter_closeup();
+        let operation = ws.open_pane(PaneKind::Agent);
+        let selected_before_completion = ws.pane().selected().clone();
+        ws.record_interaction();
+
+        ws.complete_pane(operation, terminal_ref(workspace_id, session_id));
+        assert_eq!(ws.pane().selected(), &selected_before_completion);
     }
 
     #[test]

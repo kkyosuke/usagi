@@ -29,7 +29,9 @@ const RUNNING_RABBIT: &str = "\u{f0907}";
 pub fn pending_indicator(frame: u64) -> String {
     format!(
         "{}{}",
-        " ".repeat((frame % 4) as usize),
+        // Keep the runner within one extra cell so a pending chip retains its
+        // meaningful label even beside a long session name in a narrow pane.
+        " ".repeat((frame % 2) as usize),
         Role::Feature.style().bold().paint(RUNNING_RABBIT)
     )
 }
@@ -202,7 +204,7 @@ mod tests {
         assert!(indicator.contains(RUNNING_RABBIT));
         assert_eq!(display_width(&indicator), 1);
         assert_ne!(indicator, later);
-        assert_eq!(display_width(&later), 4);
+        assert_eq!(display_width(&later), 2);
         assert!(indicator.ends_with("\u{1b}[0m"));
         let tab = render(
             40,
