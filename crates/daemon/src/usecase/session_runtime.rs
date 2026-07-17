@@ -114,6 +114,12 @@ pub struct SessionRuntime<G> {
 }
 
 impl<G: GitRunner> SessionRuntime<G> {
+    /// Returns the repository root durably trusted by this daemon's session store.
+    #[must_use]
+    pub fn repository_root(&self) -> &Path {
+        &self.repo_root
+    }
+
     /// # Errors
     ///
     /// Returns an error when the lifecycle state cannot be loaded or initialized.
@@ -947,7 +953,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(restarted.repo_root, original_root);
+        assert_eq!(restarted.repository_root(), original_root);
         assert_eq!(
             restarted.snapshot().unwrap()["sessions"]
                 .as_array()
