@@ -314,8 +314,10 @@ verified exit、reclaim を独自実装しない。
 
 通常の interactive terminal は Agent runtime ではない。client は `TerminalProfileId` と登録済み
 workspace / session / worktree scope、geometry だけを `TerminalLaunchRequest` として送る。raw shell
-command、argv、cwd、env は request / IPC に置かない。daemon の `TerminalProfileResolver` が
-code-defined profile または trusted local settings から一度だけ program、cwd、非 secret env を解決する。
+command、argv、cwd、env は request / IPC に置かない。daemon は `SessionRuntime` の available managed
+session resolver で request の完全な workspace / session / worktree fence を検証し、その worktree path を
+`TerminalProfileResolver` へ渡して code-defined profile または trusted local settings から一度だけ program、cwd、
+非 secret env を解決する。不一致・未利用可能な scope は PTY spawn 前に拒否する。
 
 `GenericTerminalCoordinator` は `TerminalRef` と `CompletionFence`、profile revision、program、cwd、env
 **名**の allowlist だけを `TerminalStore` へ保存してから PTY を spawn する。env の値、secret、rendered

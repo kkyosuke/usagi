@@ -50,7 +50,9 @@ use usagi_daemon::usecase::runtime::{
 };
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
-use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
+use usagi_daemon::usecase::terminal_ipc::{
+    GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+};
 use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
 struct TrustedLoginShell {
@@ -227,6 +229,32 @@ impl SessionScopeResolver for SharedScopeResolver {
             .map_err(|_| ScopeResolveError::Unavailable)?;
         Ok(ResolvedAgentScope {
             worktree_id: scope.worktree_id,
+            working_directory: scope.path,
+        })
+    }
+}
+
+/// Resolves the complete client fence for a generic terminal. Unlike the Agent
+/// resolver, generic terminal requests already carry a worktree ID, so the
+/// runtime verifies that exact identity before admitting a PTY spawn.
+struct SharedTerminalScopeResolver(SharedSessionRuntime);
+impl TerminalScopeResolver for SharedTerminalScopeResolver {
+    fn resolve_available_scope(
+        &self,
+        requested: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
+        let session = requested
+            .session_id
+            .ok_or(TerminalScopeResolveError::Unavailable)?;
+        let runtime = self
+            .0
+            .lock()
+            .map_err(|_| TerminalScopeResolveError::Unavailable)?;
+        let scope = runtime
+            .resolve_scope(requested.workspace_id, session, requested.worktree_id)
+            .map_err(|_| TerminalScopeResolveError::Unavailable)?;
+        Ok(ResolvedTerminalScope {
+            scope: requested.clone(),
             working_directory: scope.path,
         })
     }
@@ -408,6 +436,7 @@ impl PtyWriter for AgentPty {
 
 enum PtyObservation {
     Output(usagi_core::domain::id::TerminalRef, Vec<u8>),
+    Exited(usagi_core::domain::id::TerminalRef, i32),
 }
 
 struct DaemonPty {
@@ -455,6 +484,7 @@ impl GenericPtySpawner for DaemonPty {
             .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
         let output_sender = self.observations.clone();
         let output_terminal = terminal.clone();
+        let exit_pty = Arc::clone(&pty);
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -471,6 +501,12 @@ impl GenericPtySpawner for DaemonPty {
                 {
                     break;
                 }
+            }
+            if let Ok(status) = exit_pty
+                .lock()
+                .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
+            {
+                let _ = output_sender.send(PtyObservation::Exited(output_terminal, status));
             }
         });
         Ok(ProcessIdentity {
@@ -513,11 +549,28 @@ impl PtyWriter for DaemonPty {
 }
 
 struct SharedTerminal(
-    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>,
+    Arc<
+        Mutex<
+            GenericTerminalRuntime<
+                TrustedLoginShell,
+                FileTerminalStore,
+                DaemonPty,
+                SharedTerminalScopeResolver,
+            >,
+        >,
+    >,
 );
 type SharedSessionRuntime = Arc<Mutex<SessionRuntime<SystemGit>>>;
-type SharedTerminalRuntime =
-    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>;
+type SharedTerminalRuntime = Arc<
+    Mutex<
+        GenericTerminalRuntime<
+            TrustedLoginShell,
+            FileTerminalStore,
+            DaemonPty,
+            SharedTerminalScopeResolver,
+        >,
+    >,
+>;
 
 /// Samples daemon-owned process resources between metrics requests.
 struct ProcessMetrics {
@@ -628,6 +681,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         daemon_generation,
         trusted_repository_root(&runtime)?,
         pty,
+        Arc::clone(&runtime),
     );
     start_terminal_observer(Arc::clone(&terminal), observations)?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
@@ -724,6 +778,7 @@ fn new_terminal_runtime(
     generation: usagi_core::domain::id::DaemonGeneration,
     repo_root: PathBuf,
     pty: DaemonPty,
+    sessions: SharedSessionRuntime,
 ) -> SharedTerminalRuntime {
     Arc::new(Mutex::new(GenericTerminalRuntime::new(
         generation,
@@ -732,13 +787,19 @@ fn new_terminal_runtime(
         },
         FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
         pty,
+        SharedTerminalScopeResolver(sessions),
     )))
 }
 
-fn start_terminal_observer(
-    terminal: SharedTerminalRuntime,
+fn start_terminal_observer<Q>(
+    terminal: Arc<
+        Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty, Q>>,
+    >,
     observations: Receiver<PtyObservation>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    Q: TerminalScopeResolver + Send + 'static,
+{
     std::thread::Builder::new()
         .name("usagi-terminal-observer".to_string())
         .spawn(move || {
@@ -749,6 +810,9 @@ fn start_terminal_observer(
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
                         let _ = terminal.output(&reference, bytes);
+                    }
+                    PtyObservation::Exited(reference, status) => {
+                        let _ = terminal.exit(&reference, status);
                     }
                 }
             }
@@ -1411,9 +1475,191 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 mod tests {
     use super::*;
     use usagi_core::domain::{
-        id::{SessionId, WorkspaceId, WorktreeId},
+        id::{
+            ClientId, ConnectionId, DaemonGeneration, RequestId, SessionId, TerminalId,
+            WorkspaceId, WorktreeId,
+        },
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
+    use usagi_core::usecase::client::{
+        TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
+    };
+    use usagi_daemon::presentation::ipc::TerminalOwner;
+    use usagi_daemon::usecase::terminal_ipc::{
+        ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+    };
+
+    #[derive(Clone)]
+    struct TestTerminalScope {
+        scope: TerminalLaunchScope,
+        working_directory: PathBuf,
+    }
+
+    impl TerminalScopeResolver for TestTerminalScope {
+        fn resolve_available_scope(
+            &self,
+            scope: &TerminalLaunchScope,
+        ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
+            (scope == &self.scope)
+                .then(|| ResolvedTerminalScope {
+                    scope: self.scope.clone(),
+                    working_directory: self.working_directory.clone(),
+                })
+                .ok_or(TerminalScopeResolveError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn generic_pty_reports_child_exit_after_the_shell_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: terminal.workspace_id,
+                session_id: terminal.session_id,
+                worktree_id: terminal.worktree_id,
+            },
+        };
+        let launch = TrustedLoginShell {
+            profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+        }
+        .resolve(&request)
+        .unwrap();
+        let (mut pty, observations) = DaemonPty::new();
+
+        pty.spawn(&launch, &terminal).unwrap();
+        pty.select_terminal(&terminal);
+        pty.write_all(b"exit\n").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match observations.recv_timeout(remaining).unwrap() {
+                PtyObservation::Output(_, _) => {}
+                PtyObservation::Exited(exited, status) => {
+                    assert_eq!(exited, terminal);
+                    assert_eq!(status, 0);
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
+    fn generic_terminal_exit_reaches_its_resume_response() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
+        let (pty, observations) = DaemonPty::new();
+        let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
+            DaemonGeneration::new(),
+            TrustedLoginShell {
+                profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+            },
+            FileTerminalStore(directory.path().join("terminals.json")),
+            pty,
+            TestTerminalScope {
+                scope: scope.clone(),
+                working_directory: directory.path().to_path_buf(),
+            },
+        )));
+        start_terminal_observer(Arc::clone(&runtime), observations).unwrap();
+        let connection = ConnectionId::new();
+        let client = ClientId::new();
+        let launch = TerminalLaunchIntent {
+            request: TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope,
+            },
+            geometry: TerminalGeometry { cols: 80, rows: 24 },
+        };
+        let terminal: TerminalRef = serde_json::from_value(
+            runtime
+                .lock()
+                .unwrap()
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    TerminalAction::Launch,
+                    serde_json::to_value(TerminalRequest::Launch { intent: launch }).unwrap(),
+                )
+                .unwrap()["terminal"]
+                .clone(),
+        )
+        .unwrap();
+        let subscription = runtime
+            .lock()
+            .unwrap()
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Attach,
+                serde_json::to_value(TerminalRequest::Attach {
+                    terminal: terminal.clone(),
+                })
+                .unwrap(),
+            )
+            .unwrap()["subscription"]
+            .as_u64()
+            .unwrap();
+        runtime
+            .lock()
+            .unwrap()
+            .request(
+                connection,
+                client,
+                RequestId::new(),
+                TerminalAction::Input,
+                serde_json::to_value(TerminalRequest::Input {
+                    terminal: terminal.clone(),
+                    subscription,
+                    input_seq: 0,
+                    bytes: b"exit\n".to_vec(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = runtime
+                .lock()
+                .unwrap()
+                .request(
+                    connection,
+                    client,
+                    RequestId::new(),
+                    TerminalAction::Resume,
+                    serde_json::to_value(TerminalRequest::Resume {
+                        terminal: terminal.clone(),
+                        after_offset: 0,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            if response["exited"] == true {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal exit was not observed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn restart_from_another_directory_launches_terminals_at_the_restored_root() {
