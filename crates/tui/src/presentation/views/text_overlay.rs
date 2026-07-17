@@ -7,7 +7,7 @@ use crate::presentation::theme::Style;
 use crate::presentation::widgets::modal;
 
 /// 長文 overlay の希望する内側幅。
-const INNER_WIDTH: usize = 68;
+pub const INNER_WIDTH: usize = 68;
 const BODY_HEIGHT: usize = 14;
 
 /// overlay に表示する安全な document。`message` は backend の生エラーを含めない。
@@ -25,6 +25,7 @@ pub struct TextOverlay {
     title: String,
     document: OverlayDocument,
     scroll: usize,
+    dismiss_on_any_key: bool,
 }
 
 impl TextOverlay {
@@ -35,7 +36,16 @@ impl TextOverlay {
             title: title.into(),
             document,
             scroll: 0,
+            dismiss_on_any_key: false,
         }
+    }
+
+    /// Mark this overlay as an acknowledgement dialog. Its owner closes it on
+    /// the next user input instead of exposing scroll controls.
+    #[must_use]
+    pub fn acknowledgement(mut self) -> Self {
+        self.dismiss_on_any_key = true;
+        self
     }
 
     /// 現在の先頭行 offset。
@@ -88,7 +98,11 @@ impl TextOverlay {
             );
         }
         body.push(String::new());
-        body.push(Style::new().dim().paint("↑↓ scroll   Esc: close"));
+        body.push(Style::new().dim().paint(if self.dismiss_on_any_key {
+            "Press any key to close"
+        } else {
+            "↑↓ scroll   Esc: close"
+        }));
         modal::fixed_body(body, body_height)
     }
 }
@@ -194,5 +208,17 @@ mod tests {
         assert!(frame[0].starts_with("workspace-0-"));
         assert!(frame.join("\n").contains("Notes"));
         assert!(frame.iter().all(|line| display_width(line) == 80));
+    }
+
+    #[test]
+    fn acknowledgement_uses_an_any_key_dismiss_hint() {
+        let modal = TextOverlay::new("Error", OverlayDocument::Ready(vec!["failed".into()]))
+            .acknowledgement();
+
+        assert!(
+            render(24, 80, &modal)
+                .join("\n")
+                .contains("Press any key to close")
+        );
     }
 }

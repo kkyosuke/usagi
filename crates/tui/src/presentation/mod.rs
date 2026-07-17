@@ -332,6 +332,9 @@ enum WorkspaceModal {
     Remove(RemoveModal),
     Pr(PrModal),
     Text(TextOverlay),
+    /// A safe operation failure. Unlike document overlays, every user input
+    /// dismisses this acknowledgement dialog.
+    Error(TextOverlay),
     Quit(QuitModal),
 }
 
@@ -953,6 +956,26 @@ impl WorkspaceUi {
         self.modal = Some(WorkspaceModal::Quit(QuitModal::new(action)));
     }
 
+    /// Replace the active command palette with a readable failure dialog.
+    /// The palette result band is one line wide, so it cannot safely present a
+    /// remedial daemon error without clipping it.
+    #[coverage(off)]
+    fn show_error_dialog(&mut self, message: &str) {
+        self.modal = Some(WorkspaceModal::Error(
+            TextOverlay::new(
+                Role::Danger
+                    .style()
+                    .bold()
+                    .paint("\u{f06a} Session operation failed"),
+                OverlayDocument::Ready(crate::presentation::widgets::wrap_to_width(
+                    message,
+                    text_overlay::INNER_WIDTH,
+                )),
+            )
+            .acknowledgement(),
+        ));
+    }
+
     /// Snapshot reconciliation may remove the Closeup target. Rebuild its
     /// display label and action focus from the surviving sidebar projection
     /// before the selector gives input back to Closeup.
@@ -1390,11 +1413,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                 ui.modal = None;
             }
             Err(error) => {
-                if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
-                    modal.set_error(error);
-                } else {
-                    ui.workspace.fail_inline_session_create(error);
-                }
+                ui.show_error_dialog(&error);
             }
         }
     }
@@ -2116,6 +2135,12 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         ui.advance_terminal_auto_scroll();
         return WorkspaceStep::Stay;
     }
+    // A failure dialog is acknowledgement-only: no command, including quit,
+    // should leak through to the workspace behind it.
+    if matches!(ui.modal, Some(WorkspaceModal::Error(_))) {
+        ui.modal = None;
+        return WorkspaceStep::Stay;
+    }
     match key {
         Key::Click { column, row } => {
             handle_terminal_pointer(ui, column, row, None);
@@ -2154,6 +2179,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
             WorkspaceModal::Remove(_) => step_remove_selector(ui, key),
             WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
+            WorkspaceModal::Error(_) => true,
             WorkspaceModal::Quit(_) => return step_quit_confirmation(ui, key),
         };
         if close {
@@ -2182,6 +2208,9 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
             remove_modal::render_over(height, width, &base, modal)
         }
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
+        Some(WorkspaceModal::Error(modal)) => {
+            text_overlay::render_over(height, width, &base, modal)
+        }
         Some(WorkspaceModal::Quit(modal)) => render_quit_confirmation(height, width, &base, *modal),
         None if ui.closeup_modal_visible() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
@@ -4875,6 +4904,26 @@ mod tests {
             WorkspaceStep::Stay
         );
         assert!(matches!(ui.modal, Some(WorkspaceModal::Quit(_))));
+    }
+
+    #[test]
+    fn session_error_dialog_wraps_the_reason_and_closes_on_any_key() {
+        let workspace = WorkspaceView::new(ws("error-dialog"), state("error-dialog"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        ui.show_error_dialog(
+            "cannot create session \"aa\": branch usagi/aa already exists; choose a different name",
+        );
+
+        let frame = render_workspace(40, 80, &ui).join("\n");
+        assert!(frame.contains("Session operation failed"));
+        assert!(frame.contains('\u{f06a}'));
+        assert!(frame.contains("\u{1b}[1;31m"));
+        assert!(frame.contains("Press any key to close"));
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Error(_))));
+
+        // `q` must acknowledge this dialog, not open the global quit modal.
+        assert_eq!(step_workspace(&mut ui, Key::Char('q')), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
     }
 
     #[test]
