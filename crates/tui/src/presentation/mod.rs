@@ -771,6 +771,10 @@ impl WorkspaceUi {
 
     #[coverage(off)]
     fn close_exited_terminal(&mut self, terminal: &TerminalRef) {
+        let was_focused = self
+            .workspace
+            .focused_live_terminal()
+            .is_some_and(|focused| focused.fences(terminal));
         self.workspace.exit_terminal_pane(terminal);
         if let Some(agent) = self.agent.as_mut()
             && let Some(session) = self
@@ -783,6 +787,10 @@ impl WorkspaceUi {
         self.terminals
             .retain(|session| !session.terminal().fences(terminal));
         self.terminal_selection = None;
+        if was_focused && !self.workspace.has_panes() {
+            self.closeup.reset();
+            self.closeup_action_forced = false;
+        }
     }
 
     fn resize_terminals(&mut self, geometry: Geometry) {
@@ -4733,7 +4741,7 @@ mod tests {
             workspace,
             Box::new(SnapshotOverlayData),
             Box::new(UnavailableSessionCommandPort),
-            ModalSelectionMode::Action,
+            ModalSelectionMode::Prompt,
         )
         .with_agent_context(
             workspace_id,
@@ -4755,10 +4763,12 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Enter);
         execute_closeup_command(&mut ui, "terminal");
         drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        ui.closeup.insert_char('x');
         ui.refresh_terminal();
 
         assert!(ui.workspace.pane().tabs().is_empty());
         assert!(ui.closeup_modal_visible());
+        assert_eq!(ui.closeup.submission(), "");
         assert_eq!(*detaches.lock().unwrap(), vec![5]);
         assert!(ui.terminals.is_empty());
     }
