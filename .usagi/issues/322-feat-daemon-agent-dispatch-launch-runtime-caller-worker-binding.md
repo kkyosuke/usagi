@@ -1,14 +1,14 @@
 ---
 number: 322
 title: feat(daemon): agent dispatch を launch runtime へ接続し caller↔worker binding と「報告なし」検知を実装する
-status: todo
+status: done
 priority: high
 labels: [daemon, mcp, orchestration, agent, ipc]
 dependson: [321]
 related: [268, 271, 109, 110]
 parent: 105
 created_at: 2026-07-18T00:00:00+00:00
-updated_at: 2026-07-18T00:00:00+00:00
+updated_at: 2026-07-17T22:18:28.317661+00:00
 ---
 
 ## 目的

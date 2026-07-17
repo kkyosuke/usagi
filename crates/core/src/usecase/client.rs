@@ -12,8 +12,8 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::agent::AgentProfileId;
-use crate::domain::id::{SessionId, TerminalRef, WorkspaceId};
+use crate::domain::agent::{AgentProfileId, CallerRef, ModelSelector};
+use crate::domain::id::{AgentId, SessionId, TerminalRef, WorkspaceId};
 use crate::domain::terminal_launch::{TerminalLaunchRequest, TerminalProfileId};
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, ClientHello, ClientId, DaemonGeneration, Envelope, EnvelopeKind,
@@ -46,6 +46,13 @@ pub enum DaemonRequest {
     Agent {
         operation_id: String,
         intent: AgentLaunchIntent,
+    },
+    /// Immediately dispatch a prompt to one durable Agent.  Session creation
+    /// and Agent launch remain daemon-owned; this request only names the
+    /// product-neutral dispatch intent.
+    Dispatch {
+        operation_id: String,
+        intent: DispatchIntent,
     },
 }
 
@@ -84,6 +91,30 @@ pub struct AgentLaunchIntent {
     pub workspace: WorkspaceId,
     pub session: SessionId,
     pub profile: Option<AgentProfileId>,
+}
+
+/// The exclusive worker selector for an immediate dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum DispatchAgentIntent {
+    Existing {
+        agent_id: AgentId,
+    },
+    New {
+        runtime: AgentProfileId,
+        model: ModelSelector,
+    },
+}
+
+/// Product-neutral dispatch input. `caller` is supplied by the authenticated
+/// execution context adapter, not selected as a destination by the worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchIntent {
+    pub workspace: WorkspaceId,
+    pub session_name: String,
+    pub caller: CallerRef,
+    pub agent: DispatchAgentIntent,
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

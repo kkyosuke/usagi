@@ -190,6 +190,8 @@ launch は reservation を永続化してから実 PTY を一度だけ spawn し
 owner を一つの shared terminal owner が `TerminalRef` の所有元へ routing する。connection close は当該
 connection の subscription だけを外し、Agent process・PTY・completion worker は kill しない。
 
+[`dispatch` request](04-ipc.md#dispatch-request) はこの launch 経路を再実装せずに合成する。daemon は session を lifecycle 経由で upsert し、worker Agent と `DispatchRun` / caller↔worker binding を durable registry に保存してから同じ runtime で prompt を起動する。PTY exit の durable commit 後、Completed / Failed inbox delivery が無ければ caller inbox に NoReport を一度だけ配送する。completion と exit は同じ `CompletionFence` を照合するため、late、duplicate、wrong-generation は state や inbox を変更しない。
+
 root の provisioner は Codex を既定 profile とし、`codex login status` または `claude auth status` を spawn
 前に実行する。probe は executable の存在と製品が返す non-secret readiness/authentication status だけを判定し、
 credential、token、設定 path、CLI 出力、OS error を保存・wire・UIへ渡さない。probe は composition root で
