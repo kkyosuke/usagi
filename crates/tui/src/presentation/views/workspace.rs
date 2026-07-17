@@ -146,6 +146,9 @@ pub struct HomeProjection {
     /// Presentation-only message. Runtime state currently supplies `None`; this
     /// keeps a future event source out of the renderer and prevents dummy copy.
     mascot_speech: Option<widgets::mascot::MascotSpeech>,
+    /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
+    /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
+    metrics: Option<DaemonMetrics>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     closeup_action_visible: bool,
@@ -194,6 +197,7 @@ impl HomeProjection {
             feedback: state.feedback().cloned(),
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
+            metrics: None,
             pane_tabs: Vec::new(),
             pane_error: None,
             closeup_action_visible: matches!(
@@ -230,6 +234,15 @@ impl HomeProjection {
     #[must_use]
     pub fn with_mascot_speech(mut self, speech: Option<widgets::mascot::MascotSpeech>) -> Self {
         self.mascot_speech = speech;
+        self
+    }
+
+    /// Attach the latest daemon observation for the mascot sidecar without
+    /// touching controller or input state. `None` leaves the sidecar empty so the
+    /// home frame stays identical to its pre-metrics form.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
+        self.metrics = metrics;
         self
     }
 
@@ -1961,8 +1974,20 @@ fn home_left_pane(
             .collect();
     }
     let body_capacity = height - 1;
-    let mascot =
-        widgets::mascot::sidebar_block(width, home.mascot_tick, home.mascot_speech.as_ref());
+    // Reuse the legacy metric projection so both render paths draw an identical
+    // sidecar. An absent observation yields no sidecar rows, which keeps the
+    // pre-metrics home frame byte-for-byte unchanged.
+    let metric_labels = home
+        .metrics
+        .as_ref()
+        .map(|metrics| mascot_metrics(Some(metrics), 0))
+        .unwrap_or_default();
+    let mascot = widgets::mascot::sidebar_block_with_sidecar(
+        width,
+        home.mascot_tick,
+        home.mascot_speech.as_ref(),
+        &metric_labels,
+    );
     let show_mascot = mascot
         .as_ref()
         .is_some_and(|block| body_capacity >= block.reserved_rows() + 2);
@@ -2660,6 +2685,61 @@ mod tests {
         assert!(left_rows[bottom + 5].contains("[switch]"));
         assert_eq!(home.selected, state.selected());
         assert_eq!(home.active, state.active());
+    }
+
+    #[test]
+    fn home_metrics_sidecar_matches_the_legacy_daemon_metrics_row() {
+        let metrics = usagi_core::usecase::client::DaemonMetrics {
+            schema_version: 1,
+            sampled_at_ms: 42,
+            cpu_percent_hundredths: 123,
+            resident_memory_bytes: 45 * 1_048_576,
+            active_subscribers: 3,
+            dropped_updates: 5,
+        };
+
+        // Legacy path: the daemon observation flows through `set_metrics`.
+        let mut ws = workspace();
+        ws.set_metrics(Some(metrics.clone()));
+        let legacy = render_with_skeleton_frame(30, 100, &ws, 0);
+
+        // Controller path: the same observation flows through `with_metrics`.
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let home = HomeProjection::from_state(&state, "actual", "/tmp/actual", &[])
+            .with_metrics(Some(metrics));
+        let controller = render_home(30, 100, &home);
+
+        let metric_row = |frame: &[String]| {
+            frame
+                .iter()
+                .find(|line| line.contains('\u{f2db}'))
+                .expect("daemon metric row beside usagi")
+                .clone()
+        };
+        let legacy_row = metric_row(&legacy);
+        let controller_row = metric_row(&controller);
+
+        // Parity covers both the glyphs and the load-aware colour styling, so the
+        // raw ANSI rows must be identical, not only their stripped text.
+        assert_eq!(strip(&controller_row), strip(&legacy_row));
+        assert_eq!(controller_row, legacy_row);
+        assert!(strip(&controller_row).contains("\u{f2db} 1%    \u{f233} 45MB"));
+    }
+
+    #[test]
+    fn home_without_metrics_keeps_the_pre_metrics_frame() {
+        let state = AppState::home(WorkspaceId::new(), Vec::new());
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let baseline = render_home(30, 100, &home);
+
+        // Attaching an absent observation is a no-op on the rendered frame.
+        let with_none = home.clone().with_metrics(None);
+        assert_eq!(render_home(30, 100, &with_none), baseline);
+        assert!(
+            !baseline.iter().any(|line| line.contains('\u{f2db}')),
+            "no daemon metric row without an observation"
+        );
+        assert!(strip(&baseline.join("\n")).contains("(o.o)?"));
     }
 
     #[test]
