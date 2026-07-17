@@ -8,7 +8,7 @@
 書かず、この提案に分離する。実装が確定した部分は [02-architecture.md](../02-architecture.md) /
 [04-ipc.md](../04-ipc.md) / [05-daemon.md](../05-daemon.md) へ畳み込み、この提案はリンクだけ残す。
 
-実装タスクは issue ストア（`.usagi/issues/`）の #321 / #322 / #323 で追跡する（[§8](#8-実装-issue-分割)）。
+実装タスクは issue ストア（`.usagi/issues/`）の #321–#323、#331–#332 で追跡する（[§8](#8-実装-issue-分割)）。
 
 ## 目次
 
@@ -20,7 +20,8 @@
 - [6. 完了報告と「報告なし」検知](#6-完了報告と報告なし検知)
 - [7. 既存 tool との互換性・移行方針](#7-既存-tool-との互換性移行方針)
 - [8. 実装 issue 分割](#8-実装-issue-分割)
-- [9. 非目標](#9-非目標)
+- [9. runtime/model allowlist、schema snapshot と再検証](#9-runtimemodel-allowlistschema-snapshot-と再検証)
+- [10. 非目標](#10-非目標)
 
 ## 1. 目的と背景
 
@@ -242,6 +243,12 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
       │
       ▼
 #323 mcp: session_dispatch / *_get / *_list / agent_complete|fail / inbox + caller 推論
+      │
+      ▼
+#331 mcp: runtime/model allowlist schema snapshot
+      │
+      ▼
+#332 daemon: current allowlist / executable の launch 前再検証
 ```
 
 | issue | スコープ | 依存 |
@@ -249,8 +256,45 @@ worktree 内で子プロセスとして起動する**ため、実行コンテキ
 | #321 | Agent / DispatchRun / DispatchBinding / InboxMessage / StructuredResult のドメイン型と durable store（daemon state dir、atomic + lock）。100% ユニットテスト。MCP/daemon 配線はしない | — |
 | #322 | `DaemonRequest` に dispatch を追加し、session upsert・agent 解決・`initial_prompt` 即時 launch・run/binding 永続化・run_id 返却・PTY exit 時の「報告なし」合成配送を接続 | #321 |
 | #323 | 7 tool を daemon IPC client として実装し、caller/run をコンテキスト推論。互換・移行を正本 docs へ反映 | #321, #322 |
+| #331 | workspace runtime/model allowlist、injectable executable locator、MCP schema snapshot、`agent_cli` の段階的移行 | #323 |
+| #332 | dispatch launch 前の current allowlist / executable 再検証と safe error | #322, #331 |
 
-## 9. 非目標
+## 9. runtime/model allowlist、schema snapshot と再検証
+
+`session_dispatch` の新規 agent branch は、workspace 設定の runtime ごとの model allowlist を正本とする。
+
+```toml
+[agents.claude]
+models = ["sonnet", "opus"]
+
+[agents.codex]
+models = ["gpt-5-codex", "o4-mini"]
+```
+
+`runtime` は `claude` と `codex` の closed vocabulary とする。各 `models` はその runtime だけで許可する文字列の集合であり、section 不在・空 allowlist・空文字・制御文字・重複を含む値は当該 runtime を選択不能にする。global UI settings、code-defined adapter catalog、CLI が返すアカウントの model list は allowlist の正本ではない。provider API と Claude/Codex CLI の非対話 model listing は、設定を暗黙に拡張するため使用しない。
+
+MCP server は起動時に workspace 設定と PATH executable locator を一度だけ読み、`RuntimeModelSnapshot` を作る。production locator は `claude` / `codex` を PATH 上で探索し、test は `ExecutableLocator` port へ fake を注入する。allowlist が非空で対応 CLI が存在する runtime だけを schema に載せる。`session_dispatch.agent` は次の排他的 branch を JSON Schema `oneOf` で表す。
+
+| branch | 入力 | 制約 |
+|---|---|---|
+| existing agent | `{ id }` | `runtime` / `model` を含めない |
+| new Claude agent | `{ runtime: "claude", model: enum }` | Claude allowlist と executable が必要 |
+| new Codex agent | `{ runtime: "codex", model: enum }` | Codex allowlist と executable が必要 |
+
+schema を迂回する caller に備え、MCP parser と daemon も id/runtime/model の排他性、runtime/model の完全組、allowlist membership を検証する。既存 `session_create` / `session_delegate_issue` / `session_delegate_brief` の `agent_cli` は破壊的変更を避けるため deprecated alias として移行期間だけ受けるが、`runtime` または `agent.id` と混在すれば migration error にする。
+
+schema は server lifetime の snapshot である。CLI install/uninstall、PATH、workspace allowlist の変更後は MCP server の再起動または client 再接続でのみ選択肢を再生成する。listing ごとに schema を変動させない。一方 daemon は dispatch launch の直前に current workspace allowlist と executable availability を再検証する。schema 発行後に設定が狭まる、CLI が削除される、PATH が変わる場合は spawn 前に safe invalid-argument / unavailable として拒否する。
+
+| 層 | deterministic test |
+|---|---|
+| schema builder | fake locator と in-memory config で runtime ごとの enum、CLI 不在、空 allowlist を検証 |
+| MCP parser | `oneOf` 排他性、legacy alias、migration error、unknown model を検証 |
+| snapshot lifecycle | listing 後の fake config / locator 変更は不変、server 再生成時のみ更新を検証 |
+| daemon dispatch | temporary workspace と fixture executable で current state の再検証、spawn 前拒否、identity scope を検証 |
+
+MCP は runtime/model 以外の path、argv、environment、credential、CLI raw output を daemon に渡さない。これらと provider model list は wire response、log、durable record に保存しない。
+
+## 10. 非目標
 
 - queue/live 配送モードの再設計（`session_prompt` の既存挙動は変えない）。
 - `claude` / `codex` 以外の runtime adapter 追加や model allowlist の UI 化（#146 の語彙に従う）。
