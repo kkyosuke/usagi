@@ -41,7 +41,7 @@ use crate::presentation::ipc::TerminalOwner;
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
     runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
-    terminal::{Geometry, InputRequest, PtyWriter},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
 };
 
 /// A daemon-resolved, fully fenced checkout for an available managed session.
@@ -368,11 +368,16 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 .terminal_snapshot(runtime)
                 .map(|snapshot| json!(snapshot))
                 .map_err(map_runtime_error),
-            (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => self
-                .coordinator
-                .resize(runtime, terminal_geometry(geometry)?)
-                .map(|snapshot| json!(snapshot))
-                .map_err(map_runtime_error),
+            (TerminalAction::Resize, TerminalRequest::Resize { geometry, .. }) => {
+                let geometry = terminal_geometry(geometry)?;
+                self.pty.resize(&runtime.terminal, geometry).map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "terminal resize failed")
+                })?;
+                self.coordinator
+                    .resize(runtime, geometry)
+                    .map(|snapshot| json!(snapshot))
+                    .map_err(map_runtime_error)
+            }
             (TerminalAction::Detach, TerminalRequest::Detach { subscription, .. }) => self
                 .coordinator
                 .detach(runtime, subscription, connection)
@@ -575,6 +580,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
             ErrorCode::ResourceExhausted,
             "daemon agent runtime capacity is exhausted",
         ),
+        RuntimeError::Terminal(RegistryError::ResyncRequired) => (
+            ErrorCode::ResyncRequired,
+            "agent terminal output requires resynchronization",
+        ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
         | RuntimeError::TerminalGenerationMismatch => {
@@ -604,6 +613,7 @@ mod tests {
     use usagi_core::domain::agent::{
         AgentCapability, AgentProfile, DurableLaunchSnapshot, LaunchPlan,
     };
+    use usagi_core::usecase::client::TerminalGeometry;
 
     // ---- fakes ---------------------------------------------------------------
 
@@ -638,6 +648,7 @@ mod tests {
         writes: Vec<u8>,
         selected: Option<TerminalRef>,
         spawn: Option<SpawnFailure>,
+        resized: Vec<(TerminalRef, Geometry)>,
     }
     impl PtySpawner for Pty {
         fn spawn(
@@ -659,6 +670,14 @@ mod tests {
     impl PtyWriter for Pty {
         fn select_terminal(&mut self, terminal: &TerminalRef) {
             self.selected = Some(terminal.clone());
+        }
+        fn resize(
+            &mut self,
+            terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<(), PtyWriteError> {
+            self.resized.push((terminal.clone(), geometry));
+            Ok(())
         }
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
@@ -786,6 +805,21 @@ mod tests {
         ));
         assert_eq!(attached["snapshot"]["replay"], json!(b"ready\n".to_vec()));
         let subscription = attached["subscription"].as_u64().unwrap();
+
+        handled(runtime.handle_terminal(
+            connection,
+            client,
+            RequestId::new(),
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry { cols: 43, rows: 17 },
+            },
+        ));
+        assert_eq!(
+            runtime.pty.resized,
+            vec![(terminal.clone(), Geometry { cols: 43, rows: 17 })]
+        );
 
         let ack = handled(runtime.handle_terminal(
             connection,
@@ -1157,6 +1191,13 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn trimmed_agent_output_maps_to_a_resync_protocol_error() {
+        let error = map_runtime_error(RuntimeError::Terminal(RegistryError::ResyncRequired));
+
+        assert_eq!(error.code, ErrorCode::ResyncRequired);
     }
 
     fn handled(outcome: TerminalOutcome) -> Value {

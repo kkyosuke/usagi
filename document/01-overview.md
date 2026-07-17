@@ -92,7 +92,8 @@ Workspace 画面は、`state.json` から読んだ session 一覧と root 行を
 Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
 モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
 タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` prefix で行う。live tab に focus がある間は
-Esc、Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q を含む非 prefix 入力をすべて pane へ渡す。
+Esc、Ctrl-C、Ctrl-D、Ctrl-Q を含む leader 以外のキー入力をすべて pane へ渡す。`Ctrl-O Ctrl-A` は
+Closeup action モーダルを前面に出す。
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
 `←→` のキャレット移動と `↑↓` の候補選択ができ、Esc で開く前の mode、session、tab へ戻る。
@@ -109,6 +110,9 @@ Overview の `session create <name>`、`session list`、`session overview`、
 session 名だけに作用し、現在選択中の row や root を暗黙の対象にしない。
 Closeup の `close [-f|--force]` は同じ session checklist を開く。文法、force、keyboard 操作は
 [TUI の Overview と modal](03-tui.md#overview-と-modal) が正本である。
+
+`state.json` が未作成なら空の workspace state で開く。一方、既存ファイルを読めない、または解析できない
+場合は state を空として扱わず、起動エラーを表示して Workspace 画面を開始しない。
 
 `session remove -s [--force]` は削除対象を複数選ぶ checklist modal を開く。選択 modal の入力、snapshot
 reconciliation、Closeup/Switch への復帰は [TUI](03-tui.md#overview-と-modal) が正本である。

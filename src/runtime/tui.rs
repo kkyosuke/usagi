@@ -1,9 +1,11 @@
 //! TUI 面へ実端末と filesystem を接続する composition adapter。
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+use std::{sync::mpsc, thread};
 
 use chrono::Utc;
 use crossterm::cursor;
@@ -24,20 +26,22 @@ use usagi_core::domain::terminal_launch::{
 };
 use usagi_core::domain::workspace::Workspace;
 use usagi_core::infrastructure::error_log::ErrorLog;
+use usagi_core::infrastructure::git::diff_status;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply, DaemonRequest,
-    IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
+    AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
+    DaemonRequest, IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
     TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
+use usagi_daemon::usecase::session_runtime::SystemGit;
 use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::views::workspace::{self, HomeProjection, ProjectedSession};
+use usagi_tui::presentation::views::workspace::{self, GitDiff, HomeProjection, ProjectedSession};
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
     MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
@@ -51,10 +55,10 @@ use usagi_tui::usecase::application::terminal_session::{
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{
-    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, RuntimeEvent,
+    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, Modifiers, RuntimeEvent,
 };
 
-use crate::runtime::clipboard::MacosClipboard;
+use crate::runtime::clipboard::PlatformClipboard;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
@@ -66,6 +70,9 @@ struct DaemonSessionCommandPort {
 struct DaemonMetricsPort {
     last_sample: Option<Instant>,
     latest: Option<DaemonMetrics>,
+    git_diffs: BTreeMap<usagi_core::domain::id::SessionId, GitDiff>,
+    git_receiver: Option<mpsc::Receiver<(usagi_core::domain::id::SessionId, GitDiff)>>,
+    last_git_refresh: Option<Instant>,
 }
 impl DaemonMetricsPort {
     // Composition-only adapter: it constructs the real daemon client and uses
@@ -75,6 +82,9 @@ impl DaemonMetricsPort {
         Self {
             last_sample: None,
             latest: None,
+            git_diffs: BTreeMap::new(),
+            git_receiver: None,
+            last_git_refresh: None,
         }
     }
 }
@@ -103,6 +113,62 @@ impl MetricsPort for DaemonMetricsPort {
             }
             DaemonReply::Accepted { .. } => None,
         }
+    }
+
+    #[coverage(off)]
+    fn git_diffs(
+        &mut self,
+        sessions: &[(usagi_core::domain::id::SessionId, PathBuf)],
+    ) -> BTreeMap<usagi_core::domain::id::SessionId, GitDiff> {
+        let active_ids = sessions.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        self.git_diffs.retain(|id, _| active_ids.contains(id));
+        let mut finished = false;
+        if let Some(receiver) = &self.git_receiver {
+            loop {
+                match receiver.try_recv() {
+                    Ok((id, status)) => {
+                        self.git_diffs.insert(id, status);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if finished {
+            self.git_receiver = None;
+        }
+        if self.git_receiver.is_none()
+            && self
+                .last_git_refresh
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+        {
+            let (sender, receiver) = mpsc::channel();
+            let sessions = sessions.to_vec();
+            thread::spawn(move || {
+                let runner = SystemGit;
+                for (id, path) in sessions {
+                    let Ok(Some(status)) = diff_status(&runner, &path) else {
+                        continue;
+                    };
+                    let _ = sender.send((
+                        id,
+                        GitDiff {
+                            base: status.base,
+                            ahead: status.ahead,
+                            behind: status.behind,
+                            added: status.added,
+                            removed: status.removed,
+                        },
+                    ));
+                }
+            });
+            self.git_receiver = Some(receiver);
+            self.last_git_refresh = Some(Instant::now());
+        }
+        self.git_diffs.clone()
     }
 }
 
@@ -187,6 +253,7 @@ impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
 fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> TerminalError {
     use usagi_core::infrastructure::ipc::ErrorCode;
     match error.code() {
+        ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
         ErrorCode::StaleTarget => TerminalError::Stale,
         ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
         _ => TerminalError::Unavailable,
@@ -311,6 +378,25 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             replay,
             exited,
         })
+    }
+
+    #[coverage(off)]
+    fn resize_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        self.terminal_request(
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry {
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                },
+            },
+        )?;
+        Ok(())
     }
 
     #[coverage(off)]
@@ -483,7 +569,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 operation_id,
                 payload,
             })
-            .map_err(|error| format!("daemon request failed: {error}"))?;
+            .map_err(daemon_error_reason)?;
         match reply {
             DaemonReply::Accepted {
                 operation_id,
@@ -592,12 +678,23 @@ fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
             operation_id: usagi_core::domain::id::OperationId::new().to_string(),
             payload: serde_json::json!({}),
         })
-        .map_err(|error| format!("daemon request failed: {error}"))?
+        .map_err(daemon_error_reason)?
     {
         DaemonReply::Ok(value) => lifecycle_snapshot(&value),
         DaemonReply::Accepted { .. } => {
             Err("daemon returned an invalid lifecycle snapshot response".to_owned())
         }
+    }
+}
+
+/// Render only the user-actionable daemon reason in the TUI.  Error codes and
+/// transport variant labels remain useful to diagnostics but add no context to
+/// an interactive failure notice.
+#[coverage(off)]
+fn daemon_error_reason(error: ClientError) -> String {
+    match error {
+        ClientError::Protocol(error) => error.message,
+        ClientError::Unavailable(message) | ClientError::Lifecycle(message) => message,
     }
 }
 
@@ -607,13 +704,13 @@ struct CrosstermTerminal {
     input_started: Instant,
     renderer: FrameRenderer,
     /// live-terminal `Ctrl-O` prefix の SSoT。leader を保持して follow-up を
-    /// [`Key::Live`] へ翻訳する。`Ctrl-O`・`Ctrl-^` 以外は passthrough として従来の
+    /// [`Key::Live`] へ翻訳する。`Ctrl-O` 以外は passthrough として従来の
     /// `Key` マッピングに委ねるため、live terminal への passthrough を壊さない。
     live_input: LiveInputClassifier,
     /// The concrete OS adapter is owned by the composition root. Selection
     /// commands receive it through the TUI clipboard port rather than creating
     /// subprocesses in presentation code.
-    clipboard: MacosClipboard,
+    clipboard: PlatformClipboard,
 }
 
 struct PersistentSettingsPort {
@@ -756,12 +853,18 @@ fn control_key(input: &LiveInput) -> Option<Key> {
     let LiveInput::Key(key) = input else {
         return None;
     };
-    key.modifiers.control.then_some(match key.code {
-        KeyCode::Char('c') => Some(Key::Quit),
-        KeyCode::Char('q') => Some(Key::CtrlQ),
-        KeyCode::Char('d') => Some(Key::CtrlD),
-        _ => None,
-    })?
+    (key.modifiers.control
+        && !key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta)
+        .then_some(match key.code {
+            KeyCode::Char('c') => Some(Key::Quit),
+            KeyCode::Char('q') => Some(Key::CtrlQ),
+            KeyCode::Char('d') => Some(Key::CtrlD),
+            _ => None,
+        })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
@@ -802,6 +905,12 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     {
         return Key::Char('\u{1}');
     }
+    // The live classifier has already encoded the original terminal input.
+    // Keep modified chords opaque so this management-key adapter cannot drop
+    // their Ctrl/Alt bytes before Closeup forwards them to the focused pane.
+    if key.modifiers != Modifiers::default() {
+        return Key::Passthrough(bytes);
+    }
     match key.code {
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
@@ -839,6 +948,15 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn load_workspace_state(
+    path: &Path,
+) -> std::io::Result<usagi_core::domain::workspace_state::WorkspaceState> {
+    WorkspaceStateStore::new(path)
+        .load()
+        .map_err(io_error)
+        .map(Option::unwrap_or_default)
+}
+
 struct FsWorkspaceLoader {
     storage: Storage,
 }
@@ -858,10 +976,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         validate_workspace_directory(path)?;
         let workspace =
             workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        let mut state = WorkspaceStateStore::new(&workspace.path)
-            .load()
-            .unwrap_or_default()
-            .unwrap_or_default();
+        let mut state = load_workspace_state(&workspace.path)?;
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
         let session_ids = lifecycle
@@ -953,7 +1068,7 @@ fn run_in_terminal(
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
         live_input: LiveInputClassifier::default(),
-        clipboard: MacosClipboard,
+        clipboard: PlatformClipboard,
     };
     let result = run(&mut terminal);
     let mut teardown = std::io::stdout();
@@ -1122,7 +1237,7 @@ pub(crate) fn launch(
 mod tests {
     use super::{
         PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
-        passthrough_key,
+        load_workspace_state, passthrough_key,
     };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -1156,6 +1271,48 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(control_key(&key), Some(Key::CtrlD));
+    }
+
+    #[test]
+    fn ctrl_c_maps_to_quit_so_a_live_terminal_receives_sigint() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(control_key(&key), Some(Key::Quit));
+    }
+
+    #[test]
+    fn modified_non_leader_keys_keep_their_terminal_bytes() {
+        let ctrl_r = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&ctrl_r, vec![0x12]),
+            Key::Passthrough(vec![0x12])
+        );
+
+        let alt_f = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&alt_f, b"\x1bf".to_vec()),
+            Key::Passthrough(b"\x1bf".to_vec())
+        );
     }
 
     #[test]
@@ -1224,6 +1381,28 @@ mod tests {
         assert!(workspaces.is_empty());
         assert!(recent.is_empty());
         assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
+    }
+
+    #[test]
+    fn workspace_state_loader_defaults_only_when_state_is_missing() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let state = load_workspace_state(workspace.path()).unwrap();
+        assert!(state.sessions.is_empty());
+        assert!(state.root_notes.note.is_none());
+        assert!(state.root_notes.todos.is_empty());
+        assert!(state.root_notes.decisions.is_empty());
+    }
+
+    #[test]
+    fn workspace_state_loader_surfaces_a_malformed_state_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state_dir = workspace.path().join(".usagi");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{ broken").unwrap();
+
+        let error = load_workspace_state(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("state.json"));
     }
 
     #[test]

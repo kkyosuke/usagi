@@ -1250,7 +1250,7 @@ pub fn sidebar_row_at(
     }
 
     let start = workspace_viewport_start(ws.selected, ws, content_capacity);
-    let mut offset = 0;
+    let mut offset = 0_usize;
     for index in start..ws.row_count() {
         let pending_rows =
             usize::from(index == ws.sessions().len() + 1 && ws.pending_session.is_some()) * 2;
@@ -1413,7 +1413,7 @@ fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
 fn left_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
         Mode::Switch => "[switch] ↑↓ select / Enter closeup",
-        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
+        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
     };
     Style::new()
         .dim()
@@ -1826,6 +1826,40 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     }
 }
 
+/// Resolve a click in Home's sidebar to its stable controller selection.
+///
+/// The hit-test mirrors the visible row heights used by the compact Home
+/// projection.  Rows outside the sidebar body (including the header and
+/// footer) intentionally have no selection.
+#[must_use]
+#[coverage(off)]
+pub fn home_selection_at(
+    raw_height: usize,
+    raw_width: usize,
+    home: &HomeProjection,
+    column: u16,
+    row: u16,
+) -> Option<Selection> {
+    let (height, width) = widgets::normalize_size(raw_height, raw_width);
+    if usize::from(column) >= panes::split(width, LEFT_WIDTH).left
+        || usize::from(row) < CHROME_ROWS
+        || usize::from(row) >= height.saturating_sub(1)
+    {
+        return None;
+    }
+    let rows = home.rows();
+    let body_row = usize::from(row).saturating_sub(CHROME_ROWS);
+    let mut offset = 0_usize;
+    for selection in rows {
+        let height = home_row_height(selection);
+        if (offset..offset.saturating_add(height)).contains(&body_row) {
+            return Some(selection);
+        }
+        offset = offset.saturating_add(height);
+    }
+    None
+}
+
 /// Apply the inactive treatment only while the left sidebar owns navigation.
 /// Modals are composed after this frame, preserving their foreground styles.
 fn dim_inactive_right_pane(inactive: bool, right: Vec<String>) -> Vec<String> {
@@ -1909,7 +1943,7 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
-        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
+        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
     };
     let footer = home.metrics.as_ref().map_or_else(
         || footer.to_owned(),

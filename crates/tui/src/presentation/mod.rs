@@ -94,6 +94,19 @@ pub trait AgentCommandPort {
         Err("terminal launch is unavailable".to_owned())
     }
 
+    /// Resize a daemon-owned terminal to the visible pane viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn resize_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
     /// Attach to a daemon-owned terminal, taking its retained replay and cursor.
     ///
     /// The default keeps embedders without a terminal stream safe: attach fails
@@ -149,6 +162,11 @@ struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
 
 impl TerminalStreamPort for AgentStreamPort<'_> {
     #[coverage(off)]
+    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+        self.0.resize_terminal(terminal, geometry)
+    }
+
+    #[coverage(off)]
     fn attach(
         &mut self,
         terminal: &TerminalRef,
@@ -182,8 +200,8 @@ impl TerminalStreamPort for AgentStreamPort<'_> {
 }
 
 /// Maps a management [`Key`] to the bytes a focused live terminal should
-/// receive.  Reserved chords ([`Key::Live`]) and the global quit keys return
-/// `None` so they keep driving the workspace instead of the shell.
+/// receive. Reserved prefix actions ([`Key::Live`]) do not reach the shell;
+/// all other keys, including global controls, do while Closeup owns the pane.
 #[coverage(off)]
 fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
     let bytes = match key {
@@ -197,13 +215,10 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
         Key::Down => b"\x1b[B".to_vec(),
         Key::Right => b"\x1b[C".to_vec(),
         Key::Left => b"\x1b[D".to_vec(),
-        Key::Live(_)
-        | Key::Quit
-        | Key::CtrlQ
-        | Key::CtrlD
-        | Key::Click { .. }
-        | Key::Pointer(_)
-        | Key::Other => {
+        Key::Quit => vec![3],
+        Key::CtrlQ => vec![17],
+        Key::CtrlD => vec![4],
+        Key::Live(_) | Key::Click { .. } | Key::Pointer(_) | Key::Other => {
             return None;
         }
     };
@@ -344,6 +359,9 @@ enum WorkspaceModal {
     Remove(RemoveModal),
     Pr(PrModal),
     Text(TextOverlay),
+    /// A safe operation failure. Unlike document overlays, every user input
+    /// dismisses this acknowledgement dialog.
+    Error(TextOverlay),
     Quit(QuitModal),
 }
 
@@ -758,6 +776,16 @@ impl WorkspaceUi {
         self.workspace.set_terminal_view(rows);
     }
 
+    #[cfg(test)]
+    fn resize_terminals(&mut self, geometry: Geometry) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        for session in &mut self.terminals {
+            session.resize(&mut AgentStreamPort(agent.port.as_mut()), geometry);
+        }
+    }
+
     #[coverage(off)]
     fn terminal_selection_at(&mut self, point: TerminalPoint) {
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
@@ -929,13 +957,6 @@ impl WorkspaceUi {
         self.closeup_action_forced = false;
     }
 
-    /// Closeup の session 移動後に、表示・入力 target を選択行へ同期する。
-    #[coverage(off)]
-    fn select_previous_session(&mut self) {
-        self.workspace.select_prev();
-        self.open_closeup(false);
-    }
-
     /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
     /// あるときは `Ctrl-O a` で明示要求した間だけ出る。
     #[coverage(off)]
@@ -966,6 +987,26 @@ impl WorkspaceUi {
     #[coverage(off)]
     fn open_quit_confirmation(&mut self, action: QuitAction) {
         self.modal = Some(WorkspaceModal::Quit(QuitModal::new(action)));
+    }
+
+    /// Replace the active command palette with a readable failure dialog.
+    /// The palette result band is one line wide, so it cannot safely present a
+    /// remedial daemon error without clipping it.
+    #[coverage(off)]
+    fn show_error_dialog(&mut self, message: &str) {
+        self.modal = Some(WorkspaceModal::Error(
+            TextOverlay::new(
+                Role::Danger
+                    .style()
+                    .bold()
+                    .paint("\u{f06a} Session operation failed"),
+                OverlayDocument::Ready(crate::presentation::widgets::wrap_to_width(
+                    message,
+                    text_overlay::INNER_WIDTH,
+                )),
+            )
+            .acknowledgement(),
+        ));
     }
 
     /// Snapshot reconciliation may remove the Closeup target. Rebuild its
@@ -1405,11 +1446,7 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                 ui.modal = None;
             }
             Err(error) => {
-                if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
-                    modal.set_error(error);
-                } else {
-                    ui.workspace.fail_inline_session_create(error);
-                }
+                ui.show_error_dialog(&error);
             }
         }
     }
@@ -1948,7 +1985,6 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
         LiveTerminalAction::Agent => open_pane_from_menu(ui, PaneKind::Agent),
         LiveTerminalAction::CloseTab => ui.close_focused_pane(),
         LiveTerminalAction::QuitConfirmation => ui.open_quit_confirmation(QuitAction::CloseTui),
-        LiveTerminalAction::PreviousSession => ui.select_previous_session(),
         LiveTerminalAction::ScrollUp => ui.workspace.terminal_scroll_up(),
         LiveTerminalAction::ScrollDown => ui.workspace.terminal_scroll_down(),
         LiveTerminalAction::CopyTerminalSelection => ui.queue_terminal_copy(),
@@ -2014,9 +2050,10 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
             if ui.dragging_terminal_selection {
                 ui.extend_terminal_selection(point);
                 ui.dragging_terminal_selection = false;
-                ui.workspace.set_terminal_feedback(Some(
-                    "terminal selection ready; Cmd-S copies".to_owned(),
-                ));
+                // macOS terminal emulators often reserve Cmd-C before it can
+                // reach crossterm. Copy on release, as v1 did, so this custom
+                // selection is reliably placed on the system clipboard.
+                ui.queue_terminal_copy();
             }
         }
     }
@@ -2130,6 +2167,12 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         ui.advance_terminal_auto_scroll();
         return WorkspaceStep::Stay;
     }
+    // A failure dialog is acknowledgement-only: no command, including quit,
+    // should leak through to the workspace behind it.
+    if matches!(ui.modal, Some(WorkspaceModal::Error(_))) {
+        ui.modal = None;
+        return WorkspaceStep::Stay;
+    }
     match key {
         Key::Click { column, row } => {
             handle_terminal_pointer(ui, column, row, None);
@@ -2168,6 +2211,7 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
             WorkspaceModal::Pr(modal) => step_pr(modal, key),
             WorkspaceModal::Remove(_) => step_remove_selector(ui, key),
             WorkspaceModal::Text(modal) => step_text_overlay(modal, key),
+            WorkspaceModal::Error(_) => true,
             WorkspaceModal::Quit(_) => return step_quit_confirmation(ui, key),
         };
         if close {
@@ -2196,6 +2240,9 @@ fn render_workspace(height: usize, width: usize, ui: &WorkspaceUi) -> Vec<String
             remove_modal::render_over(height, width, &base, modal)
         }
         Some(WorkspaceModal::Text(modal)) => text_overlay::render_over(height, width, &base, modal),
+        Some(WorkspaceModal::Error(modal)) => {
+            text_overlay::render_over(height, width, &base, modal)
+        }
         Some(WorkspaceModal::Quit(modal)) => render_quit_confirmation(height, width, &base, *modal),
         None if ui.closeup_modal_visible() => {
             closeup_modal::render_over(height, width, &base, &ui.closeup)
@@ -2504,18 +2551,34 @@ struct ControllerWorkspaceRuntime {
     sessions: Vec<ProjectedSession>,
     session_names: BTreeMap<SessionId, String>,
     metrics: Option<DaemonMetrics>,
+    git_diffs: BTreeMap<SessionId, GitDiff>,
     terminal_geometry: Geometry,
+    frame_size: (usize, usize),
     panes: PaneRegistry,
     terminals: Vec<TerminalSession>,
     agent: Option<Box<dyn AgentCommandPort>>,
     session_commands: Option<Box<dyn SessionCommandPort>>,
     overview: OverviewModal,
     closeup: CloseupModal,
+    default_profile: AgentProfileId,
     pane_document: Option<Vec<String>>,
 }
 
 impl ControllerWorkspaceRuntime {
+    #[cfg(test)]
     fn new(snapshot: &WorkspaceSnapshot) -> Self {
+        Self::with_settings(
+            snapshot,
+            ModalSelectionMode::Action,
+            DefaultModel::default(),
+        )
+    }
+
+    fn with_settings(
+        snapshot: &WorkspaceSnapshot,
+        modal_selection_mode: ModalSelectionMode,
+        default_model: DefaultModel,
+    ) -> Self {
         let sessions = snapshot
             .state
             .sessions
@@ -2540,12 +2603,19 @@ impl ControllerWorkspaceRuntime {
             sessions,
             session_names,
             metrics: None,
+            git_diffs: BTreeMap::new(),
             terminal_geometry: INITIAL_TERMINAL_GEOMETRY,
+            frame_size: (0, 0),
             agent: None,
             session_commands: None,
             terminals: Vec::new(),
             overview: OverviewModal::new(),
-            closeup: CloseupModal::new(snapshot.workspace.name.clone()),
+            closeup: CloseupModal::with_selection_mode(
+                snapshot.workspace.name.clone(),
+                modal_selection_mode,
+            ),
+            default_profile: AgentProfileId::new(default_model.profile_id())
+                .expect("default model profile IDs are canonical"),
             pane_document: None,
         }
     }
@@ -2561,7 +2631,9 @@ impl ControllerWorkspaceRuntime {
     }
 
     fn frame(&mut self, height: usize, width: usize) -> Vec<String> {
+        self.frame_size = (height, width);
         self.terminal_geometry = terminal_geometry(height, width);
+        self.resize_terminals();
         let terminal_rows = self.refresh_terminal();
         let home = HomeProjection::from_state(
             &self.state,
@@ -2606,6 +2678,13 @@ impl ControllerWorkspaceRuntime {
 
     fn refresh_metrics(&mut self, port: &mut dyn MetricsPort) {
         self.metrics = port.latest();
+        self.git_diffs = port.git_diffs(
+            &self
+                .sessions
+                .iter()
+                .map(|session| (session.id, session.cwd.clone()))
+                .collect::<Vec<_>>(),
+        );
     }
 
     fn handle(&mut self, key: &Key) -> bool {
@@ -2648,14 +2727,28 @@ impl ControllerWorkspaceRuntime {
             Key::Live(LiveTerminalAction::Switch) => AppKey::CtrlO,
             Key::Live(LiveTerminalAction::NextTab) => AppKey::CtrlN,
             Key::Live(LiveTerminalAction::PreviousTab) => AppKey::CtrlP,
-            Key::Left
-            | Key::Right
-            | Key::CtrlD
-            | Key::Live(_)
-            | Key::Passthrough(_)
-            | Key::Click { .. }
-            | Key::Pointer(_)
-            | Key::Other => return false,
+            Key::Left | Key::Right | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) => {
+                return false;
+            }
+            Key::Click { column, row } => {
+                let home = HomeProjection::from_state(
+                    &self.state,
+                    &self.workspace_name,
+                    &self.root,
+                    &self.sessions,
+                );
+                let Some(selection) = workspace::home_selection_at(
+                    self.frame_size.0,
+                    self.frame_size.1,
+                    &home,
+                    *column,
+                    *row,
+                ) else {
+                    return false;
+                };
+                AppKey::Select(selection)
+            }
+            Key::Pointer(_) | Key::Other => return false,
         };
         let effects = crate::usecase::application::controller::update(
             &mut self.state,
@@ -2750,7 +2843,14 @@ impl ControllerWorkspaceRuntime {
                     operation_id,
                     profile,
                 } => {
-                    self.launch_agent(*workspace, *session, *operation_id, profile.clone());
+                    self.launch_agent(
+                        *workspace,
+                        *session,
+                        *operation_id,
+                        profile
+                            .clone()
+                            .or_else(|| Some(self.default_profile.clone())),
+                    );
                 }
                 ControllerEffect::OpenTerminal {
                     target,
@@ -2764,15 +2864,39 @@ impl ControllerWorkspaceRuntime {
                     operation_id,
                 } => {
                     self.request_pane(*target, *operation_id, PaneKind::Diff);
-                    self.apply_pane_event(
-                        *target,
-                        PaneEvent::Resolved {
-                            operation: *operation_id,
-                        },
-                    );
-                    self.pane_document = Some(vec![
-                        "Diff data is unavailable until a backend projection arrives.".to_owned(),
-                    ]);
+                    let document = match target {
+                        crate::usecase::application::controller::Target::Session(session) => {
+                            self.git_diffs.get(session).map(|diff| {
+                                vec![
+                                    format!("base: {}", diff.base),
+                                    format!(
+                                        "commits: ahead {} / behind {}",
+                                        diff.ahead, diff.behind
+                                    ),
+                                    format!("changes: +{} -{}", diff.added, diff.removed),
+                                ]
+                            })
+                        }
+                        crate::usecase::application::controller::Target::Root(_) => None,
+                    };
+                    if let Some(document) = document {
+                        self.apply_pane_event(
+                            *target,
+                            PaneEvent::Resolved {
+                                operation: *operation_id,
+                            },
+                        );
+                        self.pane_document = Some(document);
+                    } else {
+                        self.apply_pane_event(
+                            *target,
+                            PaneEvent::Failed {
+                                operation: *operation_id,
+                                message: "diff data is not available for the selected session"
+                                    .to_owned(),
+                            },
+                        );
+                    }
                 }
                 ControllerEffect::CreateSession { token, intent, .. } => {
                     self.create_session(*token, &intent.name);
@@ -2890,6 +3014,15 @@ impl ControllerWorkspaceRuntime {
             let mut session = TerminalSession::new(terminal, self.terminal_geometry);
             session.connect(&mut AgentStreamPort(agent.as_mut()));
             self.terminals.push(session);
+        }
+    }
+
+    fn resize_terminals(&mut self) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        for session in &mut self.terminals {
+            session.resize(&mut AgentStreamPort(agent.as_mut()), self.terminal_geometry);
         }
     }
 
@@ -3104,10 +3237,10 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     agent_port: Box<dyn AgentCommandPort>,
     mut metrics_port: Box<dyn MetricsPort>,
 ) -> io::Result<WorkspaceStep> {
-    let _ = (modal_selection_mode, default_model);
-    let mut runtime = ControllerWorkspaceRuntime::new(snapshot)
-        .with_agent_port(agent_port)
-        .with_session_port(session_commands);
+    let mut runtime =
+        ControllerWorkspaceRuntime::with_settings(snapshot, modal_selection_mode, default_model)
+            .with_agent_port(agent_port)
+            .with_session_port(session_commands);
     loop {
         runtime.refresh_metrics(metrics_port.as_mut());
         let (height, width) = term.size()?;
@@ -3724,6 +3857,7 @@ mod tests {
         chunk: Option<TerminalChunk>,
         inputs: TerminalInputLog,
         detaches: Arc<Mutex<Vec<u64>>>,
+        resizes: Arc<Mutex<Vec<Geometry>>>,
     }
 
     impl AgentCommandPort for StreamingTerminalPort {
@@ -3754,6 +3888,14 @@ mod tests {
                 replay: self.replay.clone(),
                 exited: false,
             })
+        }
+        fn resize_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<(), TerminalError> {
+            self.resizes.lock().unwrap().push(geometry);
+            Ok(())
         }
         fn poll_terminal(
             &mut self,
@@ -4362,6 +4504,7 @@ mod tests {
             panic!("overview modal should open");
         };
         assert_eq!(overview.selection_mode(), ModalSelectionMode::Prompt);
+        ui.resize_terminals(Geometry { cols: 80, rows: 24 });
         ui.modal = None;
         ui.enter_closeup();
         assert_eq!(ui.closeup.selection_mode(), ModalSelectionMode::Prompt);
@@ -5225,6 +5368,7 @@ mod tests {
         };
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let detaches = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
         let mut port = StreamingTerminalPort {
             terminal: terminal.clone(),
             replay: b"$ ".to_vec(),
@@ -5237,6 +5381,7 @@ mod tests {
             }),
             inputs: Arc::clone(&inputs),
             detaches: Arc::clone(&detaches),
+            resizes: Arc::clone(&resizes),
         };
         // A generic terminal never launches an Agent through this port.
         assert!(port.launch(workspace_id, session_id, None).is_err());
@@ -5268,6 +5413,21 @@ mod tests {
         drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
+
+        ui.resize_terminals(Geometry {
+            cols: 100,
+            rows: 30,
+        });
+        assert_eq!(
+            *resizes.lock().unwrap(),
+            vec![
+                Geometry { cols: 80, rows: 24 },
+                Geometry {
+                    cols: 100,
+                    rows: 30
+                },
+            ]
+        );
 
         // Typing forwards raw bytes exactly once with a monotonic sequence.
         let _ = step_workspace(&mut ui, Key::Char('l'));
@@ -5361,6 +5521,10 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
+            port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
+            Ok(())
+        );
+        assert_eq!(
             port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
             Err(TerminalError::Unavailable)
         );
@@ -5385,7 +5549,7 @@ mod tests {
     }
 
     #[test]
-    fn key_to_terminal_bytes_encodes_input_and_ignores_control_chords() {
+    fn key_to_terminal_bytes_encodes_input_and_forwards_control_chords() {
         assert_eq!(key_to_terminal_bytes(Key::Char('a')), Some(b"a".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Enter), Some(b"\r".to_vec()));
         assert_eq!(
@@ -5398,8 +5562,9 @@ mod tests {
         assert_eq!(key_to_terminal_bytes(Key::Down), Some(b"\x1b[B".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Right), Some(b"\x1b[C".to_vec()));
         assert_eq!(key_to_terminal_bytes(Key::Left), Some(b"\x1b[D".to_vec()));
-        assert_eq!(key_to_terminal_bytes(Key::Quit), None);
-        assert_eq!(key_to_terminal_bytes(Key::CtrlQ), None);
+        assert_eq!(key_to_terminal_bytes(Key::Quit), Some(vec![3]));
+        assert_eq!(key_to_terminal_bytes(Key::CtrlQ), Some(vec![17]));
+        assert_eq!(key_to_terminal_bytes(Key::CtrlD), Some(vec![4]));
         assert_eq!(key_to_terminal_bytes(Key::Other), None);
         assert_eq!(
             key_to_terminal_bytes(Key::Live(
@@ -5576,15 +5741,6 @@ mod tests {
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::Switch));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
         assert!(!ui.closeup_modal_visible());
-
-        // Moving the target in Closeup rebuilds its modal for the new session;
-        // the old target's label/action state cannot receive input.
-        step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
-        step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousSession));
-        assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
-        assert_eq!(ui.workspace.focused_label(), "main");
-        assert_eq!(ui.closeup.session(), "main");
-        assert!(ui.closeup_modal_visible());
     }
 
     #[test]
@@ -5600,6 +5756,26 @@ mod tests {
             WorkspaceStep::Stay
         );
         assert!(matches!(ui.modal, Some(WorkspaceModal::Quit(_))));
+    }
+
+    #[test]
+    fn session_error_dialog_wraps_the_reason_and_closes_on_any_key() {
+        let workspace = WorkspaceView::new(ws("error-dialog"), state("error-dialog"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        ui.show_error_dialog(
+            "cannot create session \"aa\": branch usagi/aa already exists; choose a different name",
+        );
+
+        let frame = render_workspace(40, 80, &ui).join("\n");
+        assert!(frame.contains("Session operation failed"));
+        assert!(frame.contains('\u{f06a}'));
+        assert!(frame.contains("\u{1b}[1;31m"));
+        assert!(frame.contains("Press any key to close"));
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Error(_))));
+
+        // `q` must acknowledge this dialog, not open the global quit modal.
+        assert_eq!(step_workspace(&mut ui, Key::Char('q')), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
     }
 
     #[test]

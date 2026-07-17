@@ -8,8 +8,9 @@
 //! erase and SGR styling — and silently ignores window-title (OSC) sequences.
 //! It is pure and holds no IO, so it is exercised entirely by unit tests.
 //!
-//! Out of scope on purpose: alternate screen buffers. Scrollback is retained
-//! locally with a bounded history for the pane viewport.
+//! Alternate screen buffers used by full-screen terminal applications are
+//! supported. Scrollback is retained locally with a bounded history for the
+//! pane viewport.
 
 use unicode_width::UnicodeWidthChar;
 
@@ -41,6 +42,21 @@ struct Cell {
     ch: char,
     style: String,
     continuation: bool,
+}
+
+/// The primary screen state saved while a full-screen application owns the
+/// alternate buffer. Parser state itself remains shared: `DECSET` / `DECRST`
+/// are consumed as one continuous byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenBuffer {
+    grid: Vec<Vec<Cell>>,
+    scrollback: Vec<Vec<Cell>>,
+    cursor_row: usize,
+    cursor_col: usize,
+    style: String,
+    saved_cursor: Option<(usize, usize)>,
+    scroll_top: usize,
+    scroll_bottom: usize,
 }
 
 impl Cell {
@@ -76,6 +92,13 @@ pub struct TerminalScreen {
     style: String,
     /// Cursor position saved by DECSC (`ESC 7`) or SCP (`CSI s`).
     saved_cursor: Option<(usize, usize)>,
+    /// Inclusive DECSTBM scroll region. Codex reserves its composer outside
+    /// this region and scrolls only the transcript above it.
+    scroll_top: usize,
+    scroll_bottom: usize,
+    /// The primary screen while a full-screen program (for example Codex)
+    /// renders into the active alternate buffer.
+    primary_screen: Option<Box<ScreenBuffer>>,
 }
 
 impl TerminalScreen {
@@ -98,6 +121,9 @@ impl TerminalScreen {
             utf8_needed: 0,
             style: String::new(),
             saved_cursor: None,
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
+            primary_screen: None,
         }
     }
 
@@ -357,9 +383,14 @@ impl TerminalScreen {
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
+            'r' => self.set_scroll_region(),
+            'S' => self.scroll_up(self.param(0, 1)),
+            'T' => self.scroll_down(self.param(0, 1)),
             'm' => self.sgr(),
             's' => self.save_cursor(),
             'u' => self.restore_cursor(),
+            'h' => self.set_private_modes(),
+            'l' => self.reset_private_modes(),
             // Unhandled finals leave the grid unchanged.
             _ => {}
         }
@@ -429,17 +460,60 @@ impl TerminalScreen {
     }
 
     fn line_feed(&mut self) {
-        if self.cursor_row + 1 >= self.rows {
-            self.scrollback.push(self.grid.remove(0));
-            // Bounded client-side history: the daemon remains authoritative for
-            // retained replay, while a long-running pane cannot grow this view
-            // without limit.
-            if self.scrollback.len() > 10_000 {
-                self.scrollback.remove(0);
-            }
-            self.grid.push(vec![Cell::blank(); self.cols]);
+        if self.cursor_row >= self.scroll_bottom {
+            self.scroll_region_up(1);
         } else {
             self.cursor_row += 1;
+        }
+    }
+
+    fn set_scroll_region(&mut self) {
+        let top = self.param(0, 1).saturating_sub(1).min(self.rows - 1);
+        let bottom = self
+            .param(1, self.rows)
+            .saturating_sub(1)
+            .min(self.rows - 1);
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+        } else {
+            self.scroll_top = 0;
+            self.scroll_bottom = self.rows - 1;
+        }
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    fn scroll_region_up(&mut self, count: usize) {
+        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            let row = self.grid.remove(self.scroll_top);
+            // Mirror v1's vt100 policy: a region anchored at row zero is
+            // transcript history; a lower region is a transient full-screen UI.
+            if self.primary_screen.is_none() && self.scroll_top == 0 {
+                self.scrollback.push(row);
+                if self.scrollback.len() > 10_000 {
+                    self.scrollback.remove(0);
+                }
+            }
+            self.grid
+                .insert(self.scroll_bottom, vec![Cell::blank(); self.cols]);
+        }
+    }
+
+    /// Applies CSI SU inside the active DECSTBM scroll region. On the primary
+    /// screen, rows leaving a top-anchored region are shell history; on the
+    /// alternate screen they are transient app frames.
+    fn scroll_up(&mut self, count: usize) {
+        self.scroll_region_up(count);
+    }
+
+    /// Applies CSI SD inside the active DECSTBM scroll region. Reverse
+    /// scrolling never invents local history.
+    fn scroll_down(&mut self, count: usize) {
+        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            self.grid.remove(self.scroll_bottom);
+            self.grid
+                .insert(self.scroll_top, vec![Cell::blank(); self.cols]);
         }
     }
 
@@ -476,6 +550,69 @@ impl TerminalScreen {
             self.cursor_row = row;
             self.cursor_col = col;
         }
+    }
+
+    /// Applies the DEC private modes that change the visible buffer.  Codex's
+    /// ratatui renderer uses 1049; accepting the older 47/1047 variants keeps
+    /// the pane compatible with other full-screen agents as well.
+    fn set_private_modes(&mut self) {
+        let modes = self.private_modes();
+        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
+            self.enter_alternate_screen();
+        }
+    }
+
+    fn reset_private_modes(&mut self) {
+        let modes = self.private_modes();
+        if modes.iter().any(|mode| matches!(mode, 47 | 1047 | 1049)) {
+            self.leave_alternate_screen();
+        }
+    }
+
+    fn private_modes(&self) -> Vec<usize> {
+        self.params
+            .strip_prefix('?')
+            .map_or_else(Vec::new, |values| {
+                values
+                    .split(';')
+                    .filter_map(|value| value.parse::<usize>().ok())
+                    .collect()
+            })
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        if self.primary_screen.is_some() {
+            return;
+        }
+        self.primary_screen = Some(Box::new(ScreenBuffer {
+            grid: std::mem::take(&mut self.grid),
+            scrollback: std::mem::take(&mut self.scrollback),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            style: std::mem::take(&mut self.style),
+            saved_cursor: self.saved_cursor.take(),
+            scroll_top: self.scroll_top,
+            scroll_bottom: self.scroll_bottom,
+        }));
+        self.grid = vec![vec![Cell::blank(); self.cols]; self.rows];
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
+    }
+
+    fn leave_alternate_screen(&mut self) {
+        let Some(primary) = self.primary_screen.take() else {
+            return;
+        };
+        self.grid = primary.grid;
+        self.scrollback = primary.scrollback;
+        self.cursor_row = primary.cursor_row;
+        self.cursor_col = primary.cursor_col;
+        self.style = primary.style;
+        self.saved_cursor = primary.saved_cursor;
+        self.scroll_top = primary.scroll_top;
+        self.scroll_bottom = primary.scroll_bottom;
     }
 
     /// Reads the `idx`-th `;`-separated numeric CSI parameter, or `default` when
@@ -675,6 +812,49 @@ mod tests {
     }
 
     #[test]
+    fn csi_scroll_commands_keep_the_latest_full_screen_agent_frame_visible() {
+        let mut screen = TerminalScreen::new(3, 12);
+        screen.advance(b"\x1b[?1049hone\r\ntwo\r\nthree");
+        screen.advance(b"\x1b[1S\x1b[3;1Hreply");
+        assert_eq!(screen.rows_with_scrollback(), vec!["two", "three", "reply"]);
+
+        screen.advance(b"\x1b[1T");
+        assert_eq!(screen.rows_with_scrollback(), vec!["", "two", "three"]);
+    }
+
+    #[test]
+    fn codex_scroll_region_keeps_the_composer_and_latest_reply_on_screen() {
+        let mut screen = TerminalScreen::new(4, 16);
+        screen.advance(b"\x1b[?1049hheader\x1b[2;3r\x1b[2;1Hone\r\ntwo\r\nreply");
+
+        assert_eq!(screen.rows(), vec!["header", "two", "reply", ""]);
+        assert_eq!(
+            screen.rows_with_scrollback(),
+            vec!["header", "two", "reply"]
+        );
+    }
+
+    #[test]
+    fn csi_scroll_commands_respect_the_codex_scroll_region() {
+        let mut screen = TerminalScreen::new(4, 16);
+        screen.advance(b"\x1b[?1049hheader\x1b[4;1Hcomposer\x1b[2;3r\x1b[2;1Hone\r\ntwo");
+
+        screen.advance(b"\x1b[1S");
+        assert_eq!(screen.rows(), vec!["header", "two", "", "composer"]);
+
+        screen.advance(b"\x1b[1T");
+        assert_eq!(screen.rows(), vec!["header", "", "two", "composer"]);
+    }
+
+    #[test]
+    fn invalid_scroll_region_resets_to_the_full_screen() {
+        let mut screen = TerminalScreen::new(3, 8);
+        screen.advance(b"\x1b[2;3r\x1b[3;2r");
+
+        assert_eq!((screen.scroll_top, screen.scroll_bottom), (0, 2));
+    }
+
+    #[test]
     fn scrollback_omits_unused_visible_rows_and_is_bounded() {
         let mut screen = TerminalScreen::new(2, 8);
         screen.advance(b"one\r\ntwo\r\n");
@@ -824,6 +1004,46 @@ mod tests {
         // `ESC[?25l` (hide cursor) and a stray CSI abort leave text intact.
         assert_eq!(screen_after(1, 6, b"\x1b[?25lAB"), vec!["AB"]);
         assert_eq!(screen_after(1, 6, b"\x1b[1\x00AB"), vec!["AB"]);
+    }
+
+    #[test]
+    fn alternate_screen_keeps_full_screen_agent_output_visible_and_restores_the_shell() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.advance(b"$ shell");
+
+        // An unmatched restore and unknown CSI are harmless before an agent
+        // takes over the pane.
+        screen.advance(b"\x1b[?1049l\x1b[?9999z");
+        assert_eq!(screen.rows(), vec!["$ shell", ""]);
+
+        // Codex uses DECSET 1049 before its ratatui frame. Its output must be
+        // rendered from the alternate buffer while it is active, rather than
+        // leaving the pane on the underlying shell frame.
+        screen.advance(b"\x1b[?1049h\x1b[2J\x1b[Hcodex reply");
+        assert_eq!(screen.rows(), vec!["codex reply", ""]);
+
+        // A repeated DECSET must not replace the saved primary screen.
+        screen.advance(b"\x1b[?1049h");
+        assert_eq!(screen.rows(), vec!["codex reply", ""]);
+
+        // A normal exit restores the prior shell viewport exactly.
+        screen.advance(b"\x1b[?1049l");
+        assert_eq!(screen.rows(), vec!["$ shell", ""]);
+    }
+
+    #[test]
+    fn alternate_screen_scroll_does_not_mix_old_frames_into_agent_output() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.advance(b"shell\r\n");
+        screen.advance(b"\x1b[?1049hfirst\r\nsecond\r\nthird");
+
+        assert_eq!(screen.rows(), vec!["second", "third"]);
+        assert_eq!(screen.rows_with_scrollback(), vec!["second", "third"]);
+
+        // A full-screen redraw replaces the grid, not a synthetic history of
+        // the preceding frame.
+        screen.advance(b"\x1b[2J\x1b[Hreply");
+        assert_eq!(screen.rows_with_scrollback(), vec!["reply"]);
     }
 
     #[test]

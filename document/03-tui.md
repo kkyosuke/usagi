@@ -81,8 +81,8 @@ modal と inline 作成中は背景の sidebar click を受け取らない。
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
 prefix の打鍵は live terminal への passthrough として扱う。TUI が予約するのは `Ctrl-O` prefix だけであり、
-Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q、Esc、Ctrl-^ を含むその他の bytes は PTY へ送る。prefix の
-follow-up は下表のアクションに解決する。
+leader ではないすべてのキー入力は、修飾キーを含めて PTY へ送る。leader の follow-up は `Ctrl-O`、`Ctrl-A`、`Ctrl-N`、`Ctrl-P` だけを
+下表のアクションに解決し、それ以外は消費する。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
 自動で開き、pane が到着すると通常の tab surface へ戻る。adapter は prefix の next / previous 結果を
@@ -91,13 +91,10 @@ identity は保持しない。
 
 | prefix | アクション | 効果 |
 |---|---|---|
-| `Ctrl-O` `o`（または `Ctrl-O`） | Switch | Closeup から Switch へ戻る |
-| `Ctrl-O` `a` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
-| `Ctrl-O` `n` / `→` | NextTab | 次の tab を選ぶ |
-| `Ctrl-O` `p` / `←` | PreviousTab | 前の tab を選ぶ |
-| `Ctrl-O` `g` | Agent | agent pane を開く／再接続する |
-| `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
-| `Ctrl-O` `q` | QuitConfirmation | TUI を閉じる確認を開く |
+| `Ctrl-O` `Ctrl-O` | Switch | Closeup から Switch へ戻る |
+| `Ctrl-O` `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
+| `Ctrl-O` `Ctrl-N` | NextTab | 次の tab を選ぶ |
+| `Ctrl-O` `Ctrl-P` | PreviousTab | 前の tab を選ぶ |
 
 leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。leader 待機中の次の入力は prefix の
 follow-up として扱う。
@@ -193,17 +190,17 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
 Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。Switch で
-`Ctrl-O a` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
+`Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
-を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
+を再び出すのは `Ctrl-O Ctrl-A` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
 modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に選択して右ペインへ
 表示し、completion はその tab だけを live / document tab に置換して選択を維持する。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` は tab を巡回し、`x` は
 選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
 terminal を停止しない。
@@ -217,19 +214,24 @@ terminal を停止しない。
 そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
 取得する: launch 直後に一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
 `Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・SGR の色と属性を解釈）へ流し込み、
-その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
-atomic snapshot（再 attach）で置き換える。
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）へ流し込み、
+その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
+resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
-screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。`Ctrl-O u` / `Ctrl-O d` とホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
+primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-live terminal に focus がある間、通常のキー（文字・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
+出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。キー入力は
+コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
+clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
+Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
+安全な feedback を表示する。
+
+live terminal に focus がある間、leader ではないすべてのキー入力（文字・修飾キー・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
-`Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了
-（`Ctrl-C`）を含むすべての non-prefix input は live terminal に渡す。前面 modal や forced action modal がある間は
+`Ctrl-O` prefix（`Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P` / `Ctrl-O Ctrl-O`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
 terminal は起動時点の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。redraw に追従する resize は後続作業である。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
@@ -242,7 +244,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
-変化したときだけ送る。detach はこの client の subscription を外すだけで、PTY を kill しない。
+変化したときだけ送って、PTY と右ペインの VT screen を同じ viewport に保つ。detach はこの client の
+subscription を外すだけで、PTY を kill しない。
 
 `agent [profile]` は active な session だけを対象にする。profile を省略した request は daemon の
 default policy に委ね、TUI は product 固有の argv、model、secret を組み立てない。controller が発行した

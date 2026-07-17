@@ -25,6 +25,7 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
+use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
@@ -83,10 +84,8 @@ struct FileTerminalStore(PathBuf);
 impl TerminalStore for FileTerminalStore {
     type Error = std::io::Error;
     fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), Self::Error> {
-        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
-        let temporary = self.0.with_extension("json.tmp");
-        std::fs::write(&temporary, encoded)?;
-        std::fs::rename(temporary, &self.0)
+        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -95,11 +94,19 @@ struct FileRuntimeStore(PathBuf);
 impl RuntimeStore for FileRuntimeStore {
     type Error = std::io::Error;
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
-        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
-        let temporary = self.0.with_extension("json.tmp");
-        std::fs::write(&temporary, encoded)?;
-        std::fs::rename(temporary, &self.0)
+        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
+            .map_err(std::io::Error::other)
     }
+}
+
+/// Returns the durable snapshot's data directory.
+fn snapshot_directory(path: &Path) -> std::io::Result<&Path> {
+    path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "daemon snapshot path has no parent",
+        )
+    })
 }
 
 /// The registry's bounded in-memory replay buffer already serves reconnect
@@ -375,6 +382,16 @@ impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
     }
+    #[coverage(off)] // Real PTY ioctl; the agent IPC fake verifies the fenced resize behavior.
+    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
+        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        pty.lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .resize(geometry)
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })
+    }
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let Some(key) = self.selected.as_ref() else {
             return Err(PtyWriteError { applied_prefix: 0 });
@@ -465,6 +482,20 @@ impl GenericPtySpawner for DaemonPty {
 impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
+    }
+    #[coverage(off)] // Real PTY ioctl; the generic terminal use case covers the request semantics.
+    fn resize(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
+    ) -> Result<(), PtyWriteError> {
+        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        pty.lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .resize(geometry)
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })
     }
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let Some(key) = self.selected.as_ref() else {
@@ -585,9 +616,18 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let repo_root = std::env::current_dir()?;
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let runtime = open_session_runtime(repo_root.clone(), daemon_generation)?;
+    let runtime = open_session_runtime(
+        repo_root.clone(),
+        &data_dir.join("daemon"),
+        daemon_generation,
+    )?;
     let (pty, observations) = DaemonPty::new();
-    let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
+    let terminal = new_terminal_runtime(
+        data_dir,
+        daemon_generation,
+        trusted_repository_root(&runtime)?,
+        pty,
+    );
     start_terminal_observer(Arc::clone(&terminal), observations)?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
     let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
@@ -660,11 +700,22 @@ fn start_agent_observer(
 
 fn open_session_runtime(
     repo_root: PathBuf,
+    state_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> std::io::Result<SharedSessionRuntime> {
-    SessionRuntime::open(repo_root, generation, SystemGit)
+    SessionRuntime::open(repo_root, state_dir, generation, SystemGit)
         .map(|runtime| Arc::new(Mutex::new(runtime)))
         .map_err(|error| std::io::Error::other(error.safe_message()))
+}
+
+/// Reads the root selected by the durable session store, rather than the
+/// daemon process's startup directory. This keeps terminal profile resolution
+/// aligned with restored managed-session state after a restart.
+fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<PathBuf> {
+    sessions
+        .lock()
+        .map(|sessions| sessions.repository_root().to_path_buf())
+        .map_err(|_| std::io::Error::other("session runtime is unavailable"))
 }
 
 fn new_terminal_runtime(
@@ -1353,4 +1404,123 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 #[coverage(off)]
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client(ClientPolicy::tui()).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use usagi_core::domain::{
+        id::{SessionId, WorkspaceId, WorktreeId},
+        terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
+    };
+
+    #[test]
+    fn restart_from_another_directory_launches_terminals_at_the_restored_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original_root = temporary.path().join("original-root");
+        let restart_directory = temporary.path().join("restart-directory");
+        let daemon_state = temporary.path().join("shared-daemon");
+        std::fs::create_dir_all(&original_root).unwrap();
+        std::fs::create_dir_all(&restart_directory).unwrap();
+
+        let first = open_session_runtime(
+            original_root.clone(),
+            &daemon_state,
+            usagi_core::domain::id::DaemonGeneration::new(),
+        )
+        .unwrap();
+        drop(first);
+        let restored = open_session_runtime(
+            restart_directory,
+            &daemon_state,
+            usagi_core::domain::id::DaemonGeneration::new(),
+        )
+        .unwrap();
+
+        let profile =
+            LoginShellProfile::new(BTreeMap::new(), trusted_repository_root(&restored).unwrap());
+        let launch = profile
+            .resolve(&TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: TerminalLaunchScope {
+                    workspace_id: WorkspaceId::new(),
+                    session_id: Some(SessionId::new()),
+                    worktree_id: WorktreeId::new(),
+                },
+            })
+            .unwrap();
+
+        assert_eq!(launch.snapshot.working_directory, original_root);
+    }
+
+    #[test]
+    fn file_terminal_store_writes_a_readable_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminals.json");
+        let mut store = FileTerminalStore(path.clone());
+        let snapshot = TerminalStoreSnapshot::default();
+
+        store.save(snapshot.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<TerminalStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn file_runtime_store_writes_a_readable_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let mut store = FileRuntimeStore(path.clone());
+        let snapshot = RuntimeStoreSnapshot::default();
+
+        store.save(snapshot.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<RuntimeStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn file_terminal_store_failure_preserves_target_and_cleans_temp() {
+        assert_failed_snapshot_write_is_consistent(|path| {
+            FileTerminalStore(path.to_path_buf()).save(TerminalStoreSnapshot::default())
+        });
+    }
+
+    #[test]
+    fn file_runtime_store_failure_preserves_target_and_cleans_temp() {
+        assert_failed_snapshot_write_is_consistent(|path| {
+            FileRuntimeStore(path.to_path_buf()).save(RuntimeStoreSnapshot::default())
+        });
+    }
+
+    fn assert_failed_snapshot_write_is_consistent(save: impl FnOnce(&Path) -> std::io::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        // An existing non-empty directory cannot be replaced by the final
+        // rename. This fails after the durable temp has been written, so it
+        // exercises both preservation of the old target and temp cleanup.
+        let target = dir.path().join("snapshot.json");
+        std::fs::create_dir(&target).unwrap();
+        let preserved = target.join("preserved");
+        std::fs::write(&preserved, "old snapshot owner").unwrap();
+
+        assert!(save(&target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(preserved).unwrap(),
+            "old snapshot owner"
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
 }

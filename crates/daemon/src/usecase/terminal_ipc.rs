@@ -25,7 +25,7 @@ use super::{
         GenericPtySpawner, GenericTerminalCoordinator, GenericTerminalError,
         TerminalProfileResolver, TerminalStore,
     },
-    terminal::{Geometry, InputRequest, PtyWriter},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
 };
 
 /// Injected process boundary used by the runtime.  It is intentionally the
@@ -236,6 +236,7 @@ fn geometry(value: TerminalGeometry) -> Result<Geometry, ProtocolError> {
 }
 fn map_error(error: GenericTerminalError) -> ProtocolError {
     let code = match error {
+        GenericTerminalError::Terminal(RegistryError::ResyncRequired) => ErrorCode::ResyncRequired,
         GenericTerminalError::UnknownTerminal
         | GenericTerminalError::TerminalGenerationMismatch
         | GenericTerminalError::Terminal(_) => ErrorCode::StaleTarget,
@@ -429,5 +430,14 @@ mod tests {
             0
         );
         assert_eq!(runtime.pty.writes, b"echo ok\n");
+    }
+
+    #[test]
+    fn trimmed_generic_terminal_output_maps_to_a_resync_protocol_error() {
+        let error = map_error(GenericTerminalError::Terminal(
+            RegistryError::ResyncRequired,
+        ));
+
+        assert_eq!(error.code, ErrorCode::ResyncRequired);
     }
 }

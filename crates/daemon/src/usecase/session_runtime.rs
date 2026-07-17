@@ -20,6 +20,7 @@ use usagi_core::domain::session_lifecycle::{
 };
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
+use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::usecase::client::SessionAction;
 
@@ -36,6 +37,9 @@ pub enum SessionRuntimeError {
     InvalidOperation,
     DuplicateOperation,
     IdempotencyConflict,
+    SessionBranchExists(String),
+    SessionWorkspaceExists(String),
+    SessionWorkspaceCreationFailed { name: String, detail: String },
     UnknownSession,
     ScopeUnavailable,
     Rejected,
@@ -44,16 +48,29 @@ pub enum SessionRuntimeError {
 
 impl SessionRuntimeError {
     #[must_use]
-    pub const fn safe_message(&self) -> &'static str {
+    pub fn safe_message(&self) -> String {
         match self {
-            Self::InvalidRequest => "invalid session request",
-            Self::InvalidOperation => "invalid operation identity",
-            Self::DuplicateOperation => "operation identity conflicts with an existing request",
-            Self::IdempotencyConflict => "operation id was reused with a different request",
-            Self::UnknownSession => "session was not found",
-            Self::ScopeUnavailable => "session scope is not available",
-            Self::Rejected => "session lifecycle rejected the request",
-            Self::Storage => "daemon could not persist session lifecycle state",
+            Self::InvalidRequest => "invalid session request".into(),
+            Self::InvalidOperation => "invalid operation identity".into(),
+            Self::DuplicateOperation => {
+                "operation identity conflicts with an existing request".into()
+            }
+            Self::IdempotencyConflict => "operation id was reused with a different request".into(),
+            Self::SessionBranchExists(name) => format!(
+                "cannot create session \"{name}\": branch usagi/{name} already exists; choose a different name or remove the stale branch"
+            ),
+            Self::SessionWorkspaceExists(name) => format!(
+                "cannot create session \"{name}\": workspace already exists; choose a different name or remove the stale workspace"
+            ),
+            Self::SessionWorkspaceCreationFailed { name, detail } => {
+                format!("cannot create session \"{name}\": {detail}")
+            }
+            Self::UnknownSession => "session was not found".into(),
+            Self::ScopeUnavailable => "session scope is not available".into(),
+            Self::Rejected => {
+                "could not create the session worktree; see the daemon log for details".into()
+            }
+            Self::Storage => "daemon could not persist session lifecycle state".into(),
         }
     }
 }
@@ -97,27 +114,44 @@ pub struct SessionRuntime<G> {
 }
 
 impl<G: GitRunner> SessionRuntime<G> {
+    /// Returns the repository root durably trusted by this daemon's session store.
+    #[must_use]
+    pub fn repository_root(&self) -> &Path {
+        &self.repo_root
+    }
+
     /// # Errors
     ///
     /// Returns an error when the lifecycle state cannot be loaded or initialized.
     pub fn open(
-        repo_root: PathBuf,
+        candidate_repo_root: PathBuf,
+        state_dir: &Path,
         generation: DaemonGeneration,
         git: G,
     ) -> Result<Self, SessionRuntimeError> {
-        let store = DaemonLifecycleStore::new(&repo_root);
-        if store
-            .load()
+        let store = DaemonLifecycleStore::new(state_dir);
+        let repo_root = if let Some((repository_root, _)) = store
+            .load_with_workspace()
             .map_err(|_| SessionRuntimeError::Storage)?
-            .is_none()
         {
+            repository_root
+        } else {
+            let legacy = candidate_repo_root
+                .join(STATE_DIR)
+                .join("lifecycle-state.json");
+            let state = json_file::read(&legacy)
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .unwrap_or_else(|| WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now()));
             store
-                .initialize(&WorkspaceLifecycleState::new(
-                    WorkspaceId::new(),
-                    Utc::now(),
-                ))
+                .initialize(&state, &candidate_repo_root)
                 .map_err(|_| SessionRuntimeError::Storage)?;
-        }
+            // The migrated state is already durable in `sessions.json`; from now
+            // on the `Some(..)` branch wins and the legacy file is never read
+            // again. Removing it is best-effort cleanup, so a failure here must
+            // not fail daemon startup over an otherwise-ignored stale file.
+            let _ = std::fs::remove_file(&legacy);
+            candidate_repo_root
+        };
         let mut runtime = Self {
             repo_root,
             generation,
@@ -229,6 +263,13 @@ impl<G: GitRunner> SessionRuntime<G> {
                 body: self.snapshot()?,
             });
         }
+        // A failed or otherwise retained lifecycle record still owns the
+        // session name. Report that concrete conflict before asking the
+        // reducer to reserve it, rather than collapsing the reducer's
+        // `DuplicateSessionName` into a generic rejection.
+        if before.sessions.iter().any(|session| session.name == name) {
+            return Err(SessionRuntimeError::SessionWorkspaceExists(name));
+        }
         let operation = journal(operation_id, self.generation, semantic_key);
         let reserved = self
             .store
@@ -276,19 +317,35 @@ impl<G: GitRunner> SessionRuntime<G> {
                     body: snapshot(&completed),
                 })
             }
-            Err(_) => {
+            Err(error) => {
+                let error = error.to_string();
+                let branch_exists = error.contains("branch") && error.contains("already exists");
+                let workspace_exists = !branch_exists && error.contains("already exists");
+                let detail = worktree_failure_detail(&error);
                 let _ = self.store.apply(
                     self.generation,
                     LifecycleEvent::Failed {
                         fence,
                         failure: Failure {
                             stage: FailureStage::Create,
-                            summary: "worktree creation failed".into(),
+                            summary: if branch_exists {
+                                "session branch already exists".into()
+                            } else if workspace_exists {
+                                "session workspace already exists".into()
+                            } else {
+                                "worktree creation failed".into()
+                            },
                         },
                     },
                     Utc::now(),
                 );
-                Err(SessionRuntimeError::Rejected)
+                Err(if branch_exists {
+                    SessionRuntimeError::SessionBranchExists(name)
+                } else if workspace_exists {
+                    SessionRuntimeError::SessionWorkspaceExists(name)
+                } else {
+                    SessionRuntimeError::SessionWorkspaceCreationFailed { name, detail }
+                })
             }
         }
     }
@@ -444,6 +501,30 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
     Ok(name.to_owned())
 }
 
+/// Keep the actionable Git reason on one bounded display line. Session names
+/// are validated before Git is invoked, and the command has no user-supplied
+/// argv or environment, so this only carries the worktree command's own
+/// diagnostic into the safe UI notice.
+fn worktree_failure_detail(error: &str) -> String {
+    let detail = error
+        .strip_prefix("git worktree add failed:")
+        .unwrap_or(error)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("Git rejected workspace creation")
+        .trim();
+    let detail = detail
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(160)
+        .collect::<String>();
+    if detail.is_empty() {
+        "Git rejected workspace creation".into()
+    } else {
+        detail
+    }
+}
+
 fn journal(
     operation_id: OperationId,
     generation: DaemonGeneration,
@@ -496,6 +577,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
+    use usagi_core::domain::session_lifecycle::ManagedSession;
 
     struct FakeGit(bool);
     impl FakeGit {
@@ -504,6 +586,28 @@ mod tests {
         }
         fn fail() -> Self {
             Self(false)
+        }
+    }
+
+    struct BranchExistsGit;
+    impl GitRunner for BranchExistsGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            Ok(GitOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "fatal: a branch named 'usagi/one' already exists".into(),
+            })
+        }
+    }
+
+    struct WorkspaceExistsGit;
+    impl GitRunner for WorkspaceExistsGit {
+        fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
+            Ok(GitOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "fatal: '/repo/.usagi/sessions/one' already exists".into(),
+            })
         }
     }
     impl GitRunner for FakeGit {
@@ -531,8 +635,13 @@ mod tests {
     }
     fn runtime(git: FakeGit) -> (TempDir, SessionRuntime<FakeGit>) {
         let tmp = tempfile::tempdir().unwrap();
-        let runtime =
-            SessionRuntime::open(tmp.path().to_path_buf(), DaemonGeneration::new(), git).unwrap();
+        let runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            git,
+        )
+        .unwrap();
         (tmp, runtime)
     }
     fn operation() -> String {
@@ -599,13 +708,107 @@ mod tests {
             runtime
                 .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
                 .unwrap_err(),
-            SessionRuntimeError::Rejected
+            SessionRuntimeError::SessionWorkspaceCreationFailed {
+                name: "one".into(),
+                detail: "no".into(),
+            }
         );
         assert_eq!(
             runtime
                 .handle(SessionAction::Setup, &operation(), &json!({}))
                 .unwrap_err(),
             SessionRuntimeError::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn reports_a_reusable_session_name_when_its_branch_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            BranchExistsGit,
+        )
+        .unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SessionRuntimeError::SessionBranchExists("one".into())
+        );
+        assert_eq!(
+            error.safe_message(),
+            "cannot create session \"one\": branch usagi/one already exists; choose a different name or remove the stale branch"
+        );
+        assert_eq!(
+            runtime.snapshot().unwrap()["sessions"][0]["failure"]["summary"],
+            "session branch already exists"
+        );
+    }
+
+    #[test]
+    fn reports_a_reusable_session_name_when_its_workspace_already_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            WorkspaceExistsGit,
+        )
+        .unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SessionRuntimeError::SessionWorkspaceExists("one".into())
+        );
+        assert_eq!(
+            error.safe_message(),
+            "cannot create session \"one\": workspace already exists; choose a different name or remove the stale workspace"
+        );
+        assert_eq!(
+            runtime.snapshot().unwrap()["sessions"][0]["failure"]["summary"],
+            "session workspace already exists"
+        );
+    }
+
+    #[test]
+    fn reports_an_existing_lifecycle_session_before_reserving_another_create() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+
+        let error = runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SessionRuntimeError::SessionWorkspaceExists("one".into())
+        );
+    }
+
+    #[test]
+    fn worktree_failure_detail_is_single_line_bounded_and_nonempty() {
+        assert_eq!(
+            worktree_failure_detail("git worktree add failed: fatal: first\nsecond"),
+            "fatal: first"
+        );
+        assert_eq!(
+            worktree_failure_detail("\n\t"),
+            "Git rejected workspace creation"
+        );
+        assert_eq!(
+            worktree_failure_detail(&"x".repeat(200)).chars().count(),
+            160
         );
     }
     #[test]
@@ -635,6 +838,7 @@ mod tests {
         let first_calls = Arc::new(AtomicUsize::new(0));
         let mut first = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             CountingGit {
                 calls: Arc::clone(&first_calls),
@@ -651,6 +855,7 @@ mod tests {
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let mut restarted = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             CountingGit {
                 calls: Arc::clone(&replay_calls),
@@ -706,6 +911,7 @@ mod tests {
             .unwrap();
         let restarted = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             FakeGit::ok(),
         )
@@ -716,5 +922,80 @@ mod tests {
             snapshot["sessions"][1]["failure"]["summary"],
             "interrupted; explicit recovery required"
         );
+    }
+
+    #[test]
+    fn restart_from_another_directory_uses_the_shared_session_state_and_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original_root = tmp.path().join("original");
+        let another_directory = tmp.path().join("another");
+        let state_dir = tmp.path().join("shared-daemon");
+        std::fs::create_dir_all(&original_root).unwrap();
+        std::fs::create_dir_all(&another_directory).unwrap();
+
+        let mut first = SessionRuntime::open(
+            original_root.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        first
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        drop(first);
+
+        let restarted = SessionRuntime::open(
+            another_directory,
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+
+        assert_eq!(restarted.repository_root(), original_root);
+        assert_eq!(
+            restarted.snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn first_shared_start_migrates_legacy_repository_session_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        let legacy_dir = repository.join(STATE_DIR);
+        let state_dir = tmp.path().join("shared-daemon");
+        let mut legacy = WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now());
+        legacy.sessions.push(ManagedSession::new_creating(
+            "legacy".into(),
+            OperationId::new(),
+            Utc::now(),
+        ));
+        json_file::write_atomic(
+            &legacy_dir,
+            &legacy_dir.join("lifecycle-state.json"),
+            &legacy,
+        )
+        .unwrap();
+
+        let migrated = SessionRuntime::open(
+            repository.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+
+        assert_eq!(migrated.repo_root, repository);
+        assert_eq!(
+            migrated.snapshot().unwrap()["sessions"][0]["name"],
+            "legacy"
+        );
+        assert!(state_dir.join("sessions.json").is_file());
+        assert!(!legacy_dir.join("lifecycle-state.json").exists());
     }
 }
