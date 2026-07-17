@@ -244,7 +244,7 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         offset: u64,
     ) -> Result<Vec<Output>, GenericTerminalError> {
-        self.running(terminal)?;
+        self.replayable(terminal)?;
         self.terminals
             .replay_from(terminal, offset)
             .map_err(GenericTerminalError::Terminal)
@@ -361,6 +361,19 @@ impl GenericTerminalCoordinator {
             .ok_or(GenericTerminalError::ReconcileRequired(
                 TerminalReconcileState::IdentityUnknown,
             ))
+    }
+
+    /// Retained output remains readable after a terminal exits. Only launches,
+    /// input, output, and resize require a running PTY.
+    fn replayable(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
+        matches!(
+            self.record(terminal)?.state,
+            TerminalRuntimeState::Running | TerminalRuntimeState::Exited
+        )
+        .then_some(())
+        .ok_or(GenericTerminalError::ReconcileRequired(
+            TerminalReconcileState::IdentityUnknown,
+        ))
     }
 }
 
