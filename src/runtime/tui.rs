@@ -747,6 +747,15 @@ impl Terminal for CrosstermTerminal {
             )?;
             write!(self.out, "{}", span.text)?;
         }
+        if let Some((row, column)) = diff.input_cursor {
+            queue!(
+                self.out,
+                cursor::MoveTo(
+                    u16::try_from(column).expect("terminal width came from crossterm"),
+                    u16::try_from(row).expect("terminal height came from crossterm")
+                )
+            )?;
+        }
         self.out.flush()
     }
 
