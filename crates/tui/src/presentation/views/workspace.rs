@@ -302,6 +302,67 @@ impl HomeProjection {
         rows
     }
 
+    /// Hit-test a pointer at `(column, row)` against the sidebar and return the
+    /// `Selection` it lands on, or `None` for the header, the divider under the
+    /// Root row, the mascot sidecar, the footer, or a click outside the sidebar.
+    ///
+    /// This mirrors the `home_left_pane` layout (chrome rows, mascot reservation,
+    /// viewport start, and the divider inserted after Root) so pointer selection
+    /// shares the exact geometry the frame is drawn with. It is the controller
+    /// replacement for the legacy `sidebar_row_at` index arithmetic.
+    #[must_use]
+    pub fn row_at(
+        &self,
+        raw_height: usize,
+        raw_width: usize,
+        column: u16,
+        row: u16,
+    ) -> Option<Selection> {
+        let (height, width) = widgets::normalize_size(raw_height, raw_width);
+        let split = panes::split(width, LEFT_WIDTH);
+        if usize::from(column) >= split.left
+            || usize::from(row) < CHROME_ROWS
+            || height <= CHROME_ROWS
+        {
+            return None;
+        }
+        let rows = self.rows();
+        let body_height = height - CHROME_ROWS;
+        if body_height == 1 {
+            return (usize::from(row) == CHROME_ROWS).then(|| rows[0]);
+        }
+        let body_capacity = body_height - 1;
+        let content_capacity =
+            body_capacity.saturating_sub(home_mascot_rows(self, split.left, body_capacity));
+        let clicked = usize::from(row) - CHROME_ROWS;
+        if clicked >= content_capacity {
+            return None;
+        }
+        let selected_index = rows
+            .iter()
+            .position(|entry| *entry == self.selected)
+            .unwrap_or(0);
+        let start = home_viewport_start(&rows, selected_index, content_capacity);
+        let mut offset = 0;
+        for entry in &rows[start..] {
+            let lines = home_row_content_lines(*entry);
+            if offset + lines > content_capacity {
+                break;
+            }
+            if (offset..offset + lines).contains(&clicked) {
+                return Some(*entry);
+            }
+            offset += lines;
+            if matches!(entry, Selection::Target(Target::Root(_))) && offset < content_capacity {
+                if clicked == offset {
+                    return None;
+                }
+                offset += 1;
+            }
+        }
+        None
+    }
+
     #[coverage(off)]
     fn active_label(&self) -> &str {
         match self.active {
@@ -2113,6 +2174,39 @@ fn home_row_height(row: Selection) -> usize {
         usize::from(matches!(row, Selection::Target(Target::Session(_)))) + 1
     }
 }
+
+/// Number of sidebar body lines `home_row_lines_at` renders for `row`, excluding
+/// the divider that `home_left_pane` inserts after the Root row. Root and the
+/// action row are single-line; a session identity row carries a metadata row.
+/// `home_row_height` weights Root as 2 for scroll math (its line plus divider);
+/// this returns the drawn line count so pointer hit-tests match the frame.
+fn home_row_content_lines(row: Selection) -> usize {
+    match row {
+        Selection::Target(Target::Session(_)) => 2,
+        Selection::Target(Target::Root(_)) | Selection::NewSession => 1,
+    }
+}
+
+/// Rows the mascot sidecar reserves at the foot of the sidebar for a given body
+/// capacity. This mirrors the reservation `home_left_pane` computes inline while
+/// rendering; `HomeProjection::row_at` calls it so the hit-test agrees with the
+/// frame on how much room the session list actually has.
+fn home_mascot_rows(home: &HomeProjection, width: usize, body_capacity: usize) -> usize {
+    let metric_labels = home
+        .metrics
+        .as_ref()
+        .map(|metrics| mascot_metrics(Some(metrics), 0))
+        .unwrap_or_default();
+    widgets::mascot::sidebar_block_with_sidecar(
+        width,
+        home.mascot_tick,
+        home.mascot_speech.as_ref(),
+        &metric_labels,
+    )
+    .as_ref()
+    .filter(|block| body_capacity >= block.reserved_rows() + 2)
+    .map_or(0, widgets::mascot::MascotBlock::reserved_rows)
+}
 #[coverage(off)]
 fn home_row_lines_at(
     width: usize,
@@ -2589,6 +2683,93 @@ mod tests {
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    #[test]
+    fn row_at_maps_pointer_clicks_to_sidebar_selections() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
+        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+
+        // Content begins after the two chrome rows: the Root identity line (row 2),
+        // the divider (row 3), the session's two lines (rows 4-5), then the action
+        // row. A click below every rendered row resolves to nothing.
+        assert_eq!(
+            home.row_at(30, 100, 5, 2),
+            Some(Selection::Target(Target::Root(workspace)))
+        );
+        assert_eq!(home.row_at(30, 100, 5, 3), None);
+        assert_eq!(
+            home.row_at(30, 100, 5, 4),
+            Some(Selection::Target(Target::Session(session)))
+        );
+        assert_eq!(
+            home.row_at(30, 100, 5, 5),
+            Some(Selection::Target(Target::Session(session)))
+        );
+        assert_eq!(home.row_at(30, 100, 5, 6), Some(Selection::NewSession));
+        assert_eq!(home.row_at(30, 100, 5, 8), None);
+    }
+
+    #[test]
+    fn row_at_rejects_clicks_outside_the_sidebar_body() {
+        let workspace = WorkspaceId::new();
+        let state = AppState::home(workspace, Vec::new());
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        assert_eq!(home.row_at(30, 100, 90, 4), None); // right pane column
+        assert_eq!(home.row_at(30, 100, 5, 0), None); // header row
+        assert_eq!(home.row_at(30, 100, 5, 1), None); // spacer row
+        assert_eq!(home.row_at(2, 100, 5, 2), None); // height at/under the chrome
+        assert_eq!(home.row_at(8, 100, 5, 7), None); // click past content capacity
+    }
+
+    #[test]
+    fn row_at_handles_single_body_line_and_overflowing_rows() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace, vec![session]);
+        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
+        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+        // body_height == 1: only the first row is addressable.
+        assert_eq!(
+            home.row_at(3, 100, 5, 2),
+            Some(Selection::Target(Target::Root(workspace)))
+        );
+        assert_eq!(home.row_at(3, 100, 5, 5), None);
+        // At height 6 the content capacity is 3, so the session's two lines
+        // overflow after the Root row and divider and cannot be hit.
+        assert_eq!(home.row_at(6, 100, 5, 4), None);
+    }
+
+    #[test]
+    fn pointer_select_row_moves_the_cursor_through_the_reducer() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut state = AppState::home(workspace, vec![session]);
+        let snapshot = vec![projected_session(session, "alpha", "/work/alpha")];
+        let home = HomeProjection::from_state(&state, "work", "/work", &snapshot);
+
+        let hit = home
+            .row_at(30, 100, 5, 4)
+            .expect("session row is addressable");
+        assert_eq!(hit, Selection::Target(Target::Session(session)));
+        let effects = update(&mut state, AppEvent::Key(AppKey::SelectRow(hit)));
+        assert!(effects.is_empty());
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
+
+        // A stale click naming a session that no longer exists leaves the cursor
+        // where it is rather than pointing at a vanished row.
+        let ghost = Selection::Target(Target::Session(SessionId::new()));
+        let _ = update(&mut state, AppEvent::Key(AppKey::SelectRow(ghost)));
+        assert_eq!(
+            state.selected(),
+            Selection::Target(Target::Session(session))
+        );
     }
 
     #[test]

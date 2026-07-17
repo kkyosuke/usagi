@@ -649,6 +649,16 @@ impl AppState {
         self.selected = rows[next];
     }
 
+    /// Move the cursor directly to `selection` when it names a live row. The
+    /// pointer seam relies on `HomeProjection::row_at` to only ever hand back a
+    /// row that exists, but the reducer stays defensive so a stale click can
+    /// never point the cursor at a session that has since disappeared.
+    fn select_row(&mut self, selection: Selection) {
+        if self.rows().contains(&selection) {
+            self.selected = selection;
+        }
+    }
+
     #[coverage(off)]
     fn reconcile_selection(&mut self) {
         let rows = self.rows();
@@ -673,6 +683,9 @@ pub enum AppKey {
     Up,
     /// cursor を次の row へ動かす。
     Down,
+    /// pointer の hit-test（`HomeProjection::row_at`）が返した row へ selected を
+    /// 直接移す。mouse クリック専用の暫定 seam で、terminal 内 drag / copy は対象外。
+    SelectRow(Selection),
     /// selected target を active にし Closeup を開く。
     Enter,
     /// Move to the next field in a local form.
@@ -1787,6 +1800,10 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::Down => {
             state.move_selection(1);
+            Vec::new()
+        }
+        AppKey::SelectRow(selection) => {
+            state.select_row(selection);
             Vec::new()
         }
         AppKey::OpenOverview | AppKey::Char(':') => {
