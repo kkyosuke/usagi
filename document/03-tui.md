@@ -115,6 +115,8 @@ request を非同期に開始し、完了まで行の直前に session と同じ
 左から右へ流れる低速の wave で描き、静的な点滅にはしない。daemon が同一 `OperationId` と revision を持つ `session.created`
 完了 hook を返したときだけ、skeleton をその response 内の snapshot row に置き換えて loading を終了する。`c` と IME に依存しない `Ctrl-A` も
 同じ inline 入力を開く。`Ctrl-A` は選択カーソルも `+ new session` 行へ移動する。Esc は入力を取り消し、空の名前は行の下に error を表示する。
+作成 request の受付後、完了まで入力がなければ、作成された session を選択して Closeup へ移る。完了前に入力があればこの自動遷移を取り消し、
+作成完了後もその時点の操作 surface を保つ。
 完了 snapshot は sidebar row と daemon-issued session ID を同時に置換するため、`a` のような短い名前も
 表示名ではなく stable ID で後続の Agent / terminal request を送る。snapshot の schema が不正な場合は raw
 IPC body を画面やログへ出さず、安全な error を画面に表示して `<data dir>/logs/error-YYYY-MM-DD.log` に schema
