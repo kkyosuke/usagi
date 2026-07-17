@@ -55,6 +55,10 @@ impl DispatchStore {
     }
 
     /// Upserts an agent by its never-reused incarnation ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_agent(&self, agent: Agent) -> Result<Agent> {
         self.mutate_registry(|registry| {
             if let Some(existing) = registry
@@ -71,6 +75,10 @@ impl DispatchStore {
     }
 
     /// Reuses the agent for this session/runtime/model tuple or creates an idle one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_agent_by_runtime_model(
         &self,
         session_id: SessionId,
@@ -96,6 +104,9 @@ impl DispatchStore {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
     pub fn agent(&self, agent_id: AgentId) -> Result<Option<Agent>> {
         Ok(self
             .load_registry()?
@@ -104,11 +115,18 @@ impl DispatchStore {
             .find(|agent| agent.agent_id == agent_id))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         Ok(self.load_registry()?.agents)
     }
 
     /// Adds or replaces a run by `run_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_run(&self, run: DispatchRun) -> Result<DispatchRun> {
         self.mutate_registry(|registry| {
             if let Some(existing) = registry
@@ -125,6 +143,10 @@ impl DispatchStore {
     }
 
     /// Transitions a run and records its completion timestamp when supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn transition_run(
         &self,
         run_id: OperationId,
@@ -132,9 +154,7 @@ impl DispatchStore {
         ended_at: Option<DateTime<Utc>>,
     ) -> Result<Option<DispatchRun>> {
         self.mutate_registry(|registry| {
-            let Some(run) = registry.runs.iter_mut().find(|run| run.run_id == run_id) else {
-                return None;
-            };
+            let run = registry.runs.iter_mut().find(|run| run.run_id == run_id)?;
             run.status = status;
             run.ended_at = ended_at;
             Some(run.clone())
@@ -142,6 +162,10 @@ impl DispatchStore {
     }
 
     /// Transitions an agent's durable availability and current run reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn transition_agent(
         &self,
         agent_id: AgentId,
@@ -149,19 +173,19 @@ impl DispatchStore {
         current_run: Option<OperationId>,
     ) -> Result<Option<Agent>> {
         self.mutate_registry(|registry| {
-            let Some(agent) = registry
+            let agent = registry
                 .agents
                 .iter_mut()
-                .find(|agent| agent.agent_id == agent_id)
-            else {
-                return None;
-            };
+                .find(|agent| agent.agent_id == agent_id)?;
             agent.status = status;
             agent.current_run = current_run;
             Some(agent.clone())
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be locked, read, or written.
     pub fn upsert_binding(&self, binding: DispatchBinding) -> Result<DispatchBinding> {
         self.mutate_registry(|registry| {
             if let Some(existing) = registry
@@ -177,6 +201,9 @@ impl DispatchStore {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be read.
     pub fn binding(&self, run_id: OperationId) -> Result<Option<DispatchBinding>> {
         Ok(self
             .load_registry()?
@@ -186,18 +213,28 @@ impl DispatchStore {
     }
 
     /// Appends a report to the caller's durable inbox.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the inbox cannot be locked, read, or written.
     pub fn append_inbox(&self, caller: &CallerRef, message: InboxMessage) -> Result<()> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let path = self.inbox_path(caller);
         let mut messages = Self::read_inbox(&path)?;
         messages.push(message);
-        self.write_inbox(&path, &messages)
+        Self::write_inbox(&path, &messages)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the inbox cannot be read.
     pub fn inbox(&self, caller: &CallerRef) -> Result<Vec<InboxMessage>> {
         Self::read_inbox(&self.inbox_path(caller))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the inbox cannot be read.
     pub fn unread_inbox(&self, caller: &CallerRef) -> Result<Vec<InboxMessage>> {
         Ok(self
             .inbox(caller)?
@@ -207,6 +244,10 @@ impl DispatchStore {
     }
 
     /// Marks all messages for `run_id` read and returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the inbox cannot be locked, read, or written.
     pub fn mark_inbox_read(&self, caller: &CallerRef, run_id: OperationId) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let path = self.inbox_path(caller);
@@ -219,7 +260,7 @@ impl DispatchStore {
             }
         }
         if changed {
-            self.write_inbox(&path, &messages)?;
+            Self::write_inbox(&path, &messages)?;
         }
         Ok(changed)
     }
@@ -249,7 +290,7 @@ impl DispatchStore {
             .collect()
     }
 
-    fn write_inbox(&self, path: &Path, messages: &[InboxMessage]) -> Result<()> {
+    fn write_inbox(path: &Path, messages: &[InboxMessage]) -> Result<()> {
         let parent = path.parent().expect("inbox path has a parent");
         fs::create_dir_all(parent).context(format!("failed to create {}", parent.display()))?;
         let mut text = messages
@@ -429,7 +470,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 store
                     .append_inbox(&caller, message(OperationId::new(), worker))
-                    .unwrap()
+                    .unwrap();
             }));
         }
         for handle in handles {
