@@ -1999,11 +1999,9 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
             if ui.dragging_terminal_selection {
                 ui.extend_terminal_selection(point);
                 ui.dragging_terminal_selection = false;
-                // Match v1 and native terminal selection: releasing a real
-                // drag copies immediately. This also works in terminal
-                // emulators that consume Cmd-C before crossterm can observe
-                // its Super modifier.
-                ui.queue_terminal_copy();
+                ui.workspace.set_terminal_feedback(Some(
+                    "terminal selection ready; Cmd-C copies".to_owned(),
+                ));
             }
         }
     }
@@ -2113,13 +2111,6 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 /// 順に dispatch する。これにより背面の session / tab が modal 操作で動かない。
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
-    // v1 compatibility: while text is selected, Ctrl-C copies it rather than
-    // ending the TUI. Without a selection the existing global quit behaviour
-    // remains unchanged.
-    if key == Key::Quit && ui.terminal_selection.is_some() {
-        ui.queue_terminal_copy();
-        return WorkspaceStep::Stay;
-    }
     if key == Key::Other {
         ui.advance_terminal_auto_scroll();
         return WorkspaceStep::Stay;

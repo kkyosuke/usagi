@@ -812,12 +812,17 @@ fn control_key(input: &LiveInput) -> Option<Key> {
     let LiveInput::Key(key) = input else {
         return None;
     };
-    key.modifiers.control.then_some(match key.code {
-        KeyCode::Char('c') => Some(Key::Quit),
-        KeyCode::Char('q') => Some(Key::CtrlQ),
-        KeyCode::Char('d') => Some(Key::CtrlD),
-        _ => None,
-    })?
+    (key.modifiers.control
+        && !key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta)
+        .then_some(match key.code {
+            KeyCode::Char('q') => Some(Key::CtrlQ),
+            KeyCode::Char('d') => Some(Key::CtrlD),
+            _ => None,
+        })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier

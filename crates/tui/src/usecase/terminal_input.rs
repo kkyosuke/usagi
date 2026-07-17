@@ -295,8 +295,9 @@ fn is_ctrl_caret(key: &KeyEvent) -> bool {
 
 fn is_copy_shortcut(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('c' | 'C'))
-        && ((key.modifiers.super_ && !key.modifiers.control && !key.modifiers.shift)
-            || (key.modifiers.control && key.modifiers.shift && !key.modifiers.super_))
+        && key.modifiers.super_
+        && !key.modifiers.control
+        && !key.modifiers.shift
         && !key.modifiers.alt
         && !key.modifiers.hyper
         && !key.modifiers.meta
@@ -417,21 +418,6 @@ mod tests {
         ));
         assert_eq!(
             LiveInputClassifier::default().classify(T0, command_c),
-            LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection)
-        );
-        assert_eq!(
-            LiveInputClassifier::default().classify(
-                T0,
-                LiveInput::Key(KeyEvent::new(
-                    KeyCode::Char('c'),
-                    Modifiers {
-                        control: true,
-                        shift: true,
-                        ..Modifiers::default()
-                    },
-                    KeyEventKind::Press,
-                )),
-            ),
             LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection)
         );
     }
