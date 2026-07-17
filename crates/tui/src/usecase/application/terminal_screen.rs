@@ -55,6 +55,8 @@ struct ScreenBuffer {
     cursor_col: usize,
     style: String,
     saved_cursor: Option<(usize, usize)>,
+    scroll_top: usize,
+    scroll_bottom: usize,
 }
 
 impl Cell {
@@ -90,6 +92,10 @@ pub struct TerminalScreen {
     style: String,
     /// Cursor position saved by DECSC (`ESC 7`) or SCP (`CSI s`).
     saved_cursor: Option<(usize, usize)>,
+    /// Inclusive DECSTBM scroll region. Codex reserves its composer outside
+    /// this region and scrolls only the transcript above it.
+    scroll_top: usize,
+    scroll_bottom: usize,
     /// The primary screen while a full-screen program (for example Codex)
     /// renders into the active alternate buffer.
     primary_screen: Option<Box<ScreenBuffer>>,
@@ -115,6 +121,8 @@ impl TerminalScreen {
             utf8_needed: 0,
             style: String::new(),
             saved_cursor: None,
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
             primary_screen: None,
         }
     }
@@ -375,6 +383,7 @@ impl TerminalScreen {
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
+            'r' => self.set_scroll_region(),
             'S' => self.scroll_up(self.param(0, 1)),
             'T' => self.scroll_down(self.param(0, 1)),
             'm' => self.sgr(),
@@ -451,10 +460,43 @@ impl TerminalScreen {
     }
 
     fn line_feed(&mut self) {
-        if self.cursor_row + 1 >= self.rows {
-            self.scroll_up(1);
+        if self.cursor_row >= self.scroll_bottom {
+            self.scroll_region_up(1);
         } else {
             self.cursor_row += 1;
+        }
+    }
+
+    fn set_scroll_region(&mut self) {
+        let top = self.param(0, 1).saturating_sub(1).min(self.rows - 1);
+        let bottom = self
+            .param(1, self.rows)
+            .saturating_sub(1)
+            .min(self.rows - 1);
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+        } else {
+            self.scroll_top = 0;
+            self.scroll_bottom = self.rows - 1;
+        }
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    fn scroll_region_up(&mut self, count: usize) {
+        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            let row = self.grid.remove(self.scroll_top);
+            // Mirror v1's vt100 policy: a region anchored at row zero is
+            // transcript history; a lower region is a transient full-screen UI.
+            if self.primary_screen.is_none() && self.scroll_top == 0 {
+                self.scrollback.push(row);
+                if self.scrollback.len() > 10_000 {
+                    self.scrollback.remove(0);
+                }
+            }
+            self.grid
+                .insert(self.scroll_bottom, vec![Cell::blank(); self.cols]);
         }
     }
 
@@ -556,10 +598,14 @@ impl TerminalScreen {
             cursor_col: self.cursor_col,
             style: std::mem::take(&mut self.style),
             saved_cursor: self.saved_cursor.take(),
+            scroll_top: self.scroll_top,
+            scroll_bottom: self.scroll_bottom,
         }));
         self.grid = vec![vec![Cell::blank(); self.cols]; self.rows];
         self.cursor_row = 0;
         self.cursor_col = 0;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows - 1;
     }
 
     fn leave_alternate_screen(&mut self) {
@@ -572,6 +618,8 @@ impl TerminalScreen {
         self.cursor_col = primary.cursor_col;
         self.style = primary.style;
         self.saved_cursor = primary.saved_cursor;
+        self.scroll_top = primary.scroll_top;
+        self.scroll_bottom = primary.scroll_bottom;
     }
 
     /// Reads the `idx`-th `;`-separated numeric CSI parameter, or `default` when
@@ -779,6 +827,18 @@ mod tests {
 
         screen.advance(b"\x1b[1T");
         assert_eq!(screen.rows_with_scrollback(), vec!["", "two", "three"]);
+    }
+
+    #[test]
+    fn codex_scroll_region_keeps_the_composer_and_latest_reply_on_screen() {
+        let mut screen = TerminalScreen::new(4, 16);
+        screen.advance(b"\x1b[?1049hheader\x1b[2;3r\x1b[2;1Hone\r\ntwo\r\nreply");
+
+        assert_eq!(screen.rows(), vec!["header", "two", "reply", ""]);
+        assert_eq!(
+            screen.rows_with_scrollback(),
+            vec!["header", "two", "reply"]
+        );
     }
 
     #[test]
