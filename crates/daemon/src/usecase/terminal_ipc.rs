@@ -305,13 +305,16 @@ mod tests {
     #[derive(Default)]
     struct Pty {
         writes: Vec<u8>,
+        spawned_geometry: Option<Geometry>,
     }
     impl GenericPtySpawner for Pty {
         fn spawn(
             &mut self,
             _: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
             _: &TerminalRef,
+            geometry: Geometry,
         ) -> Result<ProcessIdentity, SpawnFailure> {
+            self.spawned_geometry = Some(geometry);
             Ok(ProcessIdentity {
                 pid: 7,
                 start_identity: "fake".into(),
@@ -360,7 +363,7 @@ mod tests {
                     worktree_id: worktree,
                 },
             },
-            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            geometry: TerminalGeometry { cols: 43, rows: 17 },
         };
         let launched = call(
             &mut runtime,
@@ -370,6 +373,10 @@ mod tests {
             TerminalRequest::Launch { intent },
         );
         let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
+        assert_eq!(
+            runtime.pty.spawned_geometry,
+            Some(Geometry { cols: 43, rows: 17 })
+        );
         let attached = call(
             &mut runtime,
             connection,

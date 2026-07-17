@@ -433,6 +433,7 @@ impl GenericPtySpawner for DaemonPty {
         &mut self,
         launch: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
         terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure> {
         let environment = launch
             .environment
@@ -444,7 +445,7 @@ impl GenericPtySpawner for DaemonPty {
             &launch.snapshot.arguments,
             &environment,
             &launch.snapshot.working_directory,
-            Geometry { cols: 80, rows: 24 },
+            geometry,
         )
         .map_err(|_| SpawnFailure::Definite)?;
         let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;

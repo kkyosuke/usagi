@@ -64,6 +64,7 @@ pub trait GenericPtySpawner {
         &mut self,
         launch: &ResolvedTerminalLaunch,
         terminal: &TerminalRef,
+        geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure>;
 }
 
@@ -137,7 +138,7 @@ impl GenericTerminalCoordinator {
         if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
             return Err(GenericTerminalError::Terminal(error));
         }
-        match spawner.spawn(&resolved, &terminal) {
+        match spawner.spawn(&resolved, &terminal, geometry) {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("reserved record");
                 record.process = Some(process);
@@ -424,6 +425,7 @@ mod tests {
             &mut self,
             _: &ResolvedTerminalLaunch,
             _: &TerminalRef,
+            _: Geometry,
         ) -> Result<ProcessIdentity, SpawnFailure> {
             self.0.clone()
         }
