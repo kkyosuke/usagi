@@ -70,7 +70,7 @@ skeleton は current target にならない。名前・補足・marker は ANSI 
 CJK、Nerd Font glyph 未対応、極小幅でも後続行の style や列幅を壊さない。
 
 Home controller の management input では、Switch の `Ctrl-A` は新規 session 作成フォームを開き、`Ctrl-Q`
-は workspace 終了確認、`Ctrl-C` は TUI 終了として扱う。Closeup の live pane は `Ctrl-O` prefix 以外の
+は workspace 終了確認を開く。Switch の `Ctrl-C` は何もしない。Closeup の live pane は `Ctrl-O` prefix 以外の
 入力を所有するため、同じ control bytes は management transition に渡さない。Closeup の `Ctrl-O o` は
 Switch へ戻り、Switch 中の `Ctrl-O` は単体では mode を変えない。
 

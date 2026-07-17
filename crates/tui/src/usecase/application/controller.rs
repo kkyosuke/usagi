@@ -683,8 +683,8 @@ pub enum AppKey {
     Home,
     /// 最前面の overlay を閉じる。Home の mode は変えない。
     Escape,
-    /// Management-screen Ctrl-C. Live Ctrl-C is classified before it reaches
-    /// this reducer and is passed through to the PTY.
+    /// Management-screen Ctrl-C. It is ignored in Switch mode; live Ctrl-C is
+    /// classified before it reaches this reducer and is passed through to the PTY.
     CtrlC,
     /// Management-screen Ctrl-Q. Live Ctrl-Q is likewise PTY passthrough.
     CtrlQ,
@@ -1704,6 +1704,9 @@ fn update_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     }
     match key {
         AppKey::CtrlC => {
+            if matches!(state.route, Route::Home(HomeMode::Switch)) {
+                return Vec::new();
+            }
             if std::mem::take(&mut state.ctrl_c_grace) {
                 state.notice = Some(Notice::new("Ctrl-C ignored after leaving live pane"));
                 Vec::new()
@@ -2586,16 +2589,17 @@ mod tests {
     }
 
     #[test]
-    fn management_ctrl_c_detaches_without_live_pane_and_confirms_with_one() {
+    fn switch_ctrl_c_is_ignored_while_closeup_preserves_existing_quit_behavior() {
         let (workspace, session, _) = ids();
         let mut idle = AppState::home(workspace, Vec::new());
-        assert_eq!(
-            update(&mut idle, AppEvent::Key(AppKey::CtrlC)),
-            vec![Effect::Detach]
-        );
+        assert!(update(&mut idle, AppEvent::Key(AppKey::CtrlC)).is_empty());
+        assert_eq!(idle.route(), Route::Home(HomeMode::Switch));
+        assert_eq!(idle.overlay(), None);
 
         let mut live = AppState::home(workspace, vec![session]);
         let _ = update(&mut live, AppEvent::LivePaneAvailability(true));
+        let _ = update(&mut live, AppEvent::Key(AppKey::Enter));
+        assert_eq!(live.route(), Route::Home(HomeMode::Closeup));
         assert!(live.has_live_pane());
         assert!(update(&mut live, AppEvent::Key(AppKey::CtrlC)).is_empty());
         assert_eq!(live.overlay(), Some(Overlay::QuitConfirmation));
@@ -2629,28 +2633,18 @@ mod tests {
     }
 
     #[test]
-    fn leaving_live_pane_arms_one_shot_ctrl_c_grace_and_other_input_clears_it() {
+    fn switch_ctrl_c_never_detaches_after_leaving_a_live_pane() {
         let (workspace, _, _) = ids();
         let mut state = AppState::home(workspace, Vec::new());
         let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
         let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
         assert!(state.ctrl_c_grace());
         assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-        assert!(!state.ctrl_c_grace());
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlC)),
-            vec![Effect::Detach]
-        );
-
-        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
-        let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
         assert!(state.ctrl_c_grace());
+
         let _ = update(&mut state, AppEvent::Key(AppKey::Down));
         assert!(!state.ctrl_c_grace());
-        assert_eq!(
-            update(&mut state, AppEvent::Key(AppKey::CtrlC)),
-            vec![Effect::Detach]
-        );
+        assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
     }
 
     #[test]
