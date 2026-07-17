@@ -128,6 +128,7 @@ impl OutputJournal for DiscardJournal {
 struct RootCodexProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
+    mcp_command: PathBuf,
 }
 impl CodexProvisioner for RootCodexProvisioner {
     fn provision(
@@ -142,13 +143,22 @@ impl CodexProvisioner for RootCodexProvisioner {
         Ok(CodexProvision {
             working_directory,
             environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
-            spawn: SpawnProvision::new([], Vec::new()),
+            spawn: SpawnProvision::new(
+                [],
+                context
+                    .inject_mcp
+                    .then(|| codex_mcp_arguments(&self.mcp_command))
+                    .transpose()
+                    .map_err(|()| CodexProvisionFailure::MaterializationFailed)?
+                    .unwrap_or_default(),
+            ),
         })
     }
 }
 struct RootClaudeProvisioner {
     sessions: SharedSessionRuntime,
     readiness: Arc<dyn AgentReadinessProbe>,
+    mcp_command: PathBuf,
 }
 impl ClaudeProvisioner for RootClaudeProvisioner {
     fn provision(
@@ -163,9 +173,44 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
         Ok(ClaudeProvision {
             working_directory,
             environment_allowlist: BTreeSet::<EnvironmentVariableName>::new(),
-            spawn: SpawnProvision::new([], Vec::new()),
+            spawn: SpawnProvision::new(
+                [],
+                context
+                    .inject_mcp
+                    .then(|| claude_mcp_arguments(&self.mcp_command))
+                    .transpose()
+                    .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?
+                    .unwrap_or_default(),
+            ),
         })
     }
+}
+
+/// Product-specific MCP launch arguments.  They stay ephemeral in
+/// [`SpawnProvision`] so the durable launch plan never stores configuration
+/// paths or rendered product payloads.
+fn codex_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
+    let command = command.to_str().ok_or(())?;
+    let command = serde_json::to_string(command).map_err(|_| ())?;
+    Ok(vec![
+        "-c".into(),
+        format!("mcp_servers.usagi.command = {command}"),
+        "-c".into(),
+        r#"mcp_servers.usagi.args = ["mcp"]"#.into(),
+    ])
+}
+
+fn claude_mcp_arguments(command: &Path) -> Result<Vec<String>, ()> {
+    let command = command.to_str().ok_or(())?;
+    let config = serde_json::json!({
+        "mcpServers": {
+            "usagi": {
+                "command": command,
+                "args": ["mcp"],
+            }
+        }
+    });
+    Ok(vec!["--mcp-config".into(), config.to_string()])
 }
 
 /// Product-owned, non-secret pre-spawn readiness boundary.  Implementations
@@ -351,8 +396,12 @@ impl PtySpawner for AgentPty {
         terminal: &TerminalRef,
     ) -> Result<ProcessIdentity, SpawnFailure> {
         let plan = &launch.plan;
-        let mut argv = plan.argv.clone();
-        argv.extend(provision.arguments().iter().cloned());
+        // Product provisioning contributes global CLI options (MCP/config/hooks),
+        // which must precede product subcommands and the optional prompt after
+        // `--`.  The provision stays non-durable even though it is part of the
+        // one-time process invocation.
+        let mut argv = provision.arguments().to_vec();
+        argv.extend(plan.argv.iter().cloned());
         let mut environment = self.environment.clone();
         environment.extend(
             provision
@@ -686,7 +735,14 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     );
     start_terminal_observer(Arc::clone(&terminal), observations)?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
-    let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
+    let mcp_command = std::env::current_exe()?;
+    let agent = open_agent_runtime(
+        data_dir,
+        daemon_generation,
+        Arc::clone(&runtime),
+        agent_pty,
+        mcp_command,
+    );
     start_agent_observer(Arc::clone(&agent), agent_observations)?;
     start_ipc_accept_loop(
         listener,
@@ -703,6 +759,7 @@ fn open_agent_runtime(
     generation: usagi_core::domain::id::DaemonGeneration,
     sessions: SharedSessionRuntime,
     pty: AgentPty,
+    mcp_command: PathBuf,
 ) -> SharedAgentRuntime {
     let mut registry = AdapterRegistry::new();
     let readiness: Arc<dyn AgentReadinessProbe> = Arc::new(SystemAgentReadiness);
@@ -713,10 +770,12 @@ fn open_agent_runtime(
         CodexAdapter::new(RootCodexProvisioner {
             sessions: Arc::clone(&sessions),
             readiness: Arc::clone(&readiness),
+            mcp_command: mcp_command.clone(),
         }),
         ClaudeAdapter::new(RootClaudeProvisioner {
             sessions,
             readiness,
+            mcp_command,
         }),
     );
     Arc::new(Mutex::new(AgentRuntime::with_dispatch(
@@ -1577,6 +1636,28 @@ mod tests {
     use usagi_daemon::usecase::terminal_ipc::{
         ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
     };
+
+    #[test]
+    fn product_mcp_arguments_start_usagi_mcp_from_the_daemon_binary() {
+        let command = Path::new("/opt/usagi/bin/usagi");
+
+        assert_eq!(
+            codex_mcp_arguments(command).unwrap(),
+            [
+                "-c",
+                "mcp_servers.usagi.command = \"/opt/usagi/bin/usagi\"",
+                "-c",
+                "mcp_servers.usagi.args = [\"mcp\"]",
+            ]
+        );
+        assert_eq!(
+            claude_mcp_arguments(command).unwrap(),
+            [
+                "--mcp-config",
+                r#"{"mcpServers":{"usagi":{"args":["mcp"],"command":"/opt/usagi/bin/usagi"}}}"#,
+            ]
+        );
+    }
 
     #[derive(Clone)]
     struct TestTerminalScope {
