@@ -615,7 +615,12 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         daemon_generation,
     )?;
     let (pty, observations) = DaemonPty::new();
-    let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
+    let terminal = new_terminal_runtime(
+        data_dir,
+        daemon_generation,
+        trusted_repository_root(&runtime)?,
+        pty,
+    );
     start_terminal_observer(Arc::clone(&terminal), observations)?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
     let agent = open_agent_runtime(data_dir, daemon_generation, Arc::clone(&runtime), agent_pty);
@@ -694,6 +699,16 @@ fn open_session_runtime(
     SessionRuntime::open(repo_root, state_dir, generation, SystemGit)
         .map(|runtime| Arc::new(Mutex::new(runtime)))
         .map_err(|error| std::io::Error::other(error.safe_message()))
+}
+
+/// Reads the root selected by the durable session store, rather than the
+/// daemon process's startup directory. This keeps terminal profile resolution
+/// aligned with restored managed-session state after a restart.
+fn trusted_repository_root(sessions: &SharedSessionRuntime) -> std::io::Result<PathBuf> {
+    sessions
+        .lock()
+        .map(|sessions| sessions.repository_root().to_path_buf())
+        .map_err(|_| std::io::Error::other("session runtime is unavailable"))
 }
 
 fn new_terminal_runtime(
@@ -1382,4 +1397,52 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 #[coverage(off)]
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client(ClientPolicy::tui()).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use usagi_core::domain::{
+        id::{SessionId, WorkspaceId, WorktreeId},
+        terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
+    };
+
+    #[test]
+    fn restart_from_another_directory_launches_terminals_at_the_restored_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original_root = temporary.path().join("original-root");
+        let restart_directory = temporary.path().join("restart-directory");
+        let daemon_state = temporary.path().join("shared-daemon");
+        std::fs::create_dir_all(&original_root).unwrap();
+        std::fs::create_dir_all(&restart_directory).unwrap();
+
+        let first = open_session_runtime(
+            original_root.clone(),
+            &daemon_state,
+            usagi_core::domain::id::DaemonGeneration::new(),
+        )
+        .unwrap();
+        drop(first);
+        let restored = open_session_runtime(
+            restart_directory,
+            &daemon_state,
+            usagi_core::domain::id::DaemonGeneration::new(),
+        )
+        .unwrap();
+
+        let profile =
+            LoginShellProfile::new(BTreeMap::new(), trusted_repository_root(&restored).unwrap());
+        let launch = profile
+            .resolve(&TerminalLaunchRequest {
+                profile_id: TerminalProfileId::new("login-shell").unwrap(),
+                scope: TerminalLaunchScope {
+                    workspace_id: WorkspaceId::new(),
+                    session_id: Some(SessionId::new()),
+                    worktree_id: WorktreeId::new(),
+                },
+            })
+            .unwrap();
+
+        assert_eq!(launch.snapshot.working_directory, original_root);
+    }
 }
