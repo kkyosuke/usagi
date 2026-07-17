@@ -548,6 +548,9 @@ struct WorkspaceUi {
     session_commands: Option<Box<dyn SessionCommandPort>>,
     session_completions: Receiver<SessionCommandCompletion>,
     session_completion_sender: Sender<SessionCommandCompletion>,
+    /// Name of a create whose successful completion may still take focus. Any
+    /// later user input clears this, leaving the user on their current surface.
+    create_auto_closeup: Option<String>,
     skeleton_frame: usize,
     metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
@@ -581,6 +584,12 @@ fn handle_sidebar_click(
     let Key::Click { column, row } = key else {
         return false;
     };
+    // This path returns before `step_workspace`, so record a genuine pointer
+    // interaction here as well. A later lifecycle completion must not replace
+    // a user's explicit navigation choice.
+    if ui.workspace.pending_session().is_some() {
+        ui.create_auto_closeup = None;
+    }
     if usize::from(*column) >= workspace::right_pane_left(width) {
         return false;
     }
@@ -683,6 +692,7 @@ impl WorkspaceUi {
             session_commands: Some(session_commands),
             session_completions,
             session_completion_sender,
+            create_auto_closeup: None,
             skeleton_frame: 0,
             metrics_port: Box::new(NoMetrics),
             agent: None,
@@ -1401,6 +1411,7 @@ fn begin_session_create(ui: &mut WorkspaceUi, command: SessionCommand) {
     let workspace = ui.workspace.record().clone();
     let selected = ui.workspace.selected_session().cloned();
     ui.workspace.begin_pending_session(name.clone());
+    ui.create_auto_closeup = Some(name.clone());
     if let Some(WorkspaceModal::Overview(modal)) = ui.modal.as_mut() {
         modal.set_result(format!("Creating session {name}…"));
     }
@@ -1460,8 +1471,19 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
                 apply_session_projection(ui, result.sessions, result.session_ids);
                 ui.workspace.finish_inline_session_create();
                 ui.modal = None;
+                if let Some(name) = ui.create_auto_closeup.take()
+                    && let Some(index) = ui
+                        .workspace
+                        .sessions()
+                        .iter()
+                        .position(|session| session.name == name)
+                {
+                    ui.workspace.select_row(index + 1);
+                    ui.enter_closeup();
+                }
             }
             Err(error) => {
+                ui.create_auto_closeup = None;
                 ui.show_error_dialog(&error);
             }
         }
@@ -2180,8 +2202,16 @@ fn parse_close_force(arguments: &str) -> Result<bool, &'static str> {
 #[coverage(off)]
 fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     if key == Key::Other {
+        // The runtime maps ticks and backend wakeups to `Other`; they are not
+        // user input and must not cancel a pending create's safe landing.
         ui.advance_terminal_auto_scroll();
         return WorkspaceStep::Stay;
+    }
+    // The create-triggering key arrives before `begin_session_create` sets this
+    // marker. Every subsequent user key is an explicit choice to keep
+    // navigating, so a late completion must not steal focus into Closeup.
+    if ui.workspace.pending_session().is_some() {
+        ui.create_auto_closeup = None;
     }
     // A failure dialog is acknowledgement-only: no command, including quit,
     // should leak through to the workspace behind it.
@@ -5214,6 +5244,10 @@ mod tests {
         // The create runs on a worker thread; the skeleton appears synchronously.
         assert_eq!(ui.workspace.pending_session(), Some("review"));
 
+        // The runtime emits `Other` for ticks and backend wakeups. It is not
+        // user input and must not cancel the completion's safe landing.
+        assert_eq!(step_workspace(&mut ui, Key::Other), WorkspaceStep::Stay);
+
         // Wait for the worker to finish, then drain its completion.
         while ui.workspace.pending_session().is_some() {
             drain_session_completions(&mut ui);
@@ -5233,19 +5267,51 @@ mod tests {
         // The daemon snapshot returned by the port replaces the sidebar rows.
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
 
-        // The snapshot row is immediately a real navigation target. Before the
-        // pane-state synchronization this selection made the next render panic
-        // because the newly-created session had no entry in `Workspace::panes`.
-        assert_eq!(step_workspace(&mut ui, Key::Down), WorkspaceStep::Stay);
+        // Without intervening input, completion focuses the created session and
+        // opens its Closeup. The pane map is initialized before that selection.
         assert_eq!(
             ui.workspace
                 .selected_session()
                 .map(|session| session.name.as_str()),
             Some("review")
         );
-        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
         assert!(render_workspace(40, 80, &ui).join("\n").contains("review"));
+    }
+
+    #[test]
+    fn input_while_session_create_is_pending_cancels_automatic_closeup() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let workspace = WorkspaceView::new(ws("alpha"), state("alpha"));
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(SnapshotSessionPort(calls)),
+            ModalSelectionMode::Action,
+        );
+        while !ui.workspace.new_session_selected() {
+            assert_eq!(step_workspace(&mut ui, Key::Down), WorkspaceStep::Stay);
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        for character in "review".chars() {
+            assert_eq!(
+                step_workspace(&mut ui, Key::Char(character)),
+                WorkspaceStep::Stay
+            );
+        }
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        assert_eq!(ui.workspace.pending_session(), Some("review"));
+
+        // This input is handled while the worker is still pending, so a later
+        // successful completion updates the sidebar but leaves navigation here.
+        assert_eq!(step_workspace(&mut ui, Key::Up), WorkspaceStep::Stay);
+        while ui.workspace.pending_session().is_some() {
+            drain_session_completions(&mut ui);
+            std::thread::yield_now();
+        }
+
+        assert!(ui.workspace.selected_session().is_none());
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
     }
 
     #[test]
