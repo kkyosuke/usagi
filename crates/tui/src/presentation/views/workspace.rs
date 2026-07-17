@@ -1374,7 +1374,7 @@ fn pending_session_rows(width: usize, name: &str, frame: usize) -> Vec<String> {
 fn left_footer(width: usize, ws: &Workspace) -> String {
     let hint = match ws.mode() {
         Mode::Switch => "[switch] ↑↓ select / Enter closeup",
-        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
+        Mode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
     };
     Style::new()
         .dim()
@@ -1870,7 +1870,7 @@ fn home_left_pane(
     }
     let footer = match home.mode {
         HomeMode::Switch => "[switch] ↑↓ select / Enter closeup",
-        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a actions / n/p tabs",
+        HomeMode::Closeup => "[closeup] Ctrl-O then: o switch / a/Ctrl-A actions / n/p tabs",
     };
     lines.push(
         Style::new()

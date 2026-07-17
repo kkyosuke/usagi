@@ -288,6 +288,11 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_a(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{1}'))
+        || (matches!(key.code, KeyCode::Char('a')) && is_only_control(key.modifiers))
+}
+
 fn is_ctrl_caret(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{1e}'))
         || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
@@ -305,12 +310,12 @@ fn is_command_s(key: &KeyEvent) -> bool {
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     let plain = Modifiers::default();
-    if key.modifiers != plain && !is_ctrl_o(key) {
+    if key.modifiers != plain && !is_ctrl_o(key) && !is_ctrl_a(key) {
         return None;
     }
     match key.code {
         KeyCode::Char('o' | '\u{0f}') => Some(LiveTerminalAction::Switch),
-        KeyCode::Char('a') => Some(LiveTerminalAction::OpenCloseupModal),
+        KeyCode::Char('a' | '\u{1}') => Some(LiveTerminalAction::OpenCloseupModal),
         KeyCode::Char('n') | KeyCode::Right => Some(LiveTerminalAction::NextTab),
         KeyCode::Char('p') | KeyCode::Left => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('g') => Some(LiveTerminalAction::Agent),
@@ -566,6 +571,14 @@ mod tests {
             },
             Case {
                 follow_up: key(KeyCode::Char('a')),
+                action: LiveTerminalAction::OpenCloseupModal,
+            },
+            Case {
+                follow_up: ctrl('a'),
+                action: LiveTerminalAction::OpenCloseupModal,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{1}')),
                 action: LiveTerminalAction::OpenCloseupModal,
             },
             Case {
