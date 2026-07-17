@@ -201,9 +201,7 @@ impl<G: GitRunner> SessionRuntime<G> {
     /// Returns an error when the durable lifecycle state cannot be read.
     pub fn snapshot(&self) -> Result<Value, SessionRuntimeError> {
         let state = self.state()?;
-        Ok(
-            json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": state.sessions}),
-        )
+        Ok(snapshot(&state))
     }
 
     /// Resolves only an available, fully fenced managed session to a path.
@@ -358,6 +356,7 @@ impl<G: GitRunner> SessionRuntime<G> {
         payload: &Value,
     ) -> Result<SessionReply, SessionRuntimeError> {
         let name = session_name(payload)?;
+        let force = force(payload)?;
         let operation_id =
             OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
         let before = self.state()?;
@@ -392,7 +391,7 @@ impl<G: GitRunner> SessionRuntime<G> {
                     operation,
                     delete_plan: DeletePlan {
                         targets: vec![name.clone()],
-                        force: false,
+                        force,
                     },
                 },
                 Utc::now(),
@@ -409,7 +408,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             .join(STATE_DIR)
             .join(SESSIONS_DIR)
             .join(&name);
-        match remove_session_tree(&self.git, &path, false) {
+        match remove_session_tree(&self.git, &path, force) {
             Ok(()) => {
                 let completed = self
                     .store
@@ -607,6 +606,16 @@ fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
     Ok(name.to_owned())
 }
 
+/// Parse the optional destructive-removal flag without coercing malformed JSON.
+/// The request schema exposes it as a boolean, so accepting another type here
+/// would make a caller believe a dirty worktree was force-removed when it was not.
+fn force(payload: &Value) -> Result<bool, SessionRuntimeError> {
+    match payload.get("force") {
+        Some(value) => value.as_bool().ok_or(SessionRuntimeError::InvalidRequest),
+        None => Ok(false),
+    }
+}
+
 /// Keep the actionable Git reason on one bounded display line. Session names
 /// are validated before Git is invoked, and the command has no user-supplied
 /// argv or environment, so this only carries the worktree command's own
@@ -672,15 +681,26 @@ fn fence(
 }
 
 fn snapshot(state: &WorkspaceLifecycleState) -> Value {
-    json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": state.sessions})
+    // A reservation is durable so a crashed daemon can reconcile it and replay
+    // its operation safely, but it is not a usable session.  Publishing failed
+    // (or otherwise non-available) reservations lets a failed create become a
+    // selectable sidebar row.  Keep lifecycle recovery state durable while
+    // projecting only checkouts that were actually created to clients.
+    let sessions = state
+        .sessions
+        .iter()
+        .filter(|session| {
+            session.lifecycle == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+        })
+        .collect::<Vec<_>>();
+    json!({"workspace_id": state.workspace_id, "revision": state.state_revision, "sessions": sessions})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
@@ -731,18 +751,18 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
     struct RecordingGit {
-        calls: RefCell<Vec<(PathBuf, Vec<String>)>>,
+        calls: Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>,
     }
     impl RecordingGit {
         fn new() -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
+                calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
     impl GitRunner for RecordingGit {
         fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
-            self.calls.borrow_mut().push((
+            self.calls.lock().unwrap().push((
                 repo.into(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
@@ -876,8 +896,18 @@ mod tests {
             error.safe_message(),
             "cannot create session \"one\": branch usagi/one already exists; choose a different name or remove the stale branch"
         );
+        assert!(
+            runtime.snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            runtime.snapshot().unwrap()["sessions"][0]["failure"]["summary"],
+            runtime.state().unwrap().sessions[0]
+                .failure
+                .as_ref()
+                .unwrap()
+                .summary,
             "session branch already exists"
         );
     }
@@ -906,9 +936,73 @@ mod tests {
             error.safe_message(),
             "cannot create session \"one\": workspace already exists; choose a different name or remove the stale workspace"
         );
+        assert!(
+            runtime.snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            runtime.snapshot().unwrap()["sessions"][0]["failure"]["summary"],
+            runtime.state().unwrap().sessions[0]
+                .failure
+                .as_ref()
+                .unwrap()
+                .summary,
             "session workspace already exists"
+        );
+    }
+
+    #[test]
+    fn remove_forwards_force_to_the_worktree_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            RecordingGit {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .unwrap();
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        std::fs::write(
+            tmp.path().join(".usagi/sessions/one/.git"),
+            "gitdir: /fixture",
+        )
+        .unwrap();
+        runtime
+            .handle(
+                SessionAction::Remove,
+                &operation(),
+                &json!({"name":"one", "force":true}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap()[0].1[..3],
+            ["worktree", "remove", "--force"]
+        );
+    }
+
+    #[test]
+    fn remove_rejects_a_non_boolean_force_flag() {
+        let (_tmp, mut runtime) = runtime(FakeGit::ok());
+        runtime
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .handle(
+                    SessionAction::Remove,
+                    &operation(),
+                    &json!({"name":"one", "force":"yes"}),
+                )
+                .unwrap_err(),
+            SessionRuntimeError::InvalidRequest
         );
     }
 
@@ -1051,9 +1145,13 @@ mod tests {
         )
         .unwrap();
         let snapshot = restarted.snapshot().unwrap();
-        assert_eq!(snapshot["sessions"][1]["lifecycle"], "failed");
+        assert_eq!(snapshot["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(
-            snapshot["sessions"][1]["failure"]["summary"],
+            restarted.state().unwrap().sessions[1]
+                .failure
+                .as_ref()
+                .unwrap()
+                .summary,
             "interrupted; explicit recovery required"
         );
     }
@@ -1125,9 +1223,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(migrated.repo_root, repository);
-        assert_eq!(
-            migrated.snapshot().unwrap()["sessions"][0]["name"],
-            "legacy"
+        assert_eq!(migrated.state().unwrap().sessions[0].name, "legacy");
+        assert!(
+            migrated.snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
         assert!(state_dir.join("sessions.json").is_file());
         assert!(!legacy_dir.join("lifecycle-state.json").exists());
@@ -1156,7 +1257,7 @@ mod tests {
             "guide"
         );
         assert_eq!(
-            git.calls.borrow().as_slice(),
+            git.calls.lock().unwrap().as_slice(),
             &[(
                 nested_repo,
                 vec![

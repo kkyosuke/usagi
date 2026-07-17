@@ -33,6 +33,8 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
+client に返す session 一覧は `available` の managed session だけを投影する。作成に失敗した reservation と中断後に reconcile された record は、operation の再送・復旧判断のため daemon の durable state に残すが、TUI の選択可能な一覧には出さない。
+
 ## session tree と ignore rules
 
 `session create <name>` は workspace root が Git repository なら session root をその repository の
@@ -147,8 +149,11 @@ generic terminal coordinator、trusted `login-shell` profile resolver、durable 
 
 `login-shell` は daemon 起動時に読み取った public terminal environment から、絶対 path の `SHELL` を
 program として選ぶ。存在しない、相対 path、または NUL を含む値は `/bin/sh` へ fallback する。PTY 上では
-`-l -i` を渡し、shell の login と interactive startup を有効にする。working directory は managed session が
-解決した worktree path だけであり、IPC client が任意の path・argv・environment を指定できない。
+`-l -i` を渡し、shell の login と interactive startup を有効にする。daemon は client の完全な
+workspace / session / worktree ID を `SessionRuntime` の available managed session と照合してから、その同じ
+worktree path を cwd として profile resolver に渡す。不一致・unavailable な scope は spawn 前に拒否されるため、
+`TerminalLaunchRequest` の scope と実際の cwd は常に同じ managed session を指す。IPC client が任意の
+path・argv・environment を指定することはできない。
 
 | 項目 | 扱い |
 |---|---|
