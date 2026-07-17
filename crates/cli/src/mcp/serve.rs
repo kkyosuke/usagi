@@ -213,12 +213,10 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
             operation_id,
             payload: arguments,
         }) {
-            Ok(DaemonReply::Accepted { body, .. }) | Ok(DaemonReply::Ok(body)) => {
-                protocol::success(
-                    id,
-                    json!({"content":[{"type":"text","text":body.to_string()}]}),
-                )
-            }
+            Ok(DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) => protocol::success(
+                id,
+                json!({"content":[{"type":"text","text":body.to_string()}]}),
+            ),
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
