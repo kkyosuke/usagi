@@ -3,7 +3,7 @@
 //! This suite deliberately drives only pure reducers and the fake backend seam.
 //! It is safe to run in CI without a PTY, daemon socket, clock, or terminal.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -13,7 +13,9 @@ use usagi_core::domain::id::{
 };
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer, Span};
-use usagi_tui::presentation::views::workspace::{HomeProjection, ProjectedSession, render_home};
+use usagi_tui::presentation::views::workspace::{
+    GitDiff, HomeProjection, ProjectedSession, TerminalViewProjection, render_home,
+};
 use usagi_tui::presentation::widgets::display_width;
 use usagi_tui::usecase::application::controller::{
     AppEvent, AppKey, AppState, BackendEvent, Effect, Feedback, Overlay, SafeError, SafeMessage,
@@ -587,4 +589,115 @@ fn resume_compatibility_fixture_falls_back_for_missing_stale_and_old_state() {
     stale.reconnect(&mut port);
     assert!(stale.pane().tabs().is_empty());
     assert!(port.attachments.is_empty());
+}
+
+/// Freezes the sidebar Git diff columns projected through `with_git_diffs`.
+///
+/// The controller path must draw the same commit and changed-line summary the
+/// legacy sidebar did, so this golden fixes the ported diff column material.
+#[test]
+fn home_frame_golden_covers_sidebar_git_diffs() {
+    let workspace = WorkspaceId::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let mut alpha = session_projection(first, "alpha");
+    let mut beta = session_projection(second, "beta");
+    // Relative time renders against the frame clock; keep the layout stable.
+    alpha.last_modified = Utc::now();
+    beta.last_modified = Utc::now();
+    let state = AppState::home(workspace, vec![first, second]);
+    let diffs = BTreeMap::from([
+        (
+            first,
+            GitDiff {
+                base: "origin/main".into(),
+                ahead: 2,
+                behind: 0,
+                added: 15,
+                removed: 3,
+            },
+        ),
+        (
+            second,
+            GitDiff {
+                base: "origin/main".into(),
+                ahead: 0,
+                behind: 1,
+                added: 4,
+                removed: 40,
+            },
+        ),
+    ]);
+    let home = HomeProjection::from_state(&state, "atlas", "/work/root", &[alpha, beta])
+        .with_git_diffs(&diffs);
+
+    let actual = render_home(14, 60, &home)
+        .iter()
+        .map(|line| strip_ansi(line).trim_end().to_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        actual,
+        include_str!("fixtures/home_git_diffs.golden").trim_end()
+    );
+}
+
+/// Freezes the right-pane live terminal viewport projected through
+/// `with_terminal_view`, including the terminal feedback footer.
+#[test]
+fn home_frame_golden_covers_live_terminal_viewport() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let term = terminal(workspace, session);
+    let target = Target::Session(session);
+    let mut pane = PaneState::new(PaneSelection::Target(target));
+    let operation = OperationId::new();
+    let _ = reduce(
+        &mut pane,
+        PaneEvent::Request {
+            operation,
+            target,
+            kind: PaneKind::Terminal,
+        },
+    );
+    let _ = reduce(
+        &mut pane,
+        PaneEvent::Succeeded {
+            operation,
+            terminal: term.clone(),
+        },
+    );
+    let _ = reduce(
+        &mut pane,
+        PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(term))),
+    );
+    let mut state = AppState::home(workspace, vec![session]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+    let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+    let view = TerminalViewProjection {
+        rows: vec![
+            "$ cargo test".into(),
+            "running 3 tests".into(),
+            "test result: ok".into(),
+        ],
+        scroll: 0,
+        feedback: Some("streaming live output".into()),
+    };
+    let mut builder = session_projection(session, "builder");
+    // Relative time renders against the frame clock; keep the layout stable.
+    builder.last_modified = Utc::now();
+    let home = HomeProjection::from_state(&state, "atlas", "/work/root", &[builder])
+        .with_pane(&pane)
+        .with_terminal_view(Some(view));
+
+    let actual = render_home(12, 50, &home)
+        .iter()
+        .map(|line| strip_ansi(line).trim_end().to_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        actual,
+        include_str!("fixtures/home_live_terminal.golden").trim_end()
+    );
 }
