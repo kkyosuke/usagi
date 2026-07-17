@@ -26,6 +26,8 @@ use usagi_core::domain::id::{OperationId, SessionId, TerminalRef, WorkspaceId};
 use usagi_core::domain::recent::Recent;
 use usagi_core::domain::settings::{DefaultModel, ModalSelectionMode};
 use usagi_core::domain::workspace::Workspace;
+#[cfg(not(test))]
+use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::usecase::client::DaemonMetrics;
 
 use crate::presentation::theme::{Color, Role, Style};
@@ -1481,7 +1483,17 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
                     ui.workspace.complete_pane(operation, terminal.clone());
                     ui.start_terminal_session(terminal, geometry);
                 }
-                Err(message) => ui.workspace.fail_pane(operation, message),
+                Err(message) => {
+                    ui.workspace.fail_pane(operation, message.clone());
+                    // The failed pending tab is removed immediately. Without a
+                    // foreground dialog, tab-less Closeup redraws its action
+                    // modal and hides this pane feedback before it is visible.
+                    // `AgentCommandPort` guarantees that this is a safe
+                    // presentation message, so it is also safe to retain in
+                    // the daily error log for later diagnosis.
+                    record_agent_launch_failure(&message);
+                    ui.show_error_dialog(&message);
+                }
             },
             PaneLaunch::Terminal {
                 operation,
@@ -1517,6 +1529,20 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
         }
     }
 }
+
+/// Retain a safe Agent-launch failure without letting diagnostic IO affect the
+/// Closeup recovery path. Unit tests exercise the UI state transition without
+/// creating files in a developer's configured data directory; `ErrorLog`
+/// itself verifies append and retention behaviour in `usagi-core`.
+#[cfg(not(test))]
+#[coverage(off)]
+fn record_agent_launch_failure(message: &str) {
+    ErrorLog::record(&format!("agent launch failed: {message}"));
+}
+
+#[cfg(test)]
+#[coverage(off)]
+fn record_agent_launch_failure(_message: &str) {}
 
 /// Apply the selector's checked entries one at a time through the existing
 /// daemon-owned port. A checked record must still match the current projection;
@@ -4430,6 +4456,15 @@ mod tests {
                 Some(AgentProfileId::new("codex").expect("canonical profile ID")),
             ),]
         );
+        let frame = render_workspace(40, 80, &ui).join("\n");
+        assert!(frame.contains("Session operation failed"));
+        assert!(frame.contains("agent launch is unavailable"));
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Error(_))));
+
+        // Dismissing the error returns to the tab-less Closeup action modal.
+        assert_eq!(step_workspace(&mut ui, Key::Enter), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
+        assert!(ui.closeup_modal_visible());
     }
 
     #[test]
