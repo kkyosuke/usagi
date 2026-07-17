@@ -921,6 +921,14 @@ pub enum Effect {
         session: SessionId,
         force: bool,
     },
+    /// Remove a named session entered through the workspace Overview command.
+    /// Name resolution remains at the daemon boundary; the controller never
+    /// infers a stable identity from display text.
+    RemoveSessionNamed {
+        workspace: WorkspaceId,
+        name: String,
+        force: bool,
+    },
     /// Open a workspace and request the Home snapshot for this exact incarnation.
     ///
     /// The identity is deliberately not a name or path: a delayed completion for
@@ -2042,11 +2050,13 @@ fn submit_overview_session(state: &mut AppState, arguments: &str) -> Vec<Effect>
             ));
             Vec::new()
         }
-        overview::SessionCommand::Remove { .. } => {
-            state.notice = Some(Notice::new(
-                "named session removal is available in the live TUI",
-            ));
-            Vec::new()
+        overview::SessionCommand::Remove { name, force } => {
+            state.overlay = None;
+            vec![Effect::RemoveSessionNamed {
+                workspace: state.workspace,
+                name,
+                force,
+            }]
         }
     }
 }
@@ -3156,11 +3166,11 @@ mod tests {
                     "session remove feature-x --force".into(),
                 )),
             ),
-            Vec::new()
-        );
-        assert_eq!(
-            state.notice().map(|notice| notice.message.as_str()),
-            Some("named session removal is available in the live TUI")
+            vec![Effect::RemoveSessionNamed {
+                workspace,
+                name: "feature-x".to_owned(),
+                force: true,
+            }]
         );
     }
 

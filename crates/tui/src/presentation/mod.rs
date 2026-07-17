@@ -2780,6 +2780,9 @@ impl ControllerWorkspaceRuntime {
                 ControllerEffect::RemoveSession { session, force, .. } => {
                     self.remove_session(*session, *force);
                 }
+                ControllerEffect::RemoveSessionNamed { name, force, .. } => {
+                    self.remove_session_named(name, *force);
+                }
                 ControllerEffect::RefreshSessions { .. } => self.refresh_sessions(),
                 _ => {}
             }
@@ -2977,6 +2980,36 @@ impl ControllerWorkspaceRuntime {
                     &self.workspace,
                     None,
                     SessionCommand::Remove { name, force },
+                )
+            },
+        );
+        match result {
+            Ok(result) => self.apply_session_snapshot(result),
+            Err(message) => {
+                let _ = crate::usecase::application::controller::update(
+                    &mut self.state,
+                    AppEvent::Backend(
+                        crate::usecase::application::controller::BackendEvent::Notice(
+                            crate::usecase::application::controller::Notice::new(message),
+                        ),
+                    ),
+                );
+            }
+        }
+        self.sync_active_pane();
+    }
+
+    fn remove_session_named(&mut self, name: &str, force: bool) {
+        let result = self.session_commands.as_mut().map_or_else(
+            || Err("session commands are unavailable".to_owned()),
+            |port| {
+                port.execute(
+                    &self.workspace,
+                    None,
+                    SessionCommand::Remove {
+                        name: name.to_owned(),
+                        force,
+                    },
                 )
             },
         );
@@ -3940,16 +3973,14 @@ mod tests {
 
         assert_eq!(
             *calls.lock().unwrap(),
-            vec![
-                ((
-                    "controller-remove".to_owned(),
-                    None,
-                    SessionCommand::Remove {
-                        name: "controller-remove-session".to_owned(),
-                        force: true,
-                    },
-                ))
-            ]
+            vec![(
+                "controller-remove".to_owned(),
+                None,
+                SessionCommand::Remove {
+                    name: "controller-remove-session".to_owned(),
+                    force: true,
+                },
+            )]
         );
     }
 
