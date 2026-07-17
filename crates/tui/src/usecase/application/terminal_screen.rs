@@ -135,13 +135,12 @@ impl TerminalScreen {
         }
     }
 
-    /// Changes the visible grid without replaying prior PTY output.
+    /// Changes the visible width without replaying historical control bytes.
     ///
-    /// A terminal resize is not an output resynchronization: retaining the
-    /// existing cells avoids a disruptive full repaint while a shell or
-    /// full-screen application receives its normal `SIGWINCH` redraw.  Cells
-    /// beyond a narrowed right or bottom edge are discarded; newly exposed
-    /// cells are blank.
+    /// Historical PTY output can contain cursor moves addressed to a prior
+    /// width (notably shell right prompts). Replaying those bytes at a smaller
+    /// width duplicates rows. Resize the decoded cells instead: cells outside
+    /// the new viewport are clipped and existing history keeps its row count.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -151,6 +150,9 @@ impl TerminalScreen {
 
         let old_rows = self.rows;
         self.grid = resize_grid(std::mem::take(&mut self.grid), rows, cols);
+        for row in &mut self.scrollback {
+            resize_row(row, cols);
+        }
         self.rows = rows;
         self.cols = cols;
         self.cursor_row = self.cursor_row.min(rows - 1);
@@ -664,14 +666,18 @@ impl TerminalScreen {
     }
 }
 
+fn resize_row(row: &mut Vec<Cell>, cols: usize) {
+    row.truncate(cols);
+    row.resize(cols, Cell::blank());
+    if row.last().is_some_and(|cell| cell.continuation) {
+        *row.last_mut().expect("terminal rows are never empty") = Cell::blank();
+    }
+}
+
 fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Cell>> {
     grid.truncate(rows);
     for row in &mut grid {
-        row.truncate(cols);
-        row.resize(cols, Cell::blank());
-        if row.last().is_some_and(|cell| cell.continuation) {
-            *row.last_mut().expect("non-empty rows have a last cell") = Cell::blank();
-        }
+        resize_row(row, cols);
     }
     grid.resize_with(rows, || vec![Cell::blank(); cols]);
     grid
@@ -679,6 +685,9 @@ fn resize_grid(mut grid: Vec<Vec<Cell>>, rows: usize, cols: usize) -> Vec<Vec<Ce
 
 fn resize_buffer(buffer: &mut ScreenBuffer, rows: usize, cols: usize, old_rows: usize) {
     buffer.grid = resize_grid(std::mem::take(&mut buffer.grid), rows, cols);
+    for row in &mut buffer.scrollback {
+        resize_row(row, cols);
+    }
     buffer.cursor_row = buffer.cursor_row.min(rows - 1);
     buffer.cursor_col = buffer.cursor_col.min(cols - 1);
     buffer.saved_cursor = buffer
@@ -805,17 +814,19 @@ mod tests {
     }
 
     #[test]
-    fn resize_preserves_visible_cells_without_replaying_the_screen() {
-        let mut screen = TerminalScreen::new(2, 8);
-        screen.advance(b"abcdefgh");
+    fn resize_clips_scrollback_without_creating_additional_rows() {
+        let mut screen = TerminalScreen::new(2, 10);
+        screen.advance(b"first-row\r\nsecond-row\r\nthird-row");
+        assert_eq!(
+            screen.rows_with_scrollback(),
+            vec!["first-row", "second-row", "third-row"]
+        );
 
-        screen.resize(2, 4);
-        assert_eq!(screen.rows(), vec!["abcd", ""]);
-        assert_eq!(screen.cursor(), (0, 3));
-
-        screen.resize(3, 10);
-        assert_eq!(screen.rows(), vec!["abcd", "", ""]);
-        assert_eq!(screen.cursor(), (0, 3));
+        screen.resize(2, 5);
+        assert_eq!(
+            screen.rows_with_scrollback(),
+            vec!["first", "secon", "third"]
+        );
     }
 
     #[test]

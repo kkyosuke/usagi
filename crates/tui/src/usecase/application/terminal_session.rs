@@ -271,17 +271,26 @@ impl TerminalSession {
         }
     }
 
-    /// Rebuilds the complete local screen after the visible pane changes size.
-    ///
-    /// Retained output includes right prompts and full-screen redraws whose
-    /// cells were positioned for the prior width. Reattaching the daemon's
-    /// atomic replay at the new geometry reflows both the current row and
-    /// scrollback; retaining only the visible grid leaves old right prompts
-    /// stranded at their former columns.
+    /// Resizes the daemon PTY and decoded terminal cells without replaying
+    /// historical cursor movement sequences at the new width.
     pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
         if self.geometry != geometry {
-            self.geometry = geometry;
-            self.connect(port);
+            match port.resize(&self.terminal, geometry) {
+                Ok(()) => {
+                    self.geometry = geometry;
+                    self.synchronized_geometry = Some(geometry);
+                    self.screen
+                        .resize(geometry.rows as usize, geometry.cols as usize);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.synchronized_geometry = None;
+                    self.error = Some(format!(
+                        "terminal viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
         } else if self.synchronized_geometry != Some(geometry) {
             match port.resize(&self.terminal, geometry) {
                 Ok(()) => {
@@ -517,12 +526,9 @@ mod tests {
     }
 
     #[test]
-    fn resizing_rebuilds_current_and_retained_output_at_the_new_width() {
+    fn resizing_clips_current_and_retained_output_without_reattaching() {
         let mut port = FakePort {
-            attach: vec![
-                Ok(attach(1, 3, b"old", false)),
-                Ok(attach(2, 5, b"wide", false)),
-            ],
+            attach: vec![Ok(attach(1, 3, b"old", false))],
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
@@ -531,9 +537,9 @@ mod tests {
         session.resize(&mut port, resized);
 
         assert_eq!(port.resized, vec![geometry(), resized]);
-        assert_eq!(session.rows()[0], "wide");
+        assert_eq!(session.rows()[0], "old");
         assert_eq!(session.state(), SessionState::Live);
-        assert_eq!(port.resize_count_at_attach, vec![1, 2]);
+        assert_eq!(port.resize_count_at_attach, vec![1]);
     }
 
     #[test]
