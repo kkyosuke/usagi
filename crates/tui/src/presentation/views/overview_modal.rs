@@ -449,7 +449,9 @@ mod tests {
                 }
                 continue;
             }
-            out.push(ch);
+            if !matches!(ch, '\u{e0001}' | '\u{e0002}') {
+                out.push(ch);
+            }
         }
         out
     }
