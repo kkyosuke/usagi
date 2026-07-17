@@ -898,4 +898,71 @@ mod tests {
             Err(SupervisorError::InvalidTransition)
         );
     }
+
+    #[test]
+    fn child_dispatch_requires_its_parent_dispatch_provenance() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let root = task(run.supervisor_run_id, "root", &[]);
+        let mut child = task(run.supervisor_run_id, "child", &[]);
+        child.parent_task_id = Some(TaskId::new("root").unwrap());
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: root }),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(2, SupervisorEventKind::AddTask { task: child }),
+        )
+        .unwrap();
+        let root_id = TaskId::new("root").unwrap();
+        let root_dispatch = OperationId::new();
+        let root_provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: root_id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: root_dispatch,
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Dispatch {
+                    task_id: root_id,
+                    generation: 1,
+                    provenance: root_provenance,
+                },
+            ),
+        )
+        .unwrap();
+        let child_id = TaskId::new("child").unwrap();
+        let child_provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: child_id.clone(),
+            parent_task_id: Some(TaskId::new("root").unwrap()),
+            parent_dispatch_run: Some(root_dispatch),
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                4,
+                SupervisorEventKind::Dispatch {
+                    task_id: child_id,
+                    generation: 1,
+                    provenance: child_provenance,
+                },
+            ),
+        )
+        .unwrap();
+    }
 }
