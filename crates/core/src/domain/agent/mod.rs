@@ -8,7 +8,103 @@ use std::{collections::BTreeSet, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::id::{SessionId, WorkspaceId, WorktreeId};
+use chrono::{DateTime, Utc};
+
+use crate::domain::id::{AgentId, OperationId, SessionId, WorkspaceId, WorktreeId};
+
+/// A dispatchable agent which outlives any one runtime process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Agent {
+    pub agent_id: AgentId,
+    pub session_id: SessionId,
+    pub runtime: AgentProfileId,
+    pub model: ModelSelector,
+    pub status: AgentStatus,
+    pub current_run: Option<OperationId>,
+}
+
+/// The durable availability state of a dispatchable agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Idle,
+    Running,
+    Exited,
+    Failed,
+}
+
+/// One immediate dispatch execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchRun {
+    pub run_id: OperationId,
+    pub agent_id: AgentId,
+    pub prompt: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub status: RunStatus,
+}
+
+/// The durable result state of a dispatch run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    Completed,
+    Failed,
+    NoReport,
+}
+
+/// The caller side of a durable dispatch binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallerRef {
+    pub session_id: SessionId,
+    pub agent_id: AgentId,
+}
+
+/// The worker side of a durable dispatch binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRef {
+    pub session_id: SessionId,
+    pub agent_id: AgentId,
+}
+
+/// Durable caller-to-worker routing for one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchBinding {
+    pub run_id: OperationId,
+    pub caller: CallerRef,
+    pub worker: WorkerRef,
+}
+
+/// A structured completion payload supplied by a worker.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StructuredResult {
+    pub pr: Option<String>,
+    pub commits: Vec<String>,
+    pub changed_files: Vec<String>,
+    pub verification: Option<String>,
+}
+
+/// The kind of a durable inbox delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxKind {
+    Completed,
+    Failed,
+    NoReport,
+}
+
+/// A report delivered durably to one caller agent's inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxMessage {
+    pub run_id: OperationId,
+    pub from: WorkerRef,
+    pub kind: InboxKind,
+    pub summary: String,
+    pub result: Option<StructuredResult>,
+    pub created_at: DateTime<Utc>,
+    pub read: bool,
+}
 
 /// Stable, code-defined identity of an agent profile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -484,5 +580,98 @@ mod tests {
             LaunchValidationError::PlanProvenanceMismatch,
         ];
         assert!(errors.iter().all(|error| !error.to_string().is_empty()));
+    }
+
+    #[test]
+    fn dispatch_domain_values_round_trip_through_json() {
+        let session_id = SessionId::new();
+        let agent_id = AgentId::new();
+        let run_id = OperationId::new();
+        let worker = WorkerRef {
+            session_id,
+            agent_id,
+        };
+        let agent = Agent {
+            agent_id,
+            session_id,
+            runtime: AgentProfileId::new("codex").unwrap(),
+            model: ModelSelector::new("gpt-5").unwrap(),
+            status: AgentStatus::Running,
+            current_run: Some(run_id),
+        };
+        let run = DispatchRun {
+            run_id,
+            agent_id,
+            prompt: "implement #321".into(),
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            status: RunStatus::Running,
+        };
+        let binding = DispatchBinding {
+            run_id,
+            caller: CallerRef {
+                session_id,
+                agent_id,
+            },
+            worker: worker.clone(),
+        };
+        let message = InboxMessage {
+            run_id,
+            from: worker,
+            kind: InboxKind::Completed,
+            summary: "done".into(),
+            result: Some(StructuredResult {
+                pr: Some("#321".into()),
+                commits: vec!["abc".into()],
+                changed_files: vec!["crates/core/src/domain/agent/mod.rs".into()],
+                verification: Some("cargo test".into()),
+            }),
+            created_at: chrono::Utc::now(),
+            read: false,
+        };
+        let agent_json = serde_json::to_string(&agent).unwrap();
+        assert_eq!(serde_json::from_str::<Agent>(&agent_json).unwrap(), agent);
+        let run_json = serde_json::to_string(&run).unwrap();
+        assert_eq!(serde_json::from_str::<DispatchRun>(&run_json).unwrap(), run);
+        let binding_json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(
+            serde_json::from_str::<DispatchBinding>(&binding_json).unwrap(),
+            binding
+        );
+        let message_json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InboxMessage>(&message_json).unwrap(),
+            message
+        );
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Running,
+            AgentStatus::Exited,
+            AgentStatus::Failed,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<AgentStatus>(&serde_json::to_string(&status).unwrap())
+                    .unwrap(),
+                status
+            );
+        }
+        for status in [
+            RunStatus::Running,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::NoReport,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<RunStatus>(&serde_json::to_string(&status).unwrap())
+                    .unwrap(),
+                status
+            );
+        }
+        for kind in [InboxKind::Completed, InboxKind::Failed, InboxKind::NoReport] {
+            assert_eq!(
+                serde_json::from_str::<InboxKind>(&serde_json::to_string(&kind).unwrap()).unwrap(),
+                kind
+            );
+        }
     }
 }

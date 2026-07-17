@@ -126,6 +126,7 @@ resource_id!(SessionId, "Identity of one session record incarnation.");
 resource_id!(WorktreeId, "Identity of one physical checkout incarnation.");
 resource_id!(TerminalId, "Identity of one terminal reservation.");
 resource_id!(AgentRuntimeId, "Identity of one Agent process runtime.");
+resource_id!(AgentId, "Identity of one dispatchable Agent incarnation.");
 resource_id!(ClientId, "Identity of one client process.");
 resource_id!(ConnectionId, "Identity of one socket connection.");
 resource_id!(RequestId, "Identity of one RPC within a client process.");
