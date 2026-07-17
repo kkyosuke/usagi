@@ -307,5 +307,5 @@ TUI-local feedback として表示する。transport の内部 detail や secret
 terminal input を送らない。
 
 `q` は確認後に TUI だけを閉じ、daemon-owned terminal は継続する。`Ctrl-Q` は確認後に workspace の
-live session すべてへ強制終了を要求してから TUI を閉じる。確認 modal は `[ ok ] [cancel]` を表示し、
-`Enter`、左右、Tab、`o`、`c`、Esc で操作できる。
+live session すべてへ強制終了を要求してから TUI を閉じる。確認 modal は `[ yes ] [ no ]` を表示し、
+`Enter`、左右、Tab、`y`、`n`、Esc で操作できる。

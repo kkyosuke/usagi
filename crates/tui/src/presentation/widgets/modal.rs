@@ -64,9 +64,66 @@ pub fn fixed_body(mut body: Vec<String>, body_height: usize) -> Vec<String> {
     body
 }
 
-/// Two fixed-width buttons shared by destructive and dismiss-only modals.
-/// Selection uses role-coloured text and bold weight; focus never changes the
-/// bracket geometry.
+/// Shared state for a two-choice confirmation modal.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfirmationModal {
+    confirm_selected: bool,
+}
+
+impl ConfirmationModal {
+    /// Create a modal focused on the affirmative choice.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn new() -> Self {
+        Self {
+            confirm_selected: true,
+        }
+    }
+
+    /// Whether Yes is selected.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn is_confirm_selected(self) -> bool {
+        self.confirm_selected
+    }
+
+    /// Select Yes.
+    #[coverage(off)]
+    pub fn select_confirm(&mut self) {
+        self.confirm_selected = true;
+    }
+
+    /// Select No.
+    #[coverage(off)]
+    pub fn select_cancel(&mut self) {
+        self.confirm_selected = false;
+    }
+
+    /// Move focus between Yes and No.
+    #[coverage(off)]
+    pub fn toggle(&mut self) {
+        self.confirm_selected = !self.confirm_selected;
+    }
+}
+
+impl Default for ConfirmationModal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Display content and emphasis for a shared confirmation modal.
+pub struct ConfirmationView<'a> {
+    pub title: &'a str,
+    pub inner_width: usize,
+    pub heading: String,
+    pub message: &'a str,
+    pub confirm_role: Role,
+}
+
+/// Two fixed-width Yes/No buttons shared by confirmation modals. Selection
+/// uses role-coloured text and bold weight; focus never changes the bracket
+/// geometry.
 #[must_use]
 #[coverage(off)]
 pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> String {
@@ -75,18 +132,46 @@ pub fn confirmation_buttons(confirm_selected: bool, confirm_role: Role) -> Strin
     // labels an explicit white base so focus changes cannot leave a stale
     // success/danger colour behind.
     let idle = Style::new().fg(Color::White).dim();
-    let (ok, cancel) = if confirm_selected {
+    let (yes, no) = if confirm_selected {
         (
-            selected(confirm_role).paint("[  ok  ]"),
-            idle.paint("[cancel]"),
+            selected(confirm_role).paint("[ yes ]"),
+            idle.paint("[ no  ]"),
         )
     } else {
         (
-            idle.paint("[  ok  ]"),
-            selected(Role::Warning).paint("[cancel]"),
+            idle.paint("[ yes ]"),
+            selected(Role::Warning).paint("[ no  ]"),
         )
     };
-    format!("  {ok}  {cancel}")
+    format!("  {yes}  {no}")
+}
+
+/// Render a standard Yes/No confirmation over an existing frame.
+#[must_use]
+#[coverage(off)]
+pub fn render_confirmation_over(
+    raw_height: usize,
+    raw_width: usize,
+    base: &[String],
+    state: ConfirmationModal,
+    view: ConfirmationView<'_>,
+) -> Vec<String> {
+    render_over(
+        raw_height,
+        raw_width,
+        base,
+        view.title,
+        view.inner_width,
+        &[
+            view.heading,
+            Style::new().fg(Color::White).paint(view.message),
+            String::new(),
+            confirmation_buttons(state.is_confirm_selected(), view.confirm_role),
+            Style::new()
+                .dim()
+                .paint("  Enter/y: yes   Esc/n: no   ←→/Tab: choose"),
+        ],
+    )
 }
 
 /// `body` を中央寄せの [`boxed`] modal に収めたフレームを返す。枠は水平・垂直とも中央に置き、
@@ -268,8 +353,8 @@ pub fn render_over(
 #[cfg(test)]
 mod tests {
     use super::{
-        boxed, columns, confirmation_buttons, fixed_body, modal_inner_width, render_modal,
-        render_over,
+        ConfirmationModal, ConfirmationView, boxed, columns, confirmation_buttons, fixed_body,
+        modal_inner_width, render_confirmation_over, render_modal, render_over,
     };
     use crate::presentation::theme::Role;
 
@@ -278,13 +363,47 @@ mod tests {
         let ok_selected = confirmation_buttons(true, Role::Success);
         let cancel_selected = confirmation_buttons(false, Role::Danger);
         assert_eq!(display_width(&ok_selected), display_width(&cancel_selected));
-        assert_eq!(display_width(&ok_selected), 20);
-        assert!(ok_selected.contains("[  ok  ]"));
-        assert!(cancel_selected.contains("[cancel]"));
+        assert_eq!(display_width(&ok_selected), 18);
+        assert!(ok_selected.contains("[ yes ]"));
+        assert!(cancel_selected.contains("[ no  ]"));
         assert!(ok_selected.contains("\u{1b}[1;32m"));
         assert!(cancel_selected.contains("\u{1b}[1;33m"));
         assert!(ok_selected.contains("\u{1b}[2;37m"));
         assert!(cancel_selected.contains("\u{1b}[2;37m"));
+    }
+
+    #[test]
+    fn confirmation_modal_defaults_to_yes_and_can_select_no() {
+        let mut modal = ConfirmationModal::new();
+        assert!(modal.is_confirm_selected());
+        modal.toggle();
+        assert!(!modal.is_confirm_selected());
+        modal.select_confirm();
+        assert!(modal.is_confirm_selected());
+        modal.select_cancel();
+        assert!(!modal.is_confirm_selected());
+    }
+
+    #[test]
+    fn confirmation_renderer_uses_yes_no_copy_and_shortcuts() {
+        let frame = render_confirmation_over(
+            12,
+            60,
+            &vec![String::new(); 12],
+            ConfirmationModal::new(),
+            ConfirmationView {
+                title: "Confirm",
+                inner_width: 40,
+                heading: "Proceed?".to_owned(),
+                message: "This is a test.",
+                confirm_role: Role::Danger,
+            },
+        )
+        .join("\n");
+        assert!(frame.contains("[ yes ]"));
+        assert!(frame.contains("[ no  ]"));
+        assert!(frame.contains("Enter/y: yes"));
+        assert!(frame.contains("Esc/n: no"));
     }
     use crate::presentation::widgets::display_width;
 

@@ -19,7 +19,7 @@ use usagi_core::domain::workspace::{Workspace, WorkspaceOverview};
 
 use crate::presentation::layouts::mascot_screen;
 use crate::presentation::theme::{Role, Style};
-use crate::presentation::widgets::{self, TextInput};
+use crate::presentation::widgets::{self, TextInput, modal::ConfirmationModal};
 
 /// 画面上部に置くタイトル。
 const TITLE: &str = "Open Workspace";
@@ -41,7 +41,7 @@ pub struct Open {
     unite_paths: HashSet<std::path::PathBuf>,
     cleanup_confirming: bool,
     unregistering_path: Option<std::path::PathBuf>,
-    unregister_confirm_selected: bool,
+    unregister_confirmation: ConfirmationModal,
 }
 
 impl Open {
@@ -76,7 +76,7 @@ impl Open {
             unite_paths: HashSet::new(),
             cleanup_confirming: false,
             unregistering_path: None,
-            unregister_confirm_selected: true,
+            unregister_confirmation: ConfirmationModal::new(),
         }
     }
 
@@ -145,7 +145,14 @@ impl Open {
     #[must_use]
     #[coverage(off)]
     pub const fn unregister_confirm_selected(&self) -> bool {
-        self.unregister_confirm_selected
+        self.unregister_confirmation.is_confirm_selected()
+    }
+
+    /// Shared confirmation-modal state for the pending unregister action.
+    #[must_use]
+    #[coverage(off)]
+    pub const fn unregister_confirmation(&self) -> ConfirmationModal {
+        self.unregister_confirmation
     }
 
     /// Append one character to the filter and return selection to its first hit.
@@ -222,26 +229,26 @@ impl Open {
     #[coverage(off)]
     pub fn request_unregister(&mut self) {
         self.unregistering_path = self.selected().map(|workspace| workspace.path.clone());
-        self.unregister_confirm_selected = true;
+        self.unregister_confirmation.select_confirm();
     }
 
     /// Dismiss a selected-entry unregister confirmation without mutation.
     #[coverage(off)]
     pub fn cancel_unregister(&mut self) {
         self.unregistering_path = None;
-        self.unregister_confirm_selected = true;
+        self.unregister_confirmation.select_confirm();
     }
 
     /// Move the unregister modal focus between its confirm and cancel buttons.
     #[coverage(off)]
     pub fn toggle_unregister_choice(&mut self) {
-        self.unregister_confirm_selected = !self.unregister_confirm_selected;
+        self.unregister_confirmation.toggle();
     }
 
     /// Consume the path selected for confirmed registry removal.
     #[coverage(off)]
     pub fn confirm_unregister(&mut self) -> Option<std::path::PathBuf> {
-        if !self.unregister_confirm_selected {
+        if !self.unregister_confirmation.is_confirm_selected() {
             self.cancel_unregister();
             return None;
         }
@@ -256,7 +263,7 @@ impl Open {
         self.unite_paths.retain(|path| !paths.contains(path));
         self.cleanup_confirming = false;
         self.unregistering_path = None;
-        self.unregister_confirm_selected = true;
+        self.unregister_confirmation.select_confirm();
         self.selected_index = 0;
     }
 
