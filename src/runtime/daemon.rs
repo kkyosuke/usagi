@@ -1469,9 +1469,52 @@ pub(crate) fn ensure_ready() -> Result<(), ClientError> {
 mod tests {
     use super::*;
     use usagi_core::domain::{
-        id::{SessionId, WorkspaceId, WorktreeId},
+        id::{DaemonGeneration, SessionId, TerminalId, WorkspaceId, WorktreeId},
         terminal_launch::{TerminalLaunchRequest, TerminalLaunchScope, TerminalProfileId},
     };
+
+    #[test]
+    fn generic_pty_reports_child_exit_after_the_shell_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: WorkspaceId::new(),
+            session_id: Some(SessionId::new()),
+            worktree_id: WorktreeId::new(),
+        };
+        let request = TerminalLaunchRequest {
+            profile_id: TerminalProfileId::new("login-shell").unwrap(),
+            scope: TerminalLaunchScope {
+                workspace_id: terminal.workspace_id,
+                session_id: terminal.session_id,
+                worktree_id: terminal.worktree_id,
+            },
+        };
+        let launch = TrustedLoginShell {
+            profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
+        }
+        .resolve(&request)
+        .unwrap();
+        let (mut pty, observations) = DaemonPty::new();
+
+        pty.spawn(&launch, &terminal).unwrap();
+        pty.select_terminal(&terminal);
+        pty.write_all(b"exit\n").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match observations.recv_timeout(remaining).unwrap() {
+                PtyObservation::Output(_, _) => {}
+                PtyObservation::Exited(exited, status) => {
+                    assert_eq!(exited, terminal);
+                    assert_eq!(status, 0);
+                    break;
+                }
+            }
+        }
+    }
 
     #[test]
     fn restart_from_another_directory_launches_terminals_at_the_restored_root() {

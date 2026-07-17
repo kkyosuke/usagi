@@ -545,6 +545,19 @@ mod tests {
                 &mut runtime,
                 connection,
                 client,
+                TerminalAction::Resume,
+                TerminalRequest::Resume {
+                    terminal: terminal.clone(),
+                    after_offset: 6,
+                }
+            )["exited"],
+            true
+        );
+        assert_eq!(
+            call(
+                &mut runtime,
+                connection,
+                client,
                 TerminalAction::Resync,
                 TerminalRequest::Resync { terminal }
             )["exited"],
