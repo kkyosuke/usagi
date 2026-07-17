@@ -147,6 +147,9 @@ pub struct InputRequest {
 /// Registry failures are explicit so stale references never fall back to names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryError {
+    /// The output cursor predates the bounded journal. The terminal identity
+    /// remains valid, so the client must attach again and replace its screen.
+    ResyncRequired,
     StaleTarget,
     UnknownSubscription,
     NotAttached,
@@ -320,8 +323,9 @@ impl TerminalRegistry {
 
     /// # Errors
     ///
-    /// Returns [`RegistryError::StaleTarget`] when the reference is stale or
-    /// the requested cursor has fallen out of the bounded journal.
+    /// Returns [`RegistryError::StaleTarget`] when the reference is stale, or
+    /// [`RegistryError::ResyncRequired`] when the cursor has fallen out of the
+    /// bounded journal.
     #[coverage(off)]
     pub fn replay_from(
         &self,
@@ -334,7 +338,7 @@ impl TerminalRegistry {
             .front()
             .map_or(entry.next_offset, |segment| segment.start_offset);
         if offset < oldest {
-            return Err(RegistryError::StaleTarget);
+            return Err(RegistryError::ResyncRequired);
         }
         Ok(entry
             .journal
@@ -548,6 +552,10 @@ mod tests {
         let r = reference();
         let mut registry = registry(r.clone());
         assert_eq!(
+            Writer::default().resize(&r, Geometry { cols: 80, rows: 24 }),
+            Ok(())
+        );
+        assert_eq!(
             registry
                 .append_output(&r, b"abc".to_vec())
                 .unwrap()
@@ -561,7 +569,10 @@ mod tests {
                 .start_offset,
             3
         );
-        assert_eq!(registry.replay_from(&r, 0), Err(RegistryError::StaleTarget));
+        assert_eq!(
+            registry.replay_from(&r, 0),
+            Err(RegistryError::ResyncRequired)
+        );
         assert_eq!(registry.replay_from(&r, 3).unwrap()[0].data, b"def");
     }
     #[test]

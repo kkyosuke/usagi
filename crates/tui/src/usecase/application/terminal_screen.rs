@@ -500,27 +500,20 @@ impl TerminalScreen {
         }
     }
 
-    /// Applies CSI SU. On the primary screen, rows leaving the viewport are
-    /// shell history; on the alternate screen they are transient app frames.
+    /// Applies CSI SU inside the active DECSTBM scroll region. On the primary
+    /// screen, rows leaving a top-anchored region are shell history; on the
+    /// alternate screen they are transient app frames.
     fn scroll_up(&mut self, count: usize) {
-        for _ in 0..count.min(self.rows) {
-            let row = self.grid.remove(0);
-            if self.primary_screen.is_none() {
-                self.scrollback.push(row);
-                if self.scrollback.len() > 10_000 {
-                    self.scrollback.remove(0);
-                }
-            }
-            self.grid.push(vec![Cell::blank(); self.cols]);
-        }
+        self.scroll_region_up(count);
     }
 
-    /// Applies CSI SD. Reverse scrolling is a viewport operation and never
-    /// invents local history.
+    /// Applies CSI SD inside the active DECSTBM scroll region. Reverse
+    /// scrolling never invents local history.
     fn scroll_down(&mut self, count: usize) {
-        for _ in 0..count.min(self.rows) {
-            self.grid.pop();
-            self.grid.insert(0, vec![Cell::blank(); self.cols]);
+        for _ in 0..count.min(self.scroll_bottom - self.scroll_top + 1) {
+            self.grid.remove(self.scroll_bottom);
+            self.grid
+                .insert(self.scroll_top, vec![Cell::blank(); self.cols]);
         }
     }
 
@@ -839,6 +832,26 @@ mod tests {
             screen.rows_with_scrollback(),
             vec!["header", "two", "reply"]
         );
+    }
+
+    #[test]
+    fn csi_scroll_commands_respect_the_codex_scroll_region() {
+        let mut screen = TerminalScreen::new(4, 16);
+        screen.advance(b"\x1b[?1049hheader\x1b[4;1Hcomposer\x1b[2;3r\x1b[2;1Hone\r\ntwo");
+
+        screen.advance(b"\x1b[1S");
+        assert_eq!(screen.rows(), vec!["header", "two", "", "composer"]);
+
+        screen.advance(b"\x1b[1T");
+        assert_eq!(screen.rows(), vec!["header", "", "two", "composer"]);
+    }
+
+    #[test]
+    fn invalid_scroll_region_resets_to_the_full_screen() {
+        let mut screen = TerminalScreen::new(3, 8);
+        screen.advance(b"\x1b[2;3r\x1b[3;2r");
+
+        assert_eq!((screen.scroll_top, screen.scroll_bottom), (0, 2));
     }
 
     #[test]

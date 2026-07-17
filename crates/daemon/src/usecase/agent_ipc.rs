@@ -41,7 +41,7 @@ use crate::presentation::ipc::TerminalOwner;
 use super::{
     orchestration::{AdapterRegistry, OrchestrationError, Orchestrator, RuntimeAuthorization},
     runtime::{OutputJournal, PtySpawner, RuntimeCoordinator, RuntimeError},
-    terminal::{Geometry, InputRequest, PtyWriter},
+    terminal::{Geometry, InputRequest, PtyWriter, RegistryError},
 };
 
 /// A daemon-resolved, fully fenced checkout for an available managed session.
@@ -579,6 +579,10 @@ fn map_runtime_error(error: RuntimeError) -> ProtocolError {
         RuntimeError::ConcurrencyExhausted => (
             ErrorCode::ResourceExhausted,
             "daemon agent runtime capacity is exhausted",
+        ),
+        RuntimeError::Terminal(RegistryError::ResyncRequired) => (
+            ErrorCode::ResyncRequired,
+            "agent terminal output requires resynchronization",
         ),
         RuntimeError::Terminal(_)
         | RuntimeError::UnknownRuntime
@@ -1187,6 +1191,13 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn trimmed_agent_output_maps_to_a_resync_protocol_error() {
+        let error = map_runtime_error(RuntimeError::Terminal(RegistryError::ResyncRequired));
+
+        assert_eq!(error.code, ErrorCode::ResyncRequired);
     }
 
     fn handled(outcome: TerminalOutcome) -> Value {

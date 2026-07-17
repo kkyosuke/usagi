@@ -761,7 +761,6 @@ impl WorkspaceUi {
         self.workspace.set_terminal_view(rows);
     }
 
-    #[coverage(off)]
     fn resize_terminals(&mut self, geometry: Geometry) {
         let Some(agent) = self.agent.as_mut() else {
             return;
@@ -3160,6 +3159,7 @@ mod tests {
         chunk: Option<TerminalChunk>,
         inputs: TerminalInputLog,
         detaches: Arc<Mutex<Vec<u64>>>,
+        resizes: Arc<Mutex<Vec<Geometry>>>,
     }
 
     impl AgentCommandPort for StreamingTerminalPort {
@@ -3190,6 +3190,14 @@ mod tests {
                 replay: self.replay.clone(),
                 exited: false,
             })
+        }
+        fn resize_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<(), TerminalError> {
+            self.resizes.lock().unwrap().push(geometry);
+            Ok(())
         }
         fn poll_terminal(
             &mut self,
@@ -3684,6 +3692,7 @@ mod tests {
             panic!("overview modal should open");
         };
         assert_eq!(overview.selection_mode(), ModalSelectionMode::Prompt);
+        ui.resize_terminals(Geometry { cols: 80, rows: 24 });
         ui.modal = None;
         ui.enter_closeup();
         assert_eq!(ui.closeup.selection_mode(), ModalSelectionMode::Prompt);
@@ -4547,6 +4556,7 @@ mod tests {
         };
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let detaches = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
         let mut port = StreamingTerminalPort {
             terminal: terminal.clone(),
             replay: b"$ ".to_vec(),
@@ -4559,6 +4569,7 @@ mod tests {
             }),
             inputs: Arc::clone(&inputs),
             detaches: Arc::clone(&detaches),
+            resizes: Arc::clone(&resizes),
         };
         // A generic terminal never launches an Agent through this port.
         assert!(port.launch(workspace_id, session_id, None).is_err());
@@ -4590,6 +4601,21 @@ mod tests {
         drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
+
+        ui.resize_terminals(Geometry {
+            cols: 100,
+            rows: 30,
+        });
+        assert_eq!(
+            *resizes.lock().unwrap(),
+            vec![
+                Geometry { cols: 80, rows: 24 },
+                Geometry {
+                    cols: 100,
+                    rows: 30
+                },
+            ]
+        );
 
         // Typing forwards raw bytes exactly once with a monotonic sequence.
         let _ = step_workspace(&mut ui, Key::Char('l'));
@@ -4681,6 +4707,10 @@ mod tests {
         assert!(
             port.launch(WorkspaceId::new(), SessionId::new(), None)
                 .is_err()
+        );
+        assert_eq!(
+            port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
+            Ok(())
         );
         assert_eq!(
             port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),

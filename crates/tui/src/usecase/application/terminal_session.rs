@@ -230,14 +230,19 @@ impl TerminalSession {
     }
 
     /// Attaches (or reattaches) and rebuilds the screen from the retained
-    /// replay.  A prior transport error is cleared on success.
+    /// replay before attempting viewport synchronization. A resize failure
+    /// therefore cannot hide an otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
-        if let Err(error) = port.resize(&self.terminal, self.geometry) {
-            self.fail(error);
-            return;
-        }
         match port.attach(&self.terminal, self.geometry) {
-            Ok(attach) => self.replace(&attach),
+            Ok(attach) => {
+                self.replace(&attach);
+                if let Err(error) = port.resize(&self.terminal, self.geometry) {
+                    self.error = Some(format!(
+                        "terminal attached, but viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
             Err(error) => self.fail(error),
         }
     }
@@ -320,16 +325,17 @@ impl TerminalSession {
                 SessionState::Disconnected
             }
         };
-        self.error = Some(
-            match error {
-                TerminalError::ResyncRequired => "terminal output is resynchronizing",
-                TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
-                TerminalError::Stale => "terminal is no longer available",
-                TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
-                TerminalError::Exited => "terminal has exited",
-            }
-            .to_owned(),
-        );
+        self.error = Some(error_message(error).to_owned());
+    }
+}
+
+fn error_message(error: TerminalError) -> &'static str {
+    match error {
+        TerminalError::ResyncRequired => "terminal output is resynchronizing",
+        TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
+        TerminalError::Stale => "terminal is no longer available",
+        TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
+        TerminalError::Exited => "terminal has exited",
     }
 }
 
@@ -366,11 +372,12 @@ mod tests {
         inputs: Vec<(u64, u64, Vec<u8>)>,
         detached: Vec<u64>,
         resized: Vec<Geometry>,
+        resize_error: Option<TerminalError>,
     }
     impl TerminalStreamPort for FakePort {
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
             self.resized.push(geometry);
-            Ok(())
+            self.resize_error.take().map_or(Ok(()), Err)
         }
 
         fn attach(
@@ -401,6 +408,34 @@ mod tests {
         }
     }
 
+    struct DefaultResizePort;
+
+    impl TerminalStreamPort for DefaultResizePort {
+        fn attach(
+            &mut self,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn input(
+            &mut self,
+            _: &TerminalRef,
+            _: u64,
+            _: u64,
+            _: &[u8],
+        ) -> Result<(), TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn detach(&mut self, _: &TerminalRef, _: u64) {}
+    }
+
     fn attach(subscription: u64, offset: u64, replay: &[u8], exited: bool) -> TerminalAttach {
         TerminalAttach {
             subscription,
@@ -420,6 +455,21 @@ mod tests {
 
     #[test]
     fn connect_renders_replay_and_poll_appends_contiguous_output() {
+        let mut default_port = DefaultResizePort;
+        assert_eq!(default_port.resize(&terminal(), geometry()), Ok(()));
+        assert_eq!(
+            default_port.attach(&terminal(), geometry()),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            default_port.poll(&terminal(), 0),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            default_port.input(&terminal(), 1, 0, b"x"),
+            Err(TerminalError::Unavailable)
+        );
+        default_port.detach(&terminal(), 1);
         let mut port = FakePort {
             attach: vec![Ok(attach(7, 3, b"$ ", false))],
             polls: vec![Ok(vec![chunk(3, b"ls\r\n"), chunk(7, b"a.txt")])],
@@ -523,6 +573,28 @@ mod tests {
         // Input is dropped while not live, and no bytes reach the port.
         session.send_input(&mut port, b"ls\r");
         assert!(port.inputs.is_empty());
+    }
+
+    #[test]
+    fn resize_failure_does_not_prevent_attach_or_hide_replay() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(7, 5, b"reply", false))],
+            resize_error: Some(TerminalError::Unavailable),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "reply");
+        assert_eq!(port.resized, vec![geometry()]);
+        assert_eq!(
+            session.error(),
+            Some(
+                "terminal attached, but viewport synchronization failed: daemon disconnected; reconnect to continue"
+            )
+        );
     }
 
     #[test]
