@@ -58,7 +58,7 @@ use usagi_core::usecase::settings::SettingsPort;
 pub use crate::usecase::application::{WorkspaceLoader, WorkspaceSnapshot};
 
 /// Daemon-authoritative Agent launch boundary for the workspace runtime.
-pub trait AgentCommandPort {
+pub trait AgentCommandPort: Send {
     /// # Errors
     ///
     /// Returns a presentation-safe daemon launch failure.
@@ -552,6 +552,8 @@ struct WorkspaceUi {
     metrics_port: Box<dyn MetricsPort>,
     agent: Option<AgentContext>,
     pane_launches: Vec<PaneLaunch>,
+    pane_completions: Receiver<PaneLaunchCompletion>,
+    pane_completion_sender: Sender<PaneLaunchCompletion>,
     /// Live coordinators for daemon-owned terminals opened in this workspace,
     /// one per live terminal tab.  Detached/closed tabs are pruned lazily.
     terminals: Vec<TerminalSession>,
@@ -627,13 +629,34 @@ fn handle_sidebar_click(
 struct AgentContext {
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
-    port: Box<dyn AgentCommandPort>,
+    /// A launch worker temporarily owns this port. Terminal streaming resumes
+    /// only after the worker returns it with the daemon result.
+    port: Option<Box<dyn AgentCommandPort>>,
     default_profile: AgentProfileId,
 }
 
 struct SessionCommandCompletion {
     port: Box<dyn SessionCommandPort>,
     result: Result<SessionCommandResult, String>,
+}
+
+/// Completion of one non-blocking Agent / terminal launch. Keeping the port in
+/// the message mirrors session creation: one daemon client remains the owner
+/// of its request sequence while the TUI continues rendering the wave.
+struct PaneLaunchCompletion {
+    port: Box<dyn AgentCommandPort>,
+    outcome: PaneLaunchOutcome,
+}
+
+enum PaneLaunchOutcome {
+    Agent {
+        operation: OperationId,
+        result: Result<TerminalRef, String>,
+    },
+    Terminal {
+        operation: OperationId,
+        result: Result<TerminalRef, String>,
+    },
 }
 
 /// A pane has already been rendered as pending before this work is run.
@@ -680,6 +703,7 @@ impl WorkspaceUi {
         let closeup =
             CloseupModal::with_selection_mode(workspace.focused_label(), modal_selection_mode);
         let (session_completion_sender, session_completions) = mpsc::channel();
+        let (pane_completion_sender, pane_completions) = mpsc::channel();
         Self {
             workspace,
             closeup,
@@ -695,6 +719,8 @@ impl WorkspaceUi {
             metrics_port: Box::new(NoMetrics),
             agent: None,
             pane_launches: Vec::new(),
+            pane_completions,
+            pane_completion_sender,
             terminals: Vec::new(),
             terminal_selection: None,
             pending_terminal_pointer: None,
@@ -724,7 +750,7 @@ impl WorkspaceUi {
         self.agent = Some(AgentContext {
             workspace,
             sessions,
-            port,
+            port: Some(port),
             default_profile: AgentProfileId::new(default_model.profile_id())
                 .expect("default model profile IDs are canonical"),
         });
@@ -737,9 +763,13 @@ impl WorkspaceUi {
     /// it never spawns a local process.
     #[coverage(off)]
     fn start_terminal_session(&mut self, terminal: TerminalRef, geometry: Geometry) {
-        if let Some(agent) = self.agent.as_mut() {
+        if let Some(port) = self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())
+        {
             let mut session = TerminalSession::new(terminal, geometry);
-            session.connect(&mut AgentStreamPort(agent.port.as_mut()));
+            session.connect(&mut AgentStreamPort(port));
             self.terminals.push(session);
         }
     }
@@ -752,13 +782,15 @@ impl WorkspaceUi {
             self.workspace.set_terminal_view(None);
             return;
         };
-        let rows = if let (Some(agent), Some(session)) = (
-            self.agent.as_mut(),
+        let rows = if let (Some(port), Some(session)) = (
+            self.agent
+                .as_mut()
+                .and_then(|agent| agent.port.as_deref_mut()),
             self.terminals
                 .iter_mut()
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
-            session.poll(&mut AgentStreamPort(agent.port.as_mut()));
+            session.poll(&mut AgentStreamPort(port));
             Some(self.terminal_selection.as_ref().map_or_else(
                 || session.display_rows_with_scrollback(),
                 |selection| session.display_rows_with_scrollback_selection(selection),
@@ -770,11 +802,15 @@ impl WorkspaceUi {
     }
 
     fn resize_terminals(&mut self, geometry: Geometry) {
-        let Some(agent) = self.agent.as_mut() else {
+        let Some(port) = self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())
+        else {
             return;
         };
         for session in &mut self.terminals {
-            session.resize(&mut AgentStreamPort(agent.port.as_mut()), geometry);
+            session.resize(&mut AgentStreamPort(port), geometry);
         }
     }
 
@@ -860,13 +896,15 @@ impl WorkspaceUi {
         let Some(bytes) = key_to_terminal_bytes(key.clone()) else {
             return false;
         };
-        if let (Some(agent), Some(session)) = (
-            self.agent.as_mut(),
+        if let (Some(port), Some(session)) = (
+            self.agent
+                .as_mut()
+                .and_then(|agent| agent.port.as_deref_mut()),
             self.terminals
                 .iter_mut()
                 .find(|session| session.terminal().fences(&terminal)),
         ) {
-            session.send_input(&mut AgentStreamPort(agent.port.as_mut()), &bytes);
+            session.send_input(&mut AgentStreamPort(port), &bytes);
         }
         true
     }
@@ -899,13 +937,16 @@ impl WorkspaceUi {
         }
 
         if let Some(terminal) = live_terminal {
-            if let Some(agent) = self.agent.as_mut()
+            if let Some(port) = self
+                .agent
+                .as_mut()
+                .and_then(|agent| agent.port.as_deref_mut())
                 && let Some(session) = self
                     .terminals
                     .iter_mut()
                     .find(|session| session.terminal().fences(&terminal))
             {
-                session.detach(&mut AgentStreamPort(agent.port.as_mut()));
+                session.detach(&mut AgentStreamPort(port));
             }
             self.terminals
                 .retain(|session| !session.terminal().fences(&terminal));
@@ -1456,58 +1497,70 @@ fn drain_session_completions(ui: &mut WorkspaceUi) {
     }
 }
 
-/// Launch after the pending frame has reached the terminal.  Keeping this
-/// boundary in the presentation loop makes Agent, terminal, and snapshot diff
-/// visibly share one pending-wave -> selected completion lifecycle.
+/// Start one daemon launch after its pending tab has reached the terminal.
+///
+/// The port travels with the worker and comes back through
+/// [`PaneLaunchCompletion`]. This is deliberately the same ownership pattern
+/// as session creation: a slow daemon request never blocks input, wave redraws,
+/// or the interaction marker that suppresses automatic focus.
 #[coverage(off)]
 fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
-    for launch in std::mem::take(&mut ui.pane_launches) {
+    let mut launches = std::mem::take(&mut ui.pane_launches);
+    while !launches.is_empty() {
+        let launch = launches.remove(0);
         match launch {
             PaneLaunch::Agent {
                 operation,
                 workspace,
                 session,
                 profile,
-            } => match ui
-                .agent
-                .as_mut()
-                .expect("agent context remains while its launch is queued")
-                .port
-                .launch(workspace, session, profile)
-            {
-                Ok(terminal) => {
-                    ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal, geometry);
-                }
-                Err(message) => {
-                    ui.workspace.fail_pane(operation, message.clone());
-                    // The failed pending tab is removed immediately. Without a
-                    // foreground dialog, tab-less Closeup redraws its action
-                    // modal and hides this pane feedback before it is visible.
-                    // `AgentCommandPort` guarantees that this is a safe
-                    // presentation message, so it is also safe to retain in
-                    // the daily error log for later diagnosis.
-                    record_agent_launch_failure(&message);
-                    ui.show_error_dialog(&message);
-                }
-            },
+            } => {
+                let Some(mut port) = ui.agent.as_mut().and_then(|agent| agent.port.take()) else {
+                    ui.pane_launches.push(PaneLaunch::Agent {
+                        operation,
+                        workspace,
+                        session,
+                        profile,
+                    });
+                    continue;
+                };
+                let sender = ui.pane_completion_sender.clone();
+                std::thread::spawn(move || {
+                    let result = port.launch(workspace, session, profile);
+                    let _ = sender.send(PaneLaunchCompletion {
+                        port,
+                        outcome: PaneLaunchOutcome::Agent { operation, result },
+                    });
+                });
+                // Only one worker may own this stateful daemon port. Remaining
+                // requests stay visibly pending and start after completion.
+                ui.pane_launches.append(&mut launches);
+                return;
+            }
             PaneLaunch::Terminal {
                 operation,
                 workspace,
                 session,
-            } => match ui
-                .agent
-                .as_mut()
-                .expect("agent context remains while its launch is queued")
-                .port
-                .launch_terminal(workspace, session, geometry)
-            {
-                Ok(terminal) => {
-                    ui.workspace.complete_pane(operation, terminal.clone());
-                    ui.start_terminal_session(terminal, geometry);
-                }
-                Err(message) => ui.workspace.fail_pane(operation, message),
-            },
+            } => {
+                let Some(mut port) = ui.agent.as_mut().and_then(|agent| agent.port.take()) else {
+                    ui.pane_launches.push(PaneLaunch::Terminal {
+                        operation,
+                        workspace,
+                        session,
+                    });
+                    continue;
+                };
+                let sender = ui.pane_completion_sender.clone();
+                std::thread::spawn(move || {
+                    let result = port.launch_terminal(workspace, session, geometry);
+                    let _ = sender.send(PaneLaunchCompletion {
+                        port,
+                        outcome: PaneLaunchOutcome::Terminal { operation, result },
+                    });
+                });
+                ui.pane_launches.append(&mut launches);
+                return;
+            }
             PaneLaunch::Diff { operation } => {
                 let document = ui.overlay_data.diff(&ui.workspace);
                 let lines = match document {
@@ -1524,6 +1577,48 @@ fn drain_pane_launches(ui: &mut WorkspaceUi, geometry: Geometry) {
             PaneLaunch::Fail { operation, message } => ui.workspace.fail_pane(operation, message),
         }
     }
+}
+
+/// Apply completed launch workers before a redraw. The workspace reducer owns
+/// the focus decision, using its interaction counter captured at request time.
+#[coverage(off)]
+fn drain_pane_completions(ui: &mut WorkspaceUi, geometry: Geometry) {
+    while let Ok(completion) = ui.pane_completions.try_recv() {
+        if let Some(agent) = ui.agent.as_mut() {
+            agent.port = Some(completion.port);
+        }
+        match completion.outcome {
+            PaneLaunchOutcome::Agent { operation, result } => match result {
+                Ok(terminal) if pending_pane(ui, operation) => {
+                    ui.workspace.complete_pane(operation, terminal.clone());
+                    ui.start_terminal_session(terminal, geometry);
+                }
+                Err(message) if pending_pane(ui, operation) => {
+                    ui.workspace.fail_pane(operation, message.clone());
+                    record_agent_launch_failure(&message);
+                    ui.show_error_dialog(&message);
+                }
+                Ok(_) | Err(_) => {}
+            },
+            PaneLaunchOutcome::Terminal { operation, result } => match result {
+                Ok(terminal) if pending_pane(ui, operation) => {
+                    ui.workspace.complete_pane(operation, terminal.clone());
+                    ui.start_terminal_session(terminal, geometry);
+                }
+                Err(message) if pending_pane(ui, operation) => {
+                    ui.workspace.fail_pane(operation, message);
+                }
+                Ok(_) | Err(_) => {}
+            },
+        }
+    }
+}
+
+fn pending_pane(ui: &WorkspaceUi, operation: OperationId) -> bool {
+    ui.workspace.pane().tabs().iter().any(|tab| {
+        matches!(tab, crate::usecase::application::pane::PaneTab::Pending(pending)
+            if pending.operation == operation)
+    })
 }
 
 /// Retain a safe Agent-launch failure without letting diagnostic IO affect the
@@ -2466,6 +2561,7 @@ fn drive_workspace_with_ports_and_selection_mode(
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
+        drain_pane_completions(&mut ui, terminal_geometry(height, width));
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
@@ -2607,6 +2703,7 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         refresh_metrics(&mut ui);
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
+        drain_pane_completions(&mut ui, terminal_geometry(height, width));
         ui.resize_terminals(terminal_geometry(height, width));
         ui.refresh_terminal();
         term.draw(&render_workspace(height, width, &ui))?;
@@ -3071,7 +3168,7 @@ mod tests {
         QuitAction, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
         SnapshotOverlayData, Start, TerminalAttach, TerminalChunk, TerminalError,
         UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_completions, drain_pane_launches,
         drain_session_completions, execute_closeup_command, handle_sidebar_click,
         key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
         run as run_from_start, run_with_settings,
@@ -3093,7 +3190,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
@@ -3146,6 +3243,18 @@ mod tests {
         WorkspaceSnapshot::new(ws(name), state(name))
     }
 
+    fn finish_pane_launch(ui: &mut WorkspaceUi, geometry: Geometry) {
+        drain_pane_launches(ui, geometry);
+        for _ in 0..1_000 {
+            drain_pane_completions(ui, geometry);
+            if ui.agent.as_ref().is_none_or(|agent| agent.port.is_some()) {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("pane launch worker did not complete");
+    }
+
     type SessionCommandCall = (String, Option<String>, SessionCommand);
 
     type AgentCommandCall = (WorkspaceId, SessionId, Option<AgentProfileId>);
@@ -3174,6 +3283,25 @@ mod tests {
             _profile: Option<AgentProfileId>,
         ) -> Result<TerminalRef, String> {
             Ok(self.0.clone())
+        }
+    }
+
+    struct DeferredAgentPort {
+        terminal: TerminalRef,
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl AgentCommandPort for DeferredAgentPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            let _ = self.started.send(());
+            self.release.recv().expect("test releases the agent launch");
+            Ok(self.terminal.clone())
         }
     }
 
@@ -4442,7 +4570,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         let _ = step_workspace(&mut ui, Key::Enter);
-        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert_eq!(
             *calls.lock().unwrap(),
@@ -4501,7 +4629,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Agent
         ));
-        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4510,6 +4638,69 @@ mod tests {
                     && live.terminal == terminal
         ));
         assert!(matches!(
+            ui.workspace.pane().selected(),
+            crate::usecase::application::pane::PaneSelection::Tab(
+                crate::usecase::application::pane::TabSelection::Live(selected)
+            ) if *selected == terminal
+        ));
+    }
+
+    #[test]
+    fn input_while_an_agent_tab_loads_cancels_its_automatic_focus() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let (started_sender, started) = mpsc::channel();
+        let (release, release_receiver) = mpsc::channel();
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-agent-interaction"),
+            state("closeup-agent-interaction"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(DeferredAgentPort {
+                terminal: terminal.clone(),
+                started: started_sender,
+                release: release_receiver,
+            }),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        started.recv().expect("agent worker started");
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Pending(pending)]
+                if pending.kind == crate::usecase::application::pane::PaneKind::Agent
+        ));
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        release.send(()).expect("worker still receives completion");
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
+
+        assert!(matches!(
+            ui.workspace.pane().tabs(),
+            [crate::usecase::application::pane::PaneTab::Live(live)] if live.terminal == terminal
+        ));
+        assert!(!matches!(
             ui.workspace.pane().selected(),
             crate::usecase::application::pane::PaneSelection::Tab(
                 crate::usecase::application::pane::TabSelection::Live(selected)
@@ -4560,7 +4751,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Terminal
         ));
-        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4589,7 +4780,7 @@ mod tests {
             [crate::usecase::application::pane::PaneTab::Pending(pending)]
                 if pending.kind == crate::usecase::application::pane::PaneKind::Diff
         ));
-        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
 
         assert!(matches!(
             ui.workspace.pane().tabs(),
@@ -4663,7 +4854,7 @@ mod tests {
         let _ = step_workspace(&mut ui, Key::Down);
         let _ = step_workspace(&mut ui, Key::Enter);
         execute_closeup_command(&mut ui, "terminal");
-        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
 

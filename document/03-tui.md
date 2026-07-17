@@ -209,8 +209,9 @@ pending tab を安全な feedback に置き換える。`←` / `→`（または
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
 terminal を停止しない。
 
-各起動 request は launch / document resolve の前に一度描画されるため、pending chip は既存の共有 shimmer wave を
-必ず表示する。completion が到着した後の次フレームでは、request 受付後に入力がなかった場合だけ同じ stable identity の live / document tab を選択する。
+Agent / terminal の launch は session create と同じく worker で実行し、daemon port は completion とともに UI へ返す。したがって
+request を受け付けたフレームから completion まで pending chip は既存の共有 shimmer wave を表示し続け、入力は block されない。
+completion が到着した後の次フレームでは、request 受付後に入力がなかった場合だけ同じ stable identity の live / document tab を選択する。
 
 ### live terminal の出力表示と入力
 
