@@ -1999,9 +1999,10 @@ fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Op
             if ui.dragging_terminal_selection {
                 ui.extend_terminal_selection(point);
                 ui.dragging_terminal_selection = false;
-                ui.workspace.set_terminal_feedback(Some(
-                    "terminal selection ready; Cmd-S copies".to_owned(),
-                ));
+                // macOS terminal emulators often reserve Cmd-C before it can
+                // reach crossterm. Copy on release, as v1 did, so this custom
+                // selection is reliably placed on the system clipboard.
+                ui.queue_terminal_copy();
             }
         }
     }

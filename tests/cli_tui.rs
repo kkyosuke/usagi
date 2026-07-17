@@ -112,7 +112,11 @@ fn cli_daemon_request_autostarts_without_manual_daemon_start() {
         home.path(),
     );
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "daemon autostart wrote stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_daemon_running(home.path());
     stop_daemon(home.path());
 }
