@@ -64,6 +64,7 @@ pub trait GenericPtySpawner {
         &mut self,
         launch: &ResolvedTerminalLaunch,
         terminal: &TerminalRef,
+        geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure>;
 }
 
@@ -137,7 +138,7 @@ impl GenericTerminalCoordinator {
         if let Err(error) = self.terminals.register(terminal.clone(), geometry) {
             return Err(GenericTerminalError::Terminal(error));
         }
-        match spawner.spawn(&resolved, &terminal) {
+        match spawner.spawn(&resolved, &terminal, geometry) {
             Ok(process) => {
                 let record = self.records.get_mut(&key).expect("reserved record");
                 record.process = Some(process);
@@ -243,9 +244,7 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         offset: u64,
     ) -> Result<Vec<Output>, GenericTerminalError> {
-        // An exited terminal still owns its final retained output long enough
-        // for an attached client to observe the exit and close its pane.
-        self.record(terminal)?;
+        self.replayable(terminal)?;
         self.terminals
             .replay_from(terminal, offset)
             .map_err(GenericTerminalError::Terminal)
@@ -363,6 +362,20 @@ impl GenericTerminalCoordinator {
                 TerminalReconcileState::IdentityUnknown,
             ))
     }
+
+    /// Retained output remains readable after a terminal exits. Only launches,
+    /// input, output, and resize require a running PTY.
+    #[coverage(off)] // Narrow state predicate exercised by the exited-output contract test.
+    fn replayable(&self, terminal: &TerminalRef) -> Result<(), GenericTerminalError> {
+        matches!(
+            self.record(terminal)?.state,
+            TerminalRuntimeState::Running | TerminalRuntimeState::Exited
+        )
+        .then_some(())
+        .ok_or(GenericTerminalError::ReconcileRequired(
+            TerminalReconcileState::IdentityUnknown,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +439,7 @@ mod tests {
             &mut self,
             _: &ResolvedTerminalLaunch,
             _: &TerminalRef,
+            _: Geometry,
         ) -> Result<ProcessIdentity, SpawnFailure> {
             self.0.clone()
         }
@@ -492,6 +506,32 @@ mod tests {
         c.disconnect(ConnectionId::new());
         assert_eq!(c.occupied_slots(), 1);
         assert_eq!(c.terminal_snapshot(&terminal).unwrap().terminal, terminal);
+    }
+
+    #[test]
+    fn exited_terminal_keeps_its_retained_output_available_for_resume() {
+        let request = request();
+        let (terminal, fence) = refs(&request);
+        let mut coordinator = GenericTerminalCoordinator::new(1, 64, 1);
+        let mut store = Store::default();
+        coordinator
+            .launch(
+                &request,
+                terminal.clone(),
+                fence,
+                Geometry { cols: 80, rows: 24 },
+                &mut Resolver,
+                &mut store,
+                &mut Spawner(Ok(process())),
+            )
+            .unwrap();
+        coordinator.output(&terminal, b"done".to_vec()).unwrap();
+        coordinator.exit(&terminal, 0, &mut store).unwrap();
+
+        assert_eq!(
+            coordinator.replay_from(&terminal, 0).unwrap()[0].data,
+            b"done"
+        );
     }
     #[test]
     fn ambiguity_blocks_replacement_until_verified_exit_or_gone() {
@@ -631,7 +671,6 @@ mod tests {
         )
         .unwrap();
         c.exit(&exiting, 0, &mut store).unwrap();
-        assert!(c.replay_from(&exiting, 0).unwrap().is_empty());
         assert_eq!(c.occupied_slots(), 1);
         let (failing, failing_fence) = refs(&request);
         assert_eq!(

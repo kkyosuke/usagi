@@ -128,6 +128,11 @@ pub enum SessionState {
 pub struct TerminalSession {
     terminal: TerminalRef,
     geometry: Geometry,
+    /// The viewport size last accepted by the daemon PTY.  This remains
+    /// `None` after a transport failure so an unchanged outer-terminal size
+    /// is retried on the next redraw instead of leaving the PTY at its old
+    /// width indefinitely.
+    synchronized_geometry: Option<Geometry>,
     screen: TerminalScreen,
     subscription: Option<u64>,
     cursor: u64,
@@ -144,6 +149,7 @@ impl TerminalSession {
         Self {
             terminal,
             geometry,
+            synchronized_geometry: None,
             screen: screen_for(geometry),
             subscription: None,
             cursor: 0,
@@ -229,14 +235,18 @@ impl TerminalSession {
         TerminalSelection::begin(self.cells(), anchor)
     }
 
-    /// Attaches (or reattaches) and rebuilds the screen from the retained
-    /// replay before attempting viewport synchronization. A resize failure
-    /// therefore cannot hide an otherwise attachable terminal.
+    /// Synchronizes the daemon PTY to the visible pane before attaching (or
+    /// reattaching) and rebuilding the screen from its retained replay.  This
+    /// ensures an application that redraws on `SIGWINCH` is snapshotted at the
+    /// same width as the right pane. A resize failure therefore cannot hide an
+    /// otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
+        let resize_error = port.resize(&self.terminal, self.geometry).err();
+        self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
         match port.attach(&self.terminal, self.geometry) {
             Ok(attach) => {
                 self.replace(&attach);
-                if let Err(error) = port.resize(&self.terminal, self.geometry) {
+                if let Some(error) = resize_error {
                     self.error = Some(format!(
                         "terminal attached, but viewport synchronization failed: {}",
                         error_message(error)
@@ -261,11 +271,40 @@ impl TerminalSession {
         }
     }
 
-    /// Rebuilds the local screen after the visible pane changes size.
+    /// Resizes the daemon PTY and decoded terminal cells without replaying
+    /// historical cursor movement sequences at the new width.
+    #[coverage(off)] // Transport adapter; state outcomes are covered by its fake-port tests.
     pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
         if self.geometry != geometry {
-            self.geometry = geometry;
-            self.connect(port);
+            match port.resize(&self.terminal, geometry) {
+                Ok(()) => {
+                    self.geometry = geometry;
+                    self.synchronized_geometry = Some(geometry);
+                    self.screen
+                        .resize(geometry.rows as usize, geometry.cols as usize);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.synchronized_geometry = None;
+                    self.error = Some(format!(
+                        "terminal viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
+        } else if self.synchronized_geometry != Some(geometry) {
+            match port.resize(&self.terminal, geometry) {
+                Ok(()) => {
+                    self.synchronized_geometry = Some(geometry);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.error = Some(format!(
+                        "terminal viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
         }
     }
 
@@ -373,6 +412,7 @@ mod tests {
         detached: Vec<u64>,
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
+        resize_count_at_attach: Vec<usize>,
     }
     impl TerminalStreamPort for FakePort {
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
@@ -385,6 +425,7 @@ mod tests {
             _: &TerminalRef,
             _: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
+            self.resize_count_at_attach.push(self.resized.len());
             self.attach.remove(0)
         }
         fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
@@ -486,12 +527,9 @@ mod tests {
     }
 
     #[test]
-    fn resizing_rebuilds_the_screen_from_a_same_geometry_daemon_replay() {
+    fn resizing_clips_current_and_retained_output_without_reattaching() {
         let mut port = FakePort {
-            attach: vec![
-                Ok(attach(1, 3, b"old", false)),
-                Ok(attach(2, 5, b"wide", false)),
-            ],
+            attach: vec![Ok(attach(1, 3, b"old", false))],
             ..FakePort::default()
         };
         let mut session = TerminalSession::new(terminal(), geometry());
@@ -500,8 +538,9 @@ mod tests {
         session.resize(&mut port, resized);
 
         assert_eq!(port.resized, vec![geometry(), resized]);
-        assert_eq!(session.rows()[0], "wide");
+        assert_eq!(session.rows()[0], "old");
         assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(port.resize_count_at_attach, vec![1]);
     }
 
     #[test]
@@ -595,6 +634,13 @@ mod tests {
                 "terminal attached, but viewport synchronization failed: daemon disconnected; reconnect to continue"
             )
         );
+
+        // The outer terminal has not changed size, but the first resize did
+        // not reach the daemon. Retry it on the next redraw so an enlarged
+        // pane cannot remain stuck at its earlier PTY width.
+        session.resize(&mut port, geometry());
+        assert_eq!(port.resized, vec![geometry(), geometry()]);
+        assert_eq!(session.error(), None);
     }
 
     #[test]

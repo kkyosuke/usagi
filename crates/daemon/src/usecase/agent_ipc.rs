@@ -358,19 +358,11 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 .attach(runtime, connection)
                 .map(|attached| json!(attached))
                 .map_err(map_runtime_error),
-            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => {
-                let output = self
-                    .coordinator
-                    .replay_from(runtime, after_offset)
-                    .map_err(map_runtime_error)?;
-                let exited = self
-                    .coordinator
-                    .terminal_snapshot(runtime)
-                    .map_err(map_runtime_error)?
-                    .exited
-                    .is_some();
-                Ok(json!({ "output": output, "exited": exited }))
-            }
+            (TerminalAction::Resume, TerminalRequest::Resume { after_offset, .. }) => self
+                .coordinator
+                .replay_from(runtime, after_offset)
+                .map(|output| json!({ "output": output }))
+                .map_err(map_runtime_error),
             (TerminalAction::Resync, TerminalRequest::Resync { .. }) => self
                 .coordinator
                 .terminal_snapshot(runtime)

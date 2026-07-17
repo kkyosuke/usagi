@@ -74,15 +74,6 @@ impl CloseupModal {
         self.selection_mode
     }
 
-    /// Clear prior command entry and restore the initial menu selection.
-    #[coverage(off)]
-    pub fn reset(&mut self) {
-        self.selected = 0;
-        self.input = TextInput::default();
-        self.expanded = false;
-        self.selected_subcommand = 0;
-    }
-
     /// アクション一覧。
     #[must_use]
     #[coverage(off)]
@@ -458,22 +449,6 @@ mod tests {
                 .join("\n")
                 .contains("\u{1b}[7;36m \u{1b}[0m")
         );
-    }
-
-    #[test]
-    fn reset_clears_the_prior_prompt_and_menu_state() {
-        let mut modal = CloseupModal::with_selection_mode("s", ModalSelectionMode::Prompt);
-        for character in "terminal new".chars() {
-            modal.insert_char(character);
-        }
-        modal.select_next();
-        modal.expand_selected();
-
-        modal.reset();
-
-        assert_eq!(modal.submission(), "");
-        assert_eq!(modal.selected(), 0);
-        assert!(!modal.expanded);
     }
 
     #[test]

@@ -462,6 +462,7 @@ impl GenericPtySpawner for DaemonPty {
         &mut self,
         launch: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
         terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
     ) -> Result<ProcessIdentity, SpawnFailure> {
         let environment = launch
             .environment
@@ -473,7 +474,7 @@ impl GenericPtySpawner for DaemonPty {
             &launch.snapshot.arguments,
             &environment,
             &launch.snapshot.working_directory,
-            Geometry { cols: 80, rows: 24 },
+            geometry,
         )
         .map_err(|_| SpawnFailure::Definite)?;
         let pid = pty.process_id().ok_or(SpawnFailure::Ambiguous)?;
@@ -790,13 +791,12 @@ fn new_terminal_runtime(
     )))
 }
 
-fn start_terminal_observer<Q>(
-    terminal: Arc<
-        Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty, Q>>,
-    >,
+fn start_terminal_observer<S, Q>(
+    terminal: Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
 ) -> std::io::Result<()>
 where
+    S: TerminalStore + Send + 'static,
     Q: TerminalScopeResolver + Send + 'static,
 {
     std::thread::Builder::new()
@@ -1508,6 +1508,17 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct TestTerminalStore;
+
+    impl TerminalStore for TestTerminalStore {
+        type Error = std::convert::Infallible;
+
+        fn save(&mut self, _: TerminalStoreSnapshot) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn generic_pty_reports_child_exit_after_the_shell_exits() {
         let directory = tempfile::tempdir().unwrap();
@@ -1533,7 +1544,8 @@ mod tests {
         .unwrap();
         let (mut pty, observations) = DaemonPty::new();
 
-        pty.spawn(&launch, &terminal).unwrap();
+        pty.spawn(&launch, &terminal, Geometry { cols: 80, rows: 24 })
+            .unwrap();
         pty.select_terminal(&terminal);
         pty.write_all(b"exit\n").unwrap();
 
@@ -1569,7 +1581,7 @@ mod tests {
             TrustedLoginShell {
                 profile: LoginShellProfile::new(BTreeMap::new(), directory.path().to_path_buf()),
             },
-            FileTerminalStore(directory.path().join("terminals.json")),
+            TestTerminalStore,
             pty,
             TestTerminalScope {
                 scope: scope.clone(),

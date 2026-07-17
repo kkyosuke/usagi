@@ -245,11 +245,16 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     terminal,
                     geometry: size,
                 },
-            ) => self
-                .coordinator
-                .resize(&terminal, geometry(size)?)
-                .map(|snapshot| json!(snapshot))
-                .map_err(map_error),
+            ) => {
+                let geometry = geometry(size)?;
+                self.pty.resize(&terminal, geometry).map_err(|_| {
+                    ProtocolError::new(ErrorCode::Unavailable, "terminal resize failed")
+                })?;
+                self.coordinator
+                    .resize(&terminal, geometry)
+                    .map(|snapshot| json!(snapshot))
+                    .map_err(map_error)
+            }
             (
                 TerminalAction::Detach,
                 TerminalRequest::Detach {
@@ -395,15 +400,19 @@ mod tests {
     struct Pty {
         writes: Vec<u8>,
         spawned_directories: Vec<PathBuf>,
+        spawned_geometry: Option<Geometry>,
+        resized: Vec<Geometry>,
     }
     impl GenericPtySpawner for Pty {
         fn spawn(
             &mut self,
             launch: &usagi_core::domain::terminal_launch::ResolvedTerminalLaunch,
             _: &TerminalRef,
+            geometry: Geometry,
         ) -> Result<ProcessIdentity, SpawnFailure> {
             self.spawned_directories
                 .push(launch.snapshot.working_directory.clone());
+            self.spawned_geometry = Some(geometry);
             Ok(ProcessIdentity {
                 pid: 7,
                 start_identity: "fake".into(),
@@ -412,6 +421,11 @@ mod tests {
         }
     }
     impl PtyWriter for Pty {
+        fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
+            self.resized.push(geometry);
+            Ok(())
+        }
+
         fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
             self.writes.extend_from_slice(bytes);
             Ok(())
@@ -480,7 +494,7 @@ mod tests {
                     worktree_id: worktree,
                 },
             },
-            geometry: TerminalGeometry { cols: 80, rows: 24 },
+            geometry: TerminalGeometry { cols: 43, rows: 17 },
         };
         let launched = call(
             &mut runtime,
@@ -491,6 +505,10 @@ mod tests {
         );
         let terminal: TerminalRef = serde_json::from_value(launched["terminal"].clone()).unwrap();
         assert_eq!(runtime.pty.spawned_directories, [working_directory]);
+        assert_eq!(
+            runtime.pty.spawned_geometry,
+            Some(Geometry { cols: 43, rows: 17 })
+        );
         let attached = call(
             &mut runtime,
             connection,
@@ -502,6 +520,20 @@ mod tests {
         );
         let subscription = attached["subscription"].as_u64().unwrap();
         runtime.output(&terminal, b"ready\n".to_vec()).unwrap();
+        assert_eq!(
+            call(
+                &mut runtime,
+                connection,
+                client,
+                TerminalAction::Resize,
+                TerminalRequest::Resize {
+                    terminal: terminal.clone(),
+                    geometry: TerminalGeometry { cols: 92, rows: 31 },
+                }
+            )["geometry"],
+            serde_json::json!({"cols": 92, "rows": 31})
+        );
+        assert_eq!(runtime.pty.resized, vec![Geometry { cols: 92, rows: 31 }]);
         assert_eq!(
             call(
                 &mut runtime,

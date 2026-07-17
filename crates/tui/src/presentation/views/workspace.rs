@@ -902,18 +902,6 @@ impl Workspace {
         }
     }
 
-    /// Remove a daemon-reported exited terminal from whichever target owns it.
-    ///
-    /// Terminal observations are scoped by their fenced identity rather than
-    /// the currently selected sidebar row, so a background terminal cannot
-    /// leave a stale tab behind after its process ends.
-    #[coverage(off)]
-    pub fn exit_terminal_pane(&mut self, terminal: &TerminalRef) {
-        for pane in self.panes.values_mut() {
-            let _ = pane::reduce(pane, PaneEvent::Exited(terminal.clone()));
-        }
-    }
-
     /// The fenced terminal of the focused live tab, if the selection is one.
     ///
     /// The runtime uses this to attach, poll and route keystrokes to the
