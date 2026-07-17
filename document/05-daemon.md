@@ -32,6 +32,8 @@ effect を実行し、同じ daemon generation・operation・session attempt・r
 
 各 managed session は `SessionId` と `WorktreeId` を同時に永続化する。agent / delegation が必要とする path は、available の workspace / session / worktree identity がすべて一致する場合だけ daemon が返す。creating、deleting、failed、stale identity、表示名・path-only の指定は scope に解決しない。
 
+client に返す session 一覧は `available` の managed session だけを投影する。作成に失敗した reservation と中断後に reconcile された record は、operation の再送・復旧判断のため daemon の durable state に残すが、TUI の選択可能な一覧には出さない。
+
 ## daemon process lifecycle
 
 `usagi daemon` は daemon 面の process lifecycle を操作する入口である。すべての TUI 起動、daemon-owned
