@@ -362,6 +362,14 @@ mod tests {
         let (session, agent_id, caller) = ids();
         let first = agent(session, agent_id);
         assert_eq!(store.upsert_agent(first.clone()).unwrap(), first);
+        let replacement = Agent {
+            status: AgentStatus::Exited,
+            ..first.clone()
+        };
+        assert_eq!(
+            store.upsert_agent(replacement.clone()).unwrap(),
+            replacement
+        );
         let reused = store
             .upsert_agent_by_runtime_model(session, first.runtime.clone(), first.model.clone())
             .unwrap();
@@ -383,6 +391,14 @@ mod tests {
             status: RunStatus::Running,
         };
         store.upsert_run(run.clone()).unwrap();
+        let replaced_run = DispatchRun {
+            prompt: "updated work".into(),
+            ..run.clone()
+        };
+        assert_eq!(
+            store.upsert_run(replaced_run.clone()).unwrap(),
+            replaced_run
+        );
         assert_eq!(
             store
                 .transition_run(run.run_id, RunStatus::Completed, Some(now()))
@@ -419,6 +435,7 @@ mod tests {
                 agent_id,
             },
         };
+        assert_eq!(store.upsert_binding(binding.clone()).unwrap(), binding);
         assert_eq!(store.upsert_binding(binding.clone()).unwrap(), binding);
         assert_eq!(store.binding(run.run_id).unwrap(), Some(binding));
         assert_eq!(
@@ -488,5 +505,16 @@ mod tests {
         fs::create_dir_all(store.inbox_path(&caller).parent().unwrap()).unwrap();
         fs::write(store.inbox_path(&caller), "broken\n").unwrap();
         assert!(store.inbox(&caller).is_err());
+        fs::remove_file(store.inbox_path(&caller)).unwrap();
+        fs::create_dir(store.inbox_path(&caller)).unwrap();
+        assert!(store.inbox(&caller).is_err());
+    }
+
+    #[test]
+    fn malformed_registry_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        fs::write(store.registry_path(), "broken").unwrap();
+        assert!(store.agents().is_err());
     }
 }
