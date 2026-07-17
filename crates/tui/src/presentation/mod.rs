@@ -3056,10 +3056,7 @@ impl ControllerWorkspaceRuntime {
             return None;
         };
         session.poll(&mut AgentStreamPort(agent.as_mut()));
-        Some(self.terminal_selection.as_ref().map_or_else(
-            || session.display_rows(),
-            |selection| session.display_rows_with_scrollback_selection(selection),
-        ))
+        Some(session.display_rows())
     }
 
     fn handle_terminal_pointer(
@@ -3123,7 +3120,7 @@ impl ControllerWorkspaceRuntime {
             .iter()
             .find(|session| session.terminal().fences(&terminal))
         {
-            self.terminal_selection = Some(session.begin_selection(point));
+            self.terminal_selection = Some(TerminalSelection::begin(session.display_rows(), point));
         }
     }
 
