@@ -50,7 +50,9 @@ use usagi_daemon::usecase::runtime::{
 };
 use usagi_daemon::usecase::session_runtime::{SessionRuntime, SessionRuntimeError, SystemGit};
 use usagi_daemon::usecase::terminal::{Geometry, Output, PtyWriteError, PtyWriter, SpawnFailure};
-use usagi_daemon::usecase::terminal_ipc::GenericTerminalRuntime;
+use usagi_daemon::usecase::terminal_ipc::{
+    GenericTerminalRuntime, ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+};
 use usagi_daemon::usecase::terminal_profile::{LoginShellProfile, TERMINAL_ENVIRONMENT_VARIABLES};
 
 struct TrustedLoginShell {
@@ -227,6 +229,32 @@ impl SessionScopeResolver for SharedScopeResolver {
             .map_err(|_| ScopeResolveError::Unavailable)?;
         Ok(ResolvedAgentScope {
             worktree_id: scope.worktree_id,
+            working_directory: scope.path,
+        })
+    }
+}
+
+/// Resolves the complete client fence for a generic terminal. Unlike the Agent
+/// resolver, generic terminal requests already carry a worktree ID, so the
+/// runtime verifies that exact identity before admitting a PTY spawn.
+struct SharedTerminalScopeResolver(SharedSessionRuntime);
+impl TerminalScopeResolver for SharedTerminalScopeResolver {
+    fn resolve_available_scope(
+        &self,
+        requested: &usagi_core::domain::terminal_launch::TerminalLaunchScope,
+    ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
+        let session = requested
+            .session_id
+            .ok_or(TerminalScopeResolveError::Unavailable)?;
+        let runtime = self
+            .0
+            .lock()
+            .map_err(|_| TerminalScopeResolveError::Unavailable)?;
+        let scope = runtime
+            .resolve_scope(requested.workspace_id, session, requested.worktree_id)
+            .map_err(|_| TerminalScopeResolveError::Unavailable)?;
+        Ok(ResolvedTerminalScope {
+            scope: requested.clone(),
             working_directory: scope.path,
         })
     }
@@ -512,11 +540,28 @@ impl PtyWriter for DaemonPty {
 }
 
 struct SharedTerminal(
-    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>,
+    Arc<
+        Mutex<
+            GenericTerminalRuntime<
+                TrustedLoginShell,
+                FileTerminalStore,
+                DaemonPty,
+                SharedTerminalScopeResolver,
+            >,
+        >,
+    >,
 );
 type SharedSessionRuntime = Arc<Mutex<SessionRuntime<SystemGit>>>;
-type SharedTerminalRuntime =
-    Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty>>>;
+type SharedTerminalRuntime = Arc<
+    Mutex<
+        GenericTerminalRuntime<
+            TrustedLoginShell,
+            FileTerminalStore,
+            DaemonPty,
+            SharedTerminalScopeResolver,
+        >,
+    >,
+>;
 
 /// Samples daemon-owned process resources between metrics requests.
 struct ProcessMetrics {
@@ -627,6 +672,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         daemon_generation,
         trusted_repository_root(&runtime)?,
         pty,
+        Arc::clone(&runtime),
     );
     start_terminal_observer(Arc::clone(&terminal), observations)?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
@@ -723,6 +769,7 @@ fn new_terminal_runtime(
     generation: usagi_core::domain::id::DaemonGeneration,
     repo_root: PathBuf,
     pty: DaemonPty,
+    sessions: SharedSessionRuntime,
 ) -> SharedTerminalRuntime {
     Arc::new(Mutex::new(GenericTerminalRuntime::new(
         generation,
@@ -731,6 +778,7 @@ fn new_terminal_runtime(
         },
         FileTerminalStore(data_dir.join("daemon").join("terminals.json")),
         pty,
+        SharedTerminalScopeResolver(sessions),
     )))
 }
 
