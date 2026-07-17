@@ -107,6 +107,7 @@ impl ConfirmationModal {
 }
 
 impl Default for ConfirmationModal {
+    #[coverage(off)]
     fn default() -> Self {
         Self::new()
     }
