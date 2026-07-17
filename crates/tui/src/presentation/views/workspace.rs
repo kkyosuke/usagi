@@ -178,10 +178,20 @@ impl HomeProjection {
         _root_cwd: impl Into<PathBuf>,
         snapshot_sessions: &[ProjectedSession],
     ) -> Self {
+        // `AppState` is authoritative for ordering, while the snapshot owns
+        // display data.  Joining with `find` here made every redraw quadratic
+        // in the number of sessions; a large workspace therefore slowed down
+        // merely by opening the home pane.  Index the immutable snapshot once
+        // per projection and preserve the controller's ordering below.
+        let snapshots = snapshot_sessions
+            .iter()
+            .map(|session| (session.id, session))
+            .collect::<BTreeMap<_, _>>();
         let sessions = state
             .sessions()
             .iter()
-            .filter_map(|id| snapshot_sessions.iter().find(|session| session.id == *id))
+            .filter_map(|id| snapshots.get(id))
+            .copied()
             .cloned()
             .collect();
         Self {
@@ -1921,14 +1931,17 @@ fn home_left_pane(
 
 #[coverage(off)]
 fn home_viewport_start(rows: &[Selection], selected: usize, capacity: usize) -> usize {
+    let Some(last) = rows.len().checked_sub(1) else {
+        return 0;
+    };
+    let selected = selected.min(last);
     let mut start = 0;
-    while start < selected
-        && rows[start..=selected]
-            .iter()
-            .map(|row| home_row_height(*row))
-            .sum::<usize>()
-            > capacity
-    {
+    let mut occupied = rows[..=selected]
+        .iter()
+        .map(|row| home_row_height(*row))
+        .sum::<usize>();
+    while start < selected && occupied > capacity {
+        occupied = occupied.saturating_sub(home_row_height(rows[start]));
         start += 1;
     }
     start
@@ -2115,16 +2128,22 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
     let mut rows = vec![chrome[0].clone(), chrome[1].clone(), String::new()];
+    // `with_footer_gap` retains only `height - 2` rows.  Limit projection at
+    // the source so a terminal whose retained screen is larger than the pane
+    // does not allocate and style rows that cannot be displayed.
+    let content_capacity = height.saturating_sub(5);
     if let Some(terminal_rows) = &home.terminal_rows {
         rows.extend(
             terminal_rows
                 .iter()
+                .take(content_capacity)
                 .map(|row| widgets::clip_to_width(row, width)),
         );
     } else if let Some(document) = &home.pane_document {
         rows.extend(
             document
                 .iter()
+                .take(content_capacity)
                 .map(|row| widgets::clip_to_width(row, width)),
         );
     } else {
@@ -2185,7 +2204,7 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 mod tests {
     use super::{
         CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame, sidebar_row_at,
+        home_viewport_start, render, render_home, render_with_skeleton_frame, sidebar_row_at,
         terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
@@ -2393,6 +2412,16 @@ mod tests {
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    #[test]
+    fn home_viewport_uses_a_bounded_window_for_large_session_lists() {
+        let workspace = WorkspaceId::new();
+        let mut rows = Vec::with_capacity(1_025);
+        rows.push(Selection::Target(Target::Root(workspace)));
+        rows.extend((0..1_024).map(|_| Selection::Target(Target::Session(SessionId::new()))));
+
+        assert_eq!(home_viewport_start(&rows, 1_024, 8), 1_021);
     }
 
     #[test]
