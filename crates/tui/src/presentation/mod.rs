@@ -2556,6 +2556,10 @@ struct ControllerWorkspaceRuntime {
     frame_size: (usize, usize),
     panes: PaneRegistry,
     terminals: Vec<TerminalSession>,
+    terminal_selection: Option<TerminalSelection>,
+    pending_terminal_pointer: Option<TerminalPoint>,
+    dragging_terminal_selection: bool,
+    pending_clipboard_text: Option<String>,
     agent: Option<Box<dyn AgentCommandPort>>,
     session_commands: Option<Box<dyn SessionCommandPort>>,
     overview: OverviewModal,
@@ -2609,6 +2613,10 @@ impl ControllerWorkspaceRuntime {
             agent: None,
             session_commands: None,
             terminals: Vec::new(),
+            terminal_selection: None,
+            pending_terminal_pointer: None,
+            dragging_terminal_selection: false,
+            pending_clipboard_text: None,
             overview: OverviewModal::new(),
             closeup: CloseupModal::with_selection_mode(
                 snapshot.workspace.name.clone(),
@@ -2727,10 +2735,17 @@ impl ControllerWorkspaceRuntime {
             Key::Live(LiveTerminalAction::Switch) => AppKey::CtrlO,
             Key::Live(LiveTerminalAction::NextTab) => AppKey::CtrlN,
             Key::Live(LiveTerminalAction::PreviousTab) => AppKey::CtrlP,
+            Key::Live(LiveTerminalAction::CopyTerminalSelection) => {
+                self.queue_terminal_copy();
+                return false;
+            }
             Key::Left | Key::Right | Key::CtrlD | Key::Live(_) | Key::Passthrough(_) => {
                 return false;
             }
             Key::Click { column, row } => {
+                if self.handle_terminal_pointer(*column, *row, None) {
+                    return false;
+                }
                 let home = HomeProjection::from_state(
                     &self.state,
                     &self.workspace_name,
@@ -2748,7 +2763,11 @@ impl ControllerWorkspaceRuntime {
                 };
                 AppKey::Select(selection)
             }
-            Key::Pointer(_) | Key::Other => return false,
+            Key::Pointer(PointerEvent { kind, column, row }) => {
+                let _ = self.handle_terminal_pointer(*column, *row, Some(*kind));
+                return false;
+            }
+            Key::Other => return false,
         };
         let effects = crate::usecase::application::controller::update(
             &mut self.state,
@@ -3037,7 +3056,87 @@ impl ControllerWorkspaceRuntime {
             return None;
         };
         session.poll(&mut AgentStreamPort(agent.as_mut()));
-        Some(session.rows())
+        Some(self.terminal_selection.as_ref().map_or_else(
+            || session.display_rows(),
+            |selection| session.display_rows_with_scrollback_selection(selection),
+        ))
+    }
+
+    fn handle_terminal_pointer(
+        &mut self,
+        column: u16,
+        row: u16,
+        kind: Option<PointerKind>,
+    ) -> bool {
+        if self.panes.input_owner() != PaneInputOwner::Tab
+            || usize::from(column) < workspace::right_pane_left(self.frame_size.1)
+        {
+            return false;
+        }
+        let content_top = 5_usize;
+        let content_rows = self.terminal_geometry.rows as usize;
+        let screen_row = usize::from(row);
+        if screen_row < content_top || screen_row >= content_top.saturating_add(content_rows) {
+            return false;
+        }
+        let point = TerminalPoint {
+            row: screen_row - content_top,
+            column: usize::from(column)
+                .saturating_sub(workspace::right_pane_left(self.frame_size.1)),
+        };
+        match kind {
+            None => {
+                self.terminal_selection = None;
+                self.pending_clipboard_text = None;
+                self.dragging_terminal_selection = false;
+                self.pending_terminal_pointer = Some(point);
+            }
+            Some(PointerKind::Drag) => {
+                if let Some(anchor) = self.pending_terminal_pointer.take() {
+                    self.begin_terminal_selection(anchor);
+                    self.dragging_terminal_selection = self.terminal_selection.is_some();
+                }
+                if let Some(selection) = &mut self.terminal_selection {
+                    selection.extend(point);
+                }
+            }
+            Some(PointerKind::Up) => {
+                self.pending_terminal_pointer = None;
+                if self.dragging_terminal_selection {
+                    if let Some(selection) = &mut self.terminal_selection {
+                        selection.extend(point);
+                    }
+                    self.dragging_terminal_selection = false;
+                    self.queue_terminal_copy();
+                }
+            }
+        }
+        true
+    }
+
+    fn begin_terminal_selection(&mut self, point: TerminalPoint) {
+        let Some(terminal) = self.selected_terminal() else {
+            return;
+        };
+        if let Some(session) = self
+            .terminals
+            .iter()
+            .find(|session| session.terminal().fences(&terminal))
+        {
+            self.terminal_selection = Some(session.begin_selection(point));
+        }
+    }
+
+    fn queue_terminal_copy(&mut self) {
+        self.pending_clipboard_text = self
+            .terminal_selection
+            .as_ref()
+            .map(TerminalSelection::text)
+            .filter(|text| !text.is_empty());
+    }
+
+    fn take_terminal_copy(&mut self) -> Option<String> {
+        self.pending_clipboard_text.take()
     }
 
     fn forward_terminal_input(&mut self, key: &Key) -> bool {
@@ -3248,6 +3347,9 @@ fn drive_workspace_with_agent_port_and_selection_mode(
         let key = term.read_key()?;
         if runtime.handle(&key) {
             return Ok(WorkspaceStep::Quit);
+        }
+        if let Some(text) = runtime.take_terminal_copy() {
+            let _ = term.copy_text(&text);
         }
     }
 }

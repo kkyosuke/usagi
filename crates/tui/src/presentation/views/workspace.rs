@@ -1847,15 +1847,41 @@ pub fn home_selection_at(
     {
         return None;
     }
-    let rows = home.rows();
+    let body_height = height.saturating_sub(CHROME_ROWS);
+    let body_capacity = body_height.saturating_sub(1);
+    let mascot =
+        widgets::mascot::sidebar_block(width, home.mascot_tick, home.mascot_speech.as_ref());
+    let mascot_rows = mascot
+        .as_ref()
+        .filter(|block| body_capacity >= block.reserved_rows() + 2)
+        .map_or(0, widgets::mascot::MascotBlock::reserved_rows);
+    let content_capacity = body_capacity.saturating_sub(mascot_rows);
     let body_row = usize::from(row).saturating_sub(CHROME_ROWS);
+    if body_row >= content_capacity {
+        return None;
+    }
+    let rows = home.rows();
+    let selected_index = rows
+        .iter()
+        .position(|entry| *entry == home.selected)
+        .unwrap_or(0);
+    let start = home_viewport_start(&rows, selected_index, content_capacity);
     let mut offset = 0_usize;
-    for selection in rows {
-        let height = home_row_height(selection);
-        if (offset..offset.saturating_add(height)).contains(&body_row) {
+    for selection in rows.into_iter().skip(start) {
+        let entry_height = home_row_height(selection);
+        if offset.saturating_add(entry_height) > content_capacity {
+            break;
+        }
+        if (offset..offset.saturating_add(entry_height)).contains(&body_row) {
             return Some(selection);
         }
-        offset = offset.saturating_add(height);
+        offset = offset.saturating_add(entry_height);
+        if matches!(selection, Selection::Target(Target::Root(_))) && offset < content_capacity {
+            if body_row == offset {
+                return None;
+            }
+            offset = offset.saturating_add(1);
+        }
     }
     None
 }
