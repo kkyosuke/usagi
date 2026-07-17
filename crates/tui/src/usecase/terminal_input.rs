@@ -267,7 +267,7 @@ impl LiveInputClassifier {
         if is_ctrl_caret(key) {
             return LiveInputOutput::Action(LiveTerminalAction::PreviousSession);
         }
-        if is_command_s(key) {
+        if is_copy_shortcut(key) {
             return LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection);
         }
         LiveInputOutput::Passthrough(encode_key(key))
@@ -293,8 +293,8 @@ fn is_ctrl_caret(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
 }
 
-fn is_command_s(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('s'))
+fn is_copy_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c' | 'C'))
         && key.modifiers.super_
         && !key.modifiers.control
         && !key.modifiers.shift
@@ -407,9 +407,9 @@ mod tests {
     }
 
     #[test]
-    fn command_s_is_reserved_for_copy_without_a_live_prefix() {
-        let input = LiveInput::Key(KeyEvent::new(
-            KeyCode::Char('s'),
+    fn platform_copy_shortcuts_are_reserved_without_terminal_passthrough() {
+        let command_c = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('c'),
             Modifiers {
                 super_: true,
                 ..Modifiers::default()
@@ -417,7 +417,7 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(
-            LiveInputClassifier::default().classify(T0, input),
+            LiveInputClassifier::default().classify(T0, command_c),
             LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection)
         );
     }

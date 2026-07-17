@@ -57,7 +57,7 @@ use usagi_tui::usecase::terminal_input::{
     KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, RuntimeEvent,
 };
 
-use crate::runtime::clipboard::MacosClipboard;
+use crate::runtime::clipboard::PlatformClipboard;
 use crate::tui_input::{CrosstermSource, EventPump, NoBackend};
 
 /// Composition adapter for Overview's daemon-owned session lifecycle commands.
@@ -678,7 +678,7 @@ struct CrosstermTerminal {
     /// The concrete OS adapter is owned by the composition root. Selection
     /// commands receive it through the TUI clipboard port rather than creating
     /// subprocesses in presentation code.
-    clipboard: MacosClipboard,
+    clipboard: PlatformClipboard,
 }
 
 struct PersistentSettingsPort {
@@ -821,12 +821,17 @@ fn control_key(input: &LiveInput) -> Option<Key> {
     let LiveInput::Key(key) = input else {
         return None;
     };
-    key.modifiers.control.then_some(match key.code {
-        KeyCode::Char('c') => Some(Key::Quit),
-        KeyCode::Char('q') => Some(Key::CtrlQ),
-        KeyCode::Char('d') => Some(Key::CtrlD),
-        _ => None,
-    })?
+    (key.modifiers.control
+        && !key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta)
+        .then_some(match key.code {
+            KeyCode::Char('q') => Some(Key::CtrlQ),
+            KeyCode::Char('d') => Some(Key::CtrlD),
+            _ => None,
+        })?
 }
 
 /// Map a non-prefix live input to the management `Key` vocabulary. The classifier
@@ -1018,7 +1023,7 @@ fn run_in_terminal(
         input_started: Instant::now(),
         renderer: FrameRenderer::new(),
         live_input: LiveInputClassifier::default(),
-        clipboard: MacosClipboard,
+        clipboard: PlatformClipboard,
     };
     let result = run(&mut terminal);
     let mut teardown = std::io::stdout();
