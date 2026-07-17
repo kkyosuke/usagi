@@ -1,10 +1,10 @@
 ---
-number: 325
+number: 330
 title: "feat(daemon): MCP agent dispatch で runtime/model allowlist を再検証する"
 status: todo
 priority: high
 labels: [daemon, mcp, agent, config]
-dependson: [322, 324]
+dependson: [322, 329]
 related: [323]
 parent: 105
 created_at: 2026-07-18T00:30:00+00:00
