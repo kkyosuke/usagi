@@ -98,4 +98,46 @@ mod tests {
             "target\n"
         );
     }
+
+    #[test]
+    fn migration_keeps_current_rules_and_an_unrelated_root_ignore_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".usagi")).unwrap();
+        fs::write(tmp.path().join(".usagi/.gitignore"), USAGI_GITIGNORE).unwrap();
+        fs::write(tmp.path().join(".gitignore"), "target\n/build\n").unwrap();
+
+        migrate_usagi_ignore_rules(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".usagi/.gitignore")).unwrap(),
+            USAGI_GITIGNORE
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
+            "target\n/build\n"
+        );
+    }
+
+    #[test]
+    fn migration_does_not_create_a_root_ignore_file_and_trims_legacy_blanks() {
+        let tmp = tempfile::tempdir().unwrap();
+        migrate_usagi_ignore_rules(tmp.path()).unwrap();
+        assert!(!tmp.path().join(".gitignore").exists());
+
+        fs::write(tmp.path().join(".gitignore"), "target\n.usagi/\n\n").unwrap();
+        migrate_usagi_ignore_rules(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
+            "target\n"
+        );
+    }
+
+    #[test]
+    fn migration_reports_an_unreadable_root_ignore_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join(".gitignore")).unwrap();
+
+        assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+    }
 }
