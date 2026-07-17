@@ -790,10 +790,15 @@ fn new_terminal_runtime(
     )))
 }
 
-fn start_terminal_observer(
-    terminal: SharedTerminalRuntime,
+fn start_terminal_observer<Q>(
+    terminal: Arc<
+        Mutex<GenericTerminalRuntime<TrustedLoginShell, FileTerminalStore, DaemonPty, Q>>,
+    >,
     observations: Receiver<PtyObservation>,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    Q: TerminalScopeResolver + Send + 'static,
+{
     std::thread::Builder::new()
         .name("usagi-terminal-observer".to_string())
         .spawn(move || {
@@ -1479,6 +1484,29 @@ mod tests {
         TerminalAction, TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
     };
     use usagi_daemon::presentation::ipc::TerminalOwner;
+    use usagi_daemon::usecase::terminal_ipc::{
+        ResolvedTerminalScope, TerminalScopeResolveError, TerminalScopeResolver,
+    };
+
+    #[derive(Clone)]
+    struct TestTerminalScope {
+        scope: TerminalLaunchScope,
+        working_directory: PathBuf,
+    }
+
+    impl TerminalScopeResolver for TestTerminalScope {
+        fn resolve_available_scope(
+            &self,
+            scope: &TerminalLaunchScope,
+        ) -> Result<ResolvedTerminalScope, TerminalScopeResolveError> {
+            (scope == &self.scope)
+                .then(|| ResolvedTerminalScope {
+                    scope: self.scope.clone(),
+                    working_directory: self.working_directory.clone(),
+                })
+                .ok_or(TerminalScopeResolveError::Unavailable)
+        }
+    }
 
     #[test]
     fn generic_pty_reports_child_exit_after_the_shell_exits() {
@@ -1524,11 +1552,17 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // PTY-to-IPC exit observation is one integration scenario.
     fn generic_terminal_exit_reaches_its_resume_response() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let worktree = WorktreeId::new();
+        let scope = TerminalLaunchScope {
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: worktree,
+        };
         let (pty, observations) = DaemonPty::new();
         let runtime = Arc::new(Mutex::new(GenericTerminalRuntime::new(
             DaemonGeneration::new(),
@@ -1537,6 +1571,10 @@ mod tests {
             },
             FileTerminalStore(directory.path().join("terminals.json")),
             pty,
+            TestTerminalScope {
+                scope: scope.clone(),
+                working_directory: directory.path().to_path_buf(),
+            },
         )));
         start_terminal_observer(Arc::clone(&runtime), observations).unwrap();
         let connection = ConnectionId::new();
@@ -1544,11 +1582,7 @@ mod tests {
         let launch = TerminalLaunchIntent {
             request: TerminalLaunchRequest {
                 profile_id: TerminalProfileId::new("login-shell").unwrap(),
-                scope: TerminalLaunchScope {
-                    workspace_id: workspace,
-                    session_id: Some(session),
-                    worktree_id: worktree,
-                },
+                scope,
             },
             geometry: TerminalGeometry { cols: 80, rows: 24 },
         };
