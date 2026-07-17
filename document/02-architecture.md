@@ -451,6 +451,15 @@ argv ─► clap 解析 ─► Command ─► Command::into_handler() ─► Box
 
 ## 入口面 MCP の tool dispatch
 
+dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、`agent_list`、`agent_get`、
+`agent_complete`、`agent_fail`、`agent_inbox` は daemon IPC を通じて durable dispatch registry を操作・参照する。
+前二者は session / agent を、完了・失敗・inbox は worker の実行文脈と保存済み binding を用いるため、
+MCP caller は宛先を指定しない。`session_dispatch` は常に即時実行であり queue/live を公開しない。
+
+既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
+`session_complete` は置換せず併存する。前者群は起源・prompt・自由文報告の入口、dispatch 群は
+agent 単位の即時実行と durable な構造化報告を担う。
+
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
 `usagi <cmd>` を提供するのに対し、MCP は issue / memory / session の tool を JSON-RPC で
 公開する（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。CLI の

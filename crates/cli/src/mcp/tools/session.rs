@@ -26,7 +26,100 @@ pub fn tools() -> Vec<Box<dyn Tool>> {
         Box::new(SessionDecisionLog),
         Box::new(SessionDelegateIssue),
         Box::new(SessionDelegateBrief),
+        Box::new(SessionDispatch),
+        Box::new(SessionGet),
+        Box::new(AgentList),
+        Box::new(AgentGet),
+        Box::new(AgentComplete),
+        Box::new(AgentFail),
+        Box::new(AgentInbox),
     ]
+}
+
+/// `session_dispatch` — session を upsert して agent に prompt を即時 dispatch する。
+pub struct SessionDispatch;
+impl Tool for SessionDispatch {
+    fn name(&self) -> &'static str {
+        "session_dispatch"
+    }
+    fn description(&self) -> &'static str {
+        "session を upsert し、agent に prompt を即時実行させる"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string"}},"required":["session","agent","prompt"],"additionalProperties":false}"#
+    }
+}
+pub struct SessionGet;
+impl Tool for SessionGet {
+    fn name(&self) -> &'static str {
+        "session_get"
+    }
+    fn description(&self) -> &'static str {
+        "session の agent 一覧と現在または最後の task を返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
+    }
+}
+pub struct AgentList;
+impl Tool for AgentList {
+    fn name(&self) -> &'static str {
+        "agent_list"
+    }
+    fn description(&self) -> &'static str {
+        "agent を session / status で絞り込み一覧する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"session":{"type":"string"},"status":{"type":"string","enum":["idle","running","exited","failed"]}},"additionalProperties":false}"#
+    }
+}
+pub struct AgentGet;
+impl Tool for AgentGet {
+    fn name(&self) -> &'static str {
+        "agent_get"
+    }
+    fn description(&self) -> &'static str {
+        "agent の run 履歴と結果要約を返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"agent_id":{"type":"string"}},"required":["agent_id"],"additionalProperties":false}"#
+    }
+}
+pub struct AgentComplete;
+impl Tool for AgentComplete {
+    fn name(&self) -> &'static str {
+        "agent_complete"
+    }
+    fn description(&self) -> &'static str {
+        "現在の run の成功を caller inbox へ配送する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"summary":{"type":"string"},"result":{"type":"object","properties":{"pr":{"type":"string"},"commits":{"type":"array","items":{"type":"string"}},"changed_files":{"type":"array","items":{"type":"string"}},"verification":{"type":"string"}},"additionalProperties":false},"run_id":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#
+    }
+}
+pub struct AgentFail;
+impl Tool for AgentFail {
+    fn name(&self) -> &'static str {
+        "agent_fail"
+    }
+    fn description(&self) -> &'static str {
+        "現在の run の失敗を caller inbox へ配送する"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"summary":{"type":"string"},"error":{"type":"string"},"run_id":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#
+    }
+}
+pub struct AgentInbox;
+impl Tool for AgentInbox {
+    fn name(&self) -> &'static str {
+        "agent_inbox"
+    }
+    fn description(&self) -> &'static str {
+        "caller 自身の durable inbox を返す"
+    }
+    fn input_schema(&self) -> &'static str {
+        r#"{"type":"object","properties":{"since":{"type":"string"},"unread_only":{"type":"boolean"}},"additionalProperties":false}"#
+    }
 }
 
 /// `session_create` — セッション（worktree）を作成する。

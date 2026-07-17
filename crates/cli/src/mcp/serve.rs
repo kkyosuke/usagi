@@ -10,7 +10,7 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 use usagi_core::usecase::client::{
-    ClientError, DaemonClient, DaemonReply, DaemonRequest, SessionAction,
+    ClientError, DaemonClient, DaemonReply, DaemonRequest, DispatchToolAction, SessionAction,
 };
 
 use super::protocol::{self, error_code};
@@ -206,6 +206,22 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
             Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
         };
     }
+    if let Some(action) = dispatch_tool_action(name) {
+        let operation_id = usagi_core::domain::id::OperationId::new().as_str();
+        return match client.request(DaemonRequest::DispatchTool {
+            action,
+            operation_id,
+            payload: arguments,
+        }) {
+            Ok(DaemonReply::Accepted { body, .. }) | Ok(DaemonReply::Ok(body)) => {
+                protocol::success(
+                    id,
+                    json!({"content":[{"type":"text","text":body.to_string()}]}),
+                )
+            }
+            Err(error) => protocol::error(id, error_code::INTERNAL_ERROR, &error.to_string()),
+        };
+    }
     match dispatch(name, &arguments.to_string()) {
         Err(ToolError::UnknownTool(tool)) => protocol::error(
             id,
@@ -228,6 +244,19 @@ fn session_action(name: &str) -> Option<SessionAction> {
         "session_remove" => Some(SessionAction::Remove),
         "session_setup" => Some(SessionAction::Setup),
         "session_prompt" => Some(SessionAction::Prompt),
+        _ => None,
+    }
+}
+
+fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
+    match name {
+        "session_dispatch" => Some(DispatchToolAction::Dispatch),
+        "session_get" => Some(DispatchToolAction::SessionGet),
+        "agent_list" => Some(DispatchToolAction::AgentList),
+        "agent_get" => Some(DispatchToolAction::AgentGet),
+        "agent_complete" => Some(DispatchToolAction::AgentComplete),
+        "agent_fail" => Some(DispatchToolAction::AgentFail),
+        "agent_inbox" => Some(DispatchToolAction::AgentInbox),
         _ => None,
     }
 }
@@ -280,7 +309,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 34);
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
             assert!(tool["name"].as_str().is_some());
@@ -420,6 +449,54 @@ mod tests {
                     } else {
                         "content"
                     })
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_tools_use_the_injected_daemon_client() {
+        for (name, action) in [
+            (
+                "session_dispatch",
+                usagi_core::usecase::client::DispatchToolAction::Dispatch,
+            ),
+            (
+                "session_get",
+                usagi_core::usecase::client::DispatchToolAction::SessionGet,
+            ),
+            (
+                "agent_list",
+                usagi_core::usecase::client::DispatchToolAction::AgentList,
+            ),
+            (
+                "agent_get",
+                usagi_core::usecase::client::DispatchToolAction::AgentGet,
+            ),
+            (
+                "agent_complete",
+                usagi_core::usecase::client::DispatchToolAction::AgentComplete,
+            ),
+            (
+                "agent_fail",
+                usagi_core::usecase::client::DispatchToolAction::AgentFail,
+            ),
+            (
+                "agent_inbox",
+                usagi_core::usecase::client::DispatchToolAction::AgentInbox,
+            ),
+        ] {
+            let input = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"summary":"ok"}}}}}}"#
+            ) + "\n";
+            let mut out = Vec::new();
+            let mut client = RecordingClient {
+                reply: Ok(DaemonReply::Ok(serde_json::json!({"ok":true}))),
+                requests: vec![],
+            };
+            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            assert!(String::from_utf8(out).unwrap().contains("ok"));
+            assert!(
+                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, payload, .. } if *actual == action && payload["summary"] == "ok")
             );
         }
     }
