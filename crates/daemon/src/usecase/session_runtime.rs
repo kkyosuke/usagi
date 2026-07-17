@@ -750,8 +750,12 @@ mod tests {
     struct CountingGit {
         calls: Arc<AtomicUsize>,
     }
+
+    type GitCall = (PathBuf, Vec<String>);
+    type RecordingCalls = Arc<Mutex<Vec<GitCall>>>;
+
     struct RecordingGit {
-        calls: Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>,
+        calls: RecordingCalls,
     }
     impl RecordingGit {
         fn new() -> Self {
