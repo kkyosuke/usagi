@@ -4011,7 +4011,8 @@ mod tests {
             Key::Char(' '),
             Key::Enter,
             Key::Escape,
-            Key::Quit,
+            Key::Char('q'),
+            Key::Enter,
         ]);
         let mut unite_loader = FakeLoader::default();
         run(
@@ -5079,7 +5080,7 @@ mod tests {
         let port = RecordingSessionPort(calls.clone());
         let mut keys = vec![Key::Char(':')];
         keys.extend("session list".chars().map(Key::Char));
-        keys.extend([Key::Enter, Key::Quit]);
+        keys.extend([Key::Enter, Key::Char('q'), Key::Enter]);
         let mut term = FakeTerminal::with_keys(&keys);
 
         assert_eq!(
@@ -5092,10 +5093,8 @@ mod tests {
         );
         assert!(
             term.frames
-                .last()
-                .unwrap()
-                .join("\n")
-                .contains("daemon accepted")
+                .iter()
+                .any(|frame| frame.join("\n").contains("daemon accepted"))
         );
     }
 
@@ -5521,7 +5520,8 @@ mod tests {
             Key::Escape,
             Key::Char('p'),
             Key::Escape,
-            Key::Quit,
+            Key::Char('q'),
+            Key::Enter,
         ];
         let mut term = FakeTerminal::with_keys(&keys);
 
@@ -5543,7 +5543,8 @@ mod tests {
 
     #[test]
     fn workspace_accepts_an_injected_overlay_data_port() {
-        let mut term = FakeTerminal::with_keys(&[Key::Char('v'), Key::Escape, Key::Quit]);
+        let mut term =
+            FakeTerminal::with_keys(&[Key::Char('v'), Key::Escape, Key::Char('q'), Key::Enter]);
         assert_eq!(
             run_workspace_with_overlay_data(
                 &mut term,
