@@ -134,8 +134,11 @@ generic terminal coordinator、trusted `login-shell` profile resolver、durable 
 
 `login-shell` は daemon 起動時に読み取った public terminal environment から、絶対 path の `SHELL` を
 program として選ぶ。存在しない、相対 path、または NUL を含む値は `/bin/sh` へ fallback する。PTY 上では
-`-l -i` を渡し、shell の login と interactive startup を有効にする。working directory は managed session が
-解決した worktree path だけであり、IPC client が任意の path・argv・environment を指定できない。
+`-l -i` を渡し、shell の login と interactive startup を有効にする。daemon は client の完全な
+workspace / session / worktree ID を `SessionRuntime` の available managed session と照合してから、その同じ
+worktree path を cwd として profile resolver に渡す。不一致・unavailable な scope は spawn 前に拒否されるため、
+`TerminalLaunchRequest` の scope と実際の cwd は常に同じ managed session を指す。IPC client が任意の
+path・argv・environment を指定することはできない。
 
 | 項目 | 扱い |
 |---|---|
