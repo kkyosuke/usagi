@@ -25,6 +25,7 @@ use usagi_core::infrastructure::daemon::{
 use usagi_core::infrastructure::error_log::ErrorLog;
 use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
+use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
@@ -83,10 +84,8 @@ struct FileTerminalStore(PathBuf);
 impl TerminalStore for FileTerminalStore {
     type Error = std::io::Error;
     fn save(&mut self, snapshot: TerminalStoreSnapshot) -> Result<(), Self::Error> {
-        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
-        let temporary = self.0.with_extension("json.tmp");
-        std::fs::write(&temporary, encoded)?;
-        std::fs::rename(temporary, &self.0)
+        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
+            .map_err(std::io::Error::other)
     }
 }
 
@@ -95,11 +94,19 @@ struct FileRuntimeStore(PathBuf);
 impl RuntimeStore for FileRuntimeStore {
     type Error = std::io::Error;
     fn save(&mut self, snapshot: RuntimeStoreSnapshot) -> Result<(), Self::Error> {
-        let encoded = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
-        let temporary = self.0.with_extension("json.tmp");
-        std::fs::write(&temporary, encoded)?;
-        std::fs::rename(temporary, &self.0)
+        json_file::write_atomic(snapshot_directory(&self.0)?, &self.0, &snapshot)
+            .map_err(std::io::Error::other)
     }
+}
+
+/// Returns the durable snapshot's data directory.
+fn snapshot_directory(path: &Path) -> std::io::Result<&Path> {
+    path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "daemon snapshot path has no parent",
+        )
+    })
 }
 
 /// The registry's bounded in-memory replay buffer already serves reconnect
@@ -1382,4 +1389,80 @@ fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError>
 #[coverage(off)]
 pub(crate) fn ensure_ready() -> Result<(), ClientError> {
     client(ClientPolicy::tui()).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_terminal_store_writes_a_readable_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("terminals.json");
+        let mut store = FileTerminalStore(path.clone());
+        let snapshot = TerminalStoreSnapshot::default();
+
+        store.save(snapshot.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<TerminalStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn file_runtime_store_writes_a_readable_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agents.json");
+        let mut store = FileRuntimeStore(path.clone());
+        let snapshot = RuntimeStoreSnapshot::default();
+
+        store.save(snapshot.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::from_slice::<RuntimeStoreSnapshot>(&std::fs::read(path).unwrap()).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn file_terminal_store_failure_preserves_target_and_cleans_temp() {
+        assert_failed_snapshot_write_is_consistent(|path| {
+            FileTerminalStore(path.to_path_buf()).save(TerminalStoreSnapshot::default())
+        });
+    }
+
+    #[test]
+    fn file_runtime_store_failure_preserves_target_and_cleans_temp() {
+        assert_failed_snapshot_write_is_consistent(|path| {
+            FileRuntimeStore(path.to_path_buf()).save(RuntimeStoreSnapshot::default())
+        });
+    }
+
+    fn assert_failed_snapshot_write_is_consistent(save: impl FnOnce(&Path) -> std::io::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        // An existing non-empty directory cannot be replaced by the final
+        // rename. This fails after the durable temp has been written, so it
+        // exercises both preservation of the old target and temp cleanup.
+        let target = dir.path().join("snapshot.json");
+        std::fs::create_dir(&target).unwrap();
+        let preserved = target.join("preserved");
+        std::fs::write(&preserved, "old snapshot owner").unwrap();
+
+        assert!(save(&target).is_err());
+        assert_eq!(
+            std::fs::read_to_string(preserved).unwrap(),
+            "old snapshot owner"
+        );
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
 }
