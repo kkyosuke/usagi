@@ -947,6 +947,15 @@ fn validate_workspace_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn load_workspace_state(
+    path: &Path,
+) -> std::io::Result<usagi_core::domain::workspace_state::WorkspaceState> {
+    WorkspaceStateStore::new(path)
+        .load()
+        .map_err(io_error)
+        .map(Option::unwrap_or_default)
+}
+
 struct FsWorkspaceLoader {
     storage: Storage,
 }
@@ -966,10 +975,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         validate_workspace_directory(path)?;
         let workspace =
             workspace_usecase::open(&self.storage, path, Utc::now()).map_err(io_error)?;
-        let mut state = WorkspaceStateStore::new(&workspace.path)
-            .load()
-            .unwrap_or_default()
-            .unwrap_or_default();
+        let mut state = load_workspace_state(&workspace.path)?;
         let lifecycle = request_lifecycle_snapshot().map_err(io_error)?;
         let workspace_id = lifecycle.workspace_id;
         let session_ids = lifecycle
@@ -1217,7 +1223,7 @@ pub(crate) fn launch(
 mod tests {
     use super::{
         PersistentSettingsPort, Start, control_key, created_session_hook, load_screen_graph_data,
-        passthrough_key,
+        load_workspace_state, passthrough_key,
     };
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -1361,6 +1367,28 @@ mod tests {
         assert!(workspaces.is_empty());
         assert!(recent.is_empty());
         assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
+    }
+
+    #[test]
+    fn workspace_state_loader_defaults_only_when_state_is_missing() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let state = load_workspace_state(workspace.path()).unwrap();
+        assert!(state.sessions.is_empty());
+        assert!(state.root_notes.note.is_none());
+        assert!(state.root_notes.todos.is_empty());
+        assert!(state.root_notes.decisions.is_empty());
+    }
+
+    #[test]
+    fn workspace_state_loader_surfaces_a_malformed_state_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state_dir = workspace.path().join(".usagi");
+        std::fs::create_dir(&state_dir).unwrap();
+        std::fs::write(state_dir.join("state.json"), "{ broken").unwrap();
+
+        let error = load_workspace_state(workspace.path()).unwrap_err();
+        assert!(error.to_string().contains("state.json"));
     }
 
     #[test]
