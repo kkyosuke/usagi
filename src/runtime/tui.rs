@@ -54,7 +54,7 @@ use usagi_tui::usecase::application::terminal_session::{
 use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::overview::SessionCommand;
 use usagi_tui::usecase::terminal_input::{
-    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, RuntimeEvent,
+    KeyCode, KeyEventKind, LiveInput, LiveInputClassifier, LiveInputOutput, Modifiers, RuntimeEvent,
 };
 
 use crate::runtime::clipboard::PlatformClipboard;
@@ -683,7 +683,7 @@ struct CrosstermTerminal {
     input_started: Instant,
     renderer: FrameRenderer,
     /// live-terminal `Ctrl-O` prefix の SSoT。leader を保持して follow-up を
-    /// [`Key::Live`] へ翻訳する。`Ctrl-O`・`Ctrl-^` 以外は passthrough として従来の
+    /// [`Key::Live`] へ翻訳する。`Ctrl-O` 以外は passthrough として従来の
     /// `Key` マッピングに委ねるため、live terminal への passthrough を壊さない。
     live_input: LiveInputClassifier,
     /// The concrete OS adapter is owned by the composition root. Selection
@@ -839,6 +839,7 @@ fn control_key(input: &LiveInput) -> Option<Key> {
         && !key.modifiers.hyper
         && !key.modifiers.meta)
         .then_some(match key.code {
+            KeyCode::Char('c') => Some(Key::Quit),
             KeyCode::Char('q') => Some(Key::CtrlQ),
             KeyCode::Char('d') => Some(Key::CtrlD),
             _ => None,
@@ -882,6 +883,12 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         || key.code == KeyCode::Char('\u{1}')
     {
         return Key::Char('\u{1}');
+    }
+    // The live classifier has already encoded the original terminal input.
+    // Keep modified chords opaque so this management-key adapter cannot drop
+    // their Ctrl/Alt bytes before Closeup forwards them to the focused pane.
+    if key.modifiers != Modifiers::default() {
+        return Key::Passthrough(bytes);
     }
     match key.code {
         KeyCode::Up => Key::Up,
@@ -1224,6 +1231,48 @@ mod tests {
             KeyEventKind::Press,
         ));
         assert_eq!(control_key(&key), Some(Key::CtrlD));
+    }
+
+    #[test]
+    fn ctrl_c_maps_to_quit_so_a_live_terminal_receives_sigint() {
+        let key = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(control_key(&key), Some(Key::Quit));
+    }
+
+    #[test]
+    fn modified_non_leader_keys_keep_their_terminal_bytes() {
+        let ctrl_r = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&ctrl_r, vec![0x12]),
+            Key::Passthrough(vec![0x12])
+        );
+
+        let alt_f = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&alt_f, b"\x1bf".to_vec()),
+            Key::Passthrough(b"\x1bf".to_vec())
+        );
     }
 
     #[test]

@@ -175,8 +175,6 @@ pub enum LiveTerminalAction {
     CloseTab,
     /// Open quit confirmation.
     QuitConfirmation,
-    /// Select the previous session, if one exists.
-    PreviousSession,
     /// Scroll the focused terminal pane one line toward older output.
     ScrollUp,
     /// Scroll the focused terminal pane one line toward the live bottom.
@@ -264,12 +262,6 @@ impl LiveInputClassifier {
             self.leader_at = Some(now);
             return LiveInputOutput::Swallowed;
         }
-        if is_ctrl_caret(key) {
-            return LiveInputOutput::Action(LiveTerminalAction::PreviousSession);
-        }
-        if is_copy_shortcut(key) {
-            return LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection);
-        }
         LiveInputOutput::Passthrough(encode_key(key))
     }
 }
@@ -303,42 +295,17 @@ fn is_ctrl_p(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('p')) && is_only_control(key.modifiers))
 }
 
-fn is_ctrl_caret(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('\u{1e}'))
-        || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
-}
-
-fn is_copy_shortcut(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('c' | 'C'))
-        && key.modifiers.super_
-        && !key.modifiers.control
-        && !key.modifiers.shift
-        && !key.modifiers.alt
-        && !key.modifiers.hyper
-        && !key.modifiers.meta
-}
-
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    let plain = Modifiers::default();
-    if key.modifiers != plain
-        && !is_ctrl_o(key)
-        && !is_ctrl_a(key)
-        && !is_ctrl_n(key)
-        && !is_ctrl_p(key)
-    {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('o' | '\u{0f}') => Some(LiveTerminalAction::Switch),
-        KeyCode::Char('a' | '\u{1}') => Some(LiveTerminalAction::OpenCloseupModal),
-        KeyCode::Char('n' | '\u{e}') | KeyCode::Right => Some(LiveTerminalAction::NextTab),
-        KeyCode::Char('p' | '\u{10}') | KeyCode::Left => Some(LiveTerminalAction::PreviousTab),
-        KeyCode::Char('g') => Some(LiveTerminalAction::Agent),
-        KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
-        KeyCode::Char('q') => Some(LiveTerminalAction::QuitConfirmation),
-        KeyCode::Char('u') | KeyCode::Up => Some(LiveTerminalAction::ScrollUp),
-        KeyCode::Char('d') | KeyCode::Down => Some(LiveTerminalAction::ScrollDown),
-        _ => None,
+    if is_ctrl_o(key) {
+        Some(LiveTerminalAction::Switch)
+    } else if is_ctrl_a(key) {
+        Some(LiveTerminalAction::OpenCloseupModal)
+    } else if is_ctrl_n(key) {
+        Some(LiveTerminalAction::NextTab)
+    } else if is_ctrl_p(key) {
+        Some(LiveTerminalAction::PreviousTab)
+    } else {
+        None
     }
 }
 
@@ -427,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn platform_copy_shortcuts_are_reserved_without_terminal_passthrough() {
+    fn platform_copy_shortcuts_reach_the_terminal() {
         let command_c = LiveInput::Key(KeyEvent::new(
             KeyCode::Char('c'),
             Modifiers {
@@ -438,7 +405,7 @@ mod tests {
         ));
         assert_eq!(
             LiveInputClassifier::default().classify(T0, command_c),
-            LiveInputOutput::Action(LiveTerminalAction::CopyTerminalSelection)
+            LiveInputOutput::Passthrough(b"c".to_vec())
         );
     }
 
@@ -570,83 +537,27 @@ mod tests {
     }
 
     #[test]
-    fn input_two_acceptance_table_reserves_all_prefix_actions() {
+    fn input_two_acceptance_table_reserves_only_documented_prefix_actions() {
         struct Case {
             follow_up: LiveInput,
             action: LiveTerminalAction,
         }
         let cases = [
             Case {
-                follow_up: key(KeyCode::Char('o')),
-                action: LiveTerminalAction::Switch,
-            },
-            Case {
                 follow_up: ctrl('o'),
                 action: LiveTerminalAction::Switch,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('a')),
-                action: LiveTerminalAction::OpenCloseupModal,
             },
             Case {
                 follow_up: ctrl('a'),
                 action: LiveTerminalAction::OpenCloseupModal,
             },
             Case {
-                follow_up: key(KeyCode::Char('\u{1}')),
-                action: LiveTerminalAction::OpenCloseupModal,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('n')),
-                action: LiveTerminalAction::NextTab,
-            },
-            Case {
                 follow_up: ctrl('n'),
                 action: LiveTerminalAction::NextTab,
             },
             Case {
-                follow_up: key(KeyCode::Char('\u{e}')),
-                action: LiveTerminalAction::NextTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Right),
-                action: LiveTerminalAction::NextTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('p')),
-                action: LiveTerminalAction::PreviousTab,
-            },
-            Case {
                 follow_up: ctrl('p'),
                 action: LiveTerminalAction::PreviousTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('\u{10}')),
-                action: LiveTerminalAction::PreviousTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Left),
-                action: LiveTerminalAction::PreviousTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('g')),
-                action: LiveTerminalAction::Agent,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('x')),
-                action: LiveTerminalAction::CloseTab,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('q')),
-                action: LiveTerminalAction::QuitConfirmation,
-            },
-            Case {
-                follow_up: key(KeyCode::Char('u')),
-                action: LiveTerminalAction::ScrollUp,
-            },
-            Case {
-                follow_up: key(KeyCode::Down),
-                action: LiveTerminalAction::ScrollDown,
             },
         ];
         for case in cases {
@@ -658,6 +569,31 @@ mod tests {
             assert_eq!(
                 classifier.classify(Duration::from_millis(1), case.follow_up),
                 LiveInputOutput::Action(case.action)
+            );
+        }
+    }
+
+    #[test]
+    fn every_non_leader_key_is_forwarded_to_the_pane() {
+        let cases = [
+            (ctrl('r'), vec![0x12]),
+            (ctrl('^'), vec![0x1e]),
+            (
+                LiveInput::Key(KeyEvent::new(
+                    KeyCode::Char('f'),
+                    Modifiers {
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                    KeyEventKind::Press,
+                )),
+                b"\x1bf".to_vec(),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                LiveInputClassifier::default().classify(T0, input),
+                LiveInputOutput::Passthrough(expected)
             );
         }
     }
@@ -704,23 +640,6 @@ mod tests {
         assert_eq!(
             classifier.classify(Duration::from_millis(2), key(KeyCode::Char('z'))),
             LiveInputOutput::Passthrough(b"z".to_vec())
-        );
-    }
-
-    #[test]
-    fn ctrl_caret_is_reserved_once_and_not_a_prefix_follow_up() {
-        let mut classifier = LiveInputClassifier::default();
-        assert_eq!(
-            classifier.classify(T0, ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
-        );
-        assert_eq!(
-            classifier.classify(Duration::from_millis(1), ctrl('^')),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
-        );
-        assert_eq!(
-            classifier.classify(Duration::from_millis(2), key(KeyCode::Char('\u{1e}'))),
-            LiveInputOutput::Action(LiveTerminalAction::PreviousSession)
         );
     }
 
