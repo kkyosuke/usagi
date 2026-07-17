@@ -293,6 +293,16 @@ fn is_ctrl_a(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('a')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_n(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{e}'))
+        || (matches!(key.code, KeyCode::Char('n')) && is_only_control(key.modifiers))
+}
+
+fn is_ctrl_p(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{10}'))
+        || (matches!(key.code, KeyCode::Char('p')) && is_only_control(key.modifiers))
+}
+
 fn is_ctrl_caret(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('\u{1e}'))
         || (matches!(key.code, KeyCode::Char('^')) && is_only_control(key.modifiers))
@@ -310,14 +320,19 @@ fn is_command_s(key: &KeyEvent) -> bool {
 
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
     let plain = Modifiers::default();
-    if key.modifiers != plain && !is_ctrl_o(key) && !is_ctrl_a(key) {
+    if key.modifiers != plain
+        && !is_ctrl_o(key)
+        && !is_ctrl_a(key)
+        && !is_ctrl_n(key)
+        && !is_ctrl_p(key)
+    {
         return None;
     }
     match key.code {
         KeyCode::Char('o' | '\u{0f}') => Some(LiveTerminalAction::Switch),
         KeyCode::Char('a' | '\u{1}') => Some(LiveTerminalAction::OpenCloseupModal),
-        KeyCode::Char('n') | KeyCode::Right => Some(LiveTerminalAction::NextTab),
-        KeyCode::Char('p') | KeyCode::Left => Some(LiveTerminalAction::PreviousTab),
+        KeyCode::Char('n' | '\u{e}') | KeyCode::Right => Some(LiveTerminalAction::NextTab),
+        KeyCode::Char('p' | '\u{10}') | KeyCode::Left => Some(LiveTerminalAction::PreviousTab),
         KeyCode::Char('g') => Some(LiveTerminalAction::Agent),
         KeyCode::Char('x') => Some(LiveTerminalAction::CloseTab),
         KeyCode::Char('q') => Some(LiveTerminalAction::QuitConfirmation),
@@ -586,11 +601,27 @@ mod tests {
                 action: LiveTerminalAction::NextTab,
             },
             Case {
+                follow_up: ctrl('n'),
+                action: LiveTerminalAction::NextTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{e}')),
+                action: LiveTerminalAction::NextTab,
+            },
+            Case {
                 follow_up: key(KeyCode::Right),
                 action: LiveTerminalAction::NextTab,
             },
             Case {
                 follow_up: key(KeyCode::Char('p')),
+                action: LiveTerminalAction::PreviousTab,
+            },
+            Case {
+                follow_up: ctrl('p'),
+                action: LiveTerminalAction::PreviousTab,
+            },
+            Case {
+                follow_up: key(KeyCode::Char('\u{10}')),
                 action: LiveTerminalAction::PreviousTab,
             },
             Case {
