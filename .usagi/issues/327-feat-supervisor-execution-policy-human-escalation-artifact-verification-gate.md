@@ -5,7 +5,7 @@ status: todo
 priority: high
 labels: [orchestration, supervisor, policy, verification, daemon]
 dependson: [323, 326]
-related: [183, 187, 219, 283]
+related: [183, 187, 219, 283, 329, 330]
 parent: 324
 created_at: 2026-07-17T21:12:25.962916+00:00
 updated_at: 2026-07-17T21:12:25.962916+00:00
@@ -37,6 +37,9 @@ SupervisorRun 作成時に immutable policy snapshot/revision を保存する。
 - failure/NoReport/timeout を typed category に正規化する。retry 可能な failure だけを scheduled retry にし、attempt を消費する。retry deadline 到達は scheduler event として再現可能にする。
 - cancel を SupervisorRun と TaskNode の状態遷移として実装し、新規 dispatch/wake/retry を止める。すでに起動済み worker は #322 の operation/session fence を通じて cancel し、ACK loss・late completion でも cancelled run を success に戻さない。
 - human escalation record を durable に保存する。理由、blocking task/run、必要な選択肢、安全に表示可能な evidence、resume/cancel decision を持ち、agent が自律的に escalation を解除しない。
+- agent が明示的に要求する user decision の durable payload と non-blocking MCP 契約、TUI 操作は
+  #329 / #330 に分離する。本 issue は policy が escalation に入る条件と、解決前に新しい effect を出さない
+  admission rule を所有する。
 - artifact verification gate を追加する。worker の StructuredResult は自己申告であり、required verifier（例: PR merged、commit/worktree fence、指定 command の non-secret result、review approval を実装時に選択）を通過するまで task/parent/run を Succeeded にしない。verifier は effect reservation・timeout・result digest を durable に保存する。
 - DAG の required task が verification 済み Succeeded、optional task が明示 policy に従い terminal、in-flight effect が無い時だけ SupervisorRun を Succeeded にする。verification failure/indeterminate は retry policy または Escalated/Failed に収束させる。
 - pure evaluator、fake verifier/clock、daemon integration で境界値を検証する。

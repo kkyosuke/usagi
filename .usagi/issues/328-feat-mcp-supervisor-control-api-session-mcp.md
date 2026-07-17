@@ -5,7 +5,7 @@ status: todo
 priority: high
 labels: [mcp, cli, orchestration, supervisor, docs]
 dependson: [323, 327]
-related: [97, 106, 109, 110, 182, 183, 187]
+related: [97, 106, 109, 110, 182, 183, 187, 329, 330]
 parent: 324
 created_at: 2026-07-17T21:12:50.059083+00:00
 updated_at: 2026-07-17T21:12:50.059083+00:00
@@ -64,3 +64,5 @@ daemon IPC client として次を実装する。名前・JSON schema・wire shap
 
 - supervisor 専用 TUI。
 - 任意の既存 session を自動的に supervisor run に採用する移行。
+- agent 起点の `user_decision_request` と choice/freeform 回答の transport。これは #329 の契約とし、
+  本 issue の `supervisor_resolve_escalation` を暗黙に流用しない。
