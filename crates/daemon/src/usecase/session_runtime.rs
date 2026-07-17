@@ -20,6 +20,7 @@ use usagi_core::domain::session_lifecycle::{
 };
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
+use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 use usagi_core::usecase::client::SessionAction;
 
@@ -117,23 +118,34 @@ impl<G: GitRunner> SessionRuntime<G> {
     ///
     /// Returns an error when the lifecycle state cannot be loaded or initialized.
     pub fn open(
-        repo_root: PathBuf,
+        candidate_repo_root: PathBuf,
+        state_dir: &Path,
         generation: DaemonGeneration,
         git: G,
     ) -> Result<Self, SessionRuntimeError> {
-        let store = DaemonLifecycleStore::new(&repo_root);
-        if store
-            .load()
+        let store = DaemonLifecycleStore::new(state_dir);
+        let repo_root = if let Some((repository_root, _)) = store
+            .load_with_workspace()
             .map_err(|_| SessionRuntimeError::Storage)?
-            .is_none()
         {
+            repository_root
+        } else {
+            let legacy = candidate_repo_root
+                .join(STATE_DIR)
+                .join("lifecycle-state.json");
+            let state = json_file::read(&legacy)
+                .map_err(|_| SessionRuntimeError::Storage)?
+                .unwrap_or_else(|| WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now()));
             store
-                .initialize(&WorkspaceLifecycleState::new(
-                    WorkspaceId::new(),
-                    Utc::now(),
-                ))
+                .initialize(&state, &candidate_repo_root)
                 .map_err(|_| SessionRuntimeError::Storage)?;
-        }
+            if let Err(error) = std::fs::remove_file(&legacy)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(SessionRuntimeError::Storage);
+            }
+            candidate_repo_root
+        };
         let mut runtime = Self {
             repo_root,
             generation,
@@ -559,6 +571,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
+    use usagi_core::domain::session_lifecycle::ManagedSession;
 
     struct FakeGit(bool);
     impl FakeGit {
@@ -616,8 +629,13 @@ mod tests {
     }
     fn runtime(git: FakeGit) -> (TempDir, SessionRuntime<FakeGit>) {
         let tmp = tempfile::tempdir().unwrap();
-        let runtime =
-            SessionRuntime::open(tmp.path().to_path_buf(), DaemonGeneration::new(), git).unwrap();
+        let runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            git,
+        )
+        .unwrap();
         (tmp, runtime)
     }
     fn operation() -> String {
@@ -702,6 +720,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut runtime = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             BranchExistsGit,
         )
@@ -730,6 +749,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut runtime = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             WorkspaceExistsGit,
         )
@@ -812,6 +832,7 @@ mod tests {
         let first_calls = Arc::new(AtomicUsize::new(0));
         let mut first = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             CountingGit {
                 calls: Arc::clone(&first_calls),
@@ -828,6 +849,7 @@ mod tests {
         let replay_calls = Arc::new(AtomicUsize::new(0));
         let mut restarted = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             CountingGit {
                 calls: Arc::clone(&replay_calls),
@@ -883,6 +905,7 @@ mod tests {
             .unwrap();
         let restarted = SessionRuntime::open(
             tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
             DaemonGeneration::new(),
             FakeGit::ok(),
         )
@@ -893,5 +916,80 @@ mod tests {
             snapshot["sessions"][1]["failure"]["summary"],
             "interrupted; explicit recovery required"
         );
+    }
+
+    #[test]
+    fn restart_from_another_directory_uses_the_shared_session_state_and_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original_root = tmp.path().join("original");
+        let another_directory = tmp.path().join("another");
+        let state_dir = tmp.path().join("shared-daemon");
+        std::fs::create_dir_all(&original_root).unwrap();
+        std::fs::create_dir_all(&another_directory).unwrap();
+
+        let mut first = SessionRuntime::open(
+            original_root.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+        first
+            .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
+            .unwrap();
+        drop(first);
+
+        let restarted = SessionRuntime::open(
+            another_directory,
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+
+        assert_eq!(restarted.repo_root, original_root);
+        assert_eq!(
+            restarted.snapshot().unwrap()["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn first_shared_start_migrates_legacy_repository_session_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        let legacy_dir = repository.join(STATE_DIR);
+        let state_dir = tmp.path().join("shared-daemon");
+        let mut legacy = WorkspaceLifecycleState::new(WorkspaceId::new(), Utc::now());
+        legacy.sessions.push(ManagedSession::new_creating(
+            "legacy".into(),
+            OperationId::new(),
+            Utc::now(),
+        ));
+        json_file::write_atomic(
+            &legacy_dir,
+            &legacy_dir.join("lifecycle-state.json"),
+            &legacy,
+        )
+        .unwrap();
+
+        let migrated = SessionRuntime::open(
+            repository.clone(),
+            &state_dir,
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+
+        assert_eq!(migrated.repo_root, repository);
+        assert_eq!(
+            migrated.snapshot().unwrap()["sessions"][0]["name"],
+            "legacy"
+        );
+        assert!(state_dir.join("sessions.json").is_file());
+        assert!(!legacy_dir.join("lifecycle-state.json").exists());
     }
 }
