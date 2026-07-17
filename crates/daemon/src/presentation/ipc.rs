@@ -291,11 +291,10 @@ where
                 }
             } else {
                 let dispatched = dispatch_request(request_id.clone(), body.clone(), &hello);
-                if body.get("kind").and_then(serde_json::Value::as_str) == Some("agent") {
-                    Ok(dispatched.kind_response())
-                } else {
-                    Ok((ResponseOutcome::Ok, dispatched.kind_response_body()))
-                }
+                // Session, agent, and metrics dispatchers each own their
+                // outcome.  Replacing a session error with `Ok(null)` makes a
+                // client mistake the error body for a lifecycle snapshot.
+                Ok(dispatched.kind_response())
             };
             let (outcome, body) = match outcome_body {
                 Ok((outcome, body)) => (outcome, body),
@@ -320,20 +319,12 @@ where
 
 trait ResponseOutcomeBody {
     fn kind_response(self) -> (ResponseOutcome, serde_json::Value);
-    fn kind_response_body(self) -> serde_json::Value;
 }
 impl ResponseOutcomeBody for Envelope {
     fn kind_response(self) -> (ResponseOutcome, serde_json::Value) {
         match self.kind {
             EnvelopeKind::Response { outcome, body, .. } => (outcome, body),
             _ => (ResponseOutcome::Ok, json!(null)),
-        }
-    }
-
-    fn kind_response_body(self) -> serde_json::Value {
-        match self.kind {
-            EnvelopeKind::Response { body, .. } => body,
-            _ => json!(null),
         }
     }
 }
@@ -378,6 +369,22 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    struct NoopTerminal;
+    impl TerminalOwner for NoopTerminal {
+        fn request(
+            &mut self,
+            _: usagi_core::domain::id::ConnectionId,
+            _: usagi_core::domain::id::ClientId,
+            _: usagi_core::domain::id::RequestId,
+            _: usagi_core::usecase::client::TerminalAction,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, ProtocolError> {
+            unreachable!("non-terminal request must not reach terminal owner")
+        }
+
+        fn disconnect(&mut self, _: usagi_core::domain::id::ConnectionId) {}
     }
 
     fn server() -> ServerProtocol {
@@ -451,6 +458,46 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(response.kind, EnvelopeKind::Response { .. }));
+    }
+
+    #[test]
+    fn terminal_server_preserves_a_session_dispatch_error() {
+        let mut input = Vec::new();
+        write_json_frame(&mut input, &hello(), 1024).unwrap();
+        write_json_frame(&mut input, &request(), 1024).unwrap();
+        let mut output = Vec::new();
+        handle_connection_with_terminal_and(
+            &mut Cursor::new(input),
+            &mut output,
+            &server(),
+            &mut NoopTerminal,
+            |request_id, _, hello| Envelope {
+                protocol: hello.protocol,
+                daemon_generation: hello.daemon_generation.clone(),
+                kind: EnvelopeKind::Response {
+                    request_id,
+                    outcome: ResponseOutcome::Error(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "session branch already exists",
+                    )),
+                    body: json!(null),
+                },
+            },
+        )
+        .unwrap();
+        let mut output = Cursor::new(output);
+        let _ = read_json_frame::<Bootstrap>(&mut output, 1024).unwrap();
+        let response = read_json_frame::<Envelope>(&mut output, 1024)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response.kind,
+            EnvelopeKind::Response {
+                outcome: ResponseOutcome::Error(_),
+                body,
+                ..
+            } if body.is_null()
+        ));
     }
     #[test]
     fn connection_rejects_normal_message_before_handshake() {
