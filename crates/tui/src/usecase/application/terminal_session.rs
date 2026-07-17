@@ -229,14 +229,17 @@ impl TerminalSession {
         TerminalSelection::begin(self.cells(), anchor)
     }
 
-    /// Attaches (or reattaches) and rebuilds the screen from the retained
-    /// replay before attempting viewport synchronization. A resize failure
-    /// therefore cannot hide an otherwise attachable terminal.
+    /// Synchronizes the daemon PTY to the visible pane before attaching (or
+    /// reattaching) and rebuilding the screen from its retained replay.  This
+    /// ensures an application that redraws on `SIGWINCH` is snapshotted at the
+    /// same width as the right pane. A resize failure therefore cannot hide an
+    /// otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
+        let resize_error = port.resize(&self.terminal, self.geometry).err();
         match port.attach(&self.terminal, self.geometry) {
             Ok(attach) => {
                 self.replace(&attach);
-                if let Err(error) = port.resize(&self.terminal, self.geometry) {
+                if let Some(error) = resize_error {
                     self.error = Some(format!(
                         "terminal attached, but viewport synchronization failed: {}",
                         error_message(error)
@@ -373,6 +376,7 @@ mod tests {
         detached: Vec<u64>,
         resized: Vec<Geometry>,
         resize_error: Option<TerminalError>,
+        resize_count_at_attach: Vec<usize>,
     }
     impl TerminalStreamPort for FakePort {
         fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
@@ -385,6 +389,7 @@ mod tests {
             _: &TerminalRef,
             _: Geometry,
         ) -> Result<TerminalAttach, TerminalError> {
+            self.resize_count_at_attach.push(self.resized.len());
             self.attach.remove(0)
         }
         fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
@@ -502,6 +507,7 @@ mod tests {
         assert_eq!(port.resized, vec![geometry(), resized]);
         assert_eq!(session.rows()[0], "wide");
         assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(port.resize_count_at_attach, vec![1, 2]);
     }
 
     #[test]
