@@ -736,36 +736,53 @@ impl WorkspaceUi {
         }
     }
 
-    /// Polls the focused live terminal once and projects its screen rows into
-    /// the view.  A non-terminal or unattached selection clears the projection.
+    /// Polls every attached terminal, removes tabs for exited processes, and
+    /// projects only the focused terminal's screen rows into the view.
     #[coverage(off)]
     fn refresh_terminal(&mut self) {
+        let exited = if let Some(agent) = self.agent.as_mut() {
+            self.terminals
+                .iter_mut()
+                .filter_map(|session| {
+                    session.poll(&mut AgentStreamPort(agent.port.as_mut()));
+                    (session.state() == SessionState::Exited).then(|| session.terminal().clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for terminal in exited {
+            self.close_exited_terminal(&terminal);
+        }
         let Some(terminal) = self.workspace.focused_live_terminal().cloned() else {
             self.workspace.set_terminal_view(None);
             return;
         };
-        let (rows, exited) = if let (Some(agent), Some(session)) = (
-            self.agent.as_mut(),
-            self.terminals
-                .iter_mut()
-                .find(|session| session.terminal().fences(&terminal)),
-        ) {
-            session.poll(&mut AgentStreamPort(agent.port.as_mut()));
-            (
-                Some(self.terminal_selection.as_ref().map_or_else(
+        let rows = self.terminals.iter().find_map(|session| {
+            session.terminal().fences(&terminal).then(|| {
+                self.terminal_selection.as_ref().map_or_else(
                     || session.display_rows_with_scrollback(),
                     |selection| session.display_rows_with_scrollback_selection(selection),
-                )),
-                session.state() == SessionState::Exited,
-            )
-        } else {
-            (None, false)
-        };
-        if exited {
-            self.close_focused_pane();
-            return;
-        }
+                )
+            })
+        });
         self.workspace.set_terminal_view(rows);
+    }
+
+    #[coverage(off)]
+    fn close_exited_terminal(&mut self, terminal: &TerminalRef) {
+        self.workspace.exit_terminal_pane(terminal);
+        if let Some(agent) = self.agent.as_mut()
+            && let Some(session) = self
+                .terminals
+                .iter_mut()
+                .find(|session| session.terminal().fences(terminal))
+        {
+            session.detach(&mut AgentStreamPort(agent.port.as_mut()));
+        }
+        self.terminals
+            .retain(|session| !session.terminal().fences(terminal));
+        self.terminal_selection = None;
     }
 
     fn resize_terminals(&mut self, geometry: Geometry) {
