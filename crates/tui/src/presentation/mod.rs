@@ -40,7 +40,7 @@ use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
-use crate::presentation::widgets::modal;
+use crate::presentation::widgets::modal::{self, ConfirmationModal, ConfirmationView};
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -364,7 +364,7 @@ enum QuitAction {
 #[derive(Debug, Clone, Copy)]
 struct QuitModal {
     action: QuitAction,
-    confirm_selected: bool,
+    confirmation: ConfirmationModal,
 }
 
 impl QuitModal {
@@ -372,13 +372,8 @@ impl QuitModal {
     const fn new(action: QuitAction) -> Self {
         Self {
             action,
-            confirm_selected: true,
+            confirmation: ConfirmationModal::new(),
         }
-    }
-
-    #[coverage(off)]
-    fn toggle(&mut self) {
-        self.confirm_selected = !self.confirm_selected;
     }
 }
 
@@ -1198,10 +1193,10 @@ fn step_open(open: &mut Open, key: Key) -> OpenStep {
                 open.toggle_unregister_choice();
                 OpenStep::Stay
             }
-            Key::Char('o' | 'O') | Key::Enter => open
+            Key::Char('y' | 'Y') | Key::Enter => open
                 .confirm_unregister()
                 .map_or(OpenStep::Stay, OpenStep::ConfirmUnregister),
-            Key::Char('c' | 'C') | Key::Escape => {
+            Key::Char('n' | 'N') | Key::Escape => {
                 open.cancel_unregister();
                 OpenStep::Stay
             }
@@ -1668,15 +1663,15 @@ fn step_quit_confirmation(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
     };
     match key {
         Key::Left | Key::Right | Key::Tab => {
-            modal.toggle();
+            modal.confirmation.toggle();
             WorkspaceStep::Stay
         }
-        Key::Char('o' | 'O') => {
-            modal.confirm_selected = true;
+        Key::Char('y' | 'Y') => {
+            modal.confirmation.select_confirm();
             confirm_quit(ui)
         }
-        Key::Char('c' | 'C') | Key::Escape => {
-            modal.confirm_selected = false;
+        Key::Char('n' | 'N') | Key::Escape => {
+            modal.confirmation.select_cancel();
             ui.modal = None;
             WorkspaceStep::Stay
         }
@@ -1690,7 +1685,7 @@ fn confirm_quit(ui: &mut WorkspaceUi) -> WorkspaceStep {
     let WorkspaceModal::Quit(modal) = ui.modal.take().expect("quit modal is active") else {
         return WorkspaceStep::Stay;
     };
-    if !modal.confirm_selected {
+    if !modal.confirmation.is_confirm_selected() {
         return WorkspaceStep::Stay;
     }
     if modal.action == QuitAction::EndWorkspace {
@@ -2292,23 +2287,18 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
         .fg(Color::White)
         .bold()
         .paint(&format!("Unregister {}?", path.display()));
-    modal::render_over(
+    modal::render_confirmation_over(
         height,
         width,
         &base,
-        &title,
-        52,
-        &[
+        open.unregister_confirmation(),
+        ConfirmationView {
+            title: &title,
+            inner_width: 52,
             heading,
-            Style::new()
-                .fg(Color::White)
-                .paint("Only the registry entry is removed. Files stay."),
-            String::new(),
-            modal::confirmation_buttons(open.unregister_confirm_selected(), Role::Danger),
-            Style::new()
-                .dim()
-                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
-        ],
+            message: "Only the registry entry is removed. Files stay.",
+            confirm_role: Role::Danger,
+        },
     )
 }
 
@@ -2339,21 +2329,18 @@ fn render_quit_confirmation(
             Role::Danger,
         ),
     };
-    modal::render_over(
+    modal::render_confirmation_over(
         height,
         width,
         base,
-        &title,
-        52,
-        &[
+        modal_state.confirmation,
+        ConfirmationView {
+            title: &title,
+            inner_width: 52,
             heading,
-            Style::new().fg(Color::White).paint(message),
-            String::new(),
-            modal::confirmation_buttons(modal_state.confirm_selected, confirm_role),
-            Style::new()
-                .dim()
-                .paint("  Enter/o: confirm   Esc/c: cancel   ←→/Tab: choose"),
-        ],
+            message,
+            confirm_role,
+        },
     )
 }
 
@@ -3050,12 +3037,13 @@ mod tests {
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
         DefaultModel, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory,
         NewStep, NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
-        SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
-        Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
-        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
-        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
-        render_workspace, run as run_from_start, run_with_settings,
+        QuitAction, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
+        SnapshotOverlayData, Start, TerminalAttach, TerminalChunk, TerminalError,
+        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
+        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, drain_pane_launches,
+        drain_session_completions, execute_closeup_command, handle_sidebar_click,
+        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_workspace,
+        run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
@@ -4871,8 +4859,8 @@ mod tests {
 
         let confirmation = term.frames[1].join("\n");
         assert!(confirmation.contains("All live sessions will be stopped."));
-        assert!(confirmation.contains("[  ok  ]"));
-        assert!(confirmation.contains("[cancel]"));
+        assert!(confirmation.contains("[ yes ]"));
+        assert!(confirmation.contains("[ no  ]"));
         assert!(confirmation.contains("\u{1b}[1;31m"));
         assert_eq!(
             calls.lock().unwrap().as_slice(),
@@ -4885,6 +4873,29 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn ctrl_q_confirmation_accepts_y_and_dismisses_with_n() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut terminal = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Char('y')]);
+
+        assert_eq!(
+            run_workspace_with_session_port(
+                &mut terminal,
+                snapshot("confirm-yes"),
+                Box::new(RecordingSessionPort(calls.clone())),
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        let workspace = WorkspaceView::new(ws("confirm-no"), state("confirm-no"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+        ui.open_quit_confirmation(QuitAction::EndWorkspace);
+        assert_eq!(step_workspace(&mut ui, Key::Char('n')), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
     }
 
     #[test]
