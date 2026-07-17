@@ -128,6 +128,20 @@ fn pr_summary(prs: &[PrLink]) -> Option<String> {
     })
 }
 
+/// 選択中 live terminal を右ペインに描く presentation-only の投影素材。
+///
+/// 行データは runtime shell が daemon から poll し、scroll offset と feedback とともに
+/// 毎フレーム投影入力として渡す。controller state（reducer）には持ち込まない。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerminalViewProjection {
+    /// 選択中 live terminal tab の描画済み screen 行。
+    pub rows: Vec<String>,
+    /// viewport 下部に残す retained 行数。`0` は live 出力に追従する。
+    pub scroll: usize,
+    /// 端末操作に対する presentation-safe な feedback。footer に表示する。
+    pub feedback: Option<String>,
+}
+
 /// controller の Home state を描画可能な root / session / action row へ投影した値。
 ///
 /// session の順番は controller snapshot の `SessionId` 順を使い、表示情報は ID で結合する。
@@ -149,6 +163,12 @@ pub struct HomeProjection {
     /// 最新の daemon observation。毎フレーム外部から与える描画素材で、controller
     /// state（reducer）には持たせない。`None` は metrics 導入前と同じ静かな mascot を保つ。
     metrics: Option<DaemonMetrics>,
+    /// sidebar の git 差分列。stable `SessionId` で session 行に結合する非永続の描画素材で、
+    /// controller state には持たせない。空なら差分列を描かず metrics 導入前の frame を保つ。
+    git_diffs: BTreeMap<SessionId, GitDiff>,
+    /// 選択中 live terminal の viewport 素材。`None` は live terminal 非表示で、右ペインは
+    /// 既存の pane strip をそのまま描く。
+    terminal_view: Option<TerminalViewProjection>,
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     closeup_action_visible: bool,
@@ -198,6 +218,8 @@ impl HomeProjection {
             mascot_tick: state.mascot_tick(),
             mascot_speech: None,
             metrics: None,
+            git_diffs: BTreeMap::new(),
+            terminal_view: None,
             pane_tabs: Vec::new(),
             pane_error: None,
             closeup_action_visible: matches!(
@@ -243,6 +265,25 @@ impl HomeProjection {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<DaemonMetrics>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Attach the asynchronously refreshed Git observations drawn as the sidebar
+    /// diff columns without touching controller or input state. The diffs join to
+    /// session rows by stable `SessionId`; an empty map leaves the sidebar in its
+    /// pre-diff form.
+    #[must_use]
+    pub fn with_git_diffs(mut self, diffs: &BTreeMap<SessionId, GitDiff>) -> Self {
+        self.git_diffs = diffs.clone();
+        self
+    }
+
+    /// Attach the focused live terminal's viewport rows, scroll offset and
+    /// feedback for the right pane without touching controller or input state.
+    /// `None` keeps the right pane on its existing tab strip.
+    #[must_use]
+    pub fn with_terminal_view(mut self, view: Option<TerminalViewProjection>) -> Self {
+        self.terminal_view = view;
         self
     }
 
@@ -1723,13 +1764,12 @@ fn right_pane(height: usize, width: usize, ws: &Workspace) -> Vec<String> {
             // footer and its breathing row, then clip each screen row to the
             // pane width.
             let content_cap = height.saturating_sub(rows.len() + 2);
-            let start = view
-                .len()
-                .saturating_sub(content_cap.saturating_add(ws.terminal_scroll));
-            for line in view.iter().skip(start).take(content_cap) {
-                let line = widgets::clip_to_width(line, width);
-                rows.push(line);
-            }
+            rows.extend(terminal_viewport_rows(
+                view,
+                ws.terminal_scroll,
+                width,
+                content_cap,
+            ));
         } else if let Some(document) = ws.pane_document() {
             rows.extend(
                 document
@@ -1766,6 +1806,27 @@ fn with_footer_gap(mut rows: Vec<String>, height: usize, footer: String) -> Vec<
     rows.push(String::new());
     rows.push(footer);
     rows
+}
+
+/// Retained live-terminal rows clipped into the right pane's content window.
+///
+/// Both the legacy `right_pane` and the controller `home_right_pane` share this so
+/// the visible scrollback window (bottom-anchored, offset by `scroll`) is computed
+/// identically on either render path.
+fn terminal_viewport_rows(
+    rows: &[String],
+    scroll: usize,
+    width: usize,
+    content_cap: usize,
+) -> Vec<String> {
+    let start = rows
+        .len()
+        .saturating_sub(content_cap.saturating_add(scroll));
+    rows.iter()
+        .skip(start)
+        .take(content_cap)
+        .map(|line| widgets::clip_to_width(line, width))
+        .collect()
 }
 
 /// 生の端末サイズに対する workspace 画面 1 フレーム分の行。全幅の header と罫線の下を、共通の
@@ -1967,8 +2028,16 @@ fn home_left_pane(
         return Vec::new();
     }
     let rows = home.rows();
+    // Size the Git summary columns once for the whole sidebar so every session's
+    // commit and line cells align, matching the legacy `left_pane` computation.
+    let session_ids = home
+        .sessions
+        .iter()
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    let columns = sidebar_diff_columns(&session_ids, &home.git_diffs);
     if height == 1 {
-        return home_row_lines_at(width, home, rows[0], now)
+        return home_row_lines_at(width, home, rows[0], columns, now)
             .into_iter()
             .take(1)
             .collect();
@@ -2007,7 +2076,7 @@ fn home_left_pane(
     let start = home_viewport_start(&rows, selected_index, viewport_capacity);
     let mut lines = Vec::with_capacity(height);
     for row in &rows[start..] {
-        let row_lines = home_row_lines_at(width, home, *row, now);
+        let row_lines = home_row_lines_at(width, home, *row, columns, now);
         if lines.len() + row_lines.len() > viewport_capacity {
             break;
         }
@@ -2061,6 +2130,7 @@ fn home_row_lines_at(
     width: usize,
     home: &HomeProjection,
     row: Selection,
+    columns: SidebarDiffColumns,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let target = match row {
@@ -2131,6 +2201,16 @@ fn home_row_lines_at(
                     home_session_continuation_marker(selected, current)
                 )
             },
+        );
+        // Draw the same Git summary columns as the legacy sidebar. The whole
+        // metadata row keeps Home's dim treatment; column widths reuse the shared
+        // `sidebar_metadata` so both render paths align identically.
+        let metadata = sidebar_metadata(
+            metadata,
+            home.git_diffs.get(&session.id),
+            columns,
+            width,
+            true,
         );
         vec![
             first,
@@ -2228,6 +2308,25 @@ fn home_right_pane(height: usize, width: usize, home: &HomeProjection) -> Vec<St
         })
         .collect::<Vec<_>>();
     let chrome = widgets::session_tab::render_with_prefix(width, &header, &tabs);
+    if let Some(view) = &home.terminal_view {
+        // A focused live terminal renders daemon PTY output below the tab strip,
+        // sharing the legacy viewport window and surfacing terminal feedback in
+        // the footer.
+        let mut rows = vec![chrome[0].clone(), chrome[1].clone(), String::new()];
+        let content_cap = height.saturating_sub(rows.len() + 2);
+        rows.extend(terminal_viewport_rows(
+            &view.rows,
+            view.scroll,
+            width,
+            content_cap,
+        ));
+        let footer = view.feedback.as_deref().map_or(footer, |feedback| {
+            Style::new()
+                .dim()
+                .paint(&widgets::clip_to_width(feedback, width))
+        });
+        return with_footer_gap(rows, height, footer);
+    }
     with_footer_gap(
         vec![
             chrome[0].clone(),
@@ -2291,9 +2390,9 @@ fn feedback_label(feedback: Option<&Feedback>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession, Workspace,
-        render, render_home, render_with_skeleton_frame, sidebar_row_at,
-        terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
+        CHROME_ROWS, GitDiff, HomeProjection, LEFT_WIDTH, Mode, ProjectedSession,
+        TerminalViewProjection, Workspace, render, render_home, render_with_skeleton_frame,
+        sidebar_row_at, terminal_auto_scroll_direction_at, terminal_point_at, with_footer_gap,
     };
     use crate::presentation::widgets::mascot::MascotSpeech;
     use crate::presentation::widgets::{display_width, modal};
@@ -2308,7 +2407,9 @@ mod tests {
     use chrono::{DateTime, Utc};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+    use usagi_core::domain::id::{
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+    };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::{PrLink, PrState};
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
@@ -3501,6 +3602,300 @@ mod tests {
         assert!(rendered.contains("daemon"));
         assert!(rendered.contains("↑3 ↓2 + 8 - 1"));
         assert!(!rendered.contains("origin/main"));
+    }
+
+    fn terminal_ref(workspace: WorkspaceId, session: SessionId) -> TerminalRef {
+        TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: workspace,
+            session_id: Some(session),
+            worktree_id: WorktreeId::new(),
+        }
+    }
+
+    #[test]
+    fn home_sidebar_git_columns_match_the_legacy_diff_row() {
+        let diff = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 3,
+            behind: 2,
+            added: 8,
+            removed: 1,
+        };
+
+        // Legacy path: the observation flows through `set_git_diffs`.
+        let mut ws = workspace();
+        let daemon_id = ws.session_ids()[1];
+        ws.set_git_diffs(BTreeMap::from([(daemon_id, diff.clone())]));
+        let legacy = render(30, 100, &ws);
+
+        // Controller path: the same observation flows through `with_git_diffs`.
+        let workspace_id = WorkspaceId::new();
+        let tui = SessionId::new();
+        let daemon = SessionId::new();
+        let state = AppState::home(workspace_id, vec![tui, daemon]);
+        let home = HomeProjection::from_state(
+            &state,
+            "actual",
+            "/tmp/actual",
+            &[
+                projected_session(tui, "UI work", "/work/tui"),
+                projected_session(daemon, "daemon", "/work/daemon"),
+            ],
+        )
+        .with_git_diffs(&BTreeMap::from([(daemon, diff)]));
+        let controller = render_home(30, 100, &home);
+
+        let diff_row = |frame: &[String]| {
+            frame
+                .iter()
+                .map(|line| strip(line))
+                .find(|line| line.contains("↑3 ↓2"))
+                .expect("git diff row")
+        };
+        // The ported diff column is byte-identical after stripping ANSI: same
+        // summary text and the same right-aligned column positions.
+        assert_eq!(diff_row(&controller), diff_row(&legacy));
+        assert!(diff_row(&controller).contains("↑3 ↓2 + 8 - 1"));
+    }
+
+    #[test]
+    fn home_without_git_diffs_keeps_the_pre_diff_frame() {
+        let workspace_id = WorkspaceId::new();
+        let session = SessionId::new();
+        let state = AppState::home(workspace_id, vec![session]);
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        );
+        let baseline = render_home(30, 100, &home);
+
+        // Attaching an empty map is a no-op on the rendered frame.
+        let with_empty = home.with_git_diffs(&BTreeMap::new());
+        assert_eq!(render_home(30, 100, &with_empty), baseline);
+        // No commit summary column is drawn without an observation.
+        assert!(!baseline.iter().any(|line| strip(line).contains("↑0")));
+    }
+
+    #[test]
+    fn home_right_pane_renders_live_terminal_viewport_and_feedback() {
+        let workspace_id = WorkspaceId::new();
+        let session = SessionId::new();
+        let view_rows = vec![
+            "old row".to_owned(),
+            "middle row".to_owned(),
+            "live row".to_owned(),
+        ];
+
+        // Legacy path: a focused live terminal renders daemon PTY output and its
+        // feedback flows through `set_terminal_feedback`.
+        let mut ws = workspace();
+        ws.enter_closeup();
+        let operation = ws.open_pane(PaneKind::Terminal);
+        ws.complete_pane(operation, terminal_ref(workspace_id, session));
+        ws.set_terminal_view(Some(view_rows.clone()));
+        ws.set_terminal_feedback(Some("copied 3 lines".to_owned()));
+        let legacy = render(30, 100, &ws);
+
+        // Controller path: the same rows and feedback flow through
+        // `with_terminal_view`.
+        let target = Target::Session(session);
+        let terminal = terminal_ref(workspace_id, session);
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let operation = OperationId::new();
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Terminal,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Succeeded {
+                operation,
+                terminal: terminal.clone(),
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal))),
+        );
+        let mut state = AppState::home(workspace_id, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let home = HomeProjection::from_state(
+            &state,
+            "actual",
+            "/tmp/actual",
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_pane(&pane)
+        .with_terminal_view(Some(TerminalViewProjection {
+            rows: view_rows,
+            scroll: 0,
+            feedback: Some("copied 3 lines".to_owned()),
+        }));
+        let controller = render_home(30, 100, &home);
+
+        // Each frame line joins both panes; isolate the right pane past the
+        // divider so the differing sidebar rows do not enter the comparison.
+        let right_pane = |frame: &[String]| {
+            frame
+                .iter()
+                .filter_map(|line| {
+                    strip(line)
+                        .split_once('│')
+                        .map(|(_, right)| right.trim_end().to_owned())
+                })
+                .collect::<Vec<_>>()
+        };
+        let controller_right = right_pane(&controller);
+        let legacy_right = right_pane(&legacy);
+        // The live viewport rows and the terminal feedback both appear, matching
+        // the information the legacy pane draws.
+        assert!(controller_right.iter().any(|line| line == "live row"));
+        assert!(controller_right.iter().any(|line| line == "old row"));
+        assert!(legacy_right.iter().any(|line| line == "live row"));
+        // The terminal feedback surfaces in the right-pane footer on both paths.
+        let footer_feedback = |frame: &[String]| {
+            frame
+                .iter()
+                .any(|line| strip(line).contains("copied 3 lines"))
+        };
+        assert!(footer_feedback(&controller));
+        assert!(footer_feedback(&legacy));
+        // The shared viewport window keeps the newest row anchored to the bottom
+        // of the content area on both paths.
+        let bottom_output = |right: &[String]| {
+            right
+                .iter()
+                .rfind(|line| line.ends_with(" row"))
+                .cloned()
+                .expect("a rendered output row")
+        };
+        assert_eq!(
+            bottom_output(&controller_right),
+            bottom_output(&legacy_right)
+        );
+    }
+
+    #[test]
+    fn home_terminal_scroll_offset_matches_the_legacy_window() {
+        let workspace_id = WorkspaceId::new();
+        let session = SessionId::new();
+        let rows = (0..20).map(|row| format!("row {row}")).collect::<Vec<_>>();
+
+        let mut ws = workspace();
+        ws.enter_closeup();
+        let operation = ws.open_pane(PaneKind::Terminal);
+        ws.complete_pane(operation, terminal_ref(workspace_id, session));
+        ws.set_terminal_view(Some(rows.clone()));
+        ws.terminal_scroll_up();
+        ws.terminal_scroll_up();
+        let legacy = render(24, 80, &ws);
+
+        let target = Target::Session(session);
+        let terminal = terminal_ref(workspace_id, session);
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let op = OperationId::new();
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation: op,
+                target,
+                kind: PaneKind::Terminal,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Succeeded {
+                operation: op,
+                terminal: terminal.clone(),
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Live(terminal))),
+        );
+        let mut state = AppState::home(workspace_id, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+        let home = HomeProjection::from_state(
+            &state,
+            "actual",
+            "/tmp/actual",
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_pane(&pane)
+        .with_terminal_view(Some(TerminalViewProjection {
+            rows,
+            scroll: 2,
+            feedback: None,
+        }));
+        let controller = render_home(24, 80, &home);
+
+        let output_rows = |frame: &[String]| {
+            frame
+                .iter()
+                .filter_map(|line| {
+                    strip(line)
+                        .split_once('│')
+                        .map(|(_, right)| right.trim_end().to_owned())
+                })
+                .filter(|line| line.starts_with("row "))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(output_rows(&controller), output_rows(&legacy));
+        assert!(!output_rows(&controller).is_empty());
+        // A two-row scrollback offset keeps the live tail hidden on both paths.
+        assert!(!output_rows(&controller).iter().any(|line| line == "row 19"));
+    }
+
+    #[test]
+    fn home_without_terminal_view_keeps_the_pane_strip() {
+        let workspace_id = WorkspaceId::new();
+        let session = SessionId::new();
+        let target = Target::Session(session);
+        let operation = OperationId::new();
+        let mut pane = PaneState::new(PaneSelection::Target(target));
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Request {
+                operation,
+                target,
+                kind: PaneKind::Agent,
+            },
+        );
+        let _ = reduce(
+            &mut pane,
+            PaneEvent::Select(PaneSelection::Tab(TabSelection::Pending(operation))),
+        );
+        let mut state = AppState::home(workspace_id, vec![session]);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
+        let home = HomeProjection::from_state(
+            &state,
+            "work",
+            "/work",
+            &[projected_session(session, "session", "/work/session")],
+        )
+        .with_pane(&pane);
+        let baseline = render_home(30, 100, &home);
+
+        // Attaching an absent terminal view leaves the agent tab strip untouched.
+        let with_none = home.with_terminal_view(None);
+        assert_eq!(render_home(30, 100, &with_none), baseline);
+        assert!(
+            strip(&baseline.join("\n")).contains("agent:"),
+            "the pane strip stays without a live terminal view"
+        );
     }
 
     #[test]
