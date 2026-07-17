@@ -16,10 +16,13 @@ clap.workspace = true
 clap_complete.workspace = true
 # MCP サーバの stdio JSON-RPC 2.0 のパース・整形と、tool の入力スキーマ埋め込みに使う。
 serde_json.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # update のテストで GitRunner のフェイクを書くため（seam の戻り値が anyhow::Result）。
 anyhow.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

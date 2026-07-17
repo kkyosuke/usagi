@@ -15,6 +15,7 @@ use usagi_core::usecase::client::{
 };
 
 use super::protocol::{self, error_code};
+use super::runtime_model::{PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
 use super::tool::ToolError;
 use super::{dispatch, resources, tools};
 
@@ -51,10 +52,32 @@ pub fn serve(input: impl BufRead, out: &mut dyn Write, version: &str) -> io::Res
 /// JSON-RPC responses so one failed tool call does not stop the server.
 #[coverage(off)]
 pub fn serve_with_client(
+    input: impl BufRead,
+    out: &mut dyn Write,
+    version: &str,
+    client: &mut dyn DaemonClient,
+) -> io::Result<()> {
+    let workspace = std::env::current_dir()?;
+    let locator = PathExecutableLocator;
+    let config = WorkspaceAgentConfig::read(&workspace);
+    let snapshot = RuntimeModelSnapshot::capture(&config, &locator);
+    serve_with_client_and_snapshot(input, out, version, client, &snapshot)
+}
+
+/// As [`serve_with_client`], with a pre-captured runtime/model snapshot.
+/// This is the injection seam for embeddings and deterministic tests.
+///
+/// # Errors
+///
+/// Returns stdin/stdout IO errors; protocol and validation errors remain MCP
+/// responses so serving continues.
+#[coverage(off)]
+pub fn serve_with_client_and_snapshot(
     mut input: impl BufRead,
     out: &mut dyn Write,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
     loop {
@@ -69,7 +92,7 @@ pub fn serve_with_client(
         if line.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line_with_client(line, version, client) {
+        if let Some(response) = handle_line_with_client(line, version, client, snapshot) {
             writeln!(out, "{response}")?;
         }
     }
@@ -90,7 +113,12 @@ impl DaemonClient for UnavailableClient {
 #[coverage(off)]
 fn handle_line(line: &str, version: &str) -> Option<String> {
     let mut unavailable = UnavailableClient;
-    handle_line_with_client(line, version, &mut unavailable)
+    handle_line_with_client(
+        line,
+        version,
+        &mut unavailable,
+        &RuntimeModelSnapshot::default(),
+    )
 }
 
 #[coverage(off)]
@@ -98,6 +126,7 @@ fn handle_line_with_client(
     line: &str,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> Option<String> {
     let Ok(request) = serde_json::from_str::<Value>(line) else {
         return Some(
@@ -109,7 +138,7 @@ fn handle_line_with_client(
     match (method, id) {
         // 通常のリクエスト（method ＋ id）。
         (Some(method), Some(id)) => {
-            Some(respond(method, id, request.get("params"), version, client).to_string())
+            Some(respond(method, id, request.get("params"), version, client, snapshot).to_string())
         }
         // method が無いのに id がある＝不正リクエスト。
         (None, Some(id)) => {
@@ -128,12 +157,13 @@ fn respond(
     params: Option<&Value>,
     version: &str,
     client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
 ) -> Value {
     match method {
         "initialize" => protocol::success(id, initialize_result(params, version)),
         "ping" => protocol::success(id, json!({})),
-        "tools/list" => protocol::success(id, tools_list_result()),
-        "tools/call" => tools_call(id, params, client),
+        "tools/list" => protocol::success(id, tools_list_result(snapshot)),
+        "tools/call" => tools_call(id, params, client, snapshot),
         "resources/list" => protocol::success(id, resources::list_result()),
         "resources/read" => resources_read(id, params),
         other => protocol::error(
@@ -160,12 +190,15 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Value {
 
 /// `tools/list` の結果（全 tool の name / description / inputSchema）。
 #[coverage(off)]
-fn tools_list_result() -> Value {
+fn tools_list_result(snapshot: &RuntimeModelSnapshot) -> Value {
     let tools: Vec<Value> = tools::registry()
         .iter()
         .map(|tool| {
             // 各 tool の input_schema は妥当な JSON（tools のテストで検証済み）。
-            let schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
+            let mut schema: Value = serde_json::from_str(tool.input_schema()).unwrap();
+            if tool.name() == "session_dispatch" {
+                schema["properties"]["agent"] = snapshot.agent_schema();
+            }
             json!({
                 "name": tool.name(),
                 "description": tool.description(),
@@ -179,14 +212,34 @@ fn tools_list_result() -> Value {
 /// `tools/call` を処理する。現状は全 tool が未実装スタブのため、存在すれば「未実装」、
 /// 無ければ「method not found」を返す。
 #[coverage(off)]
-fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) -> Value {
+fn tools_call(
+    id: Value,
+    params: Option<&Value>,
+    client: &mut dyn DaemonClient,
+    snapshot: &RuntimeModelSnapshot,
+) -> Value {
     let Some(name) = params.and_then(|p| p.get("name")).and_then(Value::as_str) else {
         return protocol::error(id, error_code::INVALID_PARAMS, "missing tool name");
     };
-    let arguments = params
+    let mut arguments = params
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if name == "session_dispatch" {
+        let Some(agent) = arguments.get("agent") else {
+            return protocol::error(id, error_code::INVALID_PARAMS, "missing agent");
+        };
+        if let Err(message) = snapshot.validate_agent(agent) {
+            return protocol::error(id, error_code::INVALID_PARAMS, &message);
+        }
+    }
+    if matches!(
+        name,
+        "session_create" | "session_delegate_issue" | "session_delegate_brief"
+    ) && let Err(message) = snapshot.normalize_legacy_agent(&mut arguments)
+    {
+        return protocol::error(id, error_code::INVALID_PARAMS, &message);
+    }
     if let Some(action) = session_action(name) {
         let operation_id = usagi_core::domain::id::OperationId::new().as_str();
         return match client.request(DaemonRequest::Session {
@@ -282,13 +335,26 @@ fn dispatch_tool_action(name: &str) -> Option<DispatchToolAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client};
+    use super::{
+        DEFAULT_PROTOCOL_VERSION, handle_line, serve, serve_with_client,
+        serve_with_client_and_snapshot,
+    };
+    use crate::mcp::runtime_model::{
+        ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
+    };
     use serde_json::Value;
     use usagi_core::usecase::client::{ClientError, DaemonClient, DaemonReply, DaemonRequest};
 
     struct RecordingClient {
         reply: Result<DaemonReply, ClientError>,
         requests: Vec<DaemonRequest>,
+    }
+
+    struct FakeLocator(&'static [&'static str]);
+    impl ExecutableLocator for FakeLocator {
+        fn is_available(&self, executable: &str) -> bool {
+            self.0.contains(&executable)
+        }
     }
     impl DaemonClient for RecordingClient {
         fn request(&mut self, request: DaemonRequest) -> Result<DaemonReply, ClientError> {
@@ -547,20 +613,77 @@ mod tests {
                 usagi_core::usecase::client::DispatchToolAction::AgentInbox,
             ),
         ] {
+            let arguments = if name == "session_dispatch" {
+                r#"{"session":{"name":"a"},"agent":{"runtime":"claude","model":"sonnet"},"prompt":"ok"}"#
+            } else {
+                r#"{"summary":"ok"}"#
+            };
             let input = format!(
-                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"summary":"ok"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{arguments}}}}}"#
             ) + "\n";
             let mut out = Vec::new();
             let mut client = RecordingClient {
                 reply: Ok(DaemonReply::Ok(serde_json::json!({"ok":true}))),
                 requests: vec![],
             };
-            serve_with_client(input.as_bytes(), &mut out, "9.9.9", &mut client).unwrap();
+            let snapshot = RuntimeModelSnapshot::capture(
+                &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+                &FakeLocator(&["claude"]),
+            );
+            serve_with_client_and_snapshot(
+                input.as_bytes(),
+                &mut out,
+                "9.9.9",
+                &mut client,
+                &snapshot,
+            )
+            .unwrap();
             assert!(String::from_utf8(out).unwrap().contains("ok"));
             assert!(
-                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, payload, .. } if *actual == action && payload["summary"] == "ok")
+                matches!(&client.requests[0], DaemonRequest::DispatchTool { action: actual, payload, .. } if *actual == action && (payload["summary"] == "ok" || payload["prompt"] == "ok"))
             );
         }
+    }
+
+    #[test]
+    fn dispatch_schema_and_parser_use_the_captured_snapshot() {
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::default(),
+            &FakeLocator(&["claude"]),
+        );
+        // An empty config never publishes a runtime even when its executable exists.
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n";
+        let mut out = Vec::new();
+        let mut client = RecordingClient {
+            reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
+            requests: vec![],
+        };
+        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        let listed: Value = serde_json::from_slice(&out).unwrap();
+        let dispatch = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "session_dispatch")
+            .unwrap();
+        assert_eq!(
+            dispatch["inputSchema"]["properties"]["agent"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let snapshot = RuntimeModelSnapshot::capture(
+            &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+            &FakeLocator(&["claude"]),
+        );
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n";
+        let mut out = Vec::new();
+        serve_with_client_and_snapshot(&input[..], &mut out, "9.9.9", &mut client, &snapshot)
+            .unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("not allowed"));
     }
 
     #[test]

@@ -130,10 +130,10 @@ impl Tool for SessionCreate {
         "session_create"
     }
     fn description(&self) -> &'static str {
-        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須、agent_cli/model は任意。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
+        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"runtime":{"type":"string","enum":["claude","codex"]},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
     }
 }
 
@@ -358,7 +358,7 @@ impl Tool for SessionDelegateIssue {
         "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"runtime":{"type":"string","enum":["claude","codex"]},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"]}"#
     }
 }
 
@@ -373,6 +373,6 @@ impl Tool for SessionDelegateBrief {
         "事前 issue の無い作業を始めるときに使う。ブリーフ（自由記述の指示）からトリアージ/設計セッションを作成し起動時キューに投入する。brief 必須。委譲先が worktree 内で issue 化する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["brief"]}"#
+        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"runtime":{"type":"string","enum":["claude","codex"]},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["brief"]}"#
     }
 }
