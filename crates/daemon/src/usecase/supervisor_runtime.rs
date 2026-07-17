@@ -300,9 +300,9 @@ fn source(kind: InboxKind) -> SupervisorEventSource {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use usagi_core::domain::{
-        agent::DispatchRun,
+        agent::{CallerRef, DispatchBinding, DispatchRun, InboxMessage, WorkerRef},
         id::{AgentId, AgentRuntimeId, SessionId, WorktreeId},
         supervisor::{SupervisorRun, TaskNode},
     };
@@ -364,6 +364,148 @@ mod tests {
             self.wakes.push(wake.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn terminal_statuses_and_sources_preserve_the_safe_completion_vocabulary() {
+        assert_eq!(terminal(RunStatus::Running), None);
+        assert_eq!(
+            terminal(RunStatus::Completed),
+            Some((TaskState::Succeeded, InboxKind::Completed))
+        );
+        assert_eq!(
+            terminal(RunStatus::Failed),
+            Some((TaskState::Failed, InboxKind::Failed))
+        );
+        assert_eq!(
+            terminal(RunStatus::NoReport),
+            Some((TaskState::Failed, InboxKind::NoReport))
+        );
+        assert_eq!(
+            source(InboxKind::Completed),
+            SupervisorEventSource::DispatchCompletion
+        );
+        assert_eq!(
+            source(InboxKind::Failed),
+            SupervisorEventSource::DispatchFailure
+        );
+        assert_eq!(source(InboxKind::NoReport), SupervisorEventSource::NoReport);
+    }
+
+    #[test]
+    fn a_missing_run_is_a_noop_and_does_not_call_the_waker() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let initial = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let mut waker = Waker::default();
+        scheduler
+            .tick(initial.supervisor_run_id, now(), &mut waker)
+            .unwrap();
+        assert!(waker.wakes.is_empty());
+    }
+
+    #[test]
+    fn structured_inbox_report_is_used_for_the_wake_outcome() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let run_id = OperationId::new();
+        let caller = CallerRef {
+            session_id: SessionId::new(),
+            agent_id: AgentId::new(),
+        };
+        dispatch
+            .upsert_binding(DispatchBinding {
+                run_id,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: SessionId::new(),
+                    agent_id: AgentId::new(),
+                },
+            })
+            .unwrap();
+        dispatch
+            .append_inbox(
+                &caller,
+                InboxMessage {
+                    run_id,
+                    from: WorkerRef {
+                        session_id: SessionId::new(),
+                        agent_id: AgentId::new(),
+                    },
+                    kind: InboxKind::Failed,
+                    summary: "safe failure".into(),
+                    result: None,
+                    created_at: now(),
+                    read: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            scheduler.outcome(run_id, InboxKind::Completed).unwrap(),
+            WakeOutcome {
+                kind: InboxKind::Failed,
+                summary: "safe failure".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_parent_provenance_is_fail_closed_after_child_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let scheduler = SupervisorRuntime::new(temp.path());
+        let store = SupervisorStore::new(temp.path());
+        let dispatch = DispatchStore::new(temp.path());
+        let mut run = SupervisorRun::new(
+            "caller".into(),
+            "root".into(),
+            "input".into(),
+            "policy".into(),
+            now(),
+        );
+        let parent = TaskId::new("parent").unwrap();
+        let child = TaskId::new("child").unwrap();
+        let child_run = OperationId::new();
+        let mut parent_task = task(run.supervisor_run_id, "parent", None);
+        parent_task.state = TaskState::AwaitingDecision;
+        let mut child_task = task(run.supervisor_run_id, "child", Some("parent"));
+        child_task.state = TaskState::Dispatched;
+        run.tasks = BTreeMap::from([(parent.clone(), parent_task), (child.clone(), child_task)]);
+        run.provenance.insert(
+            child.clone(),
+            provenance(
+                run.supervisor_run_id,
+                &child,
+                Some((&parent, OperationId::new())),
+                child_run,
+            ),
+        );
+        store.initialize(&run).unwrap();
+        dispatch
+            .upsert_run(DispatchRun {
+                run_id: child_run,
+                agent_id: AgentId::new(),
+                prompt: "child".into(),
+                started_at: now(),
+                ended_at: Some(now()),
+                status: RunStatus::NoReport,
+            })
+            .unwrap();
+        let mut waker = Waker::default();
+        scheduler
+            .tick(run.supervisor_run_id, now(), &mut waker)
+            .unwrap();
+        assert_eq!(
+            store.load(run.supervisor_run_id).unwrap().unwrap().tasks[&child].state,
+            TaskState::Failed
+        );
+        assert!(waker.wakes.is_empty());
     }
 
     #[test]
