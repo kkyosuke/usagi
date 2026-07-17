@@ -280,16 +280,32 @@ fn is_ctrl_o(key: &KeyEvent) -> bool {
         || (matches!(key.code, KeyCode::Char('o')) && is_only_control(key.modifiers))
 }
 
+fn is_ctrl_a(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{1}'))
+        || (matches!(key.code, KeyCode::Char('a')) && is_only_control(key.modifiers))
+}
+
+fn is_ctrl_n(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{e}'))
+        || (matches!(key.code, KeyCode::Char('n')) && is_only_control(key.modifiers))
+}
+
+fn is_ctrl_p(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('\u{10}'))
+        || (matches!(key.code, KeyCode::Char('p')) && is_only_control(key.modifiers))
+}
+
 fn prefix_action(key: &KeyEvent) -> Option<LiveTerminalAction> {
-    if key.modifiers != Modifiers::default() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('o') => Some(LiveTerminalAction::Switch),
-        KeyCode::Char('a') => Some(LiveTerminalAction::OpenCloseupModal),
-        KeyCode::Char('n') => Some(LiveTerminalAction::NextTab),
-        KeyCode::Char('p') => Some(LiveTerminalAction::PreviousTab),
-        _ => None,
+    if is_ctrl_o(key) {
+        Some(LiveTerminalAction::Switch)
+    } else if is_ctrl_a(key) {
+        Some(LiveTerminalAction::OpenCloseupModal)
+    } else if is_ctrl_n(key) {
+        Some(LiveTerminalAction::NextTab)
+    } else if is_ctrl_p(key) {
+        Some(LiveTerminalAction::PreviousTab)
+    } else {
+        None
     }
 }
 
@@ -528,19 +544,19 @@ mod tests {
         }
         let cases = [
             Case {
-                follow_up: key(KeyCode::Char('o')),
+                follow_up: ctrl('o'),
                 action: LiveTerminalAction::Switch,
             },
             Case {
-                follow_up: key(KeyCode::Char('a')),
+                follow_up: ctrl('a'),
                 action: LiveTerminalAction::OpenCloseupModal,
             },
             Case {
-                follow_up: key(KeyCode::Char('n')),
+                follow_up: ctrl('n'),
                 action: LiveTerminalAction::NextTab,
             },
             Case {
-                follow_up: key(KeyCode::Char('p')),
+                follow_up: ctrl('p'),
                 action: LiveTerminalAction::PreviousTab,
             },
         ];

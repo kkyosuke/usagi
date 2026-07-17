@@ -92,7 +92,7 @@ Workspace 画面は、`state.json` から読んだ session 一覧と root 行を
 Diff / Notes のタブを循環する。Enter または `t` で選択行の Closeup に入り、session action の
 モーダルを workspace とタブの上へ重ねる。Closeup では `↑↓` で action を選び、`←→` で背面の
 タブを切り替える。Closeup から Switch へ戻る操作は `Ctrl-O` prefix で行う。live tab に focus がある間は
-Esc、Ctrl-C、Ctrl-D、Ctrl-Q を含む leader 以外のキー入力をすべて pane へ渡す。`Ctrl-O a` は
+Esc、Ctrl-C、Ctrl-D、Ctrl-Q を含む leader 以外のキー入力をすべて pane へ渡す。`Ctrl-O Ctrl-A` は
 Closeup action モーダルを前面に出す。
 
 `:` はどちらの mode からも Workspace scope の Overview モーダルを開く。文字入力・Backspace・
