@@ -1,14 +1,14 @@
 ---
 number: 314
 title: feat(tui): controller Effect の本番 executor DaemonBackend を実装する
-status: todo
+status: done
 priority: high
 labels: [tui, controller, daemon]
 dependson: []
 related: [258, 295]
 parent: 258
 created_at: 2026-07-17T14:21:53.722018+00:00
-updated_at: 2026-07-17T14:21:53.722018+00:00
+updated_at: 2026-07-17T22:00:00.248317+00:00
 ---
 
 ## 目的

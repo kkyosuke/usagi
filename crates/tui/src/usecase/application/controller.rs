@@ -306,6 +306,15 @@ impl PendingToken {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Rebuild a token from its raw value. Only tests synthesize effects
+    /// directly; the reducer is the sole producer at runtime.
+    #[cfg(test)]
+    #[must_use]
+    #[coverage(off)]
+    pub(crate) const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 /// pending の操作種別。

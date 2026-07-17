@@ -19,6 +19,9 @@ pub mod agent_runtime;
 /// Home の application controller。端末や daemon wire 型に依存しない reducer と
 /// fake backend seam を提供する。
 pub mod controller;
+/// controller の [`controller::Effect`] を daemon-owned ポート群へ実行する本番
+/// executor。effect → 実行 → `AppEvent` 還流の単方向ループを閉じる。
+pub mod daemon_backend;
 /// Session create/remove の pending 表示と safe landing を扱う純粋 reducer。
 pub mod lifecycle;
 /// daemon SessionLifecycle の effect / replay / snapshot を lifecycle reducer へ
