@@ -1,5 +1,5 @@
 ---
-number: 270
+number: 342
 title: feat(integration): managed session から agent／terminal 実行までを daemon root で接続する
 status: todo
 priority: high

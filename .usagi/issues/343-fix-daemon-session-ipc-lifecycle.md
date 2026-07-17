@@ -1,5 +1,5 @@
 ---
-number: 302
+number: 343
 title: fix(daemon): session 作成時の IPC 公開順序を lifecycle に整合させる
 status: done
 priority: high

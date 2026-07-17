@@ -1,5 +1,5 @@
 ---
-number: 165
+number: 336
 title: fix(tui): 没入中に完了した session 作成/削除の skeleton が残り続ける
 status: done
 priority: medium

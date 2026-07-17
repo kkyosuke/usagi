@@ -1,5 +1,5 @@
 ---
-number: 270
+number: 341
 title: feat(daemon): client daemon bootstrap を合成ルートに統一する
 status: done
 priority: high
