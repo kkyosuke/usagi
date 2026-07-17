@@ -252,6 +252,7 @@ impl AgentCommandPortFactory for DaemonAgentCommandPortFactory {
 fn map_terminal_error(error: &usagi_core::usecase::client::ClientError) -> TerminalError {
     use usagi_core::infrastructure::ipc::ErrorCode;
     match error.code() {
+        ErrorCode::ResyncRequired => TerminalError::ResyncRequired,
         ErrorCode::StaleTarget => TerminalError::Stale,
         ErrorCode::OwnershipUnknown => TerminalError::Orphaned,
         _ => TerminalError::Unavailable,
@@ -376,6 +377,25 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             replay,
             exited,
         })
+    }
+
+    #[coverage(off)]
+    fn resize_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        self.terminal_request(
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry {
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                },
+            },
+        )?;
+        Ok(())
     }
 
     #[coverage(off)]

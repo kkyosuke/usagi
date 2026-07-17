@@ -85,6 +85,19 @@ pub trait AgentCommandPort {
         Err("terminal launch is unavailable".to_owned())
     }
 
+    /// Resize a daemon-owned terminal to the visible pane viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn resize_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
     /// Attach to a daemon-owned terminal, taking its retained replay and cursor.
     ///
     /// The default keeps embedders without a terminal stream safe: attach fails
@@ -139,6 +152,11 @@ pub trait AgentCommandPort {
 struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
 
 impl TerminalStreamPort for AgentStreamPort<'_> {
+    #[coverage(off)]
+    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+        self.0.resize_terminal(terminal, geometry)
+    }
+
     #[coverage(off)]
     fn attach(
         &mut self,
@@ -741,6 +759,15 @@ impl WorkspaceUi {
             None
         };
         self.workspace.set_terminal_view(rows);
+    }
+
+    fn resize_terminals(&mut self, geometry: Geometry) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        for session in &mut self.terminals {
+            session.resize(&mut AgentStreamPort(agent.port.as_mut()), geometry);
+        }
     }
 
     #[coverage(off)]
@@ -2527,9 +2554,10 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
-        ui.refresh_terminal();
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
+        ui.resize_terminals(terminal_geometry(height, width));
+        ui.refresh_terminal();
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;
@@ -3131,6 +3159,7 @@ mod tests {
         chunk: Option<TerminalChunk>,
         inputs: TerminalInputLog,
         detaches: Arc<Mutex<Vec<u64>>>,
+        resizes: Arc<Mutex<Vec<Geometry>>>,
     }
 
     impl AgentCommandPort for StreamingTerminalPort {
@@ -3161,6 +3190,14 @@ mod tests {
                 replay: self.replay.clone(),
                 exited: false,
             })
+        }
+        fn resize_terminal(
+            &mut self,
+            _terminal: &TerminalRef,
+            geometry: Geometry,
+        ) -> Result<(), TerminalError> {
+            self.resizes.lock().unwrap().push(geometry);
+            Ok(())
         }
         fn poll_terminal(
             &mut self,
@@ -3655,6 +3692,7 @@ mod tests {
             panic!("overview modal should open");
         };
         assert_eq!(overview.selection_mode(), ModalSelectionMode::Prompt);
+        ui.resize_terminals(Geometry { cols: 80, rows: 24 });
         ui.modal = None;
         ui.enter_closeup();
         assert_eq!(ui.closeup.selection_mode(), ModalSelectionMode::Prompt);
@@ -4518,6 +4556,7 @@ mod tests {
         };
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let detaches = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
         let mut port = StreamingTerminalPort {
             terminal: terminal.clone(),
             replay: b"$ ".to_vec(),
@@ -4530,6 +4569,7 @@ mod tests {
             }),
             inputs: Arc::clone(&inputs),
             detaches: Arc::clone(&detaches),
+            resizes: Arc::clone(&resizes),
         };
         // A generic terminal never launches an Agent through this port.
         assert!(port.launch(workspace_id, session_id, None).is_err());
@@ -4561,6 +4601,21 @@ mod tests {
         drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
         ui.refresh_terminal();
         assert!(render_workspace(24, 80, &ui).join("\n").contains('$'));
+
+        ui.resize_terminals(Geometry {
+            cols: 100,
+            rows: 30,
+        });
+        assert_eq!(
+            *resizes.lock().unwrap(),
+            vec![
+                Geometry { cols: 80, rows: 24 },
+                Geometry {
+                    cols: 100,
+                    rows: 30
+                },
+            ]
+        );
 
         // Typing forwards raw bytes exactly once with a monotonic sequence.
         let _ = step_workspace(&mut ui, Key::Char('l'));
@@ -4652,6 +4707,10 @@ mod tests {
         assert!(
             port.launch(WorkspaceId::new(), SessionId::new(), None)
                 .is_err()
+        );
+        assert_eq!(
+            port.resize_terminal(&terminal, Geometry { cols: 80, rows: 24 }),
+            Ok(())
         );
         assert_eq!(
             port.attach_terminal(&terminal, Geometry { cols: 80, rows: 24 }),

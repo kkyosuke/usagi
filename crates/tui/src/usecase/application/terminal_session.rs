@@ -42,6 +42,9 @@ pub struct TerminalChunk {
 /// a local PTY fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalError {
+    /// The output cursor fell outside the daemon's retained journal. The
+    /// terminal remains owned and must be rebuilt from an atomic snapshot.
+    ResyncRequired,
     /// The daemon connection is unavailable; a reconnect may recover it.
     Unavailable,
     /// The referenced terminal is gone or its generation no longer matches.
@@ -56,6 +59,19 @@ pub enum TerminalError {
 /// the complete [`TerminalRef`]; implementations poll the daemon and must not
 /// substitute a local terminal on failure.
 pub trait TerminalStreamPort {
+    /// Resize the daemon-owned PTY to match the pane viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn resize(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
     /// Attach and take an atomic snapshot plus a subscription.
     ///
     /// # Errors
@@ -214,10 +230,19 @@ impl TerminalSession {
     }
 
     /// Attaches (or reattaches) and rebuilds the screen from the retained
-    /// replay.  A prior transport error is cleared on success.
+    /// replay before attempting viewport synchronization. A resize failure
+    /// therefore cannot hide an otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
         match port.attach(&self.terminal, self.geometry) {
-            Ok(attach) => self.replace(&attach),
+            Ok(attach) => {
+                self.replace(&attach);
+                if let Err(error) = port.resize(&self.terminal, self.geometry) {
+                    self.error = Some(format!(
+                        "terminal attached, but viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
             Err(error) => self.fail(error),
         }
     }
@@ -231,7 +256,16 @@ impl TerminalSession {
         }
         match port.poll(&self.terminal, self.cursor) {
             Ok(chunks) => self.apply(port, chunks),
+            Err(TerminalError::ResyncRequired) => self.connect(port),
             Err(error) => self.fail(error),
+        }
+    }
+
+    /// Rebuilds the local screen after the visible pane changes size.
+    pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
+        if self.geometry != geometry {
+            self.geometry = geometry;
+            self.connect(port);
         }
     }
 
@@ -287,17 +321,21 @@ impl TerminalSession {
         self.state = match error {
             TerminalError::Orphaned => SessionState::Orphaned,
             TerminalError::Exited => SessionState::Exited,
-            TerminalError::Unavailable | TerminalError::Stale => SessionState::Disconnected,
-        };
-        self.error = Some(
-            match error {
-                TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
-                TerminalError::Stale => "terminal is no longer available",
-                TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
-                TerminalError::Exited => "terminal has exited",
+            TerminalError::ResyncRequired | TerminalError::Unavailable | TerminalError::Stale => {
+                SessionState::Disconnected
             }
-            .to_owned(),
-        );
+        };
+        self.error = Some(error_message(error).to_owned());
+    }
+}
+
+fn error_message(error: TerminalError) -> &'static str {
+    match error {
+        TerminalError::ResyncRequired => "terminal output is resynchronizing",
+        TerminalError::Unavailable => "daemon disconnected; reconnect to continue",
+        TerminalError::Stale => "terminal is no longer available",
+        TerminalError::Orphaned => "terminal ownership is unknown; input is disabled",
+        TerminalError::Exited => "terminal has exited",
     }
 }
 
@@ -333,8 +371,15 @@ mod tests {
         input: Option<TerminalError>,
         inputs: Vec<(u64, u64, Vec<u8>)>,
         detached: Vec<u64>,
+        resized: Vec<Geometry>,
+        resize_error: Option<TerminalError>,
     }
     impl TerminalStreamPort for FakePort {
+        fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+            self.resized.push(geometry);
+            self.resize_error.take().map_or(Ok(()), Err)
+        }
+
         fn attach(
             &mut self,
             _: &TerminalRef,
@@ -363,6 +408,34 @@ mod tests {
         }
     }
 
+    struct DefaultResizePort;
+
+    impl TerminalStreamPort for DefaultResizePort {
+        fn attach(
+            &mut self,
+            _: &TerminalRef,
+            _: Geometry,
+        ) -> Result<TerminalAttach, TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn poll(&mut self, _: &TerminalRef, _: u64) -> Result<Vec<TerminalChunk>, TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn input(
+            &mut self,
+            _: &TerminalRef,
+            _: u64,
+            _: u64,
+            _: &[u8],
+        ) -> Result<(), TerminalError> {
+            Err(TerminalError::Unavailable)
+        }
+
+        fn detach(&mut self, _: &TerminalRef, _: u64) {}
+    }
+
     fn attach(subscription: u64, offset: u64, replay: &[u8], exited: bool) -> TerminalAttach {
         TerminalAttach {
             subscription,
@@ -382,6 +455,21 @@ mod tests {
 
     #[test]
     fn connect_renders_replay_and_poll_appends_contiguous_output() {
+        let mut default_port = DefaultResizePort;
+        assert_eq!(default_port.resize(&terminal(), geometry()), Ok(()));
+        assert_eq!(
+            default_port.attach(&terminal(), geometry()),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            default_port.poll(&terminal(), 0),
+            Err(TerminalError::Unavailable)
+        );
+        assert_eq!(
+            default_port.input(&terminal(), 1, 0, b"x"),
+            Err(TerminalError::Unavailable)
+        );
+        default_port.detach(&terminal(), 1);
         let mut port = FakePort {
             attach: vec![Ok(attach(7, 3, b"$ ", false))],
             polls: vec![Ok(vec![chunk(3, b"ls\r\n"), chunk(7, b"a.txt")])],
@@ -390,10 +478,30 @@ mod tests {
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
         assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(port.resized, vec![geometry()]);
         assert_eq!(session.rows()[0], "$");
         session.poll(&mut port);
         // The prompt echo advances a row; the command output follows it.
         assert_eq!(session.rows(), vec!["$ ls", "a.txt", ""]);
+    }
+
+    #[test]
+    fn resizing_rebuilds_the_screen_from_a_same_geometry_daemon_replay() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 3, b"old", false)),
+                Ok(attach(2, 5, b"wide", false)),
+            ],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let resized = Geometry { cols: 40, rows: 8 };
+        session.resize(&mut port, resized);
+
+        assert_eq!(port.resized, vec![geometry(), resized]);
+        assert_eq!(session.rows()[0], "wide");
+        assert_eq!(session.state(), SessionState::Live);
     }
 
     #[test]
@@ -468,6 +576,28 @@ mod tests {
     }
 
     #[test]
+    fn resize_failure_does_not_prevent_attach_or_hide_replay() {
+        let mut port = FakePort {
+            attach: vec![Ok(attach(7, 5, b"reply", false))],
+            resize_error: Some(TerminalError::Unavailable),
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+
+        session.connect(&mut port);
+
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.rows()[0], "reply");
+        assert_eq!(port.resized, vec![geometry()]);
+        assert_eq!(
+            session.error(),
+            Some(
+                "terminal attached, but viewport synchronization failed: daemon disconnected; reconnect to continue"
+            )
+        );
+    }
+
+    #[test]
     fn input_is_sent_once_with_a_monotonic_sequence() {
         let mut port = FakePort {
             attach: vec![Ok(attach(9, 0, b"", false))],
@@ -530,6 +660,30 @@ mod tests {
         session.connect(&mut port);
         session.poll(&mut port);
         assert_eq!(session.rows()[0], "ok");
+    }
+
+    #[test]
+    fn a_trimmed_output_cursor_reattaches_to_the_atomic_snapshot() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 0, b"old", false)),
+                Ok(attach(2, 12, b"fresh output", false)),
+            ],
+            polls: vec![Err(TerminalError::ResyncRequired)],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        session.poll(&mut port);
+        assert_eq!(session.rows()[0], "fresh output");
+        assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(session.error(), None);
+
+        // `poll` recovers this error before calling `fail`, but keep the
+        // defensive terminal-state mapping covered as well.
+        session.fail(TerminalError::ResyncRequired);
+        assert_eq!(session.state(), SessionState::Disconnected);
+        assert_eq!(session.error(), Some("terminal output is resynchronizing"));
     }
 
     #[test]

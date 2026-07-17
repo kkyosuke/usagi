@@ -214,12 +214,12 @@ terminal を停止しない。
 そのまま送る。TUI が使う同期 IPC client は push される stream event を受け取れないため、出力は **poll** で
 取得する: launch 直後に一度 attach して保持済みの replay と output offset を受け取り、以降は redraw ごとに
 `Resume { after_offset }` で offset 以降の出力だけを取得する。取得したバイト列は最小の VT screen（印字・
-`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・SGR の色と属性を解釈）へ流し込み、
-その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるときは local に継ぎ足さず、daemon の
-atomic snapshot（再 attach）で置き換える。
+`CR` / `LF` / `BS` / `HT`・行折返し・カーソル移動・行/画面消去・scroll region を含む画面スクロール・SGR の色と属性・alternate screen buffer）へ流し込み、
+その screen 行を右ペインへ clip して表示する。live の input cursor は現在セルを反転して表示する。output offset に gap があるとき、または daemon が
+resync を要求したときは local に継ぎ足さず、daemon の atomic snapshot（再 attach）で置き換えて、その後の出力取得を継続する。
 
-screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
+primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
@@ -244,7 +244,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
-変化したときだけ送る。detach はこの client の subscription を外すだけで、PTY を kill しない。
+変化したときだけ送って、PTY と右ペインの VT screen を同じ viewport に保つ。detach はこの client の
+subscription を外すだけで、PTY を kill しない。
 
 `agent [profile]` は active な session だけを対象にする。profile を省略した request は daemon の
 default policy に委ね、TUI は product 固有の argv、model、secret を組み立てない。controller が発行した
