@@ -382,6 +382,8 @@ mod tests {
         assert!(modal.is_confirm_selected());
         modal.select_cancel();
         assert!(!modal.is_confirm_selected());
+
+        assert!(ConfirmationModal::default().is_confirm_selected());
     }
 
     #[test]
