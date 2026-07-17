@@ -175,6 +175,10 @@ presentation 主体の実クレートになる。
   `infrastructure::store::lifecycle::DaemonLifecycleStore` に分ける。後者を保持して reducer 結果を永続化するのは daemon の command handler
   だけであり、TUI / CLI / MCP は IPC command を通じて要求する。legacy `state.json` は incarnation を持たないため、この managed state として
   自動解釈しない。
+- supervisor run の durable state は `usagi-core::domain::supervisor` の pure reducer と
+  `infrastructure::store::supervisor::SupervisorStore` に分ける。store は daemon state dir に atomic snapshot と append-only event journal を保持し、
+  lock と state revision CAS で書き手を fence する。query は task instruction 本文、secret、raw runtime argv を返さない。scheduler と policy はこの state の
+  event producer であり、domain/store はそれらを解釈しない。
 - `usagi-core` の `domain/` は他層（`usecase` / `infrastructure`）にも依存しない。外部クレートは
   エンティティの基盤語彙に限る — 時刻を表す `chrono`、JSON インデックス表現を導出する
   `serde`、v2 resource incarnation を表す `uuid` だけを使い、git・PTY・端末・ファイル IO 等の重い外部クレートは持ち込まない

@@ -12,4 +12,5 @@ pub mod issue;
 pub mod lifecycle;
 pub mod memory;
 pub mod state;
+pub mod supervisor;
 pub mod workspace;
