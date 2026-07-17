@@ -456,6 +456,18 @@ dispatch MCP の正本は本節である。`session_dispatch`、`session_get`、
 前二者は session / agent を、完了・失敗・inbox は worker の実行文脈と保存済み binding を用いるため、
 MCP caller は宛先を指定しない。`session_dispatch` は常に即時実行であり queue/live を公開しない。
 
+`session_dispatch` の新規 agent は workspace の `.usagi/config.toml` にある
+`[agents.claude].models` / `[agents.codex].models` allowlist だけから選ぶ。MCP server は起動時に
+allowlist と PATH 上の `claude` / `codex` の存在を snapshot し、非空 allowlist と executable の
+両方を持つ runtime だけを `tools/list` の `agent.runtime` / `agent.model` enum に載せる。既存 agent は
+`agent.id` branch を使い、runtime/model branch とは JSON Schema `oneOf` で排他的である。snapshot は
+server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の
+再起動または client 再接続が必要である。allowlist の正本や schema を CLI/provider の model list で拡張・保存しない。
+
+既存の `session_create`、`session_delegate_issue`、`session_delegate_brief` は移行期間の
+`agent_cli` alias を受ける。parser はこれを `runtime` に正規化するが、`runtime` または `agent.id` と
+混在した alias は migration error として拒否する。
+
 既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
 `session_complete` は置換せず併存する。前者群は起源・prompt・自由文報告の入口、dispatch 群は
 agent 単位の即時実行と durable な構造化報告を担う。
