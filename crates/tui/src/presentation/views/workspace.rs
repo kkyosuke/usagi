@@ -1127,6 +1127,7 @@ fn selectable_rows(width: usize, ws: &Workspace, index: usize) -> Vec<String> {
                     ws.mode(),
                     session,
                     ws.git_diff(index - 1),
+                    sidebar_diff_columns(ws.session_ids(), &ws.git_diffs),
                 )
             },
         )
@@ -1275,8 +1276,17 @@ fn session_menu_rows(
     mode: Mode,
     session: &SessionRecord,
     git_diff: Option<&GitDiff>,
+    columns: SidebarDiffColumns,
 ) -> Vec<String> {
-    session_menu_rows_at(width, selected, mode, session, git_diff, Utc::now())
+    session_menu_rows_at(
+        width,
+        selected,
+        mode,
+        session,
+        git_diff,
+        columns,
+        Utc::now(),
+    )
 }
 
 /// 1 フレームでは同じ基準時刻を使うことで、複数 session が境界時刻に跨って別々の表現に
@@ -1288,6 +1298,7 @@ fn session_menu_rows_at(
     mode: Mode,
     session: &SessionRecord,
     git_diff: Option<&GitDiff>,
+    columns: SidebarDiffColumns,
     now: DateTime<Utc>,
 ) -> Vec<String> {
     let marker = if selected {
@@ -1326,25 +1337,128 @@ fn session_menu_rows_at(
         || format!("{continuation} {modified}"),
         |pr| format!("{continuation} {modified} · {pr}"),
     );
-    let metadata = match git_diff {
-        Some(diff) => format!("{metadata} · {}", git_diff_text(diff)),
-        None => metadata,
-    };
+    let dim = mode == Mode::Switch && !selected;
+    let metadata = sidebar_metadata(metadata, git_diff, columns, width, dim);
     vec![
         first,
-        widgets::pad_to_width(&Style::new().dim().paint(&metadata), width),
+        widgets::pad_to_width(
+            &(if dim {
+                Style::new().dim()
+            } else {
+                Style::new()
+            })
+            .paint(&metadata),
+            width,
+        ),
     ]
 }
 
-fn git_diff_text(diff: &GitDiff) -> String {
-    let commits = format!("↑{} ↓{}", diff.ahead, diff.behind);
-    let lines = format!("+{} -{}", diff.added, diff.removed);
-    format!(
-        "{} {} {}",
-        Style::new().dim().paint(&diff.base),
-        Role::Accent.style().paint(&commits),
-        Role::Success.style().paint(&lines)
+/// Git summary columns are sized once for the entire sidebar.  This keeps the
+/// time, commit, and line-count cells at the same positions for every session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SidebarDiffColumns {
+    ahead: usize,
+    behind: usize,
+    added: usize,
+    removed: usize,
+}
+
+fn sidebar_diff_columns(
+    session_ids: &[SessionId],
+    diffs: &BTreeMap<SessionId, GitDiff>,
+) -> SidebarDiffColumns {
+    session_ids.iter().filter_map(|id| diffs.get(id)).fold(
+        SidebarDiffColumns::default(),
+        |columns, diff| SidebarDiffColumns {
+            ahead: columns.ahead.max(decimal_digits(diff.ahead)),
+            behind: columns.behind.max(decimal_digits(diff.behind)),
+            added: columns.added.max(decimal_digits(diff.added)),
+            removed: columns.removed.max(decimal_digits(diff.removed)),
+        },
     )
+}
+
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn sidebar_metadata(
+    metadata: String,
+    diff: Option<&GitDiff>,
+    columns: SidebarDiffColumns,
+    width: usize,
+    dim: bool,
+) -> String {
+    if columns == SidebarDiffColumns::default() {
+        return metadata;
+    }
+    let diff = diff.map_or_else(
+        || " ".repeat(sidebar_git_summary_width(columns)),
+        |diff| git_diff_text(diff, columns, dim),
+    );
+    let available = width.saturating_sub(2);
+    let prefix = widgets::clip_to_width(&metadata, available);
+    let gap = available
+        .saturating_sub(widgets::display_width(&prefix))
+        .saturating_sub(widgets::display_width(&diff));
+    format!("{prefix}{}{diff}", " ".repeat(gap))
+}
+
+fn sidebar_git_summary_width(columns: SidebarDiffColumns) -> usize {
+    let commits = usize::from(columns.ahead > 0) * (columns.ahead + 1)
+        + usize::from(columns.ahead > 0 && columns.behind > 0)
+        + usize::from(columns.behind > 0) * (columns.behind + 1);
+    let lines = columns.added + columns.removed + 5;
+    commits + lines + usize::from(commits > 0)
+}
+
+fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> String {
+    let commits = match (columns.ahead > 0, columns.behind > 0) {
+        (true, true) => format!(
+            "↑{:>ahead$} ↓{:>behind$}",
+            diff.ahead,
+            diff.behind,
+            ahead = columns.ahead,
+            behind = columns.behind
+        ),
+        (true, false) => format!("↑{:>ahead$}", diff.ahead, ahead = columns.ahead),
+        (false, true) => format!("↓{:>behind$}", diff.behind, behind = columns.behind),
+        (false, false) => String::new(),
+    };
+    let success = if dim {
+        Role::Success.style().dim()
+    } else {
+        Role::Success.style()
+    };
+    let danger = if dim {
+        Role::Danger.style().dim()
+    } else {
+        Role::Danger.style()
+    };
+    let lines = format!(
+        "{} {}",
+        success.paint(&format!("+ {:>added$}", diff.added, added = columns.added)),
+        danger.paint(&format!(
+            "- {:>removed$}",
+            diff.removed,
+            removed = columns.removed
+        )),
+    );
+    if commits.is_empty() {
+        lines
+    } else {
+        let accent = if dim {
+            Role::Accent.style().dim()
+        } else {
+            Role::Accent.style()
+        };
+        format!("{} {lines}", accent.paint(&commits))
+    }
 }
 
 /// v1 と同様に、作成中の session を実行前から同じ sidebar 内に予約する skeleton 行。
@@ -1479,6 +1593,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
 
     let mut rows = Vec::with_capacity(height);
     let now = Utc::now();
+    let diff_columns = sidebar_diff_columns(ws.session_ids(), &ws.git_diffs);
     for index in start..ws.row_count() {
         let mut entry = if index == 0 {
             root_rows(width, ws)
@@ -1494,6 +1609,7 @@ fn left_pane(height: usize, width: usize, ws: &Workspace, skeleton_frame: usize)
                         ws.mode(),
                         session,
                         ws.git_diff(index - 1),
+                        diff_columns,
                         now,
                     )
                 },
@@ -3071,7 +3187,15 @@ mod tests {
         let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let rows = super::session_menu_rows_at(40, true, Mode::Switch, &record, None, base);
+        let rows = super::session_menu_rows_at(
+            40,
+            true,
+            Mode::Switch,
+            &record,
+            None,
+            super::SidebarDiffColumns::default(),
+            base,
+        );
         assert_eq!(rows.len(), 2);
         assert!(rows[0].contains("\u{1b}[1;31m\u{f0907}\u{1b}[0m"));
         assert!(rows[1].contains("\u{1b}[1;31m|\u{1b}[0m"));
@@ -3080,11 +3204,27 @@ mod tests {
         assert!(strip(&rows[1]).contains("PR #42"));
         assert!(!strip(&rows[1]).contains("diff"));
         assert!(rows.iter().all(|row| display_width(row) == 40));
-        let narrow = super::session_menu_rows_at(18, true, Mode::Switch, &record, None, base);
+        let narrow = super::session_menu_rows_at(
+            18,
+            true,
+            Mode::Switch,
+            &record,
+            None,
+            super::SidebarDiffColumns::default(),
+            base,
+        );
         assert!(strip(&narrow[0]).contains("✎"));
         assert!(narrow.iter().all(|row| display_width(row) == 18));
 
-        let closeup = super::session_menu_rows_at(40, true, Mode::Closeup, &record, None, base);
+        let closeup = super::session_menu_rows_at(
+            40,
+            true,
+            Mode::Closeup,
+            &record,
+            None,
+            super::SidebarDiffColumns::default(),
+            base,
+        );
         assert!(closeup[0].contains("\u{1b}[1;32m|\u{1b}[0m"));
         assert!(closeup[1].contains("\u{1b}[1;32m|\u{1b}[0m"));
     }
@@ -3102,16 +3242,148 @@ mod tests {
             added: 12,
             removed: 4,
         };
-        let rows = super::session_menu_rows_at(60, false, Mode::Switch, &record, Some(&diff), base);
+        let columns = super::SidebarDiffColumns {
+            ahead: 1,
+            behind: 1,
+            added: 2,
+            removed: 1,
+        };
+        let rows = super::session_menu_rows_at(
+            60,
+            false,
+            Mode::Switch,
+            &record,
+            Some(&diff),
+            columns,
+            base,
+        );
         let plain = strip(&rows[1]);
-        assert!(plain.contains("origin/main"));
         assert!(plain.contains("↑2 ↓1"));
-        assert!(plain.contains("+12 -4"));
+        assert!(plain.contains("+ 12 - 4"));
+        assert!(!plain.contains("origin/main"));
+        assert!(rows[1].contains("\u{1b}[2;32m+ 12\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[2;31m- 4\u{1b}[0m"));
         assert!(rows.iter().all(|row| display_width(row) == 60));
 
-        let narrow =
-            super::session_menu_rows_at(18, false, Mode::Switch, &record, Some(&diff), base);
+        let selected = super::session_menu_rows_at(
+            60,
+            true,
+            Mode::Switch,
+            &record,
+            Some(&diff),
+            columns,
+            base,
+        );
+        assert!(selected[1].contains("\u{1b}[32m+ 12\u{1b}[0m"));
+        assert!(selected[1].contains("\u{1b}[31m- 4\u{1b}[0m"));
+        assert!(!selected[1].contains("\u{1b}[2;32m+ 12\u{1b}[0m"));
+        assert!(!selected[1].contains("\u{1b}[2;31m- 4\u{1b}[0m"));
+
+        let narrow = super::session_menu_rows_at(
+            18,
+            false,
+            Mode::Switch,
+            &record,
+            Some(&diff),
+            columns,
+            base,
+        );
         assert!(narrow.iter().all(|row| display_width(row) == 18));
+    }
+
+    #[test]
+    fn session_git_summary_columns_are_shared_by_every_session() {
+        let base = DateTime::parse_from_rfc3339("2026-06-26T13:42:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let columns = super::SidebarDiffColumns {
+            ahead: 2,
+            behind: 1,
+            added: 4,
+            removed: 3,
+        };
+        let first = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 1,
+            behind: 2,
+            added: 12,
+            removed: 4,
+        };
+        let second = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 10,
+            behind: 1,
+            added: 1234,
+            removed: 567,
+        };
+        let first = super::session_menu_rows_at(
+            70,
+            false,
+            Mode::Switch,
+            &session("one", None, SessionOrigin::Unknown),
+            Some(&first),
+            columns,
+            base,
+        );
+        let second = super::session_menu_rows_at(
+            70,
+            false,
+            Mode::Switch,
+            &session("two", None, SessionOrigin::Unknown),
+            Some(&second),
+            columns,
+            base,
+        );
+        assert_eq!(strip(&first[1]).find('+'), strip(&second[1]).find('+'));
+        assert_eq!(strip(&first[1]).find('-'), strip(&second[1]).find('-'));
+    }
+
+    #[test]
+    fn git_summary_supports_every_commit_column_shape() {
+        let diff = GitDiff {
+            base: "origin/main".to_owned(),
+            ahead: 12,
+            behind: 3,
+            added: 1,
+            removed: 2,
+        };
+        assert_eq!(super::decimal_digits(1_234), 4);
+
+        let ahead_only = super::git_diff_text(
+            &diff,
+            super::SidebarDiffColumns {
+                ahead: 2,
+                behind: 0,
+                added: 1,
+                removed: 1,
+            },
+            false,
+        );
+        assert_eq!(strip(&ahead_only), "↑12 + 1 - 2");
+
+        let behind_only = super::git_diff_text(
+            &diff,
+            super::SidebarDiffColumns {
+                ahead: 0,
+                behind: 1,
+                added: 1,
+                removed: 1,
+            },
+            false,
+        );
+        assert_eq!(strip(&behind_only), "↓3 + 1 - 2");
+
+        let no_commits = super::git_diff_text(
+            &diff,
+            super::SidebarDiffColumns {
+                ahead: 0,
+                behind: 0,
+                added: 1,
+                removed: 1,
+            },
+            false,
+        );
+        assert_eq!(strip(&no_commits), "+ 1 - 2");
     }
 
     #[test]
@@ -3135,8 +3407,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("daemon"));
-        assert!(rendered.contains("origin/main ↑3 ↓2 +8 -1"));
-        assert_eq!(rendered.matches("origin/main").count(), 1);
+        assert!(rendered.contains("↑3 ↓2 + 8 - 1"));
+        assert!(!rendered.contains("origin/main"));
     }
 
     #[test]
