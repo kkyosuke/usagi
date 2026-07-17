@@ -521,7 +521,7 @@ struct WorkspaceUi {
     modal: Option<WorkspaceModal>,
     /// Closeup に tab があるときでも action modal を前面へ出す明示要求。tab が無い
     /// Closeup では常に modal が出るため、このフラグは tab がある間だけ意味を持つ。
-    /// `Ctrl-O a`（[`LiveTerminalAction::OpenCloseupModal`]）で立て、Switch へ戻る・
+    /// `Ctrl-O a` または `Ctrl-O Ctrl-A`（[`LiveTerminalAction::OpenCloseupModal`]）で立て、Switch へ戻る・
     /// action を選ぶ・modal を閉じると倒す。
     closeup_action_forced: bool,
     overlay_data: Box<dyn OverlayDataPort>,
@@ -922,7 +922,7 @@ impl WorkspaceUi {
     }
 
     /// Closeup の action modal が現在前面に出ているか。tab が無ければ常に出る。tab が
-    /// あるときは `Ctrl-O a` で明示要求した間だけ出る。
+    /// あるときは `Ctrl-O a` または `Ctrl-O Ctrl-A` で明示要求した間だけ出る。
     #[coverage(off)]
     fn closeup_modal_visible(&self) -> bool {
         self.workspace.mode() == Mode::Closeup
@@ -1788,7 +1788,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('n') => ui.open_text(),
         Key::CtrlQ => ui.open_quit_confirmation(QuitAction::EndWorkspace),
         Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
-        // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
+        // `Ctrl-O a` / `Ctrl-O Ctrl-A` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
         Key::Escape
@@ -1809,7 +1809,7 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
 ///
 /// - live-terminal prefix（`Ctrl-O` leader）で解決した [`Key::Live`] は、modal の表示に
 ///   かかわらず [`LiveInputClassifier`] 契約として [`apply_live_action`] が処理する。
-/// - action modal が前面のとき（tab 無し、または `Ctrl-O a` で forced）は action menu を
+/// - action modal が前面のとき（tab 無し、または `Ctrl-O a` / `Ctrl-O Ctrl-A` で forced）は action menu を
 ///   操作する。Action mode は上下で選んだ command、Prompt mode は入力した command を
 ///   Enter で registry 経由に実行する。
 /// - tab が前面のとき（tab あり・非 forced）は tab を操作し、menu には触れない。
@@ -3662,7 +3662,7 @@ mod tests {
         step_workspace(&mut ui, Key::Enter);
         assert_eq!(ui.workspace.pane().tabs().len(), 1);
 
-        // A tab is now present, so the prompt is hidden until `Ctrl-O a` forces it
+        // A tab is now present, so the prompt is hidden until `Ctrl-O a` or `Ctrl-O Ctrl-A` forces it
         // back over the tabs; only then does the typed command run.
         ui.enter_closeup();
         assert!(!ui.closeup_modal_visible(), "prompt is hidden behind tabs");
@@ -4817,7 +4817,7 @@ mod tests {
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::PreviousTab));
         assert_eq!(ui.workspace.pane().selected(), &before);
 
-        // Ctrl-O a forces the action modal over the tabs; Esc clears the force
+        // Ctrl-O a / Ctrl-O Ctrl-A force the action modal over the tabs; Esc clears the force
         // and keeps the tabs (it does not leave Closeup).
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
         assert!(ui.closeup_modal_visible());
@@ -4839,7 +4839,7 @@ mod tests {
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
         ui.workspace.select_next();
 
-        // `Ctrl-O a` from Switch opens the selected target's Closeup and gives
+        // `Ctrl-O a` / `Ctrl-O Ctrl-A` from Switch open the selected target's Closeup and give
         // its action modal the input surface immediately.
         step_workspace(&mut ui, Key::Live(LiveTerminalAction::OpenCloseupModal));
         assert_eq!(ui.workspace.mode(), WorkspaceMode::Closeup);
