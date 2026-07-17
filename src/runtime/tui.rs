@@ -30,8 +30,8 @@ use usagi_core::infrastructure::git::diff_status;
 use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
-    AgentLaunchIntent, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply, DaemonRequest,
-    IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
+    AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
+    DaemonRequest, IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
     TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
@@ -548,7 +548,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                 operation_id,
                 payload,
             })
-            .map_err(|error| format!("daemon request failed: {error}"))?;
+            .map_err(daemon_error_reason)?;
         match reply {
             DaemonReply::Accepted {
                 operation_id,
@@ -657,12 +657,23 @@ fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, String> {
             operation_id: usagi_core::domain::id::OperationId::new().to_string(),
             payload: serde_json::json!({}),
         })
-        .map_err(|error| format!("daemon request failed: {error}"))?
+        .map_err(daemon_error_reason)?
     {
         DaemonReply::Ok(value) => lifecycle_snapshot(&value),
         DaemonReply::Accepted { .. } => {
             Err("daemon returned an invalid lifecycle snapshot response".to_owned())
         }
+    }
+}
+
+/// Render only the user-actionable daemon reason in the TUI.  Error codes and
+/// transport variant labels remain useful to diagnostics but add no context to
+/// an interactive failure notice.
+#[coverage(off)]
+fn daemon_error_reason(error: ClientError) -> String {
+    match error {
+        ClientError::Protocol(error) => error.message,
+        ClientError::Unavailable(message) | ClientError::Lifecycle(message) => message,
     }
 }
 
