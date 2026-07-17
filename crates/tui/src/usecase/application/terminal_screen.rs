@@ -450,12 +450,18 @@ impl TerminalScreen {
 
     fn line_feed(&mut self) {
         if self.cursor_row + 1 >= self.rows {
-            self.scrollback.push(self.grid.remove(0));
-            // Bounded client-side history: the daemon remains authoritative for
-            // retained replay, while a long-running pane cannot grow this view
-            // without limit.
-            if self.scrollback.len() > 10_000 {
-                self.scrollback.remove(0);
+            let row = self.grid.remove(0);
+            // Full-screen programs redraw the alternate buffer in place. Its
+            // scrolled rows are not terminal history; retaining them would mix
+            // stale frames into the current Agent pane after a long response.
+            if self.primary_screen.is_none() {
+                self.scrollback.push(row);
+                // Bounded client-side history: the daemon remains authoritative
+                // for retained replay, while a long-running pane cannot grow
+                // this view without limit.
+                if self.scrollback.len() > 10_000 {
+                    self.scrollback.remove(0);
+                }
             }
             self.grid.push(vec![Cell::blank(); self.cols]);
         } else {
@@ -926,6 +932,21 @@ mod tests {
         // A normal exit restores the prior shell viewport exactly.
         screen.advance(b"\x1b[?1049l");
         assert_eq!(screen.rows(), vec!["$ shell", ""]);
+    }
+
+    #[test]
+    fn alternate_screen_scroll_does_not_mix_old_frames_into_agent_output() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.advance(b"shell\r\n");
+        screen.advance(b"\x1b[?1049hfirst\r\nsecond\r\nthird");
+
+        assert_eq!(screen.rows(), vec!["second", "third"]);
+        assert_eq!(screen.rows_with_scrollback(), vec!["second", "third"]);
+
+        // A full-screen redraw replaces the grid, not a synthetic history of
+        // the preceding frame.
+        screen.advance(b"\x1b[2J\x1b[Hreply");
+        assert_eq!(screen.rows_with_scrollback(), vec!["reply"]);
     }
 
     #[test]
