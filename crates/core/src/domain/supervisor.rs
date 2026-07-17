@@ -952,6 +952,22 @@ mod tests {
             worker_worktree_id: WorktreeId::new(),
             generation: 1,
         };
+        let mut mismatched_parent = child_provenance.clone();
+        mismatched_parent.parent_dispatch_run = Some(OperationId::new());
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    4,
+                    SupervisorEventKind::Dispatch {
+                        task_id: child_id.clone(),
+                        generation: 1,
+                        provenance: mismatched_parent,
+                    },
+                ),
+            ),
+            Err(SupervisorError::ProvenanceMismatch)
+        );
         reduce(
             &mut run,
             &event(
