@@ -22,7 +22,7 @@ impl Tool for MemorySave {
         "memory_save"
     }
     fn description(&self) -> &'static str {
-        "メモリを保存する（upsert。既存は渡したフィールドだけ部分更新、新規は title 必須）"
+        "セッションをまたいで残す事実（user/feedback/project/reference）を保存するときに使う。upsert で、既存は渡したフィールドだけ部分更新、新規は title 必須。name が識別子になる。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"title":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]},"related":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}},"required":["name"]}"#
@@ -37,7 +37,7 @@ impl Tool for MemoryGet {
         "memory_get"
     }
     fn description(&self) -> &'static str {
-        "名前を指定してメモリを取得する（無ければ null）"
+        "保存済みメモリを name 指定で 1 件参照するときに使う。存在しない name なら null を返す。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
@@ -52,7 +52,7 @@ impl Tool for MemorySearch {
         "memory_search"
     }
     fn description(&self) -> &'static str {
-        "メモリを全文検索・絞り込みする（query 省略で全件、updated_at の新しい順）"
+        "関連するメモリを探すときに使う。query の全文検索と type フィルタで絞り込み、updated_at の新しい順に返す。query 省略で全件。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"query":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]}}}"#
@@ -67,7 +67,7 @@ impl Tool for MemoryDelete {
         "memory_delete"
     }
     fn description(&self) -> &'static str {
-        "名前を指定してメモリを削除する"
+        "不要・誤りのメモリを name 指定で削除するときに使う。削除は元に戻せない。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#

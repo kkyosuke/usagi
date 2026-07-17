@@ -1,5 +1,6 @@
 //! `usagi mcp` の stdio serve ループ。1 行 = 1 JSON-RPC 2.0 メッセージを読み、
-//! `initialize` / `tools/list` / `tools/call` を処理して 1 行の応答を返す。
+//! `initialize` / `tools/list` / `tools/call` / `resources/list` / `resources/read` を
+//! 処理して 1 行の応答を返す。
 //!
 //! `handle_line`（str → 応答文字列 or なし）に純粋なルーティングを閉じ込め、`serve` は
 //! 実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、ルーティングは
@@ -15,7 +16,7 @@ use usagi_core::usecase::client::{
 
 use super::protocol::{self, error_code};
 use super::tool::ToolError;
-use super::{dispatch, tools};
+use super::{dispatch, resources, tools};
 
 /// サーバが宣言する MCP プロトコルバージョン。クライアントが `initialize` で別の版を
 /// 要求したらそれをエコーし、無ければこの既定を返す。
@@ -133,6 +134,8 @@ fn respond(
         "ping" => protocol::success(id, json!({})),
         "tools/list" => protocol::success(id, tools_list_result()),
         "tools/call" => tools_call(id, params, client),
+        "resources/list" => protocol::success(id, resources::list_result()),
+        "resources/read" => resources_read(id, params),
         other => protocol::error(
             id,
             error_code::METHOD_NOT_FOUND,
@@ -150,7 +153,7 @@ fn initialize_result(params: Option<&Value>, version: &str) -> Value {
         .unwrap_or(DEFAULT_PROTOCOL_VERSION);
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": {}, "resources": {} },
         "serverInfo": { "name": "usagi", "version": version },
     })
 }
@@ -221,6 +224,24 @@ fn tools_call(id: Value, params: Option<&Value>, client: &mut dyn DaemonClient) 
     }
 }
 
+/// `resources/read` を処理する。`uri` を取り出して resource レジストリを引き、本文を
+/// `contents` に包んで返す。`uri` 欠落は `INVALID_PARAMS`、未知 URI は resource が無い旨の
+/// `INVALID_PARAMS` を返す。
+#[coverage(off)]
+fn resources_read(id: Value, params: Option<&Value>) -> Value {
+    let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
+        return protocol::error(id, error_code::INVALID_PARAMS, "missing resource uri");
+    };
+    match resources::read_result(uri) {
+        Some(result) => protocol::success(id, result),
+        None => protocol::error(
+            id,
+            error_code::INVALID_PARAMS,
+            &format!("unknown resource: {uri}"),
+        ),
+    }
+}
+
 #[coverage(off)]
 fn session_action(name: &str) -> Option<SessionAction> {
     match name {
@@ -261,6 +282,7 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["name"], "usagi");
         assert_eq!(v["result"]["serverInfo"]["version"], "9.9.9");
         assert!(v["result"]["capabilities"]["tools"].is_object());
+        assert!(v["result"]["capabilities"]["resources"].is_object());
     }
 
     #[test]
@@ -316,8 +338,50 @@ mod tests {
 
     #[test]
     fn unknown_method_is_method_not_found() {
-        let v = call(r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#).unwrap();
+        let v = call(r#"{"jsonrpc":"2.0","id":7,"method":"resources/subscribe"}"#).unwrap();
         assert_eq!(v["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn resources_list_returns_the_orchestration_guide() {
+        let v = call(r#"{"jsonrpc":"2.0","id":10,"method":"resources/list"}"#).unwrap();
+        let resources = v["result"]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|r| r["uri"] == "usagi://guides/orchestration")
+        );
+        for resource in resources {
+            assert!(resource["uri"].as_str().is_some());
+            assert!(resource["name"].as_str().is_some());
+            assert!(resource["mimeType"].as_str().is_some());
+        }
+    }
+
+    #[test]
+    fn resources_read_returns_the_guide_body_for_a_known_uri() {
+        let v = call(r#"{"jsonrpc":"2.0","id":11,"method":"resources/read","params":{"uri":"usagi://guides/orchestration"}}"#).unwrap();
+        let contents = v["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents[0]["uri"], "usagi://guides/orchestration");
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+        assert!(
+            contents[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("orchestration")
+        );
+    }
+
+    #[test]
+    fn resources_read_unknown_uri_is_invalid_params() {
+        let v = call(r#"{"jsonrpc":"2.0","id":12,"method":"resources/read","params":{"uri":"usagi://guides/nope"}}"#).unwrap();
+        assert_eq!(v["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn resources_read_without_uri_is_invalid_params() {
+        let v = call(r#"{"jsonrpc":"2.0","id":13,"method":"resources/read","params":{}}"#).unwrap();
+        assert_eq!(v["error"]["code"], -32602);
     }
 
     #[test]

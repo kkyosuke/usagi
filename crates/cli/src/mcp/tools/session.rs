@@ -37,7 +37,7 @@ impl Tool for SessionCreate {
         "session_create"
     }
     fn description(&self) -> &'static str {
-        "セッション（worktree）を作成する"
+        "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。name 必須、agent_cli/model は任意。実行と状態の権威は daemon にあり、作成は非同期に受理される。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name"]}"#
@@ -52,7 +52,7 @@ impl Tool for SessionList {
         "session_list"
     }
     fn description(&self) -> &'static str {
-        "セッション一覧を返す（state.json の軽量クエリ）"
+        "存在するセッションの一覧を素早く得るときに使う。daemon の state を軽量に読むだけで、worktree の git 状態などの重い情報は含まない（詳細は session_status）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -67,7 +67,7 @@ impl Tool for SessionStatus {
         "session_status"
     }
     fn description(&self) -> &'static str {
-        "各セッションの進捗（agent phase・worktree の status/dirty/merged）を返す"
+        "各セッションの進捗（agent の phase、worktree の status/dirty/merged）を観測するときに使う。委譲したセッションが生存中か・変更が入っているかの判定に使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -82,7 +82,7 @@ impl Tool for SessionPrompt {
         "session_prompt"
     }
     fn description(&self) -> &'static str {
-        "セッションのエージェントにプロンプトを送る（mode で配送先を選ぶ）"
+        "既存セッションの agent に指示（プロンプト）を送るときに使う。name と prompt が必須。mode で配送先を選ぶ（auto=daemon が live/queue を判定、queue=起動時キュー、live=実行中端末へ直接）。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["auto","queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#
@@ -97,7 +97,7 @@ impl Tool for SessionComplete {
         "session_complete"
     }
     fn description(&self) -> &'static str {
-        "親（または root）へ完了を報告する（セッション内限定）"
+        "自セッションの作業完了を親（または root）へ報告するときに使う。message 必須。自セッション内からのみ呼べる。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#
@@ -112,7 +112,7 @@ impl Tool for SessionPr {
         "session_pr"
     }
     fn description(&self) -> &'static str {
-        "セッションに紐づく PR とマージ状態を取得する"
+        "セッションに紐づく PR とそのマージ状態を取得するときに使う。委譲先の成果が基点ブランチに入ったか（done）の検知に使う。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
@@ -127,7 +127,7 @@ impl Tool for SessionRemove {
         "session_remove"
     }
     fn description(&self) -> &'static str {
-        "セッション（worktree）を削除する（dirty があれば force が必要）"
+        "不要になったセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"}},"required":["name"]}"#
@@ -142,7 +142,7 @@ impl Tool for SessionNoteGet {
         "session_note_get"
     }
     fn description(&self) -> &'static str {
-        "現在のセッションのメモを取得する（セッション内限定）"
+        "現在のセッションの作業メモを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -157,7 +157,7 @@ impl Tool for SessionNoteUpdate {
         "session_note_update"
     }
     fn description(&self) -> &'static str {
-        "現在のセッションのメモを更新する（空文字でクリア。セッション内限定）"
+        "現在のセッションの作業メモを書き換えるときに使う。空文字を渡すとクリアする。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"note":{"type":"string"}},"required":["note"]}"#
@@ -172,7 +172,7 @@ impl Tool for SessionTodoList {
         "session_todo_list"
     }
     fn description(&self) -> &'static str {
-        "現在のセッションのチェックリストを返す（セッション内限定）"
+        "現在のセッションのチェックリストを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -187,7 +187,7 @@ impl Tool for SessionTodoAdd {
         "session_todo_add"
     }
     fn description(&self) -> &'static str {
-        "チェックリストに項目を追加する（text は trim・非空必須。セッション内限定）"
+        "現在のセッションのチェックリストに項目を追加するときに使う。text は trim され非空必須。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
@@ -202,7 +202,7 @@ impl Tool for SessionTodoUpdate {
         "session_todo_update"
     }
     fn description(&self) -> &'static str {
-        "チェックリストの項目を更新する（done と text の少なくとも一方が必須。セッション内限定）"
+        "チェックリスト項目の完了状態や文言を index 指定で更新するときに使う。done と text の少なくとも一方が必須。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"index":{"type":"integer"},"done":{"type":"boolean"},"text":{"type":"string"}},"required":["index"]}"#
@@ -217,7 +217,7 @@ impl Tool for SessionTodoRemove {
         "session_todo_remove"
     }
     fn description(&self) -> &'static str {
-        "チェックリストの項目を index 指定で削除する（セッション内限定）"
+        "チェックリスト項目を index 指定で削除するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"index":{"type":"integer"}},"required":["index"]}"#
@@ -232,7 +232,7 @@ impl Tool for SessionDecisionList {
         "session_decision_list"
     }
     fn description(&self) -> &'static str {
-        "セッションの意思決定ログを返す（セッション内限定）"
+        "セッションの意思決定ログを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{}}"#
@@ -247,7 +247,7 @@ impl Tool for SessionDecisionLog {
         "session_decision_log"
     }
     fn description(&self) -> &'static str {
-        "意思決定ログに追記する（at はサーバが付与。text は trim・非空必須。セッション内限定）"
+        "重要な判断を意思決定ログに追記するときに使う。text は trim され非空必須、時刻（at）はサーバが付与する。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
@@ -262,7 +262,7 @@ impl Tool for SessionDelegateIssue {
         "session_delegate_issue"
     }
     fn description(&self) -> &'static str {
-        "issue をプロンプト化→セッション作成→起動時キュー投入までを 1 tool で行う"
+        "既存の committed issue を新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["number"]}"#
@@ -277,7 +277,7 @@ impl Tool for SessionDelegateBrief {
         "session_delegate_brief"
     }
     fn description(&self) -> &'static str {
-        "ブリーフからトリアージ/設計セッションを作成し起動時キューに投入する"
+        "事前 issue の無い作業を始めるときに使う。ブリーフ（自由記述の指示）からトリアージ/設計セッションを作成し起動時キューに投入する。brief 必須。委譲先が worktree 内で issue 化する。"
     }
     fn input_schema(&self) -> &'static str {
         r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["brief"]}"#
