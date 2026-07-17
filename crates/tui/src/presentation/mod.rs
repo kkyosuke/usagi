@@ -41,6 +41,7 @@ use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverla
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
 use crate::presentation::widgets::modal;
+use crate::usecase::application::controller::{AppEvent, AppKey};
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::terminal_selection::{TerminalPoint, TerminalSelection};
@@ -1999,6 +2000,68 @@ fn apply_live_action(ui: &mut WorkspaceUi, action: LiveTerminalAction) -> Worksp
     WorkspaceStep::Stay
 }
 
+/// Translates a presentation [`Key`] into the controller's [`AppEvent`] vocabulary
+/// for the real-terminal runtime that routes Home input through `update()`.
+///
+/// The composition-root adapter has already resolved the `Ctrl-O` live prefix, so
+/// [`Key::Live`] arrives as a settled [`LiveTerminalAction`] that this function
+/// maps to the equivalent [`AppKey`]. Ordinary keys map one-to-one; the reducer,
+/// which owns overlay context, decides what each means. `Key::Other` (resize and
+/// backend wakeups the composition root cannot express as input) advances the
+/// mascot via [`AppEvent::Tick`] — real resize dimensions come from `term.size()`
+/// and backend results from `DaemonBackend::drain_events()`, not from a `Key`.
+///
+/// Returns `None` for input the Home reducer never consumes: raw PTY passthrough,
+/// pointer/click cells (the shell hit-tests those into [`AppKey::SelectRow`] via
+/// [`HomeProjection::row_at`]), and keys with no Home management meaning.
+///
+/// [`HomeProjection::row_at`]: crate::presentation::views::workspace::HomeProjection::row_at
+#[must_use]
+#[allow(clippy::needless_pass_by_value)]
+pub fn app_event_from_key(key: Key) -> Option<AppEvent> {
+    let app_key = match key {
+        Key::Live(action) => return live_action_to_app_key(action).map(AppEvent::Key),
+        Key::Other => return Some(AppEvent::Tick),
+        Key::Up => AppKey::Up,
+        Key::Down => AppKey::Down,
+        Key::Enter => AppKey::Enter,
+        Key::Backspace => AppKey::Backspace,
+        Key::Tab => AppKey::Tab,
+        Key::Escape => AppKey::Escape,
+        Key::Char(character) => AppKey::Char(character),
+        Key::Quit => AppKey::CtrlC,
+        Key::CtrlQ => AppKey::CtrlQ,
+        // Input the Home reducer never consumes: raw PTY passthrough and pointer
+        // cells (the shell hit-tests pointer/click into `AppKey::SelectRow`),
+        // Left/Right (tab motion is Ctrl-N/P), and Ctrl-D (Open Workspace only).
+        Key::Passthrough(_)
+        | Key::Pointer(_)
+        | Key::Click { .. }
+        | Key::Left
+        | Key::Right
+        | Key::CtrlD => return None,
+    };
+    Some(AppEvent::Key(app_key))
+}
+
+/// Maps a resolved live-terminal action to its Home reducer key. Tab close and
+/// terminal scroll/copy stay pane- and shell-level concerns the Home reducer has
+/// no vocabulary for, so they return `None`.
+fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKey> {
+    match action {
+        LiveTerminalAction::Switch => Some(AppKey::CtrlO),
+        LiveTerminalAction::OpenCloseupModal => Some(AppKey::OpenCloseupOverlay),
+        LiveTerminalAction::NextTab => Some(AppKey::CtrlN),
+        LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
+        LiveTerminalAction::Agent => Some(AppKey::CtrlA),
+        LiveTerminalAction::QuitConfirmation => Some(AppKey::OpenQuitConfirmation),
+        LiveTerminalAction::CloseTab
+        | LiveTerminalAction::ScrollUp
+        | LiveTerminalAction::ScrollDown
+        | LiveTerminalAction::CopyTerminalSelection => None,
+    }
+}
+
 #[coverage(off)]
 fn handle_terminal_pointer(ui: &mut WorkspaceUi, column: u16, row: u16, kind: Option<PointerKind>) {
     let auto_scroll = workspace::terminal_auto_scroll_direction_at(
@@ -3053,9 +3116,9 @@ mod tests {
         SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, SnapshotOverlayData,
         Start, TerminalAttach, TerminalChunk, TerminalError, UnavailableSessionCommandPort,
         WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
-        WorkspaceUi, drain_pane_launches, drain_session_completions, execute_closeup_command,
-        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
-        render_workspace, run as run_from_start, run_with_settings,
+        WorkspaceUi, app_event_from_key, drain_pane_launches, drain_session_completions,
+        execute_closeup_command, handle_sidebar_click, key_to_terminal_bytes, play_startup_splash,
+        refresh_metrics, render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
         run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
         step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
@@ -3066,6 +3129,7 @@ mod tests {
     use crate::presentation::views::workspace::{
         Mode as WorkspaceMode, Workspace as WorkspaceView,
     };
+    use crate::usecase::application::controller::{AppEvent, AppKey};
     use crate::usecase::application::run as dispatch;
     use crate::usecase::application::{EntryScreen, Key, Terminal};
     use crate::usecase::overview::SessionCommand;
@@ -3093,6 +3157,93 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-06-25T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn app_event_from_key_maps_ordinary_management_keys() {
+        assert_eq!(app_event_from_key(Key::Up), Some(AppEvent::Key(AppKey::Up)));
+        assert_eq!(
+            app_event_from_key(Key::Down),
+            Some(AppEvent::Key(AppKey::Down))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Enter),
+            Some(AppEvent::Key(AppKey::Enter))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Backspace),
+            Some(AppEvent::Key(AppKey::Backspace))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Tab),
+            Some(AppEvent::Key(AppKey::Tab))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Escape),
+            Some(AppEvent::Key(AppKey::Escape))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Char('x')),
+            Some(AppEvent::Key(AppKey::Char('x')))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Quit),
+            Some(AppEvent::Key(AppKey::CtrlC))
+        );
+        assert_eq!(
+            app_event_from_key(Key::CtrlQ),
+            Some(AppEvent::Key(AppKey::CtrlQ))
+        );
+    }
+
+    #[test]
+    fn app_event_from_key_maps_resolved_live_actions_to_reducer_keys() {
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::Switch)),
+            Some(AppEvent::Key(AppKey::CtrlO))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::OpenCloseupModal)),
+            Some(AppEvent::Key(AppKey::OpenCloseupOverlay))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::NextTab)),
+            Some(AppEvent::Key(AppKey::CtrlN))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::PreviousTab)),
+            Some(AppEvent::Key(AppKey::CtrlP))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::Agent)),
+            Some(AppEvent::Key(AppKey::CtrlA))
+        );
+        assert_eq!(
+            app_event_from_key(Key::Live(LiveTerminalAction::QuitConfirmation)),
+            Some(AppEvent::Key(AppKey::OpenQuitConfirmation))
+        );
+    }
+
+    #[test]
+    fn app_event_from_key_ticks_on_wakeups_and_drops_pane_only_input() {
+        // Resize / backend wakeups reach the loop as `Other` and advance the mascot.
+        assert_eq!(app_event_from_key(Key::Other), Some(AppEvent::Tick));
+        // Raw passthrough, pointer cells, and clicks never reach the Home reducer.
+        assert_eq!(app_event_from_key(Key::Passthrough(vec![0x1b])), None);
+        assert_eq!(app_event_from_key(Key::Click { column: 3, row: 4 }), None);
+        // Left/Right and Ctrl-D carry no Home management meaning.
+        assert_eq!(app_event_from_key(Key::Left), None);
+        assert_eq!(app_event_from_key(Key::Right), None);
+        assert_eq!(app_event_from_key(Key::CtrlD), None);
+        // Tab close and terminal scroll/copy stay pane- and shell-level concerns.
+        for action in [
+            LiveTerminalAction::CloseTab,
+            LiveTerminalAction::ScrollUp,
+            LiveTerminalAction::ScrollDown,
+            LiveTerminalAction::CopyTerminalSelection,
+        ] {
+            assert_eq!(app_event_from_key(Key::Live(action)), None);
+        }
     }
 
     fn ws(name: &str) -> Workspace {
