@@ -745,6 +745,10 @@ mod tests {
             &event(1, SupervisorEventKind::AddTask { task: root }),
         )
         .unwrap();
+        run.tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap()
+            .state = TaskState::Pending;
         assert_eq!(
             reduce(
                 &mut run,
@@ -774,6 +778,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn rejects_duplicate_parent_and_dispatch_fences() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
         let run_id = run.supervisor_run_id;
@@ -845,6 +850,52 @@ mod tests {
                 )
             ),
             Err(SupervisorError::ProvenanceMismatch)
+        );
+        run.tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap()
+            .state = TaskState::Pending;
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    2,
+                    SupervisorEventKind::Dispatch {
+                        task_id: TaskId::new("root").unwrap(),
+                        generation: 1,
+                        provenance: RunProvenance {
+                            supervisor_run_id: run_id,
+                            task_id: TaskId::new("root").unwrap(),
+                            parent_task_id: None,
+                            parent_dispatch_run: None,
+                            dispatch_run_id: OperationId::new(),
+                            worker_session_id: SessionId::new(),
+                            worker_agent_id: AgentRuntimeId::new(),
+                            worker_worktree_id: WorktreeId::new(),
+                            generation: 1
+                        }
+                    }
+                )
+            ),
+            Err(SupervisorError::DependencyIncomplete)
+        );
+        run.tasks
+            .get_mut(&TaskId::new("root").unwrap())
+            .unwrap()
+            .state = TaskState::Succeeded;
+        assert_eq!(
+            reduce(
+                &mut run,
+                &event(
+                    2,
+                    SupervisorEventKind::SetTaskState {
+                        task_id: TaskId::new("root").unwrap(),
+                        generation: 1,
+                        state: TaskState::Failed
+                    }
+                )
+            ),
+            Err(SupervisorError::InvalidTransition)
         );
     }
 }
