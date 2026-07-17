@@ -411,6 +411,9 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 after_offset,
             },
         )?;
+        if body["exited"].as_bool().unwrap_or(false) {
+            return Err(TerminalError::Exited);
+        }
         let outputs = body["output"].as_array().cloned().unwrap_or_default();
         let mut chunks = Vec::with_capacity(outputs.len());
         for output in outputs {

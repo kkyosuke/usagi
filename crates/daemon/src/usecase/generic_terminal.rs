@@ -243,7 +243,9 @@ impl GenericTerminalCoordinator {
         terminal: &TerminalRef,
         offset: u64,
     ) -> Result<Vec<Output>, GenericTerminalError> {
-        self.running(terminal)?;
+        // An exited terminal still owns its final retained output long enough
+        // for an attached client to observe the exit and close its pane.
+        self.record(terminal)?;
         self.terminals
             .replay_from(terminal, offset)
             .map_err(GenericTerminalError::Terminal)
@@ -629,6 +631,7 @@ mod tests {
         )
         .unwrap();
         c.exit(&exiting, 0, &mut store).unwrap();
+        assert!(c.replay_from(&exiting, 0).unwrap().is_empty());
         assert_eq!(c.occupied_slots(), 1);
         let (failing, failing_fence) = refs(&request);
         assert_eq!(

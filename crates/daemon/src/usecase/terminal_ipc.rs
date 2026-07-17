@@ -221,11 +221,19 @@ impl<R: TerminalProfileResolver, S: TerminalStore, P: TerminalPty, Q: TerminalSc
                     terminal,
                     after_offset,
                 },
-            ) => self
-                .coordinator
-                .replay_from(&terminal, after_offset)
-                .map(|output| json!({"output": output}))
-                .map_err(map_error),
+            ) => {
+                let output = self
+                    .coordinator
+                    .replay_from(&terminal, after_offset)
+                    .map_err(map_error)?;
+                let exited = self
+                    .coordinator
+                    .terminal_snapshot(&terminal)
+                    .map_err(map_error)?
+                    .exited
+                    .is_some();
+                Ok(json!({"output": output, "exited": exited}))
+            }
             (TerminalAction::Resync, TerminalRequest::Resync { terminal }) => self
                 .coordinator
                 .terminal_snapshot(&terminal)
