@@ -4765,6 +4765,15 @@ mod tests {
     #[test]
     fn terminal_geometry_uses_the_visible_right_pane_width() {
         assert_eq!(terminal_geometry(24, 80), Geometry { cols: 43, rows: 17 });
+        // The left sidebar keeps its 36 columns; every remaining terminal
+        // column belongs to the right pane even on a wide outer terminal.
+        assert_eq!(
+            terminal_geometry(34, 153),
+            Geometry {
+                cols: 116,
+                rows: 27
+            }
+        );
     }
 
     #[test]

@@ -128,6 +128,11 @@ pub enum SessionState {
 pub struct TerminalSession {
     terminal: TerminalRef,
     geometry: Geometry,
+    /// The viewport size last accepted by the daemon PTY.  This remains
+    /// `None` after a transport failure so an unchanged outer-terminal size
+    /// is retried on the next redraw instead of leaving the PTY at its old
+    /// width indefinitely.
+    synchronized_geometry: Option<Geometry>,
     screen: TerminalScreen,
     subscription: Option<u64>,
     cursor: u64,
@@ -144,6 +149,7 @@ impl TerminalSession {
         Self {
             terminal,
             geometry,
+            synchronized_geometry: None,
             screen: screen_for(geometry),
             subscription: None,
             cursor: 0,
@@ -236,6 +242,7 @@ impl TerminalSession {
     /// otherwise attachable terminal.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
         let resize_error = port.resize(&self.terminal, self.geometry).err();
+        self.synchronized_geometry = resize_error.is_none().then_some(self.geometry);
         match port.attach(&self.terminal, self.geometry) {
             Ok(attach) => {
                 self.replace(&attach);
@@ -269,6 +276,19 @@ impl TerminalSession {
         if self.geometry != geometry {
             self.geometry = geometry;
             self.connect(port);
+        } else if self.synchronized_geometry != Some(geometry) {
+            match port.resize(&self.terminal, geometry) {
+                Ok(()) => {
+                    self.synchronized_geometry = Some(geometry);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.error = Some(format!(
+                        "terminal viewport synchronization failed: {}",
+                        error_message(error)
+                    ));
+                }
+            }
         }
     }
 
@@ -601,6 +621,13 @@ mod tests {
                 "terminal attached, but viewport synchronization failed: daemon disconnected; reconnect to continue"
             )
         );
+
+        // The outer terminal has not changed size, but the first resize did
+        // not reach the daemon. Retry it on the next redraw so an enlarged
+        // pane cannot remain stuck at its earlier PTY width.
+        session.resize(&mut port, geometry());
+        assert_eq!(port.resized, vec![geometry(), geometry()]);
+        assert_eq!(session.error(), None);
     }
 
     #[test]

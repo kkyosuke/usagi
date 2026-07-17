@@ -243,8 +243,9 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 名前からの terminal 推測をしない。
 
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
-ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
-変化したときだけ送って、PTY と右ペインの VT screen を同じ viewport に保つ。detach はこの client の
+ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry の
+変化時に送り、失敗した場合は同じ geometry でも次フレームで再試行して、PTY と右ペインの VT screen を
+同じ viewport に保つ。detach はこの client の
 subscription を外すだけで、PTY を kill しない。
 
 `agent [profile]` は active な session だけを対象にする。profile を省略した request は daemon の
@@ -275,7 +276,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 | Action menu の Agent、または `agent codex` を確定する | 同じ session の `Agent (starting)` tab が出て、daemon が受理した operation として pending のまま表示される |
 | matching final を daemon が replay する | pending が Agent tab に一度だけ置換され、選択中なら attach される |
 | Agent が stdout を出力する | 選択中 Agent tab の pane に出力が表示される |
-| 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry が変わったときだけ resize が届く |
+| 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry 変更時の resize は成功するまで再試行される |
 | daemon を切断して再接続する | process を作り直さず、inventory で検証済みの選択 tab だけが attach/resync される |
 | profile 未準備・daemon 不通・Agent exit を発生させる | pending/tab state は収束し、安全な inline feedback だけが表示される |
 
