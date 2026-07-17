@@ -1,5 +1,5 @@
 ---
-number: 182
+number: 338
 title: Limit queued prompt autostart concurrency
 status: done
 priority: high

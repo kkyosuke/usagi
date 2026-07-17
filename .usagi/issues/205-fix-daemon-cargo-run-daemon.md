@@ -5,7 +5,7 @@ status: done
 priority: high
 labels: [bug, daemon, tui]
 dependson: []
-related: [201]
+related: [339]
 created_at: 2026-07-11T09:00:49.686203+00:00
 updated_at: 2026-07-11T09:57:37.629714+00:00
 ---

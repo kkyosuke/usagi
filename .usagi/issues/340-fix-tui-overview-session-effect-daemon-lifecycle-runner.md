@@ -1,5 +1,5 @@
 ---
-number: 268
+number: 340
 title: fix(tui): Overview session effect を daemon lifecycle runner へ接続する
 status: done
 priority: high
