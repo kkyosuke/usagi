@@ -1855,13 +1855,14 @@ fn step_switch(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         Key::Char('d') => ui.open_diff(),
         Key::Char('n') => ui.open_text(),
         Key::CtrlQ => ui.open_quit_confirmation(QuitAction::EndWorkspace),
-        Key::Quit | Key::Char('q') => return WorkspaceStep::Quit,
+        Key::Char('q') => return WorkspaceStep::Quit,
         // `Ctrl-O a` は Switch からも選択 target の Closeup action を開く。
         // ほかの live prefix は Closeup-scoped なので Switch では no-op。
         Key::Live(LiveTerminalAction::OpenCloseupModal) => ui.open_closeup_action(),
         Key::Escape
         | Key::Backspace
         | Key::Tab
+        | Key::Quit
         | Key::CtrlD
         | Key::Char(_)
         | Key::Live(_)
@@ -2217,7 +2218,9 @@ fn step_workspace(ui: &mut WorkspaceUi, key: Key) -> WorkspaceStep {
         return WorkspaceStep::Stay;
     }
 
-    if key == Key::Quit {
+    // Switch has a single explicit exit chord: Ctrl-Q.  Ctrl-C must not
+    // accidentally close the workspace while the session selector owns input.
+    if key == Key::Quit && ui.workspace.mode() != Mode::Switch {
         return WorkspaceStep::Quit;
     }
 
@@ -5034,6 +5037,19 @@ mod tests {
             step_workspace(&mut ui, Key::Live(LiveTerminalAction::QuitConfirmation)),
             WorkspaceStep::Stay
         );
+        assert!(matches!(ui.modal, Some(WorkspaceModal::Quit(_))));
+    }
+
+    #[test]
+    fn switch_ignores_ctrl_c_but_ctrl_q_opens_workspace_exit_confirmation() {
+        let workspace = WorkspaceView::new(ws("switch-quit"), state("switch-quit"));
+        let mut ui = WorkspaceUi::with_overlay_data(workspace, Box::new(SnapshotOverlayData));
+
+        assert_eq!(step_workspace(&mut ui, Key::Quit), WorkspaceStep::Stay);
+        assert!(ui.modal.is_none());
+        assert_eq!(ui.workspace.mode(), WorkspaceMode::Switch);
+
+        assert_eq!(step_workspace(&mut ui, Key::CtrlQ), WorkspaceStep::Stay);
         assert!(matches!(ui.modal, Some(WorkspaceModal::Quit(_))));
     }
 
