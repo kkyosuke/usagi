@@ -1,6 +1,6 @@
 # 提案: PTY crash 継続（broker／FD handoff）
 
-> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [TUI v1 parity](06-tui-v1-parity.md)
+> [設計提案の目次](README.md) ｜ [ドキュメント目次](../README.md) ｜ ← 前へ [TUI v1 parity](06-tui-v1-parity.md) ｜ 次へ → [agent dispatch MCP](08-agent-dispatch-mcp.md)
 
 本書は **v2 MVP の後にだけ評価する未実装設計**である。PTY master fd を daemon crash 後にも継続利用するための broker と planned restart 時の Unix FD handoff を比較し、採否と着手条件を定める。本書がこの将来機構の設計判断の正本であり、MVP の crash 契約は [5. daemon](../05-daemon.md#generation-と-orphan-safety) を正本とする。
 
