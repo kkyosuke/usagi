@@ -436,6 +436,7 @@ impl PtyWriter for AgentPty {
 
 enum PtyObservation {
     Output(usagi_core::domain::id::TerminalRef, Vec<u8>),
+    Exited(usagi_core::domain::id::TerminalRef, i32),
 }
 
 struct DaemonPty {
@@ -482,6 +483,7 @@ impl GenericPtySpawner for DaemonPty {
             .insert(terminal.terminal_id.as_str().clone(), Arc::clone(&pty));
         let output_sender = self.observations.clone();
         let output_terminal = terminal.clone();
+        let exit_pty = Arc::clone(&pty);
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut bytes = [0_u8; 4096];
@@ -498,6 +500,12 @@ impl GenericPtySpawner for DaemonPty {
                 {
                     break;
                 }
+            }
+            if let Ok(status) = exit_pty
+                .lock()
+                .map_or(Err(()), |pty| pty.wait().map_err(|_| ()))
+            {
+                let _ = output_sender.send(PtyObservation::Exited(output_terminal, status));
             }
         });
         Ok(ProcessIdentity {
@@ -796,6 +804,9 @@ fn start_terminal_observer(
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
                         let _ = terminal.output(&reference, bytes);
+                    }
+                    PtyObservation::Exited(reference, status) => {
+                        let _ = terminal.exit(&reference, status);
                     }
                 }
             }
