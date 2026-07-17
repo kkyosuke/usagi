@@ -7,6 +7,8 @@
 
 #![coverage(off)] // daemon runtime integration boundary; exercised by fake-Git tests.
 
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -19,6 +21,7 @@ use usagi_core::domain::session_lifecycle::{
     WorkspaceLifecycleState,
 };
 use usagi_core::infrastructure::git::{GitOutput, GitRunner, add_worktree, remove_worktree};
+use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::paths::{SESSIONS_DIR, STATE_DIR};
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
@@ -158,6 +161,10 @@ impl<G: GitRunner> SessionRuntime<G> {
             store,
             git,
         };
+        if is_repo_root(&runtime.repo_root) {
+            migrate_usagi_ignore_rules(&runtime.repo_root)
+                .map_err(|_| SessionRuntimeError::Storage)?;
+        }
         runtime.reconcile()?;
         Ok(runtime)
     }
@@ -292,13 +299,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             .join(STATE_DIR)
             .join(SESSIONS_DIR)
             .join(&name);
-        match add_worktree(
-            &self.git,
-            &self.repo_root,
-            &path,
-            &format!("usagi/{name}"),
-            None,
-        ) {
+        match build_session_tree(&self.git, &self.repo_root, &path, &format!("usagi/{name}")) {
             Ok(()) => {
                 let completed = self
                     .store
@@ -408,7 +409,7 @@ impl<G: GitRunner> SessionRuntime<G> {
             .join(STATE_DIR)
             .join(SESSIONS_DIR)
             .join(&name);
-        match remove_worktree(&self.git, &self.repo_root, &path, false) {
+        match remove_session_tree(&self.git, &path, false) {
             Ok(()) => {
                 let completed = self
                     .store
@@ -482,6 +483,111 @@ impl<G: GitRunner> SessionRuntime<G> {
         }
         Ok(())
     }
+}
+
+/// Mirror the v1 session layout: a repository at the workspace root becomes a
+/// worktree at the session root; otherwise every repository found below the
+/// workspace is checked out at the matching relative path and plain entries are
+/// copied. Usagi metadata and Git internals never enter the mirror.
+fn build_session_tree(
+    git: &dyn GitRunner,
+    workspace_root: &Path,
+    destination: &Path,
+    branch: &str,
+) -> anyhow::Result<()> {
+    if is_repo_root(workspace_root) {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        return add_worktree(git, workspace_root, destination, branch, None);
+    }
+    fs::create_dir_all(destination)?;
+    mirror_directory(git, workspace_root, destination, branch)
+}
+
+fn mirror_directory(
+    git: &dyn GitRunner,
+    source: &Path,
+    destination: &Path,
+    branch: &str,
+) -> anyhow::Result<()> {
+    let mut entries = fs::read_dir(source)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        if skipped_entry(&name) {
+            continue;
+        }
+        let source = entry.path();
+        let target = destination.join(&name);
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            // A `.git` file denotes an existing linked worktree. It is neither
+            // a source repository nor a directory to recurse into.
+            if is_linked_worktree(&source) {
+                continue;
+            }
+            if is_repo_root(&source) {
+                add_worktree(git, &source, &target, branch, None)?;
+            } else {
+                fs::create_dir_all(&target)?;
+                mirror_directory(git, &source, &target, branch)?;
+            }
+        } else {
+            fs::copy(source, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove every linked worktree in a mirrored session before removing copied
+/// directories and files. Children are removed first so Git never sees a
+/// parent directory that still contains a registered nested worktree.
+fn remove_session_tree(
+    git: &dyn GitRunner,
+    session_root: &Path,
+    force: bool,
+) -> anyhow::Result<()> {
+    let mut worktrees = Vec::new();
+    collect_session_worktrees(session_root, &mut worktrees)?;
+    worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for worktree in worktrees {
+        remove_worktree(git, &worktree, &worktree, force)?;
+    }
+    match fs::remove_dir_all(session_root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn collect_session_worktrees(directory: &Path, worktrees: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    if is_linked_worktree(directory) {
+        worktrees.push(directory.into());
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_session_worktrees(&entry.path(), worktrees)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_repo_root(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
+fn is_linked_worktree(path: &Path) -> bool {
+    path.join(".git").is_file()
+}
+
+fn skipped_entry(name: &OsStr) -> bool {
+    name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
 }
 
 fn session_name(payload: &Value) -> Result<String, SessionRuntimeError> {
@@ -572,6 +678,7 @@ fn snapshot(state: &WorkspaceLifecycleState) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -623,6 +730,29 @@ mod tests {
     struct CountingGit {
         calls: Arc<AtomicUsize>,
     }
+    struct RecordingGit {
+        calls: RefCell<Vec<(PathBuf, Vec<String>)>>,
+    }
+    impl RecordingGit {
+        fn new() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl GitRunner for RecordingGit {
+        fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            self.calls.borrow_mut().push((
+                repo.into(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            Ok(GitOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
     impl GitRunner for CountingGit {
         fn run(&self, _: &Path, _: &[&str]) -> anyhow::Result<GitOutput> {
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -635,6 +765,7 @@ mod tests {
     }
     fn runtime(git: FakeGit) -> (TempDir, SessionRuntime<FakeGit>) {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let runtime = SessionRuntime::open(
             tmp.path().to_path_buf(),
             &tmp.path().join("daemon"),
@@ -724,6 +855,7 @@ mod tests {
     #[test]
     fn reports_a_reusable_session_name_when_its_branch_already_exists() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let mut runtime = SessionRuntime::open(
             tmp.path().to_path_buf(),
             &tmp.path().join("daemon"),
@@ -753,6 +885,7 @@ mod tests {
     #[test]
     fn reports_a_reusable_session_name_when_its_workspace_already_exists() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let mut runtime = SessionRuntime::open(
             tmp.path().to_path_buf(),
             &tmp.path().join("daemon"),
@@ -834,6 +967,7 @@ mod tests {
     #[test]
     fn replaying_a_successful_create_after_daemon_restart_does_not_create_twice() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let operation = operation();
         let first_calls = Arc::new(AtomicUsize::new(0));
         let mut first = SessionRuntime::open(
@@ -997,5 +1131,74 @@ mod tests {
         );
         assert!(state_dir.join("sessions.json").is_file());
         assert!(!legacy_dir.join("lifecycle-state.json").exists());
+    }
+
+    #[test]
+    fn create_recursively_mirrors_plain_entries_and_adds_a_worktree_per_nested_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let destination = workspace.join(".usagi/sessions/feature");
+        let nested_repo = workspace.join("services/api");
+        std::fs::create_dir_all(nested_repo.join(".git")).unwrap();
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        std::fs::write(workspace.join("README.md"), "read me").unwrap();
+        std::fs::write(workspace.join("docs/guide.md"), "guide").unwrap();
+
+        let git = RecordingGit::new();
+        build_session_tree(&git, &workspace, &destination, "usagi/feature").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(destination.join("README.md")).unwrap(),
+            "read me"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("docs/guide.md")).unwrap(),
+            "guide"
+        );
+        assert_eq!(
+            git.calls.borrow().as_slice(),
+            &[(
+                nested_repo,
+                vec![
+                    "worktree".into(),
+                    "add".into(),
+                    "-b".into(),
+                    "usagi/feature".into(),
+                    "--".into(),
+                    destination
+                        .join("services/api")
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+            )]
+        );
+    }
+
+    #[test]
+    fn opening_a_repository_migrates_v1_usagi_ignore_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "target\n.usagi/*\n!.usagi/issues/\n.usagi/issues/index.json\n",
+        )
+        .unwrap();
+
+        let _runtime = SessionRuntime::open(
+            tmp.path().to_path_buf(),
+            &tmp.path().join("daemon"),
+            DaemonGeneration::new(),
+            FakeGit::ok(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".usagi/.gitignore")).unwrap(),
+            usagi_core::infrastructure::gitignore::USAGI_GITIGNORE
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap(),
+            "target\n"
+        );
     }
 }

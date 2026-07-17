@@ -2,3 +2,7 @@
 !/.gitignore
 !/issues/
 /issues/index.json
+/issues/.lock
+!/memory/
+/memory/index.json
+/memory/.lock
