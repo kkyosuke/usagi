@@ -211,7 +211,7 @@ fn key_to_terminal_bytes(key: Key) -> Option<Vec<u8>> {
 }
 
 /// Initial PTY geometry before the first render-derived viewport is available.
-const CONTROLLER_TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
+const INITIAL_TERMINAL_GEOMETRY: Geometry = Geometry { cols: 80, rows: 24 };
 
 /// Pulls the latest safe daemon observation at a TUI redraw boundary.
 pub trait MetricsPort {
@@ -2503,6 +2503,7 @@ struct ControllerWorkspaceRuntime {
     root: PathBuf,
     sessions: Vec<ProjectedSession>,
     metrics: Option<DaemonMetrics>,
+    terminal_geometry: Geometry,
     panes: PaneRegistry,
     terminals: Vec<TerminalSession>,
     agent: Option<Box<dyn AgentCommandPort>>,
@@ -2530,6 +2531,7 @@ impl ControllerWorkspaceRuntime {
             root: snapshot.workspace.path.clone(),
             sessions,
             metrics: None,
+            terminal_geometry: INITIAL_TERMINAL_GEOMETRY,
             agent: None,
             session_commands: None,
             terminals: Vec::new(),
@@ -2550,6 +2552,7 @@ impl ControllerWorkspaceRuntime {
     }
 
     fn frame(&mut self, height: usize, width: usize) -> Vec<String> {
+        self.terminal_geometry = terminal_geometry(height, width);
         let terminal_rows = self.refresh_terminal();
         let home = HomeProjection::from_state(
             &self.state,
@@ -2816,7 +2819,7 @@ impl ControllerWorkspaceRuntime {
             |agent| match agent.launch_terminal(
                 self.state.workspace(),
                 session,
-                CONTROLLER_TERMINAL_GEOMETRY,
+                self.terminal_geometry,
             ) {
                 Ok(terminal) => PaneEvent::Succeeded {
                     operation,
@@ -2871,7 +2874,7 @@ impl ControllerWorkspaceRuntime {
             return;
         }
         if let Some(agent) = self.agent.as_mut() {
-            let mut session = TerminalSession::new(terminal, CONTROLLER_TERMINAL_GEOMETRY);
+            let mut session = TerminalSession::new(terminal, self.terminal_geometry);
             session.connect(&mut AgentStreamPort(agent.as_mut()));
             self.terminals.push(session);
         }
@@ -3520,7 +3523,7 @@ mod tests {
     use usagi_core::domain::AppInfo;
     use usagi_core::domain::agent::AgentProfileId;
     use usagi_core::domain::id::{
-        DaemonGeneration, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
+        DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
     use usagi_core::domain::pullrequest::PrLink;
@@ -3584,6 +3587,29 @@ mod tests {
         ) -> Result<TerminalRef, String> {
             self.0.lock().unwrap().push((workspace, session, profile));
             Err("agent launch is unavailable".to_owned())
+        }
+    }
+
+    struct GeometryRecordingPort(Arc<Mutex<Vec<Geometry>>>);
+
+    impl AgentCommandPort for GeometryRecordingPort {
+        fn launch(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            _profile: Option<AgentProfileId>,
+        ) -> Result<TerminalRef, String> {
+            Err("agent launch is not expected".to_owned())
+        }
+
+        fn launch_terminal(
+            &mut self,
+            _workspace: WorkspaceId,
+            _session: SessionId,
+            geometry: Geometry,
+        ) -> Result<TerminalRef, String> {
+            self.0.lock().unwrap().push(geometry);
+            Err("terminal launch is not expected".to_owned())
         }
     }
 
@@ -3830,6 +3856,26 @@ mod tests {
         );
         assert!(confirmed_quit.handle(&Key::Enter));
         assert!(runtime.handle(&Key::Char('q')));
+    }
+
+    #[test]
+    fn controller_runtime_launches_terminals_at_the_visible_viewport_size() {
+        let geometries = Arc::new(Mutex::new(Vec::new()));
+        let snapshot = snapshot("controller-geometry");
+        let session = snapshot.session_ids[0];
+        let mut runtime = ControllerWorkspaceRuntime::new(&snapshot)
+            .with_agent_port(Box::new(GeometryRecordingPort(geometries.clone())));
+
+        let _ = runtime.frame(24, 80);
+        runtime.open_terminal(
+            crate::usecase::application::controller::Target::Session(session),
+            OperationId::new(),
+        );
+
+        assert_eq!(
+            *geometries.lock().unwrap(),
+            vec![Geometry { cols: 43, rows: 17 }]
+        );
     }
 
     fn recent(name: &str) -> Recent {
