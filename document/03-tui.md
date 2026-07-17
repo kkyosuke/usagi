@@ -81,8 +81,8 @@ modal と inline 作成中は背景の sidebar click を受け取らない。
 Closeup の入力所有者は tab の有無で決まる。tab が無い Closeup は management input が所有し、action modal を
 前面に出す。tab が 1 つ以上ある Closeup は `LiveInputClassifier` の `Ctrl-O` prefix（leader）が所有し、非
 prefix の打鍵は live terminal への passthrough として扱う。TUI が予約するのは `Ctrl-O` prefix だけであり、
-prefix の follow-up ではない Ctrl-A、Ctrl-C、Ctrl-D、Ctrl-Q、Esc、Ctrl-^ を含むその他の bytes は PTY へ送る。prefix の
-follow-up は下表のアクションに解決する。
+leader ではないすべてのキー入力は、修飾キーを含めて PTY へ送る。leader の follow-up は `o`、`a`、`n`、`p` だけを
+下表のアクションに解決し、それ以外は消費する。
 
 controller reducer path も同じ投影を使う。`LivePaneAvailability` が無い Closeup への遷移は action overlay を
 自動で開き、pane が到着すると通常の tab surface へ戻る。adapter は prefix の next / previous 結果を
@@ -91,13 +91,10 @@ identity は保持しない。
 
 | prefix | アクション | 効果 |
 |---|---|---|
-| `Ctrl-O` `o`（または `Ctrl-O`） | Switch | Closeup から Switch へ戻る |
-| `Ctrl-O` `a` / `Ctrl-A` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
-| `Ctrl-O` `n` / `Ctrl-N` / `→` | NextTab | 次の tab を選ぶ |
-| `Ctrl-O` `p` / `Ctrl-P` / `←` | PreviousTab | 前の tab を選ぶ |
-| `Ctrl-O` `g` | Agent | agent pane を開く／再接続する |
-| `Ctrl-O` `x` | CloseTab | 選択中の tab を閉じる |
-| `Ctrl-O` `q` | QuitConfirmation | TUI を閉じる確認を開く |
+| `Ctrl-O` `o` | Switch | Closeup から Switch へ戻る |
+| `Ctrl-O` `a` | OpenCloseupModal | Switch では選択 target の Closeup action を開く。Closeup では tab があっても action modal を前面に出す |
+| `Ctrl-O` `n` | NextTab | 次の tab を選ぶ |
+| `Ctrl-O` `p` | PreviousTab | 前の tab を選ぶ |
 
 leader は 1 秒で失効し、未知の follow-up は 1 打鍵だけ握って捨てる。leader 待機中の次の入力は prefix の
 follow-up として扱う。
@@ -193,18 +190,17 @@ tab が無い target は、灰色の静的うさぎと `No tabs stirring yet. En
 画面へ色が漏れない。この空状態は tick や runtime 接続に依存しない。overlay はこの Home frame を背景のまま合成する。
 
 Closeup action modal の表示と input owner は target entry の tab 有無と forced action state から導く。Switch で
-`Ctrl-O a` または `Ctrl-O Ctrl-A` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
+`Ctrl-O a` を実行した場合は、選択 target の Closeup action を開いて modal に input を渡す。tab が無い
 Closeup は action modal が management input を所有し、Enter で `agent` / `terminal` を確定できる。tab が 1 つ以上で
 forced state が無い Closeup は tab が input を所有し、action modal は自動表示しない。tab があるときに action modal
-を再び出すのは `Ctrl-O a` または `Ctrl-O Ctrl-A` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
+を再び出すのは `Ctrl-O a` だけで、その forced 表示は Esc で閉じて tab に戻る（Closeup から Switch へは抜けない）。
 modal が所有する間、tab selection、close、terminal passthrough は dispatch しない。
 
 Closeup action で `agent`、`terminal`、または `diff` を確定すると、同じ pending tab を即座に選択して右ペインへ
 表示し、completion はその tab だけを live / document tab に置換して選択を維持する。diff は terminal identity を持たない
 document tab として完了し、安全な document 本文を tab の content area に描画する。session の `terminal` は daemon が stable session / worktree scope を解決して起動する
 `login-shell` であり、TUI はローカル PTY を生成しない。session が利用可能でない、または daemon が応答しない場合は
-pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p`
-（または `Ctrl-O Ctrl-N` / `Ctrl-O Ctrl-P`）は tab を巡回し、`x` は
+pending tab を安全な feedback に置き換える。`←` / `→`（または `h` / `l`）と `Ctrl-O n` / `Ctrl-O p` は tab を巡回し、`x` は
 選択 tab を閉じる。close 後は次の tab（末尾なら直前）を stable identity で選択し、最後の tab を閉じたときだけ
 target selection と Closeup action の空状態へ戻る。close は client-side selection を外すだけであり、daemon-owned
 terminal を停止しない。
@@ -223,20 +219,19 @@ terminal を停止しない。
 atomic snapshot（再 attach）で置き換える。
 
 screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。`Ctrl-O u` / `Ctrl-O d` とホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
+表示する。ホイール上/下でそれぞれ古い出力方向／live bottom 方向へ 1 行移動する。新しい
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。macOS の
-`Cmd-C` が端末から入力イベントとして届く場合も同じ選択をコピーする。`Ctrl-C` はコピーに使わず、live terminal へそのまま送る。
+出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。キー入力は
+コピーに使わず、`Ctrl-C` を含めて live terminal へそのまま送る。
 clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
 安全な feedback を表示する。
 
-live terminal に focus がある間、通常のキー（文字・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
+live terminal に focus がある間、leader ではないすべてのキー入力（文字・修飾キー・paste・raw bytes・Enter・Backspace・Tab・矢印など）は management ではなく
 PTY へ送られる。矢印は対応する CSI 列、Enter は `CR` に符号化する。tab 巡回や Closeup/Switch の遷移は
-`Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o` など）が所有し、workspace 終了（`Ctrl-Q`）と TUI 終了
-（`Ctrl-C`）を含むすべての non-prefix input は live terminal に渡す。前面 modal や forced action modal がある間は
+`Ctrl-O` prefix（`Ctrl-O n` / `Ctrl-O p` / `Ctrl-O o`）だけが所有する。前面 modal や forced action modal がある間は
 その modal が入力を所有する。入力は subscription と単調増加する input sequence で fence し、同じ打鍵を二重送信しない。terminal は
 terminal は起動時点の右ペイン実幅・高さで geometry を要求するため、shell の right prompt も pane 内に収まる。redraw に追従する resize は後続作業である。daemon 不通・stale・orphan は安全な
 feedback だけを表示し、local PTY を生成しない。
