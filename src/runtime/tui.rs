@@ -380,6 +380,25 @@ impl AgentCommandPort for DaemonAgentCommandPort {
     }
 
     #[coverage(off)]
+    fn resize_terminal(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        self.terminal_request(
+            TerminalAction::Resize,
+            TerminalRequest::Resize {
+                terminal: terminal.clone(),
+                geometry: TerminalGeometry {
+                    cols: geometry.cols,
+                    rows: geometry.rows,
+                },
+            },
+        )?;
+        Ok(())
+    }
+
+    #[coverage(off)]
     fn poll_terminal(
         &mut self,
         terminal: &usagi_core::domain::id::TerminalRef,

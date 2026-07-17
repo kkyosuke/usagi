@@ -85,6 +85,19 @@ pub trait AgentCommandPort {
         Err("terminal launch is unavailable".to_owned())
     }
 
+    /// Resize a daemon-owned terminal to the visible pane viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn resize_terminal(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
     /// Attach to a daemon-owned terminal, taking its retained replay and cursor.
     ///
     /// The default keeps embedders without a terminal stream safe: attach fails
@@ -139,6 +152,11 @@ pub trait AgentCommandPort {
 struct AgentStreamPort<'a>(&'a mut dyn AgentCommandPort);
 
 impl TerminalStreamPort for AgentStreamPort<'_> {
+    #[coverage(off)]
+    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+        self.0.resize_terminal(terminal, geometry)
+    }
+
     #[coverage(off)]
     fn attach(
         &mut self,
@@ -741,6 +759,16 @@ impl WorkspaceUi {
             None
         };
         self.workspace.set_terminal_view(rows);
+    }
+
+    #[coverage(off)]
+    fn resize_terminals(&mut self, geometry: Geometry) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        for session in &mut self.terminals {
+            session.resize(&mut AgentStreamPort(agent.port.as_mut()), geometry);
+        }
     }
 
     #[coverage(off)]
@@ -2527,9 +2555,10 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     loop {
         drain_session_completions(&mut ui);
         refresh_metrics(&mut ui);
-        ui.refresh_terminal();
         let (height, width) = term.size()?;
         ui.set_terminal_size(height, width);
+        ui.resize_terminals(terminal_geometry(height, width));
+        ui.refresh_terminal();
         term.draw(&render_workspace(height, width, &ui))?;
         drain_pane_launches(&mut ui, terminal_geometry(height, width));
         let key = term.read_key()?;

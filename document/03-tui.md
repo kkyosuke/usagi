@@ -244,7 +244,8 @@ TUI は daemon の accepted response 後に Agent pending tab を置き、同じ
 
 daemon inventory、attach/resume、stream、resync は `pane_runtime` が結合する。output cursor に gap が
 ある場合は local output を継ぎ足さず、daemon の atomic snapshot で置き換える。resize は geometry が
-変化したときだけ送る。detach はこの client の subscription を外すだけで、PTY を kill しない。
+変化したときだけ送って、PTY と右ペインの VT screen を同じ viewport に保つ。detach はこの client の
+subscription を外すだけで、PTY を kill しない。
 
 `agent [profile]` は active な session だけを対象にする。profile を省略した request は daemon の
 default policy に委ね、TUI は product 固有の argv、model、secret を組み立てない。controller が発行した

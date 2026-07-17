@@ -109,6 +109,19 @@ pub trait PtyWriter {
     /// writers may ignore it; real multiplexing adapters use the full fenced
     /// terminal identity rather than a client-selected process handle.
     fn select_terminal(&mut self, _terminal: &TerminalRef) {}
+    /// Resize the daemon-owned PTY. The default keeps existing injected writers
+    /// focused on input semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe PTY error when geometry cannot be applied.
+    fn resize(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), PtyWriteError> {
+        Ok(())
+    }
     /// # Errors
     ///
     /// Returns the number of bytes that may have reached the PTY on failure.

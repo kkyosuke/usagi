@@ -375,6 +375,16 @@ impl PtyWriter for AgentPty {
     fn select_terminal(&mut self, terminal: &TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
     }
+    #[coverage(off)] // Real PTY ioctl; the agent IPC fake verifies the fenced resize behavior.
+    fn resize(&mut self, terminal: &TerminalRef, geometry: Geometry) -> Result<(), PtyWriteError> {
+        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        pty.lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .resize(geometry)
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })
+    }
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let Some(key) = self.selected.as_ref() else {
             return Err(PtyWriteError { applied_prefix: 0 });
@@ -465,6 +475,20 @@ impl GenericPtySpawner for DaemonPty {
 impl PtyWriter for DaemonPty {
     fn select_terminal(&mut self, terminal: &usagi_core::domain::id::TerminalRef) {
         self.selected = Some(terminal.terminal_id.as_str().clone());
+    }
+    #[coverage(off)] // Real PTY ioctl; the generic terminal use case covers the request semantics.
+    fn resize(
+        &mut self,
+        terminal: &usagi_core::domain::id::TerminalRef,
+        geometry: Geometry,
+    ) -> Result<(), PtyWriteError> {
+        let Some(pty) = self.terminals.get(&terminal.terminal_id.as_str()) else {
+            return Err(PtyWriteError { applied_prefix: 0 });
+        };
+        pty.lock()
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })?
+            .resize(geometry)
+            .map_err(|_| PtyWriteError { applied_prefix: 0 })
     }
     fn write_all(&mut self, bytes: &[u8]) -> Result<(), PtyWriteError> {
         let Some(key) = self.selected.as_ref() else {

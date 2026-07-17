@@ -59,6 +59,19 @@ pub enum TerminalError {
 /// the complete [`TerminalRef`]; implementations poll the daemon and must not
 /// substitute a local terminal on failure.
 pub trait TerminalStreamPort {
+    /// Resize the daemon-owned PTY to match the pane viewport.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe daemon communication or terminal-ownership failure.
+    fn resize(
+        &mut self,
+        _terminal: &TerminalRef,
+        _geometry: Geometry,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
+
     /// Attach and take an atomic snapshot plus a subscription.
     ///
     /// # Errors
@@ -219,6 +232,10 @@ impl TerminalSession {
     /// Attaches (or reattaches) and rebuilds the screen from the retained
     /// replay.  A prior transport error is cleared on success.
     pub fn connect<P: TerminalStreamPort>(&mut self, port: &mut P) {
+        if let Err(error) = port.resize(&self.terminal, self.geometry) {
+            self.fail(error);
+            return;
+        }
         match port.attach(&self.terminal, self.geometry) {
             Ok(attach) => self.replace(&attach),
             Err(error) => self.fail(error),
@@ -236,6 +253,14 @@ impl TerminalSession {
             Ok(chunks) => self.apply(port, chunks),
             Err(TerminalError::ResyncRequired) => self.connect(port),
             Err(error) => self.fail(error),
+        }
+    }
+
+    /// Rebuilds the local screen after the visible pane changes size.
+    pub fn resize<P: TerminalStreamPort>(&mut self, port: &mut P, geometry: Geometry) {
+        if self.geometry != geometry {
+            self.geometry = geometry;
+            self.connect(port);
         }
     }
 
@@ -340,8 +365,14 @@ mod tests {
         input: Option<TerminalError>,
         inputs: Vec<(u64, u64, Vec<u8>)>,
         detached: Vec<u64>,
+        resized: Vec<Geometry>,
     }
     impl TerminalStreamPort for FakePort {
+        fn resize(&mut self, _: &TerminalRef, geometry: Geometry) -> Result<(), TerminalError> {
+            self.resized.push(geometry);
+            Ok(())
+        }
+
         fn attach(
             &mut self,
             _: &TerminalRef,
@@ -397,10 +428,30 @@ mod tests {
         let mut session = TerminalSession::new(terminal(), geometry());
         session.connect(&mut port);
         assert_eq!(session.state(), SessionState::Live);
+        assert_eq!(port.resized, vec![geometry()]);
         assert_eq!(session.rows()[0], "$");
         session.poll(&mut port);
         // The prompt echo advances a row; the command output follows it.
         assert_eq!(session.rows(), vec!["$ ls", "a.txt", ""]);
+    }
+
+    #[test]
+    fn resizing_rebuilds_the_screen_from_a_same_geometry_daemon_replay() {
+        let mut port = FakePort {
+            attach: vec![
+                Ok(attach(1, 3, b"old", false)),
+                Ok(attach(2, 5, b"wide", false)),
+            ],
+            ..FakePort::default()
+        };
+        let mut session = TerminalSession::new(terminal(), geometry());
+        session.connect(&mut port);
+        let resized = Geometry { cols: 40, rows: 8 };
+        session.resize(&mut port, resized);
+
+        assert_eq!(port.resized, vec![geometry(), resized]);
+        assert_eq!(session.rows()[0], "wide");
+        assert_eq!(session.state(), SessionState::Live);
     }
 
     #[test]
