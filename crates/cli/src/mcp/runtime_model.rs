@@ -23,6 +23,7 @@ pub trait ExecutableLocator {
 pub struct PathExecutableLocator;
 
 impl ExecutableLocator for PathExecutableLocator {
+    #[coverage(off)] // Production PATH boundary; schema tests inject a fake locator.
     fn is_available(&self, executable: &str) -> bool {
         env::var_os("PATH")
             .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(executable).is_file()))
@@ -241,7 +242,10 @@ impl RuntimeModelSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
+    use super::{
+        AgentsConfig, ExecutableLocator, RuntimeConfig, RuntimeModelSnapshot, WorkspaceAgentConfig,
+        WorkspaceConfig,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -250,6 +254,13 @@ mod tests {
         fn is_available(&self, executable: &str) -> bool {
             self.0.contains(&executable)
         }
+    }
+
+    #[test]
+    fn raw_workspace_config_defaults_to_no_runtime_allowlists() {
+        assert!(WorkspaceConfig::default().agents.claude.models.is_empty());
+        assert!(AgentsConfig::default().codex.models.is_empty());
+        assert!(RuntimeConfig::default().models.is_empty());
     }
 
     #[test]
@@ -292,6 +303,17 @@ mod tests {
         assert_eq!(
             branches[1]["properties"]["model"]["enum"],
             json!(["sonnet", "opus"])
+        );
+        assert!(
+            WorkspaceAgentConfig::read(workspace.path())
+                .models("unknown")
+                .is_empty()
+        );
+
+        std::fs::write(workspace.path().join(".usagi/config.toml"), "not = [valid").unwrap();
+        assert_eq!(
+            WorkspaceAgentConfig::read(workspace.path()),
+            WorkspaceAgentConfig::default()
         );
     }
 
@@ -346,10 +368,13 @@ mod tests {
                 .validate_agent(&json!({"runtime":"claude","model":"sonnet"}))
                 .is_ok()
         );
+        assert!(snapshot.validate_agent(&json!("not-an-object")).is_err());
         for agent in [
             json!({"runtime":"claude"}),
             json!({"runtime":"claude","model":"opus"}),
             json!({"id":"a","runtime":"claude","model":"sonnet"}),
+            json!({"id":""}),
+            json!({"runtime":"claude","model":"sonnet","extra":true}),
         ] {
             assert!(snapshot.validate_agent(&agent).is_err());
         }
@@ -364,9 +389,22 @@ mod tests {
         let mut accepted = json!({"agent_cli":"claude", "model":"sonnet"});
         snapshot.normalize_legacy_agent(&mut accepted).unwrap();
         assert_eq!(accepted["runtime"], "claude");
+        let mut existing = json!({"agent":{"id":"existing"}});
+        assert!(snapshot.normalize_legacy_agent(&mut existing).is_ok());
+        let mut non_object = json!("not-an-object");
+        assert!(snapshot.normalize_legacy_agent(&mut non_object).is_err());
+        let mut incomplete_agent = json!({"agent":{"runtime":"claude"}});
+        assert!(
+            snapshot
+                .normalize_legacy_agent(&mut incomplete_agent)
+                .is_err()
+        );
         for mut value in [
             json!({"agent_cli":"claude","runtime":"claude","model":"sonnet"}),
             json!({"agent_cli":"claude","agent":{"id":"a"}}),
+            json!({"runtime":"claude","model":"opus"}),
+            json!({"runtime":"claude"}),
+            json!({"agent_cli":"unknown","model":"sonnet"}),
         ] {
             assert!(snapshot.normalize_legacy_agent(&mut value).is_err());
         }
