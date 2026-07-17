@@ -226,8 +226,9 @@ screen から押し出された行は 10,000 行を上限とする local scrollb
 replay で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
-出力は mouse drag により選択できる。macOS の `Cmd-C` は選択した ANSI を含まない表示テキストを OS clipboard にコピーする。
-`Ctrl-C` はコピーに使わず、live terminal へそのまま送る。clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
+出力は mouse drag により選択でき、drag を離すと選択した ANSI を含まない表示テキストを OS clipboard にコピーする。macOS の
+`Cmd-C` が端末から入力イベントとして届く場合も同じ選択をコピーする。`Ctrl-C` はコピーに使わず、live terminal へそのまま送る。
+clipboard adapter は macOS の `pbcopy`、Windows の `clip.exe`、
 Wayland の `wl-copy`、X11 の `xclip` / `xsel` を現在の環境に応じて使う。利用可能な backend がない場合は copy を成功扱いにせず、
 安全な feedback を表示する。
 
