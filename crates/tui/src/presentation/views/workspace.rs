@@ -8,7 +8,7 @@
 //! 状態 [`Workspace`] は core の workspace と永続化済み [`WorkspaceState`] から構築する、端末 IO を
 //! 持たない純粋な値である。[`render`] が 1 フレーム分の行（ANSI 付き `Vec<String>`）に変換する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -186,7 +186,7 @@ impl HomeProjection {
         let snapshots = snapshot_sessions
             .iter()
             .map(|session| (session.id, session))
-            .collect::<BTreeMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let sessions = state
             .sessions()
             .iter()
