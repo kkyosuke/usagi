@@ -19,6 +19,7 @@
 pub mod daemon;
 pub mod error_log;
 pub mod git;
+pub mod gitignore;
 pub mod ipc;
 pub mod paths;
 pub mod persistence;
