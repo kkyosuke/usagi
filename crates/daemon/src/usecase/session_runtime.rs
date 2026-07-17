@@ -139,11 +139,11 @@ impl<G: GitRunner> SessionRuntime<G> {
             store
                 .initialize(&state, &candidate_repo_root)
                 .map_err(|_| SessionRuntimeError::Storage)?;
-            if let Err(error) = std::fs::remove_file(&legacy)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(SessionRuntimeError::Storage);
-            }
+            // The migrated state is already durable in `sessions.json`; from now
+            // on the `Some(..)` branch wins and the legacy file is never read
+            // again. Removing it is best-effort cleanup, so a failure here must
+            // not fail daemon startup over an otherwise-ignored stale file.
+            let _ = std::fs::remove_file(&legacy);
             candidate_repo_root
         };
         let mut runtime = Self {
