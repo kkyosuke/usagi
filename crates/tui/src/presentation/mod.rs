@@ -2771,6 +2771,7 @@ impl ControllerWorkspaceRuntime {
                 ControllerEffect::RemoveSession { session, force, .. } => {
                     self.remove_session(*session, *force);
                 }
+                ControllerEffect::RefreshSessions { .. } => self.refresh_sessions(),
                 _ => {}
             }
         }
@@ -2931,6 +2932,27 @@ impl ControllerWorkspaceRuntime {
         match result {
             Ok(result) => self.apply_created_session(token, name, result),
             Err(message) => self.apply_operation_result(token, false, None, message),
+        }
+        self.sync_active_pane();
+    }
+
+    fn refresh_sessions(&mut self) {
+        let result = self.session_commands.as_mut().map_or_else(
+            || Err("session commands are unavailable".to_owned()),
+            |port| port.execute(&self.workspace, None, SessionCommand::List),
+        );
+        match result {
+            Ok(result) => self.apply_session_snapshot(result),
+            Err(message) => {
+                let _ = crate::usecase::application::controller::update(
+                    &mut self.state,
+                    AppEvent::Backend(
+                        crate::usecase::application::controller::BackendEvent::Notice(
+                            crate::usecase::application::controller::Notice::new(message),
+                        ),
+                    ),
+                );
+            }
         }
         self.sync_active_pane();
     }
@@ -3875,6 +3897,24 @@ mod tests {
         assert_eq!(
             *geometries.lock().unwrap(),
             vec![Geometry { cols: 43, rows: 17 }]
+        );
+    }
+
+    #[test]
+    fn controller_runtime_refreshes_sessions_through_the_injected_port() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = ControllerWorkspaceRuntime::new(&snapshot("controller-refresh"))
+            .with_session_port(Box::new(RecordingSessionPort(calls.clone())));
+
+        assert!(!runtime.handle(&Key::Char(':')));
+        for character in "session list".chars() {
+            assert!(!runtime.handle(&Key::Char(character)));
+        }
+        assert!(!runtime.handle(&Key::Enter));
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![("controller-refresh".to_owned(), None, SessionCommand::List)]
         );
     }
 
