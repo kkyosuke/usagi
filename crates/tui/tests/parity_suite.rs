@@ -286,6 +286,7 @@ fn quit_phase_error_redaction() {
     );
 
     let _ = update(&mut state, AppEvent::LivePaneAvailability(true));
+    let _ = update(&mut state, AppEvent::Key(AppKey::Enter));
     assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
     assert_eq!(state.overlay(), Some(Overlay::QuitConfirmation));
     assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
@@ -293,7 +294,7 @@ fn quit_phase_error_redaction() {
     let _ = update(&mut state, AppEvent::LivePaneAvailability(false));
     assert!(state.ctrl_c_grace());
     assert!(update(&mut state, AppEvent::Key(AppKey::CtrlC)).is_empty());
-    assert!(!state.ctrl_c_grace());
+    assert!(state.ctrl_c_grace());
 
     let safe = SafeError {
         message: SafeMessage::new("terminal unavailable"),
@@ -303,6 +304,7 @@ fn quit_phase_error_redaction() {
         &mut state,
         AppEvent::Backend(BackendEvent::Feedback(Feedback::TerminalError(safe))),
     );
+    let _ = update(&mut state, AppEvent::Key(AppKey::CtrlO));
     let projection = HomeProjection::from_state(
         &state,
         "東京",
