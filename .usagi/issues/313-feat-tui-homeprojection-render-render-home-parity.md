@@ -1,14 +1,14 @@
 ---
 number: 313
 title: feat(tui): HomeProjection に旧 render 経路の描画素材を投影し render_home の parity を固定する
-status: todo
+status: done
 priority: high
 labels: [tui, render, parity]
 dependson: []
 related: [258]
 parent: 258
 created_at: 2026-07-17T14:21:33.157538+00:00
-updated_at: 2026-07-17T14:21:33.157538+00:00
+updated_at: 2026-07-17T21:03:37.808629+00:00
 ---
 
 ## 目的
