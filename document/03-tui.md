@@ -268,8 +268,9 @@ Closeup agent ─► LaunchAgent(operation, profile?) ─► daemon Agent reques
 ```
 
 transport failure、unknown / duplicate final、別 workspace または別 session の terminal final は local spawn、
-request retry、attach を行わない。failure は pending tab を除去し、daemon が安全と保証した文言だけを
-Closeup pane の feedback として表示する。
+request retry、attach を行わない。failure は pending tab を除去し、daemon が安全と保証した文言を error modal
+として表示するとともに `<data dir>/logs/error-YYYY-MM-DD.log` に記録する。確認して閉じると、tab-less
+Closeup の action modal に戻る。
 
 ## Closeup Agent の手動確認
 
@@ -283,7 +284,7 @@ runtime bridge を確認する手順である。profile の install 状態、認
 | Agent が stdout を出力する | 選択中 Agent tab の pane に出力が表示される |
 | 選択中 Agent tab で入力し、端末を resize する | 入力は一度だけ daemon に届き、geometry 変更時の resize は成功するまで再試行される |
 | daemon を切断して再接続する | process を作り直さず、inventory で検証済みの選択 tab だけが attach/resync される |
-| profile 未準備・daemon 不通・Agent exit を発生させる | pending/tab state は収束し、安全な inline feedback だけが表示される |
+| profile 未準備・daemon 不通・Agent exit を発生させる | pending/tab state は収束し、安全な error modal が表示され、日次 error log に記録される |
 
 ## resume data compatibility
 
