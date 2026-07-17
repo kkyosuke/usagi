@@ -609,7 +609,11 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
     let repo_root = std::env::current_dir()?;
     let daemon_generation = usagi_core::domain::id::DaemonGeneration::parse(&generation.0)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let runtime = open_session_runtime(repo_root.clone(), daemon_generation)?;
+    let runtime = open_session_runtime(
+        repo_root.clone(),
+        &data_dir.join("daemon"),
+        daemon_generation,
+    )?;
     let (pty, observations) = DaemonPty::new();
     let terminal = new_terminal_runtime(data_dir, daemon_generation, repo_root, pty);
     start_terminal_observer(Arc::clone(&terminal), observations)?;
@@ -684,9 +688,10 @@ fn start_agent_observer(
 
 fn open_session_runtime(
     repo_root: PathBuf,
+    state_dir: &Path,
     generation: usagi_core::domain::id::DaemonGeneration,
 ) -> std::io::Result<SharedSessionRuntime> {
-    SessionRuntime::open(repo_root, generation, SystemGit)
+    SessionRuntime::open(repo_root, state_dir, generation, SystemGit)
         .map(|runtime| Arc::new(Mutex::new(runtime)))
         .map_err(|error| std::io::Error::other(error.safe_message()))
 }
