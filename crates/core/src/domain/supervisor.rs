@@ -1233,6 +1233,155 @@ mod tests {
     }
 
     #[test]
+    fn retry_cancel_and_failed_verification_cannot_resume_work() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now())
+            .with_policy(ExecutionPolicy {
+                max_dispatches: 3,
+                max_concurrency: 1,
+                max_depth: 1,
+                max_attempts: 2,
+                retry_backoff_seconds: 30,
+            });
+        let mut retry_task = task(run.supervisor_run_id, "retry", &[]);
+        retry_task.required_artifact_contract = "commit-fence".into();
+        reduce(
+            &mut run,
+            &event(1, SupervisorEventKind::AddTask { task: retry_task }),
+        )
+        .unwrap();
+        let id = TaskId::new("retry").unwrap();
+        let provenance = RunProvenance {
+            supervisor_run_id: run.supervisor_run_id,
+            task_id: id.clone(),
+            parent_task_id: None,
+            parent_dispatch_run: None,
+            dispatch_run_id: OperationId::new(),
+            worker_session_id: SessionId::new(),
+            worker_agent_id: AgentRuntimeId::new(),
+            worker_worktree_id: WorktreeId::new(),
+            generation: 1,
+        };
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Dispatch {
+                    task_id: id.clone(),
+                    generation: 1,
+                    provenance,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                3,
+                SupervisorEventKind::Running {
+                    task_id: id.clone(),
+                    generation: 1,
+                },
+            ),
+        )
+        .unwrap();
+        reduce(
+            &mut run,
+            &event(
+                4,
+                SupervisorEventKind::SetTaskState {
+                    task_id: id.clone(),
+                    generation: 1,
+                    state: TaskState::Failed,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Retrying);
+        let generation = run.tasks[&id].generation;
+        assert!(matches!(
+            reduce(
+                &mut run,
+                &event(
+                    5,
+                    SupervisorEventKind::RetryReady {
+                        task_id: id.clone(),
+                        generation,
+                    },
+                )
+            ),
+            Err(SupervisorError::InvalidTransition)
+        ));
+        let mut due = event(
+            5,
+            SupervisorEventKind::RetryReady {
+                task_id: id.clone(),
+                generation,
+            },
+        );
+        due.observed_at += chrono::Duration::seconds(30);
+        reduce(&mut run, &due).unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Ready);
+    }
+
+    #[test]
+    fn cancellation_converges_tasks_and_run_to_terminal_state() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "cancel", &[]);
+        task.state = TaskState::Ready;
+        let id = task.task_id.clone();
+        run.tasks.insert(id.clone(), task);
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::Cancel {
+                    task_id: Some(id.clone()),
+                    reason: "task cancelled".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.tasks[&id].state, TaskState::Cancelled);
+        reduce(
+            &mut run,
+            &event(
+                2,
+                SupervisorEventKind::Cancel {
+                    task_id: None,
+                    reason: "run cancelled".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Cancelled);
+        assert!(run.terminal_at.is_some());
+    }
+
+    #[test]
+    fn failed_verification_escalates_and_records_safe_evidence() {
+        let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
+        let mut task = task(run.supervisor_run_id, "verify", &[]);
+        task.state = TaskState::Verifying;
+        run.tasks.insert(task.task_id.clone(), task);
+        let id = TaskId::new("verify").unwrap();
+        reduce(
+            &mut run,
+            &event(
+                1,
+                SupervisorEventKind::VerificationResult {
+                    task_id: id,
+                    generation: 1,
+                    passed: false,
+                    result_digest: "mismatch".into(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(run.state, SupervisorRunState::Escalated);
+        assert_eq!(run.escalation.as_ref().unwrap().safe_evidence, "mismatch");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn rejects_duplicate_parent_and_dispatch_fences() {
         let mut run = SupervisorRun::new("c".into(), "t".into(), "i".into(), "p".into(), now());
