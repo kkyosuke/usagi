@@ -85,7 +85,13 @@ impl PrModal {
                     pr.title.clone_from(&entry.title);
                     pr.state = match entry.state {
                         usagi_core::domain::pr_inventory::PrState::Open => PrState::Open,
-                        usagi_core::domain::pr_inventory::PrState::Closed => PrState::Closed,
+                        usagi_core::domain::pr_inventory::PrState::Closed => {
+                            // `PrLink` predates daemon inventory's Closed state. Keep
+                            // its persisted vocabulary stable and retain the display
+                            // label as modal-only metadata.
+                            pr.lookup_error = Some("closed".to_owned());
+                            PrState::Open
+                        }
                         usagi_core::domain::pr_inventory::PrState::Merged => PrState::Merged,
                         usagi_core::domain::pr_inventory::PrState::Dismissed => PrState::Dismissed,
                     };
@@ -131,10 +137,12 @@ impl PrModal {
 }
 
 /// PR の状態のラベルと色（open=success / merged=feature / dismissed=dim）。
-fn state_label(state: PrState) -> (&'static str, Style) {
-    match state {
+fn state_label(pr: &PrLink) -> (&'static str, Style) {
+    if pr.lookup_error.as_deref() == Some("closed") {
+        return ("closed", Style::new().dim());
+    }
+    match pr.state {
         PrState::Open => ("open", Role::Success.style()),
-        PrState::Closed => ("closed", Style::new().dim()),
         PrState::Merged => ("merged", Role::Feature.style()),
         PrState::Dismissed => ("dismissed", Style::new().dim()),
     }
@@ -151,7 +159,7 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
         .style()
         .bold()
         .paint(&format!("#{:<5}", pr.number));
-    let (label, style) = state_label(pr.state);
+    let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
     let title = pr.title.as_deref().unwrap_or("(no title)");
     widgets::clip_to_width(&format!("  {marker} {number} {badge} {title}"), inner)
@@ -159,7 +167,7 @@ fn pr_row(pr: &PrLink, selected: bool, inner: usize) -> String {
 
 /// 選択中 PR の詳細ブロック（状態・URL）。
 fn detail_lines(pr: &PrLink) -> Vec<String> {
-    let (label, style) = state_label(pr.state);
+    let (label, style) = state_label(pr);
     vec![
         format!(
             "  {} {}",

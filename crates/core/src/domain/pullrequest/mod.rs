@@ -169,8 +169,6 @@ impl PrLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
-    /// Closed without merging.
-    Closed,
     /// Merged — set automatically when `gh` reports the PR merged, or manually.
     Merged,
     /// Dismissed (hidden) — kept as a tombstone so a re-detected URL is not
