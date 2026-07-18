@@ -4726,6 +4726,56 @@ mod tests {
     }
 
     #[test]
+    fn closing_an_agent_tab_while_it_loads_discards_its_completion() {
+        let workspace_id = WorkspaceId::new();
+        let session_id = SessionId::new();
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id,
+            session_id: Some(session_id),
+            worktree_id: WorktreeId::new(),
+        };
+        let (started_sender, started) = mpsc::channel();
+        let (release, release_receiver) = mpsc::channel();
+        let workspace = WorkspaceView::with_runtime_ids(
+            ws("closeup-agent-close"),
+            state("closeup-agent-close"),
+            workspace_id,
+            vec![session_id],
+        );
+        let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+            workspace,
+            Box::new(SnapshotOverlayData),
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+        )
+        .with_agent_context(
+            workspace_id,
+            vec![session_id],
+            Box::new(DeferredAgentPort {
+                terminal,
+                started: started_sender,
+                release: release_receiver,
+            }),
+            DefaultModel::OpenAi,
+        );
+
+        let _ = step_workspace(&mut ui, Key::Down);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        let _ = step_workspace(&mut ui, Key::Enter);
+        drain_pane_launches(&mut ui, Geometry { cols: 80, rows: 24 });
+        started.recv().expect("agent worker started");
+        ui.workspace.tab_next();
+        ui.close_focused_pane();
+        release.send(()).expect("worker still receives completion");
+        finish_pane_launch(&mut ui, Geometry { cols: 80, rows: 24 });
+
+        assert!(ui.workspace.pane().tabs().is_empty());
+        assert!(ui.terminals.is_empty());
+    }
+
+    #[test]
     fn selecting_terminal_in_a_session_replaces_its_pending_tab_with_the_daemon_terminal() {
         let workspace_id = WorkspaceId::new();
         let session_id = SessionId::new();

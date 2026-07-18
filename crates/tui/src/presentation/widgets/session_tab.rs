@@ -209,6 +209,7 @@ mod tests {
 
     #[test]
     fn pending_label_has_a_slow_fixed_width_wave() {
+        assert_eq!(pending_label("", 0), "");
         let label = pending_label("Agent", 0);
         let later = pending_label("Agent", WAVE_TICKS_PER_POSITION);
         assert_eq!(display_width(&label), display_width("Agent"));
@@ -224,6 +225,16 @@ mod tests {
             }],
         );
         assert!(tab[0].contains("\u{1b}[1;38;5;211mA"));
+
+        let unselected = render(
+            40,
+            &[Tab {
+                label: "Agent",
+                selected: false,
+                pending_frame: Some(0),
+            }],
+        );
+        assert!(strip(&unselected[0]).contains("Agent"));
     }
 
     #[test]
