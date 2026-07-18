@@ -1261,18 +1261,18 @@ fn step_welcome(welcome: &mut Welcome, key: Key) -> WelcomeStep {
     }
 }
 
-/// New 画面のキー処理（純粋）。上下でフィールドを移り、←→ でモード切替（モード選択時）または
+/// New 画面のキー処理（純粋）。矢印キーでフィールドを移り、←→ でモード切替（モード選択時）または
 /// キャレット移動、文字入力・Backspace で編集、Esc で welcome へ戻り、`Ctrl-C` で終了する。
 /// フォームの確定（作成）は作成処理が入るまで留まる。
 #[coverage(off)]
 #[allow(clippy::needless_pass_by_value)]
 fn step_new(form: &mut New, key: Key) -> NewStep {
     match key {
-        Key::Up | Key::Char('k') => {
+        Key::Up => {
             form.focus_prev();
             NewStep::Stay
         }
-        Key::Down | Key::Char('j') => {
+        Key::Down => {
             form.focus_next();
             NewStep::Stay
         }
@@ -4368,6 +4368,16 @@ mod tests {
         assert!(matches!(step_new(&mut form, Key::Other), NewStep::Stay));
         assert!(matches!(step_new(&mut form, Key::Escape), NewStep::Back));
         assert!(matches!(step_new(&mut form, Key::Quit), NewStep::Quit));
+    }
+
+    #[test]
+    fn step_new_inserts_navigation_letters_instead_of_treating_them_as_movement() {
+        let mut form = New::default();
+        step_new(&mut form, Key::Down); // Url
+        step_new(&mut form, Key::Char('j'));
+        step_new(&mut form, Key::Char('k'));
+        assert_eq!(form.focus(), Field::Url);
+        assert_eq!(form.url(), "jk");
     }
 
     #[test]

@@ -860,6 +860,48 @@ mod tests {
     }
 
     #[test]
+    fn tab_completion_moves_non_directory_fields_and_handles_missing_or_empty_matches() {
+        let mut state = New::default();
+        // Tab on a non-directory field retains the form's ordinary field navigation.
+        state.complete_directory();
+        assert_eq!(state.focus(), Field::Url);
+
+        state.toggle_mode();
+        state.focus_next(); // Path
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::write(temporary.path().join("alpha-file"), "not a directory").unwrap();
+        type_str(
+            &mut state,
+            &temporary.path().join("alpha").to_string_lossy(),
+        );
+        state.complete_directory();
+        assert!(!joined(&state).contains("Matches:"));
+
+        state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, "/path/that/does/not/exist/");
+        state.complete_directory();
+        assert!(!joined(&state).contains("Matches:"));
+    }
+
+    #[test]
+    fn tab_completion_handles_a_trailing_separator() {
+        let temporary = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temporary.path().join("child")).unwrap();
+
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Path
+        type_str(&mut state, &format!("{}/", temporary.path().display()));
+        state.complete_directory();
+        assert_eq!(
+            state.path(),
+            format!("{}/", temporary.path().join("child").display())
+        );
+    }
+
+    #[test]
     fn render_combines_every_section_in_clone_mode() {
         let mut state = New::default();
         state.focus_next(); // Url
