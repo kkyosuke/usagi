@@ -1,13 +1,13 @@
 ---
 number: 345
 title: feat(daemon): PTY output から session PR inventory を検出・永続化する
-status: todo
+status: done
 priority: high
 labels: [daemon, core, pr]
 dependson: []
 related: []
 created_at: 2026-07-17T23:44:26.464272+00:00
-updated_at: 2026-07-17T23:45:33.206260+00:00
+updated_at: 2026-07-18T00:10:22.943237+00:00
 ---
 
 ## 目的

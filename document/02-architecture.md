@@ -308,6 +308,14 @@ final output を drain 済みの verified exit、または identity を伴う re
 
 product 固有 adapter、secret、IPC schema はこの coordinator の境界外である。
 
+daemon は journal に commit 済みの PTY output から HTTP(S) の `github.com/<owner>/<repo>/pull/<number>`
+だけを検出し、suffix・query・fragment を除いた canonical URL を stable `SessionId` ごとの PR inventory
+へ投影する。inventory は daemon data directory の atomically replaced JSON snapshot であり、terminal ID、
+worktree path、TUI selection を identity に使わない。検出は増分で行い、chunk / UTF-8 境界をまたぐ候補も扱う。
+credential・control character・不正 percent encoding・非 GitHub host・0 または overflow の番号は fail-closed
+で除外する。再検出は revision を増やさず、ユーザーが pin または dismiss した entry を復活・上書きしない。
+IPC wire、`gh` enrichment、TUI 表示はこの projection を読む後続の面の責務である。
+
 agent runtime と generic shell の terminal lifecycle は `usecase::terminal` が正本である。両者は
 `TerminalRuntimeState`、`TerminalReconcileState`、`SpawnFailure` と `TerminalRegistry` を共通で使う。
 違いは terminal を起動する前段だけで、Claude/Codex は terminal launch 子層の adapter、generic shell は

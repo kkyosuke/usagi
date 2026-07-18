@@ -27,6 +27,7 @@ use usagi_core::infrastructure::ipc::BuildIdentity;
 use usagi_core::infrastructure::paths;
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::DispatchStore;
+use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::usecase::client::{ClientError, ClientPolicy, IpcClient};
 use usagi_daemon::infrastructure::pty::PtyTerminal;
 use usagi_daemon::infrastructure::unix_transport::SecureUnixListener;
@@ -46,6 +47,7 @@ use usagi_daemon::usecase::generic_terminal::{
     GenericPtySpawner, TerminalProfileResolver, TerminalStore, TerminalStoreSnapshot,
 };
 use usagi_daemon::usecase::orchestration::AdapterRegistry;
+use usagi_daemon::usecase::pr_inventory::OutputPrProjector;
 use usagi_daemon::usecase::runtime::{
     OutputJournal, ProvisionContext, PtySpawner, RuntimeStore, RuntimeStoreSnapshot, SpawnProvision,
 };
@@ -621,6 +623,7 @@ type SharedTerminalRuntime = Arc<
         >,
     >,
 >;
+type SharedPrInventory = Arc<Mutex<OutputPrProjector<PrInventoryStore>>>;
 
 /// Samples daemon-owned process resources between metrics requests.
 struct ProcessMetrics {
@@ -725,6 +728,9 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         &data_dir.join("daemon"),
         daemon_generation,
     )?;
+    let pr_inventory = Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
+        data_dir.join("daemon"),
+    ))));
     let (pty, observations) = DaemonPty::new();
     let terminal = new_terminal_runtime(
         data_dir,
@@ -733,7 +739,11 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         pty,
         Arc::clone(&runtime),
     );
-    start_terminal_observer(Arc::clone(&terminal), observations)?;
+    start_terminal_observer(
+        Arc::clone(&terminal),
+        observations,
+        Arc::clone(&pr_inventory),
+    )?;
     let (agent_pty, agent_observations) = AgentPty::new(terminal_environment());
     let mcp_command = std::env::current_exe()?;
     let agent = open_agent_runtime(
@@ -743,7 +753,7 @@ fn spawn_ipc_server(data_dir: &Path, info: &AppInfo) -> std::io::Result<()> {
         agent_pty,
         mcp_command,
     );
-    start_agent_observer(Arc::clone(&agent), agent_observations)?;
+    start_agent_observer(Arc::clone(&agent), agent_observations, pr_inventory)?;
     start_ipc_accept_loop(
         listener,
         server,
@@ -793,6 +803,7 @@ fn open_agent_runtime(
 fn start_agent_observer(
     agent: SharedAgentRuntime,
     observations: Receiver<AgentPtyObservation>,
+    pr_inventory: SharedPrInventory,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("usagi-agent-observer".to_string())
@@ -803,7 +814,15 @@ fn start_agent_observer(
                 };
                 match observation {
                     AgentPtyObservation::Output(reference, bytes) => {
-                        let _ = agent.output(&reference, bytes);
+                        if agent.output(&reference, bytes.clone()).is_ok()
+                            && let Ok(mut projector) = pr_inventory.lock()
+                        {
+                            let _ = projector.observe_committed(
+                                reference.terminal_id,
+                                reference.session_id,
+                                &bytes,
+                            );
+                        }
                     }
                     AgentPtyObservation::Exited(reference, status) => {
                         let _ = agent.exit(&reference, status);
@@ -855,6 +874,7 @@ fn new_terminal_runtime(
 fn start_terminal_observer<S, Q>(
     terminal: Arc<Mutex<GenericTerminalRuntime<TrustedLoginShell, S, DaemonPty, Q>>>,
     observations: Receiver<PtyObservation>,
+    pr_inventory: SharedPrInventory,
 ) -> std::io::Result<()>
 where
     S: TerminalStore + Send + 'static,
@@ -869,7 +889,15 @@ where
                 };
                 match observation {
                     PtyObservation::Output(reference, bytes) => {
-                        let _ = terminal.output(&reference, bytes);
+                        if terminal.output(&reference, bytes.clone()).is_ok()
+                            && let Ok(mut projector) = pr_inventory.lock()
+                        {
+                            let _ = projector.observe_committed(
+                                reference.terminal_id,
+                                reference.session_id,
+                                &bytes,
+                            );
+                        }
                     }
                     PtyObservation::Exited(reference, status) => {
                         let _ = terminal.exit(&reference, status);
@@ -1759,7 +1787,14 @@ mod tests {
                 working_directory: directory.path().to_path_buf(),
             },
         )));
-        start_terminal_observer(Arc::clone(&runtime), observations).unwrap();
+        start_terminal_observer(
+            Arc::clone(&runtime),
+            observations,
+            Arc::new(Mutex::new(OutputPrProjector::new(PrInventoryStore::new(
+                directory.path(),
+            )))),
+        )
+        .unwrap();
         let connection = ConnectionId::new();
         let client = ClientId::new();
         let launch = TerminalLaunchIntent {

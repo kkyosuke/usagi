@@ -19,6 +19,7 @@ pub mod generation;
 pub mod generic_terminal;
 pub mod metrics;
 pub mod orchestration;
+pub mod pr_inventory;
 pub mod restart;
 pub mod runtime;
 pub mod serve;
