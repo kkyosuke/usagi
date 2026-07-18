@@ -85,7 +85,7 @@ pub enum Field {
 }
 
 /// New 画面の編集状態。端末 IO を持たず、[`render`] に渡して描画する。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct New {
     mode: Mode,
     /// `mode.fields()` 内のフォーカス位置。
@@ -110,28 +110,6 @@ pub struct New {
     /// 入力欄へ反映する。
     directory_matches: Vec<String>,
     directory_match_index: usize,
-}
-
-#[coverage(off)] // 補完用の一時状態を含む初期値の組み立ては計測対象外にする。
-#[allow(clippy::derivable_impls)] // coverage 対象外にするため derive ではなく明示実装にする。
-impl Default for New {
-    fn default() -> Self {
-        Self {
-            mode: Mode::default(),
-            focus_index: 0,
-            url: TextInput::default(),
-            location: TextInput::default(),
-            directory: TextInput::default(),
-            branch: TextInput::default(),
-            directory_dirty: false,
-            path: TextInput::default(),
-            name: TextInput::default(),
-            name_dirty: false,
-            notice: None,
-            directory_matches: Vec::new(),
-            directory_match_index: 0,
-        }
-    }
 }
 
 impl New {
@@ -228,7 +206,6 @@ impl New {
     }
 
     /// もう一方のモードへ切り替える。フォーカスはモード選択に戻すので、続けて切替できる。
-    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.other();
         self.focus_index = 0;
@@ -237,7 +214,6 @@ impl New {
     }
 
     /// フォーカスを次のフィールドへ（末尾で先頭へ回り込む）。
-    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn focus_next(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + 1) % len;
@@ -246,7 +222,6 @@ impl New {
     }
 
     /// フォーカスを前のフィールドへ（先頭で末尾へ回り込む）。
-    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn focus_prev(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + len - 1) % len;
@@ -266,7 +241,6 @@ impl New {
     /// Clone の Location または Existing の Directory を、ファイルシステム上の子
     /// ディレクトリで補完する。候補は常に入力欄へ反映し、複数あるときは繰り返し Tab を押すと
     /// 次の候補へ切り替わる。
-    #[coverage(off)] // filesystem の読み取り失敗・非 UTF-8 名は実行環境に依存する。
     pub fn complete_directory(&mut self) {
         let field = self.focus();
         if !matches!(field, Field::Location | Field::Path) {
@@ -305,7 +279,6 @@ impl New {
 
     /// 選択中の補完候補を入力欄へ反映する。これはユーザーが入力した文字ではないので、候補列は
     /// 保持して次の Tab で巡回できるようにする。
-    #[coverage(off)] // [`Self::complete_directory`] の filesystem 補完経路に閉じる。
     fn apply_directory_match(&mut self, field: Field) {
         let Some(candidate) = self
             .directory_matches
@@ -375,7 +348,6 @@ impl New {
     /// テキストが変わったフィールドの自動導出をやり直す。URL はディレクトリを、パスは名前を
     /// 導出する。ディレクトリ・名前は手編集済みか（非空 ⇒ dirty）を追い、空にすると自動導出へ
     /// 戻る（エディタが候補を復活させる挙動に合わせる）。
-    #[coverage(off)] // Tab 補完候補の一時状態を編集時に破棄するだけで、計測値に含めない。
     fn after_edit(&mut self, field: Field) {
         self.directory_matches.clear();
         self.directory_match_index = 0;
@@ -407,7 +379,6 @@ impl New {
 }
 
 /// Split a partially entered path into the directory to enumerate and the child-name prefix.
-#[coverage(off)] // [`New::complete_directory`] の filesystem 補完経路に閉じる。
 fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
     let path = std::path::Path::new(value);
     if value.ends_with(std::path::MAIN_SEPARATOR) {
@@ -422,7 +393,6 @@ fn directory_completion_base(value: &str) -> (std::path::PathBuf, String) {
 }
 
 /// Preserve the user's relative/absolute spelling while appending a matching child directory.
-#[coverage(off)] // [`New::complete_directory`] の filesystem 補完経路に閉じる。
 fn format_directory_candidate(value: &str, parent: &std::path::Path, name: &str) -> String {
     if value.ends_with(std::path::MAIN_SEPARATOR) {
         return format!("{value}{name}");
@@ -649,7 +619,6 @@ pub fn render(raw_height: usize, raw_width: usize, state: &New) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[coverage(off)] // テスト本体は計測対象ではなく、実装コードの実行だけを集計する。
 mod tests {
     use super::{
         Field, Mode, New, directory_completion_base, format_directory_candidate, render,
@@ -1032,6 +1001,15 @@ mod tests {
         state.focus_next(); // Url
         let frame = render(40, 80, &state);
         assert!(strip(frame.last().unwrap()).contains("move caret"));
+    }
+
+    #[test]
+    fn footer_names_directory_completion_on_a_directory_field() {
+        let mut state = New::default();
+        state.toggle_mode();
+        state.focus_next(); // Existing Directory
+        let frame = render(40, 80, &state);
+        assert!(strip(frame.last().unwrap()).contains("complete directory"));
     }
 
     #[test]
