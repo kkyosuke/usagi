@@ -3263,12 +3263,13 @@ mod tests {
 
     fn finish_pane_launch(ui: &mut WorkspaceUi, geometry: Geometry) {
         drain_pane_launches(ui, geometry);
-        for _ in 0..1_000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             drain_pane_completions(ui, geometry);
             if ui.agent.as_ref().is_none_or(|agent| agent.port.is_some()) {
                 return;
             }
-            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         panic!("pane launch worker did not complete");
     }
