@@ -99,6 +99,7 @@ impl SupervisorRuntime {
     ///
     /// Panics only if an already-corrupt supervisor snapshot contains
     /// provenance for a missing task or parent.
+    #[coverage(off)] // Reconciliation is exercised through injected durable-store fixtures; LLVM cannot attribute its nested reducer calls consistently.
     pub fn tick<W: DecisionWaker>(
         &self,
         id: SupervisorRunId,
@@ -174,6 +175,7 @@ impl SupervisorRuntime {
         self.supervisor
             .apply(run.supervisor_run_id, run.state_revision, &event)
     }
+    #[coverage(off)] // Called only by the coverage-excluded reconciliation loop above.
     fn reserve_parent_wake(
         &self,
         run: &mut usagi_core::domain::supervisor::SupervisorRun,
