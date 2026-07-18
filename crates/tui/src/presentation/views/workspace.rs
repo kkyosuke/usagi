@@ -1643,16 +1643,34 @@ fn sidebar_git_summary_width(columns: SidebarDiffColumns) -> usize {
 }
 
 fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> String {
+    let commit_style = |color| {
+        let style = Style::new().fg(color);
+        if dim { style.dim() } else { style }
+    };
     let commits = match (columns.ahead > 0, columns.behind > 0) {
         (true, true) => format!(
-            "↑{:>ahead$} ↓{:>behind$}",
-            diff.ahead,
-            diff.behind,
-            ahead = columns.ahead,
-            behind = columns.behind
+            "{} {}",
+            commit_style(Color::Cyan).paint(&format!(
+                "↑{:>width$}",
+                diff.ahead,
+                width = columns.ahead
+            )),
+            commit_style(Color::Magenta).paint(&format!(
+                "↓{:>width$}",
+                diff.behind,
+                width = columns.behind
+            )),
         ),
-        (true, false) => format!("↑{:>ahead$}", diff.ahead, ahead = columns.ahead),
-        (false, true) => format!("↓{:>behind$}", diff.behind, behind = columns.behind),
+        (true, false) => commit_style(Color::Cyan).paint(&format!(
+            "↑{:>width$}",
+            diff.ahead,
+            width = columns.ahead
+        )),
+        (false, true) => commit_style(Color::Magenta).paint(&format!(
+            "↓{:>width$}",
+            diff.behind,
+            width = columns.behind
+        )),
         (false, false) => String::new(),
     };
     let success = if dim {
@@ -1677,12 +1695,7 @@ fn git_diff_text(diff: &GitDiff, columns: SidebarDiffColumns, dim: bool) -> Stri
     if commits.is_empty() {
         lines
     } else {
-        let accent = if dim {
-            Role::Accent.style().dim()
-        } else {
-            Role::Accent.style()
-        };
-        format!("{} {lines}", accent.paint(&commits))
+        format!("{commits} {lines}")
     }
 }
 
@@ -3819,6 +3832,8 @@ mod tests {
         assert!(!plain.contains("origin/main"));
         assert!(rows[1].contains("\u{1b}[2;32m+ 12\u{1b}[0m"));
         assert!(rows[1].contains("\u{1b}[2;31m- 4\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[2;36m↑2\u{1b}[0m"));
+        assert!(rows[1].contains("\u{1b}[2;35m↓1\u{1b}[0m"));
         assert!(rows.iter().all(|row| display_width(row) == 60));
 
         let selected = super::session_menu_rows_at(
