@@ -184,6 +184,31 @@ impl DecisionPort for NoDecisions {
     }
 }
 
+/// Pull Request list, Markdown preview, and browser-open boundary for the Home
+/// PR/preview overlays.
+///
+/// A load returns through [`Completions`] as the matching `BackendEvent`
+/// (`PullRequestsLoaded` / `PullRequestsError` / `PreviewLoaded` /
+/// `PreviewError`), so a fetch failure surfaces as a display-safe error inside
+/// the open overlay instead of discarding it. Opening a URL is a fire-and-forget
+/// side effect; a launch failure reflues as a safe [`BackendEvent::Notice`].
+pub trait OverlayPort {
+    /// Read a target's Pull Request list.
+    fn load_pull_requests(&mut self, target: Target, completions: Completions);
+    /// Read a target's Markdown preview lines.
+    fn load_preview(&mut self, target: Target, completions: Completions);
+    /// Open one already-selected Pull Request URL in the browser.
+    fn open_pull_request(&mut self, url: String, completions: Completions);
+}
+
+struct NoOverlay;
+#[coverage(off)] // Production composition injects OverlayPort; this safe default preserves legacy embedders.
+impl OverlayPort for NoOverlay {
+    fn load_pull_requests(&mut self, _: Target, _: Completions) {}
+    fn load_preview(&mut self, _: Target, _: Completions) {}
+    fn open_pull_request(&mut self, _: String, _: Completions) {}
+}
+
 /// Whether the runtime loop should keep running after an effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
@@ -206,6 +231,7 @@ pub struct DaemonBackend {
     store: Box<dyn TargetStorePort>,
     workspace_commands: Box<dyn WorkspaceCommandPort>,
     decisions: Box<dyn DecisionPort>,
+    overlay: Box<dyn OverlayPort>,
     completions_tx: Sender<AppEvent>,
     completions_rx: Receiver<AppEvent>,
 }
@@ -226,6 +252,7 @@ impl DaemonBackend {
             store,
             workspace_commands,
             decisions: Box::new(NoDecisions),
+            overlay: Box::new(NoOverlay),
             completions_tx,
             completions_rx,
         }
@@ -235,6 +262,13 @@ impl DaemonBackend {
     #[must_use]
     pub fn with_decisions(mut self, decisions: Box<dyn DecisionPort>) -> Self {
         self.decisions = decisions;
+        self
+    }
+
+    /// Connect the Pull Request / preview / browser overlay port.
+    #[must_use]
+    pub fn with_overlay(mut self, overlay: Box<dyn OverlayPort>) -> Self {
+        self.overlay = overlay;
         self
     }
 
@@ -323,6 +357,15 @@ impl DaemonBackend {
             } => self
                 .decisions
                 .resolve(workspace, decision_id, answer, self.completions()),
+            Effect::LoadPullRequests { target } => {
+                self.overlay.load_pull_requests(target, self.completions());
+            }
+            Effect::LoadPreview { target } => {
+                self.overlay.load_preview(target, self.completions());
+            }
+            Effect::OpenPullRequest { url } => {
+                self.overlay.open_pull_request(url, self.completions());
+            }
             Effect::Detach => return Flow::Exit,
             // Entry surfaces own these; the Home screen never emits them. They
             // are accepted here so a future screen-graph route is the only edit.
@@ -480,6 +523,44 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeOverlay {
+        pull_requests: Vec<Target>,
+        previews: Vec<Target>,
+        opened: Vec<String>,
+    }
+
+    impl OverlayPort for FakeOverlay {
+        fn load_pull_requests(&mut self, target: Target, completions: Completions) {
+            self.pull_requests.push(target);
+            completions.emit(AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target,
+                prs: vec![usagi_core::domain::pullrequest::PrLink::new(
+                    7,
+                    "https://github.com/o/r/pull/7",
+                )],
+            }));
+        }
+
+        fn load_preview(&mut self, target: Target, completions: Completions) {
+            self.previews.push(target);
+            completions.emit(AppEvent::Backend(BackendEvent::PreviewError {
+                target,
+                error: SafeError {
+                    message: SafeMessage::new("no preview"),
+                    error_id: "preview".to_owned(),
+                },
+            }));
+        }
+
+        fn open_pull_request(&mut self, url: String, completions: Completions) {
+            self.opened.push(url);
+            completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
+                "opened",
+            ))));
+        }
+    }
+
     fn backend() -> DaemonBackend {
         DaemonBackend::new(
             Box::new(FakeSessions::default()),
@@ -487,6 +568,10 @@ mod tests {
             Box::new(FakeStore::default()),
             Box::new(FakeWorkspaceCommands::default()),
         )
+    }
+
+    fn backend_with_overlay() -> DaemonBackend {
+        backend().with_overlay(Box::new(FakeOverlay::default()))
     }
 
     fn intent() -> SessionCreateIntent {
@@ -633,6 +718,64 @@ mod tests {
             backend.drain_events().as_slice(),
             [AppEvent::Backend(BackendEvent::Notice(_))]
         ));
+    }
+
+    #[test]
+    fn load_pull_requests_and_preview_reflux_overlay_events() {
+        let mut backend = backend_with_overlay();
+        let target = Target::Session(SessionId::new());
+        assert_eq!(
+            backend.dispatch(Effect::LoadPullRequests { target }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::PullRequestsLoaded { target: loaded, prs })]
+                if *loaded == target && prs.len() == 1
+        ));
+        assert_eq!(
+            backend.dispatch(Effect::LoadPreview { target }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::PreviewError { target: failed, .. })]
+                if *failed == target
+        ));
+    }
+
+    #[test]
+    fn open_pull_request_reaches_the_overlay_port() {
+        let mut backend = backend_with_overlay();
+        assert_eq!(
+            backend.dispatch(Effect::OpenPullRequest {
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            }),
+            Flow::Continue
+        );
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Notice(_))]
+        ));
+    }
+
+    #[test]
+    fn overlay_effects_are_inert_without_an_overlay_port() {
+        let mut backend = backend();
+        for effect in [
+            Effect::LoadPullRequests {
+                target: Target::Root(WorkspaceId::new()),
+            },
+            Effect::LoadPreview {
+                target: Target::Root(WorkspaceId::new()),
+            },
+            Effect::OpenPullRequest {
+                url: "https://github.com/o/r/pull/7".to_owned(),
+            },
+        ] {
+            assert_eq!(backend.dispatch(effect), Flow::Continue);
+        }
+        assert!(backend.drain_events().is_empty());
     }
 
     #[test]

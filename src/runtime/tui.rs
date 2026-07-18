@@ -31,8 +31,8 @@ use usagi_core::infrastructure::store::state::WorkspaceStateStore;
 use usagi_core::infrastructure::store::workspace::Storage;
 use usagi_core::usecase::client::{
     AgentLaunchIntent, ClientError, ClientPolicy, DaemonClient, DaemonMetrics, DaemonReply,
-    DaemonRequest, IpcClient, MetricsAction, SessionAction, TerminalAction, TerminalGeometry,
-    TerminalLaunchIntent, TerminalRequest,
+    DaemonRequest, IpcClient, MetricsAction, PrAction, PrRequest, SessionAction, TerminalAction,
+    TerminalGeometry, TerminalLaunchIntent, TerminalRequest,
 };
 use usagi_core::usecase::settings::{SettingsPort, SettingsScope};
 use usagi_core::usecase::workspace as workspace_usecase;
@@ -48,6 +48,7 @@ use usagi_tui::presentation::{
     WorkspaceLoader, WorkspaceSnapshot,
 };
 use usagi_tui::usecase::application::pane_runtime::Geometry;
+use usagi_tui::usecase::application::pr::{BrowserOpener, PrSnapshotPort};
 use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError,
 };
@@ -1197,6 +1198,58 @@ fn cli_is_available(program: &str) -> bool {
     Command::new(program).arg("--version").output().is_ok()
 }
 
+/// Composition adapter for the daemon-owned PR snapshot. It deliberately has no
+/// local scanner or state fallback: a failed request remains a safe TUI message
+/// and a later snapshot retries convergence.
+struct DaemonPrSnapshotPort;
+
+impl PrSnapshotPort for DaemonPrSnapshotPort {
+    #[coverage(off)]
+    fn snapshot(
+        &mut self,
+        session_id: usagi_core::domain::id::SessionId,
+    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
+        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
+            .map_err(|_| "daemon unavailable".to_owned())?;
+        let reply = client
+            .request(DaemonRequest::Pr {
+                action: PrAction::Snapshot,
+                payload: PrRequest {
+                    session_id,
+                    revision: None,
+                },
+            })
+            .map_err(|_| "daemon unavailable".to_owned())?;
+        match reply {
+            DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
+                .map_err(|_| "invalid PR snapshot".to_owned()),
+            DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
+        }
+    }
+}
+
+/// OS adapter for the browser effect. `Command` receives separate argv items; no
+/// URL is ever interpolated into a shell command.
+struct PlatformBrowserOpener;
+
+impl BrowserOpener for PlatformBrowserOpener {
+    #[coverage(off)]
+    fn open(&mut self, url: &str) -> Result<(), String> {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "linux") {
+            "xdg-open"
+        } else {
+            return Err("browser opening is unsupported on this platform".to_owned());
+        };
+        Command::new(program)
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "browser launch failed".to_owned())
+    }
+}
+
 #[coverage(off)]
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
@@ -1210,6 +1263,8 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     Box::new(DaemonSessionCommandPort::default()),
                     Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonMetricsPort::new()),
+                    Box::new(DaemonPrSnapshotPort),
+                    Box::new(PlatformBrowserOpener),
                 )
             })
         })?;

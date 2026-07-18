@@ -1,13 +1,13 @@
 ---
 number: 317
 title: feat(tui): PR modal / preview overlay を controller Overlay へ移設する
-status: todo
+status: done
 priority: medium
 labels: [tui, controller]
 dependson: [315]
 related: [258, 316]
 created_at: 2026-07-17T14:22:46.618899+00:00
-updated_at: 2026-07-17T14:22:46.618899+00:00
+updated_at: 2026-07-18T05:36:13.965886+00:00
 ---
 
 ## 目的

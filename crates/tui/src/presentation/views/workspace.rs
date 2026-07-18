@@ -22,9 +22,11 @@ use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
 use crate::presentation::views::decision_modal;
+use crate::presentation::views::pr_modal::{self, PrModal};
+use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::widgets;
 use crate::usecase::application::controller::{
-    AppState, Feedback, HomeMode, Selection, Target, TargetPhase,
+    AppState, Feedback, HomeMode, PrOverlay, PreviewOverlay, Selection, Target, TargetPhase,
 };
 use crate::usecase::application::pane::{
     PaneKind, PaneSelection, PaneState, PaneTab, TabSelection,
@@ -166,6 +168,10 @@ pub struct HomeProjection {
     closeup_action_visible: bool,
     decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
     decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
+    /// Open Pull Request overlay projection, drawn above the sidebar/pane frame.
+    pr_overlay: Option<PrOverlay>,
+    /// Open Markdown preview overlay projection, drawn above the frame.
+    preview_overlay: Option<PreviewOverlay>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -224,6 +230,8 @@ impl HomeProjection {
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
             decision_overlay: state.decision_overlay().cloned(),
             decisions: state.decisions().to_vec(),
+            pr_overlay: state.pr_overlay().cloned(),
+            preview_overlay: state.preview_overlay().cloned(),
         }
     }
 
@@ -892,7 +900,11 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         split,
     ));
     frame.truncate(height);
-    if let Some(overlay) = &home.decision_overlay {
+    if let Some(overlay) = &home.pr_overlay {
+        render_pr_overlay(height, width, &frame, overlay)
+    } else if let Some(overlay) = &home.preview_overlay {
+        render_preview_overlay(height, width, &frame, overlay)
+    } else if let Some(overlay) = &home.decision_overlay {
         decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
     } else if home.closeup_action_visible {
         crate::presentation::views::closeup_modal::render_over(
@@ -904,6 +916,53 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
     } else {
         frame
     }
+}
+
+/// Compose the Pull Request overlay over `base`. A fetch error renders as a safe
+/// unavailable notice; otherwise the list modal is drawn at its selection.
+fn render_pr_overlay(
+    height: usize,
+    width: usize,
+    base: &[String],
+    overlay: &PrOverlay,
+) -> Vec<String> {
+    if let Some(error) = overlay.error() {
+        return text_overlay::render_over(
+            height,
+            width,
+            base,
+            &TextOverlay::new(
+                "Pull Request",
+                OverlayDocument::Unavailable(error.message.as_str().to_owned()),
+            ),
+        );
+    }
+    pr_modal::render_over(
+        height,
+        width,
+        base,
+        &PrModal::with_selection(overlay.prs().to_vec(), overlay.selected()),
+    )
+}
+
+/// Compose the Markdown preview overlay over `base`. A fetch error renders as a
+/// safe unavailable notice; otherwise the preview lines are drawn at their scroll.
+fn render_preview_overlay(
+    height: usize,
+    width: usize,
+    base: &[String],
+    overlay: &PreviewOverlay,
+) -> Vec<String> {
+    let document = overlay.error().map_or_else(
+        || OverlayDocument::Ready(overlay.lines().to_vec()),
+        |error| OverlayDocument::Unavailable(error.message.as_str().to_owned()),
+    );
+    text_overlay::render_over(
+        height,
+        width,
+        base,
+        &TextOverlay::new("Preview", document).scrolled_to(overlay.scroll()),
+    )
 }
 
 /// Apply the inactive treatment only while the left sidebar owns navigation.
@@ -1351,6 +1410,7 @@ mod tests {
         DaemonGeneration, OperationId, SessionId, TerminalId, TerminalRef, WorkspaceId, WorktreeId,
     };
     use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::pullrequest::{PrLink, PrState};
 
     use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 
@@ -1464,6 +1524,92 @@ mod tests {
         assert!(text.contains("+ new session"));
         assert!(!text.contains("+ new session  action"));
         assert!(text.contains("No tabs stirring yet. Enter starts one."));
+    }
+
+    fn pr_error() -> SafeError {
+        SafeError {
+            message: SafeMessage::new("gh unavailable"),
+            error_id: "pr".into(),
+        }
+    }
+
+    #[test]
+    fn render_home_draws_the_pr_overlay_at_its_selection() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('p')));
+        let mut first = PrLink::new(7, "https://github.com/o/r/pull/7");
+        first.title = Some("add feature".into());
+        let mut second = PrLink::new(8, "https://github.com/o/r/pull/8");
+        second.title = Some("fix bug".into());
+        second.state = PrState::Merged;
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Root(workspace),
+                prs: vec![first, second],
+            }),
+        );
+        // Move the cursor to the second PR so the detail reflects the selection.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = joined_home(&home);
+        assert!(text.contains("Pull Request"));
+        assert!(text.contains("#7"));
+        assert!(text.contains("add feature"));
+        assert!(text.contains("merged"));
+        // The selected PR's detail URL is the second one.
+        assert!(text.contains("github.com/o/r/pull/8"));
+    }
+
+    #[test]
+    fn render_home_draws_a_pr_fetch_error_as_a_safe_notice() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target: Target::Root(workspace),
+                error: pr_error(),
+            }),
+        );
+        let home = HomeProjection::from_state(&state, "work", "/work", &[]);
+        let text = joined_home(&home);
+        assert!(text.contains("Pull Request"));
+        assert!(text.contains("gh unavailable"));
+    }
+
+    #[test]
+    fn render_home_draws_the_preview_overlay_and_its_error() {
+        let workspace = WorkspaceId::new();
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Char('v')));
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: Target::Root(workspace),
+                lines: vec!["# Heading".into(), "content line".into()],
+            }),
+        );
+        let ready = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(ready.contains("Preview"));
+        assert!(ready.contains("Heading"));
+        assert!(ready.contains("content line"));
+
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewError {
+                target: Target::Root(workspace),
+                error: SafeError {
+                    message: SafeMessage::new("no preview available"),
+                    error_id: "preview".into(),
+                },
+            }),
+        );
+        let errored = joined_home(&HomeProjection::from_state(&state, "work", "/work", &[]));
+        assert!(errored.contains("Preview"));
+        assert!(errored.contains("no preview available"));
     }
 
     #[test]

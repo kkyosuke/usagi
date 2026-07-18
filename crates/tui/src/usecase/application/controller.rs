@@ -13,6 +13,7 @@ use usagi_core::domain::id::{
     AgentRuntimeRef, OperationId, SessionId, UserDecisionId, WorkspaceId,
 };
 use usagi_core::domain::note::Scratchpad;
+use usagi_core::domain::pullrequest::PrLink;
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::domain::user_decision::{UserDecision, UserDecisionAnswer, UserDecisionStatus};
 
@@ -53,6 +54,10 @@ pub enum Overlay {
     CreateSession,
     /// Workspace-scoped pending user decisions and their answer editor.
     Decisions,
+    /// active target scope の Pull Request 一覧。素材は port から還流する。
+    Prs,
+    /// active target の Markdown preview。素材は port から還流する。
+    Preview,
 }
 
 /// 新規 session 入力で編集する項目。
@@ -317,6 +322,111 @@ impl DecisionOverlayState {
     }
 }
 
+/// active target の Pull Request 一覧 overlay state。
+///
+/// 一覧 [`PrLink`] は domain データで、素材は port（[`Effect::LoadPullRequests`]）から
+/// [`BackendEvent::PullRequestsLoaded`] として還流する。reducer が所有するのは選択位置と
+/// 表示可能なエラーだけで、URL の妥当性検証や browser 起動は executor 側に残す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrOverlay {
+    target: Target,
+    prs: Vec<PrLink>,
+    selected: usize,
+    error: Option<SafeError>,
+}
+
+impl PrOverlay {
+    #[coverage(off)]
+    fn loading(target: Target) -> Self {
+        Self {
+            target,
+            prs: Vec::new(),
+            selected: 0,
+            error: None,
+        }
+    }
+
+    /// Overlay が対象とする stable identity。
+    #[must_use]
+    #[coverage(off)]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+    /// 表示中の PR 一覧。素材未着なら空。
+    #[must_use]
+    #[coverage(off)]
+    pub fn prs(&self) -> &[PrLink] {
+        &self.prs
+    }
+    /// 選択中の添字。
+    #[must_use]
+    #[coverage(off)]
+    pub const fn selected(&self) -> usize {
+        self.selected
+    }
+    /// 選択中の PR。一覧が空なら `None`。
+    #[must_use]
+    #[coverage(off)]
+    pub fn selected_pr(&self) -> Option<&PrLink> {
+        self.prs.get(self.selected)
+    }
+    /// port が分類した安全なエラー。
+    #[must_use]
+    #[coverage(off)]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+}
+
+/// active target の Markdown preview overlay state。
+///
+/// 表示行は port（[`Effect::LoadPreview`]）から [`BackendEvent::PreviewLoaded`] として
+/// 還流する安全な文字列で、reducer が所有するのは scroll 位置と表示可能なエラーだけである。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewOverlay {
+    target: Target,
+    lines: Vec<String>,
+    scroll: usize,
+    error: Option<SafeError>,
+}
+
+impl PreviewOverlay {
+    #[coverage(off)]
+    fn loading(target: Target) -> Self {
+        Self {
+            target,
+            lines: Vec::new(),
+            scroll: 0,
+            error: None,
+        }
+    }
+
+    /// Overlay が対象とする stable identity。
+    #[must_use]
+    #[coverage(off)]
+    pub const fn target(&self) -> Target {
+        self.target
+    }
+    /// 表示可能な preview 行。素材未着なら空。
+    #[must_use]
+    #[coverage(off)]
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+    /// 現在の先頭行 offset。
+    #[must_use]
+    #[coverage(off)]
+    pub const fn scroll(&self) -> usize {
+        self.scroll
+    }
+    /// port が分類した安全なエラー。
+    #[must_use]
+    #[coverage(off)]
+    pub fn error(&self) -> Option<&SafeError> {
+        self.error.as_ref()
+    }
+}
+
 impl EnvironmentEditor {
     #[coverage(off)]
     fn loading(target: Target) -> Self {
@@ -520,6 +630,8 @@ pub struct AppState {
     environment_editor: Option<EnvironmentEditor>,
     decisions: Vec<UserDecision>,
     decision_overlay: Option<DecisionOverlayState>,
+    pr_overlay: Option<PrOverlay>,
+    preview_overlay: Option<PreviewOverlay>,
     create_session: Option<CreateSessionForm>,
     workspace: WorkspaceId,
     sessions: Vec<SessionId>,
@@ -551,6 +663,8 @@ impl AppState {
             environment_editor: None,
             decisions: Vec::new(),
             decision_overlay: None,
+            pr_overlay: None,
+            preview_overlay: None,
             create_session: None,
             workspace,
             sessions,
@@ -616,6 +730,18 @@ impl AppState {
     #[coverage(off)]
     pub fn decision_overlay(&self) -> Option<&DecisionOverlayState> {
         self.decision_overlay.as_ref()
+    }
+    /// Open Pull Request overlay state, including its cursor and any safe error.
+    #[must_use]
+    #[coverage(off)]
+    pub fn pr_overlay(&self) -> Option<&PrOverlay> {
+        self.pr_overlay.as_ref()
+    }
+    /// Open Markdown preview overlay state, including its scroll and any safe error.
+    #[must_use]
+    #[coverage(off)]
+    pub fn preview_overlay(&self) -> Option<&PreviewOverlay> {
+        self.preview_overlay.as_ref()
     }
     /// navigation cursor。
     #[must_use]
@@ -803,6 +929,10 @@ pub enum AppKey {
     OpenNotes,
     /// Open the active target's environment editor.
     OpenEnvironment,
+    /// Open the active target's Pull Request list overlay.
+    OpenPrs,
+    /// Open the active target's Markdown preview overlay.
+    OpenPreview,
     /// Open the current workspace's durable pending decision list.
     OpenDecisions,
     /// Move within the pending list or current decision options.
@@ -966,6 +1096,14 @@ pub enum BackendEvent {
         decision_id: UserDecisionId,
         error: SafeError,
     },
+    /// Pull Request list returned by its snapshot owner for one target.
+    PullRequestsLoaded { target: Target, prs: Vec<PrLink> },
+    /// A safe Pull Request read failure.
+    PullRequestsError { target: Target, error: SafeError },
+    /// Markdown preview lines returned by the overlay data owner for one target.
+    PreviewLoaded { target: Target, lines: Vec<String> },
+    /// A safe preview read failure.
+    PreviewError { target: Target, error: SafeError },
 }
 
 /// 非同期 request の成否。
@@ -1075,6 +1213,15 @@ pub enum Effect {
     /// Detach this TUI client. The adapter owns the connection cleanup; this
     /// effect intentionally carries no terminal or operation cancellation.
     Detach,
+    /// Read a target's Pull Request list through the daemon snapshot owner.
+    /// The completion returns as [`BackendEvent::PullRequestsLoaded`] / `Error`.
+    LoadPullRequests { target: Target },
+    /// Read a target's Markdown preview through the overlay data owner. The
+    /// completion returns as [`BackendEvent::PreviewLoaded`] / `Error`.
+    LoadPreview { target: Target },
+    /// Open one already-selected Pull Request URL through the browser opener.
+    /// URL validation stays with the executor; the reducer forwards the raw URL.
+    OpenPullRequest { url: String },
 }
 
 /// One selectable workspace in the entry surfaces.
@@ -1775,7 +1922,11 @@ pub fn update(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             BackendEvent::NotesLoaded { .. }
             | BackendEvent::NotesError { .. }
             | BackendEvent::EnvironmentLoaded { .. }
-            | BackendEvent::EnvironmentError { .. },
+            | BackendEvent::EnvironmentError { .. }
+            | BackendEvent::PullRequestsLoaded { .. }
+            | BackendEvent::PullRequestsError { .. }
+            | BackendEvent::PreviewLoaded { .. }
+            | BackendEvent::PreviewError { .. },
         ) => Vec::new(),
         AppEvent::Backend(BackendEvent::Sessions(sessions)) => {
             state.sessions = sessions;
@@ -1874,6 +2025,45 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                 editor.error = Some(error.clone());
             }
         }
+        BackendEvent::PullRequestsLoaded { target, prs } => {
+            if let Some(overlay) = state
+                .pr_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target)
+            {
+                overlay.prs.clone_from(prs);
+                overlay.selected = overlay.selected.min(prs.len().saturating_sub(1));
+                overlay.error = None;
+            }
+        }
+        BackendEvent::PullRequestsError { target, error } => {
+            if let Some(overlay) = state
+                .pr_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target)
+            {
+                overlay.error = Some(error.clone());
+            }
+        }
+        BackendEvent::PreviewLoaded { target, lines } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target)
+            {
+                overlay.lines.clone_from(lines);
+                overlay.error = None;
+            }
+        }
+        BackendEvent::PreviewError { target, error } => {
+            if let Some(overlay) = state
+                .preview_overlay
+                .as_mut()
+                .filter(|overlay| overlay.target == *target)
+            {
+                overlay.error = Some(error.clone());
+            }
+        }
         _ => return false,
     }
     true
@@ -1943,6 +2133,8 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
             }
         }
         Overlay::CreateSession => update_create_session_form(state, &key),
+        Overlay::Prs => update_prs_overlay(state, &key),
+        Overlay::Preview => update_preview_overlay(state, &key),
         Overlay::Overview if matches!(key, AppKey::Escape) => {
             state.overlay = None;
             Vec::new()
@@ -2131,6 +2323,8 @@ fn update_management_key(state: &mut AppState, key: AppKey) -> Vec<Effect> {
         }
         AppKey::SubmitOverview(input) => submit_overview(state, &input),
         AppKey::SubmitCloseup(input) => submit_closeup(state, &input),
+        AppKey::OpenPrs | AppKey::Char('p') => open_prs(state),
+        AppKey::OpenPreview | AppKey::Char('v') => open_preview(state),
         AppKey::Enter | AppKey::Char('t') => activate_selected(state),
         AppKey::CtrlN
         | AppKey::CtrlP
@@ -2254,6 +2448,80 @@ fn open_environment(state: &mut AppState) -> Vec<Effect> {
     state.note_editor = None;
     state.environment_editor = Some(EnvironmentEditor::loading(target));
     vec![Effect::LoadEnvironment { target }]
+}
+
+#[coverage(off)]
+fn open_prs(state: &mut AppState) -> Vec<Effect> {
+    let target = state.active;
+    state.overlay = Some(Overlay::Prs);
+    state.pr_overlay = Some(PrOverlay::loading(target));
+    state.preview_overlay = None;
+    vec![Effect::LoadPullRequests { target }]
+}
+
+#[coverage(off)]
+fn open_preview(state: &mut AppState) -> Vec<Effect> {
+    let target = state.active;
+    state.overlay = Some(Overlay::Preview);
+    state.preview_overlay = Some(PreviewOverlay::loading(target));
+    state.pr_overlay = None;
+    vec![Effect::LoadPreview { target }]
+}
+
+/// Pull Request overlay の入力を還元する。↑↓ で選択を回し、Enter で選択 PR を
+/// browser で開く effect を出す。Esc は overlay を閉じる。素材の再取得はしない。
+#[coverage(off)]
+fn update_prs_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(overlay) = state.pr_overlay.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.pr_overlay = None;
+            Vec::new()
+        }
+        AppKey::Up => {
+            if !overlay.prs.is_empty() {
+                overlay.selected = (overlay.selected + overlay.prs.len() - 1) % overlay.prs.len();
+            }
+            Vec::new()
+        }
+        AppKey::Down => {
+            if !overlay.prs.is_empty() {
+                overlay.selected = (overlay.selected + 1) % overlay.prs.len();
+            }
+            Vec::new()
+        }
+        AppKey::Enter => overlay
+            .selected_pr()
+            .map(|pr| Effect::OpenPullRequest {
+                url: pr.url.clone(),
+            })
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Preview overlay の入力を還元する。↑↓ で scroll し、Esc は overlay を閉じる。
+#[coverage(off)]
+fn update_preview_overlay(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
+    let Some(overlay) = state.preview_overlay.as_mut() else {
+        state.overlay = None;
+        return Vec::new();
+    };
+    match key {
+        AppKey::Escape => {
+            state.overlay = None;
+            state.preview_overlay = None;
+        }
+        AppKey::Up => overlay.scroll = overlay.scroll.saturating_sub(1),
+        AppKey::Down => overlay.scroll = overlay.scroll.saturating_add(1),
+        _ => {}
+    }
+    Vec::new()
 }
 
 #[coverage(off)]
@@ -3863,5 +4131,179 @@ mod tests {
             }),
         );
         assert!(state.decisions().is_empty());
+    }
+
+    fn pr_link(number: u32) -> PrLink {
+        PrLink::new(number, format!("https://github.com/o/r/pull/{number}"))
+    }
+
+    fn safe_error(message: &str) -> SafeError {
+        SafeError {
+            message: SafeMessage::new(message),
+            error_id: "overlay".into(),
+        }
+    }
+
+    #[test]
+    fn pr_overlay_opens_reflows_material_navigates_opens_and_closes() {
+        let (workspace, session, _) = ids();
+        let root = Target::Root(workspace);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // `p` opens the PR overlay for the active target and requests its list.
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('p'))),
+            vec![Effect::LoadPullRequests { target: root }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert!(state.pr_overlay().unwrap().prs().is_empty());
+
+        // A list for another target is ignored; the matching one fills the overlay.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: Target::Session(session),
+                prs: vec![pr_link(9)],
+            }),
+        );
+        assert!(state.pr_overlay().unwrap().prs().is_empty());
+        let prs = vec![pr_link(1), pr_link(2)];
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsLoaded {
+                target: root,
+                prs: prs.clone(),
+            }),
+        );
+        assert_eq!(state.pr_overlay().unwrap().prs().len(), 2);
+        assert_eq!(state.pr_overlay().unwrap().selected(), 0);
+
+        // Down/Up wrap around the list.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.pr_overlay().unwrap().selected(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.pr_overlay().unwrap().selected(), 0);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.pr_overlay().unwrap().selected(), 1);
+
+        // Enter opens the selected PR through the browser effect.
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Enter)),
+            vec![Effect::OpenPullRequest {
+                url: prs[1].url.clone(),
+            }]
+        );
+
+        // Esc closes the overlay and discards its state.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert!(state.pr_overlay().is_none());
+    }
+
+    #[test]
+    fn pr_overlay_enter_is_inert_while_empty_and_errors_stay_visible() {
+        let (workspace, _, _) = ids();
+        let root = Target::Root(workspace);
+        let mut state = AppState::home(workspace, Vec::new());
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        // Enter with no entries emits nothing and keeps the overlay open.
+        assert!(update(&mut state, AppEvent::Key(AppKey::Enter)).is_empty());
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        // A safe fetch error surfaces on the open overlay.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PullRequestsError {
+                target: root,
+                error: safe_error("gh unavailable"),
+            }),
+        );
+        assert_eq!(
+            state
+                .pr_overlay()
+                .unwrap()
+                .error()
+                .map(|error| error.message.as_str()),
+            Some("gh unavailable")
+        );
+    }
+
+    #[test]
+    fn preview_overlay_opens_reflows_scrolls_errors_and_closes() {
+        let (workspace, session, _) = ids();
+        let root = Target::Root(workspace);
+        let mut state = AppState::home(workspace, vec![session]);
+
+        // `v` opens the preview overlay for the active target and requests it.
+        assert_eq!(
+            update(&mut state, AppEvent::Key(AppKey::Char('v'))),
+            vec![Effect::LoadPreview { target: root }]
+        );
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+
+        // A preview for another target is ignored; the matching one fills it.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: Target::Session(session),
+                lines: vec!["stale".into()],
+            }),
+        );
+        assert!(state.preview_overlay().unwrap().lines().is_empty());
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewLoaded {
+                target: root,
+                lines: vec!["# Title".into(), "body".into()],
+            }),
+        );
+        assert_eq!(state.preview_overlay().unwrap().lines().len(), 2);
+
+        // Down scrolls; Up saturates at the top.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Down));
+        assert_eq!(state.preview_overlay().unwrap().scroll(), 1);
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        let _ = update(&mut state, AppEvent::Key(AppKey::Up));
+        assert_eq!(state.preview_overlay().unwrap().scroll(), 0);
+
+        // A safe read error surfaces on the open overlay.
+        let _ = update(
+            &mut state,
+            AppEvent::Backend(BackendEvent::PreviewError {
+                target: root,
+                error: safe_error("no preview"),
+            }),
+        );
+        assert_eq!(
+            state
+                .preview_overlay()
+                .unwrap()
+                .error()
+                .map(|error| error.message.as_str()),
+            Some("no preview")
+        );
+
+        // Esc closes the overlay and discards its state.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        assert_eq!(state.overlay(), None);
+        assert!(state.preview_overlay().is_none());
+    }
+
+    #[test]
+    fn opening_one_overlay_discards_the_other_state() {
+        let (workspace, _, _) = ids();
+        let mut state = AppState::home(workspace, Vec::new());
+        // Open PRs, dismiss, then open preview: the PR state must not linger.
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert!(state.pr_overlay().is_some());
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPreview));
+        assert_eq!(state.overlay(), Some(Overlay::Preview));
+        assert!(state.pr_overlay().is_none());
+        assert!(state.preview_overlay().is_some());
+        // And the reverse: opening PRs discards the preview state.
+        let _ = update(&mut state, AppEvent::Key(AppKey::Escape));
+        let _ = update(&mut state, AppEvent::Key(AppKey::OpenPrs));
+        assert_eq!(state.overlay(), Some(Overlay::Prs));
+        assert!(state.preview_overlay().is_none());
     }
 }

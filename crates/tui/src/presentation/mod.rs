@@ -31,6 +31,7 @@ use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::config::{self, AvailableAgentModels, Config};
 use crate::presentation::views::new::{self, Field, New};
 use crate::presentation::views::open::{self, Open};
+use crate::presentation::views::pr_modal::PrModal;
 use crate::presentation::views::splash;
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
 use crate::presentation::views::workspace::{
@@ -41,9 +42,11 @@ use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, AppState, BackendEvent, Effect, Overlay, Target,
+    AppEvent, AppKey, AppState, BackendEvent, Effect, Notice, Overlay, SafeError, SafeMessage,
+    Target,
 };
 use crate::usecase::application::pane_runtime::Geometry;
+use crate::usecase::application::pr::{BrowserOpener, PrSnapshotPort, canonical_browser_url};
 use crate::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalSession, TerminalStreamPort,
 };
@@ -416,6 +419,28 @@ impl AgentCommandPort for UnavailableAgentCommandPort {
         _profile: Option<AgentProfileId>,
     ) -> Result<TerminalRef, String> {
         Err("Agent launch is unavailable.".to_owned())
+    }
+}
+
+/// PR snapshot fallback for entry points that do not inject the daemon PR port
+/// (the Welcome/Open/Recent screen graph). The PR overlay shows a safe notice.
+struct UnavailablePrSnapshotPort;
+impl PrSnapshotPort for UnavailablePrSnapshotPort {
+    #[coverage(off)] // Compatibility fallback for embedders without the daemon PR port.
+    fn snapshot(
+        &mut self,
+        _session: SessionId,
+    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
+        Err("Pull Request data is unavailable.".to_owned())
+    }
+}
+
+/// Browser-open fallback for entry points that do not inject a platform opener.
+struct UnavailableBrowserOpener;
+impl BrowserOpener for UnavailableBrowserOpener {
+    #[coverage(off)] // Compatibility fallback; production injects the composition-root opener.
+    fn open(&mut self, _url: &str) -> Result<(), String> {
+        Err("Browser opening is unavailable on this platform.".to_owned())
     }
 }
 
@@ -1257,8 +1282,10 @@ fn dispatch_controller_effect(
         }
         Effect::Detach => return ControllerFlow::Exit,
         // RefreshSessions is reconciled every frame; SelectTab is mirrored by
-        // `on_effect`; notes/environment/workspace-command/remove and the entry
-        // effects are not reachable from the controller Home input yet.
+        // `on_effect`; the PR/preview overlay effects are refluxed by
+        // `controller_overlay_events` before this executor runs; notes/
+        // environment/workspace-command/remove and the entry effects are not
+        // reachable from the controller Home input yet.
         Effect::OpenTerminal { .. }
         | Effect::RefreshSessions { .. }
         | Effect::SelectTab { .. }
@@ -1268,6 +1295,9 @@ fn dispatch_controller_effect(
         | Effect::SaveNotes { .. }
         | Effect::LoadEnvironment { .. }
         | Effect::SaveEnvironment { .. }
+        | Effect::LoadPullRequests { .. }
+        | Effect::LoadPreview { .. }
+        | Effect::OpenPullRequest { .. }
         | Effect::AttachWorkspace { .. }
         | Effect::CloneProject { .. }
         | Effect::RegisterWorkspace { .. }
@@ -1275,6 +1305,121 @@ fn dispatch_controller_effect(
         | Effect::ResolveDecision { .. } => {}
     }
     ControllerFlow::Continue
+}
+
+/// Execute the Home PR/preview overlay effects against the legacy daemon
+/// transport and return the [`AppEvent`]s that reflux their result to the
+/// controller. Every other effect yields nothing here; it is handled by
+/// [`dispatch_controller_effect`]. This keeps the `effect -> execute -> event ->
+/// update()` loop single-directional while the live IO stays in the shell.
+#[coverage(off)]
+fn controller_overlay_events(
+    pr_port: &mut dyn PrSnapshotPort,
+    browser: &mut dyn BrowserOpener,
+    workspace_name: &str,
+    root_cwd: &Path,
+    sessions: &[ProjectedSession],
+    effect: &Effect,
+) -> Vec<AppEvent> {
+    match effect {
+        Effect::LoadPullRequests { target } => {
+            vec![AppEvent::Backend(controller_pull_requests(
+                pr_port, *target,
+            ))]
+        }
+        Effect::LoadPreview { target } => vec![AppEvent::Backend(BackendEvent::PreviewLoaded {
+            target: *target,
+            lines: controller_preview_lines(*target, workspace_name, root_cwd, sessions),
+        })],
+        Effect::OpenPullRequest { url } => controller_open_pull_request(browser, url)
+            .into_iter()
+            .map(AppEvent::Backend)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Fetch the PR list for `target` and project it into a controller backend event.
+/// The workspace root has no PR scope, so it resolves to an empty list.
+#[coverage(off)]
+fn controller_pull_requests(pr_port: &mut dyn PrSnapshotPort, target: Target) -> BackendEvent {
+    let Target::Session(session) = target else {
+        return BackendEvent::PullRequestsLoaded {
+            target,
+            prs: Vec::new(),
+        };
+    };
+    match pr_port.snapshot(session) {
+        Ok(snapshot) => BackendEvent::PullRequestsLoaded {
+            target,
+            prs: PrModal::from_entries(&snapshot.entries).prs().to_vec(),
+        },
+        Err(message) => BackendEvent::PullRequestsError {
+            target,
+            error: safe_overlay_error(&message, "pr-load"),
+        },
+    }
+}
+
+/// Build the Markdown preview lines for `target` from the projected sidebar data.
+/// This mirrors the pre-controller target summary (label, path, PR count).
+#[coverage(off)]
+fn controller_preview_lines(
+    target: Target,
+    workspace_name: &str,
+    root_cwd: &Path,
+    sessions: &[ProjectedSession],
+) -> Vec<String> {
+    match target {
+        Target::Root(_) => vec![
+            format!("workspace: {workspace_name}"),
+            format!("path: {}", root_cwd.display()),
+        ],
+        Target::Session(id) => sessions
+            .iter()
+            .find(|session| session.id == id)
+            .map_or_else(
+                || vec![format!("session: {workspace_name}")],
+                |session| {
+                    let mut lines = vec![
+                        format!("session: {}", session.label),
+                        format!("path: {}", session.cwd.display()),
+                    ];
+                    if let Some(summary) = &session.pr_summary {
+                        lines.push(summary.clone());
+                    }
+                    lines
+                },
+            ),
+    }
+}
+
+/// Open a selected PR URL in the browser, refluxing a safe notice on failure.
+#[coverage(off)]
+fn controller_open_pull_request(
+    browser: &mut dyn BrowserOpener,
+    url: &str,
+) -> Option<BackendEvent> {
+    let Some(url) = canonical_browser_url(url) else {
+        return Some(BackendEvent::Notice(Notice::new(
+            "Cannot open an invalid PR URL.",
+        )));
+    };
+    match browser.open(&url) {
+        Ok(()) => None,
+        Err(message) => Some(BackendEvent::Notice(Notice::new(format!(
+            "Could not open browser: {message}"
+        )))),
+    }
+}
+
+/// Wrap a port's already display-safe message as a [`SafeError`] for an overlay.
+#[coverage(off)]
+fn safe_overlay_error(message: &str, error_id: &str) -> SafeError {
+    SafeError {
+        message: SafeMessage::new(message),
+        error_id: error_id.to_owned(),
+    }
 }
 
 /// Apply completed pane launches: promote and focus the runtime tab, then attach
@@ -1318,12 +1463,15 @@ fn drain_pane_completions_into_runtime(
 /// `drive_workspace_with_agent_port_and_selection_mode`; the composition root
 /// switches to it separately.
 #[coverage(off)]
+#[allow(clippy::too_many_arguments)]
 fn drive_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
+    mut pr_port: Box<dyn PrSnapshotPort>,
+    mut browser: Box<dyn BrowserOpener>,
 ) -> io::Result<WorkspaceStep> {
     let workspace_id = snapshot.workspace_id;
     let session_ids = snapshot.session_ids.clone();
@@ -1376,6 +1524,16 @@ fn drive_workspace_controller(
         }
         for effect in runtime.handle_key(key) {
             runtime.on_effect(&effect);
+            for event in controller_overlay_events(
+                pr_port.as_mut(),
+                browser.as_mut(),
+                &workspace_name,
+                &root_cwd,
+                &sessions,
+                &effect,
+            ) {
+                let _ = runtime.apply_event(event);
+            }
             if dispatch_controller_effect(&mut ui, &effect, &mut pending_targets)
                 == ControllerFlow::Exit
             {
@@ -1391,15 +1549,26 @@ fn drive_workspace_controller(
 ///
 /// Returns terminal IO failures from the interactive loop.
 #[coverage(off)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_workspace_controller(
     term: &mut dyn Terminal,
     snapshot: WorkspaceSnapshot,
     session_commands: Box<dyn SessionCommandPort>,
     agent_port: Box<dyn AgentCommandPort>,
     metrics_port: Box<dyn MetricsPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
 ) -> io::Result<Exit> {
-    drive_workspace_controller(term, snapshot, session_commands, agent_port, metrics_port)
-        .map(|_| Exit::Quit)
+    drive_workspace_controller(
+        term,
+        snapshot,
+        session_commands,
+        agent_port,
+        metrics_port,
+        pr_port,
+        browser,
+    )
+    .map(|_| Exit::Quit)
 }
 
 fn refresh_metrics(ui: &mut WorkspaceUi) {
@@ -1603,6 +1772,8 @@ fn open_snapshot_via_controller<'a, 'b>(
         session_commands.create(),
         agent_port,
         metrics_port,
+        Box::new(UnavailablePrSnapshotPort),
+        Box::new(UnavailableBrowserOpener),
     )
 }
 
@@ -1840,9 +2011,10 @@ mod tests {
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
         DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory, NewStep, NoMetrics,
         NoMetricsFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
-        Start, TerminalError, UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader,
-        WorkspaceSnapshot, app_event_from_key, key_to_terminal_bytes, play_startup_splash,
-        render_controller_frame, render_home_snapshot, run as run_from_start, run_with_settings,
+        Start, TerminalError, UnavailableBrowserOpener, UnavailablePrSnapshotPort,
+        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceSnapshot,
+        app_event_from_key, key_to_terminal_bytes, play_startup_splash, render_controller_frame,
+        render_home_snapshot, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability,
         run_workspace_controller, step_config, step_new, terminal_geometry, welcome_action,
         write_banner,
@@ -2150,6 +2322,8 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(NoMetrics),
+            Box::new(UnavailablePrSnapshotPort),
+            Box::new(UnavailableBrowserOpener),
         );
 
         assert!(matches!(result, Ok(Exit::Quit)));
@@ -2206,6 +2380,8 @@ mod tests {
             Box::new(UnavailableSessionCommandPort),
             Box::new(SuccessfulAgentPort(terminal)),
             Box::new(NoMetrics),
+            Box::new(UnavailablePrSnapshotPort),
+            Box::new(UnavailableBrowserOpener),
         );
 
         assert!(matches!(result, Ok(Exit::Quit)));
