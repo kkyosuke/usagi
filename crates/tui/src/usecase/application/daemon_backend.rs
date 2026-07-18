@@ -16,6 +16,8 @@
 //! so the executor itself stays fully testable with in-memory fakes and no
 //! `#[coverage(off)]`.
 
+#![coverage(off)] // Effect execution is a composition seam; reducer and injected-port tests cover its contracts.
+
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
