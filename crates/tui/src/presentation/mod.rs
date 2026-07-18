@@ -50,7 +50,7 @@ use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationModal, ConfirmationView};
 use crate::presentation::workspace_runtime::WorkspaceRuntime;
 use crate::usecase::application::controller::{
-    AppEvent, AppKey, BackendEvent, Effect, Overlay, Target,
+    AppEvent, AppKey, BackendEvent, Effect, Notice, Overlay, SafeError, SafeMessage, Target,
 };
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
@@ -3091,8 +3091,10 @@ fn dispatch_controller_effect(
         }
         Effect::Detach => return ControllerFlow::Exit,
         // RefreshSessions is reconciled every frame; SelectTab is mirrored by
-        // `on_effect`; notes/environment/workspace-command/remove and the entry
-        // effects are not reachable from the controller Home input yet.
+        // `on_effect`; the PR/preview overlay effects are refluxed by
+        // `controller_overlay_events` before this executor runs; notes/
+        // environment/workspace-command/remove and the entry effects are not
+        // reachable from the controller Home input yet.
         Effect::OpenTerminal { .. }
         | Effect::RefreshSessions { .. }
         | Effect::SelectTab { .. }
@@ -3102,6 +3104,9 @@ fn dispatch_controller_effect(
         | Effect::SaveNotes { .. }
         | Effect::LoadEnvironment { .. }
         | Effect::SaveEnvironment { .. }
+        | Effect::LoadPullRequests { .. }
+        | Effect::LoadPreview { .. }
+        | Effect::OpenPullRequest { .. }
         | Effect::AttachWorkspace { .. }
         | Effect::CloneProject { .. }
         | Effect::RegisterWorkspace { .. }
@@ -3109,6 +3114,100 @@ fn dispatch_controller_effect(
         | Effect::ResolveDecision { .. } => {}
     }
     ControllerFlow::Continue
+}
+
+/// Execute the Home PR/preview overlay effects against the legacy daemon
+/// transport and return the [`AppEvent`]s that reflux their result to the
+/// controller. Every other effect yields nothing here; it is handled by
+/// [`dispatch_controller_effect`]. This keeps the `effect -> execute -> event ->
+/// update()` loop single-directional while the live IO stays in the shell.
+#[coverage(off)]
+fn controller_overlay_events(ui: &mut WorkspaceUi, effect: &Effect) -> Vec<AppEvent> {
+    match effect {
+        Effect::LoadPullRequests { target } => {
+            vec![AppEvent::Backend(controller_pull_requests(ui, *target))]
+        }
+        Effect::LoadPreview { target } => {
+            vec![AppEvent::Backend(controller_preview(ui, *target))]
+        }
+        Effect::OpenPullRequest { url } => controller_open_pull_request(ui, url)
+            .into_iter()
+            .map(AppEvent::Backend)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Fetch the PR list for `target` and project it into a controller backend event.
+#[coverage(off)]
+fn controller_pull_requests(ui: &mut WorkspaceUi, target: Target) -> BackendEvent {
+    let Target::Session(session) = target else {
+        return BackendEvent::PullRequestsLoaded {
+            target,
+            prs: Vec::new(),
+        };
+    };
+    match ui.pr_port.snapshot(session) {
+        Ok(snapshot) => {
+            ui.pr_projection.apply(session, snapshot);
+            BackendEvent::PullRequestsLoaded {
+                target,
+                prs: PrModal::from_entries(ui.pr_projection.entries(session))
+                    .prs()
+                    .to_vec(),
+            }
+        }
+        Err(message) if message == "Pull Request data is unavailable." => {
+            match ui.overlay_data.pull_requests(&ui.workspace) {
+                Ok(prs) => BackendEvent::PullRequestsLoaded { target, prs },
+                Err(message) => BackendEvent::PullRequestsError {
+                    target,
+                    error: safe_overlay_error(&message, "pr-load"),
+                },
+            }
+        }
+        Err(message) => BackendEvent::PullRequestsError {
+            target,
+            error: safe_overlay_error(&message, "pr-load"),
+        },
+    }
+}
+
+/// Read the Markdown preview for `target` and project it into a backend event.
+#[coverage(off)]
+fn controller_preview(ui: &WorkspaceUi, target: Target) -> BackendEvent {
+    match ui.overlay_data.preview(&ui.workspace) {
+        OverlayDocument::Ready(lines) => BackendEvent::PreviewLoaded { target, lines },
+        OverlayDocument::Unavailable(message) => BackendEvent::PreviewError {
+            target,
+            error: safe_overlay_error(&message, "preview-load"),
+        },
+    }
+}
+
+/// Open a selected PR URL in the browser, refluxing a safe notice on failure.
+#[coverage(off)]
+fn controller_open_pull_request(ui: &mut WorkspaceUi, url: &str) -> Option<BackendEvent> {
+    let Some(url) = canonical_browser_url(url) else {
+        return Some(BackendEvent::Notice(Notice::new(
+            "Cannot open an invalid PR URL.",
+        )));
+    };
+    match ui.browser.open(&url) {
+        Ok(()) => None,
+        Err(message) => Some(BackendEvent::Notice(Notice::new(format!(
+            "Could not open browser: {message}"
+        )))),
+    }
+}
+
+/// Wrap a port's already display-safe message as a [`SafeError`] for an overlay.
+#[coverage(off)]
+fn safe_overlay_error(message: &str, error_id: &str) -> SafeError {
+    SafeError {
+        message: SafeMessage::new(message),
+        error_id: error_id.to_owned(),
+    }
 }
 
 /// Apply completed pane launches: promote and focus the runtime tab, then attach
@@ -3225,6 +3324,9 @@ fn drive_workspace_controller(
         }
         for effect in runtime.handle_key(key) {
             runtime.on_effect(&effect);
+            for event in controller_overlay_events(&mut ui, &effect) {
+                let _ = runtime.apply_event(event);
+            }
             if dispatch_controller_effect(&mut ui, &effect, &mut pending_targets)
                 == ControllerFlow::Exit
             {

@@ -150,7 +150,11 @@ target-scoped `PaneRegistry`）が所有し、入力は `presentation::app_event
 pointer クリックは `HomeProjection::row_at`（描画と同じ viewport 幾何を共有）で
 `Selection` へ hit-test し、`AppKey::SelectRow` で reducer に届く。daemon IO（session
 worker・pane 起動・terminal stream・metrics）は既存の runtime shell が transport として
-担い、Home の state には触れない。
+担い、Home の state には触れない。前面の Pull Request 一覧・Markdown preview も
+controller の `Overlay::Prs` / `Overlay::Preview` が所有し、素材は `Effect::LoadPullRequests`
+/ `LoadPreview` で要求して `BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は
+対応する `*Error`）として還流し、選択 PR の browser 起動は `Effect::OpenPullRequest` で表す。
+描画は他の overlay と同じく `render_home` に統合され、shell が別途 modal を重ねる暫定接続は残さない。
 
 **TUI の実装は core に吸収されない。** `usagi-core` が持つのは面をまたいで共有する
 data（`domain/`）・IPC プロトコル型の定義・永続化・git（`infrastructure/`）と、

@@ -67,6 +67,17 @@ impl PrModal {
         Self { prs, selected: 0 }
     }
 
+    /// Open with a caller-owned cursor, clamped to the list. The controller
+    /// [`Overlay::Prs`] owns the selection, so `render_home` rebuilds the modal
+    /// at that index each frame instead of mutating a modal-local cursor.
+    ///
+    /// [`Overlay::Prs`]: crate::usecase::application::controller::Overlay::Prs
+    #[must_use]
+    pub fn with_selection(prs: Vec<PrLink>, selected: usize) -> Self {
+        let selected = selected.min(prs.len().saturating_sub(1));
+        Self { prs, selected }
+    }
+
     /// Builds the modal from the daemon-owned PR snapshot projection.
     #[must_use]
     #[coverage(off)] // Daemon snapshot conversion is exercised through the injected workspace port; this legacy modal's layout tests use persisted links.
@@ -316,6 +327,23 @@ mod tests {
         assert_eq!(modal.selected_pr().map(|p| p.number), Some(812));
         // derive された Clone / Debug も触れる。
         assert!(format!("{:?}", modal.clone()).contains("812"));
+    }
+
+    #[test]
+    fn with_selection_clamps_the_cursor_to_the_list() {
+        let prs = vec![
+            PrLink::new(1, "https://example.com/pull/1"),
+            PrLink::new(2, "https://example.com/pull/2"),
+        ];
+        let at_second = PrModal::with_selection(prs.clone(), 1);
+        assert_eq!(at_second.selected(), 1);
+        assert_eq!(at_second.selected_pr().map(|pr| pr.number), Some(2));
+        // An out-of-range index clamps to the last entry.
+        assert_eq!(PrModal::with_selection(prs, 9).selected(), 1);
+        // An empty list stays at zero with no selection.
+        let empty = PrModal::with_selection(Vec::new(), 3);
+        assert_eq!(empty.selected(), 0);
+        assert!(empty.selected_pr().is_none());
     }
 
     #[test]
