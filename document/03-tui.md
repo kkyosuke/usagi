@@ -54,8 +54,15 @@ workspace の root へ戻す。これにより、削除済み session を target
 
 Home の mode は Switch と Closeup である。Switch 中の右ペインは tab strip、content、footer を含めて dim
 表示し、左 sidebar が操作対象であることを示す。Closeup では右ペインを active な明度へ戻す。Overview、Closeup action、PR、preview、text、notes、
-environment は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
+environment、pending user decision は Home の背景を残す overlay として開き、最前面の overlay が入力を受け取る。diff は
 Closeup pane の tab として開く。
+
+Pending user decision は workspace ID で fence した daemon snapshot からだけ投影する。overlay は pending
+一覧を表示し、選択すると title、prompt、option label/description、期限、freeform が許可された場合だけその
+editor を表示する。Esc は editor から一覧へ戻り、一覧では overlay を閉じるだけで durable decision を変更しない。
+submit は stable option ID または空でない許可済み freeform を送る。row は daemon の resolve confirmation まで
+残り、resolve error・disconnect・resync 後も snapshot で再試行可能な pending state に収束する。modal が開いて
+いる間は Home、Closeup、terminal の背景入力を dispatch しない。
 
 Home 背景の dim は各 ANSI span の reset 後にも維持し、行末で必ず reset する。overlay は dim 済みの背景へ
 後から合成するため、modal 自身の style と可読性を優先する。

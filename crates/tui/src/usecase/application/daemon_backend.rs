@@ -19,8 +19,9 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use usagi_core::domain::agent::AgentProfileId;
-use usagi_core::domain::id::{OperationId, SessionId, WorkspaceId};
+use usagi_core::domain::id::{OperationId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
+use usagi_core::domain::user_decision::UserDecisionAnswer;
 
 use super::controller::{
     AppEvent, Effect, EnvironmentEntry, PendingToken, SessionCreateIntent, TabDirection, Target,
@@ -155,6 +156,31 @@ pub trait WorkspaceCommandPort {
     );
 }
 
+/// Daemon-owned durable decision snapshot and resolve boundary.
+pub trait DecisionPort {
+    fn refresh(&mut self, workspace: WorkspaceId, completions: Completions);
+    fn resolve(
+        &mut self,
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        answer: UserDecisionAnswer,
+        completions: Completions,
+    );
+}
+
+struct NoDecisions;
+impl DecisionPort for NoDecisions {
+    fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
+    fn resolve(
+        &mut self,
+        _: WorkspaceId,
+        _: UserDecisionId,
+        _: UserDecisionAnswer,
+        _: Completions,
+    ) {
+    }
+}
+
 /// Whether the runtime loop should keep running after an effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
@@ -176,6 +202,7 @@ pub struct DaemonBackend {
     agent: Box<dyn AgentPort>,
     store: Box<dyn TargetStorePort>,
     workspace_commands: Box<dyn WorkspaceCommandPort>,
+    decisions: Box<dyn DecisionPort>,
     completions_tx: Sender<AppEvent>,
     completions_rx: Receiver<AppEvent>,
 }
@@ -195,9 +222,17 @@ impl DaemonBackend {
             agent,
             store,
             workspace_commands,
+            decisions: Box::new(NoDecisions),
             completions_tx,
             completions_rx,
         }
+    }
+
+    /// Connect a workspace-scoped durable-decision port.
+    #[must_use]
+    pub fn with_decisions(mut self, decisions: Box<dyn DecisionPort>) -> Self {
+        self.decisions = decisions;
+        self
     }
 
     /// Run one reducer-issued effect against its owning port.
@@ -275,6 +310,16 @@ impl DaemonBackend {
                 self.workspace_commands
                     .execute(workspace, command, self.completions());
             }
+            Effect::RefreshDecisions { workspace } => {
+                self.decisions.refresh(workspace, self.completions());
+            }
+            Effect::ResolveDecision {
+                workspace,
+                decision_id,
+                answer,
+            } => self
+                .decisions
+                .resolve(workspace, decision_id, answer, self.completions()),
             Effect::Detach => return Flow::Exit,
             // Entry surfaces own these; the Home screen never emits them. They
             // are accepted here so a future screen-graph route is the only edit.

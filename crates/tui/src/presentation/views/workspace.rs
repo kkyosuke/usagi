@@ -21,6 +21,7 @@ use usagi_core::usecase::client::DaemonMetrics;
 use crate::presentation::layouts::panes;
 use crate::presentation::theme::{Color, Role, Style};
 use crate::presentation::views::closeup_modal::CloseupModal;
+use crate::presentation::views::decision_modal;
 use crate::presentation::widgets;
 use crate::presentation::widgets::TextInput;
 use crate::usecase::application::controller::{
@@ -172,6 +173,8 @@ pub struct HomeProjection {
     pane_tabs: Vec<HomePaneTab>,
     pane_error: Option<String>,
     closeup_action_visible: bool,
+    decision_overlay: Option<crate::usecase::application::controller::DecisionOverlayState>,
+    decisions: Vec<usagi_core::domain::user_decision::UserDecision>,
 }
 
 /// Home の右ペインに投影する tab strip の 1 項目。
@@ -228,6 +231,8 @@ impl HomeProjection {
             ) && (!state.has_live_pane()
                 || state.overlay()
                     == Some(crate::usecase::application::controller::Overlay::Closeup)),
+            decision_overlay: state.decision_overlay().cloned(),
+            decisions: state.decisions().to_vec(),
         }
     }
 
@@ -2070,7 +2075,9 @@ pub fn render_home(raw_height: usize, raw_width: usize, home: &HomeProjection) -
         split,
     ));
     frame.truncate(height);
-    if home.closeup_action_visible {
+    if let Some(overlay) = &home.decision_overlay {
+        decision_modal::render_over(height, width, &frame, overlay, &home.decisions)
+    } else if home.closeup_action_visible {
         crate::presentation::views::closeup_modal::render_over(
             height,
             width,

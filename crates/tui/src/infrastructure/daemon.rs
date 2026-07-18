@@ -6,8 +6,9 @@
 
 use std::collections::VecDeque;
 
-use usagi_core::domain::id::AgentRuntimeRef;
+use usagi_core::domain::id::{AgentRuntimeRef, UserDecisionId, WorkspaceId};
 use usagi_core::domain::session_lifecycle::AgentPhase;
+use usagi_core::domain::user_decision::UserDecision;
 use usagi_core::infrastructure::ipc::ProtocolError;
 
 use crate::usecase::application::controller::{BackendEvent, Feedback, SafeError, SafeMessage};
@@ -32,6 +33,22 @@ pub enum DaemonPush {
     Reconnected,
     /// The daemon requires an atomic snapshot replacement.
     ResyncRequired,
+    /// Atomic workspace snapshot used on attach/reconnect/resync.
+    DecisionsSnapshot {
+        workspace: WorkspaceId,
+        decisions: Vec<UserDecision>,
+    },
+    /// Resolve confirmation; only this event removes the local pending row.
+    DecisionResolved {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+    },
+    /// Safe resolve failure. The reducer preserves the editor draft for retry.
+    DecisionError {
+        workspace: WorkspaceId,
+        decision_id: UserDecisionId,
+        error: ProtocolError,
+    },
 }
 
 /// Converts decoded daemon pushes into events consumed by the Home reducer.
@@ -73,6 +90,29 @@ pub fn adapt_push(push: DaemonPush) -> BackendEvent {
         DaemonPush::Disconnected => BackendEvent::Feedback(Feedback::Disconnected),
         DaemonPush::Reconnected => BackendEvent::Feedback(Feedback::Reconnected),
         DaemonPush::ResyncRequired => BackendEvent::Feedback(Feedback::ResyncRequired),
+        DaemonPush::DecisionsSnapshot {
+            workspace,
+            decisions,
+        } => BackendEvent::Decisions {
+            workspace,
+            decisions,
+        },
+        DaemonPush::DecisionResolved {
+            workspace,
+            decision_id,
+        } => BackendEvent::DecisionResolved {
+            workspace,
+            decision_id,
+        },
+        DaemonPush::DecisionError {
+            workspace,
+            decision_id,
+            error,
+        } => BackendEvent::DecisionError {
+            workspace,
+            decision_id,
+            error: safe_error(error),
+        },
     }
 }
 
