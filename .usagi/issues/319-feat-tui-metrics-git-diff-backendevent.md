@@ -1,13 +1,13 @@
 ---
 number: 319
 title: feat(tui): metrics / git diff を BackendEvent 駆動に統合する
-status: todo
+status: done
 priority: medium
 labels: [tui, controller, daemon]
 dependson: [315]
 related: [258, 313, 314]
 created_at: 2026-07-17T14:23:17.883035+00:00
-updated_at: 2026-07-17T14:23:17.883035+00:00
+updated_at: 2026-07-18T05:21:05.555598+00:00
 ---
 
 ## 目的
