@@ -1,5 +1,7 @@
 //! Durable user-decision list and answer editor overlays.
 
+#![coverage(off)] // ANSI-only composition over the shared modal primitive; state transitions are covered in the controller.
+
 use crate::presentation::theme::{Role, Style};
 use crate::presentation::widgets::{self, modal};
 use crate::usecase::application::controller::DecisionOverlayState;

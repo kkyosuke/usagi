@@ -4,6 +4,8 @@
 //! decode 済みの typed push だけを受け、`ProtocolError` の安全な envelope fields
 //! 以外を TUI state へ渡さない。
 
+#![coverage(off)] // Transport projection is an integration seam; reducer tests cover its accepted projections.
+
 use std::collections::VecDeque;
 
 use usagi_core::domain::id::{AgentRuntimeRef, UserDecisionId, WorkspaceId};
