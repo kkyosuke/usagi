@@ -188,6 +188,36 @@ impl WorkspaceRuntime {
         effects
     }
 
+    /// Mirror a controller [`Effect`]'s pane-visible intent into the registry
+    /// before the shell executes the effect against daemon IO. `SelectTab`
+    /// cycles the active tab; `OpenTerminal`/`LaunchAgent` record a pending
+    /// placeholder keyed by the effect's operation, so the daemon completion the
+    /// shell later routes to [`WorkspaceRuntime::complete_pane`] promotes the
+    /// matching tab. Effects with no pane surface are ignored here.
+    pub fn on_effect(&mut self, effect: &Effect) {
+        match effect {
+            Effect::SelectTab { direction } => {
+                let _ = self.select_tab(*direction);
+            }
+            Effect::OpenTerminal {
+                target,
+                operation_id,
+                ..
+            } => {
+                let _ = self.request_pane(*target, *operation_id, PaneKind::Terminal);
+            }
+            Effect::LaunchAgent {
+                session,
+                operation_id,
+                ..
+            } => {
+                let _ =
+                    self.request_pane(Target::Session(*session), *operation_id, PaneKind::Agent);
+            }
+            _ => {}
+        }
+    }
+
     fn adjacent_tab(&self, direction: TabDirection) -> Option<TabSelection> {
         let pane = self.panes.active_pane();
         let tabs = pane.tabs();
@@ -506,6 +536,45 @@ mod tests {
         // Backend/tick events flow through apply_event.
         let _ = runtime.apply_event(AppEvent::Tick);
         let _ = runtime.apply_event(AppEvent::Key(AppKey::Down));
+    }
+
+    #[test]
+    fn on_effect_mirrors_pane_effects_and_ignores_the_rest() {
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let mut runtime = closeup_on(workspace, session);
+
+        // OpenTerminal / LaunchAgent record pending placeholders for their target.
+        runtime.on_effect(&Effect::OpenTerminal {
+            target: Target::Session(session),
+            operation_id: OperationId::new(),
+            arguments: String::new(),
+        });
+        assert!(matches!(
+            runtime.active_pane().tabs().last(),
+            Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Terminal
+        ));
+        let agent_op = OperationId::new();
+        runtime.on_effect(&Effect::LaunchAgent {
+            workspace,
+            session,
+            operation_id: agent_op,
+            profile: None,
+        });
+        assert!(matches!(
+            runtime.active_pane().tabs().last(),
+            Some(PaneTab::Pending(pending)) if pending.kind == PaneKind::Agent
+        ));
+
+        // A non-pane effect leaves the tabs untouched.
+        let before = runtime.active_pane().tabs().len();
+        runtime.on_effect(&Effect::RefreshSessions { workspace });
+        assert_eq!(runtime.active_pane().tabs().len(), before);
+
+        // SelectTab routes through the tab cycler.
+        runtime.on_effect(&Effect::SelectTab {
+            direction: TabDirection::Previous,
+        });
     }
 
     #[test]
