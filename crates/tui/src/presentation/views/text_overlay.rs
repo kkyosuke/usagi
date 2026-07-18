@@ -54,6 +54,17 @@ impl TextOverlay {
         self.scroll
     }
 
+    /// Open at a caller-owned scroll offset. The controller [`Overlay::Preview`]
+    /// owns the scroll, so `render_home` rebuilds the overlay at that offset each
+    /// frame instead of mutating an overlay-local cursor.
+    ///
+    /// [`Overlay::Preview`]: crate::usecase::application::controller::Overlay::Preview
+    #[must_use]
+    pub fn scrolled_to(mut self, offset: usize) -> Self {
+        self.scroll = offset;
+        self
+    }
+
     /// 1 行上へ移動する。
     pub fn scroll_up(&mut self) {
         self.scroll = self.scroll.saturating_sub(1);
@@ -160,6 +171,17 @@ mod tests {
         assert!(text.contains("Esc: close"));
         modal.scroll_up();
         assert_eq!(modal.scroll(), 11);
+    }
+
+    #[test]
+    fn scrolled_to_opens_at_a_caller_owned_offset() {
+        let modal = TextOverlay::new(
+            "Preview",
+            OverlayDocument::Ready(vec!["a".into(), "b".into(), "c".into()]),
+        )
+        .scrolled_to(2);
+        assert_eq!(modal.scroll(), 2);
+        assert!(render(10, 40, &modal).join("\n").contains('c'));
     }
 
     #[test]

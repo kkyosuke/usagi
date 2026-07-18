@@ -602,6 +602,12 @@ mod tests {
         assert!(config.save(&mut port));
         assert_eq!(port.global.default_model, DefaultModel::Claude);
         assert_eq!(config.global_default_model(), DefaultModel::Claude);
+        // The saved modal interaction accessor reads the same global scope, used
+        // when a workspace is opened from the screen graph.
+        assert_eq!(
+            config.global_modal_selection_mode(),
+            port.global.modal_selection_mode
+        );
     }
 
     #[test]

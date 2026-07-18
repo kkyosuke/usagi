@@ -122,7 +122,6 @@ impl OverviewModal {
 
     /// 直近の history を入力欄へ呼び戻す。空の入力欄でのみ有効なので、候補選択の ↑ と
     /// 衝突しない。呼び戻せたかを返す。
-    #[coverage(off)]
     pub fn recall_previous(&mut self) -> bool {
         if (!self.input.value().trim().is_empty() && self.history_index.is_none())
             || self.history.is_empty()
@@ -139,7 +138,6 @@ impl OverviewModal {
     }
 
     /// history を新しい方へ進める。最後の次では空の新規入力に戻る。呼び戻せたかを返す。
-    #[coverage(off)]
     pub fn recall_next(&mut self) -> bool {
         let Some(index) = self.history_index else {
             return false;
@@ -157,7 +155,6 @@ impl OverviewModal {
     }
 
     /// 現在の submission を history に記録する。同じ command が連続した場合は重複させない。
-    #[coverage(off)]
     pub fn record_submission(&mut self) {
         let submission = self.submission();
         if !submission.is_empty() && self.history.last() != Some(&submission) {
@@ -167,26 +164,22 @@ impl OverviewModal {
     }
 
     /// command 実行の通常結果を結果帯へ表示する。
-    #[coverage(off)]
     pub fn set_result(&mut self, result: impl Into<String>) {
         self.result = Some(PaletteResult::Notice(result.into()));
     }
 
     /// command 実行の安全なエラーを結果帯へ表示する。
-    #[coverage(off)]
     pub fn set_error(&mut self, error: impl Into<String>) {
         self.result = Some(PaletteResult::Error(error.into()));
     }
 
     /// 結果帯を消す。
-    #[coverage(off)]
     pub fn clear_result(&mut self) {
         self.result = None;
     }
 
     /// Enter で controller へ渡す入力。空欄では選択中候補を実行する。
     #[must_use]
-    #[coverage(off)]
     pub fn submission(&self) -> String {
         if self.selection_mode == ModalSelectionMode::Prompt {
             return self.input.value().to_owned();
@@ -211,7 +204,6 @@ impl OverviewModal {
     }
 
     /// Expand the selected command's action picker when it has subcommands.
-    #[coverage(off)]
     pub fn expand_selected(&mut self) {
         if !self.subcommands().is_empty() {
             self.expanded = true;
@@ -220,13 +212,11 @@ impl OverviewModal {
     }
 
     /// Collapse an expanded action picker. Returns whether a picker was open.
-    #[coverage(off)]
     pub fn collapse(&mut self) -> bool {
         std::mem::take(&mut self.expanded)
     }
 
     /// キャレット位置に 1 文字挿入し、選択を先頭に戻す（候補集合が変わるため）。
-    #[coverage(off)]
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(c);
         self.selected = 0;
@@ -235,7 +225,6 @@ impl OverviewModal {
     }
 
     /// キャレット手前の 1 文字を削除し、選択を先頭に戻す。
-    #[coverage(off)]
     pub fn backspace(&mut self) {
         self.input.backspace();
         self.selected = 0;
@@ -244,19 +233,16 @@ impl OverviewModal {
     }
 
     /// キャレットを 1 文字左へ。
-    #[coverage(off)]
     pub fn cursor_left(&mut self) {
         self.input.move_left();
     }
 
     /// キャレットを 1 文字右へ。
-    #[coverage(off)]
     pub fn cursor_right(&mut self) {
         self.input.move_right();
     }
 
     /// 選択を次の候補へ（末尾で先頭へ回り込む）。候補が無ければ何もしない。
-    #[coverage(off)]
     pub fn select_next(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -272,7 +258,7 @@ impl OverviewModal {
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
-    #[coverage(off)]
+    #[coverage(off)] // The empty-match branch is exercised through the reducer integration path.
     pub fn select_prev(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -301,7 +287,6 @@ impl OverviewModal {
 
 /// `❯ <input>` の入力行。共通 block cursor が編集位置の 1 文字を反転し、空・行末では
 /// 反転空白 1 つを置く。
-#[coverage(off)]
 fn input_line(value: &str, cursor: usize) -> String {
     let prompt = Role::Danger.style().bold().paint("❯");
     let accent = Role::Accent.style();
@@ -310,7 +295,6 @@ fn input_line(value: &str, cursor: usize) -> String {
 }
 
 /// 1 候補行: 選択中は `›` マーカー、コマンド名（accent）、説明（dim）。幅に切り詰める。
-#[coverage(off)]
 fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String {
     let marker = if selected {
         Role::Danger.style().bold().paint("›")
@@ -327,7 +311,7 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 }
 
 /// コマンドパレットのボディ（枠の内側の行）。入力行・候補一覧・フッタからなる。
-#[coverage(off)]
+#[coverage(off)] // Rendering branches are covered by frame snapshots; LLVM misses ANSI subcommand rows.
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![input_line(state.input(), state.cursor()), String::new()];
@@ -399,7 +383,6 @@ fn body(state: &OverviewModal) -> Vec<String> {
 /// 生の端末サイズに対する overview modal 1 フレーム分の行。中央に浮かぶ枠付きダイアログとして
 /// 描く（枠と中央寄せは [`modal::render_modal`] に委譲）。サイズ 0 は 80×24 にフォールバック。
 #[must_use]
-#[coverage(off)]
 pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec<String> {
     modal::render_modal(raw_height, raw_width, "Overview", INNER_WIDTH, &body(state))
 }
@@ -407,7 +390,6 @@ pub fn render(raw_height: usize, raw_width: usize, state: &OverviewModal) -> Vec
 /// `base` の workspace フレームを背景に残し、overview modal を中央に合成する。
 /// サイズ 0 は 80×24 にフォールバックする。
 #[must_use]
-#[coverage(off)]
 pub fn render_over(
     raw_height: usize,
     raw_width: usize,
@@ -634,6 +616,12 @@ mod tests {
         assert_eq!(modal.input(), "issue list");
         assert!(modal.recall_next());
         assert_eq!(modal.input(), "");
+        // Past the newest entry there is nothing to recall forward to.
+        assert!(!modal.recall_next());
+        // A non-empty draft with no active recall keeps Up as candidate
+        // navigation rather than history recall.
+        type_str(&mut modal, "x");
+        assert!(!modal.recall_previous());
     }
 
     #[test]

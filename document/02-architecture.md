@@ -148,12 +148,20 @@ target-scoped `PaneRegistry`）が所有し、入力は `presentation::app_event
 対応する `AppKey` に、resize / backend wakeup の `Key::Other` は mascot を進める `Tick` に）
 `update()` へ通し、描画は `HomeProjection` → `render_home` が生成する。sidebar の
 pointer クリックは `HomeProjection::row_at`（描画と同じ viewport 幾何を共有）で
-`Selection` へ hit-test し、`AppKey::SelectRow` で reducer に届く。daemon IO（session
-worker・pane 起動・terminal stream・metrics）は既存の runtime shell が transport として
-担い、Home の state には触れない。daemon metrics と session ごとの git diff は描画専用素材
-なので `AppState` に載せず、shell が `MetricsBackend` で port を poll して各観測を drain し、
-`MetricsProjection` キャッシュへ畳み込んでから `render_home` に渡す（`poll → drain → 反映
-→ 描画` の単方向）。
+`Selection` へ hit-test し、`AppKey::SelectRow` で reducer に届く。前面の Pull Request
+一覧・Markdown preview は controller の `Overlay::Prs` / `Overlay::Preview` が所有し、
+素材は `Effect::LoadPullRequests` / `LoadPreview` で要求して
+`BackendEvent::PullRequestsLoaded` / `PreviewLoaded`（失敗は対応する `*Error`）として
+還流し、選択 PR の browser 起動は `Effect::OpenPullRequest` で表す。これらは他の overlay
+と同じく `render_home` に統合し、shell が別途 modal を重ねる暫定接続は残さない（controller
+に相当がある残りの create form・quit confirmation だけを shell が `render_home` の出力へ
+合成する）。daemon IO（session worker・pane 起動・terminal stream・metrics）は runtime
+shell が transport として担い、daemon-authoritative な session 一覧をキャッシュして毎フレーム
+投影へ渡す。daemon metrics と session ごとの git diff は描画専用素材なので `AppState` に
+載せず、shell が `MetricsBackend` で port を poll して各観測を drain し、`MetricsProjection`
+キャッシュへ畳み込んでから `render_home` に渡す（`poll → drain → 反映 → 描画` の単方向）。
+Home の row state・selection・入力・描画は controller が単独で所有し、旧 `Workspace` view の
+二重定義は残さない。
 
 **TUI の実装は core に吸収されない。** `usagi-core` が持つのは面をまたいで共有する
 data（`domain/`）・IPC プロトコル型の定義・永続化・git（`infrastructure/`）と、

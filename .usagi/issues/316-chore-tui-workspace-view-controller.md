@@ -1,14 +1,14 @@
 ---
 number: 316
 title: chore(tui): 旧 Workspace view 経路を削除しテストを controller 経路へ統合する
-status: todo
+status: done
 priority: high
 labels: [tui, cleanup]
 dependson: [315]
 related: [258]
 parent: 258
 created_at: 2026-07-17T14:22:28.395887+00:00
-updated_at: 2026-07-17T14:22:28.395887+00:00
+updated_at: 2026-07-18T05:57:32.086406+00:00
 ---
 
 ## 目的

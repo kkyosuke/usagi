@@ -41,7 +41,7 @@ use usagi_tui::infrastructure::metrics::MetricsHook;
 use usagi_tui::presentation::frame::{Frame, FrameRenderer};
 use usagi_tui::presentation::views::config::{self, AvailableAgentModels, Config};
 use usagi_tui::presentation::views::welcome::{self, Welcome};
-use usagi_tui::presentation::views::workspace::{self, GitDiff, Workspace as WorkspaceView};
+use usagi_tui::presentation::views::workspace::GitDiff;
 use usagi_tui::presentation::{
     self, AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Exit, MetricsPort,
     MetricsPortFactory, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult, Start,
@@ -75,57 +75,6 @@ struct DaemonMetricsPort {
     last_git_refresh: Option<Instant>,
 }
 
-/// Composition adapter for the daemon-owned PR snapshot.  It deliberately has
-/// no local scanner or state fallback: a failed request remains a safe TUI
-/// message and a later snapshot retries convergence.
-struct DaemonPrSnapshotPort;
-
-impl PrSnapshotPort for DaemonPrSnapshotPort {
-    #[coverage(off)]
-    fn snapshot(
-        &mut self,
-        session_id: usagi_core::domain::id::SessionId,
-    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
-        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
-            .map_err(|_| "daemon unavailable".to_owned())?;
-        let reply = client
-            .request(DaemonRequest::Pr {
-                action: PrAction::Snapshot,
-                payload: PrRequest {
-                    session_id,
-                    revision: None,
-                },
-            })
-            .map_err(|_| "daemon unavailable".to_owned())?;
-        match reply {
-            DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
-                .map_err(|_| "invalid PR snapshot".to_owned()),
-            DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
-        }
-    }
-}
-
-/// OS adapter for the browser effect.  `Command` receives separate argv items;
-/// no URL is ever interpolated into a shell command.
-struct PlatformBrowserOpener;
-
-impl BrowserOpener for PlatformBrowserOpener {
-    #[coverage(off)]
-    fn open(&mut self, url: &str) -> Result<(), String> {
-        let program = if cfg!(target_os = "macos") {
-            "open"
-        } else if cfg!(target_os = "linux") {
-            "xdg-open"
-        } else {
-            return Err("browser opening is unsupported on this platform".to_owned());
-        };
-        Command::new(program)
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-            .map_err(|_| "browser launch failed".to_owned())
-    }
-}
 impl DaemonMetricsPort {
     // Composition-only adapter: it constructs the real daemon client and uses
     // the monotonic clock. The presentation `MetricsPort` is covered with fakes.
@@ -977,7 +926,18 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // The live classifier has already encoded the original terminal input.
     // Keep modified chords opaque so this management-key adapter cannot drop
     // their Ctrl/Alt bytes before Closeup forwards them to the focused pane.
-    if key.modifiers != Modifiers::default() {
+    // Crossterm reports Shift even though `Char` already carries the resulting
+    // uppercase (or shifted-symbol) Unicode scalar.  It is text input, not an
+    // opaque terminal chord, so pass it to management forms normally.
+    let shift_only = key.modifiers.shift
+        && !key.modifiers.control
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta;
+    if key.modifiers != Modifiers::default()
+        && !(shift_only && matches!(key.code, KeyCode::Char(_)))
+    {
         return Key::Passthrough(bytes);
     }
     match key.code {
@@ -1238,21 +1198,69 @@ fn cli_is_available(program: &str) -> bool {
     Command::new(program).arg("--version").output().is_ok()
 }
 
+/// Composition adapter for the daemon-owned PR snapshot. It deliberately has no
+/// local scanner or state fallback: a failed request remains a safe TUI message
+/// and a later snapshot retries convergence.
+struct DaemonPrSnapshotPort;
+
+impl PrSnapshotPort for DaemonPrSnapshotPort {
+    #[coverage(off)]
+    fn snapshot(
+        &mut self,
+        session_id: usagi_core::domain::id::SessionId,
+    ) -> Result<usagi_core::usecase::client::PrSnapshot, String> {
+        let mut client = crate::runtime::daemon::client(ClientPolicy::tui())
+            .map_err(|_| "daemon unavailable".to_owned())?;
+        let reply = client
+            .request(DaemonRequest::Pr {
+                action: PrAction::Snapshot,
+                payload: PrRequest {
+                    session_id,
+                    revision: None,
+                },
+            })
+            .map_err(|_| "daemon unavailable".to_owned())?;
+        match reply {
+            DaemonReply::Ok(value) => usagi_core::usecase::client::decode_pr_snapshot(value)
+                .map_err(|_| "invalid PR snapshot".to_owned()),
+            DaemonReply::Accepted { .. } => Err("PR snapshot is unavailable".to_owned()),
+        }
+    }
+}
+
+/// OS adapter for the browser effect. `Command` receives separate argv items; no
+/// URL is ever interpolated into a shell command.
+struct PlatformBrowserOpener;
+
+impl BrowserOpener for PlatformBrowserOpener {
+    #[coverage(off)]
+    fn open(&mut self, url: &str) -> Result<(), String> {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "linux") {
+            "xdg-open"
+        } else {
+            return Err("browser opening is unsupported on this platform".to_owned());
+        };
+        Command::new(program)
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "browser launch failed".to_owned())
+    }
+}
+
 #[coverage(off)]
 fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
     let mut loader = FsWorkspaceLoader::open_default()?;
     let snapshot = loader.open(path)?;
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        let mut settings = PersistentSettingsPort::open()?;
-        let global_settings = settings.read(SettingsScope::Global)?;
         run_with_metrics_hook(|| {
             run_in_terminal(|terminal| {
                 presentation::run_workspace_controller(
                     terminal,
                     snapshot,
                     Box::new(DaemonSessionCommandPort::default()),
-                    global_settings.modal_selection_mode,
-                    global_settings.default_model,
                     Box::new(DaemonAgentCommandPort::new()),
                     Box::new(DaemonMetricsPort::new()),
                     Box::new(DaemonPrSnapshotPort),
@@ -1261,8 +1269,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             })
         })?;
     } else {
-        let workspace = WorkspaceView::new(snapshot.workspace, snapshot.state);
-        for line in workspace::render(0, 0, &workspace) {
+        for line in presentation::render_home_snapshot(0, 0, &snapshot) {
             writeln!(out, "{line}")?;
         }
     }
@@ -1436,6 +1443,22 @@ mod tests {
         assert_eq!(
             passthrough_key(&alt_f, b"\x1bf".to_vec()),
             Key::Passthrough(b"\x1bf".to_vec())
+        );
+    }
+
+    #[test]
+    fn shifted_characters_reach_management_text_inputs() {
+        let shifted_uppercase = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('A'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&shifted_uppercase, b"A".to_vec()),
+            Key::Char('A')
         );
     }
 
