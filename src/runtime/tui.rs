@@ -481,22 +481,37 @@ impl LifecycleSnapshot {
     }
 
     #[coverage(off)]
-    fn project(&self, workspace: &Workspace) -> Vec<SessionRecord> {
+    fn project(&self, workspace: &Workspace, legacy: &[SessionRecord]) -> Vec<SessionRecord> {
         self.available_sessions()
-            .map(|session| SessionRecord {
-                name: session.name.clone(),
-                display_name: None,
-                origin: SessionOrigin::Unknown,
-                started_from: None,
-                root: workspace
+            .map(|session| {
+                // Lifecycle is daemon-authoritative, but `state.json` remains
+                // the durable home of UI-only annotations.  Retain a matching
+                // record wholesale and only replace its physical identity.
+                let mut record = legacy
+                    .iter()
+                    .find(|record| record.name == session.name)
+                    .cloned()
+                    .unwrap_or_else(|| SessionRecord {
+                        name: session.name.clone(),
+                        display_name: None,
+                        origin: SessionOrigin::Unknown,
+                        started_from: None,
+                        root: workspace
+                            .path
+                            .join(".usagi")
+                            .join("sessions")
+                            .join(&session.name),
+                        created_at: session.changed_at,
+                        last_active: None,
+                        notes: Scratchpad::default(),
+                        prs: Vec::new(),
+                    });
+                record.root = workspace
                     .path
                     .join(".usagi")
                     .join("sessions")
-                    .join(&session.name),
-                created_at: session.changed_at,
-                last_active: None,
-                notes: Scratchpad::default(),
-                prs: Vec::new(),
+                    .join(&session.name);
+                record
             })
             .collect()
     }
@@ -591,11 +606,11 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                     created_session_hook(&body, &operation_id, revision)?;
                 }
                 self.last_revision = snapshot.revision;
-                Ok(session_snapshot_result(
+                session_snapshot_result(
                     format!("completed operation {operation_id} (revision {revision})"),
                     &snapshot,
                     workspace,
-                ))
+                )
             }
             DaemonReply::Ok(value) => {
                 let snapshot = lifecycle_snapshot(&value)?;
@@ -605,11 +620,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
                     ));
                 }
                 self.last_revision = snapshot.revision;
-                Ok(session_snapshot_result(
-                    "daemon snapshot refreshed",
-                    &snapshot,
-                    workspace,
-                ))
+                session_snapshot_result("daemon snapshot refreshed", &snapshot, workspace)
             }
         }
     }
@@ -646,16 +657,17 @@ fn session_snapshot_result(
     message: impl Into<String>,
     snapshot: &LifecycleSnapshot,
     workspace: &Workspace,
-) -> SessionCommandResult {
+) -> Result<SessionCommandResult, String> {
     let session_ids = snapshot
         .available_sessions()
         .map(|session| session.session_id)
         .collect();
-    SessionCommandResult {
+    let legacy = load_workspace_state(&workspace.path).map_err(|error| error.to_string())?;
+    Ok(SessionCommandResult {
         message: message.into(),
-        sessions: Some(snapshot.project(workspace)),
+        sessions: Some(snapshot.project(workspace, &legacy.sessions)),
         session_ids: Some(session_ids),
-    }
+    })
 }
 
 /// Overview の session command port を workspace 起動ごとに新しく作る合成側 factory。
@@ -987,7 +999,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .available_sessions()
             .map(|session| session.session_id)
             .collect();
-        state.sessions = lifecycle.project(&workspace);
+        state.sessions = lifecycle.project(&workspace, &state.sessions);
         Ok(WorkspaceSnapshot::with_runtime_ids(
             workspace,
             state,
@@ -1233,6 +1245,8 @@ mod tests {
     };
     use chrono::Utc;
     use usagi_core::domain::id::{OperationId, WorkspaceId};
+    use usagi_core::domain::note::Scratchpad;
+    use usagi_core::domain::session::{SessionOrigin, SessionRecord};
     use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycle};
     use usagi_core::domain::settings::{ModalSelectionMode, Settings};
     use usagi_core::infrastructure::store::workspace::Storage;
@@ -1262,6 +1276,43 @@ mod tests {
                 .map(|session| session.name.as_str())
                 .collect::<Vec<_>>(),
             ["available"]
+        );
+    }
+
+    #[test]
+    fn daemon_restart_projection_retains_legacy_ui_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = usagi_core::domain::workspace::Workspace::new("repo", temporary.path());
+        let mut available =
+            ManagedSession::new_creating("legacy".into(), OperationId::new(), Utc::now());
+        available.lifecycle = SessionLifecycle::Available;
+        let snapshot = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            revision: 2,
+            sessions: vec![available],
+        };
+        let legacy = SessionRecord {
+            name: "legacy".into(),
+            display_name: Some("Keep me".into()),
+            origin: SessionOrigin::Mcp,
+            started_from: Some("parent".into()),
+            root: temporary.path().join("stale-root"),
+            created_at: Utc::now(),
+            last_active: Some(Utc::now()),
+            notes: Scratchpad {
+                note: Some("do not drop".into()),
+                ..Default::default()
+            },
+            prs: Vec::new(),
+        };
+
+        let projected = snapshot.project(&workspace, &[legacy]);
+        assert_eq!(projected[0].display_name.as_deref(), Some("Keep me"));
+        assert_eq!(projected[0].origin, SessionOrigin::Mcp);
+        assert_eq!(projected[0].notes.note.as_deref(), Some("do not drop"));
+        assert_eq!(
+            projected[0].root,
+            temporary.path().join(".usagi/sessions/legacy")
         );
     }
 

@@ -37,7 +37,7 @@ fn short_dir(prefix: &str) -> tempfile::TempDir {
 
 fn channel_data_dir(home: &Path) -> PathBuf {
     if cfg!(debug_assertions) {
-        home.join("development")
+        home.join("develop")
     } else {
         home.to_path_buf()
     }

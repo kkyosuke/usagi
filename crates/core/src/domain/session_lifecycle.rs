@@ -152,6 +152,26 @@ impl ManagedSession {
             failure: None,
         }
     }
+
+    /// Adopts a checkout that predates daemon ownership without performing a
+    /// worktree effect.  Its identity is minted exactly once when the daemon
+    /// lifecycle store is initialized.
+    #[must_use]
+    #[coverage(off)]
+    pub fn adopt_available(name: String, created_at: DateTime<Utc>) -> Self {
+        Self {
+            session_id: SessionId::new(),
+            worktree_id: WorktreeId::new(),
+            name,
+            lifecycle: SessionLifecycle::Available,
+            attempt: 1,
+            operation_id: None,
+            changed_at: created_at,
+            setup_plan: None,
+            delete_plan: None,
+            failure: None,
+        }
+    }
 }
 
 /// Durable operation state. Terminal states cannot be restarted under the same ID.
