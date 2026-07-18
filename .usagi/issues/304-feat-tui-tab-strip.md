@@ -1,13 +1,13 @@
 ---
 number: 304
 title: feat(tui): 右ペインの tab strip を横スクロール可能にする
-status: todo
+status: done
 priority: high
 labels: [tui, pane, ux]
 dependson: []
 related: [256, 279]
 created_at: 2026-07-15T00:28:01.531015+00:00
-updated_at: 2026-07-15T00:29:54.942921+00:00
+updated_at: 2026-07-18T02:34:19.468632+00:00
 ---
 
 ## 目的
