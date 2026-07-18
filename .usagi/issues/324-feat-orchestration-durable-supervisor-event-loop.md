@@ -1,13 +1,13 @@
 ---
 number: 324
 title: feat(orchestration): durable supervisor event loop を導入する
-status: todo
+status: done
 priority: high
 labels: [orchestration, supervisor, epic, daemon, agent]
 dependson: []
 related: [182, 183, 187, 219, 321, 322, 323]
 created_at: 2026-07-17T21:11:29.509875+00:00
-updated_at: 2026-07-17T21:13:12.397717+00:00
+updated_at: 2026-07-18T02:19:12.921469+00:00
 ---
 
 ## 目的（Epic）
