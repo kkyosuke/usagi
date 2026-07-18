@@ -977,7 +977,18 @@ fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // The live classifier has already encoded the original terminal input.
     // Keep modified chords opaque so this management-key adapter cannot drop
     // their Ctrl/Alt bytes before Closeup forwards them to the focused pane.
-    if key.modifiers != Modifiers::default() {
+    // Crossterm reports Shift even though `Char` already carries the resulting
+    // uppercase (or shifted-symbol) Unicode scalar.  It is text input, not an
+    // opaque terminal chord, so pass it to management forms normally.
+    let shift_only = key.modifiers.shift
+        && !key.modifiers.control
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta;
+    if key.modifiers != Modifiers::default()
+        && !(shift_only && matches!(key.code, KeyCode::Char(_)))
+    {
         return Key::Passthrough(bytes);
     }
     match key.code {
@@ -1436,6 +1447,22 @@ mod tests {
         assert_eq!(
             passthrough_key(&alt_f, b"\x1bf".to_vec()),
             Key::Passthrough(b"\x1bf".to_vec())
+        );
+    }
+
+    #[test]
+    fn shifted_characters_reach_management_text_inputs() {
+        let shifted_uppercase = LiveInput::Key(KeyEvent::new(
+            KeyCode::Char('A'),
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            passthrough_key(&shifted_uppercase, b"A".to_vec()),
+            Key::Char('A')
         );
     }
 
