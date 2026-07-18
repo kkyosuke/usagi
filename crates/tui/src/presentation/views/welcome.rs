@@ -229,7 +229,6 @@ impl Default for Welcome {
 }
 
 /// 左のメニュー列。選択中の項目を強調する。
-#[coverage(off)]
 fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
     // "> Label...... key" — カーソル + 10 桁ラベル + 右寄せキー。
     let mut lines = vec![Role::Success.style().bold().paint("Menu"), String::new()];
@@ -259,19 +258,16 @@ fn menu_column_lines(items: &[MenuItem], selected_index: usize) -> Vec<String> {
 }
 
 /// recent カードのタイトルに置く番号キー（Warning 太字）。
-#[coverage(off)]
 fn card_key(key: char) -> String {
     Role::Warning.style().bold().paint(&key.to_string())
 }
 
 /// recent カードの本文行（dim）。
-#[coverage(off)]
 fn card_body_line(text: &str) -> String {
     Style::new().dim().paint(text)
 }
 
 /// カウント行 `◷ 相対時刻  ⎇ セッション  #PR  ● 未 done issue`。単体・unite 共通の書式。
-#[coverage(off)]
 fn counts_line(relative: &str, sessions: usize, prs: usize, open_issues: usize) -> String {
     card_body_line(&format!(
         "◷ {relative}  ⎇ {sessions}  #{prs}  ● {open_issues}"
