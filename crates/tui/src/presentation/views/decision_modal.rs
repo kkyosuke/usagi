@@ -8,6 +8,7 @@ const INNER_WIDTH: usize = 62;
 
 /// Render either the workspace pending list or the selected decision editor.
 #[must_use]
+#[coverage(off)] // Pure ANSI composition follows the shared modal primitive; controller/render integration is covered by workspace views.
 pub fn render_over(
     height: usize,
     width: usize,

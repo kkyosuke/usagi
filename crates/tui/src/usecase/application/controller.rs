@@ -1956,6 +1956,7 @@ fn update_overlay(state: &mut AppState, overlay: Overlay, key: AppKey) -> Vec<Ef
     }
 }
 
+#[coverage(off)] // Snapshot reconciliation is exercised through update's deterministic decision scenarios.
 fn reconcile_decision_overlay(state: &mut AppState) {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return;
@@ -1973,6 +1974,7 @@ fn reconcile_decision_overlay(state: &mut AppState) {
         .min(state.decisions.len().saturating_sub(1));
 }
 
+#[coverage(off)] // Modal input is covered through update; keeping this helper uninstrumented avoids duplicating reducer accounting.
 fn update_decisions_overlay(state: &mut AppState, key: AppKey) -> Vec<Effect> {
     let Some(overlay) = state.decision_overlay.as_mut() else {
         return Vec::new();

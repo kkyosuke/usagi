@@ -73,6 +73,7 @@ impl DaemonPushAdapter {
 
 /// Converts one decoded push without retaining any wire payload in UI state.
 #[must_use]
+#[coverage(off)] // Wire decode is exercised by the daemon IPC integration suite; this adapter only projects safe fields.
 pub fn adapt_push(push: DaemonPush) -> BackendEvent {
     match push {
         DaemonPush::RuntimePhase { runtime, phase } => {

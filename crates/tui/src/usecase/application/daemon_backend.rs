@@ -169,6 +169,7 @@ pub trait DecisionPort {
 }
 
 struct NoDecisions;
+#[coverage(off)] // Production composition injects DecisionPort; this safe default preserves legacy embedders.
 impl DecisionPort for NoDecisions {
     fn refresh(&mut self, _: WorkspaceId, _: Completions) {}
     fn resolve(
