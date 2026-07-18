@@ -3,103 +3,10 @@
 //! The snapshot is deliberately built once when an MCP server is created.  It
 //! never asks a provider or an agent CLI for available models.
 
-use std::collections::BTreeSet;
-use std::env;
-use std::fs;
-use std::path::Path;
-
-use serde::Deserialize;
 use serde_json::{Value, json};
-
-const CONFIG_PATH: &str = ".usagi/config.toml";
-
-/// PATH lookup boundary. Tests inject this port instead of depending on PATH.
-pub trait ExecutableLocator {
-    /// Whether `executable` can be run from the current PATH.
-    fn is_available(&self, executable: &str) -> bool;
-}
-
-/// Production PATH lookup implementation.
-pub struct PathExecutableLocator;
-
-impl ExecutableLocator for PathExecutableLocator {
-    #[coverage(off)] // Production PATH boundary; schema tests inject a fake locator.
-    fn is_available(&self, executable: &str) -> bool {
-        env::var_os("PATH")
-            .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(executable).is_file()))
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct WorkspaceConfig {
-    #[serde(default)]
-    agents: AgentsConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct AgentsConfig {
-    #[serde(default)]
-    claude: RuntimeConfig,
-    #[serde(default)]
-    codex: RuntimeConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RuntimeConfig {
-    #[serde(default)]
-    models: Vec<String>,
-}
-
-/// Runtime/model configuration read from a workspace's `.usagi/config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WorkspaceAgentConfig {
-    claude: Vec<String>,
-    codex: Vec<String>,
-}
-
-impl WorkspaceAgentConfig {
-    /// Read workspace configuration. A missing config is an empty allowlist;
-    /// malformed configuration likewise publishes no runtime rather than
-    /// guessing a safe selection.
-    #[must_use]
-    pub fn read(workspace: &Path) -> Self {
-        let Ok(text) = fs::read_to_string(workspace.join(CONFIG_PATH)) else {
-            return Self::default();
-        };
-        let Ok(parsed) = toml::from_str::<WorkspaceConfig>(&text) else {
-            return Self::default();
-        };
-        Self {
-            claude: valid_models(parsed.agents.claude.models).unwrap_or_default(),
-            codex: valid_models(parsed.agents.codex.models).unwrap_or_default(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_models_for_test(claude: Vec<&str>, codex: Vec<&str>) -> Self {
-        Self {
-            claude: claude.into_iter().map(str::to_owned).collect(),
-            codex: codex.into_iter().map(str::to_owned).collect(),
-        }
-    }
-
-    fn models(&self, runtime: &str) -> &[String] {
-        match runtime {
-            "claude" => &self.claude,
-            "codex" => &self.codex,
-            _ => &[],
-        }
-    }
-}
-
-fn valid_models(models: Vec<String>) -> Option<Vec<String>> {
-    (!models.is_empty()
-        && models
-            .iter()
-            .all(|model| !model.is_empty() && !model.chars().any(char::is_control))
-        && models.iter().collect::<BTreeSet<_>>().len() == models.len())
-    .then_some(models)
-}
+pub use usagi_core::infrastructure::runtime_model::{
+    ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+};
 
 /// Immutable runtime/model availability captured for one MCP server lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -242,10 +149,7 @@ impl RuntimeModelSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AgentsConfig, ExecutableLocator, RuntimeConfig, RuntimeModelSnapshot, WorkspaceAgentConfig,
-        WorkspaceConfig,
-    };
+    use super::{ExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig};
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -257,15 +161,17 @@ mod tests {
     }
 
     #[test]
-    fn raw_workspace_config_defaults_to_no_runtime_allowlists() {
-        assert!(WorkspaceConfig::default().agents.claude.models.is_empty());
-        assert!(AgentsConfig::default().codex.models.is_empty());
-        assert!(RuntimeConfig::default().models.is_empty());
+    fn default_workspace_config_has_no_runtime_allowlists() {
+        assert_eq!(
+            WorkspaceAgentConfig::default(),
+            WorkspaceAgentConfig::from_allowlists(vec![], vec![])
+        );
     }
 
     #[test]
     fn snapshot_exposes_only_configured_available_runtimes() {
-        let config = WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec!["gpt-5"]);
+        let config =
+            WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec!["gpt-5".into()]);
         for (available, expected) in [
             (&["claude"][..], vec!["claude"]),
             (&["codex"][..], vec!["codex"]),
@@ -360,7 +266,7 @@ mod tests {
     #[test]
     fn parser_rejects_invalid_and_mixed_agent_selectors() {
         let snapshot = RuntimeModelSnapshot::capture(
-            &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
             &FakeLocator(&["claude"]),
         );
         assert!(
@@ -383,7 +289,7 @@ mod tests {
     #[test]
     fn legacy_alias_normalizes_and_rejects_migration_mixes() {
         let snapshot = RuntimeModelSnapshot::capture(
-            &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
             &FakeLocator(&["claude"]),
         );
         let mut accepted = json!({"agent_cli":"claude", "model":"sonnet"});
