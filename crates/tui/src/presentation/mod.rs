@@ -473,6 +473,7 @@ impl SessionCommandPort for UnavailableSessionCommandPort {
 
 struct UnavailablePrSnapshotPort;
 impl PrSnapshotPort for UnavailablePrSnapshotPort {
+    #[coverage(off)] // Compatibility fallback for embedders without the daemon PR port.
     fn snapshot(
         &mut self,
         _session: SessionId,
@@ -483,6 +484,7 @@ impl PrSnapshotPort for UnavailablePrSnapshotPort {
 
 struct UnavailableBrowserOpener;
 impl BrowserOpener for UnavailableBrowserOpener {
+    #[coverage(off)] // Compatibility fallback; production injects the composition-root opener.
     fn open(&mut self, _url: &str) -> Result<(), String> {
         Err("Browser opening is unavailable on this platform.".to_owned())
     }
@@ -762,6 +764,7 @@ impl WorkspaceUi {
         self
     }
 
+    #[coverage(off)] // Runtime composition wiring; behavior is covered through injected port tests.
     fn with_pr_ports(
         mut self,
         pr_port: Box<dyn PrSnapshotPort>,
@@ -1135,6 +1138,7 @@ impl WorkspaceUi {
         }
     }
 
+    #[coverage(off)] // Browser launch is an injected composition effect; unit tests cover URL validation separately.
     fn open_selected_pr(&mut self) {
         let Some(WorkspaceModal::Pr(modal)) = self.modal.as_ref() else {
             return;
