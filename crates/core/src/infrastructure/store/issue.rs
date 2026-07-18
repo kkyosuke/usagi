@@ -47,57 +47,46 @@ impl MarkdownEntry for IssueEntry {
 
     const NAME: &'static str = "issue";
 
-    #[coverage(off)]
     fn is_entry_file(path: &Path) -> bool {
         is_issue_file(path)
     }
 
-    #[coverage(off)]
     fn parse_markdown(text: &str) -> Result<Issue> {
         Ok(Issue::from_markdown(text)?)
     }
 
-    #[coverage(off)]
     fn to_markdown(entry: &Issue) -> String {
         entry.to_markdown()
     }
 
-    #[coverage(off)]
     fn file_name(entry: &Issue) -> Result<String> {
         Ok(entry.file_name())
     }
 
-    #[coverage(off)]
     fn key(entry: &Issue) -> u32 {
         entry.number
     }
 
-    #[coverage(off)]
     fn key_from_summary(summary: &IssueSummary) -> u32 {
         summary.number
     }
 
-    #[coverage(off)]
     fn key_from_path(path: &Path) -> Option<u32> {
         number_from_filename(path)
     }
 
-    #[coverage(off)]
     fn summary(entry: &Issue) -> IssueSummary {
         entry.summary()
     }
 
-    #[coverage(off)]
     fn sort_entries(entries: &mut Vec<Issue>) {
         entries.sort_by_key(|i| i.number);
     }
 
-    #[coverage(off)]
     fn summaries_from_index(index: IndexFile) -> Vec<IssueSummary> {
         index.issues
     }
 
-    #[coverage(off)]
     fn index_file_ref(summaries: &[IssueSummary]) -> IndexFileRef<'_> {
         IndexFileRef {
             version: crate::infrastructure::persistence::json_file::FILE_FORMAT_VERSION,
@@ -115,7 +104,6 @@ pub struct IssueStore {
 impl IssueStore {
     /// Open the issue store for the repository at `repo_root`.
     #[must_use]
-    #[coverage(off)]
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         let repo_root = repo_root.as_ref().to_path_buf();
         Self {
@@ -125,13 +113,11 @@ impl IssueStore {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         self.inner.dir()
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn index_path(&self) -> PathBuf {
         self.inner.index_path()
     }
@@ -143,7 +129,6 @@ impl IssueStore {
     /// # Errors
     ///
     /// Returns an error when the lock cannot be acquired.
-    #[coverage(off)]
     pub fn lock(&self) -> Result<StoreLock> {
         StoreLock::acquire(self.dir())
     }
@@ -154,7 +139,6 @@ impl IssueStore {
     ///
     /// Returns an error when the directory cannot be read or any file fails to
     /// parse.
-    #[coverage(off)]
     pub fn scan(&self) -> Result<Vec<Issue>> {
         self.inner.scan()
     }
@@ -165,13 +149,11 @@ impl IssueStore {
     /// # Errors
     ///
     /// Returns an error when the directory itself cannot be read.
-    #[coverage(off)]
     pub fn scan_lenient(&self) -> Result<Vec<Issue>> {
         self.inner.scan_lenient()
     }
 
     /// Paths of every issue markdown file. Empty when the directory is missing.
-    #[coverage(off)]
     fn issue_files(&self) -> Result<Vec<PathBuf>> {
         self.inner.entry_files()
     }
@@ -181,7 +163,6 @@ impl IssueStore {
     /// # Errors
     ///
     /// Returns an error when the directory cannot be read.
-    #[coverage(off)]
     pub fn max_number(&self) -> Result<u32> {
         Ok(self
             .issue_files()?
@@ -204,7 +185,6 @@ impl IssueStore {
     ///
     /// Returns an error when the allocation lock or sequence cannot be read or
     /// written.
-    #[coverage(off)]
     pub fn reserve_next_number(&self) -> Result<u32> {
         let allocation_dir = self.allocation_dir()?;
         let _lock = StoreLock::acquire(&allocation_dir)?;
@@ -236,7 +216,6 @@ impl IssueStore {
     ///
     /// Returns an error when the directory cannot be read or the backing file
     /// cannot be read or parsed.
-    #[coverage(off)]
     pub fn read(&self, number: u32) -> Result<Option<Issue>> {
         let Some(path) = self.files_for(number)?.into_iter().next() else {
             return Ok(None);
@@ -251,7 +230,6 @@ impl IssueStore {
     ///
     /// Returns an error when the lock cannot be acquired or the write / reindex
     /// fails.
-    #[coverage(off)]
     pub fn write(&self, issue: &Issue) -> Result<()> {
         let lock = self.lock()?;
         self.write_locked(&lock, issue)
@@ -265,7 +243,6 @@ impl IssueStore {
     ///
     /// Returns an error when the markdown cannot be written, a stale sibling
     /// cannot be removed, or the reindex fails.
-    #[coverage(off)]
     pub fn write_locked(&self, _lock: &StoreLock, issue: &Issue) -> Result<()> {
         let target = self.inner.write_markdown(issue)?;
         for stale in self.files_for(issue.number)? {
@@ -283,7 +260,6 @@ impl IssueStore {
     ///
     /// Returns an error when the lock cannot be acquired, a file cannot be
     /// removed, or the reindex fails.
-    #[coverage(off)]
     pub fn remove(&self, number: u32) -> Result<bool> {
         let _lock = self.lock()?;
         let files = self.files_for(number)?;
@@ -303,7 +279,6 @@ impl IssueStore {
     ///
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
-    #[coverage(off)]
     pub fn summaries(&self) -> Result<Vec<IssueSummary>> {
         self.inner.summaries()
     }
@@ -316,7 +291,6 @@ impl IssueStore {
     }
 
     /// Every file that backs `number` (normally zero or one).
-    #[coverage(off)]
     fn files_for(&self, number: u32) -> Result<Vec<PathBuf>> {
         self.inner.files_for_key(&number)
     }
@@ -382,14 +356,12 @@ fn git_dir_from_dot_git(dot_git: &Path) -> Result<PathBuf> {
 }
 
 /// Whether `path` is an issue markdown file.
-#[coverage(off)]
 fn is_issue_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
 }
 
 /// The issue number encoded in an issue file's name (`NNN-slug.md`), or `None`
 /// when the name has no numeric prefix.
-#[coverage(off)]
 fn number_from_filename(path: &Path) -> Option<u32> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -901,5 +873,23 @@ mod tests {
         let store = IssueStore::new(tmp.path());
         store.write(&issue(1, "One")).unwrap();
         assert_eq!(store.scan_lenient().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reserve_next_number_reports_invalid_or_unreadable_sequence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = IssueStore::new(tmp.path());
+        assert_eq!(store.reserve_next_number().unwrap(), 1);
+
+        let sequence = store
+            .dir()
+            .join(ALLOCATION_DIR_NAME)
+            .join(ALLOCATION_FILE_NAME);
+        fs::write(&sequence, "not a number\n").unwrap();
+        assert!(store.reserve_next_number().is_err());
+
+        fs::remove_file(&sequence).unwrap();
+        fs::create_dir(&sequence).unwrap();
+        assert!(store.reserve_next_number().is_err());
     }
 }

@@ -23,7 +23,6 @@ pub struct DiffStatus {
 
 /// The runner call itself is an IO boundary. The query's parsing and fallback
 /// policy remains covered below; process-spawn failure is propagated unchanged.
-#[coverage(off)]
 fn run(runner: &dyn GitRunner, repo: &Path, args: &[&str]) -> Result<super::runner::GitOutput> {
     runner.run(repo, args)
 }

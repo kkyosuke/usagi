@@ -49,59 +49,48 @@ impl MarkdownEntry for MemoryEntry {
 
     const NAME: &'static str = "memory";
 
-    #[coverage(off)]
     fn is_entry_file(path: &Path) -> bool {
         is_memory_file(path)
     }
 
-    #[coverage(off)]
     fn parse_markdown(text: &str) -> Result<Memory> {
         Ok(Memory::from_markdown(text)?)
     }
 
-    #[coverage(off)]
     fn to_markdown(entry: &Memory) -> String {
         entry.to_markdown()
     }
 
-    #[coverage(off)]
     fn file_name(entry: &Memory) -> Result<String> {
         memory_file_name(&entry.name)
     }
 
-    #[coverage(off)]
     fn key(entry: &Memory) -> String {
         entry.name.clone()
     }
 
-    #[coverage(off)]
     fn key_from_summary(summary: &MemorySummary) -> String {
         summary.name.clone()
     }
 
-    #[coverage(off)]
     fn key_from_path(path: &Path) -> Option<String> {
         path.file_stem()
             .and_then(|stem| stem.to_str())
             .map(ToOwned::to_owned)
     }
 
-    #[coverage(off)]
     fn summary(entry: &Memory) -> MemorySummary {
         entry.summary()
     }
 
-    #[coverage(off)]
     fn sort_entries(entries: &mut Vec<Memory>) {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    #[coverage(off)]
     fn summaries_from_index(index: IndexFile) -> Vec<MemorySummary> {
         index.memories
     }
 
-    #[coverage(off)]
     fn index_file_ref(summaries: &[MemorySummary]) -> IndexFileRef<'_> {
         IndexFileRef {
             version: crate::infrastructure::persistence::json_file::FILE_FORMAT_VERSION,
@@ -109,7 +98,6 @@ impl MarkdownEntry for MemoryEntry {
         }
     }
 
-    #[coverage(off)]
     fn write_extra_derived(dir: &Path, summaries: &[MemorySummary]) -> Result<()> {
         crate::infrastructure::persistence::json_file::write_text_atomic(
             &dir.join(TOC_FILE),
@@ -120,7 +108,6 @@ impl MarkdownEntry for MemoryEntry {
 
 /// The on-disk filename for a memory `name`, rejecting anything that is not a
 /// single safe path component so a name can never escape the memory directory.
-#[coverage(off)]
 fn memory_file_name(name: &str) -> Result<String> {
     let mut components = Path::new(name).components();
     let single_component =
@@ -142,7 +129,6 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Open the memory store for the repository at `repo_root`.
     #[must_use]
-    #[coverage(off)]
     pub fn new(repo_root: impl AsRef<Path>) -> Self {
         Self {
             inner: MarkdownStore::new(repo_root.as_ref().join(STATE_DIR).join(MEMORY_DIR_NAME)),
@@ -150,19 +136,16 @@ impl MemoryStore {
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn dir(&self) -> &Path {
         self.inner.dir()
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn index_path(&self) -> PathBuf {
         self.inner.index_path()
     }
 
     #[must_use]
-    #[coverage(off)]
     pub fn toc_path(&self) -> PathBuf {
         self.dir().join(TOC_FILE)
     }
@@ -173,7 +156,6 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the lock cannot be acquired.
-    #[coverage(off)]
     pub fn lock(&self) -> Result<StoreLock> {
         StoreLock::acquire(self.dir())
     }
@@ -184,7 +166,6 @@ impl MemoryStore {
     ///
     /// Returns an error when the directory cannot be read or any file fails to
     /// parse.
-    #[coverage(off)]
     pub fn scan(&self) -> Result<Vec<Memory>> {
         self.inner.scan()
     }
@@ -195,7 +176,6 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the directory itself cannot be read.
-    #[coverage(off)]
     pub fn scan_lenient(&self) -> Result<Vec<Memory>> {
         self.inner.scan_lenient()
     }
@@ -206,7 +186,6 @@ impl MemoryStore {
     ///
     /// Returns an error when `name` is not a single safe path component, or the
     /// backing file exists but cannot be read or parsed.
-    #[coverage(off)]
     pub fn read(&self, name: &str) -> Result<Option<Memory>> {
         let path = self.dir().join(memory_file_name(name)?);
         match self.inner.read_existing_path(&path) {
@@ -223,7 +202,6 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired, the name is unsafe, or
     /// the write / reindex fails.
-    #[coverage(off)]
     pub fn write(&self, memory: &Memory) -> Result<()> {
         let lock = self.lock()?;
         self.write_locked(&lock, memory)
@@ -235,7 +213,6 @@ impl MemoryStore {
     /// # Errors
     ///
     /// Returns an error when the name is unsafe or the write / reindex fails.
-    #[coverage(off)]
     pub fn write_locked(&self, _lock: &StoreLock, memory: &Memory) -> Result<()> {
         self.inner.write_markdown(memory)?;
         self.inner.reindex_after_write(memory)
@@ -248,7 +225,6 @@ impl MemoryStore {
     ///
     /// Returns an error when the lock cannot be acquired, the name is unsafe, the
     /// file cannot be removed, or the reindex fails.
-    #[coverage(off)]
     pub fn remove(&self, name: &str) -> Result<bool> {
         let _lock = self.lock()?;
         let path = self.dir().join(memory_file_name(name)?);
@@ -267,13 +243,11 @@ impl MemoryStore {
     ///
     /// Returns an error when the index cannot be read and the markdown source
     /// cannot be rescanned.
-    #[coverage(off)]
     pub fn summaries(&self) -> Result<Vec<MemorySummary>> {
         self.inner.summaries()
     }
 }
 
-#[coverage(off)]
 fn path_missing(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -283,7 +257,6 @@ fn path_missing(error: &anyhow::Error) -> bool {
 
 /// Render the `MEMORY.md` table of contents: a heading and one bullet per memory
 /// (newest first), each linking to its file with the type as a one-word hook.
-#[coverage(off)]
 fn render_toc(summaries: &[MemorySummary]) -> String {
     let mut sorted: Vec<&MemorySummary> = summaries.iter().collect();
     sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.name.cmp(&b.name)));
@@ -302,7 +275,6 @@ fn render_toc(summaries: &[MemorySummary]) -> String {
 
 /// Whether `path` is a memory markdown file (a `*.md` that is not the table of
 /// contents).
-#[coverage(off)]
 fn is_memory_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()) == Some("md")
         && path.file_name().and_then(|n| n.to_str()) != Some(TOC_FILE)

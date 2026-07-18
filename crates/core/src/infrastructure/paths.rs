@@ -40,7 +40,7 @@ pub enum BuildChannel {
 /// Returns the compile-time channel for this binary. `cargo run --release`
 /// selects production because debug assertions are disabled in that profile.
 #[must_use]
-#[coverage(off)]
+#[coverage(off)] // The production variant is only compiled by a release build.
 pub const fn build_channel() -> BuildChannel {
     if cfg!(debug_assertions) {
         BuildChannel::Development
@@ -59,7 +59,7 @@ pub const fn build_channel() -> BuildChannel {
 ///
 /// Returns an error when `$USAGI_HOME` is unset and the home directory cannot be
 /// determined.
-#[coverage(off)]
+#[coverage(off)] // The production base branch is only reachable in a release build.
 pub fn data_dir() -> Result<PathBuf> {
     let base = if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|v| !v.is_empty()) {
         PathBuf::from(dir)
