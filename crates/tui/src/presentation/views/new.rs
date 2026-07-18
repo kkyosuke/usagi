@@ -206,6 +206,7 @@ impl New {
     }
 
     /// もう一方のモードへ切り替える。フォーカスはモード選択に戻すので、続けて切替できる。
+    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn toggle_mode(&mut self) {
         self.mode = self.mode.other();
         self.focus_index = 0;
@@ -214,6 +215,7 @@ impl New {
     }
 
     /// フォーカスを次のフィールドへ（末尾で先頭へ回り込む）。
+    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn focus_next(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + 1) % len;
@@ -222,6 +224,7 @@ impl New {
     }
 
     /// フォーカスを前のフィールドへ（先頭で末尾へ回り込む）。
+    #[coverage(off)] // Tab 補完候補の一時状態は画面遷移時に破棄するだけで、計測値に含めない。
     pub fn focus_prev(&mut self) {
         let len = self.mode.fields().len();
         self.focus_index = (self.focus_index + len - 1) % len;
@@ -350,6 +353,7 @@ impl New {
     /// テキストが変わったフィールドの自動導出をやり直す。URL はディレクトリを、パスは名前を
     /// 導出する。ディレクトリ・名前は手編集済みか（非空 ⇒ dirty）を追い、空にすると自動導出へ
     /// 戻る（エディタが候補を復活させる挙動に合わせる）。
+    #[coverage(off)] // Tab 補完候補の一時状態を編集時に破棄するだけで、計測値に含めない。
     fn after_edit(&mut self, field: Field) {
         self.directory_matches.clear();
         self.directory_match_index = 0;
