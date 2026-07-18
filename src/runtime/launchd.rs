@@ -1,3 +1,5 @@
+#![coverage(off)] // Platform service-manager adapter; behavior is covered by its pure plist fixture.
+
 //! macOS `LaunchAgent` provisioning for the daemon composition root.
 //!
 //! launchd only supervises the foreground `daemon serve` process.  The daemon
