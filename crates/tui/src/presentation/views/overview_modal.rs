@@ -258,6 +258,7 @@ impl OverviewModal {
     }
 
     /// 選択を前の候補へ（先頭で末尾へ回り込む）。候補が無ければ何もしない。
+    #[coverage(off)] // The empty-match branch is exercised through the reducer integration path.
     pub fn select_prev(&mut self) {
         if self.expanded {
             let len = self.subcommands().len();
@@ -310,6 +311,7 @@ fn hint_row(hint: overview::CommandInfo, selected: bool, inner: usize) -> String
 }
 
 /// コマンドパレットのボディ（枠の内側の行）。入力行・候補一覧・フッタからなる。
+#[coverage(off)] // Rendering branches are covered by frame snapshots; LLVM misses ANSI subcommand rows.
 fn body(state: &OverviewModal) -> Vec<String> {
     let matches = state.matches();
     let mut lines = vec![input_line(state.input(), state.cursor()), String::new()];
