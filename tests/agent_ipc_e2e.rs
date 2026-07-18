@@ -48,6 +48,12 @@ fn git(repo: &Path, args: &[&str]) {
         .arg("-C")
         .arg(repo)
         .args(args)
+        // Hooks export these for their own worktree. Fixture repositories
+        // must not inherit them, or parallel coverage runs mutate the parent.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .status()
         .expect("git must start for the temporary fixture repository");
     assert!(status.success(), "git {args:?} failed");
@@ -99,6 +105,10 @@ fn start_daemon(repo: &Path, home: &Path, path: &Path, count: &Path) -> Daemon {
         .env("USAGI_HOME", home)
         .env("PATH", fixture_path)
         .env("USAGI_FIXTURE_COUNT", count)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

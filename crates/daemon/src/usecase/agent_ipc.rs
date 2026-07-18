@@ -37,6 +37,9 @@ use usagi_core::{
         },
     },
     infrastructure::ipc::{ErrorCode, ProtocolError},
+    infrastructure::runtime_model::{
+        ExecutableLocator, PathExecutableLocator, WorkspaceAgentConfig,
+    },
     infrastructure::store::dispatch::DispatchStore,
     usecase::client::{
         AgentLaunchIntent, DispatchAgentIntent, DispatchIntent, TerminalAction, TerminalRequest,
@@ -134,7 +137,7 @@ pub trait AgentTerminalActor {
 /// The daemon's single Agent owner.  It holds the durable runtime coordinator,
 /// orchestrator, adapter registry, runtime store, output journal, and PTY
 /// spawner/writer, plus the producer-issued operation ledger for idempotency.
-pub struct AgentRuntime<S, P, J> {
+pub struct AgentRuntime<S, P, J, L = PathExecutableLocator> {
     generation: DaemonGeneration,
     coordinator: RuntimeCoordinator,
     orchestrator: Orchestrator,
@@ -145,10 +148,11 @@ pub struct AgentRuntime<S, P, J> {
     default_profile: AgentProfileId,
     geometry: Geometry,
     dispatch: DispatchStore,
+    locator: L,
     operations: BTreeMap<String, AgentOperation>,
 }
 
-impl<S, P, J> AgentRuntime<S, P, J> {
+impl<S, P, J> AgentRuntime<S, P, J, PathExecutableLocator> {
     #[must_use]
     pub fn new(
         generation: DaemonGeneration,
@@ -184,6 +188,34 @@ impl<S, P, J> AgentRuntime<S, P, J> {
         geometry: Geometry,
         dispatch: DispatchStore,
     ) -> Self {
+        Self::with_dispatch_and_locator(
+            generation,
+            registry,
+            store,
+            journal,
+            pty,
+            default_profile,
+            geometry,
+            dispatch,
+            PathExecutableLocator,
+        )
+    }
+}
+
+impl<S, P, J, L> AgentRuntime<S, P, J, L> {
+    /// Constructs an Agent runtime with an injected current executable locator.
+    #[must_use]
+    pub fn with_dispatch_and_locator(
+        generation: DaemonGeneration,
+        registry: AdapterRegistry,
+        store: S,
+        journal: J,
+        pty: P,
+        default_profile: AgentProfileId,
+        geometry: Geometry,
+        dispatch: DispatchStore,
+        locator: L,
+    ) -> Self {
         Self {
             generation,
             coordinator: RuntimeCoordinator::new(16, 64 * 1024, 64),
@@ -195,6 +227,7 @@ impl<S, P, J> AgentRuntime<S, P, J> {
             default_profile,
             geometry,
             dispatch,
+            locator,
             operations: BTreeMap::new(),
         }
     }
@@ -217,8 +250,12 @@ impl<S, P, J> AgentRuntime<S, P, J> {
     }
 }
 
-impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJournal>
-    AgentRuntime<S, P, J>
+impl<
+    S: super::runtime::RuntimeStore,
+    P: PtySpawner + PtyWriter,
+    J: OutputJournal,
+    L: ExecutableLocator,
+> AgentRuntime<S, P, J, L>
 {
     /// Admits one Agent launch.  The same producer `operation_id` with the same
     /// intent returns the same admission (no second spawn); the same id with a
@@ -291,6 +328,26 @@ impl<S: super::runtime::RuntimeStore, P: PtySpawner + PtyWriter, J: OutputJourna
                 ErrorCode::InvalidArgument,
                 "dispatch agent does not belong to session",
             ));
+        }
+        if matches!(intent.agent, DispatchAgentIntent::New { .. }) {
+            let config = WorkspaceAgentConfig::read(
+                &scope
+                    .resolve_available_scope(intent.workspace, session)
+                    .map_err(map_scope_error)?
+                    .working_directory,
+            );
+            if !config.allows(worker.runtime.as_str(), worker.model.as_str()) {
+                return Err(ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "dispatch runtime/model is not allowed by the current workspace configuration",
+                ));
+            }
+            if !self.locator.is_available(worker.runtime.as_str()) {
+                return Err(ProtocolError::new(
+                    ErrorCode::Unavailable,
+                    "dispatch runtime executable is unavailable",
+                ));
+            }
         }
         let launch = AgentLaunchIntent {
             workspace: intent.workspace,
@@ -1047,6 +1104,13 @@ mod tests {
         }
     }
 
+    struct FixtureLocator(PathBuf);
+    impl ExecutableLocator for FixtureLocator {
+        fn is_available(&self, executable: &str) -> bool {
+            self.0.join(executable).is_file()
+        }
+    }
+
     /// A minimal generic terminal owner double so the shared owner can be tested
     /// without a real PTY. It records the requests it receives.
     #[derive(Default)]
@@ -1099,6 +1163,35 @@ mod tests {
             AgentProfileId::new("claude").unwrap(),
             Geometry { cols: 80, rows: 24 },
         )
+    }
+
+    fn runtime_with_fixture(
+        locator: FixtureLocator,
+    ) -> AgentRuntime<Store, Pty, Journal, FixtureLocator> {
+        AgentRuntime::with_dispatch_and_locator(
+            DaemonGeneration::new(),
+            claude_registry(),
+            Store::default(),
+            Journal::default(),
+            Pty::default(),
+            AgentProfileId::new("claude").unwrap(),
+            Geometry { cols: 80, rows: 24 },
+            DispatchStore::new(tempfile::tempdir().unwrap().keep()),
+            locator,
+        )
+    }
+
+    fn configured_scope(workspace: &std::path::Path) -> ResolvedAgentScope {
+        std::fs::create_dir_all(workspace.join(".usagi")).unwrap();
+        std::fs::write(
+            workspace.join(".usagi/config.toml"),
+            "[agents.claude]\nmodels = [\"test\"]\n",
+        )
+        .unwrap();
+        ResolvedAgentScope {
+            worktree_id: WorktreeId::new(),
+            working_directory: workspace.to_path_buf(),
+        }
     }
 
     fn intent(profile: Option<&str>) -> AgentLaunchIntent {
@@ -1327,7 +1420,10 @@ mod tests {
 
     #[test]
     fn dispatch_launches_once_persists_binding_and_synthesizes_no_report_on_exit() {
-        let mut runtime = runtime();
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let caller = CallerRef {
@@ -1346,7 +1442,12 @@ mod tests {
             prompt: "finish the task".into(),
         };
         let admission = runtime
-            .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+            .dispatch(
+                &operation,
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
             .unwrap();
         let run_id = OperationId::parse(&operation).unwrap();
         assert_eq!(
@@ -1361,7 +1462,12 @@ mod tests {
         assert_eq!(runtime.dispatch_store().inbox(&caller).unwrap(), Vec::new());
         assert_eq!(
             runtime
-                .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+                .dispatch(
+                    &operation,
+                    &dispatch,
+                    session,
+                    &FakeScope(Ok(configured_scope(worktree.path())))
+                )
                 .unwrap(),
             admission
         );
@@ -1373,7 +1479,10 @@ mod tests {
 
     #[test]
     fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
-        let mut runtime = runtime();
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("claude"), "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
         let workspace = WorkspaceId::new();
         let session = SessionId::new();
         let caller = CallerRef {
@@ -1392,7 +1501,12 @@ mod tests {
             prompt: "finish".into(),
         };
         let admission = runtime
-            .dispatch(&operation, &dispatch, session, &FakeScope(Ok(scope())))
+            .dispatch(
+                &operation,
+                &dispatch,
+                session,
+                &FakeScope(Ok(configured_scope(worktree.path()))),
+            )
             .unwrap();
         let runtime_ref = runtime
             .coordinator
@@ -1417,6 +1531,69 @@ mod tests {
         let inbox = runtime.dispatch_store().inbox(&caller).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, InboxKind::Completed);
+    }
+
+    #[test]
+    fn dispatch_revalidates_current_allowlist_and_fixture_executable_before_spawn() {
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("claude");
+        std::fs::write(&executable, "fixture").unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+        let scope = configured_scope(worktree.path());
+        let mut runtime = runtime_with_fixture(FixtureLocator(fixture.path().to_path_buf()));
+        let session = SessionId::new();
+        let dispatch = |model: &str| DispatchIntent {
+            workspace: WorkspaceId::new(),
+            session_name: "worker".into(),
+            caller: CallerRef {
+                session_id: SessionId::new(),
+                agent_id: usagi_core::domain::id::AgentId::new(),
+            },
+            agent: DispatchAgentIntent::New {
+                runtime: AgentProfileId::new("claude").unwrap(),
+                model: usagi_core::domain::agent::ModelSelector::new(model).unwrap(),
+            },
+            prompt: "finish".into(),
+        };
+        let accepted = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope.clone())),
+            )
+            .unwrap();
+        assert_eq!(accepted.terminal.session_id, Some(session));
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
+
+        std::fs::remove_file(&executable).unwrap();
+        let unavailable = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope.clone())),
+            )
+            .unwrap_err();
+        assert_eq!(unavailable.code, ErrorCode::Unavailable);
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
+
+        std::fs::write(&executable, "fixture").unwrap();
+        std::fs::write(
+            worktree.path().join(".usagi/config.toml"),
+            "[agents.claude]\nmodels = [\"other\"]\n",
+        )
+        .unwrap();
+        let rejected = runtime
+            .dispatch(
+                &OperationId::new().to_string(),
+                &dispatch("test"),
+                session,
+                &FakeScope(Ok(scope)),
+            )
+            .unwrap_err();
+        assert_eq!(rejected.code, ErrorCode::InvalidArgument);
+        assert_eq!(runtime.coordinator.occupied_slots(), 1);
     }
 
     #[test]

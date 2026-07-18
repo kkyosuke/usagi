@@ -627,7 +627,7 @@ mod tests {
                 requests: vec![],
             };
             let snapshot = RuntimeModelSnapshot::capture(
-                &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+                &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
                 &FakeLocator(&["claude"]),
             );
             serve_with_client_and_snapshot(
@@ -676,7 +676,7 @@ mod tests {
         );
 
         let snapshot = RuntimeModelSnapshot::capture(
-            &WorkspaceAgentConfig::with_models_for_test(vec!["sonnet"], vec![]),
+            &WorkspaceAgentConfig::from_allowlists(vec!["sonnet".into()], vec![]),
             &FakeLocator(&["claude"]),
         );
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_dispatch\",\"arguments\":{\"agent\":{\"runtime\":\"claude\",\"model\":\"opus\"}}}}\n";
