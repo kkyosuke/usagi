@@ -42,9 +42,16 @@ use crate::presentation::views::remove_modal::{self, RemoveModal};
 use crate::presentation::views::splash;
 use crate::presentation::views::text_overlay::{self, OverlayDocument, TextOverlay};
 use crate::presentation::views::welcome::{self, MenuAction, Welcome};
-use crate::presentation::views::workspace::{self, GitDiff, Mode, Workspace as WorkspaceView};
+use crate::presentation::views::workspace::{
+    self, GitDiff, HomeProjection, Mode, ProjectedSession, TerminalViewProjection,
+    Workspace as WorkspaceView, render_home,
+};
+use crate::presentation::views::{create_session_modal, quit_modal};
 use crate::presentation::widgets::modal::{self, ConfirmationModal, ConfirmationView};
-use crate::usecase::application::controller::{AppEvent, AppKey};
+use crate::presentation::workspace_runtime::WorkspaceRuntime;
+use crate::usecase::application::controller::{
+    AppEvent, AppKey, BackendEvent, Effect, Overlay, Target,
+};
 use crate::usecase::application::pane::{PaneKind, PaneSelection, TabSelection};
 use crate::usecase::application::pane_runtime::Geometry;
 use crate::usecase::application::pr::{
@@ -853,6 +860,46 @@ impl WorkspaceUi {
         for session in &mut self.terminals {
             session.resize(&mut AgentStreamPort(port), geometry);
         }
+    }
+
+    /// Poll the live terminal `terminal` once and return its rendered rows, or
+    /// `None` when no attached session matches. The controller runtime picks the
+    /// focused terminal, so this takes the ref explicitly instead of reading the
+    /// legacy view's focus.
+    #[coverage(off)]
+    fn poll_terminal_rows(&mut self, terminal: &TerminalRef) -> Option<Vec<String>> {
+        let port = self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())?;
+        let session = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.terminal().fences(terminal))?;
+        session.poll(&mut AgentStreamPort(port));
+        Some(session.display_rows_with_scrollback())
+    }
+
+    /// Forward raw passthrough bytes to the live terminal `terminal`. Returns
+    /// `false` when no attached session matches.
+    #[coverage(off)]
+    fn send_terminal_bytes(&mut self, terminal: &TerminalRef, bytes: &[u8]) -> bool {
+        let Some(port) = self
+            .agent
+            .as_mut()
+            .and_then(|agent| agent.port.as_deref_mut())
+        else {
+            return false;
+        };
+        let Some(session) = self
+            .terminals
+            .iter_mut()
+            .find(|session| session.terminal().fences(terminal))
+        else {
+            return false;
+        };
+        session.send_input(&mut AgentStreamPort(port), bytes);
+        true
     }
 
     #[coverage(off)]
@@ -2920,6 +2967,305 @@ fn drive_workspace_with_agent_port_and_selection_mode(
     }
 }
 
+/// Loop control for the controller-driven workspace runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControllerFlow {
+    Continue,
+    Exit,
+}
+
+/// Project the daemon-authoritative session records into the controller's Home
+/// row material, in the same order the runtime holds their IDs.
+#[coverage(off)]
+fn project_controller_sessions(ui: &WorkspaceUi) -> Vec<ProjectedSession> {
+    ui.workspace
+        .sessions()
+        .iter()
+        .zip(ui.workspace.session_ids())
+        .map(|(record, id)| ProjectedSession::from_record(*id, record))
+        .collect()
+}
+
+/// Keep the controller's Home rows in step with the daemon session projection
+/// the legacy transport reconciled this frame.
+#[coverage(off)]
+fn sync_runtime_sessions(runtime: &mut WorkspaceRuntime, ui: &WorkspaceUi) {
+    let ids = ui.workspace.session_ids().to_vec();
+    if runtime.state().sessions() != ids.as_slice() {
+        let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::Sessions(ids)));
+    }
+}
+
+/// Poll the focused live terminal and project its rows for `with_terminal_view`.
+#[coverage(off)]
+fn controller_terminal_view(
+    ui: &mut WorkspaceUi,
+    runtime: &WorkspaceRuntime,
+) -> Option<TerminalViewProjection> {
+    let terminal = runtime.focused_terminal()?;
+    let rows = ui.poll_terminal_rows(&terminal)?;
+    Some(TerminalViewProjection {
+        rows,
+        scroll: 0,
+        feedback: None,
+    })
+}
+
+/// Compose the controller Home frame: `render_home` plus the shell overlays that
+/// `render_home` does not own (create form, quit confirmation).
+#[allow(clippy::too_many_arguments)]
+fn render_controller_frame(
+    height: usize,
+    width: usize,
+    runtime: &WorkspaceRuntime,
+    workspace_name: &str,
+    root_cwd: &Path,
+    sessions: &[ProjectedSession],
+    metrics: Option<usagi_core::usecase::client::DaemonMetrics>,
+    git_diffs: &BTreeMap<SessionId, GitDiff>,
+    terminal_view: Option<TerminalViewProjection>,
+) -> Vec<String> {
+    let projection =
+        HomeProjection::from_state(runtime.state(), workspace_name, root_cwd, sessions)
+            .with_pane(runtime.active_pane())
+            .with_metrics(metrics)
+            .with_git_diffs(git_diffs)
+            .with_terminal_view(terminal_view);
+    let frame = render_home(height, width, &projection);
+    // The create form exists exactly when its overlay is open, so keying off it
+    // avoids an unreachable "create overlay without a form" branch.
+    if let Some(form) = runtime.state().create_session_form() {
+        return create_session_modal::render_over(height, width, &frame, form);
+    }
+    if runtime.state().overlay() == Some(Overlay::QuitConfirmation) {
+        return quit_modal::render_over(height, width, &frame);
+    }
+    frame
+}
+
+/// Execute one controller [`Effect`] against the legacy daemon transport. Pane
+/// launches record their target so the completion can promote the matching tab.
+#[coverage(off)]
+fn dispatch_controller_effect(
+    ui: &mut WorkspaceUi,
+    effect: &Effect,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+) -> ControllerFlow {
+    match effect {
+        Effect::CreateSession { intent, .. } => {
+            begin_session_create(
+                ui,
+                SessionCommand::Create {
+                    name: intent.name.clone(),
+                },
+            );
+        }
+        Effect::LaunchAgent {
+            workspace,
+            session,
+            operation_id,
+            profile,
+        } => {
+            pending_targets.insert(*operation_id, Target::Session(*session));
+            ui.pane_launches.push(PaneLaunch::Agent {
+                operation: *operation_id,
+                workspace: *workspace,
+                session: *session,
+                profile: profile.clone(),
+            });
+        }
+        Effect::OpenTerminal {
+            target: Target::Session(session),
+            operation_id,
+            ..
+        } => {
+            if let Some(agent) = ui.agent.as_ref() {
+                let workspace = agent.workspace;
+                pending_targets.insert(*operation_id, Target::Session(*session));
+                ui.pane_launches.push(PaneLaunch::Terminal {
+                    operation: *operation_id,
+                    workspace,
+                    session: *session,
+                });
+            }
+        }
+        Effect::Detach => return ControllerFlow::Exit,
+        // RefreshSessions is reconciled every frame; SelectTab is mirrored by
+        // `on_effect`; notes/environment/workspace-command/remove and the entry
+        // effects are not reachable from the controller Home input yet.
+        Effect::OpenTerminal { .. }
+        | Effect::RefreshSessions { .. }
+        | Effect::SelectTab { .. }
+        | Effect::RemoveSession { .. }
+        | Effect::WorkspaceCommand { .. }
+        | Effect::LoadNotes { .. }
+        | Effect::SaveNotes { .. }
+        | Effect::LoadEnvironment { .. }
+        | Effect::SaveEnvironment { .. }
+        | Effect::AttachWorkspace { .. }
+        | Effect::CloneProject { .. }
+        | Effect::RegisterWorkspace { .. }
+        | Effect::RefreshDecisions { .. }
+        | Effect::ResolveDecision { .. } => {}
+    }
+    ControllerFlow::Continue
+}
+
+/// Apply completed pane launches: promote and focus the runtime tab, then attach
+/// the daemon terminal stream, so the live viewport renders next frame.
+#[coverage(off)]
+fn drain_pane_completions_into_runtime(
+    ui: &mut WorkspaceUi,
+    runtime: &mut WorkspaceRuntime,
+    pending_targets: &mut std::collections::HashMap<OperationId, Target>,
+    geometry: Geometry,
+) {
+    while let Ok(completion) = ui.pane_completions.try_recv() {
+        if let Some(agent) = ui.agent.as_mut() {
+            agent.port = Some(completion.port);
+        }
+        let (operation, result) = match completion.outcome {
+            PaneLaunchOutcome::Agent { operation, result }
+            | PaneLaunchOutcome::Terminal { operation, result } => (operation, result),
+        };
+        let Some(target) = pending_targets.remove(&operation) else {
+            continue;
+        };
+        match result {
+            Ok(terminal) => {
+                let _ = runtime.complete_pane(target, operation, terminal.clone());
+                let _ = runtime.focus_terminal(target, terminal.clone());
+                ui.start_terminal_session(terminal, geometry);
+            }
+            Err(message) => {
+                let _ = runtime.fail_pane(target, operation, message);
+            }
+        }
+    }
+}
+
+/// Controller-driven real-terminal frame loop (`drain → poll → render → input →
+/// dispatch`). Home row state, live-pane availability, and the Home frame come
+/// from [`WorkspaceRuntime`]/`render_home`; the legacy [`WorkspaceUi`] is kept as
+/// the daemon IO transport (session workers, pane launches, terminal streams,
+/// metrics). This is the controller replacement for
+/// `drive_workspace_with_agent_port_and_selection_mode`; the composition root
+/// switches to it separately.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+fn drive_workspace_controller(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+    default_model: DefaultModel,
+    agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
+) -> io::Result<WorkspaceStep> {
+    let workspace_id = snapshot.workspace_id;
+    let session_ids = snapshot.session_ids.clone();
+    let workspace_name = snapshot.workspace.name.clone();
+    let root_cwd = snapshot.workspace.path.clone();
+    let workspace = WorkspaceView::with_runtime_ids(
+        snapshot.workspace,
+        snapshot.state,
+        workspace_id,
+        session_ids.clone(),
+    );
+    let mut ui = WorkspaceUi::with_ports_and_selection_mode(
+        workspace,
+        Box::new(SnapshotOverlayData),
+        session_commands,
+        modal_selection_mode,
+    )
+    .with_agent_context(workspace_id, session_ids.clone(), agent_port, default_model)
+    .with_metrics_port(metrics_port)
+    .with_pr_ports(pr_port, browser);
+    let mut runtime = WorkspaceRuntime::new(workspace_id, session_ids);
+    let mut pending_targets: std::collections::HashMap<OperationId, Target> =
+        std::collections::HashMap::new();
+    loop {
+        drain_session_completions(&mut ui);
+        sync_runtime_sessions(&mut runtime, &ui);
+        refresh_metrics(&mut ui);
+        let (height, width) = term.size()?;
+        ui.set_terminal_size(height, width);
+        let geometry = terminal_geometry(height, width);
+        drain_pane_completions_into_runtime(&mut ui, &mut runtime, &mut pending_targets, geometry);
+        ui.resize_terminals(geometry);
+        let terminal_view = controller_terminal_view(&mut ui, &runtime);
+        let sessions = project_controller_sessions(&ui);
+        let metrics = ui.workspace.metrics();
+        let frame = render_controller_frame(
+            height,
+            width,
+            &runtime,
+            &workspace_name,
+            &root_cwd,
+            &sessions,
+            metrics,
+            ui.workspace.git_diffs(),
+            terminal_view,
+        );
+        term.draw(&frame)?;
+        drain_pane_launches(&mut ui, geometry);
+        let key = term.read_key()?;
+        if runtime.wants_live_input()
+            && let Some(terminal) = runtime.focused_terminal()
+            && let Some(bytes) = key_to_terminal_bytes(key.clone())
+        {
+            ui.send_terminal_bytes(&terminal, &bytes);
+            continue;
+        }
+        // Overview command palette (`:`) is not yet ported to the controller loop.
+        if key == Key::Char(':') {
+            continue;
+        }
+        for effect in runtime.handle_key(key) {
+            runtime.on_effect(&effect);
+            if dispatch_controller_effect(&mut ui, &effect, &mut pending_targets)
+                == ControllerFlow::Exit
+            {
+                return Ok(WorkspaceStep::Quit);
+            }
+        }
+    }
+}
+
+/// Run the controller-driven workspace runtime, mapping its stop to [`Exit`].
+///
+/// # Errors
+///
+/// Returns terminal IO failures from the interactive loop.
+#[coverage(off)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_workspace_controller(
+    term: &mut dyn Terminal,
+    snapshot: WorkspaceSnapshot,
+    session_commands: Box<dyn SessionCommandPort>,
+    modal_selection_mode: ModalSelectionMode,
+    default_model: DefaultModel,
+    agent_port: Box<dyn AgentCommandPort>,
+    metrics_port: Box<dyn MetricsPort>,
+    pr_port: Box<dyn PrSnapshotPort>,
+    browser: Box<dyn BrowserOpener>,
+) -> io::Result<Exit> {
+    drive_workspace_controller(
+        term,
+        snapshot,
+        session_commands,
+        modal_selection_mode,
+        default_model,
+        agent_port,
+        metrics_port,
+        pr_port,
+        browser,
+    )
+    .map(|_| Exit::Quit)
+}
+
 fn refresh_metrics(ui: &mut WorkspaceUi) {
     if let Some(metrics) = ui.metrics_port.latest() {
         ui.workspace.set_metrics(Some(metrics));
@@ -3363,17 +3709,19 @@ mod tests {
     use super::{
         AgentCommandPort, AgentCommandPortFactory, BannerScreenRunner, Config, ConfigStep,
         DefaultModel, DefaultSettingsPort, Exit, Geometry, MetricsPort, MetricsPortFactory,
-        NewStep, NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal, PrModal,
-        QuitAction, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
+        NewStep, NoMetrics, NoMetricsFactory, OverlayDataPort, OverlayDocument, OverviewModal,
+        PrModal, QuitAction, SessionCommandPort, SessionCommandPortFactory, SessionCommandResult,
         SnapshotOverlayData, Start, TerminalAttach, TerminalChunk, TerminalError,
-        UnavailableSessionCommandPort, WelcomeStep, WorkspaceLoader, WorkspaceModal,
-        WorkspaceSnapshot, WorkspaceStep, WorkspaceUi, app_event_from_key, drain_pane_completions,
-        drain_pane_launches, drain_session_completions, execute_closeup_command,
-        handle_sidebar_click, key_to_terminal_bytes, play_startup_splash, refresh_metrics,
+        UnavailableBrowserOpener, UnavailablePrSnapshotPort, UnavailableSessionCommandPort,
+        WelcomeStep, WorkspaceLoader, WorkspaceModal, WorkspaceSnapshot, WorkspaceStep,
+        WorkspaceUi, app_event_from_key, drain_pane_completions, drain_pane_launches,
+        drain_session_completions, execute_closeup_command, handle_sidebar_click,
+        key_to_terminal_bytes, play_startup_splash, refresh_metrics, render_controller_frame,
         render_workspace, run as run_from_start, run_with_settings,
         run_with_settings_and_agent_and_metrics_port_factory_and_model_availability, run_workspace,
-        run_workspace_with_overlay_data, run_workspace_with_session_port, step_config, step_new,
-        step_overview, step_pr, step_workspace, terminal_geometry, welcome_action, write_banner,
+        run_workspace_controller, run_workspace_with_overlay_data, run_workspace_with_session_port,
+        step_config, step_new, step_overview, step_pr, step_workspace, terminal_geometry,
+        welcome_action, write_banner,
     };
     use crate::presentation::views::config::AvailableAgentModels;
     use crate::presentation::views::new::{Field, Mode, New};
@@ -3811,6 +4159,90 @@ mod tests {
         loader: &mut dyn WorkspaceLoader,
     ) -> io::Result<Exit> {
         run_from_start(term, workspaces, recent, now, Start::Welcome, loader)
+    }
+
+    #[test]
+    fn render_controller_frame_composites_the_home_and_overlays() {
+        use crate::presentation::views::workspace::ProjectedSession;
+        use crate::presentation::workspace_runtime::WorkspaceRuntime;
+        use crate::usecase::application::controller::{AppEvent, AppKey};
+
+        let workspace = WorkspaceId::new();
+        let session = SessionId::new();
+        let projected = ProjectedSession {
+            id: session,
+            label: "alpha".into(),
+            detail: "fixture".into(),
+            cwd: "/work/alpha".into(),
+            last_modified: now(),
+            has_notes: false,
+            pr_summary: None,
+        };
+        let sessions = std::slice::from_ref(&projected);
+        let git = std::collections::BTreeMap::new();
+        let root = std::path::Path::new("/work");
+
+        // Base Home frame: workspace name and session row render.
+        let runtime = WorkspaceRuntime::new(workspace, vec![session]);
+        let base =
+            render_controller_frame(20, 80, &runtime, "atlas", root, sessions, None, &git, None);
+        assert!(base.join("\n").contains("atlas"));
+        assert!(base.join("\n").contains("alpha"));
+
+        // Create form overlay: with no sessions a single Down reaches + new session.
+        let mut creating = WorkspaceRuntime::new(workspace, Vec::new());
+        let _ = creating.handle_key(Key::Down);
+        let _ = creating.handle_key(Key::Enter);
+        let create =
+            render_controller_frame(20, 80, &creating, "atlas", root, &[], None, &git, None);
+        assert!(create.join("\n").contains("New session"));
+
+        // Quit confirmation overlay.
+        let mut quitting = WorkspaceRuntime::new(workspace, vec![session]);
+        let _ = quitting.apply_event(AppEvent::Key(AppKey::CtrlQ));
+        let quit =
+            render_controller_frame(20, 80, &quitting, "atlas", root, sessions, None, &git, None);
+        assert!(quit.join("\n").contains("Detach from this workspace?"));
+    }
+
+    #[test]
+    #[coverage(off)]
+    fn controller_loop_renders_home_and_detaches_on_quit_confirmation() {
+        let snapshot = snapshot("demo");
+        let terminal = TerminalRef {
+            daemon_generation: DaemonGeneration::new(),
+            terminal_id: TerminalId::new(),
+            workspace_id: snapshot.workspace_id,
+            session_id: snapshot.session_ids.first().copied(),
+            worktree_id: WorktreeId::new(),
+        };
+        // Ctrl-Q opens the quit confirmation; `y` detaches and ends the loop.
+        let mut term = FakeTerminal::with_keys(&[Key::CtrlQ, Key::Char('y')]);
+        let result = run_workspace_controller(
+            &mut term,
+            snapshot,
+            Box::new(UnavailableSessionCommandPort),
+            ModalSelectionMode::Action,
+            DefaultModel::default(),
+            Box::new(SuccessfulAgentPort(terminal)),
+            Box::new(NoMetrics),
+            Box::new(UnavailablePrSnapshotPort),
+            Box::new(UnavailableBrowserOpener),
+        );
+
+        assert!(matches!(result, Ok(Exit::Quit)));
+        // The controller Home frame renders through render_home, and the quit
+        // confirmation is composited before the loop detaches.
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("demo"))
+        );
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("Detach from this workspace?"))
+        );
     }
 
     /// テスト用 Terminal。キー列を順に返し、描いたフレームを記録する。
