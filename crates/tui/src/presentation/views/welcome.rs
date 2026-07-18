@@ -279,7 +279,6 @@ fn counts_line(relative: &str, sessions: usize, prs: usize, open_issues: usize) 
 ///
 /// - 単体 workspace: タイトル `key name`、本文はカウント 1 行。
 /// - unite（合併）: タイトル `key primary +追加数`、本文はメンバー名（`∪`）＋合計カウントの 2 行。
-#[coverage(off)]
 fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<String> {
     let key = recent_key(index);
     match item {
@@ -330,7 +329,6 @@ fn recent_card(item: Option<&Recent>, index: usize, now: DateTime<Utc>) -> Vec<S
 
 /// 右カラムの recent 群。見出し＋常に [`RECENT_SLOTS`] 枚のカードを出し、読み込みや空でも
 /// 列の見出し位置がずれないようにする。
-#[coverage(off)]
 fn recent_lines(items: &[Recent], now: DateTime<Utc>) -> Vec<String> {
     let mut lines = vec![Role::Success.style().bold().paint("Recent")];
     for i in 0..RECENT_SLOTS {
@@ -341,7 +339,6 @@ fn recent_lines(items: &[Recent], now: DateTime<Utc>) -> Vec<String> {
 
 /// ANSI 付きの断片を表示幅 `width` に詰める（広ければ切り、狭ければ空白で右を埋める）ので、
 /// 次のカラムが安定した位置から始まる。
-#[coverage(off)]
 fn pad_segment(segment: &str, width: usize) -> String {
     let clipped = widgets::clip_to_width(segment, width);
     let visible = widgets::display_width(&clipped);
@@ -350,7 +347,6 @@ fn pad_segment(segment: &str, width: usize) -> String {
 
 /// メニュー列（左）と recent 群（右）を区切り線で結んだ 2 カラムブロック。ブロック全体を
 /// 端末に中央寄せする。unite カードは行数が多いので、片方の列が尽きた行は空白で埋める。
-#[coverage(off)]
 fn menu_lines(
     width: usize,
     items: &[MenuItem],
@@ -377,7 +373,6 @@ fn menu_lines(
 
 /// メニュー下の一時通知行。通知が無くても必ず 1 行（空行）返し、出現・消滅でレイアウトが
 /// ずれないようにする。
-#[coverage(off)]
 fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
     match notice {
         None => vec![String::new()],
@@ -394,7 +389,6 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 /// ボディ（2 カラムメニュー＋通知）だけを組む。`now` は recent の相対時刻に使うので呼び出し側が
 /// 渡す（この層は実時計を読まない）。
 #[must_use]
-#[coverage(off)]
 pub fn render(
     raw_height: usize,
     raw_width: usize,
